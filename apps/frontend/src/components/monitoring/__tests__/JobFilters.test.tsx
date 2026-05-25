@@ -28,6 +28,14 @@ async function chooseFilter(label: string, option: string) {
 }
 
 describe('JobFilters', () => {
+  it('selects queued as a concrete status filter', async () => {
+    render(<FiltersHarness />)
+
+    await chooseFilter('Status filter', 'queued')
+
+    expect(currentFilters()).toEqual({ status: 'queued' })
+  })
+
   it('updates status, run type, and scenario filters', async () => {
     render(<FiltersHarness />)
 

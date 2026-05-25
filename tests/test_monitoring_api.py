@@ -73,6 +73,118 @@ def test_pipeline_stages_endpoint() -> None:
         assert convert["basin_progress"] == {"completed": 1, "total": 2, "failed": 1}
 
 
+def test_pipeline_stages_caps_basin_results_and_preserves_aggregate_progress(monkeypatch: Any) -> None:
+    monkeypatch.setattr(pipeline_routes, "PIPELINE_STAGE_BASIN_RESULTS_LIMIT", 3)
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
+        base_time = _cycle_time()
+        for index in range(8):
+            _create_job(
+                store,
+                job_id=f"job_forcing_{index}",
+                run_id=f"run_forcing_{index}",
+                cycle_id=cycle_id,
+                stage="forcing",
+                status="failed" if index == 7 else "succeeded",
+                submitted_at=base_time + timedelta(minutes=index),
+                started_at=base_time + timedelta(minutes=index),
+                finished_at=base_time + timedelta(minutes=index + 1),
+                error_code="NODE_FAILURE" if index == 7 else None,
+            )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert response.status_code == 200
+        forcing = next(stage for stage in response.json()["data"] if stage["stage"] == "forcing")
+        assert forcing["basin_progress"] == {"completed": 7, "total": 8, "failed": 1}
+        assert forcing["basin_results_limit"] == 3
+        assert forcing["basin_results_total"] == 8
+        assert forcing["basin_results_returned"] == 3
+        assert forcing["basin_results_truncated"] is True
+        assert [result["job_id"] for result in forcing["basin_results"]] == [
+            "job_forcing_0",
+            "job_forcing_1",
+            "job_forcing_2",
+        ]
+
+
+def test_pipeline_stages_bounds_detailed_sample_query_before_iteration(monkeypatch: Any) -> None:
+    monkeypatch.setattr(pipeline_routes, "PIPELINE_STAGE_BASIN_RESULTS_LIMIT", 3)
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
+        base_time = _cycle_time()
+        for stage in ("download", "forcing"):
+            for index in range(8):
+                _create_job(
+                    store,
+                    job_id=f"job_{stage}_{index}",
+                    run_id=f"run_{stage}_{index}",
+                    cycle_id=cycle_id,
+                    stage=stage,
+                    submitted_at=base_time + timedelta(minutes=index),
+                    started_at=base_time + timedelta(minutes=index),
+                    finished_at=base_time + timedelta(minutes=index + 1),
+                )
+
+        sample_selects: list[str] = []
+
+        @event.listens_for(store.session.get_bind(), "before_cursor_execute")
+        def _capture_sample_query(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+            normalized = " ".join(str(statement).lower().split())
+            if "row_number() over" in normalized and "pipeline_job" in normalized:
+                sample_selects.append(normalized)
+
+        stages = pipeline_routes._stage_summaries(store, cycle_id)
+        event.remove(store.session.get_bind(), "before_cursor_execute", _capture_sample_query)
+
+        assert len(sample_selects) == 1
+        assert "partition by" in sample_selects[0]
+        assert "stage_row_number <=" in sample_selects[0]
+        assert "row_number() over" in sample_selects[0]
+        assert sample_selects[0].index("stage_row_number <=") > sample_selects[0].index("row_number() over")
+        by_stage = {stage["stage"]: stage for stage in stages}
+        assert by_stage["download"]["basin_results_total"] == 8
+        assert by_stage["forcing"]["basin_results_total"] == 8
+        assert by_stage["download"]["basin_results_returned"] == 3
+        assert by_stage["forcing"]["basin_results_returned"] == 3
+
+
+def test_pipeline_stages_support_queued_and_skipped_public_job_statuses() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(store, job_id="job_queued", cycle_id=cycle_id, stage="download", status="queued")
+        _create_job(store, job_id="job_skipped", cycle_id=cycle_id, stage="convert", status="skipped")
+        with _client(store) as client:
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            jobs_response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "limit": 10},
+            )
+
+        assert stages_response.status_code == 200
+        stages = stages_response.json()["data"]
+        download_result = next(stage for stage in stages if stage["stage"] == "download")["basin_results"][0]
+        convert_result = next(stage for stage in stages if stage["stage"] == "convert")["basin_results"][0]
+        assert download_result["status"] == "queued"
+        assert convert_result["status"] == "skipped"
+        assert jobs_response.status_code == 200
+        returned_statuses = {job["job_id"]: job["status"] for job in jobs_response.json()["data"]["items"]}
+        assert returned_statuses["job_queued"] == "queued"
+        assert returned_statuses["job_skipped"] == "skipped"
+
+
 def test_qhh_like_pipeline_stages_expose_formal_job_evidence_for_all_canonical_stages() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
@@ -118,6 +230,11 @@ def test_qhh_like_pipeline_stages_expose_formal_job_evidence_for_all_canonical_s
         assert frequency_job["duration_seconds"] == 180
         assert frequency_job["retry_count"] == 2
         assert frequency_job["log_uri"] == "qhh/frequency.log"
+        frequency_stage = next(stage for stage in stages if stage["stage"] == "frequency")
+        assert frequency_stage["basin_results_limit"] == 50
+        assert frequency_stage["basin_results_total"] == 1
+        assert frequency_stage["basin_results_returned"] == 1
+        assert frequency_stage["basin_results_truncated"] is False
 
 
 def test_pipeline_stages_missing_cycle() -> None:
@@ -208,6 +325,53 @@ def test_jobs_list_endpoint() -> None:
             "log_uri",
             "duration_seconds",
         }
+
+
+def test_jobs_and_pipeline_stages_redact_and_truncate_success_log_uri(monkeypatch: Any) -> None:
+    monkeypatch.setattr(pipeline_routes, "_MAX_PUBLIC_LOG_URI_LENGTH", 48)
+    secret_log_uri = (
+        "https://alice:pass123@example.test/qhh/job.log/"
+        "very-long-path-segment-for-public-uri-budget-check?"
+        "X-Amz-Signature=sig123&token=tok123&password=pass123"
+    )
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(
+            store,
+            job_id="job_secret_log_uri",
+            run_id="run_secret_log_uri",
+            cycle_id=cycle_id,
+            stage="forecast",
+            status="failed",
+            log_uri=secret_log_uri,
+        )
+        with _client(store) as client:
+            jobs_response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+    assert jobs_response.status_code == 200
+    assert stages_response.status_code == 200
+    job_log_uri = jobs_response.json()["data"]["items"][0]["log_uri"]
+    stage_log_uri = next(
+        stage for stage in stages_response.json()["data"] if stage["stage"] == "forecast"
+    )["basin_results"][0]["log_uri"]
+    for public_log_uri in (job_log_uri, stage_log_uri):
+        assert public_log_uri.endswith("...[truncated]")
+        assert len(public_log_uri) <= 48
+    public_payload = json.dumps(
+        {"jobs": jobs_response.json(), "stages": stages_response.json()},
+        sort_keys=True,
+    )
+    for raw_secret in ("alice:pass123", "pass123", "sig123", "tok123", "X-Amz-Signature=sig123"):
+        assert raw_secret not in public_payload
 
 
 def test_jobs_list_source_cycle_requires_matching_forecast_cycle_and_excludes_sibling_records() -> None:
@@ -324,6 +488,25 @@ def test_job_logs_tails_large_file(tmp_path: Path, monkeypatch) -> None:
 
         assert response.status_code == 200
         assert response.json()["data"]["content"] == "89abcdef"
+
+
+def test_job_logs_redacts_decoded_log_content(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    with _store() as store:
+        log_path = tmp_path / "secret.log"
+        log_path.write_text(
+            "DATABASE_URL=postgresql://nhms:pass123@db/nhms token=tok123 password=pass123\n",
+            encoding="utf-8",
+        )
+        _create_job(store, job_id="job_secret_logs", log_uri="secret.log")
+        with _client(store) as client:
+            response = client.get("/api/v1/jobs/job_secret_logs/logs")
+
+    assert response.status_code == 200
+    body = json.dumps(response.json(), sort_keys=True)
+    for raw_secret in ("pass123", "tok123", "nhms:pass123", "postgresql://nhms:pass123"):
+        assert raw_secret not in body
+    assert "[redacted]" in response.json()["data"]["content"]
 
 
 def test_job_logs_response_redacts_and_bounds_log_uri(tmp_path: Path, monkeypatch) -> None:
@@ -464,6 +647,51 @@ def test_retry_accepts_ops_mvp_failed_source_states_and_records_metadata() -> No
             assert retry_event.details["retry_count"] == 2
             assert retry_event.details["previous_job_id"] == f"job_retry_{status}"
             assert retry_event.details["failure"]["manual_retry_marker"] is True
+
+
+def test_retry_accepts_partial_failed_job_when_later_publish_succeeded_and_run_failed() -> None:
+    with _store_with_hydro() as store:
+        _insert_hydro_run(store, "cycle_gfs_qhh", status="failed")
+        base_time = _cycle_time()
+        partial = _create_job(
+            store,
+            job_id="job_frequency_partial",
+            run_id="cycle_gfs_qhh",
+            stage="frequency",
+            status="partially_failed",
+            error_code="NO_FREQUENCY_CURVE",
+            submitted_at=base_time,
+            started_at=base_time,
+            finished_at=base_time + timedelta(minutes=3),
+        )
+        partial.updated_at = base_time + timedelta(minutes=3)
+        publish = _create_job(
+            store,
+            job_id="job_publish_succeeded",
+            run_id="cycle_gfs_qhh",
+            stage="publish",
+            status="succeeded",
+            error_code=None,
+            submitted_at=base_time + timedelta(minutes=10),
+            started_at=base_time + timedelta(minutes=10),
+            finished_at=base_time + timedelta(minutes=12),
+        )
+        publish.updated_at = base_time + timedelta(minutes=12)
+        store.session.add_all([partial, publish])
+        store.session.commit()
+        with _client(store, allow_dev_role_header=True) as client:
+            response = client.post("/api/v1/runs/cycle_gfs_qhh/retry", headers={"X-User-Role": "operator"})
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["run_id"] == "cycle_gfs_qhh"
+        assert data["status"] == "submitted"
+        retry_jobs = [job for job in store.query_jobs_by_run("cycle_gfs_qhh") if job.job_id.endswith("_retry_active")]
+        assert len(retry_jobs) == 1
+        retry_job = retry_jobs[0]
+        assert retry_job.stage == "frequency"
+        retry_event = next(event for event in _events(store) if event.event_type == "retry")
+        assert retry_event.details["previous_job_id"] == "job_frequency_partial"
 
 
 def test_retry_dev_token_defaults_operator_only_when_role_header_absent(monkeypatch: Any) -> None:
@@ -1041,6 +1269,99 @@ def test_monitoring_filters_use_cycle_id_for_source_prefixes() -> None:
         ]
 
 
+def test_monitoring_forecast_cycle_accepts_legacy_cycle_id_only_shape() -> None:
+    with _store(forecast_cycle_shape="legacy_cycle_id_only") as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        store.session.execute(
+            text(
+                """
+                INSERT INTO met.forecast_cycle (cycle_id, current_state, updated_at)
+                VALUES (:cycle_id, :current_state, :updated_at)
+                """
+            ),
+            {"cycle_id": cycle_id, "current_state": "parsed_partial", "updated_at": cycle_time + timedelta(minutes=5)},
+        )
+        store.session.commit()
+        _create_job(store, job_id="job_legacy_cycle", cycle_id=cycle_id, status="succeeded")
+
+        with _client(store) as client:
+            status_response = client.get(
+                "/api/v1/pipeline/status",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            jobs_response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+    assert status_response.status_code == 200
+    status_data = status_response.json()["data"]
+    assert status_data["cycle_id"] == cycle_id
+    assert status_data["source"] == "GFS"
+    assert status_data["cycle_time"] == cycle_time.isoformat().replace("+00:00", "Z")
+    assert status_data["current_state"] == "parsed_partial"
+    assert stages_response.status_code == 200
+    assert next(stage for stage in stages_response.json()["data"] if stage["stage"] == "download")[
+        "basin_progress"
+    ] == {"completed": 1, "total": 1, "failed": 0}
+    assert jobs_response.status_code == 200
+    assert [job["job_id"] for job in jobs_response.json()["data"]["items"]] == ["job_legacy_cycle"]
+
+
+def test_monitoring_forecast_cycle_rejects_conflicting_present_source_or_cycle_time() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        store.session.execute(
+            text(
+                """
+                INSERT INTO met.forecast_cycle (
+                    cycle_id,
+                    source_id,
+                    cycle_time,
+                    current_state,
+                    started_at,
+                    updated_at,
+                    created_at
+                )
+                VALUES (
+                    :cycle_id,
+                    :source_id,
+                    :cycle_time,
+                    :current_state,
+                    :started_at,
+                    :updated_at,
+                    :created_at
+                )
+                """
+            ),
+            {
+                "cycle_id": cycle_id,
+                "source_id": "IFS",
+                "cycle_time": cycle_time + timedelta(hours=6),
+                "current_state": "forecast_running",
+                "started_at": cycle_time,
+                "updated_at": cycle_time,
+                "created_at": cycle_time,
+            },
+        )
+        store.session.commit()
+        _create_job(store, job_id="job_conflicting_cycle", cycle_id=cycle_id, status="succeeded")
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/status",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "PIPELINE_CYCLE_NOT_FOUND"
+
+
 def test_queue_depth() -> None:
     with _store() as store:
         gateway = _MockGateway(depth={"running": 2, "pending": 3, "idle": 1})
@@ -1119,7 +1440,7 @@ def test_error_response_wrapper() -> None:
         assert response.json()["error"]["code"] == "JOB_NOT_FOUND"
 
 
-def _store() -> "_ClosingStore":
+def _store(*, forecast_cycle_shape: str = "current") -> "_ClosingStore":
     engine = create_engine(
         "sqlite://",
         future=True,
@@ -1134,6 +1455,53 @@ def _store() -> "_ClosingStore":
 
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
+        if forecast_cycle_shape == "legacy_cycle_id_only":
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE met.forecast_cycle (
+                        cycle_id TEXT PRIMARY KEY,
+                        current_state TEXT NOT NULL,
+                        updated_at DATETIME
+                    )
+                    """
+                )
+            )
+        else:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE met.forecast_cycle (
+                        cycle_id TEXT PRIMARY KEY,
+                        source_id TEXT NOT NULL,
+                        cycle_time DATETIME NOT NULL,
+                        current_state TEXT NOT NULL,
+                        started_at DATETIME,
+                        updated_at DATETIME,
+                        created_at DATETIME
+                    )
+                    """
+                )
+            )
+    return _ClosingStore(Session(engine))
+
+
+def _store_with_hydro() -> "_ClosingStore":
+    engine = create_engine(
+        "sqlite://",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _attach_schemas(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS met")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS hydro")
+
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
         connection.execute(
             text(
                 """
@@ -1145,6 +1513,18 @@ def _store() -> "_ClosingStore":
                     started_at DATETIME,
                     updated_at DATETIME,
                     created_at DATETIME
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE hydro.hydro_run (
+                    run_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    error_code TEXT,
+                    error_message TEXT
                 )
                 """
             )
@@ -1274,6 +1654,19 @@ def _insert_cycle(
             "updated_at": cycle_time + timedelta(minutes=10),
             "created_at": cycle_time,
         },
+    )
+    store.session.commit()
+
+
+def _insert_hydro_run(store: PipelineStore, run_id: str, *, status: str) -> None:
+    store.session.execute(
+        text(
+            """
+            INSERT INTO hydro.hydro_run (run_id, status)
+            VALUES (:run_id, :status)
+            """
+        ),
+        {"run_id": run_id, "status": status},
     )
     store.session.commit()
 

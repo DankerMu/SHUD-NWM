@@ -2718,6 +2718,7 @@ def test_latest_manual_retry_event_outside_oldest_first_cap_allows_candidate(tmp
     [
         ("permanently_failed", "permanent_failure_guard"),
         ("cancelled", "manual_retry_required_after_cancelled"),
+        ("queued", "active_duplicate_pipeline"),
         ("running", "active_slurm_job"),
     ],
 )
@@ -2869,7 +2870,21 @@ def test_newer_manual_retry_after_terminal_truth_allows_candidate_and_preserves_
         ),
         (
             {
-                "pipeline_status": "running",
+                "pipeline_status": "queued",
+                "pipeline_jobs": [
+                    {
+                        "job_id": "job_queued",
+                        "run_id": "fcst_gfs_2026052106_model_a",
+                        "status": "queued",
+                        "stage": "forecast",
+                        "updated_at": "2026-05-21T06:20:00Z",
+                    }
+                ],
+            },
+            "active_duplicate_pipeline",
+        ),
+        (
+            {
                 "pipeline_jobs": [
                     {
                         "job_id": "job_running_no_slurm",

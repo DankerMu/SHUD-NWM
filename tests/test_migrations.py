@@ -28,6 +28,7 @@ EXPECTED_MIGRATIONS = [
     "000022_model_asset_lifecycle.sql",
     "000023_interp_weight_grid_signature.sql",
     "000024_qhh_latest_display_product_indexes.sql",
+    "000025_active_manual_retry_guard.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -554,6 +555,21 @@ def test_fresh_tile_cache_schema_requires_non_null_cache_key_identity() -> None:
 
     assert "cache_key TEXT NOT NULL" in tile_cache
     assert "PRIMARY KEY (cache_key)" in tile_cache
+
+
+def test_active_manual_retry_guard_is_run_level_active_marker_invariant() -> None:
+    migration = dict(_migration_sql())["000025_active_manual_retry_guard.sql"]
+
+    assert "ADD COLUMN IF NOT EXISTS manual_retry_marker BOOLEAN NOT NULL DEFAULT false" in migration
+    assert "UPDATE ops.pipeline_job" in migration
+    assert "substr(job_id, 1, length(run_id || '_retry_')) = run_id || '_retry_'" in migration
+    assert "job_id LIKE run_id || '_retry_%'" not in migration
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS pipeline_job_active_manual_retry_guard_idx" in migration
+    assert "ON ops.pipeline_job (run_id)" in migration
+    assert "manual_retry_marker IS true" in migration
+    assert "run_id IS NOT NULL" in migration
+    assert "status IN ('pending', 'queued', 'submitted', 'running')" in migration
+    assert "job_id = run_id || '_retry_active'" not in migration
 
 
 def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:

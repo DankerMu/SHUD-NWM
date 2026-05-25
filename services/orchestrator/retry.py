@@ -5,10 +5,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
-from uuid import uuid4
 
 from sqlalchemy import inspect, select, text, update
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.redaction import redact_payload
@@ -40,11 +39,12 @@ NON_TRANSIENT_ERROR_CODES: set[str] = {
     "MANIFEST_SCHEMA_INVALID",
 }
 DEFAULT_BACKOFF_SCHEDULE = [60, 300, 900]
-ACTIVE_RETRY_STATUSES = {"pending", "submitted", "running"}
+ACTIVE_RETRY_STATUSES = {"pending", "queued", "submitted", "running"}
 FAILED_RETRY_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 MANUAL_RETRY_SOURCE_STATUSES = FAILED_RETRY_STATUSES | {"cancelled"}
 TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
 DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published"}
+PARTIAL_OR_FAILED_HYDRO_STATUSES = {"failed", "cancelled", "partially_failed"}
 
 
 def is_transient_error(error_code: str | None) -> bool:
@@ -335,7 +335,8 @@ class RetryService:
             if not locked_jobs:
                 raise RetryNotFoundError(run_id)
 
-            if has_hydro_run_table and _hydro_run_status(self.store, run_id) in DURABLE_HYDRO_SUCCESS_STATUSES:
+            durable_run_status = _hydro_run_status(self.store, run_id) if has_hydro_run_table else None
+            if durable_run_status in DURABLE_HYDRO_SUCCESS_STATUSES:
                 raise RetryNotFoundError(run_id)
 
             jobs = _jobs_by_truth_time(self.store.query_jobs_by_run(run_id))
@@ -344,13 +345,9 @@ class RetryService:
                 raise RetryConflictError(run_id, active_job)
 
             latest_truth_job = jobs[-1]
-            if latest_truth_job.status in TERMINAL_SUCCESS_RETRY_STATUSES:
+            failed_job = _retry_source_job_for_run(jobs, durable_run_status=durable_run_status)
+            if latest_truth_job.status in TERMINAL_SUCCESS_RETRY_STATUSES and failed_job is None:
                 raise RetryNotFoundError(run_id)
-            failed_job = (
-                latest_truth_job
-                if latest_truth_job.status in MANUAL_RETRY_SOURCE_STATUSES
-                else next((job for job in reversed(jobs) if job.status in MANUAL_RETRY_SOURCE_STATUSES), None)
-            )
             if failed_job is None:
                 raise RetryNotFoundError(run_id)
 
@@ -363,17 +360,7 @@ class RetryService:
                 retry_limit=self.config.max_retries,
                 manual=True,
             )
-            retry_job = self.store.create_job(
-                job_id=f"{run_id}_retry_{uuid4().hex[:8]}",
-                run_id=failed_job.run_id,
-                cycle_id=failed_job.cycle_id,
-                job_type=failed_job.job_type,
-                slurm_job_id=None,
-                model_id=failed_job.model_id,
-                stage=failed_job.stage,
-                status="pending",
-                commit=False,
-            )
+            retry_job = self._create_pending_manual_retry_job(failed_job, run_id=run_id)
             retry_job.retry_count = next_retry_count
             self.store.session.add(retry_job)
             self.store.insert_event(
@@ -568,6 +555,33 @@ class RetryService:
             return retry_job.model_id
         return _model_id_from_hydro_run(self.store, retry_job.run_id) or _model_id_from_run_id(retry_job.run_id)
 
+    def _create_pending_manual_retry_job(self, failed_job: PipelineJob, *, run_id: str) -> PipelineJob:
+        job_id = _next_manual_retry_job_id_for_run(self.store, run_id)
+        try:
+            return self.store.create_job(
+                job_id=job_id,
+                run_id=failed_job.run_id,
+                cycle_id=failed_job.cycle_id,
+                job_type=failed_job.job_type,
+                slurm_job_id=None,
+                model_id=failed_job.model_id,
+                stage=failed_job.stage,
+                status="pending",
+                retry_count=failed_job.retry_count + 1,
+                manual_retry_marker=True,
+                commit=False,
+            )
+        except IntegrityError as error:
+            active_job = _active_retry_job_for_run(self.store, run_id) or failed_job
+            raise RetryConflictError(run_id, active_job) from error
+        except SQLAlchemyError as error:
+            self.store.session.rollback()
+            raise RetryError(
+                "RETRY_GUARD_UNAVAILABLE",
+                "Manual retry guard could not be acquired.",
+                {"run_id": run_id},
+            ) from error
+
 
 def _jobs_by_truth_time(jobs: list[PipelineJob]) -> list[PipelineJob]:
     return sorted(
@@ -578,6 +592,48 @@ def _jobs_by_truth_time(jobs: list[PipelineJob]) -> list[PipelineJob]:
             job.job_id,
         ),
     )
+
+
+def _retry_source_job_for_run(jobs: list[PipelineJob], *, durable_run_status: str | None) -> PipelineJob | None:
+    latest_truth_job = jobs[-1]
+    if latest_truth_job.status in MANUAL_RETRY_SOURCE_STATUSES:
+        return latest_truth_job
+    if durable_run_status is not None and (
+        durable_run_status in PARTIAL_OR_FAILED_HYDRO_STATUSES or str(durable_run_status).startswith("failed")
+    ):
+        return next((job for job in reversed(jobs) if job.status in MANUAL_RETRY_SOURCE_STATUSES), None)
+    return None
+
+
+def _active_retry_job_for_run(store: PipelineStore, run_id: str) -> PipelineJob | None:
+    statement = (
+        select(PipelineJob)
+        .where(PipelineJob.run_id == run_id)
+        .where(PipelineJob.manual_retry_marker.is_(True))
+        .where(PipelineJob.status.in_(ACTIVE_RETRY_STATUSES))
+        .order_by(PipelineJob.submitted_at.desc(), PipelineJob.created_at.desc())
+    )
+    try:
+        return store.session.scalars(statement).first()
+    except SQLAlchemyError:
+        return None
+
+
+def _next_manual_retry_job_id_for_run(store: PipelineStore, run_id: str) -> str:
+    prefix = f"{run_id}_retry_"
+    statement = select(PipelineJob.job_id, PipelineJob.manual_retry_marker).where(PipelineJob.run_id == run_id)
+    used_retry_job_ids = {
+        str(job_id)
+        for job_id, manual_retry_marker in store.session.execute(statement)
+        if manual_retry_marker is True or str(job_id).startswith(prefix)
+    }
+    deterministic_job_id = f"{run_id}_retry_active"
+    if deterministic_job_id not in used_retry_job_ids:
+        return deterministic_job_id
+    sequence = 2
+    while f"{run_id}_retry_{sequence}" in used_retry_job_ids:
+        sequence += 1
+    return f"{run_id}_retry_{sequence}"
 
 
 def _job_truth_timestamp(job: PipelineJob) -> datetime | None:

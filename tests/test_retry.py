@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -329,6 +330,35 @@ def test_manual_retry_conflict_409() -> None:
         assert len(store.query_jobs_by_run("run_1")) == 2
 
 
+def test_manual_retry_queued_retry_marker_blocks_second_manual_retry_without_submission() -> None:
+    with _store() as store:
+        _create_job(store, job_id="job_failed", run_id="run_queued_marker", status="failed")
+        active_retry = _create_job(
+            store,
+            job_id="run_queued_marker_retry_active",
+            run_id="run_queued_marker",
+            status="queued",
+            error_code=None,
+            retry_count=1,
+        )
+        active_retry.manual_retry_marker = True
+        store.session.add(active_retry)
+        store.session.commit()
+        gateway = _RecordingGateway()
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with pytest.raises(RetryConflictError) as exc_info:
+            service.attempt_manual_retry("run_queued_marker", gateway=gateway, trusted_internal=True)
+
+        assert exc_info.value.details["active_job_id"] == "run_queued_marker_retry_active"
+        assert exc_info.value.details["active_status"] == "queued"
+        assert gateway.submissions == []
+        assert [job.job_id for job in store.query_jobs_by_run("run_queued_marker")] == [
+            "job_failed",
+            "run_queued_marker_retry_active",
+        ]
+
+
 def test_second_manual_retry_attempt_gets_conflict() -> None:
     with _store() as store:
         _create_job(store, job_id="job_failed", run_id="run_1", status="failed")
@@ -341,6 +371,102 @@ def test_second_manual_retry_attempt_gets_conflict() -> None:
 
         assert exc_info.value.details["active_job_id"] == first.job_id
         assert exc_info.value.details["active_status"] == "submitted"
+
+
+def test_manual_retry_duplicate_guard_failure_returns_conflict_without_submission() -> None:
+    with _store() as store:
+        failed = _create_job(store, job_id="job_failed", run_id="run_guard", status="failed")
+        # Fast CI runs SQLite, where SELECT FOR UPDATE does not emulate a true PostgreSQL race.
+        # This deterministic fixture covers the durable guard failure path that a duplicate
+        # active retry insert would take after the first transaction wins the guard row.
+        gateway = _RecordingGateway()
+        service = RetryService(store, RetryConfig(max_retries=3))
+        original_create_job = store.create_job
+
+        def race_create_job(**kwargs):
+            if kwargs["manual_retry_marker"] is True:
+                original_create_job(**kwargs)
+                raise IntegrityError("duplicate active retry guard", params=None, orig=RuntimeError("duplicate"))
+            return original_create_job(**kwargs)
+
+        store.create_job = race_create_job  # type: ignore[method-assign]
+
+        with pytest.raises(RetryConflictError) as exc_info:
+            service.attempt_manual_retry("run_guard", gateway=gateway, trusted_internal=True)
+
+        assert exc_info.value.details["run_id"] == "run_guard"
+        assert exc_info.value.details["active_job_id"] == "run_guard_retry_active"
+        assert gateway.submissions == []
+        assert [job.job_id for job in store.query_jobs_by_run("run_guard")] == ["job_failed"]
+        assert failed.status == "failed"
+
+
+def test_manual_retry_stale_terminal_guard_row_allows_next_retry_without_random_guard_bypass() -> None:
+    with _store() as store:
+        _create_job(store, job_id="job_failed", run_id="run_stale_guard", status="failed", error_code="NODE_FAILURE")
+        stale_guard = _create_job(
+            store,
+            job_id="run_stale_guard_retry_active",
+            run_id="run_stale_guard",
+            status="submission_failed",
+            error_code="SBATCH_SUBMISSION_FAILED",
+            retry_count=1,
+        )
+        stale_guard.manual_retry_marker = True
+        store.session.add(stale_guard)
+        store.session.commit()
+        gateway = _RecordingGateway(job_id="slurm_retry_after_stale_guard")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("run_stale_guard", gateway=gateway, trusted_internal=True)
+
+        assert retry.job_id == "run_stale_guard_retry_2"
+        assert retry.manual_retry_marker is True
+        assert retry.status == "submitted"
+        assert gateway.submissions[0].manifest["pipeline_job_id"] == "run_stale_guard_retry_2"
+        retry_jobs = [job for job in store.query_jobs_by_run("run_stale_guard") if job.manual_retry_marker]
+        active_retry_jobs = [job for job in retry_jobs if job.status in {"pending", "queued", "submitted", "running"}]
+        assert {job.job_id for job in retry_jobs} == {"run_stale_guard_retry_active", "run_stale_guard_retry_2"}
+        assert [job.job_id for job in active_retry_jobs] == ["run_stale_guard_retry_2"]
+
+
+def test_manual_retry_run_level_guard_blocks_duplicate_attempt_after_stale_guard_row() -> None:
+    with _store() as store:
+        _create_job(
+            store,
+            job_id="job_failed",
+            run_id="run_stale_duplicate",
+            status="failed",
+            error_code="NODE_FAILURE",
+        )
+        stale_guard = _create_job(
+            store,
+            job_id="run_stale_duplicate_retry_active",
+            run_id="run_stale_duplicate",
+            status="failed",
+            error_code="RETRY_STALE_PENDING",
+            retry_count=1,
+        )
+        stale_guard.manual_retry_marker = True
+        store.session.add(stale_guard)
+        store.session.commit()
+        gateway = _RecordingGateway(job_id="slurm_retry")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        first = service.attempt_manual_retry("run_stale_duplicate", gateway=gateway, trusted_internal=True)
+        with pytest.raises(RetryConflictError) as exc_info:
+            service.attempt_manual_retry("run_stale_duplicate", gateway=gateway, trusted_internal=True)
+
+        assert first.job_id == "run_stale_duplicate_retry_2"
+        assert exc_info.value.details["active_job_id"] == first.job_id
+        assert exc_info.value.details["active_status"] == "submitted"
+        assert len(gateway.submissions) == 1
+        active_retry_jobs = [
+            job
+            for job in store.query_jobs_by_run("run_stale_duplicate")
+            if job.manual_retry_marker and job.status in {"pending", "queued", "submitted", "running"}
+        ]
+        assert [job.job_id for job in active_retry_jobs] == [first.job_id]
 
 
 def test_manual_retry_conflicts_with_submitted_job() -> None:

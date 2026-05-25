@@ -11,6 +11,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from apps.api.routes import pipeline as pipeline_routes
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from apps.api.routes.models import get_model_registry_store
@@ -26,6 +27,7 @@ from tests.test_monitoring_api import (
 )
 from workers.data_adapters.base import cycle_id_for
 
+PIPELINE_JOB_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "pipeline_job.schema.json"
 PIPELINE_JOB_KEYS = {
     "job_id",
     "run_id",
@@ -49,6 +51,7 @@ PIPELINE_JOB_KEYS = {
 }
 OPS_JOB_STATUS_ENUM = [
     "pending",
+    "queued",
     "submitted",
     "running",
     "succeeded",
@@ -57,6 +60,7 @@ OPS_JOB_STATUS_ENUM = [
     "submission_failed",
     "permanently_failed",
     "cancelled",
+    "skipped",
 ]
 STAGE_JOB_EVIDENCE_KEYS = {
     "job_id",
@@ -209,9 +213,19 @@ def test_pipeline_stage_contract_exposes_formal_job_evidence_and_ops_statuses() 
 
     basin_result = schemas["BasinResult"]
     assert set(basin_result["required"]) == STAGE_JOB_EVIDENCE_KEYS
-    assert basin_result["properties"]["status"]["enum"] == OPS_JOB_STATUS_ENUM
-    assert schemas["PipelineJob"]["properties"]["status"]["enum"] == OPS_JOB_STATUS_ENUM
-    assert schemas["RetryRunResult"]["properties"]["status"]["enum"] == ["submitted", "submission_failed"]
+    persisted_statuses = _persisted_pipeline_job_statuses()
+    assert OPS_JOB_STATUS_ENUM == persisted_statuses
+    assert basin_result["properties"]["status"]["enum"] == persisted_statuses
+    assert schemas["PipelineJob"]["properties"]["status"]["enum"] == persisted_statuses
+    assert schemas["RetryRunResult"]["properties"]["status"]["enum"] == ["submitted"]
+    assert schemas["PipelineStage"]["properties"]["basin_results"]["maxItems"] == (
+        pipeline_routes.PIPELINE_STAGE_BASIN_RESULTS_LIMIT
+    )
+    assert schemas["PipelineStage"]["properties"]["basin_results_total"]["type"] == "integer"
+    assert schemas["PipelineStage"]["properties"]["basin_results_truncated"]["type"] == "boolean"
+    max_public_log_uri_length = pipeline_routes.PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH
+    assert schemas["PipelineJob"]["properties"]["log_uri"]["maxLength"] == max_public_log_uri_length
+    assert basin_result["properties"]["log_uri"]["maxLength"] == max_public_log_uri_length
 
     generated_types = (
         Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
@@ -225,11 +239,19 @@ def test_pipeline_stage_contract_exposes_formal_job_evidence_and_ops_statuses() 
     assert "submitted_at: string | null;" in basin_result_types
     assert "duration_seconds: number | null;" in basin_result_types
     assert "retry_count: number;" in basin_result_types
+    pipeline_stage_start = generated_types.index("PipelineStage:")
+    basin_progress_start = generated_types.index("BasinProgress:")
+    pipeline_stage_types = generated_types[pipeline_stage_start:basin_progress_start]
+    assert "basin_results_truncated: boolean;" in pipeline_stage_types
+    assert '"queued"' in basin_result_types
+    assert '"skipped"' in basin_result_types
     assert '"submission_failed"' in basin_result_types
     assert '"permanently_failed"' in basin_result_types
     retry_start = generated_types.index("RetryRunResult:")
     cancel_start = generated_types.index("CancelRunResult:")
-    assert 'status: "submitted" | "submission_failed";' in generated_types[retry_start:cancel_start]
+    retry_types = generated_types[retry_start:cancel_start]
+    assert 'status: "submitted";' in retry_types
+    assert '"submission_failed"' not in retry_types
 
 
 def test_queue_depth_contract_uses_success_envelope() -> None:
@@ -1151,6 +1173,11 @@ def _assert_success_envelope(body: dict[str, Any]) -> Any:
     assert body["request_id"]
     assert body["status"] == "ok"
     return body["data"]
+
+
+def _persisted_pipeline_job_statuses() -> list[str]:
+    schema = json.loads(PIPELINE_JOB_SCHEMA_PATH.read_text(encoding="utf-8"))
+    return list(schema["properties"]["status"]["enum"])
 
 
 class _RetryGateway(_MockGateway):

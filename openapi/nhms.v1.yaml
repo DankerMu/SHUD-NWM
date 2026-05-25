@@ -3169,7 +3169,16 @@ components:
           type: string
     PipelineStage:
       type: object
-      required: [stage, display_status, duration_seconds, basin_progress, basin_results]
+      required:
+        - stage
+        - display_status
+        - duration_seconds
+        - basin_progress
+        - basin_results
+        - basin_results_limit
+        - basin_results_total
+        - basin_results_returned
+        - basin_results_truncated
       properties:
         stage:
           type: string
@@ -3185,8 +3194,22 @@ components:
           nullable: true
         basin_progress:
           $ref: "#/components/schemas/BasinProgress"
+        basin_results_limit:
+          type: integer
+          minimum: 0
+          maximum: 50
+        basin_results_total:
+          type: integer
+          minimum: 0
+        basin_results_returned:
+          type: integer
+          minimum: 0
+          maximum: 50
+        basin_results_truncated:
+          type: boolean
         basin_results:
           type: array
+          maxItems: 50
           items:
             $ref: "#/components/schemas/BasinResult"
     BasinProgress:
@@ -3195,10 +3218,13 @@ components:
       properties:
         completed:
           type: integer
+          minimum: 0
         total:
           type: integer
+          minimum: 0
         failed:
           type: integer
+          minimum: 0
     BasinResult:
       type: object
       required:
@@ -3241,7 +3267,7 @@ components:
           nullable: true
         status:
           type: string
-          enum: [pending, submitted, running, succeeded, partially_failed, failed, submission_failed, permanently_failed, cancelled]
+          enum: [pending, queued, submitted, running, succeeded, partially_failed, failed, submission_failed, permanently_failed, cancelled, skipped]
         stage:
           type: string
           nullable: true
@@ -3262,6 +3288,7 @@ components:
           nullable: true
         retry_count:
           type: integer
+          minimum: 0
         error_code:
           type: string
           nullable: true
@@ -3271,6 +3298,7 @@ components:
         log_uri:
           type: string
           nullable: true
+          maxLength: 512
     PipelineJob:
       type: object
       required:
@@ -3318,7 +3346,7 @@ components:
           nullable: true
         status:
           type: string
-          enum: [pending, submitted, running, succeeded, partially_failed, failed, submission_failed, permanently_failed, cancelled]
+          enum: [pending, queued, submitted, running, succeeded, partially_failed, failed, submission_failed, permanently_failed, cancelled, skipped]
         stage:
           type: string
           nullable: true
@@ -3339,6 +3367,7 @@ components:
           nullable: true
         retry_count:
           type: integer
+          minimum: 0
         error_code:
           type: string
           nullable: true
@@ -3348,6 +3377,7 @@ components:
         log_uri:
           type: string
           nullable: true
+          maxLength: 512
         duration_seconds:
           type: integer
           nullable: true
@@ -3536,9 +3566,11 @@ components:
           type: string
         source:
           type: string
+          nullable: true
         cycle_time:
           type: string
           format: date-time
+          nullable: true
         current_state:
           type: string
         started_at:
@@ -3559,6 +3591,7 @@ components:
           type: string
         log_uri:
           type: string
+          maxLength: 512
         content:
           type: string
     QueueDepth:
@@ -3585,15 +3618,16 @@ components:
           nullable: true
         retry_count:
           type: integer
+          minimum: 0
         status:
           type: string
-          enum: [submitted, submission_failed]
+          enum: [submitted]
         slurm_job_id:
           type: string
           nullable: true
         execution_status:
           type: string
-          enum: [queued, submitted]
+          enum: [submitted]
     CancelRunResult:
       type: object
       required: [run_id, cancelled_jobs]

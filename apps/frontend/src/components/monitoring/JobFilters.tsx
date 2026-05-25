@@ -15,6 +15,7 @@ interface JobFiltersProps {
 
 const statusOptions: Array<{ value: JobStatus; label: string }> = [
   { value: 'pending', label: 'pending' },
+  { value: 'queued', label: 'queued' },
   { value: 'submitted', label: 'submitted' },
   { value: 'running', label: 'running' },
   { value: 'succeeded', label: 'succeeded' },
@@ -23,6 +24,7 @@ const statusOptions: Array<{ value: JobStatus; label: string }> = [
   { value: 'submission_failed', label: 'submission_failed' },
   { value: 'permanently_failed', label: 'permanently_failed' },
   { value: 'partially_failed', label: 'partially_failed' },
+  { value: 'skipped', label: 'skipped' },
 ]
 
 const runTypeOptions = ['forecast', 'analysis', 'hindcast']

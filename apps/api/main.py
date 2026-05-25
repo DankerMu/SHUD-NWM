@@ -18,6 +18,11 @@ from apps.api.routes.flood_alerts import router as flood_alerts_router
 from apps.api.routes.forecast import router as forecast_router
 from apps.api.routes.hindcast import router as hindcast_router
 from apps.api.routes.models import router as models_router
+from apps.api.routes.pipeline import (
+    PIPELINE_JOB_STATUS_VALUES,
+    PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH,
+    PIPELINE_STAGE_BASIN_RESULTS_LIMIT,
+)
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
 from packages.common.forecast_store import MAX_STATION_SERIES_LIMIT
@@ -306,6 +311,7 @@ def custom_openapi():
     _patch_station_series_openapi(schema)
     _patch_qhh_latest_product_openapi(schema)
     _patch_layer_metadata_openapi(schema)
+    _patch_pipeline_openapi(schema)
     app.openapi_schema = schema
     return app.openapi_schema
 
@@ -523,6 +529,167 @@ def _patch_qhh_latest_product_openapi(schema: dict) -> None:
     }
 
 
+def _patch_pipeline_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["ErrorResponse"] = _error_response_schema()
+    schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
+    schemas["JobStatusCounts"] = _job_status_counts_schema()
+    schemas["PipelineStatus"] = _pipeline_status_schema()
+    schemas["BasinProgress"] = _basin_progress_schema()
+    schemas["BasinResult"] = _basin_result_schema()
+    schemas["PipelineStage"] = _pipeline_stage_schema()
+    schemas["PipelineJob"] = _pipeline_job_schema()
+    schemas["PipelineJobPage"] = _pipeline_job_page_schema()
+    schemas["JobLogs"] = _job_logs_schema()
+    schemas["RetryRunResult"] = _retry_run_result_schema()
+
+    responses = components.setdefault("responses", {})
+    responses["Error"] = {
+        "description": "Error response",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+    }
+
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/pipeline/status",
+        "get",
+        operation_id="getPipelineStatus",
+        summary="Get pipeline status for a cycle",
+        tags=["pipeline"],
+        parameters=[_source_query_parameter(required=True), _cycle_time_query_parameter(required=True)],
+        data_schema={"$ref": "#/components/schemas/PipelineStatus"},
+        description="Pipeline status",
+    )
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/pipeline/stages",
+        "get",
+        operation_id="listPipelineStages",
+        summary="List pipeline stages for a cycle",
+        tags=["pipeline"],
+        parameters=[_source_query_parameter(required=True), _cycle_time_query_parameter(required=True)],
+        data_schema={"type": "array", "items": {"$ref": "#/components/schemas/PipelineStage"}},
+        description="Pipeline stage list",
+    )
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/jobs",
+        "get",
+        operation_id="listPipelineJobs",
+        summary="List pipeline jobs",
+        tags=["pipeline"],
+        parameters=[
+            _source_query_parameter(required=False),
+            _cycle_time_query_parameter(required=False),
+            {"name": "status", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "model_id", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "stage", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "run_type", "in": "query", "required": False, "schema": {"type": "string"}},
+            {"name": "scenario", "in": "query", "required": False, "schema": {"type": "string"}},
+            {
+                "name": "sort_by",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "enum": ["submitted_at", "duration_seconds"], "default": "submitted_at"},
+            },
+            {
+                "name": "sort_order",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
+            },
+            {
+                "name": "limit",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+            {
+                "name": "offset",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "minimum": 0, "default": 0},
+            },
+        ],
+        data_schema={"$ref": "#/components/schemas/PipelineJobPage"},
+        description="Pipeline job list",
+    )
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/jobs/{job_id}/logs",
+        "get",
+        operation_id="getPipelineJobLogs",
+        summary="Get pipeline job logs",
+        tags=["pipeline"],
+        parameters=[{"name": "job_id", "in": "path", "required": True, "schema": {"type": "string"}}],
+        data_schema={"$ref": "#/components/schemas/JobLogs"},
+        description="Pipeline job logs",
+    )
+    _patch_pipeline_operation(
+        schema,
+        "/api/v1/runs/{run_id}/retry",
+        "post",
+        operation_id="retryRun",
+        summary="Retry a failed or cancelled run",
+        tags=["runs"],
+        parameters=[
+            {"name": "run_id", "in": "path", "required": True, "schema": {"type": "string"}},
+            {
+                "name": "X-User-Role",
+                "in": "header",
+                "required": False,
+                "schema": {"type": "string", "enum": ["operator", "model_admin", "sys_admin"]},
+            },
+        ],
+        data_schema={"$ref": "#/components/schemas/RetryRunResult"},
+        description="Retry request accepted",
+    )
+
+
+def _patch_pipeline_operation(
+    schema: dict,
+    path: str,
+    method: str,
+    *,
+    operation_id: str,
+    summary: str,
+    tags: list[str],
+    parameters: list[dict[str, Any]],
+    data_schema: dict[str, Any],
+    description: str,
+) -> None:
+    operation = schema.get("paths", {}).get(path, {}).get(method)
+    if not operation:
+        return
+    operation["operationId"] = operation_id
+    operation["summary"] = summary
+    operation["tags"] = tags
+    operation["parameters"] = parameters
+    operation["responses"] = {
+        "200": {
+            "description": description,
+            "content": {"application/json": {"schema": _success_response_schema(data_schema)}},
+        },
+        "4XX": {"$ref": "#/components/responses/Error"},
+        "5XX": {"$ref": "#/components/responses/Error"},
+    }
+
+
+def _source_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {"name": "source", "in": "query", "required": required, "schema": {"type": "string"}}
+
+
+def _cycle_time_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {
+        "name": "cycle_time",
+        "in": "query",
+        "required": required,
+        "schema": {"type": "string", "format": "date-time"},
+    }
+
+
 def _station_series_parameters() -> list[dict[str, Any]]:
     return [
         {
@@ -677,6 +844,226 @@ def _validation_error_detail_schema() -> dict:
             "reason": {"type": "string"},
         },
         "additionalProperties": True,
+    }
+
+
+def _job_status_counts_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["succeeded", "failed", "running", "pending"],
+        "properties": {
+            "succeeded": {"type": "integer", "minimum": 0},
+            "failed": {"type": "integer", "minimum": 0},
+            "running": {"type": "integer", "minimum": 0},
+            "pending": {"type": "integer", "minimum": 0},
+        },
+    }
+
+
+def _pipeline_status_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["cycle_id", "source", "cycle_time", "current_state", "started_at", "updated_at", "job_counts"],
+        "properties": {
+            "cycle_id": {"type": "string"},
+            "source": {"type": "string", "nullable": True},
+            "cycle_time": {"type": "string", "format": "date-time", "nullable": True},
+            "current_state": {"type": "string"},
+            "started_at": {"type": "string", "format": "date-time", "nullable": True},
+            "updated_at": {"type": "string", "format": "date-time", "nullable": True},
+            "job_counts": {"$ref": "#/components/schemas/JobStatusCounts"},
+        },
+    }
+
+
+def _basin_progress_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["completed", "total", "failed"],
+        "properties": {
+            "completed": {"type": "integer", "minimum": 0},
+            "total": {"type": "integer", "minimum": 0},
+            "failed": {"type": "integer", "minimum": 0},
+        },
+    }
+
+
+def _pipeline_stage_schema() -> dict:
+    stage_statuses = ["pending", "running", "succeeded", "partially_failed", "failed", "skipped"]
+    return {
+        "type": "object",
+        "required": [
+            "stage",
+            "display_status",
+            "duration_seconds",
+            "basin_progress",
+            "basin_results",
+            "basin_results_limit",
+            "basin_results_total",
+            "basin_results_returned",
+            "basin_results_truncated",
+        ],
+        "properties": {
+            "stage": {"type": "string"},
+            "display_status": {"type": "string", "enum": stage_statuses},
+            "status": {
+                "type": "string",
+                "enum": stage_statuses,
+                "description": "Backward-compatible alias of display_status.",
+            },
+            "duration_seconds": {"type": "integer", "nullable": True},
+            "basin_progress": {"$ref": "#/components/schemas/BasinProgress"},
+            "basin_results_limit": {"type": "integer", "minimum": 0, "maximum": PIPELINE_STAGE_BASIN_RESULTS_LIMIT},
+            "basin_results_total": {"type": "integer", "minimum": 0},
+            "basin_results_returned": {"type": "integer", "minimum": 0, "maximum": PIPELINE_STAGE_BASIN_RESULTS_LIMIT},
+            "basin_results_truncated": {"type": "boolean"},
+            "basin_results": {
+                "type": "array",
+                "maxItems": PIPELINE_STAGE_BASIN_RESULTS_LIMIT,
+                "items": {"$ref": "#/components/schemas/BasinResult"},
+            },
+        },
+    }
+
+
+def _basin_result_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "job_id",
+            "run_id",
+            "cycle_id",
+            "job_type",
+            "slurm_job_id",
+            "model_id",
+            "basin_id",
+            "status",
+            "stage",
+            "submitted_at",
+            "started_at",
+            "finished_at",
+            "duration_seconds",
+            "retry_count",
+            "error_code",
+            "error_message",
+            "log_uri",
+        ],
+        "properties": {
+            "job_id": {"type": "string"},
+            "run_id": {"type": "string", "nullable": True},
+            "cycle_id": {"type": "string", "nullable": True},
+            "job_type": {"type": "string"},
+            "slurm_job_id": {"type": "string", "nullable": True},
+            "model_id": {"type": "string", "nullable": True},
+            "basin_id": {"type": "string", "nullable": True},
+            "status": {"type": "string", "enum": list(PIPELINE_JOB_STATUS_VALUES)},
+            "stage": {"type": "string", "nullable": True},
+            "submitted_at": {"type": "string", "format": "date-time", "nullable": True},
+            "started_at": {"type": "string", "format": "date-time", "nullable": True},
+            "finished_at": {"type": "string", "format": "date-time", "nullable": True},
+            "duration_seconds": {"type": "integer", "nullable": True},
+            "retry_count": {"type": "integer", "minimum": 0},
+            "error_code": {"type": "string", "nullable": True},
+            "error_message": {"type": "string", "nullable": True},
+            "log_uri": {"type": "string", "nullable": True, "maxLength": PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH},
+        },
+    }
+
+
+def _pipeline_job_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "job_id",
+            "run_id",
+            "cycle_id",
+            "run_type",
+            "scenario",
+            "job_type",
+            "slurm_job_id",
+            "model_id",
+            "status",
+            "stage",
+            "submitted_at",
+            "started_at",
+            "finished_at",
+            "exit_code",
+            "retry_count",
+            "error_code",
+            "error_message",
+            "log_uri",
+            "duration_seconds",
+        ],
+        "properties": {
+            "job_id": {"type": "string"},
+            "run_id": {"type": "string", "nullable": True},
+            "cycle_id": {"type": "string", "nullable": True},
+            "run_type": {"type": "string", "nullable": True},
+            "scenario": {"type": "string", "nullable": True},
+            "job_type": {"type": "string"},
+            "slurm_job_id": {"type": "string", "nullable": True},
+            "model_id": {"type": "string", "nullable": True},
+            "status": {"type": "string", "enum": list(PIPELINE_JOB_STATUS_VALUES)},
+            "stage": {"type": "string", "nullable": True},
+            "submitted_at": {"type": "string", "format": "date-time", "nullable": True},
+            "started_at": {"type": "string", "format": "date-time", "nullable": True},
+            "finished_at": {"type": "string", "format": "date-time", "nullable": True},
+            "exit_code": {"type": "integer", "nullable": True},
+            "retry_count": {"type": "integer", "minimum": 0},
+            "error_code": {"type": "string", "nullable": True},
+            "error_message": {"type": "string", "nullable": True},
+            "log_uri": {"type": "string", "nullable": True, "maxLength": PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH},
+            "duration_seconds": {"type": "integer", "nullable": True},
+        },
+    }
+
+
+def _pipeline_job_page_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["items", "total", "limit", "offset"],
+        "properties": {
+            "items": {"type": "array", "items": {"$ref": "#/components/schemas/PipelineJob"}},
+            "total": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            "offset": {"type": "integer", "minimum": 0},
+        },
+    }
+
+
+def _job_logs_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["job_id", "log_uri", "content"],
+        "properties": {
+            "job_id": {"type": "string"},
+            "log_uri": {"type": "string", "maxLength": PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH},
+            "content": {"type": "string"},
+        },
+    }
+
+
+def _retry_run_result_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "job_id",
+            "pipeline_job_id",
+            "run_id",
+            "retry_count",
+            "status",
+            "slurm_job_id",
+            "execution_status",
+        ],
+        "properties": {
+            "job_id": {"type": "string"},
+            "pipeline_job_id": {"type": "string", "description": "Alias of job_id for pipeline-control clients."},
+            "run_id": {"type": "string", "nullable": True},
+            "retry_count": {"type": "integer", "minimum": 0},
+            "status": {"type": "string", "enum": ["submitted"]},
+            "slurm_job_id": {"type": "string", "nullable": True},
+            "execution_status": {"type": "string", "enum": ["submitted"]},
+        },
     }
 
 
