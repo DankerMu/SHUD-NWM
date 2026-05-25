@@ -23,11 +23,11 @@
 ## 3. Hydro-met MVP Frontend
 
 - [ ] 3.1 Add `/hydro-met` route or route alias and MVP navigation entry while preserving existing `/meteorology`, `/forecast`, `/segments/:segmentId`, and `/monitoring` routes.
-- [ ] 3.2 Build the hydro-met bootstrap data adapter using latest-product metadata, station inventory, river segment list, station series, and forecast-series APIs without manual IDs.
+- [ ] 3.2 Build the hydro-met bootstrap data adapter using latest-product metadata, station inventory, and river segment list APIs without manual IDs. Station series calls are owned by 3.3/#208, and forecast-series calls are owned by 3.4/#209.
 - [ ] 3.3 Implement station selection UI for map/list/detail and six-variable forcing charts with source, cycle, forcing version, valid-time range, unit, quality flag, truncation, and unavailable states.
 - [ ] 3.4 Implement river segment selection UI for real `q_down` forecast-series curves, GFS/IFS source selection, unit metadata, empty-state handling, and IFS shorter-horizon labels.
 - [ ] 3.5 Replace MVP-facing "water level/stage" wording with river discharge or river-segment flow wording wherever it describes `q_down`.
-- [ ] 3.6 Add frontend unit/component tests and browser smoke coverage for `/hydro-met` bootstrap, station selection, river selection, unavailable states, and no-synthetic-data behavior.
+- [ ] 3.6 Add frontend unit/component tests for `/hydro-met` bootstrap, route/nav/query-state behavior, unavailable/partial states, and no-synthetic-data behavior. Station selection tests are owned by 3.3/#208, river selection tests by 3.4/#209, and browser smoke by 6.1/#214.
 
 ## 4. Ops Backend Pipeline Control
 
