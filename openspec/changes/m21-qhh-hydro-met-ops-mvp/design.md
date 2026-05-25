@@ -82,3 +82,80 @@ Rollback is straightforward for read-only API/UI changes: hide the MVP nav entri
 - Whether latest-product should live under `/api/v1/mvp/qhh/latest-product` or be expressed as a more generic `/api/v1/display-products/latest` query with `basin_id=qhh`. The MVP may use the QHH-specific path if it keeps launch risk lower.
 - Whether `/ops` should be a route alias over `/monitoring` or a separate simplified page. Either is acceptable if the visible MVP workflow and tests target `/ops`.
 - Whether QHH smoke should run against local PostgreSQL only or a target Slurm-accessible database for the launch rehearsal. The release checklist must record which mode was used.
+
+## Issue #204 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM backend store and time-series query
+Repair intensity: high
+
+Change surface:
+- `packages/common/forecast_store.py` station-series query helper and supporting dataclasses/helpers.
+- Backend tests for store/query behavior and QHH forcing readiness evidence.
+- Optional additive database index migration only if the implementation proves the current primary key/query shape is insufficient.
+
+Must preserve:
+- `forecast_series(...)`, `list_met_stations(...)`, existing run/model/basin queries, and existing API routes keep their current response shapes.
+- `workers/forcing_producer` remains the writer of `met.forcing_station_timeseries`; this issue must not redesign or duplicate forcing writes.
+- Existing `met.forcing_station_timeseries` composite identity `(forcing_version_id, station_id, variable, valid_time)` remains the source of truth for samples.
+
+Must add/change:
+- Store-level station series query supports explicit `forcing_version_id` and `model_id + source_id + cycle_time` forcing-version resolution.
+- Query response groups samples by requested variable and preserves `unit`, `native_resolution`, `quality_flag`, `source_id`, `cycle_time`, `valid_time`, and truncation metadata.
+- Readiness checks/tests verify selected QHH forcing versions, expected/actual station counts near 386 where fixture data exists, six-variable coverage, units, quality flags, missing-data reasons, and index/query-plan considerations.
+
+Risk packs considered:
+- Public API / CLI / script entry: not selected - #204 adds store/query helpers only; HTTP route is #205.
+- Config / project setup: not selected - no new operator configuration.
+- File IO / path safety / overwrite: not selected - database reads/tests only.
+- Schema / columns / units / field names: selected - station series depends on exact `met.forcing_station_timeseries` and `met.forcing_version` columns, units, variable names, and timestamps.
+- Geospatial / CRS / shapefile sidecars: not selected - no geometry parsing or CRS changes.
+- Time series / forcing / temporal boundaries: selected - valid-time filtering, cycle-time resolution, limit/truncation, UTC normalization, and IFS/GFS forcing-version identity are central.
+- Numerical stability / conservation / NaN: selected - values must be returned as stored and missing/non-finite handling must not fabricate samples.
+- Solver runtime / performance / threading: not selected - no SHUD runtime changes.
+- Resource limits / large input / discovery: selected - bounded limits and readiness aggregation must avoid unbounded station/time-series scans.
+- Legacy compatibility / examples: selected - existing forecast/met station consumers and seed/demo tests must keep working.
+- Error handling / rollback / partial outputs: selected - missing station, missing forcing version, ambiguous resolution, invalid filters, and empty valid ranges need stable errors or explicit empty results.
+- Release / packaging / dependency compatibility: not selected - no package/dependency changes expected.
+- Documentation / migration notes: selected - tests/evidence must record that forcing writes are existing and not rebuilt.
+
+Required evidence:
+- Store tests: explicit forcing version, model/source/cycle resolution, variable filtering, time filtering, limit/truncated, missing station, missing forcing version, invalid variable/limit/time range, unit/native_resolution/quality_flag preservation.
+- Readiness tests/evidence: selected QHH-like forcing version reports station count, six-variable coverage, missing-data reasons, and query/index outcome without requiring live QHH data in fast CI.
+- Regression command: `uv run pytest -q tests/test_forecast_api.py tests/test_migrations.py` plus any new focused tests.
+- Validation command: `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`.
+
+Invariant Matrix
+
+Governing invariant: one selected forcing version identity must bind every returned station-series sample, metadata field, truncation decision, and readiness count without mixing samples from another model, source, cycle, station, variable, or time window.
+Source-of-truth identity/contract: `met.forcing_version.forcing_version_id` plus `met.forcing_station_timeseries(forcing_version_id, station_id, variable, valid_time)`.
+Surfaces:
+- Producers: existing `workers/forcing_producer/store.py` writes `met.forcing_station_timeseries`; unchanged except tests may assert compatibility.
+- Validators/preflight: store parameter validation for station id, forcing version resolution, variable names, UTC time range, and limit.
+- Storage/cache/query: SQL in `packages/common/forecast_store.py`; optional additive index migration if proven required.
+- Public routes/entrypoints: none in #204; #205 will expose the HTTP route.
+- Frontend/downstream consumers: unchanged in #204; future #205/#208 consume the store contract.
+- Failure paths/rollback/stale state: missing station, missing forcing version, ambiguous model/source/cycle, empty filtered range, over-limit results, missing unit/quality flag evidence.
+- Evidence/audit/readiness: focused tests or deterministic readiness helper output; no final production readiness claim.
+Regression rows:
+- explicit valid `forcing_version_id + station_id + variables + time range` -> grouped series from only that forcing version with units, quality flags, native resolution, returned range, and truncation metadata.
+- valid `model_id + source_id + cycle_time + station_id` -> same resolved forcing version as explicit query; no ad hoc ID guessing in callers.
+- `model_id + source_id + cycle_time` resolves to multiple forcing versions or inconsistent identities -> stable ambiguous/unavailable failure with details, not silent arbitrary selection.
+- missing station or forcing version -> stable not-found/unavailable result at store boundary, not a misleading empty success.
+- over-limit query -> deterministic truncation per variable without unbounded row materialization.
+- QHH-like readiness fixture -> expected/actual station counts, six-variable coverage, missing unit, missing quality flag, missing-data reasons, and query/index outcome are reported without re-running forcing producer.
+- existing `forecast_series` and `list_met_stations` tests -> unchanged behavior.
+
+Boundary-surface checklist:
+- Shared helper roots: datetime parsing/UTC normalization, token normalization, SQL fetch helpers.
+- Public entrypoints: none for #204.
+- Read surfaces: `met.forcing_version`, `met.forcing_station_timeseries`, `met.met_station`, and model/station association tables used for resolution.
+- Write/delete/overwrite surfaces: none, except optional additive migration.
+- Producer/consumer evidence boundaries: forcing producer remains producer; readiness helper must label deterministic vs live evidence.
+- Stale-state/idempotency boundaries: repeated query for same identity returns same rows and does not mutate result tables.
+- Unchanged downstream consumers: forecast API tests, met station list tests, forcing producer tests where relevant.
+
+Non-goals:
+- Implementing the FastAPI station-series route, OpenAPI schemas, or frontend generated types; those belong to #205.
+- Building `/hydro-met`, latest-product, `/ops`, or controlled retry UI.
+- Running live QHH/Slurm/GFS/IFS smoke in fast CI.
