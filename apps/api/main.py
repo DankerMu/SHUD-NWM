@@ -625,7 +625,7 @@ def _validation_error_detail_schema() -> dict:
         "required": ["field", "reason"],
         "properties": {
             "field": {"type": "string"},
-            "rejected_value": {"nullable": True},
+            "rejected_value": _json_value_schema(),
             "reason": {"type": "string"},
         },
         "additionalProperties": True,
@@ -642,6 +642,19 @@ def _station_series_point_schema() -> dict:
             "quality_flag": {"type": "string", "nullable": True},
             "source_id": {"type": "string", "nullable": True},
         },
+    }
+
+
+def _json_value_schema() -> dict:
+    return {
+        "oneOf": [
+            {"type": "string"},
+            {"type": "number"},
+            {"type": "boolean"},
+            {"type": "object", "additionalProperties": True},
+            {"type": "array", "items": {}},
+            {"type": "null"},
+        ]
     }
 
 

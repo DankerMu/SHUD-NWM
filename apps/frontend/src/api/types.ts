@@ -750,7 +750,9 @@ export interface components {
         };
         ValidationErrorDetail: {
             field: string;
-            rejected_value?: unknown;
+            rejected_value?: string | number | boolean | {
+                [key: string]: unknown;
+            } | unknown[] | null;
             reason: string;
         } & {
             [key: string]: unknown;

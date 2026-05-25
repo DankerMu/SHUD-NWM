@@ -727,7 +727,16 @@ def test_station_series_openapi_and_generated_types_include_store_contract() -> 
         "required": ["field", "reason"],
         "properties": {
             "field": {"type": "string"},
-            "rejected_value": {"nullable": True},
+            "rejected_value": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "number"},
+                    {"type": "boolean"},
+                    {"type": "object", "additionalProperties": True},
+                    {"type": "array", "items": {}},
+                    {"type": "null"},
+                ]
+            },
             "reason": {"type": "string"},
         },
         "additionalProperties": True,

@@ -1934,7 +1934,15 @@ components:
         field:
           type: string
         rejected_value:
-          nullable: true
+          oneOf:
+            - type: string
+            - type: number
+            - type: boolean
+            - type: object
+              additionalProperties: true
+            - type: array
+              items: {}
+            - type: "null"
         reason:
           type: string
       additionalProperties: true
