@@ -843,3 +843,91 @@ Review focus:
 - Confirm logs are backend-mediated and stale modal content is cleared across job changes/errors.
 - Confirm retry uses `run_id`, refreshes scoped status/stages/jobs, and preserves #211 source/cycle stale-state guards.
 - Confirm frontend UI gating and backend direct-call RBAC tests cover both allowed and denied paths.
+
+## Issue #213 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM controlled operations evidence, backend API fixtures, and frontend browser smoke
+Repair intensity: high
+
+Change surface:
+- Deterministic controlled-failure fixture or evidence helper for one QHH-like source/cycle/run using formal `ops.pipeline_job` and `ops.pipeline_event` state.
+- Focused backend tests or evidence command proving `/api/v1/pipeline/status`, `/api/v1/pipeline/stages`, `/api/v1/jobs`, `/api/v1/jobs/{job_id}/logs`, and `POST /api/v1/runs/{run_id}/retry` observe the same failed run identity and retry lifecycle.
+- Focused `/ops` Playwright or component evidence proving the failed job row, backend-mediated log, retry action, new retry job identity, and terminal outcome are visible without relying on diagnostic qhh state files.
+- Runbook/evidence documentation recording commands, artifact paths, environment assumptions, deterministic-vs-live labels, and exact skipped live Slurm/QHH dependencies.
+
+Must preserve:
+- #210 formal pipeline/orchestrator APIs remain the source of truth; `.nhms-runs/qhh-continuous` JSON and qhh scripts are diagnostic only and must not be read as production operations state.
+- #211/#212 `/ops` source/cycle context, RBAC gates, log route mediation, retry-by-`run_id`, and stale-state protections remain unchanged.
+- Retry service semantics, scheduler persistence schema, OpenAPI response shapes, and production Slurm behavior are not redesigned by this evidence issue.
+- Evidence must not claim live Slurm, live QHH, or final production readiness unless that exact live dependency was executed and recorded.
+
+Must add/change:
+- Add a deterministic controlled failure evidence lane that seeds or simulates a QHH-like failed stage/run through formal pipeline persistence, exposes it through public ops APIs, performs an authorized retry, records the retry job/event, and drives the retry to `submitted`/`running`/`succeeded` or a documented terminal failure.
+- Add browser or E2E proof for `/ops` that a failed job appears, its log opens through the backend log API, retry sends the authorized `run_id`, refreshed jobs include the new retry job, and final outcome text/state is visible.
+- Store evidence artifacts under a stable non-committed path such as `.codex/evidence/issue-213/`, with a committed runbook or markdown pointer explaining artifact names and live-skip reasons.
+- Update `progress.md` and the relevant QHH runbook if the evidence lane changes MVP status wording; deterministic evidence may close #213 but must remain labeled as deterministic when live Slurm/QHH is unavailable.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - #213 exercises public ops APIs and may add an evidence command or browser smoke entrypoint.
+- Config / project setup: selected - evidence must record dev-role/test auth, log root, database, frontend server, Slurm, and live QHH dependency assumptions without requiring new production config.
+- File IO / path safety / overwrite: selected - evidence reads job logs via backend bounded log routes and writes local evidence artifacts without following or exposing local log paths to the browser.
+- Schema / columns / units / field names: selected - evidence identity depends on exact job, event, status, Slurm id, retry count, log, and API payload fields.
+- Geospatial / CRS / shapefile sidecars: not selected - no map geometry or CRS proof in this issue.
+- Time series / forcing / temporal boundaries: selected - source/cycle/run identity and terminal transition timestamps must stay stable and must not mix sibling cycles.
+- Numerical stability / conservation / NaN: not selected - no forecast numerical values or solver math are validated here.
+- Solver runtime / performance / threading: not selected - deterministic proof does not change SHUD runtime; live SHUD execution, if skipped, is recorded as a dependency gap.
+- Resource limits / large input / discovery: selected - jobs/log/evidence reads are bounded and evidence artifact writing is scoped to the issue path.
+- Legacy compatibility / examples: selected - existing monitoring, retry, and E2E tests must keep passing while new evidence is added.
+- Error handling / rollback / partial outputs: selected - controlled failure, retry submission, terminal success/failure, skipped live dependencies, and missing logs need explicit stable evidence.
+- Release / packaging / dependency compatibility: selected - evidence commands must use existing uv/pnpm toolchains without adding unrelated dependencies.
+- Documentation / migration notes: selected - runbooks/progress must distinguish deterministic controlled proof from live Slurm/QHH readiness.
+
+Required evidence:
+- Backend/API evidence: deterministic QHH-like failed stage/run is visible in `/pipeline/status`, `/pipeline/stages`, `/jobs`, and `/jobs/{job_id}/logs`; authorized retry creates a new pipeline job and retry/submission event with incremented retry count, run id, stage, Slurm metadata where available, and an explicit terminal outcome.
+- Backend negative evidence: unauthorized retry does not mutate state; retry is unavailable or terminal-failed with a typed reason when no gateway/live dependency is present; sibling-cycle jobs are not mixed into the selected cycle.
+- `/ops` browser evidence: selected source/cycle loads the failed job row, log modal content comes from the backend route, retry posts to `/api/v1/runs/{run_id}/retry`, refresh shows the new retry job or terminal failure state, and viewer/non-operator does not see mutating controls.
+- Artifact evidence: manifest or markdown records command lines, artifact paths, deterministic/live mode, environment assumptions, skipped live Slurm/QHH/IFS/GFS dependencies, checked git SHA when feasible, and no final production readiness claim.
+- Regression commands: `uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py` plus any new backend evidence tests, `cd apps/frontend && corepack pnpm test -- --run` for changed frontend tests, `cd apps/frontend && corepack pnpm test:e2e -- monitoring` or the repository-specific Playwright command used by the implementation, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: one controlled QHH-like failed run identity must propagate from formal persisted pipeline state through public ops APIs, `/ops` UI evidence, authorized retry creation, retry job/event records, and terminal outcome documentation without using diagnostic qhh state files, fabricating live Slurm/QHH proof, or mixing source/cycle/run contexts.
+Source-of-truth identity/contract: `source_id + cycle_time + cycle_id + run_id + PipelineJob.job_id/stage/status/retry_count/slurm_job_id/log_uri + PipelineEvent(event_type,status_from,status_to,details.previous_job_id)`.
+Surfaces:
+- Producers: deterministic seed/helper or existing test setup that writes `ops.pipeline_job`, `ops.pipeline_event`, `met.forecast_cycle`, and optional `hydro.hydro_run`; live scheduler/Slurm producers are used only when explicitly available and recorded.
+- Validators/preflight: source/cycle parsing, role/RBAC policy evidence, safe run id, retryable status set, log route containment, evidence output path containment, and live dependency detection.
+- Storage/cache/query: `PipelineStore`, `ops.pipeline_job`, `ops.pipeline_event`, `met.forecast_cycle`, `hydro.hydro_run`, frontend monitoring store, and local non-committed evidence artifact directory.
+- Public routes/entrypoints: pipeline status/stages/jobs/logs/retry APIs, `/ops`, optional evidence CLI/script/test command, and runbook instructions.
+- Frontend/downstream consumers: `MonitoringPage`, `JobsTable`, `LogModal`, Playwright/component tests, progress/runbook readers, and PR evidence.
+- Failure paths/rollback/stale state: unauthorized retry, missing gateway/live Slurm, retry submission failure, terminal retry failure, missing/unsafe logs, source/cycle change during refresh, sibling-cycle jobs, and skipped live dependencies.
+- Evidence/audit/readiness: committed tests/runbook/progress plus local `.codex/evidence/issue-213/` artifacts; deterministic evidence must be labeled deterministic and live gaps must be explicit.
+Regression rows:
+- seeded failed `run_id` in selected `source/cycle` -> `/pipeline/status`, `/pipeline/stages`, `/jobs`, and `/ops` all show the same failed run/job/stage and no sibling-cycle jobs.
+- failed job with contained `log_uri` -> `/jobs/{job_id}/logs` returns bounded content and `/ops` log modal renders it without exposing local path instructions.
+- authorized operator retry for that `run_id` -> retry POST returns a new pipeline job id, persisted retry/submission events name the previous job, retry count increments, and refreshed APIs/UI show the retry job with Slurm id when provided by the gateway fixture.
+- retry lifecycle update to `running` then `succeeded` or to a documented terminal failure -> status/stage/jobs/UI/evidence manifest all report the final outcome explicitly.
+- viewer or analyst retry attempt -> RBAC error and original failed job/event set remains unchanged.
+- diagnostic `.nhms-runs/qhh-continuous` file present, absent, or contradictory -> evidence lane and ops APIs ignore it and continue to use formal persistence only.
+- live Slurm/QHH/GFS/IFS dependency unavailable -> evidence artifact records the exact missing dependency and mode remains deterministic/blocked, not live-ready.
+
+Boundary-surface checklist:
+- Shared helper roots: monitoring API source/cycle filters, retry source-job selection, event payload creation, log route safe reads, frontend monitoring refresh sequencing, evidence path writer if added.
+- Public entrypoints: ops APIs, `/ops`, and any new evidence command/test entry.
+- Read surfaces: formal pipeline tables, backend log root through the log API, frontend API mocks/fixtures, committed runbook/progress docs.
+- Write/delete/overwrite surfaces: deterministic fixture writes to test database only; local evidence files use issue-scoped paths and no runtime delete/overwrite outside that root.
+- Staging/publish/rollback surfaces: retry status transitions only; no product publish/rollback behavior.
+- Producer/consumer evidence boundaries: formal pipeline persistence is authoritative; qhh diagnostic scripts remain non-authoritative.
+- Stale-state/idempotency boundaries: repeated evidence runs overwrite or version only the issue-scoped artifact root, retry duplicate guards remain intact, and refreshes stay scoped to selected source/cycle.
+- Unchanged downstream consumers: existing monitoring, retry, OpenAPI drift, station/river chart, and production scheduler tests.
+
+Non-goals:
+- Redesigning scheduler persistence, retry service semantics, Slurm gateway behavior, OpenAPI schemas, station-series, latest-product, `/hydro-met`, or chart features.
+- Running real GFS/IFS download, SHUD solve, parse, or live Slurm submission unless the environment is available; skipped live proof is acceptable only with exact dependency reasons.
+- Claiming final production readiness, live IdP readiness, live rollback, nationwide readiness, water-level `stage`, CLDAS, ERA5 near-real-time, or real flood-frequency curves.
+
+Review focus:
+- Confirm evidence identity is end-to-end and formal-persistence backed.
+- Confirm deterministic/live labels and skipped dependency reasons prevent overclaiming.
+- Confirm `/ops` browser proof exercises the actual log/retry UI contract added by #211/#212.
+- Confirm new tests/evidence are focused and do not refactor scheduler/runtime behavior.

@@ -449,6 +449,286 @@ def test_qhh_like_pipeline_stages_expose_formal_job_evidence_for_all_canonical_s
         assert frequency_stage["basin_results_truncated"] is False
 
 
+def test_qhh_like_controlled_failure_retry_evidence_propagates_one_formal_identity(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    cycle_time = datetime(2026, 5, 21, tzinfo=UTC)
+    sibling_cycle_time = cycle_time + timedelta(hours=6)
+    cycle_id = cycle_id_for("GFS", cycle_time)
+    sibling_cycle_id = cycle_id_for("GFS", sibling_cycle_time)
+    run_id = "qhh_gfs_2026052100_controlled_failure"
+    sibling_run_id = "qhh_gfs_2026052106_controlled_failure"
+    failed_job_id = "qhh_controlled_forecast_failed"
+    log_path = tmp_path / "qhh" / "controlled" / "forecast_failed.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text(
+        "controlled qhh forecast failure\n"
+        f"run_id={run_id}\n"
+        f"cycle_id={cycle_id}\n"
+        "stage=forecast\n"
+        "reason=NODE_FAILURE\n",
+        encoding="utf-8",
+    )
+
+    with _store_with_hydro() as store:
+        _insert_cycle(store, cycle_time=cycle_time, current_state="failed_run")
+        _insert_cycle(store, cycle_time=sibling_cycle_time, current_state="complete")
+        _insert_hydro_run(store, run_id, status="failed")
+        _seed_qhh_success_before_controlled_failure(store, cycle_id=cycle_id, run_id=run_id, base_time=cycle_time)
+        failed_job = _create_job(
+            store,
+            job_id=failed_job_id,
+            run_id=run_id,
+            cycle_id=cycle_id,
+            job_type="forecast_qhh_stage",
+            slurm_job_id="slurm_qhh_forecast_failed_2100",
+            model_id="basins_qhh_shud",
+            stage="forecast",
+            status="failed",
+            submitted_at=cycle_time + timedelta(minutes=30),
+            started_at=cycle_time + timedelta(minutes=31),
+            finished_at=cycle_time + timedelta(minutes=36),
+            error_code="NODE_FAILURE",
+            error_message="Controlled QHH forecast failure for retry evidence.",
+            log_uri="qhh/controlled/forecast_failed.log",
+        )
+        failed_job.retry_count = 1
+        store.session.add(failed_job)
+        _create_job(
+            store,
+            job_id="qhh_sibling_cycle_forecast_failed",
+            run_id=sibling_run_id,
+            cycle_id=sibling_cycle_id,
+            job_type="forecast_qhh_stage",
+            slurm_job_id="slurm_qhh_forecast_failed_2106",
+            model_id="basins_qhh_shud",
+            stage="forecast",
+            status="failed",
+            submitted_at=sibling_cycle_time + timedelta(minutes=30),
+            started_at=sibling_cycle_time + timedelta(minutes=31),
+            finished_at=sibling_cycle_time + timedelta(minutes=35),
+            error_code="NODE_FAILURE",
+            log_uri="qhh/controlled/sibling.log",
+        )
+        store.session.commit()
+
+        gateway = _MockGateway(submitted_at="2026-05-21T00:42:00Z")
+        with _client(store, gateway, allow_dev_role_header=True) as client:
+            status_response = client.get(
+                "/api/v1/pipeline/status",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            jobs_response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "limit": 20},
+            )
+            logs_response = client.get(f"/api/v1/jobs/{failed_job_id}/logs")
+            denied = client.post(f"/api/v1/runs/{run_id}/retry", headers={"X-User-Role": "viewer"})
+
+        assert denied.status_code == 403
+        assert denied.json()["error"]["code"] == "RBAC_FORBIDDEN"
+        assert gateway.submissions == []
+        assert [job.job_id for job in store.query_jobs_by_run(run_id)] == [
+            "qhh_controlled_download",
+            "qhh_controlled_convert",
+            "qhh_controlled_forcing",
+            failed_job_id,
+        ]
+        assert _events(store) == []
+
+        with _client(store, gateway, allow_dev_role_header=True) as client:
+            retry_response = client.post(f"/api/v1/runs/{run_id}/retry", headers={"X-User-Role": "operator"})
+
+        assert status_response.status_code == 200
+        status_data = status_response.json()["data"]
+        assert status_data["cycle_id"] == cycle_id
+        assert status_data["source"] == "GFS"
+        assert status_data["current_state"] == "failed_run"
+        assert status_data["job_counts"] == {"succeeded": 3, "failed": 1, "running": 0, "pending": 0}
+
+        assert stages_response.status_code == 200
+        stages = stages_response.json()["data"]
+        forecast = next(stage for stage in stages if stage["stage"] == "forecast")
+        assert forecast["display_status"] == "failed"
+        assert forecast["basin_progress"] == {"completed": 0, "total": 1, "failed": 1}
+        assert forecast["basin_results_total"] == 1
+        assert forecast["basin_results_returned"] == 1
+        forecast_job = forecast["basin_results"][0]
+        assert forecast_job["job_id"] == failed_job_id
+        assert forecast_job["run_id"] == run_id
+        assert forecast_job["cycle_id"] == cycle_id
+        assert forecast_job["stage"] == "forecast"
+        assert forecast_job["status"] == "failed"
+        assert forecast_job["retry_count"] == 1
+        assert forecast_job["slurm_job_id"] == "slurm_qhh_forecast_failed_2100"
+
+        assert jobs_response.status_code == 200
+        jobs_page = jobs_response.json()["data"]
+        returned_job_ids = {job["job_id"] for job in jobs_page["items"]}
+        assert jobs_page["total"] == 4
+        assert failed_job_id in returned_job_ids
+        assert "qhh_sibling_cycle_forecast_failed" not in returned_job_ids
+        failed_job_payload = next(job for job in jobs_page["items"] if job["job_id"] == failed_job_id)
+        assert failed_job_payload["run_id"] == run_id
+        assert failed_job_payload["cycle_id"] == cycle_id
+        assert failed_job_payload["stage"] == "forecast"
+        assert failed_job_payload["status"] == "failed"
+
+        assert logs_response.status_code == 200
+        logs = logs_response.json()["data"]
+        assert logs["job_id"] == failed_job_id
+        assert logs["log_uri"] == "qhh/controlled/forecast_failed.log"
+        assert "controlled qhh forecast failure" in logs["content"]
+        assert run_id in logs["content"]
+        assert cycle_id in logs["content"]
+
+        assert retry_response.status_code == 200
+        retry_data = retry_response.json()["data"]
+        assert retry_data["run_id"] == run_id
+        assert retry_data["job_id"] == f"{run_id}_retry_active"
+        assert retry_data["pipeline_job_id"] == retry_data["job_id"]
+        assert retry_data["retry_count"] == 2
+        assert retry_data["status"] == "submitted"
+        assert retry_data["execution_status"] == "submitted"
+        assert retry_data["slurm_job_id"] == "slurm_retry"
+
+        retry_job = store.get_job(retry_data["job_id"])
+        assert retry_job is not None
+        assert retry_job.run_id == run_id
+        assert retry_job.cycle_id == cycle_id
+        assert retry_job.stage == "forecast"
+        assert retry_job.status == "submitted"
+        assert retry_job.retry_count == 2
+        assert retry_job.slurm_job_id == "slurm_retry"
+        assert retry_job.manual_retry_marker is True
+        assert len(gateway.submissions) == 1
+        submitted = gateway.submissions[0]
+        assert submitted.run_id == run_id
+        assert submitted.model_id == "basins_qhh_shud"
+        assert submitted.manifest["cycle_id"] == cycle_id
+        assert submitted.manifest["stage"] == "forecast"
+        assert submitted.manifest["pipeline_job_id"] == retry_job.job_id
+        assert submitted.manifest["retry_count"] == 2
+        assert submitted.manifest["manual_retry_marker"] is True
+
+        events = _events(store)
+        assert [event.event_type for event in events] == ["retry", "submission"]
+        retry_event = events[0]
+        assert retry_event.entity_id == retry_job.job_id
+        assert retry_event.status_from == "failed"
+        assert retry_event.status_to == "pending"
+        assert retry_event.details["trigger"] == "manual"
+        assert retry_event.details["previous_job_id"] == failed_job_id
+        assert retry_event.details["previous_error"] == "NODE_FAILURE"
+        assert retry_event.details["retry_count"] == 2
+        assert retry_event.details["slurm_job_id"] is None
+        assert retry_event.details["manual_retry_marker"] is True
+        submission_event = events[1]
+        assert submission_event.entity_id == retry_job.job_id
+        assert submission_event.status_from == "pending"
+        assert submission_event.status_to == "submitted"
+        assert submission_event.details["trigger"] == "manual"
+        assert submission_event.details["slurm_job_id"] == "slurm_retry"
+        assert submission_event.details["gateway_status"] == "submitted"
+
+        running_at = cycle_time + timedelta(minutes=42)
+        succeeded_at = cycle_time + timedelta(minutes=50)
+        store.update_job_status(retry_job.job_id, "running", started_at=running_at)
+        store.insert_event(
+            entity_type="pipeline_job",
+            entity_id=retry_job.job_id,
+            event_type="status",
+            status_from="submitted",
+            status_to="running",
+            details={
+                "run_id": run_id,
+                "stage": "forecast",
+                "slurm_job_id": retry_job.slurm_job_id,
+                "terminal_outcome": False,
+            },
+        )
+        store.update_job_status(retry_job.job_id, "succeeded", finished_at=succeeded_at, exit_code=0)
+        store.insert_event(
+            entity_type="pipeline_job",
+            entity_id=retry_job.job_id,
+            event_type="terminal_outcome",
+            status_from="running",
+            status_to="succeeded",
+            details={
+                "run_id": run_id,
+                "stage": "forecast",
+                "slurm_job_id": retry_job.slurm_job_id,
+                "outcome": "succeeded",
+                "mode": "deterministic",
+            },
+        )
+
+        with _client(store, gateway, allow_dev_role_header=True) as client:
+            post_retry_status = client.get(
+                "/api/v1/pipeline/status",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            post_retry_stages = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            post_retry_jobs = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "limit": 20},
+            )
+
+        assert post_retry_status.status_code == 200
+        post_retry_status_data = post_retry_status.json()["data"]
+        assert post_retry_status_data["cycle_id"] == cycle_id
+        assert post_retry_status_data["source"] == "GFS"
+        assert post_retry_status_data["current_state"] == "failed_run"
+        assert post_retry_status_data["job_counts"] == {"succeeded": 4, "failed": 1, "running": 0, "pending": 0}
+
+        assert post_retry_stages.status_code == 200
+        post_forecast = next(stage for stage in post_retry_stages.json()["data"] if stage["stage"] == "forecast")
+        assert post_forecast["display_status"] == "succeeded"
+        assert post_forecast["basin_progress"] == {"completed": 1, "total": 1, "failed": 0}
+        assert post_forecast["basin_results_total"] == 1
+        assert [result["job_id"] for result in post_forecast["basin_results"]] == [retry_job.job_id]
+        assert post_forecast["basin_results"][0]["run_id"] == run_id
+        assert post_forecast["basin_results"][0]["retry_count"] == 2
+        assert post_forecast["basin_results"][0]["slurm_job_id"] == "slurm_retry"
+
+        assert post_retry_jobs.status_code == 200
+        post_jobs = post_retry_jobs.json()["data"]["items"]
+        assert {job["job_id"] for job in post_jobs} == {
+            "qhh_controlled_download",
+            "qhh_controlled_convert",
+            "qhh_controlled_forcing",
+            failed_job_id,
+            retry_job.job_id,
+        }
+        post_retry_payload = next(job for job in post_jobs if job["job_id"] == retry_job.job_id)
+        assert post_retry_payload["run_id"] == run_id
+        assert post_retry_payload["cycle_id"] == cycle_id
+        assert post_retry_payload["stage"] == "forecast"
+        assert post_retry_payload["status"] == "succeeded"
+        assert post_retry_payload["retry_count"] == 2
+        assert "qhh_sibling_cycle_forecast_failed" not in {job["job_id"] for job in post_jobs}
+
+        terminal_event = next(event for event in _events(store) if event.event_type == "terminal_outcome")
+        assert terminal_event.entity_id == retry_job.job_id
+        assert terminal_event.status_to == "succeeded"
+        assert terminal_event.details == {
+            "run_id": run_id,
+            "stage": "forecast",
+            "slurm_job_id": "slurm_retry",
+            "outcome": "succeeded",
+            "mode": "deterministic",
+        }
+
+
 def test_pipeline_stages_missing_cycle() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
@@ -1808,10 +2088,11 @@ class _ClosingStore(PipelineStore):
 
 
 class _MockGateway:
-    def __init__(self, depth: dict[str, int] | None = None) -> None:
+    def __init__(self, depth: dict[str, int] | None = None, *, submitted_at: str = "2026-05-15T00:00:00Z") -> None:
         self.cancelled: list[str] = []
         self.submissions: list[Any] = []
         self.depth = depth or {"running": 0, "pending": 0, "idle": 0}
+        self.submitted_at = submitted_at
 
     def submit_job(self, request: Any) -> dict[str, Any]:
         self.submissions.append(request)
@@ -1820,8 +2101,8 @@ class _MockGateway:
             "run_id": request.run_id,
             "model_id": request.model_id,
             "status": "submitted",
-            "submitted_at": "2026-05-15T00:00:00Z",
-            "updated_at": "2026-05-15T00:00:00Z",
+            "submitted_at": self.submitted_at,
+            "updated_at": self.submitted_at,
         }
 
     def cancel_job(self, job_id: str) -> dict[str, str]:
@@ -2029,6 +2310,31 @@ def _seed_qhh_canonical_stage_jobs(store: PipelineStore, *, cycle_id: str) -> No
         job.retry_count = retry_count
         store.session.add(job)
     store.session.commit()
+
+
+def _seed_qhh_success_before_controlled_failure(
+    store: PipelineStore,
+    *,
+    cycle_id: str,
+    run_id: str,
+    base_time: datetime,
+) -> None:
+    for index, stage in enumerate(("download", "convert", "forcing")):
+        _create_job(
+            store,
+            job_id=f"qhh_controlled_{stage}",
+            run_id=run_id,
+            cycle_id=cycle_id,
+            job_type=f"{stage}_qhh_stage",
+            slurm_job_id=f"slurm_qhh_{stage}_2100",
+            model_id="basins_qhh_shud",
+            stage=stage,
+            status="succeeded",
+            submitted_at=base_time + timedelta(minutes=index * 10),
+            started_at=base_time + timedelta(minutes=index * 10 + 1),
+            finished_at=base_time + timedelta(minutes=index * 10 + 5),
+            log_uri=f"qhh/controlled/{stage}.log",
+        )
 
 
 def _create_job(
