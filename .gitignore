@@ -42,6 +42,7 @@ minio-data/
 data/
 .codex/tmp/
 .codex/cache/
+.codex/evidence/
 
 # Coverage
 htmlcov/

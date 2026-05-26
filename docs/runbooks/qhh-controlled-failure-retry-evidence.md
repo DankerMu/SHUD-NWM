@@ -8,6 +8,11 @@
 
 这条证据不读取 `.nhms-runs/qhh-continuous` 诊断 state JSON，不伪造 live Slurm/QHH proof，也不声明 final production readiness。
 
+## #214 evidence boundary
+
+Issue #214 的统一 evidence matrix 见 [`qhh-mvp-smoke-evidence.md`](qhh-mvp-smoke-evidence.md)。
+本文只作为 `/ops` controlled failure/retry 的 deterministic evidence 入口；它证明 mocked browser/API fixture 与正式 pipeline persistence identity 的连通性，不证明 live Slurm submit/accounting、live QHH SHUD runtime、live GFS/IFS download 或 final production readiness。
+
 ## deterministic evidence
 
 deterministic 模式只使用测试数据库、mocked Slurm gateway fixture 和 mocked browser API response。证据命令：

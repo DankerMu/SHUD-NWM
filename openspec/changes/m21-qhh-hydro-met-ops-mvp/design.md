@@ -1,8 +1,13 @@
 ## Context
 
-The repository already contains most of the ingredients for a constrained MVP. QHH has real live-chain evidence: calibrated `data/Basins/qhh`, 386 forcing stations seeded from `qhh.tsd.forc`, real GFS/IFS cycles, parsed `q_down` rows for 1633 SHUD output river segments, display-product publication, and reusable diagnostic scripts. M20 also established the formal backend scheduler path through `nhms-pipeline plan-production`, with Slurm preflight, pipeline persistence, retry/cancel evidence, and clear production-readiness boundaries.
+The repository already contains most of the ingredients for a constrained MVP.
+QHH has real live-chain evidence: calibrated `data/Basins/qhh`, 386 forcing stations seeded from `qhh.tsd.forc`, real GFS/IFS cycles, parsed `q_down` rows for 1633 SHUD output river segments, display-product publication, and reusable diagnostic scripts.
+M20 also established the formal backend scheduler path through `nhms-pipeline plan-production`, with Slurm preflight, pipeline persistence, retry/cancel evidence, and clear production-readiness boundaries.
 
-The current gap is product convergence. Existing forecast-series APIs can return river `q_down`, and `/api/v1/met/stations` can return station inventory, but the real station forcing series route is not implemented despite the OpenAPI placeholder. The frontend station page still relies on fixture/unavailable contracts for station forcing curves. The monitoring page has reusable controls, but the MVP must prove it reads formal orchestrator/pipeline state and can restart controlled failures. This change defines the narrow launch slice that connects those surfaces without expanding into nationwide or final-production scope.
+The current gap is product convergence. Existing forecast-series APIs can return river `q_down`, and `/api/v1/met/stations` can return station inventory, but the real station forcing series route is not implemented despite the OpenAPI placeholder.
+The frontend station page still relies on fixture/unavailable contracts for station forcing curves.
+The monitoring page has reusable controls, but the MVP must prove it reads formal orchestrator/pipeline state and can restart controlled failures.
+This change defines the narrow launch slice that connects those surfaces without expanding into nationwide or final-production scope.
 
 ## Goals / Non-Goals
 
@@ -27,27 +32,39 @@ The current gap is product convergence. Existing forecast-series APIs can return
 
 ### MVP Data Contract
 
-The MVP hydrologic variable is `q_down` discharge from `hydro.river_timeseries`. The MVP meteorology variables are `PRCP`, `TEMP`, `RH`, `wind`, `Rn`, and `Press` from `met.forcing_station_timeseries`. UI copy and issue scope must use "river discharge" or "river-segment flow", not "water level", unless a later change adds stage support.
+The MVP hydrologic variable is `q_down` discharge from `hydro.river_timeseries`.
+The MVP meteorology variables are `PRCP`, `TEMP`, `RH`, `wind`, `Rn`, and `Press` from `met.forcing_station_timeseries`.
+UI copy and issue scope must use "river discharge" or "river-segment flow", not "water level", unless a later change adds stage support.
 
 ### Station Series API
 
-Implement `GET /api/v1/met/stations/{station_id}/series` as a read API over existing forcing station time series. The API accepts explicit `forcing_version_id` when known, or resolves one from `model_id`, `source_id`, and `cycle_time` through existing forcing/run metadata. It returns grouped series by variable, point-level `valid_time`, `value`, and `quality_flag`, plus `unit`, provenance, and `truncated` metadata.
+Implement `GET /api/v1/met/stations/{station_id}/series` as a read API over existing forcing station time series.
+The API accepts explicit `forcing_version_id` when known, or resolves one from `model_id`, `source_id`, and `cycle_time` through existing forcing/run metadata.
+It returns grouped series by variable, point-level `valid_time`, `value`, and `quality_flag`, plus `unit`, provenance, and `truncated` metadata.
 
 Alternative considered: add station series to the existing station list response. That would make inventory queries large and unbounded. The separate detail route keeps the list cheap and the chart request bounded.
 
 ### Latest Display Product
 
-Add a lightweight QHH latest-product API or equivalent stable aggregation. It should select the latest usable QHH display product for a requested source and return enough identifiers for the UI to fetch stations and river forecasts. The aggregation may compose existing runs/models/forcing queries internally, but the frontend should not need to guess versions or build IDs by convention.
+Add a lightweight QHH latest-product API or equivalent stable aggregation.
+It should select the latest usable QHH display product for a requested source and return enough identifiers for the UI to fetch stations and river forecasts.
+The aggregation may compose existing runs/models/forcing queries internally, but the frontend should not need to guess versions or build IDs by convention.
 
-Alternative considered: have the frontend call `/runs`, `/models`, station list, and river segment APIs separately and infer identity. That increases race conditions and duplicates domain rules in the UI; it is acceptable as an implementation fallback only if hidden behind a frontend data adapter with the same contract.
+Alternative considered: have the frontend call `/runs`, `/models`, station list, and river segment APIs separately and infer identity.
+That increases race conditions and duplicates domain rules in the UI; it is acceptable as an implementation fallback only if hidden behind a frontend data adapter with the same contract.
 
 ### Frontend Shape
 
-Expose two MVP navigation entries: `/hydro-met` and `/ops`. The implementation may reuse `/meteorology`, `/forecast`, `/segments/:segmentId`, and `/monitoring` components, but the visible MVP workflow should not require users to jump among legacy pages. `/hydro-met` loads latest product, station inventory, river segments, and selected charts. `/ops` reuses monitoring controls but removes or hides non-MVP distractions.
+Expose two MVP navigation entries: `/hydro-met` and `/ops`.
+The implementation may reuse `/meteorology`, `/forecast`, `/segments/:segmentId`, and `/monitoring` components, but the visible MVP workflow should not require users to jump among legacy pages.
+`/hydro-met` loads latest product, station inventory, river segments, and selected charts.
+`/ops` reuses monitoring controls but removes or hides non-MVP distractions.
 
 ### Operations Boundary
 
-Operations evidence must come from formal pipeline/orchestrator persistence and APIs. QHH scripts can remain documented as diagnostic/reproduction paths, but they must not be the scheduler dependency for the MVP operations page. Failed run restart uses existing retry APIs and must be demonstrated with a controlled failure.
+Operations evidence must come from formal pipeline/orchestrator persistence and APIs.
+QHH scripts can remain documented as diagnostic/reproduction paths, but they must not be the scheduler dependency for the MVP operations page.
+Failed run restart uses existing retry APIs and must be demonstrated with a controlled failure.
 
 ### IFS Horizon
 
@@ -120,14 +137,16 @@ Risk packs considered:
 - Documentation / migration notes: selected - tests/evidence must record that forcing writes are existing and not rebuilt.
 
 Required evidence:
-- Store tests: explicit forcing version, model/source/cycle resolution, redundant-filter conflict, finalized-checksum gate, station membership, forcing-window filtering, variable filtering, time filtering, limit/truncated, missing station, missing forcing version, invalid variable/limit/time range, unit/native_resolution/quality_flag preservation.
+- Store tests: explicit forcing version, model/source/cycle resolution, redundant-filter conflict, finalized-checksum gate, station membership, forcing-window filtering, variable filtering, time filtering, limit/truncated, missing station, missing forcing version, invalid variable/limit/time range,
+  and unit/native_resolution/quality_flag preservation.
 - Readiness tests/evidence: selected QHH-like forcing version reports declared/effective station count, six-variable coverage, missing-data reasons, missing unit and quality flags, forcing-window filtering, and query/index outcome without requiring live QHH data in fast CI.
 - Regression command: `uv run pytest -q tests/test_forecast_api.py tests/test_migrations.py` plus any new focused tests.
 - Validation command: `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`.
 
 Invariant Matrix
 
-Governing invariant: one selected finalized forcing version identity must bind every returned station-series sample, metadata field, truncation decision, and readiness count from one stable database snapshot without mixing samples from another model, source, cycle, station, variable, time window, or concurrent same-ID producer rewrite/pending state.
+Governing invariant: one selected finalized forcing version identity must bind every returned station-series sample, metadata field, truncation decision, and readiness count from one stable database snapshot.
+It must not mix samples from another model, source, cycle, station, variable, time window, or concurrent same-ID producer rewrite/pending state.
 Source-of-truth identity/contract: `met.forcing_version.forcing_version_id` plus `met.forcing_station_timeseries(forcing_version_id, station_id, variable, valid_time)`.
 Surfaces:
 - Producers: existing `workers/forcing_producer/store.py` writes `met.forcing_station_timeseries`; unchanged except tests may assert compatibility.
@@ -146,7 +165,9 @@ Regression rows:
 - out-of-window samples for the selected forcing version -> excluded from station-series points, truncation, and readiness counts.
 - over-limit query -> deterministic truncation per variable without unbounded row materialization.
 - QHH-like readiness fixture -> effective expected station count falls back to declared `forcing_version.station_count`, six-variable coverage, missing unit, missing quality flag, missing-data reasons, and query/index outcome are reported without re-running forcing producer.
-- concurrent same-ID forcing producer rewrite around a station-series/readiness read -> `PsycopgForecastStore` opens a read-only `REPEATABLE READ` transaction before selecting `met.forcing_version`, so finalized metadata and dependent `met.forcing_station_timeseries` rows come from one stable snapshot instead of mixing old finalized identity with newly replaced or pending rows.
+- concurrent same-ID forcing producer rewrite around a station-series/readiness read -> `PsycopgForecastStore` opens a read-only `REPEATABLE READ` transaction before selecting `met.forcing_version`.
+  Finalized metadata and dependent `met.forcing_station_timeseries` rows come from one stable snapshot.
+  It must not mix old finalized identity with newly replaced or pending rows.
 - existing `forecast_series` and `list_met_stations` tests -> unchanged behavior.
 
 Boundary-surface checklist:
@@ -202,15 +223,20 @@ Risk packs considered:
 - Documentation / migration notes: selected - OpenAPI drift allowlist must be tightened so the implemented route cannot silently drift again.
 
 Required evidence:
-- HTTP tests: valid explicit `forcing_version_id`, valid `model_id + source_id + cycle_time`, comma-separated and repeated variable filters if supported by FastAPI parsing, time filters, `limit`/truncation metadata, default MVP variables, missing station, missing forcing version, station not in forcing version, conflicting identity filters, invalid variable, invalid time range, invalid limit, and no synthetic samples for empty valid ranges.
+- HTTP tests: valid explicit `forcing_version_id`, valid `model_id + source_id + cycle_time`, comma-separated and repeated variable filters if supported by FastAPI parsing, time filters, `limit`/truncation metadata, default MVP variables, missing station,
+  missing forcing version, station not in forcing version,
+  conflicting identity filters, invalid variable, invalid time range, invalid limit, and no synthetic samples for empty valid ranges.
 - API contract tests: success envelope shape, station metadata/provenance fields, point-level `quality_flag`, variable-level `unit`/`native_resolution`, and stable API error envelope for at least one store error.
 - OpenAPI drift tests: `GET /api/v1/met/stations/{station_id}/series` is removed from `DEFERRED_ROUTES` and static OpenAPI matches implemented FastAPI route parameters.
 - Frontend type freshness: generated `apps/frontend/src/api/types.ts` includes the updated station-series operation, query parameters, and response schemas.
-- Regression commands: `uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`, `uv run ruff check apps/api/routes/data_sources.py tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, frontend type-generation/check command used by the repo, and `git diff --check`.
+- Regression commands: `uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`,
+  `uv run ruff check apps/api/routes/data_sources.py tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`,
+  `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, frontend type-generation/check command used by the repo, and `git diff --check`.
 
 Invariant Matrix
 
-Governing invariant: the public station-series route, static OpenAPI document, generated frontend types, and route tests must expose exactly the #204 store contract for one selected finalized forcing version without inventing samples, weakening identity/error semantics, or leaving route-documentation drift.
+Governing invariant: the public station-series route, static OpenAPI document, generated frontend types, and route tests must expose exactly the #204 store contract for one selected finalized forcing version.
+They must not invent samples, weaken identity/error semantics, or leave route-documentation drift.
 Source-of-truth identity/contract: `PsycopgForecastStore.station_series(...)` response contract plus the documented OpenAPI operation `getMetStationSeries`.
 Surfaces:
 - Producers: none - #205 does not write forcing data or change `workers/forcing_producer`.
@@ -262,7 +288,8 @@ Must preserve:
 
 Must add/change:
 - Select the newest usable QHH product for a requested `source=GFS|IFS` using formal persisted run/model/forcing/time-series identity, not run-id naming conventions or qhh diagnostic JSON files.
-- Return `basin_id`, `model_id`, `basin_version_id`, `river_network_version_id`, `source_id`, `cycle_time`, `run_id`, `forcing_version_id`, `station_count`, `expected_station_count`, `segment_count`, `expected_segment_count`, `status`, valid-time/horizon metadata, and availability reasons/quality metadata.
+- Return `basin_id`, `model_id`, `basin_version_id`, `river_network_version_id`, `source_id`, `cycle_time`, `run_id`, `forcing_version_id`, `station_count`, `expected_station_count`, `segment_count`, `expected_segment_count`, `status`,
+  valid-time/horizon metadata, and availability reasons/quality metadata.
 - Reject failed, cancelled, pending, incomplete, identity-missing, not-finalized-forcing, station-forcing-incomplete, and missing-`q_down` products as ready; unavailable responses must be explicit and typed.
 - Represent IFS shorter-horizon metadata from available forcing/hydro valid-time end rather than padding to seven days.
 
@@ -282,18 +309,26 @@ Risk packs considered:
 - Documentation / migration notes: selected - API must not claim nationwide, stage, UI readiness, or final production readiness.
 
 Required evidence:
-- Store/helper tests: latest GFS selection, latest IFS selection, source normalization, newest-ready ordering, failed/cancelled/pending/incomplete rejection, missing `forcing_version_id`, missing `river_network_version_id`, not-finalized forcing, missing station variables, missing `q_down`, station/segment count metadata, valid-time/horizon metadata, and IFS shorter-horizon disclosure.
-- Resource-bound tests/evidence: candidate discovery must be bounded by source/status/basin filters and either an explicit candidate limit or a single indexed/aggregated readiness query; tests must assert the SQL shape does not perform unbounded station-series or river-timeseries materialization before selecting candidates, and must record whether `hydro_run_latest_ready_run_idx`, `river_timeseries_mvt_selected_identity_valid_time_discovery_idx`, and the `met.forcing_station_timeseries` primary key support the lookup.
+- Store/helper tests: latest GFS selection, latest IFS selection, source normalization, newest-ready ordering, failed/cancelled/pending/incomplete rejection, missing `forcing_version_id`, missing `river_network_version_id`, not-finalized forcing, missing station variables, missing `q_down`,
+  station/segment count metadata, valid-time/horizon metadata, and IFS shorter-horizon disclosure.
+- Resource-bound tests/evidence: candidate discovery must be bounded by source/status/basin filters and either an explicit candidate limit or a single indexed/aggregated readiness query.
+  Tests must assert the SQL shape does not perform unbounded station-series or river-timeseries materialization before selecting candidates.
+  They must record whether `hydro_run_latest_ready_run_idx`, `river_timeseries_mvt_selected_identity_valid_time_discovery_idx`, and the `met.forcing_station_timeseries` primary key support the lookup.
 - API tests: success envelope for `source=GFS|IFS`, unsupported source validation, no usable product unavailable response with reasons, and no manual IDs required in response.
 - Contract tests: static OpenAPI and generated frontend types include latest-product route, response schema, availability/unavailable reason schema, and horizon/count fields.
 - Drift tests: runtime/static OpenAPI parameters/responses/components for latest-product match or are intentionally patched like station-series.
 - Compatibility tests/evidence: existing `/api/v1/runs`, data-source cycle, met-station, station-series, forecast-series, MVT/layer, and generated-type tests remain green.
-- Regression commands: `uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`, `uv run ruff check apps/api/routes apps/api/main.py packages/common/forecast_store.py tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`, `cd apps/frontend && corepack pnpm check:api-types`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+- Regression commands: `uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`,
+  `uv run ruff check apps/api/routes apps/api/main.py packages/common/forecast_store.py tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`,
+  `cd apps/frontend && corepack pnpm check:api-types`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
 
 Invariant Matrix
 
-Governing invariant: a latest-product response marked ready must bind one persisted QHH hydro run, finalized forcing version, model river network, basin version, station forcing coverage, river `q_down` coverage, and horizon/count metadata from a single consistent read without selecting failed, incomplete, identity-mismatched, stale, or diagnostic-file-only products.
-Source-of-truth identity/contract: `hydro.hydro_run.run_id` plus `hydro.hydro_run.forcing_version_id`, `core.model_instance(model_id, basin_version_id, river_network_version_id)`, `met.forcing_version(forcing_version_id, model_id, source_id, cycle_time)`, `met.forcing_station_timeseries(forcing_version_id, station_id, variable, valid_time)`, and `hydro.river_timeseries(run_id, river_network_version_id, river_segment_id, variable, valid_time)`.
+Governing invariant: a latest-product response marked ready must bind one persisted QHH hydro run, finalized forcing version, model river network, basin version, station forcing coverage, river `q_down` coverage, and horizon/count metadata from a single consistent read.
+It must not select failed, incomplete, identity-mismatched, stale, or diagnostic-file-only products.
+Source-of-truth identity/contract: `hydro.hydro_run.run_id` plus `hydro.hydro_run.forcing_version_id`,
+`core.model_instance(model_id, basin_version_id, river_network_version_id)`, `met.forcing_version(forcing_version_id, model_id, source_id, cycle_time)`,
+`met.forcing_station_timeseries(forcing_version_id, station_id, variable, valid_time)`, and `hydro.river_timeseries(run_id, river_network_version_id, river_segment_id, variable, valid_time)`.
 Surfaces:
 - Producers: existing scheduler/SHUD/parse/forcing producers write runs, forcing versions, station series, and river time series; unchanged in #206.
 - Validators/preflight: source query validation, candidate status filtering, finalized forcing gate, identity consistency checks, station variable coverage checks, `q_down` coverage checks, horizon calculations.
@@ -379,7 +414,8 @@ Required evidence:
 
 Invariant Matrix
 
-Governing invariant: `/hydro-met` bootstrap must derive every displayed QHH source/cycle/version/station/river candidate identity from the latest-product API response and subsequent API-backed inventory/list calls, without requiring manual IDs, mixing products across source/cycle, breaking existing routes, or rendering fake chart data.
+Governing invariant: `/hydro-met` bootstrap must derive every displayed QHH source/cycle/version/station/river candidate identity from the latest-product API response and subsequent API-backed inventory/list calls.
+It must not require manual IDs, mix products across source/cycle, break existing routes, or render fake chart data.
 Source-of-truth identity/contract: generated API types for `GET /api/v1/mvp/qhh/latest-product`, `GET /api/v1/met/stations`, and `GET /api/v1/basin-versions/{basin_version_id}/river-segments`, plus URL query state for `source` and optional `cycle`.
 Surfaces:
 - Producers: #206 latest-product API, #205 station inventory/series APIs, existing river segment API; unchanged in #207.
@@ -409,7 +445,9 @@ Non-goals:
 - Claiming live QHH/IFS smoke or browser smoke completion.
 
 Issue ownership note:
-- `hydro-met-mvp-ui` is the full M21 capability spec. For #207 acceptance, only the Hydro-met MVP entry, latest-product bootstrap, route/nav compatibility, query-state, loading/unavailable/incomplete-product states, and no-fake-data shell apply. Station chart scenarios are #208, river chart scenarios are #209, and browser smoke is #214.
+- `hydro-met-mvp-ui` is the full M21 capability spec.
+  For #207 acceptance, only the Hydro-met MVP entry, latest-product bootstrap, route/nav compatibility, query-state, loading/unavailable/incomplete-product states, and no-fake-data shell apply.
+  Station chart scenarios are #208, river chart scenarios are #209, and browser smoke is #214.
 
 ## Issue #208 Fixture
 
@@ -491,7 +529,9 @@ Non-goals:
 - Full MVP browser smoke or live QHH/GFS/IFS evidence; #214 owns release smoke. #208 may add focused component or existing-test browser-like coverage, but must not claim final smoke readiness.
 
 Issue ownership note:
-- `hydro-met-mvp-ui` is the full M21 capability spec. For #208 acceptance, only station inventory markers/list, station selection, station-series API consumption, six-variable forcing chart rendering, QC/truncation/unavailable states, and no-fake-data behavior apply. River chart scenarios are #209, ops scenarios are #211/#212, controlled retry evidence is #213, and full browser/live smoke is #214.
+- `hydro-met-mvp-ui` is the full M21 capability spec.
+  For #208 acceptance, only station inventory markers/list, station selection, station-series API consumption, six-variable forcing chart rendering, QC/truncation/unavailable states, and no-fake-data behavior apply.
+  River chart scenarios are #209, ops scenarios are #211/#212, controlled retry evidence is #213, and full browser/live smoke is #214.
 
 ## Issue #209 Fixture
 
@@ -545,7 +585,8 @@ Required evidence:
 
 Invariant Matrix
 
-Governing invariant: the selected `/hydro-met` river chart must bind one user-selected river segment, one latest-product basin version, one river network version, one selected source/scenario/cycle, and the `q_down` forecast-series response without mixing stale segment/source/cycle data, padding IFS horizons, or synthesizing chart points.
+Governing invariant: the selected `/hydro-met` river chart must bind one user-selected river segment, one latest-product basin version, one river network version, one selected source/scenario/cycle, and the `q_down` forecast-series response.
+It must not mix stale segment/source/cycle data, pad IFS horizons, or synthesize chart points.
 Source-of-truth identity/contract: generated API types for forecast-series, #207 latest-product bootstrap result, selected `river_segment_id`, `basin_version_id`, `river_network_version_id`, selected source/scenario, `cycle_time`, and response variable `q_down`.
 Surfaces:
 - Producers: existing forecast-series API and #206 latest-product API; unchanged in #209.
@@ -573,7 +614,9 @@ Non-goals:
 - Full MVP browser smoke or live QHH/GFS/IFS evidence; #214 owns release smoke. #209 may add focused component/browser-like tests but must not claim final smoke readiness.
 
 Issue ownership note:
-- `hydro-met-mvp-ui` is the full M21 capability spec. For #209 acceptance, only river candidate selection, forecast-series API consumption, real `q_down` discharge chart rendering, IFS shorter-horizon labeling, no-water-level/stage wording, and no-synthetic-data behavior apply. Station chart scenarios are #208, ops scenarios are #211/#212, controlled retry evidence is #213, and full browser/live smoke is #214.
+- `hydro-met-mvp-ui` is the full M21 capability spec.
+  For #209 acceptance, only river candidate selection, forecast-series API consumption, real `q_down` discharge chart rendering, IFS shorter-horizon labeling, no-water-level/stage wording, and no-synthetic-data behavior apply.
+  Station chart scenarios are #208, ops scenarios are #211/#212, controlled retry evidence is #213, and full browser/live smoke is #214.
 
 ## Issue #210 Fixture
 
@@ -597,7 +640,8 @@ Must add/change:
 - Monitoring APIs return QHH stage/job records from formal persistence with run id, status, Slurm job id where available, submitted/started/finished timestamps, duration, retry count, and bounded/redacted `log_uri`.
 - Jobs/status filtering by `source + cycle_time` must not mix sibling cycles or sources; missing cycles fail explicitly.
 - Retry accepts the failed states required by the ops MVP contract, creates retry metadata/events, preserves authorization evidence, and reports submission failures without marking unproven work successful.
-- Shared public redaction must remove credential material from Authorization, Proxy-Authorization, auth/auth_header, token/password/secret-like fields, URL credentials, and standalone `Bearer` / `Basic` credential strings in logs, API errors, retry/cancel events, auth audit text, and scheduler/orchestrator evidence.
+- Shared public redaction must remove credential material from Authorization, Proxy-Authorization, auth/auth_header, token/password/secret-like fields, URL credentials, and standalone `Bearer` / `Basic` credential strings in logs, API errors, retry/cancel events, auth audit text,
+  and scheduler/orchestrator evidence.
 
 Risk packs considered:
 - Public API / CLI / script entry: selected - #210 hardens public monitoring and retry API behavior used by `/ops`.
@@ -620,11 +664,13 @@ Required evidence:
 - Log route tests: contained relative log, tail limit, traversal rejection, symlink swap rejection, missing log, redacted details, representative credential-bearing log content including standalone `Bearer` / `Basic` credentials, and no client-side filesystem assumptions.
 - Redaction tests: shared helper and at least one public API/event surface must prove raw authorization credentials are absent for mapping keys, keyed assignment forms, quoted/JSON-like forms, URL credentials, and standalone `Bearer` / `Basic` credential strings without an Authorization key.
 - Contract tests: OpenAPI/frontend type drift check if any ops fields or status enum values change.
-- Regression commands: `uv run pytest -q tests/test_monitoring_api.py tests/test_openapi_drift.py tests/test_api_contract.py`, targeted orchestrator tests changed by the implementation, `uv run ruff check apps/api/routes/pipeline.py services/orchestrator tests/test_monitoring_api.py`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+- Regression commands: `uv run pytest -q tests/test_monitoring_api.py tests/test_openapi_drift.py tests/test_api_contract.py`, targeted orchestrator tests changed by the implementation,
+  `uv run ruff check apps/api/routes/pipeline.py services/orchestrator tests/test_monitoring_api.py`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
 
 Invariant Matrix
 
-Governing invariant: every operations API response and retry/log action for a selected QHH source/cycle/run must be derived from formal persisted orchestrator state bound to that same identity, with bounded server-side log access, shape-complete credential redaction, and retry evidence, never from qhh diagnostic JSON or mixed sibling-cycle records.
+Governing invariant: every operations API response and retry/log action for a selected QHH source/cycle/run must be derived from formal persisted orchestrator state bound to that same identity, with bounded server-side log access, shape-complete credential redaction, and retry evidence.
+It must never come from qhh diagnostic JSON or mixed sibling-cycle records.
 Source-of-truth identity/contract: `ops.pipeline_job(job_id, run_id, cycle_id, stage, status, slurm_job_id, timestamps, retry_count, log_uri)`, `ops.pipeline_event`, `met.forecast_cycle(source, cycle_time, cycle_id)`, and retry policy evidence.
 Surfaces:
 - Producers: formal scheduler/orchestrator job creation and retry service writes to `PipelineStore`; qhh diagnostic scripts are explicitly out of scope as production producers.
@@ -632,14 +678,16 @@ Surfaces:
 - Storage/cache/query: `PipelineStore`, `ops.pipeline_job`, `ops.pipeline_event`, `met.forecast_cycle`, and `hydro.hydro_run` status transitions touched by retry/cancel.
 - Public routes/entrypoints: `GET /api/v1/pipeline/status`, `GET /api/v1/pipeline/stages`, `GET /api/v1/jobs`, `GET /api/v1/jobs/{job_id}/logs`, `POST /api/v1/runs/{run_id}/retry`, and OpenAPI schemas if changed.
 - Frontend/downstream consumers: generated `apps/frontend/src/api/types.ts` and existing monitoring store/components; `/ops` UI implementation remains #211/#212.
-- Failure paths/rollback/stale state: missing cycle, invalid source/cycle, mixed source/cycle filters, failed/partial/submission/permanent states, active retry conflict, retry submission failure, cancelled jobs, missing or unsafe logs, unauthorized retry/cancel, and credential-bearing error/log/evidence strings.
+- Failure paths/rollback/stale state: missing cycle, invalid source/cycle, mixed source/cycle filters, failed/partial/submission/permanent states, active retry conflict, retry submission failure, cancelled jobs, missing or unsafe logs, unauthorized retry/cancel,
+  and credential-bearing error/log/evidence strings.
 - Evidence/audit/readiness: backend tests, pipeline events, retry metadata, log route evidence, runbook notes, and PR evidence; controlled live failure evidence remains #213.
 Regression rows:
 - QHH-like persisted jobs for all canonical stages in one `cycle_id` -> `/pipeline/stages` returns ordered stage summaries with status, progress, and only jobs from that cycle.
 - jobs from another source or cycle with similar run ids -> `/pipeline/status`, `/pipeline/stages`, and `/jobs?source=&cycle_time=` exclude them instead of mixing evidence.
 - job payload with Slurm id, timestamps, retry count, and `log_uri` -> `/jobs` exposes required fields and deterministic `duration_seconds` without leaking unbounded error/log text.
 - relative contained log under configured root -> `/jobs/{job_id}/logs` returns at most the bounded tail and redacted `log_uri`.
-- log content, retry/cancel gateway text, auth audit text, or scheduler/orchestrator evidence containing `Authorization: Bearer ...`, JSON/quoted authorization values, URL credentials, token/password fields, or standalone `Bearer ...` / `Basic ...` credentials -> public responses and persisted events contain `[redacted]` and never the raw secret.
+- log content, retry/cancel gateway text, auth audit text, or scheduler/orchestrator evidence containing `Authorization: Bearer ...`, JSON/quoted authorization values, URL credentials, token/password fields, or standalone `Bearer ...` / `Basic ...` credentials ->
+  public responses and persisted events contain `[redacted]` and never the raw secret.
 - traversal, symlink swap, missing file, or unsafe log URI -> stable API error and no filesystem content leak.
 - failed, submission failed, partially failed, or permanently failed run with no active retry -> authorized retry creates persisted retry job/event with incremented retry metadata and returned execution status.
 - active retry already pending/submitted/running -> retry returns conflict and does not create duplicate side effects.
@@ -716,7 +764,9 @@ Required evidence:
 - Query-state tests: `source` and `cycle` URL parameters initialize store state, selection changes preserve/update query state, and compare/unsupported source contexts avoid fabricated scoped jobs.
 - Display tests: stage cards/progress include the seven canonical stages, jobs table renders job id/run id/stage/status/Slurm id/timestamps/duration/retry count/log availability, and queue/metrics panels remain visible where supported.
 - Failure/unavailable tests: scoped backend errors or missing formal context render explicit unavailable/unsupported state and do not show stale jobs/stages from another cycle.
-- Regression commands: `cd apps/frontend && corepack pnpm test -- --run apps/frontend/src/__tests__/AppRoutes.test.tsx apps/frontend/src/stores/__tests__/monitoring.test.ts apps/frontend/src/components/monitoring/__tests__/StageCard.test.tsx apps/frontend/src/components/monitoring/__tests__/JobsTable.test.tsx`, `cd apps/frontend && corepack pnpm build`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+- Regression commands:
+  `cd apps/frontend && corepack pnpm test -- --run apps/frontend/src/__tests__/AppRoutes.test.tsx apps/frontend/src/stores/__tests__/monitoring.test.ts apps/frontend/src/components/monitoring/__tests__/StageCard.test.tsx apps/frontend/src/components/monitoring/__tests__/JobsTable.test.tsx`,
+  `cd apps/frontend && corepack pnpm build`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
 
 Invariant Matrix
 
@@ -795,10 +845,14 @@ Required evidence:
 - Frontend route tests: `/ops` as authorized operator shows log controls and retry for each retryable failed status, while `/monitoring` remains compatible.
 - Frontend RBAC tests: viewer/non-operator access does not show retry/cancel controls; authorized operator/model-admin/sys-admin roles preserve intended controls where existing policy allows them.
 - Log-modal tests: successful backend `JobLogs` content renders from the bounded API response, empty/unavailable/error responses render explicit text, and `log_uri` is not presented as a clickable/local path action.
-- Retry tests: clicking restart posts to `/api/v1/runs/{run_id}/retry` with the selected run id and authorized role evidence, disables duplicate clicks while pending, shows success/error feedback, and refreshes `fetchAll` plus jobs for the same source/cycle context after success and policy/terminal failures.
+- Retry tests: clicking restart posts to `/api/v1/runs/{run_id}/retry` with the selected run id and authorized role evidence, disables duplicate clicks while pending, shows success/error feedback,
+  and refreshes `fetchAll` plus jobs for the same source/cycle context after success and policy/terminal failures.
 - Context/stale-state tests: route/source/cycle changes during or after retry do not leave previous-cycle jobs/stages visible as selected-cycle truth.
 - Backend regression evidence: existing or added tests prove unauthorized direct retry/cancel calls are rejected before mutation, and allowed retry covers `failed`, `submission_failed`, `partially_failed`, and `permanently_failed`.
-- Regression commands: `cd apps/frontend && corepack pnpm test -- --run apps/frontend/src/__tests__/AppRoutes.test.tsx apps/frontend/src/components/monitoring/__tests__/JobsTable.test.tsx apps/frontend/src/components/monitoring/__tests__/LogModal.test.tsx apps/frontend/src/stores/__tests__/monitoring.test.ts`, `cd apps/frontend && corepack pnpm test`, `cd apps/frontend && corepack pnpm build`, `uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+- Regression commands:
+  `cd apps/frontend && corepack pnpm test -- --run apps/frontend/src/__tests__/AppRoutes.test.tsx apps/frontend/src/components/monitoring/__tests__/JobsTable.test.tsx apps/frontend/src/components/monitoring/__tests__/LogModal.test.tsx apps/frontend/src/stores/__tests__/monitoring.test.ts`,
+  `cd apps/frontend && corepack pnpm test`, `cd apps/frontend && corepack pnpm build`, `uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py`,
+  `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
 
 Invariant Matrix
 
@@ -863,7 +917,8 @@ Must preserve:
 - Evidence must not claim live Slurm, live QHH, or final production readiness unless that exact live dependency was executed and recorded.
 
 Must add/change:
-- Add a deterministic controlled failure evidence lane that seeds or simulates a QHH-like failed stage/run through formal pipeline persistence, exposes it through public ops APIs, performs an authorized retry, records the retry job/event, and drives the retry to `submitted`/`running`/`succeeded` or a documented terminal failure.
+- Add a deterministic controlled failure evidence lane that seeds or simulates a QHH-like failed stage/run through formal pipeline persistence, exposes it through public ops APIs, performs an authorized retry, records the retry job/event,
+  and drives the retry to `submitted`/`running`/`succeeded` or a documented terminal failure.
 - Add browser or E2E proof for `/ops` that a failed job appears, its log opens through the backend log API, retry sends the authorized `run_id`, refreshed jobs include the new retry job, and final outcome text/state is visible.
 - Store evidence artifacts under a stable non-committed path such as `.codex/evidence/issue-213/`, with a committed runbook or markdown pointer explaining artifact names and live-skip reasons.
 - Update `progress.md` and the relevant QHH runbook if the evidence lane changes MVP status wording; deterministic evidence may close #213 but must remain labeled as deterministic when live Slurm/QHH is unavailable.
@@ -884,15 +939,19 @@ Risk packs considered:
 - Documentation / migration notes: selected - runbooks/progress must distinguish deterministic controlled proof from live Slurm/QHH readiness.
 
 Required evidence:
-- Backend/API evidence: deterministic QHH-like failed stage/run is visible in `/pipeline/status`, `/pipeline/stages`, `/jobs`, and `/jobs/{job_id}/logs`; authorized retry creates a new pipeline job and retry/submission event with incremented retry count, run id, stage, Slurm metadata where available, and an explicit terminal outcome.
+- Backend/API evidence: deterministic QHH-like failed stage/run is visible in `/pipeline/status`, `/pipeline/stages`, `/jobs`, and `/jobs/{job_id}/logs`.
+  Authorized retry creates a new pipeline job and retry/submission event with incremented retry count, run id, stage, Slurm metadata where available, and an explicit terminal outcome.
 - Backend negative evidence: unauthorized retry does not mutate state; retry is unavailable or terminal-failed with a typed reason when no gateway/live dependency is present; sibling-cycle jobs are not mixed into the selected cycle.
 - `/ops` browser evidence: selected source/cycle loads the failed job row, log modal content comes from the backend route, retry posts to `/api/v1/runs/{run_id}/retry`, refresh shows the new retry job or terminal failure state, and viewer/non-operator does not see mutating controls.
 - Artifact evidence: manifest or markdown records command lines, artifact paths, deterministic/live mode, environment assumptions, skipped live Slurm/QHH/IFS/GFS dependencies, checked git SHA when feasible, and no final production readiness claim.
-- Regression commands: `uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py` plus any new backend evidence tests, `cd apps/frontend && corepack pnpm test -- --run` for changed frontend tests, `cd apps/frontend && corepack pnpm test:e2e -- monitoring` or the repository-specific Playwright command used by the implementation, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+- Regression commands: `uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py` plus any new backend evidence tests,
+  `cd apps/frontend && corepack pnpm test -- --run` for changed frontend tests, `cd apps/frontend && corepack pnpm test:e2e -- monitoring` or the repository-specific Playwright command used by the implementation,
+  `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
 
 Invariant Matrix
 
-Governing invariant: one controlled QHH-like failed run identity must propagate from formal persisted pipeline state through public ops APIs, `/ops` UI evidence, authorized retry creation, retry job/event records, and terminal outcome documentation without using diagnostic qhh state files, fabricating live Slurm/QHH proof, or mixing source/cycle/run contexts.
+Governing invariant: one controlled QHH-like failed run identity must propagate from formal persisted pipeline state through public ops APIs, `/ops` UI evidence, authorized retry creation, retry job/event records, and terminal outcome documentation.
+It must not use diagnostic qhh state files, fabricate live Slurm/QHH proof, or mix source/cycle/run contexts.
 Source-of-truth identity/contract: `source_id + cycle_time + cycle_id + run_id + PipelineJob.job_id/stage/status/retry_count/slurm_job_id/log_uri + PipelineEvent(event_type,status_from,status_to,details.previous_job_id)`.
 Surfaces:
 - Producers: deterministic seed/helper or existing test setup that writes `ops.pipeline_job`, `ops.pipeline_event`, `met.forecast_cycle`, and optional `hydro.hydro_run`; live scheduler/Slurm producers are used only when explicitly available and recorded.
@@ -931,3 +990,93 @@ Review focus:
 - Confirm deterministic/live labels and skipped dependency reasons prevent overclaiming.
 - Confirm `/ops` browser proof exercises the actual log/retry UI contract added by #211/#212.
 - Confirm new tests/evidence are focused and do not refactor scheduler/runtime behavior.
+
+## Issue #214 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM MVP release evidence, browser smoke, and documentation freeze
+Repair intensity: high
+
+Change surface:
+- MVP smoke/readiness runbook or evidence document covering QHH GFS smoke, IFS handling, `/hydro-met` browser smoke, `/ops` browser smoke, validation commands, and exact skipped live dependencies.
+- `progress.md`, `docs/plans/2026-05-25-mvp-launch-plan.md`, and QHH runbooks that describe delivered MVP scope, formal scheduler boundary, qhh diagnostic-script boundary, accepted `no_frequency_curve` quality state, and P2 exclusions.
+- Focused deterministic browser smoke tests or evidence records for `/hydro-met` station/river selection and `/ops` stage/job/log/retry surfaces, if existing browser lanes do not already capture these flows.
+- Local non-committed evidence artifact pointers under a stable issue-scoped path such as `.codex/evidence/issue-214/`.
+
+Must preserve:
+- #214 is a release evidence/docs freeze. It must not add new feature scope, redesign backend scheduler/retry/station/latest-product APIs, or change production runtime behavior except for narrowly fixing blockers discovered by smoke.
+- Deterministic, local PostgreSQL, mocked-browser, and live evidence labels must remain distinct. Deterministic evidence may support internal MVP readiness but must not be described as live Slurm/QHH/GFS/IFS or final production readiness proof.
+- QHH diagnostic scripts remain diagnostic/regression/evidence collection tools. Formal operations status and scheduler readiness remain tied to backend `nhms-pipeline plan-production` and `ops.pipeline_job`/`ops.pipeline_event` persistence.
+- MVP hydrology wording remains river discharge/flow `q_down`; no water level `stage` claim is introduced.
+- `no_frequency_curve` remains acceptable only as a quality state when return periods and warning levels are not fabricated.
+
+Must add/change:
+- Record one accepted QHH GFS smoke result or an exact live blocker for each required step: download, canonical, forcing, SHUD, parse, station series API, forecast-series API, `/hydro-met`, `/ops`, and retry evidence.
+- Record IFS evidence or exact blocker, including 06/18 UTC shorter-horizon behavior or why live IFS proof was skipped.
+- Record browser smoke coverage for `/hydro-met` station and river selection plus `/ops` stage/job/log/retry; if deterministic/mocked, label it as browser UI evidence, not live backend proof.
+- Record validation commands and results for backend tests, OpenAPI drift/static contract checks, frontend API type check, frontend tests/build, browser smoke, OpenSpec validation, and opt-in live smoke commands.
+- Update progress/plan/runbooks so internal MVP readiness, remaining live blockers, P2 exclusions, and final production readiness boundaries are consistent across documents.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - release evidence names public API routes, browser routes, and smoke commands that operators may run.
+- Config / project setup: selected - live smoke blockers depend on database, object store, Slurm, log root, source credentials, browser server, and dev/live auth configuration.
+- File IO / path safety / overwrite: selected - evidence artifacts, logs, screenshots, Playwright reports, and smoke outputs must remain issue-scoped and non-committed unless intentionally documented.
+- Schema / columns / units / field names: selected - docs must preserve exact API fields, MVP variables, `q_down`, `quality_flag`, `no_frequency_curve`, stage/status names, and IFS horizon metadata.
+- Geospatial / CRS / shapefile sidecars: selected - `/hydro-met` browser smoke touches station/river map surfaces; evidence must not claim nationwide/geospatial production proof.
+- Time series / forcing / temporal boundaries: selected - GFS/IFS cycle identity, station forcing variables, river valid-time range, and IFS shorter horizon are central.
+- Numerical stability / conservation / NaN: not selected - #214 does not validate solver numerical correctness beyond existing smoke/QC references.
+- Solver runtime / performance / threading: selected only for evidence labeling - live SHUD runtime may be recorded or skipped; no solver code changes are allowed.
+- Resource limits / large input / discovery: selected - smoke/browser evidence must stay bounded and not imply national-scale proof.
+- Legacy compatibility / examples: selected - existing runbooks, progress, launch plan, and previously delivered M21 surfaces must remain compatible.
+- Error handling / rollback / partial outputs: selected - skipped live dependencies, unavailable products, `no_frequency_curve`, restricted sources, and partial/missing smoke steps need explicit stable wording.
+- Release / packaging / dependency compatibility: selected - validation command records must use existing uv/pnpm/OpenSpec/GitHub toolchains without adding dependencies.
+- Documentation / migration notes: selected - this is the main change surface.
+
+Required evidence:
+- Evidence/runbook: each required MVP smoke item is marked `passed`, `deterministic`, `blocked`, `skipped`, or `out_of_scope`, with command, artifact path, source/cycle/run identity, and exact blocker where not passed live.
+- Browser smoke: `/hydro-met` deterministic or live evidence covers latest-product bootstrap, station selection, six-variable forcing chart state, river `q_down` chart state, IFS shorter-horizon label/unavailable state, and no fake data.
+  `/ops` evidence covers stages, jobs, log modal, retry action or controlled retry evidence reference, and RBAC/dev-role boundary.
+- Docs/progress: `progress.md`, launch plan, and QHH runbooks use consistent MVP readiness language, formal scheduler boundary, qhh diagnostic boundary, `q_down` not `stage`, `no_frequency_curve` quality state, and P2 exclusions.
+- Validation commands: record results for backend tests, OpenAPI/static contract checks, frontend API types, frontend tests/build, browser smoke, OpenSpec validation, and opt-in live smoke entrypoints with skipped dependency reasons.
+- Regression commands: `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, docs/static checks used by the repo, targeted browser smoke commands, targeted backend/frontend checks touched by docs or smoke, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: every MVP readiness claim in #214 must be traceable to a labeled evidence item with a stable identity, command, artifact path, and mode, and no deterministic, mocked, partial, or skipped item may be promoted into live QHH/Slurm/GFS/IFS/final-production readiness.
+Source-of-truth identity/contract: issue #214 evidence table rows keyed by `surface + mode + source_id + cycle_time + run_id/forcing_version_id/job_id/artifact_path`, plus OpenSpec `qhh-mvp-smoke-readiness` scenarios.
+Surfaces:
+- Producers: existing M21 implementation tests, QHH smoke scripts/runbooks, browser smoke tests, controlled retry evidence from #213, and optional live smoke commands.
+- Validators/preflight: evidence mode labels, live dependency checks, source/cycle/run identity checks, no-fake-data checks, docs scope review, OpenSpec validation, and CI/static checks.
+- Storage/cache/query: local `.codex/evidence/issue-214/` artifact pointers, committed docs/runbooks/progress, non-committed Playwright reports/screenshots, QHH smoke output paths, and formal pipeline tables referenced by evidence.
+- Public routes/entrypoints: `/hydro-met`, `/ops`, station series API, forecast-series API, latest-product API, pipeline status/stages/jobs/logs/retry APIs, `scripts/run_qhh_backend_smoke.sh`, qhh diagnostic scripts, and `uv run nhms-pipeline plan-production`.
+- Frontend/downstream consumers: MVP launch plan readers, progress readers, QHH runbook operators, release reviewers, browser smoke consumers, and Epic #202 acceptance.
+- Failure paths/rollback/stale state: live source unavailable, Slurm unavailable, local DB unavailable, IFS live proof skipped, shorter horizon, no station/river data, no frequency curve, dev-role-only auth, stale diagnostic state, missing browser server, and partial smoke artifacts.
+- Evidence/audit/readiness: committed evidence summary/runbook, PR evidence comments, validation command logs, GitHub checks, and explicit residual blockers.
+Regression rows:
+- GFS live smoke fully executed -> docs record source/cycle/run identities and artifacts; if not executed -> exact blocker is recorded and readiness claim remains deterministic/blocked for that step.
+- IFS live or deterministic evidence -> docs record source/cycle/horizon and 06/18 shorter-horizon behavior; skipped live IFS -> exact dependency reason and no live readiness claim.
+- `/hydro-met` browser smoke -> station and river interactions prove UI wiring/no-fake-data states; mocked browser evidence is labeled deterministic and does not claim live backend product proof.
+- `/ops` browser smoke -> stage/job/log/retry visibility is recorded and references #213 controlled retry evidence; dev-role/mock boundaries are explicit.
+- `no_frequency_curve` state -> accepted only as quality metadata; docs do not fabricate return periods or warning levels.
+- release docs mention MVP complete -> same section lists P2 exclusions and final production readiness blockers.
+- qhh diagnostic script evidence present or absent -> docs continue to name `nhms-pipeline plan-production` as the formal scheduler path.
+
+Boundary-surface checklist:
+- Shared helper roots: evidence mode labels, smoke command snippets, browser smoke fixtures, validation command matrix, launch checklist wording.
+- Public entrypoints: `/hydro-met`, `/ops`, station series, forecast-series, latest-product, ops APIs, QHH smoke scripts, and `nhms-pipeline plan-production`.
+- Read surfaces: docs/runbooks/progress, QHH smoke artifacts, local evidence root, GitHub checks, OpenSpec specs/tasks.
+- Write/delete/overwrite surfaces: committed markdown/spec/test evidence only; generated screenshots/reports remain non-committed and issue-scoped.
+- Producer/consumer evidence boundaries: deterministic browser/API tests are evidence producers for UI wiring; live backend/scheduler proofs require separate live receipts.
+- Stale-state/idempotency boundaries: repeated smoke/evidence runs either overwrite only issue-scoped artifacts or record a new run id; stale qhh diagnostic state cannot satisfy formal ops readiness.
+- Unchanged downstream consumers: existing M21 APIs/UI/tests, production scheduler docs, #213 controlled retry runbook, MVP launch plan.
+
+Non-goals:
+- New backend/frontend product features beyond narrow smoke blockers.
+- Final production readiness, live IdP, live alert sink, live rollback, nationwide all-basin proof, real national MVT/PBF proof, water level `stage`, CLDAS, ERA5 near-real-time, or real QHH flood-frequency curves.
+- Replacing formal backend scheduler with qhh diagnostic scripts.
+
+Review focus:
+- Confirm every readiness claim has evidence mode, identity, command/path, and explicit live blocker where applicable.
+- Confirm documentation language is consistent across progress, launch plan, and QHH runbooks.
+- Confirm deterministic browser/API evidence is not overclaimed as live backend or final production proof.
+- Confirm no feature scope or production behavior changes slipped into the docs freeze.

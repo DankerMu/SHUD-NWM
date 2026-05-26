@@ -1,6 +1,6 @@
 # QHH/有限流域 MVP 上线实施计划
 
-最后更新：2026-05-25
+最后更新：2026-05-26
 
 ## 结论
 
@@ -26,16 +26,18 @@ QHH 真实链路已有可复用证据：
 
 - 河段流量曲线 API 已实现：`/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series`。
 - 站点清单 API 已实现：`/api/v1/met/stations`。
+- 气象代站时序 API 已实现：`/api/v1/met/stations/{station_id}/series`，可返回六个 MVP forcing 变量的真实 station-series 合同响应。
+- QHH latest-product 聚合已实现：`/api/v1/mvp/qhh/latest-product`，前端不需要手工拼 `run_id`、`forcing_version_id`、`basin_version_id` 或 `river_network_version_id`。
 - `workers/forcing_producer` 已生成并写入 `met.forcing_station_timeseries`，变量覆盖 `PRCP`、`TEMP`、`RH`、`wind`、`Rn`、`Press`。
 - pipeline 运维 API 已实现：`/api/v1/pipeline/status`、`/api/v1/pipeline/stages`、`/api/v1/jobs`、`/api/v1/jobs/{job_id}/logs`、`/api/v1/runs/{run_id}/retry`、`/api/v1/runs/{run_id}/cancel`、`/api/v1/queue/depth`。
-- 前端已有 `/meteorology`、`/forecast`、`/segments/:segmentId`、`/monitoring` 等可复用页面和组件。
+- 前端已有 `/hydro-met` MVP 展示页、`/ops` 运维入口，以及 `/meteorology`、`/forecast`、`/segments/:segmentId`、`/monitoring` 等可复用页面和组件。
 
 ## M21 实施基线
 
 M21 GitHub Epic 为 #202，OpenSpec change 为 `openspec/changes/m21-qhh-hydro-met-ops-mvp/`。下游 issue 默认使用这个基线，不再重新定义 MVP 范围：
 
 | 项 | 基线 |
-|---|---|
+| --- | --- |
 | 首选模型 | `basins_qhh_shud` |
 | 首选流域版本 | `basins_qhh_vbasins` |
 | 首选河网版本 | `basins_qhh_rivnet_vbasins` |
@@ -48,21 +50,35 @@ M21 GitHub Epic 为 #202，OpenSpec change 为 `openspec/changes/m21-qhh-hydro-m
 
 这个基线不是最终生产 readiness 声明。后续实现 issue 可以使用 deterministic fixture、local PostgreSQL 或 opt-in live QHH smoke 证明功能；任何未执行的 live GFS/IFS/Slurm/browser 步骤都必须记录具体缺失依赖，不能默认为已通过。
 
+## #214 evidence freeze
+
+Issue #214 的证据冻结入口是 [`docs/runbooks/qhh-mvp-smoke-evidence.md`](../runbooks/qhh-mvp-smoke-evidence.md)。它不改变 MVP 范围，只把已有 QHH diagnostic evidence、deterministic browser evidence、static validation 和 skipped/blocked live dependency 分开编号。
+
+当前状态：
+
+- QHH GFS/IFS `2026052100`、`2026052106` 保持为 live diagnostic/reproduction evidence，不升级为 formal scheduler readiness。
+- `/hydro-met` 已使用 latest-product、station inventory、station-series 和 river forecast-series 合同完成 deterministic consumption；browser smoke 使用 mocked `/api/v1/**` deterministic evidence，覆盖两站点选择、两河段选择、station-series 六个 forcing 变量、`q_down` forecast-series、GFS/IFS 和 IFS 144h shorter horizon。
+- `/ops` controlled failure/retry evidence 继续引用 #213 deterministic runbook，不声明 live Slurm/QHH retry。
+- OpenSpec、OpenAPI/API type、frontend test/build、markdown/static 和 opt-in live smoke 都必须在 #214 evidence matrix 中保留 command、artifact path、mode 和 claim boundary。
+- 未执行的 live GFS/IFS/Slurm/browser/IdP/alert/rollback 步骤保持 skipped 或 blocked；不能作为内部 MVP 之外的 final production readiness 证明。
+
 ## 关键缺口
 
-1. 气象代站真实曲线读取 API 缺失。OpenAPI 已声明 `/api/v1/met/stations/{station_id}/series`，但 FastAPI 当前未实现，测试中仍标记为 deferred。
-2. `/meteorology?tab=stations` 当前使用前端 fixture contract 和 unavailable 状态，不消费真实 `met.forcing_station_timeseries`。
-3. 河段曲线是 `q_down` 流量曲线，不能在 MVP 中称为水位曲线。
-4. `/forecast` 默认河网加载是有限预览，不是全国全量河段展示。MVP 应聚焦 QHH/有限流域。
-5. qhh 诊断脚本不能写成生产 scheduler dependency。正式运维闭环应对接 backend orchestrator 的 `plan-production` 路径。
-6. 前端 retry/cancel 按钮当前依赖 dev role override，正式环境仍需 live IdP；内部 MVP 可先使用受控 operator header/dev role 验收，但要标明边界。
+1. 目标环境 live receipts 尚未执行：target DB、对象存储、Slurm、source credentials、IdP/operator 身份、alert sink、rollback 和 target browser 都仍需 accepted receipt。
+2. QHH forcing timeseries 仍需目标或集成环境的完整性/index proof：386 站点、六变量、unit、quality_flag、GFS/IFS 已完成 forcing_version 覆盖和查询计划证据不能只靠 UI smoke 代替。
+3. `/ops` 当前有 deterministic controlled-failure/retry evidence；正式运维闭环仍需 `nhms-pipeline plan-production --plan` 产生的 target-env scheduler receipt，并由 `nhms-production validate-readiness` 摄取 proof files。
+4. legacy `/meteorology?tab=stations` 仍可保留为历史/设计路由；若要把它作为 MVP 演示入口，还需要与 `/hydro-met` 同等的真实 station-series 消费证据。当前 MVP 展示入口以 `/hydro-met` 为准。
+5. 河段曲线是 `q_down` 流量曲线，不能在 MVP 中称为水位曲线。
+6. `/forecast` 默认河网加载是有限预览，不是全国全量河段展示。MVP 应聚焦 QHH/有限流域。
+7. qhh 诊断脚本不能写成生产 scheduler dependency。正式运维闭环应对接 backend orchestrator 的 `plan-production` 路径。
+8. 前端 retry/cancel 按钮当前依赖 dev role override，正式环境仍需 live IdP；内部 MVP 可先使用受控 operator header/dev role 验收，但要标明边界。
 
 ## MVP 范围
 
 ### P0 数据范围
 
 | 项 | MVP 决策 |
-|---|---|
+| --- | --- |
 | 流域 | QHH/有限流域 |
 | 水文变量 | `q_down` 流量，单位 `m3/s` 或 `m³/s` |
 | 气象变量 | `PRCP`、`TEMP`、`RH`、`wind`、`Rn`、`Press` |
@@ -97,9 +113,9 @@ M21 GitHub Epic 为 #202，OpenSpec change 为 `openspec/changes/m21-qhh-hydro-m
 
 ## 后端实施计划
 
-### P0-1 实现 station series API
+### P0-1 station series API 当前状态
 
-新增：
+当前已实现并作为 MVP 展示页的真实消费合同：
 
 ```text
 GET /api/v1/met/stations/{station_id}/series
@@ -139,13 +155,12 @@ GET /api/v1/met/stations/{station_id}/series
 }
 ```
 
-实现点：
+实现/验收关注点：
 
-- `packages/common/forecast_store.py` 增加 `station_series(...)`。
-- `apps/api/routes/data_sources.py` 增加 `/met/stations/{station_id}/series`。
-- `openapi/nhms.v1.yaml` 更新 schema，不再把该 route 标为 deferred。
-- `apps/frontend/src/api/types.ts` 重新生成。
-- 后端测试覆盖正常查询、变量过滤、时间范围、limit/truncated、站点不存在、forcing_version 不存在、`model_id + source_id + cycle_time` 自动解析 forcing_version。
+- `packages/common/forecast_store.py` 提供 `station_series(...)`。
+- `apps/api/routes/data_sources.py` 提供 `/met/stations/{station_id}/series`。
+- `openapi/nhms.v1.yaml` 和 `apps/frontend/src/api/types.ts` 已包含 station-series 合同。
+- 后端/API contract 测试应覆盖正常查询、变量过滤、时间范围、limit/truncated、站点不存在、forcing_version 不存在、`model_id + source_id + cycle_time` 自动解析 forcing_version。
 
 ### P0-2 验收 forcing station timeseries 完整性
 
@@ -168,9 +183,9 @@ ON met.forcing_station_timeseries
 
 如 station series API 需要按 forcing_version 高效查询，可优先使用现有主键 `(forcing_version_id, station_id, variable, valid_time)`，再根据实际 query plan 补 `(station_id, forcing_version_id, variable, valid_time DESC)`。
 
-### P0-3 最新可展示产品聚合
+### P0-3 最新可展示产品聚合当前状态
 
-新增轻量聚合接口，避免前端手工拼 `run_id`、`forcing_version_id`、`cycle_time`：
+当前已提供轻量聚合接口，避免前端手工拼 `run_id`、`forcing_version_id`、`cycle_time`：
 
 ```text
 GET /api/v1/mvp/qhh/latest-product?source=GFS
@@ -194,7 +209,7 @@ GET /api/v1/mvp/qhh/latest-product?source=GFS
 }
 ```
 
-可先由现有 `/api/v1/runs`、`/api/v1/models`、`met.forcing_version` 拼装，但建议后端提供稳定聚合，减少前端多接口竞态。
+该接口是只读 bootstrap 元数据，不等于 live smoke 或生产 readiness proof。
 
 ### P0-4 正式 pipeline/orchestrator 运维闭环
 
@@ -210,7 +225,7 @@ MVP 不把 `scripts/run_qhh_continuous.py` 写成生产依赖。正确路径：
 
 ### P0-5 水文气象展示页
 
-推荐新增 `/hydro-met`，也可以先在 `/meteorology` 和 `/forecast` 上收敛导航入口。页面只暴露 MVP 范围，不展示未接入功能的入口。
+当前已新增 `/hydro-met` 作为 MVP 展示入口。页面只暴露 MVP 范围，不展示未接入功能的入口；legacy `/meteorology` 和 `/forecast` 可继续作为历史路由保留。
 
 数据流：
 
@@ -271,7 +286,7 @@ job.status in failed/submission_failed/permanently_failed
 ### P0 必须完成
 
 | 编号 | 工作 | 交付物 | 验收 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | P0-1 | 冻结 MVP 数据范围 | QHH、GFS、IFS、`q_down`、6 个 forcing 变量 | 文档和前端文案一致 |
 | P0-2 | station series API | `/api/v1/met/stations/{station_id}/series` | 返回真实点列、unit、quality_flag |
 | P0-3 | QHH forcing timeseries 完整性验收 | 查询脚本/测试/索引 | 任一站点可查 6 个变量 |
@@ -284,7 +299,7 @@ job.status in failed/submission_failed/permanently_failed
 ### P1 建议 MVP 前完成
 
 | 编号 | 工作 | 说明 |
-|---|---|---|
+| --- | --- | --- |
 | P1-1 | GFS/IFS raw mirror manifest | 防止外部源抖动影响 SHUD |
 | P1-2 | IFS 06/18 时效标注 | 只到 144h 时必须提示 |
 | P1-3 | 日志归档规范 | Slurm stdout/stderr 进入统一 `log_uri` |
@@ -295,7 +310,7 @@ job.status in failed/submission_failed/permanently_failed
 ### P2 不阻塞 MVP
 
 | 工作 | 原因 |
-|---|---|
+| --- | --- |
 | 全国所有流域 | QHH/有限流域先行 |
 | 水位 `stage` | 当前真实主变量是 `q_down` |
 | CLDAS | 权限和自动下载能力未闭环 |
@@ -305,15 +320,11 @@ job.status in failed/submission_failed/permanently_failed
 
 ## 推荐实施顺序
 
-1. 确认 QHH 最新真实 run、forcing_version、station_count、segment_count。
-2. 实现 station series API。
-3. 补 QHH forcing timeseries 完整性测试和必要索引。
-4. 实现 latest product 聚合。
-5. 改造水文气象展示页。
-6. 让正式 orchestrator 路径写齐 QHH stage job/status/log。
-7. 收敛 monitoring 为 MVP ops 页。
-8. 做 controlled failure + retry 验收。
-9. 跑完整 GFS/IFS QHH smoke。
-10. 冻结 MVP 文档、演示脚本和 release checklist。
+1. 确认当前 QHH latest-product、station-series、forecast-series 和 `/hydro-met` deterministic evidence 均指向同一 source/cycle/product identity。
+2. 补 QHH forcing timeseries 完整性测试和必要索引证据。
+3. 让正式 orchestrator 路径写齐 QHH stage job/status/log，并用 target-env `nhms-pipeline plan-production --plan` 产生 scheduler receipt。
+4. 用 `nhms-production validate-readiness` 摄取 scheduler、Slurm、object-store、source、E2E、target-env、IdP、alert 和 rollback proof files。
+5. 跑完整 GFS/IFS QHH live smoke，并保留未满足依赖的 skipped/blocked receipt。
+6. 冻结 MVP 文档、演示脚本和 release checklist。
 
-最关键的两件事是：先补真实 station series API，再把运维页绑定到正式 pipeline/orchestrator 产生的 job/status/log/retry。前者决定展示页是否真实可用，后者决定运维页是否真实可控。
+最关键的两件事是：补齐 QHH 完整性/index proof，再把运维页绑定到正式 pipeline/orchestrator 在目标环境产生的 job/status/log/retry receipt。前者决定展示页真实数据覆盖是否可验收，后者决定运维页是否真实可控。
