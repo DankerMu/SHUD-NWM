@@ -87,17 +87,19 @@ def test_manual_retry_response_includes_execution_status() -> None:
         assert data["status"] == "submitted"
 
 
-def test_duplicate_retry_returns_conflict() -> None:
+@pytest.mark.parametrize("active_status", ["pending", "queued", "submitted", "running"])
+def test_duplicate_retry_returns_conflict(active_status: str) -> None:
     with _store() as store:
         _create_job(store, job_id="job_failed", run_id="run_conflict", status="failed")
-        _create_job(store, job_id="job_pending", run_id="run_conflict", status="pending")
+        _create_job(store, job_id=f"job_{active_status}", run_id="run_conflict", status=active_status)
         service = RetryService(store, RetryConfig(max_retries=3))
         with _client(store, retry_service=service) as client:
             response = client.post("/api/v1/runs/run_conflict/retry", headers=_operator_headers())
 
         assert response.status_code == 409
         assert response.json()["error"]["code"] == "RETRY_CONFLICT"
-        assert response.json()["error"]["details"]["active_job_id"] == "job_pending"
+        assert response.json()["error"]["details"]["active_job_id"] == f"job_{active_status}"
+        assert response.json()["error"]["details"]["active_status"] == active_status
 
 
 def test_retry_event_records_trigger_and_previous_error() -> None:
@@ -212,12 +214,19 @@ def test_cancel_gateway_error_redacts_response_and_event_details() -> None:
                 "slurm_secret": SlurmGatewayError(
                     502,
                     "SLURM_ERROR",
-                    "scancel failed token=tok123 for https://alice:pass123@slurm.example/cancel?signature=sig123",
+                    "scancel failed token=tok123 Authorization: Bearer live-token-123 "
+                    "{\"Authorization\": \"Bearer json-cancel-token-123\"} "
+                    "for https://alice:pass123@slurm.example/cancel?signature=sig123",
                     {
                         "code": "SCANCEL_FAILED",
                         "status": "failed",
                         "password": "pass123",
-                        "stderr": "token=tok123 url=https://alice:pass123@slurm.example/cancel?signature=sig123",
+                        "Authorization": "Bearer payload-token-123",
+                        "stderr": (
+                            "token=tok123 authorization=Basic basic-secret-123 "
+                            "Proxy-Authorization: 'Basic quoted-cancel-proxy-secret-123' "
+                            "url=https://alice:pass123@slurm.example/cancel?signature=sig123"
+                        ),
                     },
                 )
             }
@@ -238,13 +247,24 @@ def test_cancel_gateway_error_redacts_response_and_event_details() -> None:
         assert failure["error"]["details"]["code"] == "SCANCEL_FAILED"
         assert failure["error"]["details"]["status"] == "failed"
         assert failure["error"]["details"]["password"] == "[redacted]"
+        assert failure["error"]["details"]["Authorization"] == "[redacted]"
         event = next(event for event in _events(store) if event.event_type == "cancel_failed")
         assert event.details["previous_status"] == "running"
         assert event.details["cancellation_proven"] is False
         assert event.details["error"]["code"] == "SLURM_ERROR"
         response_body = json.dumps(response.json(), sort_keys=True)
         event_body = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
-        for raw_secret in ("alice:pass123", "pass123", "tok123", "sig123"):
+        for raw_secret in (
+            "alice:pass123",
+            "pass123",
+            "tok123",
+            "sig123",
+            "live-token-123",
+            "json-cancel-token-123",
+            "payload-token-123",
+            "basic-secret-123",
+            "quoted-cancel-proxy-secret-123",
+        ):
             assert raw_secret not in response_body
             assert raw_secret not in event_body
         assert "[redacted]" in response_body
@@ -308,11 +328,24 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
                     "status": "pending",
                     "cancellation_proven": False,
                     "token": "tok987",
+                    "authorization": "Bearer response-token-987",
+                    "auth": {
+                        "issuer_url": "https://service:issuer-pass@idp.example.invalid/auth?token=issuer-query-secret",
+                        "value": "opaque-cancel-auth-token-987",
+                        "permissions": ["jobs.cancel", {"provider": "opaque-cancel-permission-token-987"}],
+                        "errors": [{"status": "opaque-cancel-error-token-987"}],
+                        "scope": {
+                            "provider": "opaque-cancel-provider-token-987",
+                            "status": "opaque-cancel-status-token-987",
+                            "message": "opaque-cancel-scope-token-987",
+                        },
+                    },
                     "callback_url": "https://bob:pass987@slurm.example/cancel?X-Amz-Signature=sig987",
                     "details": {
                         "code": "SCANCEL_PENDING",
                         "status": "pending",
                         "password": "pass987",
+                        "stderr": "Authorization: Basic basic-secret-987",
                     },
                 }
             }
@@ -333,6 +366,14 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
         assert gap["gateway_response"]["status"] == "pending"
         assert gap["gateway_response"]["cancellation_proven"] is False
         assert gap["gateway_response"]["token"] == "[redacted]"
+        assert gap["gateway_response"]["authorization"] == "[redacted]"
+        assert gap["gateway_response"]["auth"]["issuer_url"] == "https://idp.example.invalid/auth"
+        assert gap["gateway_response"]["auth"]["value"] == "[redacted]"
+        assert gap["gateway_response"]["auth"]["permissions"] == ["jobs.cancel", {"provider": "[redacted]"}]
+        assert gap["gateway_response"]["auth"]["errors"] == [{"status": "[redacted]"}]
+        assert gap["gateway_response"]["auth"]["scope"]["provider"] == "[redacted]"
+        assert gap["gateway_response"]["auth"]["scope"]["status"] == "[redacted]"
+        assert gap["gateway_response"]["auth"]["scope"]["message"] == "[redacted]"
         assert gap["gateway_response"]["details"]["code"] == "SCANCEL_PENDING"
         assert gap["gateway_response"]["details"]["status"] == "pending"
         assert gap["gateway_response"]["details"]["password"] == "[redacted]"
@@ -340,9 +381,31 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
         assert event.details["previous_status"] == "submitted"
         assert event.details["cancellation_proven"] is False
         assert event.details["gateway_response"]["status"] == "pending"
+        assert event.details["gateway_response"]["auth"]["issuer_url"] == "https://idp.example.invalid/auth"
+        assert event.details["gateway_response"]["auth"]["value"] == "[redacted]"
+        assert event.details["gateway_response"]["auth"]["permissions"] == ["jobs.cancel", {"provider": "[redacted]"}]
+        assert event.details["gateway_response"]["auth"]["errors"] == [{"status": "[redacted]"}]
+        assert event.details["gateway_response"]["auth"]["scope"]["provider"] == "[redacted]"
+        assert event.details["gateway_response"]["auth"]["scope"]["status"] == "[redacted]"
+        assert event.details["gateway_response"]["auth"]["scope"]["message"] == "[redacted]"
         response_body = json.dumps(response.json(), sort_keys=True)
         event_body = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
-        for raw_secret in ("bob:pass987", "pass987", "tok987", "sig987"):
+        for raw_secret in (
+            "bob:pass987",
+            "pass987",
+            "tok987",
+            "sig987",
+            "response-token-987",
+            "service:issuer-pass",
+            "issuer-query-secret",
+            "opaque-cancel-auth-token-987",
+            "opaque-cancel-permission-token-987",
+            "opaque-cancel-error-token-987",
+            "opaque-cancel-provider-token-987",
+            "opaque-cancel-status-token-987",
+            "opaque-cancel-scope-token-987",
+            "basic-secret-987",
+        ):
             assert raw_secret not in response_body
             assert raw_secret not in event_body
         assert "[redacted]" in response_body
@@ -382,6 +445,34 @@ def test_cancel_conflict_terminal_slurm_job_preserves_local_state() -> None:
         assert store.get_job("job_conflict_terminal_slurm").status == "submitted"
         assert _hydro_status(store, "run_conflict_terminal_slurm") == "running"
         assert _cycle_status(store, "cycle_conflict_terminal_slurm") == "forecast_running"
+
+
+@pytest.mark.parametrize("active_status", ["queued", "submitted", "running"])
+def test_cancel_treats_queued_job_as_active_like_submitted_and_running(active_status: str) -> None:
+    with _store() as store:
+        _insert_hydro_run(store, f"run_cancel_{active_status}", status="running")
+        _insert_forecast_cycle(store, f"cycle_cancel_{active_status}", status="forecast_running")
+        _create_job(
+            store,
+            job_id=f"job_cancel_{active_status}",
+            run_id=f"run_cancel_{active_status}",
+            cycle_id=f"cycle_cancel_{active_status}",
+            status=active_status,
+            slurm_job_id=f"slurm_{active_status}",
+        )
+        gateway = _MockGateway()
+        with _client(store, gateway=gateway) as client:
+            response = client.post(f"/api/v1/runs/run_cancel_{active_status}/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["partial_failure"] is False
+        assert [job["job_id"] for job in data["cancelled_jobs"]] == [f"job_cancel_{active_status}"]
+        assert gateway.cancelled == [f"slurm_{active_status}"]
+        assert store.get_job(f"job_cancel_{active_status}").status == "cancelled"
+        event = next(event for event in _events(store) if event.entity_type == "pipeline_job")
+        assert event.status_from == active_status
+        assert event.status_to == "cancelled"
 
 
 def test_cancel_event_records_slurm_context() -> None:
@@ -470,9 +561,10 @@ def test_job_log_forbidden_response_redacts_secret_file_uri(monkeypatch: pytest.
     error = response.json()["error"]
     assert response.status_code == 403
     assert error["code"] == "FORBIDDEN"
-    assert error["details"]["log_uri"] == f"file://{outside_root}/job.log"
-    assert error["details"]["log_root"] == str(log_root.resolve())
+    assert error["details"] == {"reason": "unsafe_log_path"}
     assert "job_forbidden_secret_log" not in response_text
+    assert str(log_root.resolve()) not in response_text
+    assert str(outside_root.resolve()) not in response_text
     assert "rawsecret" not in response_text
     assert "hunter2" not in response_text
     assert "signedsecret" not in response_text
@@ -638,6 +730,43 @@ def test_retry_api_rejects_terminal_hydro_status_without_mutation() -> None:
             "job_retry_terminal_api"
         ]
         assert _events(store) == []
+
+
+def test_manual_retry_uses_partial_failure_despite_later_success_when_hydro_run_failed() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_partial_then_publish", status="failed")
+        base_time = _cycle_time()
+        partial = _create_job(
+            store,
+            job_id="job_frequency_partial",
+            run_id="run_partial_then_publish",
+            status="partially_failed",
+            error_code="NODE_FAILURE",
+        )
+        partial.stage = "frequency"
+        partial.updated_at = base_time + timedelta(minutes=5)
+        succeeded = _create_job(
+            store,
+            job_id="job_publish_success",
+            run_id="run_partial_then_publish",
+            status="succeeded",
+            error_code=None,
+        )
+        succeeded.stage = "publish"
+        succeeded.updated_at = base_time + timedelta(minutes=10)
+        store.session.add_all([partial, succeeded])
+        store.session.commit()
+        gateway = _MockGateway()
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("run_partial_then_publish", gateway=gateway, trusted_internal=True)
+
+        assert retry.status == "submitted"
+        assert retry.stage == "frequency"
+        assert retry.job_id == "run_partial_then_publish_retry_active"
+        event = next(event for event in _events(store) if event.event_type == "retry")
+        assert event.details["previous_job_id"] == "job_frequency_partial"
+        assert gateway.submissions
 
 
 def test_cancel_preserves_terminal_hydro_run() -> None:

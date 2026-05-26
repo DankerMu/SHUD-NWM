@@ -72,6 +72,26 @@ const runningJob = {
   duration_seconds: null,
 }
 
+const queuedJob = {
+  job_id: 'job-queued',
+  run_id: 'run-queued',
+  cycle_id: 'cycle-1',
+  job_type: 'forecast',
+  slurm_job_id: '1003',
+  model_id: 'model-q',
+  status: 'queued',
+  stage: 'forecast',
+  submitted_at: '2026-05-09T00:09:00Z',
+  started_at: null,
+  finished_at: null,
+  exit_code: null,
+  retry_count: 0,
+  error_code: null,
+  error_message: null,
+  log_uri: 's3://logs/job-queued.log',
+  duration_seconds: null,
+}
+
 describe('JobsTable RBAC action boundary', () => {
   beforeEach(() => {
     mocks.authState.role = 'viewer'
@@ -136,6 +156,35 @@ describe('JobsTable RBAC action boundary', () => {
       expect.objectContaining({
         params: {
           path: { run_id: 'run-running' },
+          header: { 'X-User-Role': 'operator' },
+        },
+      }),
+    )
+  })
+
+  it('allows an operator with dev actions to cancel queued jobs but does not show retry', async () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    useMonitoringStore.setState({
+      jobs: [queuedJob],
+      jobTotal: 1,
+    })
+
+    render(<JobsTable />)
+    await waitFor(() => expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(1))
+
+    const queuedRow = screen.getByRole('row', { name: /run-queued/ })
+    expect(within(queuedRow).getByRole('button', { name: /取消/ })).toBeVisible()
+    expect(within(queuedRow).queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+
+    await userEvent.click(within(queuedRow).getByRole('button', { name: /取消/ }))
+
+    await waitFor(() => expect(mocks.postMock).toHaveBeenCalledTimes(1))
+    expect(mocks.postMock).toHaveBeenCalledWith(
+      '/api/v1/runs/{run_id}/cancel',
+      expect.objectContaining({
+        params: {
+          path: { run_id: 'run-queued' },
           header: { 'X-User-Role': 'operator' },
         },
       }),

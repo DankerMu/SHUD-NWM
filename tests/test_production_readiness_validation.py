@@ -480,16 +480,30 @@ def test_exclusions_are_not_failed_and_do_not_satisfy_live_proof(tmp_path: Path)
     assert all(item["live_proof_accepted"] is False for item in exclusion_items)
 
 
-def test_incomplete_live_auth_receipt_is_redacted_and_remains_release_blocked(tmp_path: Path) -> None:
+def test_incomplete_live_auth_receipt_is_redacted_and_remains_release_blocked(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     root = tmp_path / "artifacts"
-    validate_readiness(
-        ProductionReadinessConfig.from_env(
-            evidence_root=root,
-            run_id="m19",
-            auth_proof=_auth_proof(allowed=["models.activate"], denied=[]),
-        )
+    auth_receipt = _auth_proof(
+        allowed=["models.activate", "jobs.cancel", {"provider": "opaque-permission-token"}],
+        denied=["users.manage"],
+        value="opaque-live-token",
+        errors=[{"status": "opaque-error-token"}],
+        scope={
+            "provider": "opaque-provider-token",
+            "status": "opaque-status-token",
+            "message": "opaque-scope-token",
+        },
+        roles=["operator", {"provider": "opaque-role-token"}],
     )
 
+    exit_code = slurm_validation.main(
+        ["validate-readiness", "--evidence-root", str(root), "--run-id", "m19", "--auth-proof", auth_receipt]
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
     auth_item = next(item for item in _items(root) if item["surface"] == "live_backend_auth")
     assert auth_item["status"] == "release_blocked"
     assert auth_item["execution_mode"] == "live_proof"
@@ -497,11 +511,110 @@ def test_incomplete_live_auth_receipt_is_redacted_and_remains_release_blocked(tm
     assert "missing_allowed_actions" in auth_item["details"]["acceptance_errors"]
     assert _summary(root)["final_production_readiness_claimed"] is False
 
-    evidence = (root / "m19" / "readiness" / "live_proof_receipts.json").read_text(encoding="utf-8")
-    assert "super-secret" not in evidence
-    assert "token=secret" not in evidence
-    assert "user:pass@" not in evidence
-    assert "https://idp.example.invalid/auth" in evidence
+    receipts = (root / "m19" / "readiness" / "live_proof_receipts.json").read_text(encoding="utf-8")
+    items = (root / "m19" / "readiness" / "readiness_items.json").read_text(encoding="utf-8")
+    summary = (root / "m19" / "readiness" / "summary.json").read_text(encoding="utf-8")
+    for artifact in (receipts, items, summary, stdout):
+        for raw_secret in (
+            "super-secret",
+            "token=secret",
+            "user:pass@",
+            "opaque-live-token",
+            "opaque-error-token",
+            "opaque-provider-token",
+            "opaque-status-token",
+            "opaque-scope-token",
+            "opaque-permission-token",
+            "opaque-role-token",
+        ):
+            assert raw_secret not in artifact
+
+    for detailed_artifact in (receipts, items):
+        assert "https://idp.example.invalid/auth" in detailed_artifact
+        assert "models.activate" in detailed_artifact
+        assert "jobs.cancel" in detailed_artifact
+        assert "users.manage" in detailed_artifact
+        assert "pipeline.retry_run" in detailed_artifact
+        assert "model_admin" in detailed_artifact
+
+
+def test_contract_mismatched_live_auth_receipt_is_redacted_and_remains_release_blocked(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "artifacts"
+    malformed_auth_receipt = json.dumps(
+        {
+            "schema": LIVE_SCHEMA,
+            "status": "passed",
+            "accepted": True,
+            "run_id": "m19",
+            "target_environment": "production",
+            "execution_mode": "live_proof",
+            "artifact_refs": ["evidence/m19/auth/receipt.json"],
+            "provider": {
+                "issuer_url": "https://user:pass@idp.example.invalid/auth?token=secret",
+                "client_secret": "super-secret",
+            },
+            "role_mapping": {"operator": ["pipeline.retry_run"]},
+            "allowed_actions": _all_auth_actions(),
+            "denied_actions": _all_auth_actions(),
+            "value": "opaque-live-token",
+            "errors": [{"status": "opaque-error-token"}],
+            "scope": {
+                "provider": "opaque-provider-token",
+                "status": "opaque-status-token",
+                "message": "opaque-scope-token",
+            },
+        }
+    )
+
+    exit_code = slurm_validation.main(
+        [
+            "validate-readiness",
+            "--evidence-root",
+            str(root),
+            "--run-id",
+            "m19",
+            "--auth-proof",
+            malformed_auth_receipt,
+        ]
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    auth_item = next(item for item in _items(root) if item["surface"] == "live_backend_auth")
+    assert auth_item["status"] == "release_blocked"
+    assert auth_item["execution_mode"] == "live_proof"
+    assert auth_item["live_proof_accepted"] is False
+    acceptance_errors = auth_item["details"]["acceptance_errors"]["errors"]
+    assert "proof_type_mismatch" in acceptance_errors
+    assert "surface_mismatch" in acceptance_errors
+    assert _summary(root)["final_production_readiness_claimed"] is False
+
+    receipts = (root / "m19" / "readiness" / "live_proof_receipts.json").read_text(encoding="utf-8")
+    items = (root / "m19" / "readiness" / "readiness_items.json").read_text(encoding="utf-8")
+    summary = (root / "m19" / "readiness" / "summary.json").read_text(encoding="utf-8")
+    for artifact in (receipts, items, summary, stdout):
+        for raw_secret in (
+            "super-secret",
+            "token=secret",
+            "user:pass@",
+            "opaque-live-token",
+            "opaque-error-token",
+            "opaque-provider-token",
+            "opaque-status-token",
+            "opaque-scope-token",
+        ):
+            assert raw_secret not in artifact
+
+    for detailed_artifact in (receipts, items):
+        assert "https://idp.example.invalid/auth" in detailed_artifact
+        assert "pipeline.retry_run" in detailed_artifact
+        assert "models.activate" in detailed_artifact
+        assert "users.manage" in detailed_artifact
+    assert "proof_type_mismatch" in items
+    assert "surface_mismatch" in items
 
 
 def test_malformed_and_oversized_live_proofs_are_bounded_release_blockers(tmp_path: Path) -> None:

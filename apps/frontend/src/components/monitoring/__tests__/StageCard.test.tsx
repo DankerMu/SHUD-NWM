@@ -12,6 +12,10 @@ function makeStage(overrides: Partial<PipelineStage> = {}): PipelineStage {
     status: 'pending',
     duration_seconds: 0,
     basin_progress: { completed: 0, total: 0, failed: 0 },
+    basin_results_limit: 50,
+    basin_results_total: 0,
+    basin_results_returned: 0,
+    basin_results_truncated: false,
     basin_results: [],
     ...overrides,
   }

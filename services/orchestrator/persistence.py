@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, Integer, MetaData, Text, func, select
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Index, Integer, MetaData, Text, false, func, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 TERMINAL_STATUS_GUARD = {"succeeded", "failed", "cancelled", "permanently_failed"}
 TERMINAL_STATUS_OVERRIDES = {"partially_failed", "permanently_failed"}
+ACTIVE_MANUAL_RETRY_STATUSES = ("pending", "queued", "submitted", "running")
 
 
 def _utcnow() -> datetime:
@@ -35,6 +36,7 @@ class PipelineJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    manual_retry_marker: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     log_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -66,6 +68,19 @@ class PipelineEvent(Base):
     )
 
 
+Index(
+    "pipeline_job_active_manual_retry_guard_idx",
+    PipelineJob.run_id,
+    unique=True,
+    sqlite_where=PipelineJob.manual_retry_marker.is_(True)
+    & PipelineJob.run_id.is_not(None)
+    & PipelineJob.status.in_(ACTIVE_MANUAL_RETRY_STATUSES),
+    postgresql_where=PipelineJob.manual_retry_marker.is_(True)
+    & PipelineJob.run_id.is_not(None)
+    & PipelineJob.status.in_(ACTIVE_MANUAL_RETRY_STATUSES),
+)
+
+
 class PipelineStore:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -81,6 +96,8 @@ class PipelineStore:
         model_id: str | None,
         stage: str | None,
         status: str = "pending",
+        retry_count: int = 0,
+        manual_retry_marker: bool = False,
         commit: bool = True,
     ) -> PipelineJob:
         job = PipelineJob(
@@ -92,6 +109,8 @@ class PipelineStore:
             model_id=model_id,
             stage=stage,
             status=status,
+            retry_count=retry_count,
+            manual_retry_marker=manual_retry_marker,
             submitted_at=_utcnow(),
         )
         self.session.add(job)

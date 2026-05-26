@@ -2086,6 +2086,81 @@ def test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_mod
     assert jobs[0]["model_id"] == "model_a"
 
 
+def test_psycopg_has_active_pipeline_includes_queued_pipeline_rows() -> None:
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            calls.append((statement, parameters))
+            return {"active": 1}
+
+    repository = CapturingRepository("postgresql://example")
+
+    assert (
+        repository.has_active_pipeline(
+            source_id="gfs",
+            cycle_time=_dt("2026-05-01T00:00:00Z"),
+            model_id="model_a",
+        )
+        is True
+    )
+
+    statement, parameters = calls[0]
+    terminal_statuses = _pipeline_status_not_in_clause(statement)
+    assert "queued" not in terminal_statuses
+    assert "submitted" not in terminal_statuses
+    assert "running" not in terminal_statuses
+    assert parameters[:3] == (
+        "gfs",
+        _dt("2026-05-01T00:00:00Z"),
+        "model_a",
+    )
+    assert set(parameters[3]) == {"created", "staged", "submitted", "running"}
+    assert parameters[4:] == (
+        "gfs_2026050100",
+        "fcst_gfs_2026050100_model_a",
+        "cycle_gfs_2026050100",
+        "model_a",
+        "cycle_gfs_2026050100",
+    )
+
+
+def test_psycopg_active_slurm_jobs_includes_queued_pipeline_rows() -> None:
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            calls.append((statement, parameters))
+            return [
+                {
+                    "job_id": "job_cycle_gfs_2026050100_forcing",
+                    "run_id": "cycle_gfs_2026050100",
+                    "cycle_id": "gfs_2026050100",
+                    "job_type": "run_shud_forecast_array",
+                    "slurm_job_id": "3001",
+                    "model_id": "model_a",
+                    "status": "queued",
+                    "stage": "forcing",
+                }
+            ]
+
+    repository = CapturingRepository("postgresql://example")
+
+    jobs = repository.active_slurm_jobs(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_a",
+    )
+
+    statement, _parameters = calls[0]
+    terminal_statuses = _pipeline_status_not_in_clause(statement)
+    assert "queued" not in terminal_statuses
+    assert "submitted" not in terminal_statuses
+    assert "running" not in terminal_statuses
+    assert jobs[0]["status"] == "queued"
+    assert jobs[0]["slurm_job_id"] == "3001"
+
+
 def test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scope() -> None:
     calls: list[tuple[str, tuple[Any, ...]]] = []
 
@@ -2660,6 +2735,13 @@ def _basins(count: int) -> list[dict[str, Any]]:
 
 def _dt(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _pipeline_status_not_in_clause(statement: str) -> set[str]:
+    marker = "pj.status NOT IN ("
+    start = statement.index(marker) + len(marker)
+    end = statement.index(")", start)
+    return {status.strip().strip("'") for status in statement[start:end].split(",") if status.strip()}
 
 
 def _fmt(value: datetime) -> str:

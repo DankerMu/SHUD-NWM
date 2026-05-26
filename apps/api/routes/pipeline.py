@@ -4,6 +4,7 @@ import os
 import re
 from collections import defaultdict
 from collections.abc import Generator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -29,7 +30,23 @@ from workers.data_adapters.base import format_cycle_time, parse_cycle_time
 
 router = APIRouter(prefix="/api/v1", tags=["pipeline"])
 _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
-_ACTIVE_JOB_STATUSES = {"pending", "submitted", "running"}
+PIPELINE_JOB_STATUS_VALUES = (
+    "pending",
+    "queued",
+    "submitted",
+    "running",
+    "succeeded",
+    "partially_failed",
+    "failed",
+    "submission_failed",
+    "permanently_failed",
+    "cancelled",
+    "skipped",
+)
+PIPELINE_STAGE_BASIN_RESULTS_LIMIT = 50
+PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH = 512
+_ACTIVE_JOB_STATUSES = {"pending", "queued", "submitted", "running"}
+_PENDING_JOB_STATUSES = {"pending", "queued"}
 _FAILED_JOB_STATUSES = {"failed", "submission_failed", "permanently_failed", "cancelled"}
 _TERMINAL_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "failed", "cancelled", "superseded"}
 _TERMINAL_CYCLE_STATUSES = {
@@ -47,7 +64,16 @@ _TERMINAL_CYCLE_STATUSES = {
 _STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "frequency", "publish")
 _MAX_JOBS_LIMIT = 200
 _MAX_LOG_BYTES = 1024 * 1024
+_MAX_PUBLIC_LOG_URI_LENGTH = PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH
 LOG_ROOT = Path(os.getenv("LOG_ROOT", "workspace"))
+
+
+@dataclass
+class _StageStats:
+    total: int = 0
+    status_counts: dict[str, int] = field(default_factory=dict)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 @lru_cache
@@ -118,16 +144,17 @@ def pipeline_status(
             details={"source": source, "cycle_time": parsed_cycle_time.isoformat(), "cycle_id": cycle_id},
         )
 
+    resolved_cycle_id = str(cycle.get("cycle_id") or cycle_id)
     return _ok(
         request,
         {
-            "cycle_id": cycle.get("cycle_id") or cycle_id,
+            "cycle_id": resolved_cycle_id,
             "source": cycle.get("source") or source,
             "cycle_time": cycle.get("cycle_time") or parsed_cycle_time,
             "current_state": cycle["current_state"],
             "started_at": cycle.get("started_at"),
             "updated_at": cycle.get("updated_at"),
-            "job_counts": _job_count_summary(store, cycle_id),
+            "job_counts": _job_count_summary(store, resolved_cycle_id),
         },
     )
 
@@ -150,8 +177,7 @@ def pipeline_stages(
             details={"source": source, "cycle_time": parsed_cycle_time.isoformat(), "cycle_id": cycle_id},
         )
 
-    jobs = store.query_jobs_by_cycle(cycle_id)
-    return _ok(request, _stage_summaries(jobs))
+    return _ok(request, _stage_summaries(store, str(cycle.get("cycle_id") or cycle_id)))
 
 
 @router.get("/jobs")
@@ -175,7 +201,10 @@ def list_jobs(
     if cycle_time is not None:
         parsed_cycle_time = _parse_cycle_time(cycle_time)
         if source is not None:
-            statement = statement.where(PipelineJob.cycle_id == _cycle_id_for_source(source, parsed_cycle_time))
+            cycle = _fetch_forecast_cycle_or_404(store, source=source, cycle_time=parsed_cycle_time)
+            statement = statement.where(
+                PipelineJob.cycle_id == (cycle.get("cycle_id") or _cycle_id_for_source(source, parsed_cycle_time))
+            )
         else:
             statement = statement.where(PipelineJob.cycle_id.like(f"%_{format_cycle_time(parsed_cycle_time)}"))
     elif source is not None:
@@ -236,7 +265,7 @@ def job_logs(
             details={"job_id": job_id},
         )
 
-    safe_log_uri = _safe_redacted_text(job.log_uri)
+    safe_log_uri = _safe_public_log_uri(job.log_uri)
     log_path = _local_log_path(job.log_uri)
     if log_path is None or not log_path.is_file():
         raise ApiError(
@@ -694,6 +723,15 @@ def _safe_redacted_text(value: str) -> str:
     return redacted if isinstance(redacted, str) else str(redacted)
 
 
+def _safe_public_log_uri(value: str | None) -> str | None:
+    if value is None:
+        return None
+    redacted = _safe_redacted_text(value)
+    if len(redacted) <= _MAX_PUBLIC_LOG_URI_LENGTH:
+        return redacted
+    return f"{redacted[: _MAX_PUBLIC_LOG_URI_LENGTH - 14]}...[truncated]"
+
+
 def _cancellation_payload_proven(response: dict[str, Any]) -> bool:
     status = str(response.get("status") or "").lower()
     if response.get("error_code"):
@@ -875,37 +913,87 @@ def _fetch_forecast_cycle(
             message="Unable to inspect met.forecast_cycle.",
         ) from error
 
-    state_column = "current_state" if "current_state" in column_names else "status"
+    state_column = _first_present_column(column_names, ("current_state", "status"))
+    if state_column is None:
+        raise ApiError(
+            status_code=500,
+            code="FORECAST_CYCLE_SCHEMA_UNSUPPORTED",
+            message="met.forecast_cycle does not expose the required monitoring columns.",
+        )
     source_column = "source_id" if "source_id" in column_names else "source"
-    started_expression = "started_at" if "started_at" in column_names else "created_at"
-    updated_expression = "updated_at" if "updated_at" in column_names else started_expression
+    started_expression = _first_present_column(column_names, ("started_at", "created_at")) or "NULL"
+    updated_expression = _first_present_column(column_names, ("updated_at", "created_at", "started_at")) or "NULL"
+    source_select = f"{source_column} AS source" if source_column in column_names else "NULL AS source"
+    cycle_time_select = "cycle_time" if "cycle_time" in column_names else "NULL AS cycle_time"
+    cycle_id_select = "cycle_id" if "cycle_id" in column_names else "NULL AS cycle_id"
+    selected_columns = f"""
+        {cycle_id_select},
+        {source_select},
+        {cycle_time_select},
+        {state_column} AS current_state,
+        {started_expression} AS started_at,
+        {updated_expression} AS updated_at
+    """
 
-    filters: list[str] = []
     if "cycle_id" in column_names:
-        filters.append("cycle_id = :cycle_id")
-    if source_column in column_names and "cycle_time" in column_names:
-        filters.append(f"({source_column} = :source AND cycle_time = :cycle_time)")
-    if not filters or state_column not in column_names:
+        row = _forecast_cycle_row_by_filters(
+            store,
+            selected_columns=selected_columns,
+            filters=["cycle_id = :cycle_id"],
+            parameters={"cycle_id": cycle_id},
+            source=source,
+            cycle_time=cycle_time,
+            cycle_id=cycle_id,
+        )
+        if row is not None:
+            return _verified_forecast_cycle_row(
+                row,
+                source=source,
+                cycle_time=cycle_time,
+                verify_source=source_column in column_names,
+                verify_cycle_time="cycle_time" in column_names,
+            )
+
+    if source_column not in column_names or "cycle_time" not in column_names:
+        if "cycle_id" in column_names:
+            return None
         raise ApiError(
             status_code=500,
             code="FORECAST_CYCLE_SCHEMA_UNSUPPORTED",
             message="met.forecast_cycle does not expose the required monitoring columns.",
         )
 
-    source_select = f"{source_column} AS source" if source_column in column_names else "NULL AS source"
-    cycle_time_select = "cycle_time" if "cycle_time" in column_names else "NULL AS cycle_time"
-    cycle_id_select = "cycle_id" if "cycle_id" in column_names else "NULL AS cycle_id"
+    source_aliases = _source_aliases_for_query(source)
+    source_bind_names = [f"source_{index}" for index, _source in enumerate(source_aliases)]
+    parameters: dict[str, Any] = {"cycle_time": cycle_time, **dict(zip(source_bind_names, source_aliases, strict=True))}
+    source_filter = f"{source_column} IN ({', '.join(f':{name}' for name in source_bind_names)})"
+    return _forecast_cycle_row_by_filters(
+        store,
+        selected_columns=selected_columns,
+        filters=[source_filter, "cycle_time = :cycle_time"],
+        parameters=parameters,
+        source=source,
+        cycle_time=cycle_time,
+        cycle_id=cycle_id,
+    )
+
+
+def _forecast_cycle_row_by_filters(
+    store: PipelineStore,
+    *,
+    selected_columns: str,
+    filters: list[str],
+    parameters: dict[str, Any],
+    source: str,
+    cycle_time: datetime,
+    cycle_id: str,
+) -> dict[str, Any] | None:
     statement = text(
         f"""
         SELECT
-            {cycle_id_select},
-            {source_select},
-            {cycle_time_select},
-            {state_column} AS current_state,
-            {started_expression} AS started_at,
-            {updated_expression} AS updated_at
+            {selected_columns}
         FROM met.forecast_cycle
-        WHERE {" OR ".join(filters)}
+        WHERE {" AND ".join(filters)}
         LIMIT 1
         """
     )
@@ -913,7 +1001,7 @@ def _fetch_forecast_cycle(
         row = (
             store.session.execute(
                 statement,
-                {"source": source, "cycle_time": cycle_time, "cycle_id": cycle_id},
+                parameters,
             )
             .mappings()
             .first()
@@ -926,6 +1014,73 @@ def _fetch_forecast_cycle(
             details={"source": source, "cycle_time": cycle_time.isoformat(), "cycle_id": cycle_id},
         ) from error
     return dict(row) if row is not None else None
+
+
+def _verified_forecast_cycle_row(
+    row: dict[str, Any],
+    *,
+    source: str,
+    cycle_time: datetime,
+    verify_source: bool,
+    verify_cycle_time: bool,
+) -> dict[str, Any] | None:
+    if verify_source and not _forecast_cycle_source_matches(row.get("source"), source):
+        return None
+    if verify_cycle_time and not _forecast_cycle_time_matches(row.get("cycle_time"), cycle_time):
+        return None
+    return row
+
+
+def _forecast_cycle_source_matches(value: Any, source: str) -> bool:
+    if value is None:
+        return False
+    return str(value) in set(_source_aliases_for_query(source))
+
+
+def _forecast_cycle_time_matches(value: Any, cycle_time: datetime) -> bool:
+    parsed = _coerce_datetime(value)
+    return parsed == cycle_time
+
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+        except ValueError:
+            return None
+    return None
+
+
+def _first_present_column(column_names: set[str], candidates: tuple[str, ...]) -> str | None:
+    return next((column for column in candidates if column in column_names), None)
+
+
+def _fetch_forecast_cycle_or_404(
+    store: PipelineStore,
+    *,
+    source: str,
+    cycle_time: datetime,
+) -> dict[str, Any]:
+    cycle_id = _cycle_id_for_source(source, cycle_time)
+    cycle = _fetch_forecast_cycle(store, source=source, cycle_time=cycle_time, cycle_id=cycle_id)
+    if cycle is None:
+        raise ApiError(
+            status_code=404,
+            code="PIPELINE_CYCLE_NOT_FOUND",
+            message="No forecast cycle found for the requested source and cycle_time.",
+            details={"source": source, "cycle_time": cycle_time.isoformat(), "cycle_id": cycle_id},
+        )
+    return cycle
+
+
+def _source_aliases_for_query(source: str) -> list[str]:
+    normalized = _normalize_source_for_query(source)
+    aliases = {source, normalized, normalized.upper(), normalized.lower()}
+    return sorted(alias for alias in aliases if alias)
 
 
 def _run_ids_matching_filters(
@@ -1067,49 +1222,161 @@ def _duration_sort_expression(store: PipelineStore) -> Any:
     return PipelineJob.finished_at - PipelineJob.started_at
 
 
-def _stage_summaries(jobs: list[PipelineJob]) -> list[dict[str, Any]]:
-    jobs_by_stage: dict[str, list[PipelineJob]] = defaultdict(list)
-    for job in jobs:
-        if job.stage:
-            jobs_by_stage[job.stage].append(job)
+def _stage_summaries(store: PipelineStore, cycle_id: str) -> list[dict[str, Any]]:
+    stats_by_stage = _stage_stats_by_cycle(store, cycle_id)
+    samples_by_stage = _stage_result_samples_by_cycle(store, cycle_id)
 
     stages = list(_STAGE_ORDER)
-    for stage in jobs_by_stage:
+    for stage in stats_by_stage:
         if stage not in stages:
             stages.append(stage)
 
     summaries: list[dict[str, Any]] = []
     previous_failed = False
     for stage in stages:
-        stage_jobs = jobs_by_stage.get(stage, [])
-        display_status = _stage_display_status(stage_jobs)
-        if not stage_jobs and previous_failed:
+        stats = stats_by_stage.get(stage, _StageStats())
+        stage_jobs = samples_by_stage.get(stage, [])
+        display_status = _stage_display_status(stats.status_counts)
+        if stats.total == 0 and previous_failed:
             display_status = "skipped"
-        if display_status == "failed":
+        if display_status in {"failed", "partially_failed"}:
             previous_failed = True
+        basin_results_total = stats.total
+        basin_results_returned = len(stage_jobs)
 
         summaries.append(
             {
                 "stage": stage,
                 "display_status": display_status,
                 "status": display_status,
-                "duration_seconds": _stage_duration_seconds(stage_jobs),
-                "basin_progress": _basin_progress(stage_jobs),
+                "duration_seconds": _duration_seconds(stats.started_at, stats.finished_at),
+                "basin_progress": _basin_progress(stats),
+                "basin_results_limit": PIPELINE_STAGE_BASIN_RESULTS_LIMIT,
+                "basin_results_total": basin_results_total,
+                "basin_results_returned": basin_results_returned,
+                "basin_results_truncated": basin_results_returned < basin_results_total,
                 "basin_results": [_basin_result(job) for job in stage_jobs],
             }
         )
     return summaries
 
 
-def _stage_display_status(jobs: list[PipelineJob]) -> str:
-    if not jobs:
+def _stage_stats_by_cycle(store: PipelineStore, cycle_id: str) -> dict[str, _StageStats]:
+    stats_by_stage: dict[str, _StageStats] = {}
+    latest_jobs = _latest_stage_truth_job_ids_by_cycle(cycle_id)
+    rows = store.session.execute(
+        select(
+            PipelineJob.stage,
+            PipelineJob.status,
+            func.count(),
+            func.min(PipelineJob.started_at),
+            func.max(PipelineJob.finished_at),
+        )
+        .join(latest_jobs, PipelineJob.job_id == latest_jobs.c.job_id)
+        .where(latest_jobs.c.truth_row_number == 1)
+        .where(PipelineJob.cycle_id == cycle_id)
+        .where(PipelineJob.stage.is_not(None))
+        .group_by(PipelineJob.stage, PipelineJob.status)
+    )
+    for stage, status, count, started_at, finished_at in rows:
+        if stage is None:
+            continue
+        stats = stats_by_stage.setdefault(str(stage), _StageStats())
+        status_text = str(status)
+        count_int = int(count)
+        stats.total += count_int
+        stats.status_counts[status_text] = stats.status_counts.get(status_text, 0) + count_int
+        if started_at is not None and (stats.started_at is None or started_at < stats.started_at):
+            stats.started_at = started_at
+        if finished_at is not None and (stats.finished_at is None or finished_at > stats.finished_at):
+            stats.finished_at = finished_at
+    return stats_by_stage
+
+
+def _stage_result_samples_by_cycle(store: PipelineStore, cycle_id: str) -> dict[str, list[PipelineJob]]:
+    latest_jobs = _latest_stage_truth_job_ids_by_cycle(cycle_id)
+    ranked_jobs = (
+        select(
+            PipelineJob.job_id.label("job_id"),
+            func.row_number()
+            .over(
+                partition_by=PipelineJob.stage,
+                order_by=(PipelineJob.submitted_at.asc(), PipelineJob.created_at.asc(), PipelineJob.job_id.asc()),
+            )
+            .label("stage_row_number"),
+        )
+        .join(latest_jobs, PipelineJob.job_id == latest_jobs.c.job_id)
+        .where(latest_jobs.c.truth_row_number == 1)
+        .where(PipelineJob.cycle_id == cycle_id)
+        .where(PipelineJob.stage.is_not(None))
+        .subquery()
+    )
+    statement = (
+        select(PipelineJob)
+        .join(ranked_jobs, PipelineJob.job_id == ranked_jobs.c.job_id)
+        .where(ranked_jobs.c.stage_row_number <= PIPELINE_STAGE_BASIN_RESULTS_LIMIT)
+        .order_by(
+            PipelineJob.stage.asc(),
+            PipelineJob.submitted_at.asc(),
+            PipelineJob.created_at.asc(),
+            PipelineJob.job_id.asc(),
+        )
+    )
+    samples_by_stage: dict[str, list[PipelineJob]] = defaultdict(list)
+    for job in store.session.scalars(statement):
+        if job.stage is None:
+            continue
+        samples_by_stage[str(job.stage)].append(job)
+    return samples_by_stage
+
+
+def _latest_stage_truth_job_ids_by_cycle(cycle_id: str) -> Any:
+    logical_run_id = func.coalesce(func.nullif(PipelineJob.run_id, ""), PipelineJob.job_id)
+    return (
+        select(
+            PipelineJob.job_id.label("job_id"),
+            func.row_number()
+            .over(
+                partition_by=(PipelineJob.cycle_id, PipelineJob.stage, logical_run_id),
+                order_by=_latest_stage_truth_order(descending=True),
+            )
+            .label("truth_row_number"),
+        )
+        .where(PipelineJob.cycle_id == cycle_id)
+        .where(PipelineJob.stage.is_not(None))
+        .subquery()
+    )
+
+
+def _latest_stage_truth_order(*, descending: bool) -> tuple[Any, ...]:
+    if descending:
+        return (
+            PipelineJob.submitted_at.desc().nulls_last(),
+            PipelineJob.created_at.desc().nulls_last(),
+            PipelineJob.updated_at.desc().nulls_last(),
+            PipelineJob.finished_at.desc().nulls_last(),
+            PipelineJob.job_id.desc(),
+        )
+    return (
+        PipelineJob.submitted_at.asc().nulls_last(),
+        PipelineJob.created_at.asc().nulls_last(),
+        PipelineJob.updated_at.asc().nulls_last(),
+        PipelineJob.finished_at.asc().nulls_last(),
+        PipelineJob.job_id.asc(),
+    )
+
+
+def _stage_display_status(status_counts: dict[str, int]) -> str:
+    if not status_counts:
         return "pending"
 
-    statuses = {job.status for job in jobs}
-    if statuses & {"submitted", "running"}:
+    statuses = set(status_counts)
+    if statuses & _ACTIVE_JOB_STATUSES:
         return "running"
-    if statuses == {"pending"}:
-        return "pending"
+    if statuses == {"skipped"}:
+        return "skipped"
+    if statuses <= {"succeeded", "skipped"}:
+        return "succeeded" if "succeeded" in statuses else "skipped"
     if "partially_failed" in statuses:
         return "partially_failed"
     if statuses & _FAILED_JOB_STATUSES:
@@ -1119,27 +1386,32 @@ def _stage_display_status(jobs: list[PipelineJob]) -> str:
     return "running" if statuses & _ACTIVE_JOB_STATUSES else "failed"
 
 
-def _stage_duration_seconds(jobs: list[PipelineJob]) -> int | None:
-    starts = [job.started_at for job in jobs if job.started_at is not None]
-    finishes = [job.finished_at for job in jobs if job.finished_at is not None]
-    if not starts or not finishes:
-        return None
-    return _duration_seconds(min(starts), max(finishes))
-
-
-def _basin_progress(jobs: list[PipelineJob]) -> dict[str, int]:
-    failed = sum(1 for job in jobs if job.status in _FAILED_JOB_STATUSES or job.status == "partially_failed")
-    completed = sum(1 for job in jobs if job.status == "succeeded")
-    return {"completed": completed, "total": len(jobs), "failed": failed}
+def _basin_progress(stats: _StageStats) -> dict[str, int]:
+    failed = sum(count for status, count in stats.status_counts.items() if status in _FAILED_JOB_STATUSES)
+    failed += stats.status_counts.get("partially_failed", 0)
+    completed = stats.status_counts.get("succeeded", 0)
+    return {"completed": completed, "total": stats.total, "failed": failed}
 
 
 def _basin_result(job: PipelineJob) -> dict[str, Any]:
     return {
+        "job_id": job.job_id,
+        "run_id": job.run_id,
+        "cycle_id": job.cycle_id,
+        "job_type": job.job_type,
+        "slurm_job_id": job.slurm_job_id,
         "model_id": job.model_id,
         "basin_id": None,
         "status": job.status,
+        "stage": job.stage,
+        "submitted_at": job.submitted_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "duration_seconds": _duration_seconds(job.started_at, job.finished_at),
+        "retry_count": job.retry_count,
         "error_code": job.error_code,
         "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
+        "log_uri": _safe_public_log_uri(job.log_uri),
     }
 
 
@@ -1163,7 +1435,7 @@ def _job_payload(job: PipelineJob, run_metadata: dict[str, str | None] | None = 
         "retry_count": job.retry_count,
         "error_code": job.error_code,
         "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
-        "log_uri": _safe_redacted_text(job.log_uri) if job.log_uri is not None else None,
+        "log_uri": _safe_public_log_uri(job.log_uri),
         "duration_seconds": _duration_seconds(job.started_at, job.finished_at),
     }
 
@@ -1211,11 +1483,12 @@ def _local_log_path(log_uri: str) -> Path | None:
 
 
 def _raise_log_path_forbidden(log_uri: str, log_root: Path) -> None:
+    del log_uri, log_root
     raise ApiError(
         status_code=403,
         code="FORBIDDEN",
         message="Job log path is outside the configured log root.",
-        details={"log_uri": _safe_redacted_text(log_uri), "log_root": str(log_root)},
+        details={"reason": "unsafe_log_path"},
     )
 
 
@@ -1227,6 +1500,6 @@ def _read_log_tail(log_path: Path) -> str:
             status_code=403,
             code="FORBIDDEN",
             message="Job log path is outside the configured log root.",
-            details={"log_path": str(log_path), "log_root": str(_log_root())},
+            details={"reason": "unsafe_log_path"},
         ) from exc
-    return data.decode("utf-8", errors="replace")
+    return _safe_redacted_text(data.decode("utf-8", errors="replace"))

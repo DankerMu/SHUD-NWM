@@ -220,6 +220,58 @@ def test_qhh_latest_product_runtime_openapi_matches_static_parameters_and_schema
         assert fastapi_spec["components"]["schemas"][schema_name] == static_spec["components"]["schemas"][schema_name]
 
 
+@pytest.mark.parametrize(
+    ("path", "method", "data_schema"),
+    [
+        ("/api/v1/pipeline/status", "get", {"$ref": "#/components/schemas/PipelineStatus"}),
+        (
+            "/api/v1/pipeline/stages",
+            "get",
+            {"type": "array", "items": {"$ref": "#/components/schemas/PipelineStage"}},
+        ),
+        ("/api/v1/jobs", "get", {"$ref": "#/components/schemas/PipelineJobPage"}),
+        ("/api/v1/jobs/{job_id}/logs", "get", {"$ref": "#/components/schemas/JobLogs"}),
+        ("/api/v1/runs/{run_id}/retry", "post", {"$ref": "#/components/schemas/RetryRunResult"}),
+    ],
+)
+def test_ops_runtime_openapi_matches_static_success_schema(
+    path: str,
+    method: str,
+    data_schema: dict[str, Any],
+) -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    runtime_spec: dict[str, Any] = app.openapi()
+    static_operation = static_spec["paths"][path][method]
+    runtime_operation = runtime_spec["paths"][path][method]
+
+    assert runtime_operation["operationId"] == static_operation["operationId"]
+    assert _operation_parameters_by_name(runtime_operation, runtime_spec) == _operation_parameters_by_name(
+        static_operation,
+        static_spec,
+    )
+    static_response = static_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    runtime_response = runtime_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert runtime_response == static_response
+    assert static_response["allOf"][0]["$ref"] == "#/components/schemas/SuccessEnvelope"
+    assert static_response["allOf"][1]["properties"]["data"] == data_schema
+    assert runtime_operation["responses"]["4XX"] == static_operation["responses"]["4XX"]
+    assert runtime_operation["responses"]["5XX"] == static_operation["responses"]["5XX"]
+
+    for schema_name in (
+        "JobStatusCounts",
+        "PipelineStatus",
+        "BasinProgress",
+        "BasinResult",
+        "PipelineStage",
+        "PipelineJob",
+        "PipelineJobPage",
+        "JobLogs",
+        "RetryRunResult",
+    ):
+        assert runtime_spec["components"]["schemas"][schema_name] == static_spec["components"]["schemas"][schema_name]
+
+
 def test_flood_alert_timeline_river_network_query_parameter_matches_fastapi_openapi() -> None:
     static_spec = _openapi_spec()
     fastapi_spec: dict[str, Any] = app.openapi()

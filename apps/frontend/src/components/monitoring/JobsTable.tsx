@@ -27,7 +27,7 @@ type SortDirection = 'asc' | 'desc'
 
 const failedStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'])
 const retryableStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'partially_failed'])
-const activeStatuses = new Set(['pending', 'submitted', 'running'])
+const activeStatuses = new Set(['pending', 'queued', 'submitted', 'running'])
 const policyFailureCodes = new Set(['RBAC_FORBIDDEN', 'AUTH_REQUIRED', 'RELEASE_BLOCKED'])
 
 function statusClass(status: string) {

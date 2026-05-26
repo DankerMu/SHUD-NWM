@@ -11,6 +11,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from apps.api.routes import pipeline as pipeline_routes
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from apps.api.routes.models import get_model_registry_store
@@ -26,6 +27,7 @@ from tests.test_monitoring_api import (
 )
 from workers.data_adapters.base import cycle_id_for
 
+PIPELINE_JOB_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "pipeline_job.schema.json"
 PIPELINE_JOB_KEYS = {
     "job_id",
     "run_id",
@@ -46,6 +48,38 @@ PIPELINE_JOB_KEYS = {
     "error_message",
     "log_uri",
     "duration_seconds",
+}
+OPS_JOB_STATUS_ENUM = [
+    "pending",
+    "queued",
+    "submitted",
+    "running",
+    "succeeded",
+    "partially_failed",
+    "failed",
+    "submission_failed",
+    "permanently_failed",
+    "cancelled",
+    "skipped",
+]
+STAGE_JOB_EVIDENCE_KEYS = {
+    "job_id",
+    "run_id",
+    "cycle_id",
+    "job_type",
+    "slurm_job_id",
+    "model_id",
+    "basin_id",
+    "status",
+    "stage",
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "duration_seconds",
+    "retry_count",
+    "error_code",
+    "error_message",
+    "log_uri",
 }
 
 
@@ -132,6 +166,7 @@ def test_jobs_contract_uses_success_envelope_and_paginated_pipeline_jobs() -> No
     with _store() as store:
         cycle_time = _cycle_time()
         cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
         _seed_monitoring_jobs(store, cycle_id=cycle_id)
         with _client(store) as client:
             response = client.get(
@@ -169,6 +204,54 @@ def test_pipeline_status_contract_uses_success_envelope() -> None:
     assert data["cycle_id"] == cycle_id
     assert data["current_state"] == "forecast_running"
     assert data["job_counts"] == {"succeeded": 3, "failed": 1, "running": 1, "pending": 0}
+
+
+def test_pipeline_stage_contract_exposes_formal_job_evidence_and_ops_statuses() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+
+    basin_result = schemas["BasinResult"]
+    assert set(basin_result["required"]) == STAGE_JOB_EVIDENCE_KEYS
+    persisted_statuses = _persisted_pipeline_job_statuses()
+    assert OPS_JOB_STATUS_ENUM == persisted_statuses
+    assert basin_result["properties"]["status"]["enum"] == persisted_statuses
+    assert schemas["PipelineJob"]["properties"]["status"]["enum"] == persisted_statuses
+    assert schemas["RetryRunResult"]["properties"]["status"]["enum"] == ["submitted"]
+    assert schemas["PipelineStage"]["properties"]["basin_results"]["maxItems"] == (
+        pipeline_routes.PIPELINE_STAGE_BASIN_RESULTS_LIMIT
+    )
+    assert schemas["PipelineStage"]["properties"]["basin_results_total"]["type"] == "integer"
+    assert schemas["PipelineStage"]["properties"]["basin_results_truncated"]["type"] == "boolean"
+    max_public_log_uri_length = pipeline_routes.PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH
+    assert schemas["PipelineJob"]["properties"]["log_uri"]["maxLength"] == max_public_log_uri_length
+    assert basin_result["properties"]["log_uri"]["maxLength"] == max_public_log_uri_length
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    basin_result_start = generated_types.index("BasinResult:")
+    pipeline_job_start = generated_types.index("PipelineJob:")
+    basin_result_types = generated_types[basin_result_start:pipeline_job_start]
+    assert "job_id: string;" in basin_result_types
+    assert "run_id: string | null;" in basin_result_types
+    assert "slurm_job_id: string | null;" in basin_result_types
+    assert "submitted_at: string | null;" in basin_result_types
+    assert "duration_seconds: number | null;" in basin_result_types
+    assert "retry_count: number;" in basin_result_types
+    pipeline_stage_start = generated_types.index("PipelineStage:")
+    basin_progress_start = generated_types.index("BasinProgress:")
+    pipeline_stage_types = generated_types[pipeline_stage_start:basin_progress_start]
+    assert "basin_results_truncated: boolean;" in pipeline_stage_types
+    assert '"queued"' in basin_result_types
+    assert '"skipped"' in basin_result_types
+    assert '"submission_failed"' in basin_result_types
+    assert '"permanently_failed"' in basin_result_types
+    retry_start = generated_types.index("RetryRunResult:")
+    cancel_start = generated_types.index("CancelRunResult:")
+    retry_types = generated_types[retry_start:cancel_start]
+    assert 'status: "submitted";' in retry_types
+    assert '"submission_failed"' not in retry_types
 
 
 def test_queue_depth_contract_uses_success_envelope() -> None:
@@ -1090,6 +1173,11 @@ def _assert_success_envelope(body: dict[str, Any]) -> Any:
     assert body["request_id"]
     assert body["status"] == "ok"
     return body["data"]
+
+
+def _persisted_pipeline_job_statuses() -> list[str]:
+    schema = json.loads(PIPELINE_JOB_SCHEMA_PATH.read_text(encoding="utf-8"))
+    return list(schema["properties"]["status"]["enum"])
 
 
 class _RetryGateway(_MockGateway):

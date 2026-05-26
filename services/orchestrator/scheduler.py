@@ -97,7 +97,7 @@ SLURM_RESOURCE_PROFILE_TEMPLATE_IDENTITY_FIELDS = {
 }
 TASK_RESULT_CANDIDATE_IDENTITY_FIELDS = ("candidate_id", "run_id", "forcing_version_id", "model_id")
 TASK_RESULT_INDEX_IDENTITY_FIELDS = ("task_id", "array_task_id", "original_task_id")
-ACTIVE_PIPELINE_STATUSES = {"pending", "submitted", "running"}
+ACTIVE_PIPELINE_STATUSES = {"pending", "queued", "submitted", "running"}
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
 DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}

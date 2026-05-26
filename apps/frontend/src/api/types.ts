@@ -1296,6 +1296,10 @@ export interface components {
             status?: "pending" | "running" | "succeeded" | "partially_failed" | "failed" | "skipped";
             duration_seconds: number | null;
             basin_progress: components["schemas"]["BasinProgress"];
+            basin_results_limit: number;
+            basin_results_total: number;
+            basin_results_returned: number;
+            basin_results_truncated: boolean;
             basin_results: components["schemas"]["BasinResult"][];
         };
         BasinProgress: {
@@ -1304,11 +1308,27 @@ export interface components {
             failed: number;
         };
         BasinResult: {
+            job_id: string;
+            run_id: string | null;
+            cycle_id: string | null;
+            job_type: string;
+            slurm_job_id: string | null;
             model_id: string | null;
             basin_id: string | null;
-            status: string;
+            /** @enum {string} */
+            status: "pending" | "queued" | "submitted" | "running" | "succeeded" | "partially_failed" | "failed" | "submission_failed" | "permanently_failed" | "cancelled" | "skipped";
+            stage: string | null;
+            /** Format: date-time */
+            submitted_at: string | null;
+            /** Format: date-time */
+            started_at: string | null;
+            /** Format: date-time */
+            finished_at: string | null;
+            duration_seconds: number | null;
+            retry_count: number;
             error_code: string | null;
             error_message: string | null;
+            log_uri: string | null;
         };
         PipelineJob: {
             job_id: string;
@@ -1319,7 +1339,8 @@ export interface components {
             job_type: string;
             slurm_job_id: string | null;
             model_id: string | null;
-            status: string;
+            /** @enum {string} */
+            status: "pending" | "queued" | "submitted" | "running" | "succeeded" | "partially_failed" | "failed" | "submission_failed" | "permanently_failed" | "cancelled" | "skipped";
             stage: string | null;
             /** Format: date-time */
             submitted_at: string | null;
@@ -1405,9 +1426,9 @@ export interface components {
         };
         PipelineStatus: {
             cycle_id: string;
-            source: string;
+            source: string | null;
             /** Format: date-time */
-            cycle_time: string;
+            cycle_time: string | null;
             current_state: string;
             /** Format: date-time */
             started_at: string | null;
@@ -1431,10 +1452,11 @@ export interface components {
             pipeline_job_id: string;
             run_id: string | null;
             retry_count: number;
-            status: string;
+            /** @enum {string} */
+            status: "submitted";
             slurm_job_id: string | null;
             /** @enum {string} */
-            execution_status: "queued" | "submitted";
+            execution_status: "submitted";
         };
         CancelRunResult: {
             run_id: string;

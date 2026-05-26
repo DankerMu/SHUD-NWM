@@ -18,6 +18,7 @@ export type PipelineStatus =
 
 export type JobStatus =
   | 'pending'
+  | 'queued'
   | 'submitted'
   | 'running'
   | 'succeeded'
@@ -26,6 +27,7 @@ export type JobStatus =
   | 'cancelled'
   | 'submission_failed'
   | 'permanently_failed'
+  | 'skipped'
 
 export const STATUS_COLORS: Record<PipelineStatus, string> = {
   pending: 'bg-muted/10 text-muted border-border',
