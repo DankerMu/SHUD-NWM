@@ -329,6 +329,17 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
                     "cancellation_proven": False,
                     "token": "tok987",
                     "authorization": "Bearer response-token-987",
+                    "auth": {
+                        "issuer_url": "https://service:issuer-pass@idp.example.invalid/auth?token=issuer-query-secret",
+                        "value": "opaque-cancel-auth-token-987",
+                        "permissions": ["jobs.cancel", {"provider": "opaque-cancel-permission-token-987"}],
+                        "errors": [{"status": "opaque-cancel-error-token-987"}],
+                        "scope": {
+                            "provider": "opaque-cancel-provider-token-987",
+                            "status": "opaque-cancel-status-token-987",
+                            "message": "opaque-cancel-scope-token-987",
+                        },
+                    },
                     "callback_url": "https://bob:pass987@slurm.example/cancel?X-Amz-Signature=sig987",
                     "details": {
                         "code": "SCANCEL_PENDING",
@@ -356,6 +367,13 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
         assert gap["gateway_response"]["cancellation_proven"] is False
         assert gap["gateway_response"]["token"] == "[redacted]"
         assert gap["gateway_response"]["authorization"] == "[redacted]"
+        assert gap["gateway_response"]["auth"]["issuer_url"] == "https://idp.example.invalid/auth"
+        assert gap["gateway_response"]["auth"]["value"] == "[redacted]"
+        assert gap["gateway_response"]["auth"]["permissions"] == ["jobs.cancel", {"provider": "[redacted]"}]
+        assert gap["gateway_response"]["auth"]["errors"] == [{"status": "[redacted]"}]
+        assert gap["gateway_response"]["auth"]["scope"]["provider"] == "[redacted]"
+        assert gap["gateway_response"]["auth"]["scope"]["status"] == "[redacted]"
+        assert gap["gateway_response"]["auth"]["scope"]["message"] == "[redacted]"
         assert gap["gateway_response"]["details"]["code"] == "SCANCEL_PENDING"
         assert gap["gateway_response"]["details"]["status"] == "pending"
         assert gap["gateway_response"]["details"]["password"] == "[redacted]"
@@ -363,9 +381,31 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
         assert event.details["previous_status"] == "submitted"
         assert event.details["cancellation_proven"] is False
         assert event.details["gateway_response"]["status"] == "pending"
+        assert event.details["gateway_response"]["auth"]["issuer_url"] == "https://idp.example.invalid/auth"
+        assert event.details["gateway_response"]["auth"]["value"] == "[redacted]"
+        assert event.details["gateway_response"]["auth"]["permissions"] == ["jobs.cancel", {"provider": "[redacted]"}]
+        assert event.details["gateway_response"]["auth"]["errors"] == [{"status": "[redacted]"}]
+        assert event.details["gateway_response"]["auth"]["scope"]["provider"] == "[redacted]"
+        assert event.details["gateway_response"]["auth"]["scope"]["status"] == "[redacted]"
+        assert event.details["gateway_response"]["auth"]["scope"]["message"] == "[redacted]"
         response_body = json.dumps(response.json(), sort_keys=True)
         event_body = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
-        for raw_secret in ("bob:pass987", "pass987", "tok987", "sig987", "response-token-987", "basic-secret-987"):
+        for raw_secret in (
+            "bob:pass987",
+            "pass987",
+            "tok987",
+            "sig987",
+            "response-token-987",
+            "service:issuer-pass",
+            "issuer-query-secret",
+            "opaque-cancel-auth-token-987",
+            "opaque-cancel-permission-token-987",
+            "opaque-cancel-error-token-987",
+            "opaque-cancel-provider-token-987",
+            "opaque-cancel-status-token-987",
+            "opaque-cancel-scope-token-987",
+            "basic-secret-987",
+        ):
             assert raw_secret not in response_body
             assert raw_secret not in event_body
         assert "[redacted]" in response_body
