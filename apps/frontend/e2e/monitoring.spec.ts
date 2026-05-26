@@ -230,9 +230,9 @@ function controlledStatus(retrySubmitted: boolean) {
     cycle_id: controlledCycleId,
     source: 'GFS',
     cycle_time: controlledCycleTime,
-    current_state: retrySubmitted ? 'complete' : 'failed_run',
+    current_state: 'failed_run',
     started_at: '2026-05-21T00:00:00Z',
-    updated_at: retrySubmitted ? '2026-05-21T00:50:00Z' : '2026-05-21T00:36:00Z',
+    updated_at: '2026-05-21T00:36:00Z',
     job_counts: retrySubmitted
       ? { succeeded: 4, failed: 1, running: 0, pending: 0 }
       : { succeeded: 3, failed: 1, running: 0, pending: 0 },
@@ -512,6 +512,8 @@ test.describe('monitoring page', () => {
 
     await selectRole(page, 'Operator')
     await expect(page.getByRole('heading', { name: '运维工作台' })).toBeVisible()
+    const currentStateField = page.getByText('Current State').locator('..')
+    await expect(currentStateField).toContainText('failed_run')
     await expect(page.getByRole('cell', { name: controlledRunId })).toBeVisible()
     const failedRow = page.getByRole('row', { name: new RegExp(controlledFailedJobId) })
     await expect(failedRow).toContainText('forecast')
@@ -537,6 +539,7 @@ test.describe('monitoring page', () => {
     await expect(retryRow).toContainText('succeeded')
     await expect(retryRow).toContainText('slurm_retry')
     await expect(retryRow).toContainText('2')
+    await expect(currentStateField).toContainText('failed_run')
     await expect(page.getByRole('button', { name: /预报.*succeeded/ })).toBeVisible()
     await expect(page.getByText('qhh_sibling_cycle_forecast_failed')).toHaveCount(0)
     expect(opsApi.observedJobsQueries.length).toBeGreaterThan(0)

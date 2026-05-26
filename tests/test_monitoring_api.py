@@ -670,6 +670,10 @@ def test_qhh_like_controlled_failure_retry_evidence_propagates_one_formal_identi
         )
 
         with _client(store, gateway, allow_dev_role_header=True) as client:
+            post_retry_status = client.get(
+                "/api/v1/pipeline/status",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
             post_retry_stages = client.get(
                 "/api/v1/pipeline/stages",
                 params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
@@ -678,6 +682,13 @@ def test_qhh_like_controlled_failure_retry_evidence_propagates_one_formal_identi
                 "/api/v1/jobs",
                 params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "limit": 20},
             )
+
+        assert post_retry_status.status_code == 200
+        post_retry_status_data = post_retry_status.json()["data"]
+        assert post_retry_status_data["cycle_id"] == cycle_id
+        assert post_retry_status_data["source"] == "GFS"
+        assert post_retry_status_data["current_state"] == "failed_run"
+        assert post_retry_status_data["job_counts"] == {"succeeded": 4, "failed": 1, "running": 0, "pending": 0}
 
         assert post_retry_stages.status_code == 200
         post_forecast = next(stage for stage in post_retry_stages.json()["data"] if stage["stage"] == "forecast")

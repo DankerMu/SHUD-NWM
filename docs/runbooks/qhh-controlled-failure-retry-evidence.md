@@ -4,7 +4,7 @@
 
 ## 范围
 
-本 runbook 对应 GitHub issue #213 / M21-10。目标是证明一个受控的 QHH-like failed run identity 能从正式 pipeline persistence 贯穿到公开 ops API、`/ops` UI、authorized retry、retry job/event 记录和终态结果。
+本 runbook 对应 GitHub issue #213 / M21-10。目标是证明一个受控的 QHH-like failed run identity 能从正式 pipeline persistence 贯穿到公开 ops API、`/ops` UI、authorized retry、retry job/event 记录和 job/stage 终态结果。
 
 这条证据不读取 `.nhms-runs/qhh-continuous` 诊断 state JSON，不伪造 live Slurm/QHH proof，也不声明 final production readiness。
 
@@ -31,8 +31,9 @@ deterministic 证据证明：
 - viewer/non-operator retry 被拒绝且不创建 job/event。
 - operator retry 调用 `POST /api/v1/runs/{run_id}/retry`，带 operator role header。
 - retry 创建新 pipeline job，记录 retry/submission event、`previous_job_id`、`retry_count`、`stage`、`run_id` 和 fixture Slurm metadata。
-- retry lifecycle 在 deterministic fixture 中推进到 `running` 后 `succeeded`，并记录 explicit terminal outcome。
-- `/ops` 能看到 failed row、backend logs route 内容、retry request、刷新后的 retry job row 和 succeeded terminal outcome。
+- retry job lifecycle 在 deterministic fixture 中推进到 `running` 后 `succeeded`，并记录 explicit job/stage terminal outcome。
+- post-retry `/api/v1/pipeline/status` 的 `job_counts` 反映新增的 succeeded retry job 和历史 failed job；`current_state` 仍来自 `met.forecast_cycle.current_state` 的持久化值，除非正式 scheduler/orchestrator producer 另行更新，不因 retry job 成功而自动变为 cycle `complete`。
+- `/ops` 能看到 failed row、backend logs route 内容、retry request、刷新后的 retry job row 和 succeeded job/stage terminal outcome；cycle current_state 仍保持后端持久化状态。
 
 ## artifact root
 
@@ -75,5 +76,5 @@ live 模式只有在真实依赖实际执行并记录 receipt 后才可标注为
 1. 使用 `nhms-pipeline plan-production --plan` 作为正式 scheduler/orchestrator 入口。
 2. 记录真实 `source_id`、`cycle_time`、`cycle_id`、`run_id`、failed `job_id`、`stage`、`slurm_job_id` 和 bounded `log_uri`。
 3. 通过公开 API 验证 status/stages/jobs/logs，不读取 qhh diagnostic state JSON。
-4. 用授权 operator 身份调用 retry，并记录 retry job/event、Slurm metadata 和终态。
+4. 用授权 operator 身份调用 retry，并记录 retry job/event、Slurm metadata、job/stage 终态和 cycle current_state 是否由正式 producer 更新。
 5. 如果 live Slurm/QHH 任一步 unavailable，记录具体 unavailable reason；不要把 deterministic 结果提升为 live readiness。
