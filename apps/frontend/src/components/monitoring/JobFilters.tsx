@@ -10,6 +10,7 @@ import type { JobFilters as JobFilterState } from '@/stores/monitoring'
 
 interface JobFiltersProps {
   filters: JobFilterState
+  disabled?: boolean
   onChange: (filters: JobFilterState) => void
 }
 
@@ -39,10 +40,11 @@ function nextValue(value: string) {
   return value === 'all' ? undefined : value
 }
 
-export function JobFilters({ filters, onChange }: JobFiltersProps) {
+export function JobFilters({ filters, disabled = false, onChange }: JobFiltersProps) {
   return (
     <div className="grid gap-2 sm:grid-cols-3">
       <Select
+        disabled={disabled}
         value={filters.status ?? 'all'}
         onValueChange={(value) => onChange({ ...filters, status: nextValue(value) as JobStatus | undefined })}
       >
@@ -60,6 +62,7 @@ export function JobFilters({ filters, onChange }: JobFiltersProps) {
       </Select>
 
       <Select
+        disabled={disabled}
         value={filters.runType ?? 'all'}
         onValueChange={(value) => onChange({ ...filters, runType: nextValue(value) })}
       >
@@ -77,6 +80,7 @@ export function JobFilters({ filters, onChange }: JobFiltersProps) {
       </Select>
 
       <Select
+        disabled={disabled}
         value={filters.scenario ?? 'all'}
         onValueChange={(value) => onChange({ ...filters, scenario: nextValue(value) })}
       >

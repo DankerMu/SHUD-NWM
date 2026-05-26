@@ -50,7 +50,15 @@ export default function App() {
               path="/monitoring"
               element={
                 <RBACGate roles={['operator', 'model_admin', 'sys_admin']}>
-                  <MonitoringPage />
+                  <MonitoringPage mode="monitoring" />
+                </RBACGate>
+              }
+            />
+            <Route
+              path="/ops"
+              element={
+                <RBACGate roles={['operator', 'model_admin', 'sys_admin']}>
+                  <MonitoringPage mode="ops" />
                 </RBACGate>
               }
             />

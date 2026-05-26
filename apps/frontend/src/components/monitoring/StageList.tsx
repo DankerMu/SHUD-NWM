@@ -10,6 +10,8 @@ import type { PipelineStage } from '@/stores/monitoring'
 
 interface StageListProps {
   stages: PipelineStage[]
+  unavailableReason?: string | null
+  showPendingPlaceholders?: boolean
 }
 
 const stageOrder = Object.keys(STAGE_NAMES)
@@ -29,15 +31,50 @@ function pendingStage(stage: string): PipelineStage {
   }
 }
 
-export function StageList({ stages }: StageListProps) {
+export function StageList({ stages, unavailableReason, showPendingPlaceholders = true }: StageListProps) {
   const [expandedStage, setExpandedStage] = useState<string | null>(null)
 
   const orderedStages = useMemo(() => {
     const byName = new Map(stages.map((stage) => [stage.stage, stage]))
-    const ordered = stageOrder.map((stage) => byName.get(stage) ?? pendingStage(stage))
+    const ordered = showPendingPlaceholders
+      ? stageOrder.map((stage) => byName.get(stage) ?? pendingStage(stage))
+      : stageOrder.flatMap((stage) => {
+        const row = byName.get(stage)
+        return row ? [row] : []
+      })
     const extras = stages.filter((stage) => !stageOrder.includes(stage.stage))
     return [...ordered, ...extras]
-  }, [stages])
+  }, [showPendingPlaceholders, stages])
+
+  if (unavailableReason) {
+    return (
+      <Card className="min-w-0">
+        <CardHeader>
+          <CardTitle>七阶段流水线</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="rounded-md border border-dashed border-border p-4 text-sm text-muted" role="status">
+            当前 source/cycle 的流水线阶段不可用：{unavailableReason}
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (!orderedStages.length) {
+    return (
+      <Card className="min-w-0">
+        <CardHeader>
+          <CardTitle>七阶段流水线</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="rounded-md border border-dashed border-border p-4 text-sm text-muted" role="status">
+            当前 source/cycle 暂无后端阶段记录。
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
 
   return (
     <Card className="min-w-0">

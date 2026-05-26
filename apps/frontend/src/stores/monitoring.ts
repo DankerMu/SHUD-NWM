@@ -22,6 +22,15 @@ export type JobSortOrder = 'asc' | 'desc'
 
 export type QueueState = components['schemas']['QueueDepth']
 
+export interface MonitoringPayloadContext {
+  source: string
+  cycleTime: string
+}
+
+export interface MonitoringFetchOptions {
+  clearOnFailure?: boolean
+}
+
 export interface JobFilters {
   status?: JobStatus
   runType?: string
@@ -36,8 +45,10 @@ interface MonitoringState {
   source: string
   cycleTime: string
   cycle: PipelineCycle | null
+  cycleContext: MonitoringPayloadContext | null
   stages: PipelineStage[]
   jobs: PipelineJob[]
+  jobsContext: MonitoringPayloadContext | null
   jobTotal: number
   queue: QueueState | null
   queueError: string | null
@@ -49,20 +60,62 @@ interface MonitoringState {
   error: string | null
   setSource: (source: string) => void
   setCycleTime: (cycleTime: string | null) => void
-  fetchAll: () => Promise<void>
-  fetchJobs: (filters?: JobFilters) => Promise<void>
+  clearSelectedContext: () => void
+  fetchAll: (options?: MonitoringFetchOptions) => Promise<void>
+  fetchJobs: (filters?: JobFilters, options?: MonitoringFetchOptions) => Promise<void>
 }
 
-function defaultCycleTime() {
+let fetchAllRequestSeq = 0
+let fetchJobsRequestSeq = 0
+
+export function defaultMonitoringCycleTime() {
   const date = new Date()
   date.setUTCMinutes(0, 0, 0)
   return date.toISOString().slice(0, 19) + 'Z'
 }
 
-function cycleTimeForApi(cycleTime: string | null | undefined) {
-  if (!cycleTime) return defaultCycleTime()
-  if (cycleTime.length === 16) return `${cycleTime}:00Z`
-  return cycleTime
+export function normalizeMonitoringCycleTime(cycleTime: string | null | undefined) {
+  const value = cycleTime?.trim()
+  if (!value) return defaultMonitoringCycleTime()
+  if (value.length === 16) {
+    const candidate = `${value}:00Z`
+    const date = new Date(candidate)
+    return Number.isNaN(date.getTime()) ? candidate : date.toISOString()
+  }
+  return value
+}
+
+function emptySelectedContext() {
+  return {
+    cycle: null,
+    cycleContext: null,
+    stages: [],
+    jobs: [],
+    jobsContext: null,
+    jobTotal: 0,
+  }
+}
+
+export function monitoringPayloadContext(source: string, cycleTime: string): MonitoringPayloadContext {
+  return {
+    source: source.toUpperCase(),
+    cycleTime: normalizeMonitoringCycleTime(cycleTime),
+  }
+}
+
+export function monitoringContextMatches(
+  context: MonitoringPayloadContext | null,
+  source: string,
+  cycleTime: string,
+) {
+  if (!context) return false
+  const expected = monitoringPayloadContext(source, cycleTime)
+  return context.source === expected.source && context.cycleTime === expected.cycleTime
+}
+
+function isCurrentContext(source: string, cycleTime: string) {
+  const state = useMonitoringStore.getState()
+  return state.source === source && normalizeMonitoringCycleTime(state.cycleTime) === cycleTime
 }
 
 function inferRunType(runId: string, jobType: string | null | undefined) {
@@ -110,6 +163,14 @@ async function getQueueDepth() {
   return unwrapApiData<QueueState>(data, '获取队列深度失败')
 }
 
+async function getQueueDepthState() {
+  try {
+    return { queue: await getQueueDepth(), queueError: null }
+  } catch (error) {
+    return { queue: null, queueError: getApiErrorMessage(error, '队列深度暂不可用') }
+  }
+}
+
 async function getJobsPage(source: string, cycleTime: string, filters: JobFilters) {
   const page = filters.page ?? 1
   const pageSize = filters.pageSize ?? 12
@@ -134,10 +195,12 @@ async function getJobsPage(source: string, cycleTime: string, filters: JobFilter
 
 export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   source: 'GFS',
-  cycleTime: defaultCycleTime(),
+  cycleTime: defaultMonitoringCycleTime(),
   cycle: null,
+  cycleContext: null,
   stages: [],
   jobs: [],
+  jobsContext: null,
   jobTotal: 0,
   queue: null,
   queueError: null,
@@ -147,56 +210,125 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
   isPolling: false,
   isJobsLoading: false,
   error: null,
-  setSource: (source) => set((state) => ({ source, jobFilters: { ...state.jobFilters, page: 1 } })),
-  setCycleTime: (cycleTime) => set((state) => ({
-    cycleTime: cycleTimeForApi(cycleTime),
-    jobFilters: { ...state.jobFilters, page: 1 },
-  })),
-  fetchAll: async () => {
+  setSource: (source) => set((state) => {
+    const nextSource = source.toUpperCase()
+    if (nextSource === state.source) {
+      return { jobFilters: { ...state.jobFilters, page: 1 } }
+    }
+    return {
+      source: nextSource,
+      jobFilters: { ...state.jobFilters, page: 1 },
+    }
+  }),
+  setCycleTime: (cycleTime) => set((state) => {
+    const nextCycleTime = normalizeMonitoringCycleTime(cycleTime)
+    if (nextCycleTime === state.cycleTime) {
+      return { jobFilters: { ...state.jobFilters, page: 1 } }
+    }
+    return {
+      cycleTime: nextCycleTime,
+      jobFilters: { ...state.jobFilters, page: 1 },
+    }
+  }),
+  clearSelectedContext: () => {
+    fetchAllRequestSeq += 1
+    fetchJobsRequestSeq += 1
+    set({
+      ...emptySelectedContext(),
+      operationalError: null,
+      jobsError: null,
+      error: null,
+      isPolling: false,
+      isJobsLoading: false,
+    })
+  },
+  fetchAll: async (options) => {
+    const requestId = fetchAllRequestSeq + 1
+    fetchAllRequestSeq = requestId
     const { source, cycleTime } = get()
-    const apiCycleTime = cycleTimeForApi(cycleTime)
+    const requestSource = source.toUpperCase()
+    const apiCycleTime = normalizeMonitoringCycleTime(cycleTime)
     set((state) => ({ isPolling: true, operationalError: null, queueError: null, error: state.jobsError }))
 
     try {
       const [cycle, stages] = await Promise.all([
-        getPipelineStatus(source, apiCycleTime),
-        getPipelineStages(source, apiCycleTime),
+        getPipelineStatus(requestSource, apiCycleTime),
+        getPipelineStages(requestSource, apiCycleTime),
       ])
 
-      let queue: QueueState | null = null
-      let queueError: string | null = null
-      try {
-        queue = await getQueueDepth()
-      } catch (error) {
-        queueError = getApiErrorMessage(error, '队列深度暂不可用')
+      const { queue, queueError } = await getQueueDepthState()
+
+      if (requestId !== fetchAllRequestSeq || !isCurrentContext(requestSource, apiCycleTime)) {
+        if (requestId === fetchAllRequestSeq) set({ isPolling: false })
+        return
       }
 
       set({
         cycle,
+        cycleContext: monitoringPayloadContext(requestSource, apiCycleTime),
         cycleTime: apiCycleTime,
         stages,
         queue,
         queueError,
         isPolling: false,
-        operationalError: queueError,
+        operationalError: null,
         error: queueError ?? get().jobsError,
       })
     } catch (error) {
       const message = getApiErrorMessage(error, '刷新监控数据失败')
-      set({ operationalError: message, error: message, isPolling: false })
+      const { queue, queueError } = await getQueueDepthState()
+
+      if (requestId !== fetchAllRequestSeq || !isCurrentContext(requestSource, apiCycleTime)) {
+        if (requestId === fetchAllRequestSeq) set({ isPolling: false })
+        return
+      }
+
+      if (options?.clearOnFailure) {
+        fetchJobsRequestSeq += 1
+        set({
+          ...emptySelectedContext(),
+          cycleTime: apiCycleTime,
+          queue,
+          queueError,
+          operationalError: message,
+          jobsError: null,
+          error: message,
+          isPolling: false,
+          isJobsLoading: false,
+        })
+      } else {
+        set({
+          cycleTime: apiCycleTime,
+          queue,
+          queueError,
+          operationalError: message,
+          error: message,
+          isPolling: false,
+        })
+      }
       throw error
     }
   },
-  fetchJobs: async (filters) => {
+  fetchJobs: async (filters, options) => {
+    const requestId = fetchJobsRequestSeq + 1
+    fetchJobsRequestSeq = requestId
     const { source, cycleTime, jobFilters } = get()
+    const requestSource = source.toUpperCase()
     const nextFilters = { ...jobFilters, ...filters }
-    const apiCycleTime = cycleTimeForApi(cycleTime)
+    const apiCycleTime = normalizeMonitoringCycleTime(cycleTime)
     set((state) => ({ jobFilters: nextFilters, isJobsLoading: true, jobsError: null, error: state.operationalError }))
 
     try {
-      const page = await getJobsPage(source, apiCycleTime, nextFilters)
+      const page = await getJobsPage(requestSource, apiCycleTime, nextFilters)
+
+      if (requestId !== fetchJobsRequestSeq || !isCurrentContext(requestSource, apiCycleTime)) {
+        if (requestId === fetchJobsRequestSeq) set({ isJobsLoading: false })
+        return
+      }
+
       set({
         jobs: page.items.map(normalizeJob),
+        jobsContext: monitoringPayloadContext(requestSource, apiCycleTime),
         jobTotal: page.total,
         isJobsLoading: false,
         jobsError: null,
@@ -204,7 +336,18 @@ export const useMonitoringStore = create<MonitoringState>((set, get) => ({
       })
     } catch (error) {
       const message = getApiErrorMessage(error, '获取作业列表失败')
-      set({ jobsError: message, error: get().operationalError ?? message, isJobsLoading: false })
+
+      if (requestId !== fetchJobsRequestSeq || !isCurrentContext(requestSource, apiCycleTime)) {
+        if (requestId === fetchJobsRequestSeq) set({ isJobsLoading: false })
+        return
+      }
+
+      set({
+        ...(options?.clearOnFailure ? { jobs: [], jobsContext: null, jobTotal: 0 } : {}),
+        jobsError: message,
+        error: get().operationalError ?? message,
+        isJobsLoading: false,
+      })
       throw error
     }
   },

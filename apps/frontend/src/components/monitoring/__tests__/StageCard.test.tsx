@@ -1,9 +1,14 @@
 import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { StageCard } from '@/components/monitoring/StageCard'
+import { StageList } from '@/components/monitoring/StageList'
 import type { PipelineStatus } from '@/lib/constants'
 import type { PipelineStage } from '@/stores/monitoring'
+
+vi.mock('@/components/charts/StageDurationBar', () => ({
+  StageDurationBar: () => <div>mock stage chart</div>,
+}))
 
 function makeStage(overrides: Partial<PipelineStage> = {}): PipelineStage {
   return {
@@ -41,6 +46,7 @@ describe('StageCard', () => {
     render(<StageCard stage={makeStage({ stage: 'forecast', display_status: 'running', status: 'running' })} />)
 
     expect(screen.getByText('预报')).toBeInTheDocument()
+    expect(screen.getByText('forecast')).toBeInTheDocument()
   })
 
   it('renders completion rate from basin progress', () => {
@@ -53,5 +59,39 @@ describe('StageCard', () => {
     )
 
     expect(screen.getByText(/完成率 75% \(3\/4\)/)).toBeInTheDocument()
+  })
+
+  it('renders the seven canonical stages in display order with raw ids', () => {
+    const canonicalStages = [
+      ['download', '下载'],
+      ['convert', '标准化'],
+      ['forcing', '强迫场'],
+      ['forecast', '预报'],
+      ['parse', '解析'],
+      ['frequency', '频率计算'],
+      ['publish', '发布'],
+    ] as const
+
+    render(
+      <StageList
+        stages={canonicalStages.map(([stage], index) =>
+          makeStage({
+            stage,
+            display_status: 'succeeded',
+            status: 'succeeded',
+            duration_seconds: (index + 1) * 10,
+            basin_progress: { completed: index + 1, total: 7, failed: 0 },
+          }),
+        )}
+      />,
+    )
+
+    const cards = screen.getAllByRole('button')
+    expect(cards).toHaveLength(canonicalStages.length)
+    canonicalStages.forEach(([stage, label], index) => {
+      expect(within(cards[index]).getByText(label)).toBeInTheDocument()
+      expect(within(cards[index]).getByText(stage)).toBeInTheDocument()
+      expect(within(cards[index]).getByText(new RegExp(`完成率 .*\\(${index + 1}/7\\)`))).toBeInTheDocument()
+    })
   })
 })

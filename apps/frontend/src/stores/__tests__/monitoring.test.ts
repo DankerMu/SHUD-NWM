@@ -84,6 +84,16 @@ function failure(message: string) {
   return { data: undefined, error: { error: { message } } }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve
+    reject = promiseReject
+  })
+  return { promise, resolve, reject }
+}
+
 function resetStore() {
   useMonitoringStore.setState(
     {
@@ -123,6 +133,7 @@ describe('useMonitoringStore', () => {
 
     const state = useMonitoringStore.getState()
     expect(state.cycle).toEqual(cycle)
+    expect(state.cycleContext).toEqual({ source: 'GFS', cycleTime: TEST_CYCLE_TIME })
     expect(state.stages).toHaveLength(3)
     expect(state.queue).toEqual(queue)
     expect(state.isPolling).toBe(false)
@@ -206,14 +217,199 @@ describe('useMonitoringStore', () => {
     expect(useMonitoringStore.getState().jobs).toMatchObject([
       { run_type: 'analysis', scenario: 'analysis_true_field' },
     ])
+    expect(useMonitoringStore.getState().jobsContext).toEqual({ source: 'GFS', cycleTime: TEST_CYCLE_TIME })
     expect(useMonitoringStore.getState().jobTotal).toBe(24)
   })
 
-  it('sets error state when an API call fails', async () => {
+  it('fetches status, stages, and jobs for the selected source/cycle context', async () => {
+    const calls: Array<Record<string, unknown> | undefined> = []
+    useMonitoringStore.setState({
+      source: 'IFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+    })
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } } | undefined
+      calls.push(options?.params?.query)
+      if (path === '/api/v1/pipeline/status') return success({ ...cycle, source: 'IFS', cycle_time: '2026-05-18T00:00:00.000Z' }) as never
+      if (path === '/api/v1/pipeline/stages') return success(stages) as never
+      if (path === '/api/v1/queue/depth') return success(queue) as never
+      if (path === '/api/v1/jobs') return success({ items: [makeJob({ run_id: 'ifs-run-1' })], total: 1, limit: 12, offset: 0 }) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    await useMonitoringStore.getState().fetchAll()
+    await useMonitoringStore.getState().fetchJobs()
+
+    expect(calls).toEqual([
+      { source: 'IFS', cycle_time: '2026-05-18T00:00:00.000Z' },
+      { source: 'IFS', cycle_time: '2026-05-18T00:00:00.000Z' },
+      undefined,
+      expect.objectContaining({ source: 'IFS', cycle_time: '2026-05-18T00:00:00.000Z' }),
+    ])
+    expect(useMonitoringStore.getState().jobs).toMatchObject([{ run_id: 'ifs-run-1' }])
+    expect(useMonitoringStore.getState().cycleContext).toEqual({
+      source: 'IFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+    })
+    expect(useMonitoringStore.getState().jobsContext).toEqual({
+      source: 'IFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+    })
+  })
+
+  it('clears selected payload context with selected rows', () => {
+    useMonitoringStore.setState({
+      cycle,
+      cycleContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME },
+      stages,
+      jobs: [makeJob({ run_id: 'old-cycle-run' })],
+      jobsContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME },
+      jobTotal: 1,
+    })
+
+    useMonitoringStore.getState().clearSelectedContext()
+
+    const state = useMonitoringStore.getState()
+    expect(state.cycle).toBeNull()
+    expect(state.cycleContext).toBeNull()
+    expect(state.stages).toEqual([])
+    expect(state.jobs).toEqual([])
+    expect(state.jobsContext).toBeNull()
+    expect(state.jobTotal).toBe(0)
+  })
+
+  it('ignores stale pipeline success and failure after source/cycle changes', async () => {
+    const oldStatus = deferred<unknown>()
+    const oldStages = deferred<unknown>()
+    const oldQueue = deferred<unknown>()
+    const newStatus = deferred<unknown>()
+    const newStages = deferred<unknown>()
+    const newQueue = deferred<unknown>()
+    const calls: Array<Record<string, unknown> | undefined> = []
+
+    vi.mocked(client.GET).mockImplementation((...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } } | undefined
+      calls.push(options?.params?.query)
+      const source = options?.params?.query?.source
+      if (path === '/api/v1/pipeline/status') {
+        return (source === 'GFS' ? oldStatus.promise : newStatus.promise) as never
+      }
+      if (path === '/api/v1/pipeline/stages') {
+        return (source === 'GFS' ? oldStages.promise : newStages.promise) as never
+      }
+      if (path === '/api/v1/queue/depth') {
+        return (source === 'GFS' ? oldQueue.promise : newQueue.promise) as never
+      }
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const oldFetch = useMonitoringStore.getState().fetchAll({ clearOnFailure: true })
+    useMonitoringStore.getState().setSource('IFS')
+    useMonitoringStore.getState().setCycleTime('2026-05-18T00:00:00Z')
+    const newFetch = useMonitoringStore.getState().fetchAll({ clearOnFailure: true })
+
+    newStatus.resolve(success({ ...cycle, source: 'IFS', cycle_time: '2026-05-18T00:00:00.000Z' }))
+    newStages.resolve(success([makeStage('forecast', 'succeeded', 20, 1, 1)]))
+    newQueue.resolve(success(queue))
+    await newFetch
+
+    oldStatus.resolve(success({ ...cycle, cycle_id: 'old-gfs-cycle' }))
+    oldStages.resolve(success([makeStage('download', 'failed', 99, 1, 0, 1)]))
+    oldQueue.resolve(success(queue))
+    await oldFetch
+
+    const state = useMonitoringStore.getState()
+    expect(state.source).toBe('IFS')
+    expect(state.cycle).toMatchObject({ source: 'IFS', cycle_time: '2026-05-18T00:00:00.000Z' })
+    expect(state.stages).toMatchObject([{ stage: 'forecast', display_status: 'succeeded' }])
+    expect(state.stages).not.toMatchObject([{ stage: 'download', display_status: 'failed' }])
+
+    const staleStatusFailure = deferred<unknown>()
+    const staleStagesFailure = deferred<unknown>()
+    const staleQueueFailure = deferred<unknown>()
+    vi.mocked(client.GET).mockImplementation((...args: unknown[]) => {
+      const path = String(args[0])
+      if (path === '/api/v1/pipeline/status') return staleStatusFailure.promise as never
+      if (path === '/api/v1/pipeline/stages') return staleStagesFailure.promise as never
+      if (path === '/api/v1/queue/depth') return staleQueueFailure.promise as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    useMonitoringStore.getState().setSource('IFS')
+    const staleFailure = useMonitoringStore.getState().fetchAll({ clearOnFailure: true })
+    useMonitoringStore.getState().setSource('GFS')
+    staleStatusFailure.reject(new Error('stale pipeline failed'))
+    staleStagesFailure.resolve(success(stages))
+    staleQueueFailure.resolve(success(queue))
+    await staleFailure
+
+    expect(useMonitoringStore.getState().cycle).toMatchObject({ source: 'IFS' })
+    expect(useMonitoringStore.getState().source).toBe('GFS')
+    expect(calls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'GFS', cycle_time: TEST_CYCLE_TIME }),
+      expect.objectContaining({ source: 'IFS', cycle_time: '2026-05-18T00:00:00Z' }),
+    ]))
+  })
+
+  it('ignores stale jobs success and failure after source/cycle changes', async () => {
+    const oldJobs = deferred<unknown>()
+    const newJobs = deferred<unknown>()
+
+    vi.mocked(client.GET).mockImplementation((...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } } | undefined
+      if (path !== '/api/v1/jobs') throw new Error(`Unexpected GET ${path}`)
+      return (options?.params?.query?.source === 'GFS' ? oldJobs.promise : newJobs.promise) as never
+    })
+
+    const oldFetch = useMonitoringStore.getState().fetchJobs(undefined, { clearOnFailure: true })
+    useMonitoringStore.getState().setSource('IFS')
+    useMonitoringStore.getState().setCycleTime('2026-05-18T00:00:00Z')
+    const newFetch = useMonitoringStore.getState().fetchJobs(undefined, { clearOnFailure: true })
+
+    newJobs.resolve(success({ items: [makeJob({ run_id: 'ifs-run-1' })], total: 1, limit: 12, offset: 0 }))
+    await newFetch
+
+    oldJobs.resolve(success({ items: [makeJob({ run_id: 'old-gfs-run' })], total: 1, limit: 12, offset: 0 }))
+    await oldFetch
+
+    expect(useMonitoringStore.getState().jobs).toMatchObject([{ run_id: 'ifs-run-1' }])
+
+    const staleJobsFailure = deferred<unknown>()
+    vi.mocked(client.GET).mockImplementation((...args: unknown[]) => {
+      const path = String(args[0])
+      if (path !== '/api/v1/jobs') throw new Error(`Unexpected GET ${path}`)
+      return staleJobsFailure.promise as never
+    })
+
+    useMonitoringStore.getState().setSource('IFS')
+    const staleFailure = useMonitoringStore.getState().fetchJobs(undefined, { clearOnFailure: true })
+    useMonitoringStore.getState().setSource('GFS')
+    staleJobsFailure.reject(new Error('stale jobs failed'))
+    await staleFailure
+
+    expect(useMonitoringStore.getState().jobs).toMatchObject([{ run_id: 'ifs-run-1' }])
+    expect(useMonitoringStore.getState().jobsError).toBeNull()
+  })
+
+  it('preserves last-known pipeline rows on legacy monitoring refresh failure', async () => {
+    useMonitoringStore.setState({
+      cycle,
+      cycleContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME },
+      stages,
+      jobs: [makeJob({ run_id: 'old-cycle-run' })],
+      jobsContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME },
+      jobTotal: 1,
+    })
+
     vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
       const path = String(args[0])
       if (path === '/api/v1/pipeline/status') return failure('backend unavailable') as never
       if (path === '/api/v1/pipeline/stages') return success(stages) as never
+      if (path === '/api/v1/queue/depth') return success(queue) as never
       throw new Error(`Unexpected GET ${path}`)
     })
 
@@ -221,6 +417,44 @@ describe('useMonitoringStore', () => {
 
     const state = useMonitoringStore.getState()
     expect(state.error).toBe('backend unavailable')
+    expect(state.operationalError).toBe('backend unavailable')
+    expect(state.cycle).toEqual(cycle)
+    expect(state.cycleContext).toEqual({ source: 'GFS', cycleTime: TEST_CYCLE_TIME })
+    expect(state.stages).toEqual(stages)
+    expect(state.jobs).toMatchObject([{ run_id: 'old-cycle-run' }])
+    expect(state.jobsContext).toEqual({ source: 'GFS', cycleTime: TEST_CYCLE_TIME })
+    expect(state.jobTotal).toBe(1)
+    expect(state.isPolling).toBe(false)
+  })
+
+  it('clears selected context on ops pipeline refresh failure', async () => {
+    useMonitoringStore.setState({
+      cycle,
+      cycleContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME },
+      stages,
+      jobs: [makeJob({ run_id: 'old-cycle-run' })],
+      jobsContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME },
+      jobTotal: 1,
+    })
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      if (path === '/api/v1/pipeline/status') return failure('backend unavailable') as never
+      if (path === '/api/v1/pipeline/stages') return success(stages) as never
+      if (path === '/api/v1/queue/depth') return success(queue) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    await expect(useMonitoringStore.getState().fetchAll({ clearOnFailure: true })).rejects.toThrow('backend unavailable')
+
+    const state = useMonitoringStore.getState()
+    expect(state.error).toBe('backend unavailable')
+    expect(state.cycle).toBeNull()
+    expect(state.cycleContext).toBeNull()
+    expect(state.stages).toEqual([])
+    expect(state.jobs).toEqual([])
+    expect(state.jobsContext).toBeNull()
+    expect(state.jobTotal).toBe(0)
     expect(state.isPolling).toBe(false)
   })
 
@@ -241,5 +475,39 @@ describe('useMonitoringStore', () => {
     expect(state.jobsError).toBeNull()
     expect(state.error).toBe('pipeline unavailable')
     expect(state.jobs).toEqual([])
+  })
+
+  it('preserves last-known jobs on legacy monitoring jobs fetch failure', async () => {
+    useMonitoringStore.setState({
+      jobs: [makeJob({ run_id: 'old-cycle-run' })],
+      jobsContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME },
+      jobTotal: 1,
+    })
+    vi.mocked(client.GET).mockResolvedValue(failure('jobs unsupported for selected context') as never)
+
+    await expect(useMonitoringStore.getState().fetchJobs()).rejects.toThrow('jobs unsupported for selected context')
+
+    const state = useMonitoringStore.getState()
+    expect(state.jobsError).toBe('jobs unsupported for selected context')
+    expect(state.jobs).toMatchObject([{ run_id: 'old-cycle-run' }])
+    expect(state.jobsContext).toEqual({ source: 'GFS', cycleTime: TEST_CYCLE_TIME })
+    expect(state.jobTotal).toBe(1)
+  })
+
+  it('clears stale jobs on ops jobs fetch failure', async () => {
+    useMonitoringStore.setState({
+      jobs: [makeJob({ run_id: 'old-cycle-run' })],
+      jobsContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME },
+      jobTotal: 1,
+    })
+    vi.mocked(client.GET).mockResolvedValue(failure('jobs unsupported for selected context') as never)
+
+    await expect(useMonitoringStore.getState().fetchJobs(undefined, { clearOnFailure: true })).rejects.toThrow('jobs unsupported for selected context')
+
+    const state = useMonitoringStore.getState()
+    expect(state.jobsError).toBe('jobs unsupported for selected context')
+    expect(state.jobs).toEqual([])
+    expect(state.jobsContext).toBeNull()
+    expect(state.jobTotal).toBe(0)
   })
 })
