@@ -837,6 +837,7 @@ async function assertStateOracle(page: Page, stateLabel: string) {
       break
     case 'failed-job-error':
       await expect(page.getByText('monitoring fixture API error')).toBeVisible()
+      await expect(page.getByText('monitoring fixture API error')).toHaveCount(1)
       await expect(page.getByText('暂无作业')).toBeVisible()
       await expect(page.getByText('partial fixture failure')).toHaveCount(0)
       await expect(page.locator('tbody').getByText('failed')).toHaveCount(0)

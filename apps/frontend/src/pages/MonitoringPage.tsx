@@ -92,6 +92,9 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const visibleStages = isOperationalDataReady && hasVisibleCyclePayload ? stages : []
   const visibleQueue = isOperationalDataReady ? queue : null
   const visibleQueueError = isOperationalDataReady ? queueError : null
+  const stageListUnavailableReason = dataUnavailableReason
+    ?? (isOpsMode ? operationalError : null)
+    ?? displayPayloadUnavailableReason
 
   const updateQueryState = useCallback((nextSource: string, nextCycleTime: string) => {
     const params = new URLSearchParams(location.search)
@@ -233,7 +236,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
       <div className="grid gap-4 min-[800px]:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.2fr)] min-[1200px]:grid-cols-[20rem_minmax(0,1fr)_22rem]">
         <StageList
           stages={visibleStages}
-          unavailableReason={dataUnavailableReason ?? operationalError ?? displayPayloadUnavailableReason}
+          unavailableReason={stageListUnavailableReason}
           showPendingPlaceholders={!isOpsMode}
         />
         <JobsTable

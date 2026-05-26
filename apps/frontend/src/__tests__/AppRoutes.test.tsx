@@ -1112,6 +1112,8 @@ beforeEach(() => {
     jobTotal: 0,
     queue: null,
     queueError: null,
+    operationalError: null,
+    jobsError: null,
     jobFilters: { page: 1, pageSize: 12, sortBy: 'submitted_at', sortOrder: 'desc' },
     isPolling: false,
     isJobsLoading: false,
@@ -5890,6 +5892,27 @@ describe('App route state', () => {
     expect(screen.getByRole('link', { name: /产品监控/ })).toHaveClass('border-accent')
   })
 
+  it('keeps legacy /monitoring operational errors out of StageList unavailable text', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    useMonitoringStore.setState({
+      operationalError: 'monitoring fixture API error',
+      error: 'monitoring fixture API error',
+      stages: [],
+      jobs: [],
+      jobTotal: 0,
+      fetchAll: vi.fn().mockResolvedValue(undefined),
+      fetchJobs: vi.fn().mockResolvedValue(undefined),
+    })
+    window.history.pushState({}, '', '/monitoring')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
+    expect(screen.getAllByText(/monitoring fixture API error/)).toHaveLength(1)
+    expect(screen.queryByText(/当前 source\/cycle 的流水线阶段不可用：monitoring fixture API error/)).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '七阶段流水线' })).toBeInTheDocument()
+  })
+
   it('routes /ops through the same RBAC gate with active ops navigation and monitoring compatibility intact', async () => {
     useAuthStore.setState({ role: 'operator' })
     useMonitoringStore.setState({
@@ -5948,6 +5971,30 @@ describe('App route state', () => {
     expect(screen.queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps /ops operational errors as explicit StageList unavailable state', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      cycle: null,
+      cycleContext: null,
+      stages: [],
+      jobs: [],
+      jobsContext: null,
+      jobTotal: 0,
+      operationalError: 'ops fixture API error',
+      error: 'ops fixture API error',
+      fetchAll: vi.fn().mockResolvedValue(undefined),
+      fetchJobs: vi.fn().mockResolvedValue(undefined),
+    })
+    window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(screen.getByText(/当前 source\/cycle 的流水线阶段不可用：ops fixture API error/)).toBeInTheDocument()
   })
 
   it('treats trailing-slash /ops/ as ops mode and keeps selector updates on /ops', async () => {
