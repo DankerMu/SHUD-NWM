@@ -6,6 +6,7 @@ export type OperatorRole = Extract<AuthRole, 'operator' | 'model_admin' | 'sys_a
 const authRoles: AuthRole[] = ['viewer', 'analyst', 'operator', 'model_admin', 'sys_admin']
 const operatorRoles: OperatorRole[] = ['operator', 'model_admin', 'sys_admin']
 export const isRoleOverrideEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_ROLE_OVERRIDE === 'true'
+const isTestMode = import.meta.env.MODE === 'test'
 
 function configuredRole(): AuthRole {
   const role = import.meta.env.VITE_AUTH_ROLE
@@ -17,7 +18,7 @@ function isOperatorRole(role: AuthRole): role is OperatorRole {
 }
 
 export function canUseDevRoleActions(role: AuthRole): role is OperatorRole {
-  return isRoleOverrideEnabled && isOperatorRole(role)
+  return (isRoleOverrideEnabled || isTestMode) && isOperatorRole(role)
 }
 
 interface AuthState {

@@ -748,3 +748,98 @@ Review focus:
 - Confirm selected source/cycle identity is not split between URL, store, status fetch, stage fetch, and job fetch.
 - Confirm unavailable/error states clear or label stale data instead of mixing cycles.
 - Confirm implementation stays within #211 and does not wire mutating retry/log controls.
+
+## Issue #212 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM frontend operations controls and backend RBAC regression surface
+Repair intensity: high
+
+Change surface:
+- `apps/frontend/src/pages/MonitoringPage.tsx` ops-mode wiring for log and retry controls.
+- `apps/frontend/src/components/monitoring/JobsTable.tsx` and `LogModal.tsx` log-modal, retry visibility, retry request, and refresh behavior.
+- `apps/frontend/src/stores/auth.ts` role-gating helpers only if needed to preserve existing operator/model-admin/sys-admin behavior.
+- Frontend route/component/store tests for `/ops` controls, backend-log error states, retry refresh, non-operator gating, and `/monitoring` compatibility.
+- Backend authorization regression tests around `/api/v1/runs/{run_id}/retry` and `/api/v1/runs/{run_id}/cancel` only if the existing coverage is insufficient.
+
+Must preserve:
+- `/ops` continues to use the source/cycle context and stale-payload protections introduced by #211; retry refresh must not display jobs/stages from another cycle.
+- Existing `/monitoring` behavior remains compatible, including log modal/retry/cancel controls already exposed there.
+- Mutating controls are only visible/enabled for authorized operator-style roles according to existing frontend RBAC helpers, and direct backend retry/cancel calls remain protected by canonical RBAC.
+- Logs are fetched only through `GET /api/v1/jobs/{job_id}/logs`; the frontend never exposes `log_uri` as a local path instruction or attempts direct filesystem/object-store access.
+- Retry is run-scoped through `POST /api/v1/runs/{run_id}/retry`; the UI must not retry by `job_id`, synthesize a run id, or create duplicate local state before the backend responds.
+
+Must add/change:
+- Enable `/ops` log buttons and modal content/error flows for formal jobs with bounded backend log responses or explicit unavailable/error text.
+- Show restart actions in `/ops` for `failed`, `submission_failed`, `partially_failed`, and `permanently_failed` jobs/runs only when the user is authorized.
+- Wire restart to the backend retry route with the existing dev-role/test header behavior, then refresh status, stages, jobs, and visible log state after success or terminal failure.
+- Keep non-operator UI free of mutating retry/cancel controls and maintain backend tests proving unauthorized direct retry/cancel calls do not mutate state.
+- Add deterministic frontend tests for log success/error, retry visibility, retry API call, refresh sequencing, source/cycle context preservation, non-operator gating, and `/monitoring` compatibility.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - `/ops` exposes operational retry/log controls over public frontend routes and existing backend API entrypoints.
+- Config / project setup: not selected - no new deployment flags or operator configuration.
+- File IO / path safety / overwrite: selected - log display must remain bounded and backend-mediated; frontend must not dereference `log_uri`.
+- Schema / columns / units / field names: selected - job status, `run_id`, `log_uri`, retry metadata, and `JobLogs` response fields must match existing OpenAPI/generated types.
+- Geospatial / CRS / shapefile sidecars: not selected - no map/geometry changes.
+- Time series / forcing / temporal boundaries: selected - source/cycle context and polling refresh must not mix cycles after retry.
+- Numerical stability / conservation / NaN: not selected - no model computation or numerical series changes.
+- Solver runtime / performance / threading: not selected - no SHUD runtime behavior.
+- Resource limits / large input / discovery: selected - log modal uses bounded backend content and jobs pagination/polling remains bounded.
+- Legacy compatibility / examples: selected - existing `/monitoring` controls and tests must remain compatible while `/ops` gains the same authorized controls.
+- Error handling / rollback / partial outputs: selected - log failures, retry API failures, RBAC denials, and stale refresh failures must show stable states and avoid optimistic mutation.
+- Release / packaging / dependency compatibility: selected - frontend tests/build and any backend regression tests must use existing toolchains and types.
+- Documentation / migration notes: selected - PR evidence must label this as UI/API-control closure only, not #213 controlled live failure proof or final production readiness.
+
+Required evidence:
+- Frontend route tests: `/ops` as authorized operator shows log controls and retry for each retryable failed status, while `/monitoring` remains compatible.
+- Frontend RBAC tests: viewer/non-operator access does not show retry/cancel controls; authorized operator/model-admin/sys-admin roles preserve intended controls where existing policy allows them.
+- Log-modal tests: successful backend `JobLogs` content renders from the bounded API response, empty/unavailable/error responses render explicit text, and `log_uri` is not presented as a clickable/local path action.
+- Retry tests: clicking restart posts to `/api/v1/runs/{run_id}/retry` with the selected run id and authorized role evidence, disables duplicate clicks while pending, shows success/error feedback, and refreshes `fetchAll` plus jobs for the same source/cycle context after success and policy/terminal failures.
+- Context/stale-state tests: route/source/cycle changes during or after retry do not leave previous-cycle jobs/stages visible as selected-cycle truth.
+- Backend regression evidence: existing or added tests prove unauthorized direct retry/cancel calls are rejected before mutation, and allowed retry covers `failed`, `submission_failed`, `partially_failed`, and `permanently_failed`.
+- Regression commands: `cd apps/frontend && corepack pnpm test -- --run apps/frontend/src/__tests__/AppRoutes.test.tsx apps/frontend/src/components/monitoring/__tests__/JobsTable.test.tsx apps/frontend/src/components/monitoring/__tests__/LogModal.test.tsx apps/frontend/src/stores/__tests__/monitoring.test.ts`, `cd apps/frontend && corepack pnpm test`, `cd apps/frontend && corepack pnpm build`, `uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: every `/ops` log or retry action must be authorized, bound to the selected formal pipeline job/run and source/cycle context, mediated by backend APIs, and followed by a scoped refresh without local log-path access, optimistic mutation, or stale cross-cycle display.
+Source-of-truth identity/contract: frontend auth role + selected URL/store `source` and `cycleTime` + `PipelineJob.job_id`, `PipelineJob.run_id`, `PipelineJob.status`, `PipelineJob.log_uri` + backend `JobLogs` and `RetryRunResult` contracts.
+Surfaces:
+- Producers: backend pipeline APIs and persisted pipeline jobs from #210; unchanged except optional auth regression tests.
+- Validators/preflight: frontend role/action gating, retryable status set, `run_id` presence, `job_id` log lookup, route source/cycle validation, backend RBAC guards.
+- Storage/cache/query: `useMonitoringStore` status/stage/jobs context, polling, request sequencing, and post-action refresh.
+- Public routes/entrypoints: `/ops`, existing `/monitoring`, `GET /api/v1/jobs/{job_id}/logs`, `POST /api/v1/runs/{run_id}/retry`, and existing cancel route for RBAC regression.
+- Frontend/downstream consumers: `MonitoringPage`, `JobsTable`, `LogModal`, toast/error surfaces, route tests, and M15 visual evidence consumers where relevant.
+- Failure paths/rollback/stale state: unauthorized viewer/direct API calls, missing `run_id`, missing/failed logs, retry policy failure, retry transport failure, pending duplicate clicks, source/cycle changes during refresh, stale jobs after backend error.
+- Evidence/audit/readiness: frontend tests/build, backend auth regression tests if added, OpenSpec validation, and PR review evidence; no live controlled retry proof in this issue.
+Regression rows:
+- `/ops` operator + job status `failed|submission_failed|partially_failed|permanently_failed` + `run_id` -> restart button visible, one backend retry POST for that run, controls disabled while pending, then status/stages/jobs/log visibility refreshed for the selected source/cycle.
+- `/ops` operator + non-retryable or missing-`run_id` job -> no restart action and no synthesized retry request.
+- `/ops` viewer/non-operator -> no mutating retry/cancel controls, while backend direct retry/cancel requests remain `RBAC_FORBIDDEN` and original job state is unchanged.
+- log button for job with logs -> modal fetches `GET /api/v1/jobs/{job_id}/logs` and renders bounded response content or `(空日志)`; frontend does not render `log_uri` as a local path instruction.
+- log button when backend returns missing/unavailable/error -> modal remains open with explicit failure/unavailable text and no stale content from a previous job.
+- retry success, RBAC failure, terminal backend failure, or network error -> visible toast/error state plus scoped `fetchAll` and `fetchJobs` refresh where possible; no optimistic local status mutation.
+- source/cycle changes before retry refresh completes -> request sequencing/context checks prevent previous-cycle jobs/stages from appearing under the new `/ops` query context.
+- existing `/monitoring` controls and tests -> unchanged behavior except shared component fixes that preserve compatibility.
+
+Boundary-surface checklist:
+- Shared helper roots: auth role helper, retryable status classification, API error parsing, log modal fetch lifecycle, monitoring store context/request sequencing.
+- Public entrypoints: `/ops`, `/monitoring`, jobs log route, run retry route, run cancel route for auth regression.
+- Read surfaces: `PipelineJob` rows from frontend store/API, `JobLogs` backend response; no direct `log_uri` reads in frontend.
+- Write/delete/overwrite surfaces: retry POST only; no delete/overwrite behavior and cancel remains existing behavior.
+- Staging/publish/rollback surfaces: retry status transition and refresh only; no product publish/rollback.
+- Producer/consumer evidence boundaries: backend controls are authoritative; frontend action success depends on backend response and refresh.
+- Stale-state/idempotency boundaries: duplicate click prevention, pending action cleanup, stale log cleanup on job changes, and source/cycle context guards.
+- Unchanged downstream consumers: `/monitoring`, existing monitoring tests, OpenAPI-generated type consumers, M15 visual evidence tests.
+
+Non-goals:
+- Implementing controlled live failure/retry proof or Slurm transition evidence; #213 owns that.
+- Changing scheduler persistence, retry service semantics, OpenAPI schemas, station-series, latest-product, `/hydro-met`, or river/station chart behavior.
+- Adding final production IdP behavior beyond existing documented dev-role/test and live-proof auth behavior.
+- Adding new log storage backends or exposing object-store/local paths to the browser.
+
+Review focus:
+- Confirm `/ops` controls are intentionally enabled only under authorized roles and retryable statuses.
+- Confirm logs are backend-mediated and stale modal content is cleared across job changes/errors.
+- Confirm retry uses `run_id`, refreshes scoped status/stages/jobs, and preserves #211 source/cycle stale-state guards.
+- Confirm frontend UI gating and backend direct-call RBAC tests cover both allowed and denied paths.
