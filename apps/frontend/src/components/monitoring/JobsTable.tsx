@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, RotateCcw, Square, Terminal } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 import { client } from '@/api/client'
 import { getApiErrorMessage } from '@/api/response'
@@ -48,10 +48,29 @@ function getApiErrorCode(error: unknown) {
   return envelope.error?.code ?? null
 }
 
-export function JobsTable() {
+interface JobsTableProps {
+  actionsEnabled?: boolean
+  autoFetch?: boolean
+  clearOnFailure?: boolean
+  displayEnabled?: boolean
+  fetchEnabled?: boolean
+  logControlsEnabled?: boolean
+  unavailableReason?: string | null
+}
+
+export function JobsTable({
+  actionsEnabled = true,
+  autoFetch = true,
+  clearOnFailure = false,
+  displayEnabled,
+  fetchEnabled = true,
+  logControlsEnabled = true,
+  unavailableReason = null,
+}: JobsTableProps) {
   const role = useAuthStore((state) => state.role)
   const jobs = useMonitoringStore((state) => state.jobs)
   const jobTotal = useMonitoringStore((state) => state.jobTotal)
+  const jobsError = useMonitoringStore((state) => state.jobsError)
   const filters = useMonitoringStore((state) => state.jobFilters)
   const isJobsLoading = useMonitoringStore((state) => state.isJobsLoading)
   const fetchJobs = useMonitoringStore((state) => state.fetchJobs)
@@ -63,27 +82,40 @@ export function JobsTable() {
 
   const page = filters.page ?? 1
   const pageSize = filters.pageSize ?? 12
-  const pageCount = Math.max(1, Math.ceil(jobTotal / pageSize))
   const sortKey = filters.sortBy ?? 'submitted_at'
   const sortDirection = filters.sortOrder ?? 'desc'
+  const controlsVisible = logControlsEnabled || actionsEnabled
+  const canDisplayRows = displayEnabled ?? fetchEnabled
+  const visibleJobs = canDisplayRows ? jobs : []
+  const visibleJobTotal = canDisplayRows ? jobTotal : 0
+  const visiblePage = canDisplayRows ? page : 1
+  const visiblePageCount = Math.max(1, Math.ceil(visibleJobTotal / pageSize))
+  const controlsDisabled = !fetchEnabled || isJobsLoading
+
+  const requestJobs = useCallback(async (nextFilters?: JobFilterState) => {
+    if (!fetchEnabled) return
+    await fetchJobs(nextFilters, { clearOnFailure })
+  }, [clearOnFailure, fetchEnabled, fetchJobs])
 
   useEffect(() => {
-    void fetchJobs().catch(() => undefined)
-  }, [fetchJobs])
+    if (!autoFetch || !fetchEnabled) return
+    void requestJobs().catch(() => undefined)
+  }, [autoFetch, fetchEnabled, requestJobs])
 
-  const actionRole = canUseDevRoleActions(role) ? role : null
+  const actionRole = fetchEnabled && actionsEnabled && canUseDevRoleActions(role) ? role : null
 
   const updateFilters = (nextFilters: JobFilterState) => {
-    void fetchJobs({ ...nextFilters, page: 1, pageSize }).catch(() => undefined)
+    void requestJobs({ ...nextFilters, page: 1, pageSize }).catch(() => undefined)
   }
 
   const toggleSort = (key: SortKey) => {
     const nextDirection = sortKey === key && sortDirection === 'desc' ? 'asc' : 'desc'
-    void fetchJobs({ ...filters, sortBy: key, sortOrder: nextDirection, page: 1, pageSize }).catch(() => undefined)
+    void requestJobs({ ...filters, sortBy: key, sortOrder: nextDirection, page: 1, pageSize }).catch(() => undefined)
   }
 
   const runAction = async (job: PipelineJob, action: 'retry' | 'cancel') => {
     if (!job.run_id) return
+    if (!fetchEnabled) return
     if (!actionRole) return
 
     const actionKey = `${action}:${job.run_id}`
@@ -104,8 +136,8 @@ export function JobsTable() {
             variant: 'destructive',
           })
           await Promise.all([
-            fetchAll().catch(() => undefined),
-            fetchJobs().catch(() => undefined),
+            fetchAll({ clearOnFailure }).catch(() => undefined),
+            requestJobs().catch(() => undefined),
           ])
           return
         }
@@ -114,8 +146,8 @@ export function JobsTable() {
 
       toast({ title: action === 'retry' ? '重试已提交' : '取消请求已提交' })
       await Promise.all([
-        fetchAll().catch(() => undefined),
-        fetchJobs().catch(() => undefined),
+        fetchAll({ clearOnFailure }).catch(() => undefined),
+        requestJobs().catch(() => undefined),
       ])
     } catch (error) {
       toast({
@@ -134,90 +166,128 @@ export function JobsTable() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <CardTitle>作业列表</CardTitle>
           <div className="text-sm text-muted">
-            总数 {jobTotal}，第 {page}/{pageCount} 页
+            总数 {visibleJobTotal}，第 {visiblePage}/{visiblePageCount} 页
           </div>
         </div>
-        <JobFilters filters={filters} onChange={updateFilters} />
+        <JobFilters filters={filters} disabled={!fetchEnabled} onChange={updateFilters} />
       </CardHeader>
       <CardContent className="space-y-3">
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead>job_id</TableHead>
               <TableHead>run_id</TableHead>
+              <TableHead>stage</TableHead>
               <TableHead>model_id</TableHead>
-              <TableHead>run_type</TableHead>
-              <TableHead>scenario</TableHead>
               <TableHead>status</TableHead>
               <TableHead>slurm_job_id</TableHead>
               <TableHead>
-                <Button variant="ghost" size="sm" className="-ml-3 h-8 px-2" onClick={() => toggleSort('submitted_at')}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 h-8 px-2"
+                  disabled={!fetchEnabled}
+                  onClick={() => toggleSort('submitted_at')}
+                >
                   submitted_at
                   <SortIcon active={sortKey === 'submitted_at'} direction={sortDirection} />
                 </Button>
               </TableHead>
+              <TableHead>started_at</TableHead>
+              <TableHead>finished_at</TableHead>
               <TableHead>
-                <Button variant="ghost" size="sm" className="-ml-3 h-8 px-2" onClick={() => toggleSort('duration_seconds')}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="-ml-3 h-8 px-2"
+                  disabled={!fetchEnabled}
+                  onClick={() => toggleSort('duration_seconds')}
+                >
                   duration
                   <SortIcon active={sortKey === 'duration_seconds'} direction={sortDirection} />
                 </Button>
               </TableHead>
-              <TableHead>操作</TableHead>
+              <TableHead>retry_count</TableHead>
+              <TableHead>log</TableHead>
+              {controlsVisible ? <TableHead>操作</TableHead> : null}
             </TableRow>
           </TableHeader>
           <TableBody>
-            {jobs.length ? (
-              jobs.map((job) => {
+            {visibleJobs.length ? (
+              visibleJobs.map((job) => {
                 const retryKey = `retry:${job.run_id ?? ''}`
                 const cancelKey = `cancel:${job.run_id ?? ''}`
+                const logAvailable = Boolean(job.log_uri)
                 return (
                   <TableRow key={job.job_id}>
+                    <TableCell className="max-w-36 truncate font-mono text-xs">{job.job_id}</TableCell>
                     <TableCell className="max-w-44 truncate font-medium">{job.run_id ?? '-'}</TableCell>
+                    <TableCell>{job.stage ?? job.job_type ?? '-'}</TableCell>
                     <TableCell>{job.model_id ?? '-'}</TableCell>
-                    <TableCell>{job.run_type ?? '-'}</TableCell>
-                    <TableCell className="max-w-48 truncate">{job.scenario ?? '-'}</TableCell>
                     <TableCell>
                       <Badge className={cn('whitespace-nowrap', statusClass(job.status))}>{job.status}</Badge>
                     </TableCell>
                     <TableCell>{job.slurm_job_id ?? '-'}</TableCell>
                     <TableCell className="whitespace-nowrap">{formatDate(job.submitted_at)}</TableCell>
+                    <TableCell className="whitespace-nowrap">{formatDate(job.started_at)}</TableCell>
+                    <TableCell className="whitespace-nowrap">{formatDate(job.finished_at)}</TableCell>
                     <TableCell className="whitespace-nowrap">{formatDuration(job.duration_seconds)}</TableCell>
+                    <TableCell>{job.retry_count}</TableCell>
                     <TableCell>
-                      <div className="flex flex-wrap gap-1.5">
-                        <Button variant="outline" size="sm" onClick={() => setLogJobId(job.job_id)}>
-                          <Terminal className="size-3.5" />
-                          查看日志
-                        </Button>
-                        {actionRole && retryableStatuses.has(job.status) && job.run_id ? (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={pendingAction === retryKey}
-                            onClick={() => void runAction(job, 'retry')}
-                          >
-                            <RotateCcw className="size-3.5" />
-                            重试
-                          </Button>
-                        ) : null}
-                        {actionRole && activeStatuses.has(job.status) && job.run_id ? (
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            disabled={pendingAction === cancelKey}
-                            onClick={() => void runAction(job, 'cancel')}
-                          >
-                            <Square className="size-3.5" />
-                            取消
-                          </Button>
-                        ) : null}
-                      </div>
+                      <Badge className={cn(
+                        'whitespace-nowrap',
+                        logAvailable ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-border bg-muted/10 text-muted',
+                      )}>
+                        {logAvailable ? 'available' : 'unavailable'}
+                      </Badge>
                     </TableCell>
+                    {controlsVisible ? (
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1.5">
+                          {logControlsEnabled ? (
+                            <Button variant="outline" size="sm" onClick={() => setLogJobId(job.job_id)}>
+                              <Terminal className="size-3.5" />
+                              查看日志
+                            </Button>
+                          ) : null}
+                          {actionRole && retryableStatuses.has(job.status) && job.run_id ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={pendingAction === retryKey}
+                              onClick={() => void runAction(job, 'retry')}
+                            >
+                              <RotateCcw className="size-3.5" />
+                              重试
+                            </Button>
+                          ) : null}
+                          {actionRole && activeStatuses.has(job.status) && job.run_id ? (
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              disabled={pendingAction === cancelKey}
+                              onClick={() => void runAction(job, 'cancel')}
+                            >
+                              <Square className="size-3.5" />
+                              取消
+                            </Button>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                    ) : null}
                   </TableRow>
                 )
               })
             ) : (
               <TableRow>
-                <TableCell colSpan={9} className="h-24 text-center text-muted">
-                  {isJobsLoading ? '加载中...' : '暂无作业'}
+                <TableCell colSpan={controlsVisible ? 13 : 12} className="h-24 text-center text-muted">
+                  {!canDisplayRows
+                    ? `当前 source/cycle 的作业不可用：${unavailableReason ?? jobsError ?? '当前路由不支持作业查询'}`
+                    : isJobsLoading
+                      ? '加载中...'
+                      : jobsError
+                        ? `当前 source/cycle 的作业不可用：${jobsError}`
+                        : '暂无作业'}
                 </TableCell>
               </TableRow>
             )}
@@ -232,8 +302,8 @@ export function JobsTable() {
             <Button
               variant="outline"
               size="sm"
-              disabled={page <= 1 || isJobsLoading}
-              onClick={() => void fetchJobs({ ...filters, page: Math.max(1, page - 1), pageSize }).catch(() => undefined)}
+              disabled={page <= 1 || controlsDisabled}
+              onClick={() => void requestJobs({ ...filters, page: Math.max(1, page - 1), pageSize }).catch(() => undefined)}
             >
               <ChevronLeft className="size-4" />
               上一页
@@ -241,8 +311,8 @@ export function JobsTable() {
             <Button
               variant="outline"
               size="sm"
-              disabled={page >= pageCount || isJobsLoading}
-              onClick={() => void fetchJobs({ ...filters, page: Math.min(pageCount, page + 1), pageSize }).catch(() => undefined)}
+              disabled={page >= visiblePageCount || controlsDisabled}
+              onClick={() => void requestJobs({ ...filters, page: Math.min(visiblePageCount, page + 1), pageSize }).catch(() => undefined)}
             >
               下一页
               <ChevronRight className="size-4" />
@@ -250,7 +320,9 @@ export function JobsTable() {
           </div>
         </div>
       </CardContent>
-      <LogModal jobId={logJobId} open={Boolean(logJobId)} onOpenChange={(open) => !open && setLogJobId(null)} />
+      {logControlsEnabled ? (
+        <LogModal jobId={logJobId} open={Boolean(logJobId)} onOpenChange={(open) => !open && setLogJobId(null)} />
+      ) : null}
     </Card>
   )
 }

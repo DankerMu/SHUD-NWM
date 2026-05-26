@@ -200,6 +200,16 @@ vi.mock('echarts-for-react/lib/core', () => ({
 const noopAsync = vi.fn().mockResolvedValue(undefined)
 const overviewAsync = vi.fn().mockResolvedValue(undefined)
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve
+    reject = promiseReject
+  })
+  return { promise, resolve, reject }
+}
+
 const m11LayerFreshness = {
   updatedAt: null,
   cycleTime: '2026-05-18T00:00:00.000Z',
@@ -1095,8 +1105,10 @@ beforeEach(() => {
     source: 'GFS',
     cycleTime: '2026-05-09T00:00:00Z',
     cycle: null,
+    cycleContext: null,
     stages: [],
     jobs: [],
+    jobsContext: null,
     jobTotal: 0,
     queue: null,
     queueError: null,
@@ -5876,6 +5888,949 @@ describe('App route state', () => {
     expect(screen.getByRole('heading', { name: '趋势' })).toBeInTheDocument()
     expect(within(screen.getByRole('row', { name: /run-failed/ })).getByText('model-b')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /产品监控/ })).toHaveClass('border-accent')
+  })
+
+  it('routes /ops through the same RBAC gate with active ops navigation and monitoring compatibility intact', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    useMonitoringStore.setState({
+      source: 'IFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      cycle: {
+        source: 'IFS',
+        cycle_time: '2026-05-18T00:00:00.000Z',
+        current_state: 'running',
+        started_at: '2026-05-09T00:00:30Z',
+        updated_at: '2026-05-09T00:08:00Z',
+        job_counts: { succeeded: 3, failed: 0, running: 1, pending: 2 },
+      },
+      cycleContext: { source: 'IFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+      stages: [],
+      jobs: [
+        {
+          job_id: 'job-ops',
+          run_id: 'run-ops',
+          cycle_id: 'cycle-ops',
+          job_type: 'forecast',
+          slurm_job_id: '2001',
+          model_id: 'model-ops',
+          status: 'failed',
+          stage: 'forecast',
+          submitted_at: '2026-05-09T00:03:00Z',
+          started_at: '2026-05-09T00:04:00Z',
+          finished_at: '2026-05-09T00:06:00Z',
+          exit_code: 1,
+          retry_count: 2,
+          error_code: 'E_MODEL',
+          error_message: 'model failed',
+          log_uri: 's3://logs/job-ops.log',
+          duration_seconds: 120,
+        },
+      ],
+      jobsContext: { source: 'IFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+      jobTotal: 1,
+      queue: { running: 2, pending: 4, idle: 6 },
+    })
+    window.history.pushState({}, '', '/ops?source=ifs&cycle=2026-05-18T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(useMonitoringStore.getState()).toMatchObject({
+        source: 'IFS',
+        cycleTime: '2026-05-18T00:00:00.000Z',
+      }),
+    )
+    expect(screen.queryByText('权限不足')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /系统运维/ })).toHaveClass('border-accent')
+    expect(screen.getByRole('link', { name: /产品监控/ })).toHaveAttribute('href', '/monitoring')
+    expect(screen.getByRole('row', { name: /job-ops.*run-ops.*forecast.*model-ops.*failed.*2001.*2m.*2.*available/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+  })
+
+  it('treats trailing-slash /ops/ as ops mode and keeps selector updates on /ops', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    const user = userEvent.setup()
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      jobs: [
+        {
+          job_id: 'job-ops-slash',
+          run_id: 'run-ops-slash',
+          cycle_id: 'cycle-ops',
+          job_type: 'forecast',
+          slurm_job_id: '2001',
+          model_id: 'model-ops',
+          status: 'failed',
+          stage: 'forecast',
+          submitted_at: '2026-05-09T00:03:00Z',
+          started_at: '2026-05-09T00:04:00Z',
+          finished_at: '2026-05-09T00:06:00Z',
+          exit_code: 1,
+          retry_count: 0,
+          error_code: 'E_MODEL',
+          error_message: 'model failed',
+          log_uri: 's3://logs/job-ops.log',
+          duration_seconds: 120,
+        },
+      ],
+      jobTotal: 1,
+      fetchAll: vi.fn().mockResolvedValue(undefined),
+      fetchJobs: vi.fn().mockResolvedValue(undefined),
+    })
+    window.history.pushState({}, '', '/ops/?source=gfs&cycle=2026-05-18T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('Source'))
+    await user.click(await screen.findByRole('option', { name: 'IFS' }))
+
+    await waitFor(() => expect(window.location.pathname).toBe('/ops'))
+    expect(new URLSearchParams(window.location.search).get('source')).toBe('ifs')
+  })
+
+  it.each(['/ops?source=era5&cycle=2026-05-18T00:00:00Z', '/monitoring?source=era5&cycle=2026-05-18T00:00:00Z'])(
+    'round-trips ERA5 monitoring source for %s',
+    async (url) => {
+      useAuthStore.setState({ role: 'operator' })
+      const contexts: Array<{ type: string; source: string; cycleTime: string }> = []
+      useMonitoringStore.setState({
+        source: 'GFS',
+        cycleTime: '2026-05-09T00:00:00Z',
+        fetchAll: vi.fn().mockImplementation(async () => {
+          const { source, cycleTime } = useMonitoringStore.getState()
+          contexts.push({ type: 'all', source, cycleTime })
+        }),
+        fetchJobs: vi.fn().mockImplementation(async () => {
+          const { source, cycleTime } = useMonitoringStore.getState()
+          contexts.push({ type: 'jobs', source, cycleTime })
+        }),
+      })
+      window.history.pushState({}, '', url)
+
+      render(<App />)
+
+      expect(await screen.findByRole('heading', { name: url.startsWith('/ops') ? '运维工作台' : '监控工作台' })).toBeInTheDocument()
+      await waitFor(() =>
+        expect(useMonitoringStore.getState()).toMatchObject({
+          source: 'ERA5',
+          cycleTime: '2026-05-18T00:00:00.000Z',
+        }),
+      )
+      await waitFor(() =>
+        expect(contexts).toEqual(expect.arrayContaining([
+          { type: 'all', source: 'ERA5', cycleTime: '2026-05-18T00:00:00.000Z' },
+          { type: 'jobs', source: 'ERA5', cycleTime: '2026-05-18T00:00:00.000Z' },
+        ])),
+      )
+    },
+  )
+
+  it.each(['best', 'compare', 'bogus'])('keeps legacy /monitoring source=%s query state non-strict', async (unsupportedSource) => {
+    useAuthStore.setState({ role: 'operator' })
+    const currentCycle = '2026-05-09T00:00:00Z'
+    const contexts: Array<{ type: string; source: string; cycleTime: string }> = []
+    useMonitoringStore.setState({
+      source: 'IFS',
+      cycleTime: currentCycle,
+      cycle: {
+        source: 'IFS',
+        cycle_time: currentCycle,
+        current_state: 'partially_failed',
+        started_at: '2026-05-09T00:00:30Z',
+        updated_at: '2026-05-09T00:08:00Z',
+        job_counts: { succeeded: 3, failed: 1, running: 1, pending: 2 },
+      },
+      stages: [
+        {
+          stage: 'forcing',
+          display_status: 'partially_failed',
+          status: 'partially_failed',
+          duration_seconds: 35,
+          basin_progress: { completed: 3, total: 4, failed: 1 },
+          basin_results_limit: 50,
+          basin_results_total: 0,
+          basin_results_returned: 0,
+          basin_results_truncated: false,
+          basin_results: [],
+        },
+      ],
+      jobs: [
+        {
+          job_id: 'legacy-monitoring-job',
+          run_id: 'legacy-monitoring-run',
+          cycle_id: 'legacy-cycle',
+          job_type: 'forecast',
+          slurm_job_id: '1001',
+          model_id: 'legacy-model',
+          status: 'failed',
+          stage: 'forecast',
+          submitted_at: '2026-05-09T00:03:00Z',
+          started_at: '2026-05-09T00:04:00Z',
+          finished_at: '2026-05-09T00:06:00Z',
+          exit_code: 1,
+          retry_count: 0,
+          error_code: 'E_MODEL',
+          error_message: 'model failed',
+          log_uri: null,
+          duration_seconds: 120,
+        },
+      ],
+      jobTotal: 1,
+      fetchAll: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime } = useMonitoringStore.getState()
+        contexts.push({ type: 'all', source, cycleTime })
+      }),
+      fetchJobs: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime } = useMonitoringStore.getState()
+        contexts.push({ type: 'jobs', source, cycleTime })
+      }),
+    })
+    window.history.pushState({}, '', `/monitoring?source=${unsupportedSource}&cycle=2026-05-18T00:00:00Z`)
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
+    expect(screen.queryByText(new RegExp(`source=${unsupportedSource} 不支持`))).not.toBeInTheDocument()
+    expect(screen.queryByText(/当前 source\/cycle 的流水线阶段不可用/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/当前 source\/cycle 不支持趋势查询/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '刷新' })).not.toBeDisabled()
+    expect(screen.getByRole('row', { name: /legacy-monitoring-run/ })).toBeInTheDocument()
+    expect(useMonitoringStore.getState()).toMatchObject({
+      source: 'IFS',
+      cycleTime: currentCycle,
+    })
+    await waitFor(() =>
+      expect(contexts).toEqual(expect.arrayContaining([
+        { type: 'all', source: 'IFS', cycleTime: currentCycle },
+        { type: 'jobs', source: 'IFS', cycleTime: currentCycle },
+      ])),
+    )
+    expect(contexts).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ cycleTime: '2026-05-18T00:00:00.000Z' }),
+    ]))
+  })
+
+  it('ignores malformed /monitoring cycle query state while preserving the usable monitoring view', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    const currentCycle = '2026-05-09T00:00:00Z'
+    const contexts: Array<{ type: string; source: string; cycleTime: string }> = []
+    useMonitoringStore.setState({
+      source: 'IFS',
+      cycleTime: currentCycle,
+      cycle: {
+        source: 'IFS',
+        cycle_time: currentCycle,
+        current_state: 'running',
+        started_at: '2026-05-09T00:00:30Z',
+        updated_at: '2026-05-09T00:08:00Z',
+        job_counts: { succeeded: 4, failed: 0, running: 1, pending: 0 },
+      },
+      stages: [
+        {
+          stage: 'forecast',
+          display_status: 'running',
+          status: 'running',
+          duration_seconds: 45,
+          basin_progress: { completed: 1, total: 4, failed: 0 },
+          basin_results_limit: 50,
+          basin_results_total: 0,
+          basin_results_returned: 0,
+          basin_results_truncated: false,
+          basin_results: [],
+        },
+      ],
+      jobs: [
+        {
+          job_id: 'cycle-compatible-job',
+          run_id: 'cycle-compatible-run',
+          cycle_id: 'legacy-cycle',
+          job_type: 'forecast',
+          slurm_job_id: '1002',
+          model_id: 'cycle-compatible-model',
+          status: 'running',
+          stage: 'forecast',
+          submitted_at: '2026-05-09T00:03:00Z',
+          started_at: '2026-05-09T00:04:00Z',
+          finished_at: null,
+          exit_code: null,
+          retry_count: 0,
+          error_code: null,
+          error_message: null,
+          log_uri: null,
+          duration_seconds: null,
+        },
+      ],
+      jobTotal: 1,
+      fetchAll: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime } = useMonitoringStore.getState()
+        contexts.push({ type: 'all', source, cycleTime })
+      }),
+      fetchJobs: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime } = useMonitoringStore.getState()
+        contexts.push({ type: 'jobs', source, cycleTime })
+      }),
+    })
+    window.history.pushState({}, '', '/monitoring?source=gfs&cycle=bad-cycle')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
+    expect(screen.queryByText(/cycle=bad-cycle 不是有效 RFC3339 时间/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/当前 source\/cycle 的流水线阶段不可用/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/当前 source\/cycle 不支持趋势查询/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '刷新' })).not.toBeDisabled()
+    expect(screen.getByRole('row', { name: /cycle-compatible-run/ })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(useMonitoringStore.getState()).toMatchObject({
+        source: 'GFS',
+        cycleTime: currentCycle,
+      }),
+    )
+    await waitFor(() =>
+      expect(contexts).toEqual(expect.arrayContaining([
+        { type: 'all', source: 'GFS', cycleTime: currentCycle },
+        { type: 'jobs', source: 'GFS', cycleTime: currentCycle },
+      ])),
+    )
+    expect(contexts).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ cycleTime: 'bad-cycle' }),
+    ]))
+  })
+
+  it.each(['best', 'compare', 'bogus'])('renders explicit /ops unavailable state for unsupported source=%s without scoped fetches', async (unsupportedSource) => {
+    useAuthStore.setState({ role: 'operator' })
+    const fetchAll = vi.fn().mockResolvedValue(undefined)
+    const fetchJobs = vi.fn().mockResolvedValue(undefined)
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: '2026-05-09T00:00:00Z',
+      stages: [
+        {
+          stage: 'forecast',
+          display_status: 'failed',
+          status: 'failed',
+          duration_seconds: 120,
+          basin_progress: { completed: 0, total: 1, failed: 1 },
+          basin_results_limit: 50,
+          basin_results_total: 0,
+          basin_results_returned: 0,
+          basin_results_truncated: false,
+          basin_results: [],
+        },
+      ],
+      jobs: [
+        {
+          job_id: 'old-job',
+          run_id: 'old-cycle-run',
+          cycle_id: 'old-cycle',
+          job_type: 'forecast',
+          slurm_job_id: '1001',
+          model_id: 'old-model',
+          status: 'failed',
+          stage: 'forecast',
+          submitted_at: '2026-05-09T00:03:00Z',
+          started_at: '2026-05-09T00:04:00Z',
+          finished_at: '2026-05-09T00:06:00Z',
+          exit_code: 1,
+          retry_count: 0,
+          error_code: 'E_MODEL',
+          error_message: 'model failed',
+          log_uri: null,
+          duration_seconds: 120,
+        },
+      ],
+      jobTotal: 1,
+      fetchAll,
+      fetchJobs,
+    })
+    window.history.pushState({}, '', `/ops?source=${unsupportedSource}&cycle=2026-05-18T00:00:00Z`)
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect((await screen.findAllByText(new RegExp(`source=${unsupportedSource} 不支持`))).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
+    expect(fetchAll).not.toHaveBeenCalled()
+    expect(fetchJobs).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['/ops?source=compare&cycle=2026-05-18T00:00:00Z', /source=compare 不支持/],
+    ['/ops?source=gfs&cycle=bad-cycle', /cycle=bad-cycle 不是有效 RFC3339 时间/],
+  ] as const)('keeps unsupported /ops jobs controls from fetching stale/default jobs for %s', async (url, errorPattern) => {
+    useAuthStore.setState({ role: 'operator' })
+    const user = userEvent.setup()
+    const jobsRequests: Array<Record<string, unknown> | undefined> = []
+    const staleJob = {
+      job_id: 'stale-default-job',
+      run_id: 'stale-default-run',
+      cycle_id: 'stale-default-cycle',
+      job_type: 'forecast',
+      slurm_job_id: '1001',
+      model_id: 'stale-model',
+      status: 'failed' as const,
+      stage: 'forecast',
+      submitted_at: '2026-05-09T00:03:00Z',
+      started_at: '2026-05-09T00:04:00Z',
+      finished_at: '2026-05-09T00:06:00Z',
+      exit_code: 1,
+      retry_count: 0,
+      error_code: 'E_MODEL',
+      error_message: 'model failed',
+      log_uri: null,
+      duration_seconds: 120,
+    }
+    useMonitoringStore.setState(
+      {
+        ...useMonitoringStore.getInitialState(),
+        source: 'GFS',
+        cycleTime: '2026-05-09T00:00:00Z',
+        jobs: [staleJob],
+        jobTotal: 1,
+      },
+      true,
+    )
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } } | undefined
+      if (path === '/api/v1/jobs') {
+        jobsRequests.push(options?.params?.query)
+        return { data: success({ items: [staleJob], total: 1, limit: 12, offset: 0 }), error: undefined } as never
+      }
+      return { data: success({}), error: undefined } as never
+    })
+    window.history.pushState({}, '', url)
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect((await screen.findAllByText(errorPattern)).length).toBeGreaterThan(0)
+    await waitFor(() => expect(screen.queryByRole('row', { name: /stale-default-run/ })).not.toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: /submitted_at/ }))
+
+    expect(jobsRequests).toEqual([])
+    expect(screen.queryByRole('row', { name: /stale-default-run/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/当前 source\/cycle 的作业不可用/)).toBeInTheDocument()
+  })
+
+  it('keeps /monitoring jobs sorting on the normal jobs fetch path', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    const user = userEvent.setup()
+    const fetchJobs = vi.fn().mockResolvedValue(undefined)
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      fetchAll: vi.fn().mockResolvedValue(undefined),
+      fetchJobs,
+    })
+    window.history.pushState({}, '', '/monitoring?source=gfs&cycle=2026-05-18T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
+    await waitFor(() => expect(fetchJobs).toHaveBeenCalled())
+    fetchJobs.mockClear()
+
+    await user.click(screen.getByRole('button', { name: /submitted_at/ }))
+
+    await waitFor(() =>
+      expect(fetchJobs).toHaveBeenCalledWith(
+        expect.objectContaining({ sortBy: 'submitted_at', sortOrder: 'asc', page: 1, pageSize: 12 }),
+        expect.objectContaining({ clearOnFailure: false }),
+      ),
+    )
+  })
+
+  it.each([
+    ['ifs', 'IFS'],
+    ['era5', 'ERA5'],
+  ] as const)('keeps valid /ops?source=%s direct links from fetching or rendering the previous store context', async (urlSource, expectedSource) => {
+    useAuthStore.setState({ role: 'operator' })
+    const oldCycle = '2026-05-09T00:00:00Z'
+    const urlCycle = '2026-05-18T00:00:00.000Z'
+    const oldJob = {
+      job_id: 'old-job',
+      run_id: 'old-cycle-run',
+      cycle_id: 'old-cycle',
+      job_type: 'forecast',
+      slurm_job_id: '1001',
+      model_id: 'old-model',
+      status: 'failed' as const,
+      stage: 'forecast',
+      submitted_at: '2026-05-09T00:03:00Z',
+      started_at: '2026-05-09T00:04:00Z',
+      finished_at: '2026-05-09T00:06:00Z',
+      exit_code: 1,
+      retry_count: 0,
+      error_code: 'E_MODEL',
+      error_message: 'model failed',
+      log_uri: null,
+      duration_seconds: 120,
+    }
+    const targetJob = {
+      ...oldJob,
+      job_id: `${urlSource}-url-job`,
+      run_id: `${urlSource}-url-run`,
+      cycle_id: `${urlSource}-url-cycle`,
+      model_id: `${urlSource}-model`,
+      status: 'succeeded' as const,
+      retry_count: 0,
+      error_code: null,
+      error_message: null,
+      log_uri: `s3://logs/${urlSource}-url-job.log`,
+      duration_seconds: 60,
+    }
+    const jobsRequests: Array<Record<string, unknown> | undefined> = []
+    const scopedRequests: Array<{ path: string; source: unknown; cycleTime: unknown }> = []
+    const metricRequests: Array<Record<string, unknown> | undefined> = []
+
+    useMonitoringStore.setState(
+      {
+        ...useMonitoringStore.getInitialState(),
+        source: 'GFS',
+        cycleTime: oldCycle,
+        cycle: {
+          source: 'GFS',
+          cycle_time: oldCycle,
+          current_state: 'failed',
+          started_at: '2026-05-09T00:00:30Z',
+          updated_at: '2026-05-09T00:08:00Z',
+          job_counts: { succeeded: 0, failed: 1, running: 0, pending: 0 },
+        },
+        stages: [
+          {
+            stage: 'forecast',
+            display_status: 'failed',
+            status: 'failed',
+            duration_seconds: 120,
+            basin_progress: { completed: 0, total: 1, failed: 1 },
+            basin_results_limit: 50,
+            basin_results_total: 0,
+            basin_results_returned: 0,
+            basin_results_truncated: false,
+            basin_results: [],
+          },
+        ],
+        jobs: [oldJob],
+        jobTotal: 1,
+      },
+      true,
+    )
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } } | undefined
+      const query = options?.params?.query
+      if (path === '/api/v1/jobs') {
+        jobsRequests.push(query)
+        scopedRequests.push({ path, source: query?.source, cycleTime: query?.cycle_time })
+        return {
+          data: success({
+            items: query?.source === expectedSource && query?.cycle_time === urlCycle ? [targetJob] : [oldJob],
+            total: 1,
+            limit: 12,
+            offset: 0,
+          }),
+          error: undefined,
+        } as never
+      }
+      if (path === '/api/v1/pipeline/status') {
+        scopedRequests.push({ path, source: query?.source, cycleTime: query?.cycle_time })
+        return {
+          data: success({
+            source: query?.source,
+            cycle_time: query?.cycle_time,
+            current_state: 'running',
+            started_at: '2026-05-18T00:00:30Z',
+            updated_at: '2026-05-18T00:08:00Z',
+            job_counts: { succeeded: 1, failed: 0, running: 0, pending: 0 },
+          }),
+          error: undefined,
+        } as never
+      }
+      if (path === '/api/v1/pipeline/stages') {
+        scopedRequests.push({ path, source: query?.source, cycleTime: query?.cycle_time })
+        return { data: success([]), error: undefined } as never
+      }
+      if (path === '/api/v1/queue/depth') {
+        return { data: success({ running: 0, pending: 0, idle: 1 }), error: undefined } as never
+      }
+      if (path === '/api/v1/metrics/stage-duration' || path === '/api/v1/metrics/success-rate') {
+        metricRequests.push(query)
+        return { data: success([]), error: undefined } as never
+      }
+      return { data: success([]), error: undefined } as never
+    })
+    window.history.pushState({}, '', `/ops?source=${urlSource}&cycle=2026-05-18T00:00:00Z`)
+
+    render(<App />)
+
+    expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(useMonitoringStore.getState()).toMatchObject({
+        source: expectedSource,
+        cycleTime: urlCycle,
+      }),
+    )
+    await waitFor(() =>
+      expect(jobsRequests).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source: expectedSource, cycle_time: urlCycle }),
+      ])),
+    )
+
+    expect(jobsRequests).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'GFS', cycle_time: oldCycle }),
+    ]))
+    expect(scopedRequests).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'GFS', cycleTime: oldCycle }),
+    ]))
+    expect(metricRequests).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'GFS' }),
+    ]))
+    expect(await screen.findByText(`${urlSource}-url-run`)).toBeInTheDocument()
+    expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
+  })
+
+  it('hides stale /ops payloads when URL and store keys already match until selected-context payloads load', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    const selectedCycle = '2026-05-18T00:00:00.000Z'
+    const oldCycle = '2026-05-09T00:00:00.000Z'
+    const staleJob = {
+      job_id: 'stale-job',
+      run_id: 'stale-cycle-run',
+      cycle_id: 'stale-cycle',
+      job_type: 'forecast',
+      slurm_job_id: '1001',
+      model_id: 'stale-model',
+      status: 'failed' as const,
+      stage: 'forecast',
+      submitted_at: '2026-05-09T00:03:00Z',
+      started_at: '2026-05-09T00:04:00Z',
+      finished_at: '2026-05-09T00:06:00Z',
+      exit_code: 1,
+      retry_count: 0,
+      error_code: 'E_MODEL',
+      error_message: 'model failed',
+      log_uri: null,
+      duration_seconds: 120,
+    }
+    const selectedJob = {
+      ...staleJob,
+      job_id: 'selected-job',
+      run_id: 'selected-cycle-run',
+      cycle_id: 'selected-cycle',
+      model_id: 'selected-model',
+      status: 'succeeded' as const,
+      retry_count: 1,
+      error_code: null,
+      error_message: null,
+      log_uri: 's3://logs/selected-job.log',
+      duration_seconds: 60,
+    }
+    const statusResponse = deferred<unknown>()
+    const stagesResponse = deferred<unknown>()
+    const jobsResponse = deferred<unknown>()
+    const selectedRequests: Array<{ path: string; source: unknown; cycleTime: unknown }> = []
+
+    useMonitoringStore.setState(
+      {
+        ...useMonitoringStore.getInitialState(),
+        source: 'IFS',
+        cycleTime: selectedCycle,
+        cycle: {
+          source: 'GFS',
+          cycle_time: oldCycle,
+          current_state: 'stale-running',
+          started_at: '2026-05-09T00:00:30Z',
+          updated_at: '2026-05-09T00:08:00Z',
+          job_counts: { succeeded: 0, failed: 1, running: 0, pending: 0 },
+        },
+        cycleContext: null,
+        stages: [
+          {
+            stage: 'forecast',
+            display_status: 'failed',
+            status: 'failed',
+            duration_seconds: 120,
+            basin_progress: { completed: 0, total: 1, failed: 1 },
+            basin_results_limit: 50,
+            basin_results_total: 0,
+            basin_results_returned: 0,
+            basin_results_truncated: false,
+            basin_results: [],
+          },
+        ],
+        jobs: [staleJob],
+        jobsContext: null,
+        jobTotal: 1,
+      },
+      true,
+    )
+    vi.mocked(client.GET).mockImplementation((path: string, options?: { params?: { query?: Record<string, unknown> } }) => {
+      const query = options?.params?.query
+      if (path === '/api/v1/pipeline/status') {
+        selectedRequests.push({ path, source: query?.source, cycleTime: query?.cycle_time })
+        return statusResponse.promise as never
+      }
+      if (path === '/api/v1/pipeline/stages') {
+        selectedRequests.push({ path, source: query?.source, cycleTime: query?.cycle_time })
+        return stagesResponse.promise as never
+      }
+      if (path === '/api/v1/jobs') {
+        selectedRequests.push({ path, source: query?.source, cycleTime: query?.cycle_time })
+        return jobsResponse.promise as never
+      }
+      if (path === '/api/v1/queue/depth') {
+        return Promise.resolve({ data: success({ running: 0, pending: 0, idle: 1 }), error: undefined }) as never
+      }
+      if (path === '/api/v1/metrics/stage-duration' || path === '/api/v1/metrics/success-rate') {
+        return Promise.resolve({ data: success([]), error: undefined }) as never
+      }
+      return Promise.resolve({ data: success([]), error: undefined }) as never
+    })
+    window.history.pushState({}, '', '/ops?source=ifs&cycle=2026-05-18T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(screen.queryByText('stale-running')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /预报.*forecast.*failed/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('row', { name: /stale-cycle-run/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/当前 source\/cycle 的流水线阶段不可用：当前 source\/cycle 的流水线数据尚未加载完成。/)).toBeInTheDocument()
+    expect(screen.getByText(/当前 source\/cycle 的作业不可用：当前 source\/cycle 的作业数据尚未加载完成。/)).toBeInTheDocument()
+
+    await waitFor(() =>
+      expect(selectedRequests).toEqual(expect.arrayContaining([
+        { path: '/api/v1/pipeline/status', source: 'IFS', cycleTime: selectedCycle },
+        { path: '/api/v1/pipeline/stages', source: 'IFS', cycleTime: selectedCycle },
+        { path: '/api/v1/jobs', source: 'IFS', cycleTime: selectedCycle },
+      ])),
+    )
+
+    statusResponse.resolve({
+      data: success({
+        source: 'IFS',
+        cycle_time: selectedCycle,
+        current_state: 'selected-running',
+        started_at: '2026-05-18T00:00:30Z',
+        updated_at: '2026-05-18T00:08:00Z',
+        job_counts: { succeeded: 1, failed: 0, running: 1, pending: 0 },
+      }),
+      error: undefined,
+    })
+    stagesResponse.resolve({
+      data: success([
+        {
+          stage: 'forecast',
+          display_status: 'succeeded',
+          status: 'succeeded',
+          duration_seconds: 60,
+          basin_progress: { completed: 1, total: 1, failed: 0 },
+          basin_results_limit: 50,
+          basin_results_total: 0,
+          basin_results_returned: 0,
+          basin_results_truncated: false,
+          basin_results: [],
+        },
+      ]),
+      error: undefined,
+    })
+    jobsResponse.resolve({
+      data: success({ items: [selectedJob], total: 1, limit: 12, offset: 0 }),
+      error: undefined,
+    })
+
+    expect(await screen.findByText('selected-running')).toBeInTheDocument()
+    expect(await screen.findByRole('row', { name: /selected-cycle-run.*selected-model.*succeeded/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /预报.*forecast.*succeeded/ })).toBeInTheDocument()
+    expect(screen.queryByText('stale-running')).not.toBeInTheDocument()
+    expect(screen.queryByRole('row', { name: /stale-cycle-run/ })).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(useMonitoringStore.getState()).toMatchObject({
+        cycleContext: { source: 'IFS', cycleTime: selectedCycle },
+        jobsContext: { source: 'IFS', cycleTime: selectedCycle },
+      }),
+    )
+  })
+
+  it('initializes /ops source/cycle query into the monitoring store and scoped fetches without stale rows', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    const contexts: Array<{ type: string; source: string; cycleTime: string }> = []
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: '2026-05-09T00:00:00Z',
+      jobs: [
+        {
+          job_id: 'old-job',
+          run_id: 'old-cycle-run',
+          cycle_id: 'old-cycle',
+          job_type: 'forecast',
+          slurm_job_id: '1001',
+          model_id: 'old-model',
+          status: 'failed',
+          stage: 'forecast',
+          submitted_at: '2026-05-09T00:03:00Z',
+          started_at: '2026-05-09T00:04:00Z',
+          finished_at: '2026-05-09T00:06:00Z',
+          exit_code: 1,
+          retry_count: 0,
+          error_code: 'E_MODEL',
+          error_message: 'model failed',
+          log_uri: null,
+          duration_seconds: 120,
+        },
+      ],
+      jobTotal: 1,
+      stages: [
+        {
+          stage: 'forecast',
+          display_status: 'failed',
+          status: 'failed',
+          duration_seconds: 120,
+          basin_progress: { completed: 0, total: 1, failed: 1 },
+          basin_results_limit: 50,
+          basin_results_total: 0,
+          basin_results_returned: 0,
+          basin_results_truncated: false,
+          basin_results: [],
+        },
+      ],
+      fetchAll: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime } = useMonitoringStore.getState()
+        contexts.push({ type: 'all', source, cycleTime })
+      }),
+      fetchJobs: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime } = useMonitoringStore.getState()
+        contexts.push({ type: 'jobs', source, cycleTime })
+      }),
+    })
+    window.history.pushState({}, '', '/ops?source=ifs&cycle=2026-05-18T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(useMonitoringStore.getState()).toMatchObject({
+        source: 'IFS',
+        cycleTime: '2026-05-18T00:00:00.000Z',
+        stages: [],
+        jobs: [],
+        jobTotal: 0,
+      }),
+    )
+    await waitFor(() =>
+      expect(contexts).toEqual(expect.arrayContaining([
+        { type: 'all', source: 'IFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+        { type: 'jobs', source: 'IFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+      ])),
+    )
+    expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps /ops selector changes, query state, store state, and scoped fetch context aligned', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    const user = userEvent.setup()
+    const contexts: Array<{ type: string; source: string; cycleTime: string }> = []
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      jobs: [
+        {
+          job_id: 'old-selector-job',
+          run_id: 'old-selector-run',
+          cycle_id: 'old-cycle',
+          job_type: 'forecast',
+          slurm_job_id: '1001',
+          model_id: 'old-model',
+          status: 'failed',
+          stage: 'forecast',
+          submitted_at: '2026-05-09T00:03:00Z',
+          started_at: '2026-05-09T00:04:00Z',
+          finished_at: '2026-05-09T00:06:00Z',
+          exit_code: 1,
+          retry_count: 0,
+          error_code: 'E_MODEL',
+          error_message: 'model failed',
+          log_uri: null,
+          duration_seconds: 120,
+        },
+      ],
+      jobTotal: 1,
+      stages: [
+        {
+          stage: 'forecast',
+          display_status: 'failed',
+          status: 'failed',
+          duration_seconds: 120,
+          basin_progress: { completed: 0, total: 1, failed: 1 },
+          basin_results_limit: 50,
+          basin_results_total: 0,
+          basin_results_returned: 0,
+          basin_results_truncated: false,
+          basin_results: [],
+        },
+      ],
+      fetchAll: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime } = useMonitoringStore.getState()
+        contexts.push({ type: 'all', source, cycleTime })
+        await new Promise(() => undefined)
+      }),
+      fetchJobs: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime } = useMonitoringStore.getState()
+        contexts.push({ type: 'jobs', source, cycleTime })
+        await new Promise(() => undefined)
+      }),
+    })
+    window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    await waitFor(() => expect(useMonitoringStore.getState().fetchAll).toHaveBeenCalled())
+    contexts.length = 0
+
+    await user.click(screen.getByLabelText('Source'))
+    await user.click(await screen.findByRole('option', { name: 'IFS' }))
+    fireEvent.change(screen.getByLabelText('Cycle Time UTC'), { target: { value: '2026-05-19T06:00' } })
+
+    await waitFor(() =>
+      expect(useMonitoringStore.getState()).toMatchObject({
+        source: 'IFS',
+        cycleTime: '2026-05-19T06:00:00.000Z',
+        stages: [],
+        jobs: [],
+        jobTotal: 0,
+      }),
+    )
+    expect(screen.queryByRole('row', { name: /old-selector-run/ })).not.toBeInTheDocument()
+    await waitFor(() => expect(window.location.pathname).toBe('/ops'))
+    expect(new URLSearchParams(window.location.search).get('source')).toBe('ifs')
+    expect(new URLSearchParams(window.location.search).get('cycle')).toBe('2026-05-19T06:00:00.000Z')
+    await waitFor(() =>
+      expect(contexts).toEqual(expect.arrayContaining([
+        { type: 'all', source: 'IFS', cycleTime: '2026-05-19T06:00:00.000Z' },
+        { type: 'jobs', source: 'IFS', cycleTime: '2026-05-19T06:00:00.000Z' },
+      ])),
+    )
+  })
+
+  it('blocks /ops for non-operator roles with the same monitoring RBAC boundary', async () => {
+    useAuthStore.setState({ role: 'analyst' })
+    window.history.pushState({}, '', '/ops')
+
+    render(<App />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('权限不足')
+    expect(screen.queryByRole('heading', { name: '运维工作台' })).not.toBeInTheDocument()
   })
 
   it.each(['model_admin', 'sys_admin'] as const)('routes /system/model-assets for %s and restores URL-selected detail', async (role) => {

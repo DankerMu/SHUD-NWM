@@ -1,5 +1,5 @@
 import { NavLink, useLocation } from 'react-router-dom'
-import { Bell, CloudRain, Database, Gauge, Map, Waves } from 'lucide-react'
+import { Bell, CloudRain, Database, Gauge, Map, Settings2, Waves } from 'lucide-react'
 
 import { cn } from '@/lib/cn'
 import { hasMinimumMeteorologyContracts } from '@/lib/meteorology/contracts'
@@ -11,6 +11,7 @@ const links = [
   { to: '/meteorology', label: '气象数据', icon: CloudRain },
   { to: '/forecast', label: '水文预报', icon: Waves },
   { to: '/flood-alerts', label: '洪水预警', icon: Bell },
+  { to: '/ops', label: '系统运维', icon: Settings2, roles: ['operator', 'model_admin', 'sys_admin'] satisfies AuthRole[] },
   { to: '/monitoring', label: '产品监控', icon: Gauge },
   { to: '/system/model-assets', label: '模型资产', icon: Database, roles: ['model_admin', 'sys_admin'] satisfies AuthRole[] },
 ]

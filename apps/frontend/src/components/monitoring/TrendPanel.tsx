@@ -8,9 +8,11 @@ import { STAGE_NAMES } from '@/lib/constants'
 import type { StageDurationMetric, SuccessRateMetric } from '@/stores/monitoring'
 
 interface TrendPanelProps {
+  fetchEnabled?: boolean
   refreshKey?: number
   source?: string
   scenario?: string | null
+  unavailableReason?: string | null
 }
 
 const stageOrder = Object.keys(STAGE_NAMES) as Array<keyof typeof STAGE_NAMES>
@@ -31,13 +33,27 @@ async function fetchSuccessRateMetrics(source?: string, scenario?: string | null
   return unwrapApiData<SuccessRateMetric[]>(data, '成功率趋势加载失败')
 }
 
-export function TrendPanel({ refreshKey = 0, source, scenario }: TrendPanelProps) {
+export function TrendPanel({
+  fetchEnabled = true,
+  refreshKey = 0,
+  source,
+  scenario,
+  unavailableReason = null,
+}: TrendPanelProps) {
   const [stageRows, setStageRows] = useState<StageDurationMetric[]>([])
   const [successRows, setSuccessRows] = useState<SuccessRateMetric[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (!fetchEnabled) {
+      setStageRows([])
+      setSuccessRows([])
+      setLoading(false)
+      setError(null)
+      return
+    }
+
     let active = true
     setLoading(true)
     setError(null)
@@ -59,7 +75,7 @@ export function TrendPanel({ refreshKey = 0, source, scenario }: TrendPanelProps
     return () => {
       active = false
     }
-  }, [refreshKey, scenario, source])
+  }, [fetchEnabled, refreshKey, scenario, source])
 
   const stageTrend = useMemo(() => {
     const dates = [...new Set(stageRows.map((row) => row.date))].sort()
@@ -93,9 +109,18 @@ export function TrendPanel({ refreshKey = 0, source, scenario }: TrendPanelProps
         <span className="text-sm text-muted">{loading ? '加载中' : '近 7 天'}</span>
       </CardHeader>
       <CardContent className="space-y-4">
+        {!fetchEnabled ? (
+          <div className="rounded-md border border-dashed border-border p-4 text-sm text-muted" role="status">
+            当前 source/cycle 不支持趋势查询：{unavailableReason ?? '当前路由上下文尚未可用。'}
+          </div>
+        ) : null}
         {error ? <div className="rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div> : null}
-        <TrendLine title="阶段平均耗时" dates={stageTrend.dates} series={stageTrend.series} unit="seconds" />
-        <TrendLine title="每周期成功率" dates={successTrend.dates} series={successTrend.series} unit="percent" />
+        {fetchEnabled ? (
+          <>
+            <TrendLine title="阶段平均耗时" dates={stageTrend.dates} series={stageTrend.series} unit="seconds" />
+            <TrendLine title="每周期成功率" dates={successTrend.dates} series={successTrend.series} unit="percent" />
+          </>
+        ) : null}
       </CardContent>
     </Card>
   )

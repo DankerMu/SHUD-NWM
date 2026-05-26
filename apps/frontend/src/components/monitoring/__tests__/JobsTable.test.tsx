@@ -162,6 +162,53 @@ describe('JobsTable RBAC action boundary', () => {
     )
   })
 
+  it('renders formal pipeline job fields from the backend contract', () => {
+    render(<JobsTable actionsEnabled={false} />)
+
+    expect(screen.getByRole('columnheader', { name: 'job_id' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'run_id' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'stage' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'status' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'slurm_job_id' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'submitted_at' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'started_at' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'finished_at' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'duration' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'retry_count' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'log' })).toBeInTheDocument()
+
+    const row = screen.getByRole('row', { name: /job-failed.*run-failed.*forecast.*failed.*1001.*2m.*available/ })
+    expect(within(row).getByText('job-failed')).toBeInTheDocument()
+    expect(within(row).getByText('run-failed')).toBeInTheDocument()
+    expect(within(row).getByText('forecast')).toBeInTheDocument()
+    expect(within(row).getByText('1001')).toBeInTheDocument()
+    expect(within(row).getByText('0')).toBeInTheDocument()
+    expect(within(row).getByText('available')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+  })
+
+  it('can render log availability without opening the #212 log modal surface', () => {
+    render(<JobsTable actionsEnabled={false} logControlsEnabled={false} />)
+
+    expect(screen.getAllByText('available')).toHaveLength(2)
+    expect(screen.queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('shows explicit unavailable state instead of stale rows when jobs fail to load', () => {
+    useMonitoringStore.setState({
+      jobs: [],
+      jobTotal: 0,
+      jobsError: 'jobs unsupported for selected context',
+    })
+
+    render(<JobsTable actionsEnabled={false} />)
+
+    expect(screen.queryByRole('row', { name: /run-failed/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/当前 source\/cycle 的作业不可用：jobs unsupported for selected context/)).toBeInTheDocument()
+  })
+
   it('allows an operator with dev actions to cancel queued jobs but does not show retry', async () => {
     mocks.authState.role = 'operator'
     mocks.authState.canUseActions = true

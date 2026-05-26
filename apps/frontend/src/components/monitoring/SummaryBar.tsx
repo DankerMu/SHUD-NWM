@@ -14,6 +14,7 @@ interface SummaryBarProps {
   queue: QueueState | null
   queueError?: string | null
   isRefreshing?: boolean
+  disabled?: boolean
   onRefresh: () => void
 }
 
@@ -26,6 +27,7 @@ export function SummaryBar({
   queue,
   queueError,
   isRefreshing,
+  disabled,
   onRefresh,
 }: SummaryBarProps) {
   const counts = cycle?.job_counts ?? emptyJobCounts
@@ -35,7 +37,7 @@ export function SummaryBar({
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <CardTitle>当前周期</CardTitle>
-          <Button size="sm" variant="outline" onClick={onRefresh} disabled={isRefreshing}>
+          <Button size="sm" variant="outline" onClick={onRefresh} disabled={isRefreshing || disabled}>
             <RefreshCw className={isRefreshing ? 'size-4 animate-spin' : 'size-4'} />
             {isRefreshing ? '刷新中' : '刷新'}
           </Button>

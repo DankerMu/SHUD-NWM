@@ -669,3 +669,82 @@ Review focus:
 - Prove log reads remain bounded, contained, and server-side.
 - Prove retry metadata and failed-state handling cover the status set named by the ops MVP spec.
 - Prove existing monitoring/OpenAPI/frontend type consumers remain compatible.
+
+## Issue #211 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM frontend operations workflow
+Repair intensity: high
+
+Change surface:
+- `apps/frontend/src/App.tsx` route table and `apps/frontend/src/components/layout/NavBar.tsx` navigation.
+- `apps/frontend/src/pages/MonitoringPage.tsx` or a thin `/ops` route alias/page wrapper over the monitoring workflow.
+- `apps/frontend/src/stores/monitoring.ts` query-state and API adapter behavior for source/cycle-scoped status, stages, jobs, queue, and compact metrics.
+- Monitoring display components for stage cards/progress and jobs table fields if required by #211 display acceptance.
+- Frontend route/store/component tests for `/ops`, navigation, source/cycle filtering, unavailable state, canonical stage/job fields, and existing `/monitoring` compatibility.
+
+Must preserve:
+- Existing `/monitoring` route, RBAC gate, polling, queue depth, trends, log modal placeholder behavior, and monitoring tests remain compatible.
+- Backend is the source of truth for source/cycle filtering; frontend must not merge jobs from another cycle or infer missing formal context as ready.
+- Non-operator RBAC behavior remains enforced for `/ops` exactly as `/monitoring`.
+- #212 owns mutating retry/log-modal controls; #211 must not wire new restart actions or backend mutation flows beyond preserving existing inert/placeholder display.
+
+Must add/change:
+- `/ops` is reachable for authorized operator/model_admin/sys_admin users and appears as the MVP operations navigation entry.
+- `/ops` preserves selected `source` and `cycle` query state, including handoff from overview-style query parameters where applicable.
+- `/ops` renders canonical `download`, `convert`, `forcing`, `forecast`, `parse`, `frequency`, and `publish` stage display when backend data exists, and explicit unsupported/unavailable state when scoped stage/job data cannot be loaded.
+- Jobs table exposes job id, run id, stage, status, Slurm job id, started/finished/duration, retry count, and log availability from formal API data.
+- Queue depth and compact success/duration metrics remain visible when existing APIs support them.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - frontend route/navigation exposes a new `/ops` public app entry and must preserve `/monitoring`.
+- Config / project setup: not selected - no new runtime configuration or deployment flags.
+- File IO / path safety / overwrite: not selected - no local file access; logs remain backend-mediated and #212 owns modal behavior.
+- Schema / columns / units / field names: selected - frontend must consume the #210 OpenAPI/generated type fields for stage/job/status/log availability without drift.
+- Geospatial / CRS / shapefile sidecars: not selected - no map/geometry changes in #211.
+- Time series / forcing / temporal boundaries: selected - source/cycle query state must be normalized and preserved without mixing cycles.
+- Numerical stability / conservation / NaN: not selected - no numeric model computation.
+- Solver runtime / performance / threading: not selected - no SHUD runtime behavior.
+- Resource limits / large input / discovery: selected - jobs table pagination/limits and polling must remain bounded.
+- Legacy compatibility / examples: selected - existing `/monitoring`, overview handoff links, AppShell navigation tests, and monitoring store/component tests must keep working.
+- Error handling / rollback / partial outputs: selected - unavailable/unsupported backend responses must render explicit states and not leave stale mixed-cycle data as selected-cycle truth.
+- Release / packaging / dependency compatibility: selected - frontend tests/build must pass with existing pnpm/toolchain; no new dependency unless already present.
+- Documentation / migration notes: selected - PR evidence must not claim #212 retry/log controls, #213 controlled failure evidence, or final production readiness.
+
+Required evidence:
+- Route/nav tests: `/ops` route renders through the same operator RBAC gate as `/monitoring`, nav shows an operations MVP entry, active state works for `/ops`, and `/monitoring` remains reachable.
+- Query-state tests: `source` and `cycle` URL parameters initialize store state, selection changes preserve/update query state, and compare/unsupported source contexts avoid fabricated scoped jobs.
+- Display tests: stage cards/progress include the seven canonical stages, jobs table renders job id/run id/stage/status/Slurm id/timestamps/duration/retry count/log availability, and queue/metrics panels remain visible where supported.
+- Failure/unavailable tests: scoped backend errors or missing formal context render explicit unavailable/unsupported state and do not show stale jobs/stages from another cycle.
+- Regression commands: `cd apps/frontend && corepack pnpm test -- --run apps/frontend/src/__tests__/AppRoutes.test.tsx apps/frontend/src/stores/__tests__/monitoring.test.ts apps/frontend/src/components/monitoring/__tests__/StageCard.test.tsx apps/frontend/src/components/monitoring/__tests__/JobsTable.test.tsx`, `cd apps/frontend && corepack pnpm build`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: every `/ops` source/cycle view must render only formal backend pipeline state for the selected context, while `/monitoring` compatibility and RBAC boundaries remain unchanged.
+Source-of-truth identity/contract: URL/store `source` + `cycleTime` query state and #210 `PipelineStatus`, `PipelineStage`, and `PipelineJob` API contracts.
+Surfaces:
+- Producers: backend pipeline APIs from #210; unchanged by #211.
+- Validators/preflight: frontend query parsing and source/cycle normalization.
+- Storage/cache/query: `useMonitoringStore` state and polling/fetch methods.
+- Public routes/entrypoints: `/ops`, existing `/monitoring`, app navigation, overview handoff links if updated.
+- Frontend/downstream consumers: monitoring page/components/tests, AppShell navigation, route tests.
+- Failure paths/rollback/stale state: backend unavailable/errors, unsupported compare source, missing selected-cycle data, non-operator access, stale previous-cycle jobs/stages.
+- Evidence/audit/readiness: frontend unit/component tests and build evidence only; no live controlled failure claim.
+Regression rows:
+- `/ops?source=ifs&cycle=<cycle>` as operator -> store uses `IFS` and exact cycle, page renders selected-cycle status/stages/jobs and active ops nav.
+- `/monitoring?source=ifs&cycle=<cycle>` -> existing route remains compatible and active monitoring behavior is not broken.
+- source/cycle selector change -> query/store/fetch context moves together and jobs/stages are not shown as if from the previous cycle.
+- backend stage/job fetch error or missing scoped context -> explicit unavailable/unsupported state; stale previous-cycle rows are not silently presented as selected-cycle truth.
+- non-operator `/ops` -> existing RBAC denied state; mutating controls are not introduced by #211.
+- jobs table receives #210 formal fields -> displays Slurm id, timestamps, duration, retry count, and log availability without local filesystem instructions.
+
+Non-goals:
+- Implementing log modal content/error flows, restart buttons, retry API calls, cancel controls, or non-operator backend authorization tests; #212 owns those controls.
+- Running controlled failure/retry evidence; #213 owns it.
+- Changing backend scheduler persistence, OpenAPI schemas, `/hydro-met`, station/river charts, or live smoke docs.
+
+Review focus:
+- Confirm `/ops` is not a second divergent ops implementation when a route alias/page wrapper is enough.
+- Confirm selected source/cycle identity is not split between URL, store, status fetch, stage fetch, and job fetch.
+- Confirm unavailable/error states clear or label stale data instead of mixing cycles.
+- Confirm implementation stays within #211 and does not wire mutating retry/log controls.

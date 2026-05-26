@@ -54,7 +54,10 @@ export function StageCard({ stage, expanded, onToggle }: StageCardProps) {
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex flex-wrap items-center justify-between gap-2">
-            <span className="font-semibold text-foreground">{stageLabel(stage.stage)}</span>
+            <span className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="font-semibold text-foreground">{stageLabel(stage.stage)}</span>
+              <span className="font-mono text-xs text-muted">{stage.stage}</span>
+            </span>
             <span className="text-xs font-medium text-muted">{status}</span>
           </span>
           <span className="mt-2 grid gap-1 text-xs text-muted sm:grid-cols-2">
