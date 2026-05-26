@@ -47,6 +47,6 @@
 
 - [ ] 6.1 Add or update an MVP smoke command/runbook that validates one accepted QHH GFS cycle from download through station series, forecast-series, `/hydro-met`, and `/ops`, or records the exact missing live dependency.
 - [ ] 6.2 Add required IFS live or deterministic evidence for GFS/IFS parallel display and 06/18 UTC shorter-horizon labeling; skipped live IFS proof must record the exact missing dependency and must not claim IFS live readiness.
-- [ ] 6.3 Add controlled failure/retry evidence showing failed stage visibility, retry job creation, Slurm/job metadata update, and terminal outcome.
+- [ ] 6.3 Add controlled failure/retry evidence showing failed stage visibility, backend log visibility, authorized retry job creation, retry/submission event evidence, Slurm/job metadata update where available, `/ops` browser visibility, terminal outcome or documented terminal failure, and exact skipped live dependencies when Slurm/QHH are unavailable.
 - [ ] 6.4 Record validation commands for backend tests, OpenAPI drift, frontend API type check, frontend tests/build, browser smoke, and opt-in live smoke dependencies.
 - [ ] 6.5 Update `progress.md`, MVP launch plan, and QHH runbooks so they reflect delivered MVP scope, formal scheduler boundary, qhh diagnostic-script boundary, accepted `no_frequency_curve` boundary, and explicit P2 exclusions.

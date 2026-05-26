@@ -118,6 +118,12 @@ const successRateMetrics = [
   { date: '2026-05-04', success_rate: 0.8, succeeded_cycles: 8, total_cycles: 10 },
 ]
 
+const controlledCycleTime = '2026-05-21T00:00:00.000Z'
+const controlledCycleId = 'gfs_2026052100'
+const controlledRunId = 'qhh_gfs_2026052100_controlled_failure'
+const controlledFailedJobId = 'qhh_controlled_forecast_failed'
+const controlledRetryJobId = `${controlledRunId}_retry_active`
+
 interface MonitoringApiMockOptions {
   onRetryRequest?: (request: Request) => void
   onCancelRequest?: (request: Request) => void
@@ -217,6 +223,168 @@ async function openMonitoringAsOperator(page: Page, mockOptions?: MonitoringApiM
   await expect(page.getByText('权限不足')).toBeVisible()
   await selectRole(page, 'Operator')
   await expect(page.getByRole('heading', { name: '监控工作台' })).toBeVisible()
+}
+
+function controlledStatus(retrySubmitted: boolean) {
+  return {
+    cycle_id: controlledCycleId,
+    source: 'GFS',
+    cycle_time: controlledCycleTime,
+    current_state: retrySubmitted ? 'complete' : 'failed_run',
+    started_at: '2026-05-21T00:00:00Z',
+    updated_at: retrySubmitted ? '2026-05-21T00:50:00Z' : '2026-05-21T00:36:00Z',
+    job_counts: retrySubmitted
+      ? { succeeded: 4, failed: 1, running: 0, pending: 0 }
+      : { succeeded: 3, failed: 1, running: 0, pending: 0 },
+  }
+}
+
+function controlledStages(retrySubmitted: boolean) {
+  const successStages = [
+    { stage: 'download', display_status: 'succeeded', status: 'succeeded', duration_seconds: 240 },
+    { stage: 'convert', display_status: 'succeeded', status: 'succeeded', duration_seconds: 300 },
+    { stage: 'forcing', display_status: 'succeeded', status: 'succeeded', duration_seconds: 360 },
+  ].map((stage) => ({
+    ...stage,
+    basin_progress: { completed: 1, total: 1, failed: 0 },
+    basin_results_limit: 50,
+    basin_results_total: 1,
+    basin_results_returned: 1,
+    basin_results_truncated: false,
+    basin_results: [],
+  }))
+
+  const forecastJob = retrySubmitted ? controlledRetryJob() : controlledFailedJob()
+  return [
+    ...successStages,
+    {
+      stage: 'forecast',
+      display_status: retrySubmitted ? 'succeeded' : 'failed',
+      status: retrySubmitted ? 'succeeded' : 'failed',
+      duration_seconds: retrySubmitted ? 480 : 300,
+      basin_progress: { completed: retrySubmitted ? 1 : 0, total: 1, failed: retrySubmitted ? 0 : 1 },
+      basin_results_limit: 50,
+      basin_results_total: 1,
+      basin_results_returned: 1,
+      basin_results_truncated: false,
+      basin_results: [forecastJob],
+    },
+  ]
+}
+
+function controlledFailedJob() {
+  return {
+    job_id: controlledFailedJobId,
+    run_id: controlledRunId,
+    cycle_id: controlledCycleId,
+    run_type: 'forecast',
+    scenario: 'forecast_gfs_deterministic',
+    job_type: 'forecast_qhh_stage',
+    slurm_job_id: 'slurm_qhh_forecast_failed_2100',
+    model_id: 'basins_qhh_shud',
+    status: 'failed',
+    stage: 'forecast',
+    submitted_at: '2026-05-21T00:30:00Z',
+    started_at: '2026-05-21T00:31:00Z',
+    finished_at: '2026-05-21T00:36:00Z',
+    exit_code: 1,
+    retry_count: 1,
+    error_code: 'NODE_FAILURE',
+    error_message: 'Controlled QHH forecast failure for retry evidence.',
+    log_uri: 'qhh/controlled/forecast_failed.log',
+    duration_seconds: 300,
+  }
+}
+
+function controlledRetryJob() {
+  return {
+    job_id: controlledRetryJobId,
+    run_id: controlledRunId,
+    cycle_id: controlledCycleId,
+    run_type: 'forecast',
+    scenario: 'forecast_gfs_deterministic',
+    job_type: 'forecast_qhh_stage',
+    slurm_job_id: 'slurm_retry',
+    model_id: 'basins_qhh_shud',
+    status: 'succeeded',
+    stage: 'forecast',
+    submitted_at: '2026-05-21T00:42:00Z',
+    started_at: '2026-05-21T00:42:30Z',
+    finished_at: '2026-05-21T00:50:00Z',
+    exit_code: 0,
+    retry_count: 2,
+    error_code: null,
+    error_message: null,
+    log_uri: 'qhh/controlled/retry_succeeded.log',
+    duration_seconds: 450,
+  }
+}
+
+async function mockControlledOpsApi(page: Page, options: MonitoringApiMockOptions = {}) {
+  let retrySubmitted = false
+  const observedJobsQueries: Array<{ source: string | null; cycle: string | null }> = []
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request()
+    options.onApiRequest?.(request)
+    const url = new URL(request.url())
+
+    if (url.pathname === '/api/v1/pipeline/status') {
+      expect(url.searchParams.get('source')).toBe('GFS')
+      expect(url.searchParams.get('cycle_time')).toBe(controlledCycleTime)
+      return fulfill(route, controlledStatus(retrySubmitted))
+    }
+    if (url.pathname === '/api/v1/pipeline/stages') {
+      expect(url.searchParams.get('source')).toBe('GFS')
+      expect(url.searchParams.get('cycle_time')).toBe(controlledCycleTime)
+      return fulfill(route, controlledStages(retrySubmitted))
+    }
+    if (url.pathname === '/api/v1/queue/depth') return fulfill(route, { running: 0, pending: 0, idle: 2 })
+    if (url.pathname === '/api/v1/metrics/stage-duration') return fulfill(route, stageDurationMetrics)
+    if (url.pathname === '/api/v1/metrics/success-rate') return fulfill(route, successRateMetrics)
+    if (url.pathname === `/api/v1/jobs/${controlledFailedJobId}/logs`) {
+      return fulfill(route, {
+        job_id: controlledFailedJobId,
+        log_uri: 'qhh/controlled/forecast_failed.log',
+        content: `controlled qhh forecast failure\nrun_id=${controlledRunId}\nstage=forecast\nreason=NODE_FAILURE`,
+      })
+    }
+    if (url.pathname === `/api/v1/runs/${controlledRunId}/retry` && request.method() === 'POST') {
+      options.onRetryRequest?.(request)
+      retrySubmitted = true
+      return fulfill(route, {
+        job_id: controlledRetryJobId,
+        pipeline_job_id: controlledRetryJobId,
+        run_id: controlledRunId,
+        retry_count: 2,
+        status: 'submitted',
+        execution_status: 'submitted',
+        slurm_job_id: 'slurm_retry',
+      })
+    }
+    if (url.pathname === '/api/v1/jobs') {
+      observedJobsQueries.push({
+        source: url.searchParams.get('source'),
+        cycle: url.searchParams.get('cycle_time'),
+      })
+      const items = retrySubmitted
+        ? [controlledRetryJob(), controlledFailedJob()]
+        : [controlledFailedJob()]
+      return fulfill(route, {
+        items,
+        total: items.length,
+        limit: Number(url.searchParams.get('limit') ?? 12),
+        offset: Number(url.searchParams.get('offset') ?? 0),
+      })
+    }
+
+    throw new Error(`Unhandled controlled ops API route: ${request.method()} ${url.pathname}`)
+  })
+
+  return {
+    observedJobsQueries,
+    retrySubmitted: () => retrySubmitted,
+  }
 }
 
 test.describe('monitoring page', () => {
@@ -322,6 +490,61 @@ test.describe('monitoring page', () => {
 
     await selectRole(page, 'Viewer')
 
+    await expect(page.getByText('权限不足')).toBeVisible()
+    await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
+  })
+
+  test('proves the /ops controlled failure log and retry lifecycle', async ({ page }) => {
+    const retryRequests: Array<{ method: string; pathname: string; role: string | null }> = []
+    const opsApi = await mockControlledOpsApi(page, {
+      onRetryRequest: (request) => {
+        retryRequests.push({
+          method: request.method(),
+          pathname: new URL(request.url()).pathname,
+          role: request.headers()['x-user-role'] ?? null,
+        })
+      },
+    })
+
+    await page.goto(`/ops?source=gfs&cycle=${encodeURIComponent(controlledCycleTime)}`)
+    await expect(page.getByText('权限不足')).toBeVisible()
+    await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
+
+    await selectRole(page, 'Operator')
+    await expect(page.getByRole('heading', { name: '运维工作台' })).toBeVisible()
+    await expect(page.getByRole('cell', { name: controlledRunId })).toBeVisible()
+    const failedRow = page.getByRole('row', { name: new RegExp(controlledFailedJobId) })
+    await expect(failedRow).toContainText('forecast')
+    await expect(failedRow).toContainText('failed')
+    await expect(failedRow).toContainText('slurm_qhh_forecast_failed_2100')
+
+    await failedRow.getByRole('button', { name: /查看日志/ }).click()
+    await expect(page.getByRole('dialog')).toContainText(`作业日志 ${controlledFailedJobId}`)
+    await expect(page.getByRole('dialog')).toContainText('controlled qhh forecast failure')
+    await expect(page.getByRole('dialog')).toContainText(controlledRunId)
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+
+    await failedRow.getByRole('button', { name: /重试/ }).click()
+    await expect.poll(() => retryRequests).toEqual([
+      { method: 'POST', pathname: `/api/v1/runs/${controlledRunId}/retry`, role: 'operator' },
+    ])
+    await expect.poll(() => opsApi.retrySubmitted()).toBe(true)
+    await expect(page.getByRole('listitem').filter({ hasText: '重试已提交' })).toBeVisible()
+
+    const retryRow = page.getByRole('row', { name: new RegExp(controlledRetryJobId) })
+    await expect(retryRow).toBeVisible()
+    await expect(retryRow).toContainText('succeeded')
+    await expect(retryRow).toContainText('slurm_retry')
+    await expect(retryRow).toContainText('2')
+    await expect(page.getByRole('button', { name: /预报.*succeeded/ })).toBeVisible()
+    await expect(page.getByText('qhh_sibling_cycle_forecast_failed')).toHaveCount(0)
+    expect(opsApi.observedJobsQueries.length).toBeGreaterThan(0)
+    for (const query of opsApi.observedJobsQueries) {
+      expect(query).toEqual({ source: 'GFS', cycle: controlledCycleTime })
+    }
+
+    await selectRole(page, 'Viewer')
     await expect(page.getByText('权限不足')).toBeVisible()
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
   })
