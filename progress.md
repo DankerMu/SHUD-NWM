@@ -1,183 +1,120 @@
 # 项目进度
 
-最后更新：2026-05-26，测试环境。
+最后更新：2026-05-27，测试环境。
 
-用途：作为跨 session 继承的项目真实进度索引。本文只保留“当前能做什么、已完成哪些闭环、还剩哪些明确方向”，避免把历史 review 细节继续堆进进度页。
+用途：作为跨 session 继承的项目真实进度索引。本文只保留当前结论、可用能力、证据边界和下一步，不再堆叠历史 review 细节。
 
-## 一句话状态
+## 当前结论
 
-M11 全国总览与流域钻取 Epic #159 已完成并关闭。#160-#165 全部关闭，最后 PR #171 已合并到 `master`，merge commit 为 `da26dc331453988612ce4d4d5818948309d117ef`。
+- M21 QHH 水文气象展示 + 运维监控 MVP issue 链路已完成：Epic #202 已关闭，子任务 #203-#214 已全部关闭，最后 PR #226 已合并到 `master`，merge commit 为 `ec5d535db334ddc6dc4f899742c3ff3d667e2df0`。
+- MVP 范围已冻结为 QHH/有限流域、GFS 主源、IFS 并行源、河段流量 `q_down`、forcing 代站 `PRCP/TEMP/RH/wind/Rn/Press` 和 pipeline 运维闭环。
+- MVP 不承诺水位 `stage`、全国所有流域、CLDAS、ERA5 近实时、真实全国 MVT/PBF 或最终生产就绪。
+- 前端 MVP 两个入口已落地：`/hydro-met` 水文气象展示，`/ops` 系统运维。
+- 内部 MVP deterministic E2E / browser smoke 已完成；目标环境 live E2E 尚未完成，不能声明 final production readiness。
 
-项目已经具备一套可重复运行的 production-like 证据链：Slurm、对象存储/Basins、气象源/QC、staging E2E、全国规模性能、生产运维安全与 runbook readiness 都有 opt-in validation lane、结构化 evidence、fast regression test 和文档入口。
-M19 新增 `nhms-production validate-readiness` 汇总 lane，用统一 truth table 把 deterministic evidence、opt-in live proof、release blockers 和 scoped exclusions 分开，不会把 fast evidence 误宣称为最终生产就绪。
+## MVP 证据状态
 
-前端入口已经从旧的单一预报地图推进到 M11 map-first 产品骨架，并开始补齐 M12 河段详情：`/` 和 `/overview` 为全国总览，`/basins/:basinId` 为流域钻取，`/segments/:segmentId` 为可恢复的河段预报详情，`/forecast`、`/flood-alerts`、`/monitoring` 保持可访问。
+统一证据索引：[`docs/runbooks/qhh-mvp-smoke-evidence.md`](docs/runbooks/qhh-mvp-smoke-evidence.md)。
 
-M20 production scheduler automation 已把 qhh 标准链路证明推进到 backend 多流域自动化切片：#192-#196 覆盖生产 scheduler 发现/锁/dry-run、通用 model-run assembly、Slurm preflight 与 array/task evidence、状态幂等/重试/取消、scheduler evidence/readiness 文档。
-正式生产调度入口是 `nhms-pipeline plan-production`，默认 dry-run 会写 `<workspace_root>/scheduler/evidence/<pass_id>.json`，并证明 no download、no Slurm submit、no SHUD run、no hydro/met result mutation。
-非 dry-run 生产路径必须先通过 compute-node reachable `DATABASE_URL`、workspace/object-store/log/runtime root、sbatch allowlist 和 env/export 安全 preflight。
-qhh `run_qhh_*` 脚本保留为诊断/复现证据，不再描述为 backend production scheduler 依赖。
-2026-05-21 已完成的 qhh GFS/IFS 00Z/06Z 四个 `frequency_done` run 仍是重要 live reproduction evidence，但不能替代 M20 backend scheduler readiness。
-
-MVP 上线最短路径已冻结为“QHH/有限流域水文气象展示 + 运维监控”，实施计划见 [`docs/plans/2026-05-25-mvp-launch-plan.md`](docs/plans/2026-05-25-mvp-launch-plan.md)。
-MVP 只承诺 QHH/有限流域、GFS 主源、IFS 并行源、河段流量 `q_down`、forcing 代站 `PRCP/TEMP/RH/wind/Rn/Press` 和 pipeline 运维闭环；不把水位 `stage`、全国所有流域、CLDAS、真实全国 MVT/PBF 或 final production readiness 作为内部 MVP 阻塞项。
-Issue #213 已补 deterministic controlled-failure/retry evidence：正式 pipeline persistence -> ops API -> `/ops` mock browser lane -> authorized retry -> retry job/event -> deterministic job/stage succeeded terminal outcome。
-cycle `current_state` 仍以正式 `met.forecast_cycle` 持久化状态为准，不声明 retry job 自动完成 forecast cycle。
-Issue #214 已新增 MVP smoke/evidence freeze：[`docs/runbooks/qhh-mvp-smoke-evidence.md`](docs/runbooks/qhh-mvp-smoke-evidence.md) 用稳定 ID 标注 QHH GFS/IFS live diagnostic、`/hydro-met` mocked browser smoke、`/ops` deterministic retry evidence、static checks、opt-in live blockers 和 claim boundary。
-live Slurm/QHH/GFS/IFS/target-browser/IdP/alert/rollback 仍按 runbook 标注为 skipped/blocked，不能据此声明最终生产就绪。
-
-重要边界：默认 fast/production-like lane 不会伪造最终生产就绪。真实 final production readiness 仍需要在目标环境补齐 live backend auth、live alert sink delivery、live rollback execution、accepted live dependency proofs，以及真实外部系统运行证据。
-
-## 已完成里程碑
-
-- Epic #120 已完成并关闭；子 issue #121-#126 全部关闭。
-- M9 Basins 已完成并关闭：Epic #133，子 issue #134-#139 全部关闭；PR #144、#145 已合并。
-- M10 Production Closure 已完成并关闭：Epic #146，子 issue #147-#152 全部关闭；PR #154-#158 已合并。
-- M11 Overview + Basin Drilldown 已完成并关闭：Epic #159，子 issue #160-#165 全部关闭；PR #166-#171 已合并。
-- M12 Segment forecast detail 已完成本地实现：新增 `/segments/:segmentId` 全屏详情路由、basin/forecast/flood handoff、scoped segment identity 恢复、KPI/缩略图/多源曲线/阈值/partial panels/timeline，并保留无 station/forcing/weather 合同时的显式不可用状态。
-- QHH 完整链路已完成标准多周期真实闭环并迁入 Slurm：使用 `data/Basins/qhh` 已校准模型、原始 `qhh.tsd.forc` 386 站点、项目内 PostgreSQL、真实 GFS/IFS `2026052100` 与 `2026052106`、仓库内 `SHUD/shud`。
-  已完成 download、canonical、forcing、SHUD runtime、parse、结果摘要、display product 发布与 API 消费验证。
-  新增 `run_qhh_cycle.sh`、`run_qhh_cycle.sbatch`、`run_qhh_continuous.py` 覆盖 GFS+IFS 多周期扫描、Slurm 提交、幂等跳过、锁和状态文件；forcing producer 已改为按 valid_time streaming 插值，减少全周期 canonical field 常驻内存。
-- M20 Production Scheduler Automation 已完成 #192-#196 的 fast/deterministic 自动化切片：生产 scheduler 默认发现所有 active runnable 注册 SHUD 模型，按 GFS/IFS 周期生成确定性 candidate/run/forcing identity。
-  它记录 operator filters、unavailable/block reason、dry-run no-mutation proof、Slurm preflight/submission/accounting、array partial evidence、durable state skip/resume、retry/cancel 证据，并把 operator docs、qhh 诊断边界和 readiness 解释补齐。
-- 当前远端主干：`origin/master` @ `da26dc331453988612ce4d4d5818948309d117ef`。
-
-## M10 生产闭环结果
-
-M10 对应 OpenSpec change：`openspec/changes/m10-production-closure/`。
-
-| Issue | 状态 | 交付能力 |
-| --- | ---: | --- |
-| #147 Real Slurm + SHUD workload closure | 完成 | `nhms-production validate-slurm`，Slurm preflight、sbatch 渲染、fake/real sacct schema、array partial success、retry/cancel、SHUD QC blocker、redacted environment evidence |
-| #148 Production object store + Basins copied-data closure | 完成 | `nhms-production validate-object-store`，synthetic copied Basins、local production-like object store、package publish/checksum verification、registry/API/runtime object URI contract、cleanup/rollback evidence |
-| #149 Live meteorology ingestion + QC closure | 完成 | `nhms-production validate-met`，GFS/IFS/ERA5 deterministic fixture、CLDAS restricted evidence、raw/canonical/forcing/QC/best-available lineage、negative QC blockers |
-| #150 Staging E2E forecast/analysis closure | 完成 | `nhms-production validate-e2e`，source -> canonical -> forcing -> Slurm -> parse -> frequency -> tile -> API/frontend 的 deterministic stage evidence bundle |
-| #151 National-scale MVT/performance closure | 完成 | `nhms-production validate-scale`，large fixture、thresholds、query plan/hash/p95、GeoJSON/MVT blocker、frontend timing、resource bounds |
-| #152 Production ops/security/runbook readiness | 完成 | `nhms-production validate-ops`，preflight、config validation、auth/RBAC matrix、audit/redaction、alerts、rollback drills、dependency closure、summary evidence |
-| #181 M19 production readiness proof | 完成 | `nhms-production validate-readiness`，readiness item schema/truth table、deterministic summary ingestion、opt-in live receipt ingestion/redaction、release blocker summary、CLDAS/real-national-data scoped exclusions |
-
-M10 最终 CI 状态：PR #158 最新 head 的 Markdown Lint、OpenAPI Validate、JSON Schema Validate、SQL Migration Dry Run、Unit Tests、Frontend Build 全部通过。最终 cross-review round 27 clean，Phase 7 independent final review clean。
-
-## M11 全国总览与流域钻取结果
-
-M11 对应 OpenSpec change：`openspec/changes/m11-overview-basin-drilldown/`。
-
-| Issue | 状态 | 交付能力 |
-| --- | ---: | --- |
-| #160 M11 route foundation | 完成 | `/overview`、`/forecast`、`/flood-alerts`、`/monitoring` 路由骨架，导航标签，基础 app shell，查询状态基础 |
-| #161 M11 data contracts | 完成 | overview/basin view-model、数据归一化、API 组合、缓存/去重、聚合端点决策规则 |
-| #162 M11 map controls | 完成 | M11 shared MapLibre surface、terrain/satellite/vector 底图、source/scenario 控制、水文/气象/基础图层控制、legend、valid-time timeline |
-| #163 National overview page | 完成 | `/` 和 `/overview` 默认全国总览，左侧流域/图层面板，中央全国地图，右侧运行态势，底部时间轴，流域 popup 和 drill-down handoff |
-| #164 Basin drill-down workflow | 完成 | `/basins/:basinId` 流域分析页，流域身份/版本、河段列表、搜索/预警筛选、行选择、URL 状态恢复、forecast handoff |
-| #165 Basin map delivery | 完成 | 流域河网地图、选中河段高亮、segment detail panel、趋势 sparkline、lineage/forecast handoff、route state 不变量和 PostGIS SQL CI 修复 |
-
-M11 最终 PR #171 CI 状态：Markdown Lint、OpenAPI Validate、JSON Schema Validate、SQL Migration Dry Run、Unit Tests、Frontend Build 全部通过。
-最后一次本地验证覆盖：`uv run ruff check .`、后端重点测试 `171 passed, 3 skipped`、OpenSpec validate、`git diff --check`、前端单测 `270 passed`、`tsc --noEmit`、`check:api-types`、frontend build、Playwright E2E `34 passed`、preview E2E `3 passed`。
+| 证据面 | 当前状态 | 边界 |
+| --- | --- | --- |
+| QHH GFS backend smoke | 已有 `qhh_gfs_2026052100_smoke` live diagnostic 证据 | 证明诊断脚本链路可跑通，不证明正式 scheduler readiness |
+| QHH IFS continuous cycle | 已有 `fcst_ifs_2026052106_basins_qhh_shud` live diagnostic 证据 | 证明记录周期可跑通，不证明未来 IFS 可用性 |
+| `/hydro-met` browser smoke | Playwright deterministic mocked API，`1 passed` | 证明 UI/API wiring、station-series、`q_down`、GFS/IFS、IFS 144h 标注，不证明 live backend |
+| `/ops` controlled failure/retry smoke | Playwright deterministic mocked API，`11 passed` | 证明失败行、日志、operator retry 和 retry job/stage 终态，不证明 live Slurm/QHH retry |
+| Backend/API contract | `uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py`，`137 passed, 8 warnings` | 证明 deterministic fixture 合同，不证明目标环境数据 |
+| Frontend unit/build | `corepack pnpm test`、`corepack pnpm build`，`536 tests passed` 且 build 通过 | 证明前端健康，不证明 live 部署 |
+| OpenAPI/API types | Redocly lint 与 frontend API type drift check 已通过 | 证明契约一致，不证明 endpoint live availability |
+| Live target E2E | skipped/blocked | 缺 target DB、对象存储、Slurm、source credentials、共享日志、IdP/operator、target browser、alert、rollback receipts |
 
 ## 当前系统能力
 
 ### 后端与数据链路
 
 - FastAPI 后端已实现 forecast、models、pipeline、hindcast、flood alerts、best-available、state snapshots、data-source 等路由。
-- 数据库 migration `000001`-`000014` 覆盖 core/met/hydro/flood/map/ops schema、索引、pipeline 字段、best-available lineage 等。
 - OpenAPI 契约位于 `openapi/nhms.v1.yaml`，前端类型由该文件生成。
-- JSON Schema 覆盖 run manifest、run status、QC result、pipeline job，并有 examples 校验。
-- GFS、ERA5、IFS adapter 已实现并有 mock/test 覆盖；IFS 多源预报能力已接入。
+- 数据库 migration 覆盖 core/met/hydro/flood/map/ops schema、索引、pipeline 字段和 best-available lineage。
+- GFS、IFS、ERA5 adapter 已实现并有 deterministic 测试覆盖；CLDAS 仍按受限数据源处理。
 - Canonical conversion、forcing production、SHUD runtime adapter、output parser、state manager、洪水频率拟合、重现期计算、tile publisher 已实现。
-- Forcing producer 已生成并写入 `met.forcing_station_timeseries`，变量覆盖 `PRCP`、`TEMP`、`RH`、`wind`、`Rn`、`Press`；station-series API、QHH latest-product API 和 `/hydro-met` deterministic 消费已经落地。MVP 剩余缺口不是落库从零实现，而是 QHH 真实 forcing_version 完整性验收、必要查询索引 proof 和目标环境 live receipt。
-- Orchestrator 支持 forecast/analysis/hindcast 链路、Slurm job array、retry/cancel、partial success、publish stage、pipeline persistence。
-- Production scheduler 支持 GFS/IFS 周期发现、active runnable registry model 发现、确定性 candidate identity、operator filters、文件锁、dry-run evidence、Slurm compute-node preflight、array/task 证据、state/idempotency skip/resume、retry/cancel 证据和 bounded/redacted scheduler artifact。
-- M21 #213 deterministic controlled-failure lane 使用正式 `ops.pipeline_job` / `ops.pipeline_event` fixture 和公开 pipeline/job/retry API 验证同一 QHH-like failed run identity。
-  `/ops` Playwright mock 验证 failed row、backend log modal、operator retry header、刷新后的 retry job succeeded outcome、cycle current_state 持久化语义和 viewer gate。
-  运行说明见 [`docs/runbooks/qhh-controlled-failure-retry-evidence.md`](docs/runbooks/qhh-controlled-failure-retry-evidence.md)。
-- M21 #214 smoke/evidence freeze 使用 [`docs/runbooks/qhh-mvp-smoke-evidence.md`](docs/runbooks/qhh-mvp-smoke-evidence.md) 作为 readiness claim 索引。
-  每条 claim 需要 stable ID、mode、command、artifact path 和 claim boundary；新增 `/hydro-met` deterministic Playwright smoke 只证明 mocked latest-product、两站点选择、station-series、两河段选择、`q_down` forecast-series、GFS/IFS 和 IFS 144h shorter-horizon UI wiring。
-  它不证明 live backend 或 final production readiness。
-- Real Slurm gateway 支持 `sbatch`、`sacct`、`scancel`、`sinfo`、array job、日志读取、模板白名单，并有 fake-binary smoke。
-- Basins discovery、publish、registry import、runtime/API consumption、frontend asset fixture 已形成完整 M9 资产链路。
+- `met.forcing_station_timeseries` 已由 forcing producer 写入，覆盖 `PRCP/TEMP/RH/wind/Rn/Press`。
+- Station-series API、QHH latest-product API、forecast-series `q_down` 查询和 `/hydro-met` deterministic 消费已落地。
+- Orchestrator / production scheduler 支持 forecast/analysis/hindcast、GFS/IFS 周期发现、active runnable model 发现、Slurm job array、retry/cancel、partial success、publish stage、pipeline persistence、dry-run evidence 和 readiness ingestion。
+- QHH `run_qhh_*` 脚本保留为诊断/复现工具；正式生产调度入口是 `nhms-pipeline plan-production`。
 
 ### 前端
 
 - 有效前端为 `apps/frontend`：Vite + React + TypeScript + MapLibre + ECharts + Zustand + OpenAPI-generated types。
-- 已实现路由：
-  - `/`、`/overview`：M11 全国总览，左侧 basin/source/layer 控制，中央全国地图，右侧运行态势，底部 valid-time timeline。
-  - `/basins/:basinId`：M11 流域钻取，流域身份/版本、河段列表、搜索/预警筛选、按径流/重现期/预警着色的有界河网、河段 hover/click、URL `segmentId` 同步、河段详情、趋势 sparkline、forecast/lineage handoff。
-  - `/segments/:segmentId`：M12 河段预报详情，保留 source/cycle/validTime/basin/river/segment 身份；先校验 scoped river segment，再请求同一 basin/network/segment 的 forecast series。
-    页面展示 KPI、120x90 位置缩略图、多源曲线、analysis/forecast 分割、IFS 6d 标签、Q2/Q5/Q10/Q20/Q50/Q100 阈值、station/forcing/weather/frequency partial 状态、底部时间线和 stale valid-time correction。
-  - `/forecast`：预报河网地图、河段选择、预报侧栏，并可与 M11 流域页互相传递 basin/version/segment/source/cycle/validTime 上下文。
-  - `/flood-alerts`：洪水预警统计、排名、ticker、地图、时间轴、详情。
-  - `/monitoring`：流水线监控工作台、阶段、作业表、队列摘要、趋势面板、operator RBAC gate。
-- MVP 前端已经新增两个可演示入口：`/hydro-met` 水文气象展示和 `/ops` 系统运维；现有 `/meteorology`、`/forecast`、`/segments/:segmentId`、`/monitoring` 作为可复用实现基础，不要求删除历史路由。
-- M11 shared controls 支持 terrain/satellite/vector 底图切换，GFS/IFS/GFS+IFS/Best Available source state，hydrology layer legend，API `valid_times[]` 驱动时间轴，stale valid-time correction。
-- M11 overview/basin 数据层复用 basins、basin versions、models、river segments、forecast series、flood alerts、pipeline、jobs、queue、metrics、layers、lineage 等现有 API，并在前端归一化 freshness、quality、source provenance、partial error 和 unavailable reason。
-- M11 数据合同在 `overviewDataContracts.ts` / `overviewData.ts` 归一化；缺失/超预算几何、compare 聚合缺口、lineage/trend/comparison 不可用均以局部状态呈现，不伪造地图或预报数据。
-- Forecast UI 支持 GFS/IFS scenario、多曲线图、analysis/forecast 区分、来源/周期归因、IFS 144h 可用时效标注。
-- Flood warning UI 支持预警等级过滤、时间轴播放、排名、河段详情、API-base-aware tile URL。
-- Monitoring UI 支持 pipeline status/jobs 轮询、source/cycle 选择、作业筛选/分页、日志弹窗、队列深度、趋势组件。
-- 前端测试覆盖 M11 路由/query state、overview 和 basin interaction、map controls、timeline、data contracts、API base 行为、route preview、mock API E2E、build、bundle size。
+- 已实现主要路由：
+  - `/hydro-met`：MVP 水文气象页，自动 latest-product bootstrap，站点列表/地图/forcing 曲线，河段列表/地图/`q_down` 曲线，GFS/IFS source 选择和 IFS shorter-horizon 标注。
+  - `/ops`：MVP 运维页，source/cycle selector、stage cards、jobs table、log modal、retry controls、queue/metrics 和 operator RBAC。
+  - `/`、`/overview`：全国总览。
+  - `/basins/:basinId`：流域钻取。
+  - `/segments/:segmentId`：河段预报详情。
+  - `/forecast`、`/flood-alerts`、`/monitoring`、`/meteorology`：保留为已有功能和复用基础。
+- 前端测试覆盖 unit/component、mock API E2E、preview E2E、visual evidence lane、build、bundle size 和 API type drift。
 
 ### Basins 与样例数据
 
-- 开发环境通过 `data/Basins -> /volume/data/nwm/Basins` 软链接接入河网/流域等 Basins 数据；这是开发期依赖，不是可迁移 artifact。
-- `data/Basins` 当前可发现 13 个 SHUD 模型目录：`qhh`、`heihe`、`kashigeer`、`weiganhe`、`xinanjiang_upstream`、`hetianhe`、`qinyijiang`、`keliya`、`tailanhe`、`zhaochen/{WEM,HHY,MC,BST}`。
-- Basins package/registry import 已支持 inventory、checksum、runtime/GIS/CALIB evidence、forcing metadata、manifest URI、registry lineage、inactive model activation audit。
-- 真实 Basins smoke 为 opt-in：仅在环境变量和路径满足时运行。
+- 开发环境通过 `data/Basins -> /volume/data/nwm/Basins` 软链接接入 Basins 数据；这是开发期依赖，不是可迁移 artifact。
+- 当前可发现 13 个 SHUD 模型目录，包括 `qhh`、`heihe`、`kashigeer`、`weiganhe`、`xinanjiang_upstream`、`hetianhe`、`qinyijiang`、`keliya`、`tailanhe` 和 `zhaochen/{WEM,HHY,MC,BST}`。
+- QHH 已有真实 GFS/IFS `2026052100` 与 `2026052106` 多周期诊断闭环，仍作为 reproduction evidence 使用。
 
-## 设计、效果图与当前实现缺口
+## 历史里程碑索引
 
-设计基准主要来自 `docs/spec/06_frontend_gis_design.md`、`docs/spec/06B_frontend_ui_design_spec.md`、`docs/modules/15_frontend_application_design.md`，效果图索引目前落在 `docs/images/roadmap_*.png`。M11 已覆盖效果图 1 和效果图 2 的核心操作路径，但不是完整产品视觉终态。
+- Epic #120：基础阶段已完成并关闭。
+- M9 Basins：Epic #133，子任务 #134-#139 已完成并关闭。
+- M10 Production Closure：Epic #146，子任务 #147-#152 已完成并关闭。
+- M11 Overview + Basin Drilldown：Epic #159，子任务 #160-#165 已完成并关闭。
+- M12 Segment Forecast Detail：`/segments/:segmentId` 本地实现已完成。
+- M19 Production Readiness Proof：`nhms-production validate-readiness` 已实现 deterministic evidence / live proof / blocker truth table。
+- M20 Production Scheduler Automation：#192-#196 已完成 scheduler dry-run、Slurm evidence、state idempotency、retry/cancel 和 readiness 文档。
+- M21 QHH Hydro-met/Ops MVP：#202-#214 已完成并关闭。
 
-| 设计/效果图目标 | 当前实现 | 主要缺口 |
-| --- | --- | --- |
-| 效果图 1：全国总览 | `/`、`/overview` 已实现 map-first shell、左侧流域/图层/source 控制、中央全国 MapLibre surface、右侧运行态势、底部 timeline、basin popup、monitoring/flood handoff | 视觉仍偏工程化组件，未按效果图做最终像素级打磨；一级/二级流域树依赖现有 basin metadata，不保证完整八大流域层级；真实气象/DEM/base overlay 未接入，只显示 unavailable；全国真实边界/河网覆盖取决于 Basins/registry 数据 |
-| 效果图 2：流域详情 / drill-down | `/basins/:basinId` 已实现流域身份、版本、bbox/fallback、河段列表、搜索、预警筛选、地图选择、URL segment state、选中河段 detail、trend sparkline、forecast handoff | 城市/站点标签缺数据合同，当前明确显示暂不可用；河段 hover tooltip 和地图动画效果仍有限；右侧趋势为轻量 sparkline，不是完整 48h/7d 专业分析面板；流域内真实视觉密度依赖河网 geometry 数据质量 |
-| 效果图 3：河段预报曲线全屏详情 | `/segments/:segmentId` 已实现可恢复全屏 route、basin/forecast/flood handoff、scoped identity 校验、KPI、120x90 位置缩略图、多源主图、scenario toggles、analysis/forecast 分割、IFS 6d 标注、Q2/Q5/Q10/Q20/Q50/Q100 阈值、partial panels、底部时间线 | station/forcing/weather 合同仍缺，当前只显示 unavailable/restricted/partial，不伪造数据；频率曲线参数合同缺失，当前展示离散阈值而非完整曲线；segment route 未携带 run_id，lineage API 无法安全查询时显示不可用；box zoom/crosshair 和像素级视觉打磨仍未完成 |
-| 效果图 4：洪水预警总览 | `/flood-alerts` 已有统计、ranking、ticker、bounded GeoJSON compatibility、timeline、segment detail；M16 已补 canonical flood-return-period `.pbf` live-PostGIS-only 合同、layer metadata、MapLibre vector-source selection、PostGIS-oriented SQL shape 和 measured deterministic MVT contract evidence | live PostGIS/national-data/browser proof 仍未在目标环境执行，canonical `.pbf` 在 live PostGIS 不可用时返回 `MVT_LIVE_POSTGIS_UNAVAILABLE`，`production_mvt_readiness_claimed=false`；和 M11 overview/basin 的视觉语言还需统一；点击 ranking 到全屏 segment detail 的目标页仍缺失 |
-| 效果图 5：气象空间栅格 | `/meteorology?tab=grid` 已启用 query-state tab、PRCP/TEMP/RH/wind/Rn/Press 与 GFS/IFS/ERA5/CLDAS/Best Available 合同夹具、严格 validTime 规范化、色标、透明度/等值线/站点叠加控件、格点查询弹窗（lon/lat/source/cycle/validTime/unit/time resolution/spatial resolution）、可请求的区域统计 bbox 状态、多源对比状态、CLDAS restricted 和 tile/query/area-stat unavailable/validation 显式状态；URL normalization 会保留 over-limit 搜索证据；未伪造气象值 | 仍缺真实 TiTiler/PNG/MVT 栅格瓦片服务、真实 grid-cell query/area-stat 返回值、真实 live best_available 栅格差值；当前为前端合同夹具和不可用状态，不代表生产全国栅格发布已完成 |
-| 效果图 6：气象代站查询 | `/meteorology?tab=stations` 已启用 station inventory、流域筛选、搜索、排序、完整度/QC、站点 marker/popup/detail、PRCP/TEMP/RH/wind/Press forcing 图、缺测/QC 区间、相邻站点高亮语义、无结果与 forcing unavailable 状态；deep-linked `stationId` 先在筛选后/分页前集合中解析，默认页外的有效站点会显式追加/标注，不回退成其他站点；筛选排除站点时清理旧详情；后端已能列出 `/api/v1/met/stations`，forcing producer 已写入 `met.forcing_station_timeseries`；MVP `/hydro-met` 已消费 `/api/v1/met/stations/{station_id}/series` 并展示六变量 station-series | legacy `/meteorology?tab=stations` 若作为演示入口仍需同步真实 station-series 消费证据；MVP 当前以 `/hydro-met` 为真实消费入口。仍缺完整 QC/adjacent/forcing metadata、真实分页大列表、真实 Thiessen/Voronoi、真实长时段 sample limit 服务端校验，以及目标环境 QHH 完整性/index proof |
-| 效果图 7：流域/模型资产管理 | `/system/model-assets` 已实现只读管理页，按 `model_admin`/`sys_admin` gated；NavBar 仅对允许角色显示“模型资产”；复用 `/api/v1/models` 和 `/api/v1/models/{model_id}`，不新增后端/OpenAPI endpoint。页面包含流域/模型树、搜索、启用/停用筛选、URL `modelId` 恢复、筛选排除后的 stale-detail 清理、六张 KPI 卡、元数据、来源/包 lineage、版本时间线、依赖图、产品资产列表、空间小地图 degraded state；`modelAssets` store/view-model 递归清理本地路径、Windows 绝对路径、`file://`、URI userinfo/query/fragment，并限制产品列表 12 条、空间预览 50 features/2,000 vertices。`version_admin` 未作为运行时角色加入。 | 当前范围明确为 readonly；模型包创建/编辑/删除/发布、active model 切换、真实大规模 MVT/geometry publication 和 mutating audit workflow 仍按 M14 OpenSpec non-goals 后续处理 |
-| 效果图 8：产品监控 | `/monitoring` 已有 pipeline summary、stage cards、jobs table/filter/pagination、queue、trend、log modal、operator RBAC gate | 与效果图的最终 dashboard 信息层级/视觉密度仍需打磨；当前 local dev role override 不是生产 auth；缺 live alert sink、真实 backend identity provider 证明 |
-| 全局 UI 规范 06B | 已引入 M11 visual tokens、56px nav、左右面板、64px timeline、状态色/预警色、icon buttons、responsive collapse | 仍需做真实截图对照和像素级 visual QA；部分控件仍是 Tailwind 工程样式而非完整 design-token 抽象；缺正式 effect-image visual baseline 自动比对 |
-| 地图与性能 | MapLibre surface 已复用，支持 basemap switch、GeoJSON budget、geometry guards、stale-state 修复；M16 已提供 river-network/hydro/flood-return-period live-PostGIS-only `application/x-protobuf` MVT 路径、metadata-driven vector source、cache/etag/checksum headers、deterministic SQL/cache/contract evidence | live PostGIS/national-data/browser proof 仍为 opt-in/not_executed，因此不能宣称最终生产 MVT readiness；非 live PostGIS 环境不会伪造 `.pbf` success，当前 M11 可用但仍需目标环境全国规模压测 |
+## 仍需目标环境补齐的 live proof
 
-## 剩余生产化边界
+这些不是内部 MVP deterministic 完成度缺口，而是正式生产上线前必须在目标环境补齐的 live 证据：
 
-这些不是 M10/M11 fast closure 的缺口，而是真实生产上线前必须在目标环境补齐的 live proof：
-
-- live backend auth / identity provider 行为。
-- live alert sink delivery。
-- live rollback execution。
-- accepted live dependency proofs。
-- 真实 qhh Slurm workload 已完成 GFS/IFS 00Z/06Z 单轮闭环；M20 已纳入正式 backend scheduler automation 的 deterministic/fast 证据路径。目标环境仍需运行 accepted live scheduler/Slurm/object-store/source/E2E receipts，才能移除 final production readiness blocker。
-- 真实对象存储，如 MinIO/S3，而不是 local object store。
-- live GFS/IFS/ERA5 数据下载稳定性与凭据管理。
-- CLDAS adapter、授权数据接入和 best_available 生产路径。
-- 全国规模真实数据、真实 PostGIS query plan/压测、真正 `application/x-protobuf` MVT。
-
-## 有效代码入口
-
-- 后端：`apps/api`
-- 前端：`apps/frontend`
-- 编排：`services/orchestrator`
-- Slurm gateway：`services/slurm_gateway`
-- Tile publisher：`services/tile_publisher`
-- Workers：`workers/*`
-- sbatch 模板：`infra/sbatch`
-- 生产闭环 lanes：`services/production_closure/*`
-
-已清理 legacy 占位目录：`apps/web`、hyphenated worker/service 目录、`workers/sbatch_templates`。后续不要在这些路径恢复实现。
+- target PostgreSQL/PostGIS/TimescaleDB receipt。
+- 对象存储和共享 Slurm log root receipt。
+- `nhms-pipeline plan-production --plan` scheduler receipt。
+- live Slurm `sbatch`/`squeue`/`sacct`/`scancel` receipt。
+- live 新周期 GFS/IFS source download receipt。
+- live QHH SHUD runtime receipt，并绑定正式 pipeline persistence。
+- live `/hydro-met` browser run against target backend。
+- live `/ops` retry/cancel run with target IdP/operator identity。
+- live alert sink、rollback、nationwide MVT/PBF 和 final production readiness receipts。
 
 ## 常用验证命令
+
+后端与 OpenSpec：
 
 ```bash
 uv run ruff check .
 uv run pytest -q
-openspec validate m10-production-closure --strict --no-interactive
-openspec validate m11-overview-basin-drilldown --strict --no-interactive
-openspec validate m20-production-multibasin-continuous-automation --strict --no-interactive
+openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive
 ```
 
-M20 scheduler fast dry-run / readiness 证据：
+MVP focused checks：
+
+```bash
+uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py
+uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py
+```
+
+前端：
+
+```bash
+cd apps/frontend
+corepack pnpm test
+corepack pnpm exec tsc --noEmit
+corepack pnpm run check:api-types
+corepack pnpm build
+corepack pnpm check:bundle
+corepack pnpm test:e2e -- hydro-met.spec.ts --project=chromium --workers=1
+corepack pnpm test:e2e -- monitoring.spec.ts --project=chromium --workers=1
+```
+
+M20 scheduler fast dry-run / readiness evidence：
 
 ```bash
 export DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms
@@ -197,71 +134,17 @@ NHMS_RUN_PRODUCTION_CLOSURE=1 uv run nhms-production validate-readiness \
   --force
 ```
 
-真实 DB integration：
-
-```bash
-NHMS_RUN_INTEGRATION=1 \
-NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms \
-uv run pytest -q -m integration
-```
-
-前端：
-
-```bash
-cd apps/frontend
-corepack pnpm test
-corepack pnpm exec tsc --noEmit
-corepack pnpm run check:api-types
-corepack pnpm build
-corepack pnpm check:bundle
-corepack pnpm exec playwright test
-corepack pnpm run test:e2e:preview
-```
-
-M10 production-like lanes 均为 opt-in，典型形式：
-
-```bash
-NHMS_RUN_PRODUCTION_CLOSURE=1 \
-uv run nhms-production validate-ops \
-  --evidence-root artifacts/production-closure \
-  --run-id <run_id>
-```
-
-完整验证说明见 `docs/VALIDATION.md`。
+完整验证说明见 [`docs/VALIDATION.md`](docs/VALIDATION.md)。
 
 ## 下一步优先级
 
-1. **MVP P0 evidence freeze follow-through**：按 [`docs/runbooks/qhh-mvp-smoke-evidence.md`](docs/runbooks/qhh-mvp-smoke-evidence.md) 保持每个 readiness claim 的 mode、command、artifact path 和 claim boundary；新增或刷新证据时先补对应 ID，避免 deterministic/mock/live 混淆。
-2. **MVP P0 opt-in live receipts**：在目标环境准备好 target DB、对象存储、Slurm、source credentials、共享日志、IdP/operator 身份和浏览器入口后，先用 `nhms-pipeline plan-production --plan` 产生正式 scheduler receipt。
-   再用 `nhms-production validate-readiness` 摄取 scheduler/Slurm/object-store/source/E2E/target-env/IdP/alert/rollback proof files。
-   跑一轮 QHH GFS/IFS live smoke，验收下载 -> canonical -> forcing -> SHUD -> parse -> station series -> forecast-series -> `/hydro-met` 展示 -> `/ops` 日志/重启；未跑前保持 skipped/blocked。
-3. **MVP 后续生产化**：M20 live production proof、live IdP、live alert sink、live rollback、真实对象存储、真实全国 PostGIS/MVT、CLDAS、ERA5 近实时和全国所有流域均保留为 P2/production readiness，不阻塞内部 MVP。
-
-## M19 生产就绪证明状态
-
-- 新入口：`uv run nhms-production validate-readiness --evidence-root artifacts/production-closure --run-id <run_id>`。
-- 默认 fast 路径只生成/汇总证据，不执行 live IdP、alert sink、backend mutation、rollback、Slurm、object store、weather/source 或 real-national-data 操作。
-- 输出位于 `<evidence-root>/<run_id>/readiness/`：`preflight.json`、`live_proof_receipts.json`、`readiness_items.json`、`release_blockers.json`、`environment.json`、`summary.json`。
-- `final_production_readiness_claimed` 只有在所有 required live proof receipt 被接受时才会为 `true`；当前缺少 live backend auth、live alert sink、live rollback、Slurm/object-store/source/E2E/MVT 和 target-env config receipts 时均保持 `false`。
-- CLDAS 和 incomplete real national data 是本阶段 scoped exclusions，记录为 `not_executed`，不是 deterministic failure，也不满足 live proof。
-
-## M15 前端视觉收敛状态
-
-- GitHub issue #176 / OpenSpec `m15-frontend-visual-conformance` 已实现机械视觉证据：`/overview`、`/basins/basin-demo?...segmentId=seg-009`、`/flood-alerts`、`/monitoring` 在 `1920x1080`、`1440x900`、`1280x900` 均由 deterministic Playwright 夹具截图并校验。
-- 扩展证据已覆盖 `/segments/seg-009?...`、气象 grid/stations 两条 URL、`/system/model-assets?modelId=model-demo`。
-  非 happy-state 证据在 canonical `1440x900` 覆盖 overview loading/partial/error、basin empty/partial/error、flood empty/warning/error、monitoring empty/failed/RBAC denied。
-  还覆盖 segment missing/chart error、meteorology grid unavailable/restricted、stations empty/detail unavailable、model-assets denied/loading/redacted error。
-- 证据命令：`cd apps/frontend && corepack pnpm run test:e2e:m15-visual`。
-  Manifest：`.codex/evidence/issue-176/manifest.json`；截图：`.codex/evidence/issue-176/screenshots/`。
-  Manifest SHA 始终等于运行时 checked-out `git rev-parse HEAD`；CI 通过 `M15_EVIDENCE_SHA` 声明证据 commit，PR 事件设置为 pull request head SHA 并 checkout 同一 SHA，push/non-PR 设置为 `github.sha`。
-  任何 `M15_EVIDENCE_SHA` / PR head / `GITHUB_SHA` / `CI_COMMIT_SHA` 与 `HEAD` 不一致都会阻断截图生成；PR 证据必须在 final commit/frozen PR head 后重新生成，禁止 `local-uncommitted` 等 placeholder。
-- M15 证据 lane 阻断未知 non-local network；OpenTopoMap、Esri、OpenStreetMap 等已知地图 tile/style/font 请求使用 deterministic neutral stubs，不依赖 live 外部瓦片服务。
-- 治理文档：`apps/frontend/e2e/m15-visual-evidence.md` 记录 review checklist、acceptable deltas、no-overlap criteria 和 blocking criteria。截图二进制仍为本地 volatile evidence，不纳入仓库。
-- 已收敛共享根：06B/M15 CSS token aliases、focus ring、shared card/button/badge/select/tabs/dialog/toast radius/shadow/spacing/control-height/z-index、M11 nav/panel/timeline tokens、warning/status palette。未改变 backend/OpenAPI contract、生产 time-series semantics、RBAC 数据边界、M14 redaction/model-assets sanitization。
+1. 保持 MVP evidence matrix 的 claim boundary：新增或刷新证据时必须标注 mode、command、artifact path 和 claim boundary，不能混淆 deterministic、mocked、live。
+2. 在目标环境补 live receipts：target DB、对象存储、Slurm、source credentials、共享日志、IdP/operator、浏览器入口、alert、rollback。
+3. 跑一轮 QHH GFS/IFS live MVP smoke：download -> canonical -> forcing -> SHUD -> parse -> station series -> forecast-series -> `/hydro-met` -> `/ops` logs/retry。
+4. 后续生产化再推进 live IdP、live alert sink、live rollback、真实对象存储、真实全国 PostGIS/MVT、CLDAS、ERA5 近实时和全国所有流域。
 
 ## 注意事项
 
-- 工作区可能存在 `.codex/`、`data/`、`docs/images/`、`node_modules/`、`dist/`、`__pycache__` 等本地或生成文件；不要误 stage。
-- 当前主 worktree 的 `master` 可能落后 `origin/master`；判断 M11 完成度时以 `origin/master` 和已合并 PR #166-#171 为准，不要只看本地 `HEAD`。
-- 历史 OpenSpec proposal/tasks 保留当时路径和任务状态用于审计；判断当前完成度以源码、测试、`docs/VALIDATION.md` 和本文为准。
+- 工作区可能存在 `.agents/`、`.codex/`、`data/`、`docs/images/`、`node_modules/`、`dist/`、`__pycache__` 等本地或生成文件；不要误 stage。
+- 历史 OpenSpec proposal/tasks 保留当时路径和任务状态用于审计；判断当前完成度以源码、测试、`docs/VALIDATION.md`、M21 evidence matrix 和本文为准。
 - 生产环境迁移不能复用 macOS `.venv` 或 `node_modules`；Linux 目标环境按 `AGENTS.md` 重新 `uv sync` 和 `corepack pnpm install`。
