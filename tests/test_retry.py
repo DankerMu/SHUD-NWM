@@ -275,7 +275,10 @@ def test_manual_retry_submission_failure_marks_submission_failed() -> None:
 def test_manual_retry_submission_failure_redacts_persisted_event_and_api_error() -> None:
     secret_message = (
         "sbatch failed for https://alice:pass123@slurm.example/sbatch?"
-        "X-Amz-Signature=sig123&token=tok123 token=tok123 password=pass123"
+        "X-Amz-Signature=sig123&token=tok123 token=tok123 password=pass123 "
+        "Authorization: Bearer live-token-123 authorization=Basic basic-secret-123 "
+        "{\"Authorization\": \"Bearer json-retry-token-123\"} "
+        "Proxy-Authorization='Basic proxy-retry-secret-123'"
     )
     with _store() as store:
         _create_job(store, run_id="run_api_secret", error_code="SLURM_UNAVAILABLE")
@@ -301,7 +304,16 @@ def test_manual_retry_submission_failure_redacts_persisted_event_and_api_error()
             assert event.details["error_code"] == "SBATCH_SUBMISSION_FAILED"
             persisted = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
             response_body = json.dumps(response.json(), sort_keys=True)
-            for raw_secret in ("alice:pass123", "pass123", "sig123", "tok123"):
+            for raw_secret in (
+                "alice:pass123",
+                "pass123",
+                "sig123",
+                "tok123",
+                "live-token-123",
+                "basic-secret-123",
+                "json-retry-token-123",
+                "proxy-retry-secret-123",
+            ):
                 assert raw_secret not in persisted
                 assert raw_secret not in response_body
             assert "[redacted]" in persisted

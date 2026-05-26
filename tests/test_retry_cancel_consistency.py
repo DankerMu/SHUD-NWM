@@ -214,12 +214,19 @@ def test_cancel_gateway_error_redacts_response_and_event_details() -> None:
                 "slurm_secret": SlurmGatewayError(
                     502,
                     "SLURM_ERROR",
-                    "scancel failed token=tok123 for https://alice:pass123@slurm.example/cancel?signature=sig123",
+                    "scancel failed token=tok123 Authorization: Bearer live-token-123 "
+                    "{\"Authorization\": \"Bearer json-cancel-token-123\"} "
+                    "for https://alice:pass123@slurm.example/cancel?signature=sig123",
                     {
                         "code": "SCANCEL_FAILED",
                         "status": "failed",
                         "password": "pass123",
-                        "stderr": "token=tok123 url=https://alice:pass123@slurm.example/cancel?signature=sig123",
+                        "Authorization": "Bearer payload-token-123",
+                        "stderr": (
+                            "token=tok123 authorization=Basic basic-secret-123 "
+                            "Proxy-Authorization: 'Basic quoted-cancel-proxy-secret-123' "
+                            "url=https://alice:pass123@slurm.example/cancel?signature=sig123"
+                        ),
                     },
                 )
             }
@@ -240,13 +247,24 @@ def test_cancel_gateway_error_redacts_response_and_event_details() -> None:
         assert failure["error"]["details"]["code"] == "SCANCEL_FAILED"
         assert failure["error"]["details"]["status"] == "failed"
         assert failure["error"]["details"]["password"] == "[redacted]"
+        assert failure["error"]["details"]["Authorization"] == "[redacted]"
         event = next(event for event in _events(store) if event.event_type == "cancel_failed")
         assert event.details["previous_status"] == "running"
         assert event.details["cancellation_proven"] is False
         assert event.details["error"]["code"] == "SLURM_ERROR"
         response_body = json.dumps(response.json(), sort_keys=True)
         event_body = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
-        for raw_secret in ("alice:pass123", "pass123", "tok123", "sig123"):
+        for raw_secret in (
+            "alice:pass123",
+            "pass123",
+            "tok123",
+            "sig123",
+            "live-token-123",
+            "json-cancel-token-123",
+            "payload-token-123",
+            "basic-secret-123",
+            "quoted-cancel-proxy-secret-123",
+        ):
             assert raw_secret not in response_body
             assert raw_secret not in event_body
         assert "[redacted]" in response_body
@@ -310,11 +328,13 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
                     "status": "pending",
                     "cancellation_proven": False,
                     "token": "tok987",
+                    "authorization": "Bearer response-token-987",
                     "callback_url": "https://bob:pass987@slurm.example/cancel?X-Amz-Signature=sig987",
                     "details": {
                         "code": "SCANCEL_PENDING",
                         "status": "pending",
                         "password": "pass987",
+                        "stderr": "Authorization: Basic basic-secret-987",
                     },
                 }
             }
@@ -335,6 +355,7 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
         assert gap["gateway_response"]["status"] == "pending"
         assert gap["gateway_response"]["cancellation_proven"] is False
         assert gap["gateway_response"]["token"] == "[redacted]"
+        assert gap["gateway_response"]["authorization"] == "[redacted]"
         assert gap["gateway_response"]["details"]["code"] == "SCANCEL_PENDING"
         assert gap["gateway_response"]["details"]["status"] == "pending"
         assert gap["gateway_response"]["details"]["password"] == "[redacted]"
@@ -344,7 +365,7 @@ def test_unproven_cancel_gateway_response_redacts_response_and_event_details() -
         assert event.details["gateway_response"]["status"] == "pending"
         response_body = json.dumps(response.json(), sort_keys=True)
         event_body = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
-        for raw_secret in ("bob:pass987", "pass987", "tok987", "sig987"):
+        for raw_secret in ("bob:pass987", "pass987", "tok987", "sig987", "response-token-987", "basic-secret-987"):
             assert raw_secret not in response_body
             assert raw_secret not in event_body
         assert "[redacted]" in response_body

@@ -561,7 +561,12 @@ def test_active_manual_retry_guard_is_run_level_active_marker_invariant() -> Non
     migration = dict(_migration_sql())["000025_active_manual_retry_guard.sql"]
 
     assert "ADD COLUMN IF NOT EXISTS manual_retry_marker BOOLEAN NOT NULL DEFAULT false" in migration
-    assert "UPDATE ops.pipeline_job" in migration
+    assert "WITH ranked_active_legacy_retries AS" in migration
+    assert "row_number() OVER" in migration
+    assert "PARTITION BY run_id" in migration
+    assert "retry_rank" in migration
+    assert "ranked.retry_rank = 1" in migration
+    assert "UPDATE ops.pipeline_job AS job" in migration
     assert "substr(job_id, 1, length(run_id || '_retry_')) = run_id || '_retry_'" in migration
     assert "job_id LIKE run_id || '_retry_%'" not in migration
     assert "CREATE UNIQUE INDEX IF NOT EXISTS pipeline_job_active_manual_retry_guard_idx" in migration
@@ -570,6 +575,44 @@ def test_active_manual_retry_guard_is_run_level_active_marker_invariant() -> Non
     assert "run_id IS NOT NULL" in migration
     assert "status IN ('pending', 'queued', 'submitted', 'running')" in migration
     assert "job_id = run_id || '_retry_active'" not in migration
+
+
+def test_active_manual_retry_guard_backfill_is_duplicate_safe_before_index() -> None:
+    migration = dict(_migration_sql())["000025_active_manual_retry_guard.sql"]
+
+    ranked_position = migration.index("WITH ranked_active_legacy_retries AS")
+    update_position = migration.index("UPDATE ops.pipeline_job AS job")
+    index_position = migration.index("CREATE UNIQUE INDEX IF NOT EXISTS pipeline_job_active_manual_retry_guard_idx")
+
+    assert ranked_position < update_position < index_position
+    ranked_source = migration[ranked_position:index_position]
+    assert "PARTITION BY run_id" in ranked_source
+    for ordering in (
+        "submitted_at DESC NULLS LAST",
+        "created_at DESC NULLS LAST",
+        "updated_at DESC NULLS LAST",
+        "finished_at DESC NULLS LAST",
+        "job_id DESC",
+    ):
+        assert ordering in ranked_source
+    assert "status IN ('pending', 'queued', 'submitted', 'running')" in ranked_source
+    assert "ranked.retry_rank = 1" in ranked_source
+
+
+def test_active_manual_retry_guard_predicate_matches_runtime_guard() -> None:
+    migration = dict(_migration_sql())["000025_active_manual_retry_guard.sql"]
+    persistence_source = (
+        Path(__file__).resolve().parents[1] / "services" / "orchestrator" / "persistence.py"
+    ).read_text(encoding="utf-8")
+
+    index_source = migration[migration.index("CREATE UNIQUE INDEX IF NOT EXISTS") :]
+    assert "manual_retry_marker IS true" in index_source
+    assert "run_id IS NOT NULL" in index_source
+    assert "status IN ('pending', 'queued', 'submitted', 'running')" in index_source
+    assert 'ACTIVE_MANUAL_RETRY_STATUSES = ("pending", "queued", "submitted", "running")' in persistence_source
+    assert "PipelineJob.manual_retry_marker.is_(True)" in persistence_source
+    assert "PipelineJob.run_id.is_not(None)" in persistence_source
+    assert "PipelineJob.status.in_(ACTIVE_MANUAL_RETRY_STATUSES)" in persistence_source
 
 
 def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:

@@ -89,6 +89,11 @@ def test_audit_redaction_preserves_numeric_log_id_evidence_only() -> None:
             "package_checksum": "a" * 64,
             "manifest": {"uri": "s3://bucket/manifest.json?credential=secret"},
             "credential": {"token": "secret"},
+            "Authorization": "Bearer audit-secret",
+            "provider_metadata": {
+                "authorization": "Basic provider-secret",
+                "text": '{"Authorization": "Bearer json-audit-secret"}',
+            },
         }
     )
 
@@ -102,3 +107,6 @@ def test_audit_redaction_preserves_numeric_log_id_evidence_only() -> None:
     assert redacted["package_checksum"] == "[redacted]"
     assert redacted["manifest"] == {"uri": "[redacted]"}
     assert redacted["credential"] == {"token": "[redacted]"}
+    assert redacted["Authorization"] == "[redacted]"
+    assert redacted["provider_metadata"]["authorization"] == "[redacted]"
+    assert redacted["provider_metadata"]["text"] == '{"Authorization": "Bearer [redacted]"}'

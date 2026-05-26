@@ -138,7 +138,7 @@ def test_pipeline_stages_bounds_detailed_sample_query_before_iteration(monkeypat
         @event.listens_for(store.session.get_bind(), "before_cursor_execute")
         def _capture_sample_query(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
             normalized = " ".join(str(statement).lower().split())
-            if "row_number() over" in normalized and "pipeline_job" in normalized:
+            if "stage_row_number" in normalized and "pipeline_job" in normalized:
                 sample_selects.append(normalized)
 
         stages = pipeline_routes._stage_summaries(store, cycle_id)
@@ -183,6 +183,218 @@ def test_pipeline_stages_support_queued_and_skipped_public_job_statuses() -> Non
         returned_statuses = {job["job_id"]: job["status"] for job in jobs_response.json()["data"]["items"]}
         assert returned_statuses["job_queued"] == "queued"
         assert returned_statuses["job_skipped"] == "skipped"
+
+
+def test_pipeline_stages_skipped_only_stage_projects_skipped() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(store, job_id="job_skipped_only", cycle_id=cycle_id, stage="convert", status="skipped")
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert response.status_code == 200
+        convert = next(stage for stage in response.json()["data"] if stage["stage"] == "convert")
+        assert convert["display_status"] == "skipped"
+        assert convert["status"] == "skipped"
+        assert convert["basin_progress"] == {"completed": 0, "total": 1, "failed": 0}
+        assert convert["basin_results_total"] == 1
+        assert [result["job_id"] for result in convert["basin_results"]] == ["job_skipped_only"]
+
+
+def test_pipeline_stages_latest_queued_retry_overrides_stale_partial_failure() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        base_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time)
+        original = _create_job(
+            store,
+            job_id="job_forecast_original_partial",
+            run_id="run_retry_forecast",
+            cycle_id=cycle_id,
+            stage="forecast",
+            status="partially_failed",
+            submitted_at=base_time,
+            started_at=base_time,
+            finished_at=base_time + timedelta(minutes=8),
+            error_code="NODE_FAILURE",
+        )
+        original.updated_at = base_time + timedelta(minutes=8)
+        retry = _create_job(
+            store,
+            job_id="job_forecast_retry_queued",
+            run_id="run_retry_forecast",
+            cycle_id=cycle_id,
+            stage="forecast",
+            status="queued",
+            submitted_at=base_time + timedelta(minutes=10),
+            started_at=base_time + timedelta(minutes=10),
+            finished_at=None,
+        )
+        retry.updated_at = base_time + timedelta(minutes=10)
+        store.session.add_all([original, retry])
+        store.session.commit()
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert response.status_code == 200
+        forecast = next(stage for stage in response.json()["data"] if stage["stage"] == "forecast")
+        assert forecast["display_status"] == "running"
+        assert forecast["basin_progress"] == {"completed": 0, "total": 1, "failed": 0}
+        assert forecast["basin_results_total"] == 1
+        assert [result["job_id"] for result in forecast["basin_results"]] == ["job_forecast_retry_queued"]
+        assert forecast["basin_results"][0]["status"] == "queued"
+
+
+def test_pipeline_stages_latest_succeeded_retry_replaces_stale_partial_failure() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        base_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(
+            store,
+            job_id="job_parse_original_partial",
+            run_id="run_retry_parse",
+            cycle_id=cycle_id,
+            stage="parse",
+            status="partially_failed",
+            submitted_at=base_time,
+            started_at=base_time,
+            finished_at=base_time + timedelta(minutes=6),
+            error_code="OUTPUT_INCOMPLETE",
+        )
+        _create_job(
+            store,
+            job_id="job_parse_retry_succeeded",
+            run_id="run_retry_parse",
+            cycle_id=cycle_id,
+            stage="parse",
+            status="succeeded",
+            submitted_at=base_time + timedelta(minutes=12),
+            started_at=base_time + timedelta(minutes=12),
+            finished_at=base_time + timedelta(minutes=15),
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert response.status_code == 200
+        parse = next(stage for stage in response.json()["data"] if stage["stage"] == "parse")
+        assert parse["display_status"] == "succeeded"
+        assert parse["basin_progress"] == {"completed": 1, "total": 1, "failed": 0}
+        assert parse["basin_results_total"] == 1
+        assert [result["job_id"] for result in parse["basin_results"]] == ["job_parse_retry_succeeded"]
+
+
+def test_pipeline_stages_recovered_retry_keeps_separate_sibling_failure() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        base_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(
+            store,
+            job_id="job_forcing_original_partial",
+            run_id="run_recovered_forcing",
+            cycle_id=cycle_id,
+            stage="forcing",
+            status="partially_failed",
+            submitted_at=base_time,
+            started_at=base_time,
+            finished_at=base_time + timedelta(minutes=4),
+            error_code="NODE_FAILURE",
+        )
+        _create_job(
+            store,
+            job_id="job_forcing_retry_succeeded",
+            run_id="run_recovered_forcing",
+            cycle_id=cycle_id,
+            stage="forcing",
+            status="succeeded",
+            submitted_at=base_time + timedelta(minutes=10),
+            started_at=base_time + timedelta(minutes=10),
+            finished_at=base_time + timedelta(minutes=13),
+        )
+        _create_job(
+            store,
+            job_id="job_forcing_sibling_failed",
+            run_id="run_sibling_forcing",
+            cycle_id=cycle_id,
+            stage="forcing",
+            status="failed",
+            submitted_at=base_time + timedelta(minutes=2),
+            started_at=base_time + timedelta(minutes=2),
+            finished_at=base_time + timedelta(minutes=5),
+            error_code="NODE_FAILURE",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert response.status_code == 200
+        forcing = next(stage for stage in response.json()["data"] if stage["stage"] == "forcing")
+        assert forcing["display_status"] == "partially_failed"
+        assert forcing["basin_progress"] == {"completed": 1, "total": 2, "failed": 1}
+        assert forcing["basin_results_total"] == 2
+        assert {result["job_id"] for result in forcing["basin_results"]} == {
+            "job_forcing_retry_succeeded",
+            "job_forcing_sibling_failed",
+        }
+
+
+def test_pipeline_stages_do_not_collapse_legacy_rows_without_run_id() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        base_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(
+            store,
+            job_id="job_legacy_no_run_a",
+            run_id=None,
+            cycle_id=cycle_id,
+            stage="download",
+            status="succeeded",
+            submitted_at=base_time,
+        )
+        _create_job(
+            store,
+            job_id="job_legacy_no_run_b",
+            run_id="",
+            cycle_id=cycle_id,
+            stage="download",
+            status="failed",
+            submitted_at=base_time + timedelta(minutes=1),
+            error_code="NODE_FAILURE",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert response.status_code == 200
+        download = next(stage for stage in response.json()["data"] if stage["stage"] == "download")
+        assert download["display_status"] == "partially_failed"
+        assert download["basin_progress"] == {"completed": 1, "total": 2, "failed": 1}
+        assert download["basin_results_total"] == 2
+        assert {result["job_id"] for result in download["basin_results"]} == {
+            "job_legacy_no_run_a",
+            "job_legacy_no_run_b",
+        }
 
 
 def test_qhh_like_pipeline_stages_expose_formal_job_evidence_for_all_canonical_stages() -> None:
@@ -495,7 +707,11 @@ def test_job_logs_redacts_decoded_log_content(tmp_path: Path, monkeypatch) -> No
     with _store() as store:
         log_path = tmp_path / "secret.log"
         log_path.write_text(
-            "DATABASE_URL=postgresql://nhms:pass123@db/nhms token=tok123 password=pass123\n",
+            "DATABASE_URL=postgresql://nhms:pass123@db/nhms token=tok123 password=pass123\n"
+            "Authorization: Bearer live-token-123\n"
+            "authorization=Basic basic-secret-123\n"
+            '{"Authorization": "Bearer json-log-token-123"}\n'
+            "Proxy-Authorization: 'Basic quoted-proxy-secret-123'\n",
             encoding="utf-8",
         )
         _create_job(store, job_id="job_secret_logs", log_uri="secret.log")
@@ -504,7 +720,16 @@ def test_job_logs_redacts_decoded_log_content(tmp_path: Path, monkeypatch) -> No
 
     assert response.status_code == 200
     body = json.dumps(response.json(), sort_keys=True)
-    for raw_secret in ("pass123", "tok123", "nhms:pass123", "postgresql://nhms:pass123"):
+    for raw_secret in (
+        "pass123",
+        "tok123",
+        "nhms:pass123",
+        "postgresql://nhms:pass123",
+        "live-token-123",
+        "basic-secret-123",
+        "json-log-token-123",
+        "quoted-proxy-secret-123",
+    ):
         assert raw_secret not in body
     assert "[redacted]" in response.json()["data"]["content"]
 

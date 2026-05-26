@@ -9,7 +9,16 @@ REDACTION_MARKER = "[redacted]"
 
 SENSITIVE_KEY_RE = re.compile(
     r"(token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|session[_-]?key|signature|"
-    r"accountingstoragepass|storagepass)",
+    r"accountingstoragepass|storagepass|authorization|proxy[_-]?authorization|auth[_-]?header|^auth$)",
+    re.IGNORECASE,
+)
+AUTHORIZATION_ASSIGNMENT_RE = re.compile(
+    r"(?P<prefix>(?P<key_quote>[\"']?)\b"
+    r"(?P<key>(?:proxy[-_.]?)?authorization|auth[-_.]?header|auth)\b"
+    r"(?P=key_quote)(?P<separator>\s*[:=]\s*)(?P<value_quote>[\"']?))"
+    r"(?:(?P<scheme>Bearer|Basic)\s+)?"
+    r"(?P<secret>[^\"'\s,;&}]+)"
+    r"(?P=value_quote)",
     re.IGNORECASE,
 )
 SENSITIVE_ASSIGNMENT_RE = re.compile(
@@ -41,6 +50,7 @@ def redact_payload(value: Any) -> Any:
 
 def redact_text(value: str) -> str:
     redacted = URL_RE.sub(lambda match: _redact_url(match.group(0)), value)
+    redacted = AUTHORIZATION_ASSIGNMENT_RE.sub(_redact_authorization_assignment, redacted)
     return SENSITIVE_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}", redacted)
 
 
@@ -63,3 +73,9 @@ def _redact_url(value: str) -> str:
     if parsed.port is not None:
         netloc = f"{netloc}:{parsed.port}"
     return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _redact_authorization_assignment(match: re.Match[str]) -> str:
+    scheme = match.group("scheme")
+    value = f"{scheme} {REDACTION_MARKER}" if scheme else REDACTION_MARKER
+    return f"{match.group('prefix')}{value}{match.group('value_quote')}"

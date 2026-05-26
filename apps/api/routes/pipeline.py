@@ -1263,6 +1263,7 @@ def _stage_summaries(store: PipelineStore, cycle_id: str) -> list[dict[str, Any]
 
 def _stage_stats_by_cycle(store: PipelineStore, cycle_id: str) -> dict[str, _StageStats]:
     stats_by_stage: dict[str, _StageStats] = {}
+    latest_jobs = _latest_stage_truth_job_ids_by_cycle(cycle_id)
     rows = store.session.execute(
         select(
             PipelineJob.stage,
@@ -1271,6 +1272,8 @@ def _stage_stats_by_cycle(store: PipelineStore, cycle_id: str) -> dict[str, _Sta
             func.min(PipelineJob.started_at),
             func.max(PipelineJob.finished_at),
         )
+        .join(latest_jobs, PipelineJob.job_id == latest_jobs.c.job_id)
+        .where(latest_jobs.c.truth_row_number == 1)
         .where(PipelineJob.cycle_id == cycle_id)
         .where(PipelineJob.stage.is_not(None))
         .group_by(PipelineJob.stage, PipelineJob.status)
@@ -1291,6 +1294,7 @@ def _stage_stats_by_cycle(store: PipelineStore, cycle_id: str) -> dict[str, _Sta
 
 
 def _stage_result_samples_by_cycle(store: PipelineStore, cycle_id: str) -> dict[str, list[PipelineJob]]:
+    latest_jobs = _latest_stage_truth_job_ids_by_cycle(cycle_id)
     ranked_jobs = (
         select(
             PipelineJob.job_id.label("job_id"),
@@ -1301,6 +1305,8 @@ def _stage_result_samples_by_cycle(store: PipelineStore, cycle_id: str) -> dict[
             )
             .label("stage_row_number"),
         )
+        .join(latest_jobs, PipelineJob.job_id == latest_jobs.c.job_id)
+        .where(latest_jobs.c.truth_row_number == 1)
         .where(PipelineJob.cycle_id == cycle_id)
         .where(PipelineJob.stage.is_not(None))
         .subquery()
@@ -1324,15 +1330,53 @@ def _stage_result_samples_by_cycle(store: PipelineStore, cycle_id: str) -> dict[
     return samples_by_stage
 
 
+def _latest_stage_truth_job_ids_by_cycle(cycle_id: str) -> Any:
+    logical_run_id = func.coalesce(func.nullif(PipelineJob.run_id, ""), PipelineJob.job_id)
+    return (
+        select(
+            PipelineJob.job_id.label("job_id"),
+            func.row_number()
+            .over(
+                partition_by=(PipelineJob.cycle_id, PipelineJob.stage, logical_run_id),
+                order_by=_latest_stage_truth_order(descending=True),
+            )
+            .label("truth_row_number"),
+        )
+        .where(PipelineJob.cycle_id == cycle_id)
+        .where(PipelineJob.stage.is_not(None))
+        .subquery()
+    )
+
+
+def _latest_stage_truth_order(*, descending: bool) -> tuple[Any, ...]:
+    if descending:
+        return (
+            PipelineJob.submitted_at.desc().nulls_last(),
+            PipelineJob.created_at.desc().nulls_last(),
+            PipelineJob.updated_at.desc().nulls_last(),
+            PipelineJob.finished_at.desc().nulls_last(),
+            PipelineJob.job_id.desc(),
+        )
+    return (
+        PipelineJob.submitted_at.asc().nulls_last(),
+        PipelineJob.created_at.asc().nulls_last(),
+        PipelineJob.updated_at.asc().nulls_last(),
+        PipelineJob.finished_at.asc().nulls_last(),
+        PipelineJob.job_id.asc(),
+    )
+
+
 def _stage_display_status(status_counts: dict[str, int]) -> str:
     if not status_counts:
         return "pending"
 
     statuses = set(status_counts)
-    if statuses & {"submitted", "running"}:
+    if statuses & _ACTIVE_JOB_STATUSES:
         return "running"
-    if statuses <= _PENDING_JOB_STATUSES:
-        return "pending"
+    if statuses == {"skipped"}:
+        return "skipped"
+    if statuses <= {"succeeded", "skipped"}:
+        return "succeeded" if "succeeded" in statuses else "skipped"
     if "partially_failed" in statuses:
         return "partially_failed"
     if statuses & _FAILED_JOB_STATUSES:
