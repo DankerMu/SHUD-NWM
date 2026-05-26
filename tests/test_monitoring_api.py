@@ -711,7 +711,8 @@ def test_job_logs_redacts_decoded_log_content(tmp_path: Path, monkeypatch) -> No
             "Authorization: Bearer live-token-123\n"
             "authorization=Basic basic-secret-123\n"
             '{"Authorization": "Bearer json-log-token-123"}\n'
-            "Proxy-Authorization: 'Basic quoted-proxy-secret-123'\n",
+            "Proxy-Authorization: 'Basic quoted-proxy-secret-123'\n"
+            'gateway stderr "Bearer bare-log-token-123"; Basic bare-basic-log-secret-123, next field\n',
             encoding="utf-8",
         )
         _create_job(store, job_id="job_secret_logs", log_uri="secret.log")
@@ -729,6 +730,8 @@ def test_job_logs_redacts_decoded_log_content(tmp_path: Path, monkeypatch) -> No
         "basic-secret-123",
         "json-log-token-123",
         "quoted-proxy-secret-123",
+        "bare-log-token-123",
+        "bare-basic-log-secret-123",
     ):
         assert raw_secret not in body
     assert "[redacted]" in response.json()["data"]["content"]

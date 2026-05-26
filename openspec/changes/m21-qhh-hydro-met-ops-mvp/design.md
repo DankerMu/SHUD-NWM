@@ -597,6 +597,7 @@ Must add/change:
 - Monitoring APIs return QHH stage/job records from formal persistence with run id, status, Slurm job id where available, submitted/started/finished timestamps, duration, retry count, and bounded/redacted `log_uri`.
 - Jobs/status filtering by `source + cycle_time` must not mix sibling cycles or sources; missing cycles fail explicitly.
 - Retry accepts the failed states required by the ops MVP contract, creates retry metadata/events, preserves authorization evidence, and reports submission failures without marking unproven work successful.
+- Shared public redaction must remove credential material from Authorization, Proxy-Authorization, auth/auth_header, token/password/secret-like fields, URL credentials, and standalone `Bearer` / `Basic` credential strings in logs, API errors, retry/cancel events, auth audit text, and scheduler/orchestrator evidence.
 
 Risk packs considered:
 - Public API / CLI / script entry: selected - #210 hardens public monitoring and retry API behavior used by `/ops`.
@@ -616,13 +617,14 @@ Risk packs considered:
 Required evidence:
 - Backend monitoring tests: source/cycle-scoped stage status over all seven canonical stages, no mixed-cycle jobs, job payload fields, failed/partial status aggregation, timestamps/duration, Slurm job id, retry count, bounded/redacted log URI, missing cycle, and pagination/filter behavior.
 - Retry tests: manual retry for `failed`, `submission_failed`, `partially_failed`, and `permanently_failed` source states, retry metadata/event creation, active retry conflict, unauthorized retry no mutation, submission failure response, and no synthetic success.
-- Log route tests: contained relative log, tail limit, traversal rejection, symlink swap rejection, missing log, redacted details, and no client-side filesystem assumptions.
+- Log route tests: contained relative log, tail limit, traversal rejection, symlink swap rejection, missing log, redacted details, representative credential-bearing log content including standalone `Bearer` / `Basic` credentials, and no client-side filesystem assumptions.
+- Redaction tests: shared helper and at least one public API/event surface must prove raw authorization credentials are absent for mapping keys, keyed assignment forms, quoted/JSON-like forms, URL credentials, and standalone `Bearer` / `Basic` credential strings without an Authorization key.
 - Contract tests: OpenAPI/frontend type drift check if any ops fields or status enum values change.
 - Regression commands: `uv run pytest -q tests/test_monitoring_api.py tests/test_openapi_drift.py tests/test_api_contract.py`, targeted orchestrator tests changed by the implementation, `uv run ruff check apps/api/routes/pipeline.py services/orchestrator tests/test_monitoring_api.py`, `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, and `git diff --check`.
 
 Invariant Matrix
 
-Governing invariant: every operations API response and retry/log action for a selected QHH source/cycle/run must be derived from formal persisted orchestrator state bound to that same identity, with bounded server-side log access and retry evidence, never from qhh diagnostic JSON or mixed sibling-cycle records.
+Governing invariant: every operations API response and retry/log action for a selected QHH source/cycle/run must be derived from formal persisted orchestrator state bound to that same identity, with bounded server-side log access, shape-complete credential redaction, and retry evidence, never from qhh diagnostic JSON or mixed sibling-cycle records.
 Source-of-truth identity/contract: `ops.pipeline_job(job_id, run_id, cycle_id, stage, status, slurm_job_id, timestamps, retry_count, log_uri)`, `ops.pipeline_event`, `met.forecast_cycle(source, cycle_time, cycle_id)`, and retry policy evidence.
 Surfaces:
 - Producers: formal scheduler/orchestrator job creation and retry service writes to `PipelineStore`; qhh diagnostic scripts are explicitly out of scope as production producers.
@@ -630,13 +632,14 @@ Surfaces:
 - Storage/cache/query: `PipelineStore`, `ops.pipeline_job`, `ops.pipeline_event`, `met.forecast_cycle`, and `hydro.hydro_run` status transitions touched by retry/cancel.
 - Public routes/entrypoints: `GET /api/v1/pipeline/status`, `GET /api/v1/pipeline/stages`, `GET /api/v1/jobs`, `GET /api/v1/jobs/{job_id}/logs`, `POST /api/v1/runs/{run_id}/retry`, and OpenAPI schemas if changed.
 - Frontend/downstream consumers: generated `apps/frontend/src/api/types.ts` and existing monitoring store/components; `/ops` UI implementation remains #211/#212.
-- Failure paths/rollback/stale state: missing cycle, invalid source/cycle, mixed source/cycle filters, failed/partial/submission/permanent states, active retry conflict, retry submission failure, cancelled jobs, missing or unsafe logs, and unauthorized retry/cancel.
+- Failure paths/rollback/stale state: missing cycle, invalid source/cycle, mixed source/cycle filters, failed/partial/submission/permanent states, active retry conflict, retry submission failure, cancelled jobs, missing or unsafe logs, unauthorized retry/cancel, and credential-bearing error/log/evidence strings.
 - Evidence/audit/readiness: backend tests, pipeline events, retry metadata, log route evidence, runbook notes, and PR evidence; controlled live failure evidence remains #213.
 Regression rows:
 - QHH-like persisted jobs for all canonical stages in one `cycle_id` -> `/pipeline/stages` returns ordered stage summaries with status, progress, and only jobs from that cycle.
 - jobs from another source or cycle with similar run ids -> `/pipeline/status`, `/pipeline/stages`, and `/jobs?source=&cycle_time=` exclude them instead of mixing evidence.
 - job payload with Slurm id, timestamps, retry count, and `log_uri` -> `/jobs` exposes required fields and deterministic `duration_seconds` without leaking unbounded error/log text.
 - relative contained log under configured root -> `/jobs/{job_id}/logs` returns at most the bounded tail and redacted `log_uri`.
+- log content, retry/cancel gateway text, auth audit text, or scheduler/orchestrator evidence containing `Authorization: Bearer ...`, JSON/quoted authorization values, URL credentials, token/password fields, or standalone `Bearer ...` / `Basic ...` credentials -> public responses and persisted events contain `[redacted]` and never the raw secret.
 - traversal, symlink swap, missing file, or unsafe log URI -> stable API error and no filesystem content leak.
 - failed, submission failed, partially failed, or permanently failed run with no active retry -> authorized retry creates persisted retry job/event with incremented retry metadata and returned execution status.
 - active retry already pending/submitted/running -> retry returns conflict and does not create duplicate side effects.
@@ -646,7 +649,7 @@ Regression rows:
 - qhh diagnostic `.nhms-runs/qhh-continuous` JSON present/absent -> monitoring API behavior is unchanged because it reads formal persistence only.
 
 Boundary-surface checklist:
-- Shared helper roots: source/cycle normalization, status classification, stage aggregation, duration calculation, `_job_payload`, `_stage_summaries`, log URI path binding, retry status selection.
+- Shared helper roots: source/cycle normalization, status classification, stage aggregation, duration calculation, `_job_payload`, `_stage_summaries`, log URI path binding, retry status selection, and shared credential redaction helpers.
 - Public entrypoints: pipeline status/stages/jobs/logs/retry/cancel routes.
 - Read surfaces: `ops.pipeline_job`, `ops.pipeline_event`, `met.forecast_cycle`, `hydro.hydro_run`, configured log root.
 - Write/delete/overwrite surfaces: retry job/event creation and hydro/cycle status updates where retry/cancel already writes; no delete/overwrite behavior added.

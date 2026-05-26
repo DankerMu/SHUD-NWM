@@ -49,3 +49,42 @@ def test_redact_payload_treats_authorization_header_keys_as_sensitive(payload: d
 )
 def test_redact_text_redacts_authorization_assignment_forms(raw: str, expected: str) -> None:
     assert redact_text(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected", "raw_secrets"),
+    [
+        ("Bearer live-token-123", "Bearer [redacted]", ("live-token-123",)),
+        ("Basic basic-secret-123", "Basic [redacted]", ("basic-secret-123",)),
+        (
+            'gateway stderr="Bearer quoted-token-123"',
+            'gateway stderr="Bearer [redacted]"',
+            ("quoted-token-123",),
+        ),
+        (
+            "retry failed: Basic quoted-basic-secret-123; queued next",
+            "retry failed: Basic [redacted]; queued next",
+            ("quoted-basic-secret-123",),
+        ),
+        (
+            "log line Bearer punct-token-123, status follows",
+            "log line Bearer [redacted], status follows",
+            ("punct-token-123",),
+        ),
+        (
+            "tail Basic terminal-basic-secret-123. retry pending",
+            "tail Basic [redacted]. retry pending",
+            ("terminal-basic-secret-123",),
+        ),
+    ],
+)
+def test_redact_text_redacts_free_form_authorization_scheme_credentials(
+    raw: str,
+    expected: str,
+    raw_secrets: tuple[str, ...],
+) -> None:
+    redacted = redact_text(raw)
+
+    assert redacted == expected
+    for raw_secret in raw_secrets:
+        assert raw_secret not in redacted

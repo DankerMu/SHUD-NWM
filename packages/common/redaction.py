@@ -21,6 +21,11 @@ AUTHORIZATION_ASSIGNMENT_RE = re.compile(
     r"(?P=value_quote)",
     re.IGNORECASE,
 )
+AUTHORIZATION_SCHEME_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?P<scheme>Bearer|Basic)\b(?P<separator>\s+)"
+    r"(?P<secret>[^\"'\s,;&<>{}\[\]()]+)",
+    re.IGNORECASE,
+)
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"\b([A-Za-z0-9_.-]*(?:token|password|passwd|pwd|secret|credential|api[_-]?key|"
     r"access[_-]?key|session[_-]?key|signature|accountingstoragepass|storagepass)"
@@ -51,6 +56,7 @@ def redact_payload(value: Any) -> Any:
 def redact_text(value: str) -> str:
     redacted = URL_RE.sub(lambda match: _redact_url(match.group(0)), value)
     redacted = AUTHORIZATION_ASSIGNMENT_RE.sub(_redact_authorization_assignment, redacted)
+    redacted = AUTHORIZATION_SCHEME_RE.sub(_redact_authorization_scheme, redacted)
     return SENSITIVE_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}{REDACTION_MARKER}", redacted)
 
 
@@ -79,3 +85,12 @@ def _redact_authorization_assignment(match: re.Match[str]) -> str:
     scheme = match.group("scheme")
     value = f"{scheme} {REDACTION_MARKER}" if scheme else REDACTION_MARKER
     return f"{match.group('prefix')}{value}{match.group('value_quote')}"
+
+
+def _redact_authorization_scheme(match: re.Match[str]) -> str:
+    secret = match.group("secret")
+    trimmed = secret.rstrip(".,:!?")
+    suffix = secret[len(trimmed) :]
+    if not trimmed:
+        return match.group(0)
+    return f"{match.group('scheme')}{match.group('separator')}{REDACTION_MARKER}{suffix}"
