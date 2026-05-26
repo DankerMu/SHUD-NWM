@@ -1,6 +1,6 @@
 # QHH/有限流域 MVP 上线实施计划
 
-最后更新：2026-05-25
+最后更新：2026-05-26
 
 ## 结论
 
@@ -35,7 +35,7 @@ QHH 真实链路已有可复用证据：
 M21 GitHub Epic 为 #202，OpenSpec change 为 `openspec/changes/m21-qhh-hydro-met-ops-mvp/`。下游 issue 默认使用这个基线，不再重新定义 MVP 范围：
 
 | 项 | 基线 |
-|---|---|
+| --- | --- |
 | 首选模型 | `basins_qhh_shud` |
 | 首选流域版本 | `basins_qhh_vbasins` |
 | 首选河网版本 | `basins_qhh_rivnet_vbasins` |
@@ -47,6 +47,18 @@ M21 GitHub Epic 为 #202，OpenSpec change 为 `openspec/changes/m21-qhh-hydro-m
 | IFS 时效边界 | `00/12 UTC` 可作为完整 7 天候选；`06/18 UTC` 不足 7 天时必须标注实际可用时效，典型为 144h |
 
 这个基线不是最终生产 readiness 声明。后续实现 issue 可以使用 deterministic fixture、local PostgreSQL 或 opt-in live QHH smoke 证明功能；任何未执行的 live GFS/IFS/Slurm/browser 步骤都必须记录具体缺失依赖，不能默认为已通过。
+
+## #214 evidence freeze
+
+Issue #214 的证据冻结入口是 [`docs/runbooks/qhh-mvp-smoke-evidence.md`](../runbooks/qhh-mvp-smoke-evidence.md)。它不改变 MVP 范围，只把已有 QHH diagnostic evidence、deterministic browser evidence、static validation 和 skipped/blocked live dependency 分开编号。
+
+当前状态：
+
+- QHH GFS/IFS `2026052100`、`2026052106` 保持为 live diagnostic/reproduction evidence，不升级为 formal scheduler readiness。
+- `/hydro-met` browser smoke 使用 mocked `/api/v1/**` deterministic evidence，覆盖 latest-product、station inventory、station-series 六个 forcing 变量、`q_down` forecast-series、GFS/IFS 和 IFS 144h shorter horizon。
+- `/ops` controlled failure/retry evidence 继续引用 #213 deterministic runbook，不声明 live Slurm/QHH retry。
+- OpenSpec、OpenAPI/API type、frontend test/build、markdown/static 和 opt-in live smoke 都必须在 #214 evidence matrix 中保留 command、artifact path、mode 和 claim boundary。
+- 未执行的 live GFS/IFS/Slurm/browser/IdP/alert/rollback 步骤保持 skipped 或 blocked；不能作为内部 MVP 之外的 final production readiness 证明。
 
 ## 关键缺口
 
@@ -62,7 +74,7 @@ M21 GitHub Epic 为 #202，OpenSpec change 为 `openspec/changes/m21-qhh-hydro-m
 ### P0 数据范围
 
 | 项 | MVP 决策 |
-|---|---|
+| --- | --- |
 | 流域 | QHH/有限流域 |
 | 水文变量 | `q_down` 流量，单位 `m3/s` 或 `m³/s` |
 | 气象变量 | `PRCP`、`TEMP`、`RH`、`wind`、`Rn`、`Press` |
@@ -271,7 +283,7 @@ job.status in failed/submission_failed/permanently_failed
 ### P0 必须完成
 
 | 编号 | 工作 | 交付物 | 验收 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | P0-1 | 冻结 MVP 数据范围 | QHH、GFS、IFS、`q_down`、6 个 forcing 变量 | 文档和前端文案一致 |
 | P0-2 | station series API | `/api/v1/met/stations/{station_id}/series` | 返回真实点列、unit、quality_flag |
 | P0-3 | QHH forcing timeseries 完整性验收 | 查询脚本/测试/索引 | 任一站点可查 6 个变量 |
@@ -284,7 +296,7 @@ job.status in failed/submission_failed/permanently_failed
 ### P1 建议 MVP 前完成
 
 | 编号 | 工作 | 说明 |
-|---|---|---|
+| --- | --- | --- |
 | P1-1 | GFS/IFS raw mirror manifest | 防止外部源抖动影响 SHUD |
 | P1-2 | IFS 06/18 时效标注 | 只到 144h 时必须提示 |
 | P1-3 | 日志归档规范 | Slurm stdout/stderr 进入统一 `log_uri` |
@@ -295,7 +307,7 @@ job.status in failed/submission_failed/permanently_failed
 ### P2 不阻塞 MVP
 
 | 工作 | 原因 |
-|---|---|
+| --- | --- |
 | 全国所有流域 | QHH/有限流域先行 |
 | 水位 `stage` | 当前真实主变量是 `q_down` |
 | CLDAS | 权限和自动下载能力未闭环 |

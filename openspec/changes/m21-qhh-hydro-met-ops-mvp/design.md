@@ -931,3 +931,92 @@ Review focus:
 - Confirm deterministic/live labels and skipped dependency reasons prevent overclaiming.
 - Confirm `/ops` browser proof exercises the actual log/retry UI contract added by #211/#212.
 - Confirm new tests/evidence are focused and do not refactor scheduler/runtime behavior.
+
+## Issue #214 Fixture
+
+Fixture level: expanded
+Project profile: other / SHUD-NWM MVP release evidence, browser smoke, and documentation freeze
+Repair intensity: high
+
+Change surface:
+- MVP smoke/readiness runbook or evidence document covering QHH GFS smoke, IFS handling, `/hydro-met` browser smoke, `/ops` browser smoke, validation commands, and exact skipped live dependencies.
+- `progress.md`, `docs/plans/2026-05-25-mvp-launch-plan.md`, and QHH runbooks that describe delivered MVP scope, formal scheduler boundary, qhh diagnostic-script boundary, accepted `no_frequency_curve` quality state, and P2 exclusions.
+- Focused deterministic browser smoke tests or evidence records for `/hydro-met` station/river selection and `/ops` stage/job/log/retry surfaces, if existing browser lanes do not already capture these flows.
+- Local non-committed evidence artifact pointers under a stable issue-scoped path such as `.codex/evidence/issue-214/`.
+
+Must preserve:
+- #214 is a release evidence/docs freeze. It must not add new feature scope, redesign backend scheduler/retry/station/latest-product APIs, or change production runtime behavior except for narrowly fixing blockers discovered by smoke.
+- Deterministic, local PostgreSQL, mocked-browser, and live evidence labels must remain distinct. Deterministic evidence may support internal MVP readiness but must not be described as live Slurm/QHH/GFS/IFS or final production readiness proof.
+- QHH diagnostic scripts remain diagnostic/regression/evidence collection tools. Formal operations status and scheduler readiness remain tied to backend `nhms-pipeline plan-production` and `ops.pipeline_job`/`ops.pipeline_event` persistence.
+- MVP hydrology wording remains river discharge/flow `q_down`; no water level `stage` claim is introduced.
+- `no_frequency_curve` remains acceptable only as a quality state when return periods and warning levels are not fabricated.
+
+Must add/change:
+- Record one accepted QHH GFS smoke result or an exact live blocker for each required step: download, canonical, forcing, SHUD, parse, station series API, forecast-series API, `/hydro-met`, `/ops`, and retry evidence.
+- Record IFS evidence or exact blocker, including 06/18 UTC shorter-horizon behavior or why live IFS proof was skipped.
+- Record browser smoke coverage for `/hydro-met` station and river selection plus `/ops` stage/job/log/retry; if deterministic/mocked, label it as browser UI evidence, not live backend proof.
+- Record validation commands and results for backend tests, OpenAPI drift/static contract checks, frontend API type check, frontend tests/build, browser smoke, OpenSpec validation, and opt-in live smoke commands.
+- Update progress/plan/runbooks so internal MVP readiness, remaining live blockers, P2 exclusions, and final production readiness boundaries are consistent across documents.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - release evidence names public API routes, browser routes, and smoke commands that operators may run.
+- Config / project setup: selected - live smoke blockers depend on database, object store, Slurm, log root, source credentials, browser server, and dev/live auth configuration.
+- File IO / path safety / overwrite: selected - evidence artifacts, logs, screenshots, Playwright reports, and smoke outputs must remain issue-scoped and non-committed unless intentionally documented.
+- Schema / columns / units / field names: selected - docs must preserve exact API fields, MVP variables, `q_down`, `quality_flag`, `no_frequency_curve`, stage/status names, and IFS horizon metadata.
+- Geospatial / CRS / shapefile sidecars: selected - `/hydro-met` browser smoke touches station/river map surfaces; evidence must not claim nationwide/geospatial production proof.
+- Time series / forcing / temporal boundaries: selected - GFS/IFS cycle identity, station forcing variables, river valid-time range, and IFS shorter horizon are central.
+- Numerical stability / conservation / NaN: not selected - #214 does not validate solver numerical correctness beyond existing smoke/QC references.
+- Solver runtime / performance / threading: selected only for evidence labeling - live SHUD runtime may be recorded or skipped; no solver code changes are allowed.
+- Resource limits / large input / discovery: selected - smoke/browser evidence must stay bounded and not imply national-scale proof.
+- Legacy compatibility / examples: selected - existing runbooks, progress, launch plan, and previously delivered M21 surfaces must remain compatible.
+- Error handling / rollback / partial outputs: selected - skipped live dependencies, unavailable products, `no_frequency_curve`, restricted sources, and partial/missing smoke steps need explicit stable wording.
+- Release / packaging / dependency compatibility: selected - validation command records must use existing uv/pnpm/OpenSpec/GitHub toolchains without adding dependencies.
+- Documentation / migration notes: selected - this is the main change surface.
+
+Required evidence:
+- Evidence/runbook: each required MVP smoke item is marked `passed`, `deterministic`, `blocked`, `skipped`, or `out_of_scope`, with command, artifact path, source/cycle/run identity, and exact blocker where not passed live.
+- Browser smoke: `/hydro-met` deterministic or live evidence covers latest-product bootstrap, station selection, six-variable forcing chart state, river `q_down` chart state, IFS shorter-horizon label/unavailable state, and no fake data; `/ops` evidence covers stages, jobs, log modal, retry action or controlled retry evidence reference, and RBAC/dev-role boundary.
+- Docs/progress: `progress.md`, launch plan, and QHH runbooks use consistent MVP readiness language, formal scheduler boundary, qhh diagnostic boundary, `q_down` not `stage`, `no_frequency_curve` quality state, and P2 exclusions.
+- Validation commands: record results for backend tests, OpenAPI/static contract checks, frontend API types, frontend tests/build, browser smoke, OpenSpec validation, and opt-in live smoke entrypoints with skipped dependency reasons.
+- Regression commands: `openspec validate m21-qhh-hydro-met-ops-mvp --strict --no-interactive`, docs/static checks used by the repo, targeted browser smoke commands, targeted backend/frontend checks touched by docs or smoke, and `git diff --check`.
+
+Invariant Matrix
+
+Governing invariant: every MVP readiness claim in #214 must be traceable to a labeled evidence item with a stable identity, command, artifact path, and mode, and no deterministic, mocked, partial, or skipped item may be promoted into live QHH/Slurm/GFS/IFS/final-production readiness.
+Source-of-truth identity/contract: issue #214 evidence table rows keyed by `surface + mode + source_id + cycle_time + run_id/forcing_version_id/job_id/artifact_path`, plus OpenSpec `qhh-mvp-smoke-readiness` scenarios.
+Surfaces:
+- Producers: existing M21 implementation tests, QHH smoke scripts/runbooks, browser smoke tests, controlled retry evidence from #213, and optional live smoke commands.
+- Validators/preflight: evidence mode labels, live dependency checks, source/cycle/run identity checks, no-fake-data checks, docs scope review, OpenSpec validation, and CI/static checks.
+- Storage/cache/query: local `.codex/evidence/issue-214/` artifact pointers, committed docs/runbooks/progress, non-committed Playwright reports/screenshots, QHH smoke output paths, and formal pipeline tables referenced by evidence.
+- Public routes/entrypoints: `/hydro-met`, `/ops`, station series API, forecast-series API, latest-product API, pipeline status/stages/jobs/logs/retry APIs, `scripts/run_qhh_backend_smoke.sh`, qhh diagnostic scripts, and `uv run nhms-pipeline plan-production`.
+- Frontend/downstream consumers: MVP launch plan readers, progress readers, QHH runbook operators, release reviewers, browser smoke consumers, and Epic #202 acceptance.
+- Failure paths/rollback/stale state: live source unavailable, Slurm unavailable, local DB unavailable, IFS live proof skipped, shorter horizon, no station/river data, no frequency curve, dev-role-only auth, stale diagnostic state, missing browser server, and partial smoke artifacts.
+- Evidence/audit/readiness: committed evidence summary/runbook, PR evidence comments, validation command logs, GitHub checks, and explicit residual blockers.
+Regression rows:
+- GFS live smoke fully executed -> docs record source/cycle/run identities and artifacts; if not executed -> exact blocker is recorded and readiness claim remains deterministic/blocked for that step.
+- IFS live or deterministic evidence -> docs record source/cycle/horizon and 06/18 shorter-horizon behavior; skipped live IFS -> exact dependency reason and no live readiness claim.
+- `/hydro-met` browser smoke -> station and river interactions prove UI wiring/no-fake-data states; mocked browser evidence is labeled deterministic and does not claim live backend product proof.
+- `/ops` browser smoke -> stage/job/log/retry visibility is recorded and references #213 controlled retry evidence; dev-role/mock boundaries are explicit.
+- `no_frequency_curve` state -> accepted only as quality metadata; docs do not fabricate return periods or warning levels.
+- release docs mention MVP complete -> same section lists P2 exclusions and final production readiness blockers.
+- qhh diagnostic script evidence present or absent -> docs continue to name `nhms-pipeline plan-production` as the formal scheduler path.
+
+Boundary-surface checklist:
+- Shared helper roots: evidence mode labels, smoke command snippets, browser smoke fixtures, validation command matrix, launch checklist wording.
+- Public entrypoints: `/hydro-met`, `/ops`, station series, forecast-series, latest-product, ops APIs, QHH smoke scripts, and `nhms-pipeline plan-production`.
+- Read surfaces: docs/runbooks/progress, QHH smoke artifacts, local evidence root, GitHub checks, OpenSpec specs/tasks.
+- Write/delete/overwrite surfaces: committed markdown/spec/test evidence only; generated screenshots/reports remain non-committed and issue-scoped.
+- Producer/consumer evidence boundaries: deterministic browser/API tests are evidence producers for UI wiring; live backend/scheduler proofs require separate live receipts.
+- Stale-state/idempotency boundaries: repeated smoke/evidence runs either overwrite only issue-scoped artifacts or record a new run id; stale qhh diagnostic state cannot satisfy formal ops readiness.
+- Unchanged downstream consumers: existing M21 APIs/UI/tests, production scheduler docs, #213 controlled retry runbook, MVP launch plan.
+
+Non-goals:
+- New backend/frontend product features beyond narrow smoke blockers.
+- Final production readiness, live IdP, live alert sink, live rollback, nationwide all-basin proof, real national MVT/PBF proof, water level `stage`, CLDAS, ERA5 near-real-time, or real QHH flood-frequency curves.
+- Replacing formal backend scheduler with qhh diagnostic scripts.
+
+Review focus:
+- Confirm every readiness claim has evidence mode, identity, command/path, and explicit live blocker where applicable.
+- Confirm documentation language is consistent across progress, launch plan, and QHH runbooks.
+- Confirm deterministic browser/API evidence is not overclaimed as live backend or final production proof.
+- Confirm no feature scope or production behavior changes slipped into the docs freeze.

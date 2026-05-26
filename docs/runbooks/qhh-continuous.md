@@ -1,6 +1,6 @@
 # QHH GFS/IFS 持续多周期自动运行
 
-最后更新：2026-05-24
+最后更新：2026-05-26
 
 ## 生产调度边界
 
@@ -59,6 +59,12 @@ uv run nhms-pipeline plan-production \
 Slurm preflight、提交、状态/重试/取消证据和 readiness 输入。qhh 脚本产生的
 证据可作为诊断或复现材料，不应写成生产 scheduler dependency，也不应作为最终
 production readiness proof。
+
+## #214 evidence boundary
+
+Issue #214 的 MVP smoke/evidence 索引见 [`qhh-mvp-smoke-evidence.md`](qhh-mvp-smoke-evidence.md)。本文中的 GFS/IFS `2026052100`、`2026052106` 结果属于 qhh diagnostic/reproduction evidence；它们证明记录周期可以完成 qhh 脚本链路，但不能替代 `nhms-pipeline plan-production` 的 formal scheduler evidence，也不能替代 target-env final production readiness。
+
+IFS 06/18 UTC shorter-horizon 行为在 #214 中通过 deterministic `/hydro-met` browser smoke 标注 144h actual horizon；未在本 PR 执行新的 live IFS 18Z download/SHUD run。任何新 live IFS claim 必须新增 source/cycle/run/artifact receipt，并在 #214 evidence matrix 中独立标注。
 
 ## 目标
 
@@ -171,7 +177,7 @@ qhh 脚本 dry-run 输出每轮 JSON summary，核心字段为 `status`、
 常用调度变量：
 
 | 变量 | 默认 | 含义 |
-|---|---:|---|
+| --- | ---: | --- |
 | `QHH_CONTINUOUS_SOURCES` | `gfs,IFS` | 调度的数据源 |
 | `QHH_CONTINUOUS_LOOKBACK_HOURS` | `48` | 向前扫描周期窗口 |
 | `QHH_CONTINUOUS_MAX_CYCLES_PER_SOURCE` | `2` | 每个 source 每轮最多尝试的周期数 |
@@ -269,7 +275,7 @@ forc_{source_lower}_{YYYYMMDDHH}_basins_qhh_shud
 已通过 qhh 诊断/复现入口按标准链路完成 GFS 与 IFS 两个起报周期：
 
 | Source | Cycle UTC | Run ID | 状态 | 执行位置 |
-|---|---:|---|---|---|
+| --- | ---: | --- | --- | --- |
 | GFS | 2026-05-21 00Z | `fcst_gfs_2026052100_basins_qhh_shud` | `frequency_done` | 本项目运行根，已作为 terminal 状态复用 |
 | IFS | 2026-05-21 00Z | `fcst_ifs_2026052100_basins_qhh_shud` | `frequency_done` | 本项目运行根，已作为 terminal 状态复用 |
 | GFS | 2026-05-21 06Z | `fcst_gfs_2026052106_basins_qhh_shud` | `frequency_done` | Slurm job `5743` |
