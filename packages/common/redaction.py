@@ -12,6 +12,7 @@ SENSITIVE_KEY_RE = re.compile(
     r"accountingstoragepass|storagepass|authorization|proxy[_-]?authorization|auth[_-]?header|^auth$)",
     re.IGNORECASE,
 )
+AUTH_NAMESPACE_KEY_RE = re.compile(r"^auth$", re.IGNORECASE)
 AUTHORIZATION_ASSIGNMENT_RE = re.compile(
     r"(?P<prefix>(?P<key_quote>[\"']?)\b"
     r"(?P<key>(?:proxy[-_.]?)?authorization|auth[-_.]?header|auth)\b"
@@ -40,7 +41,9 @@ def redact_payload(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, nested in value.items():
             key_text = str(key)
-            redacted[key_text] = REDACTION_MARKER if is_sensitive_key(key_text) else redact_payload(nested)
+            redacted[key_text] = (
+                REDACTION_MARKER if _should_redact_mapping_value(key_text, nested) else redact_payload(nested)
+            )
         return redacted
     if isinstance(value, tuple):
         return tuple(redact_payload(item) for item in value)
@@ -62,6 +65,12 @@ def redact_text(value: str) -> str:
 
 def is_sensitive_key(key: str) -> bool:
     return bool(SENSITIVE_KEY_RE.search(key))
+
+
+def _should_redact_mapping_value(key: str, value: Any) -> bool:
+    if AUTH_NAMESPACE_KEY_RE.fullmatch(key) and isinstance(value, Mapping):
+        return False
+    return is_sensitive_key(key)
 
 
 def _redact_url(value: str) -> str:

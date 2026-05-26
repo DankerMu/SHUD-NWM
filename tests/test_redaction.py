@@ -32,6 +32,33 @@ def test_redact_payload_treats_authorization_header_keys_as_sensitive(payload: d
     assert REDACTION_MARKER in body
 
 
+def test_redact_payload_preserves_structured_auth_namespace() -> None:
+    redacted = redact_payload(
+        {
+            "receipts": {
+                "auth": {
+                    "provider": {
+                        "issuer_url": "https://user:pass@idp.example.invalid/auth?token=secret",
+                        "client_secret": "super-secret",
+                    },
+                    "Authorization": "Bearer nested-token",
+                    "message": "authorization=Basic text-token",
+                }
+            }
+        }
+    )
+
+    auth_receipt = redacted["receipts"]["auth"]
+    assert auth_receipt["provider"]["issuer_url"] == "https://idp.example.invalid/auth"
+    assert auth_receipt["provider"]["client_secret"] == REDACTION_MARKER
+    assert auth_receipt["Authorization"] == REDACTION_MARKER
+    assert auth_receipt["message"] == "authorization=Basic [redacted]"
+
+    body = json.dumps(redacted, sort_keys=True)
+    for raw_secret in ("user:pass@", "token=secret", "super-secret", "nested-token", "text-token"):
+        assert raw_secret not in body
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
