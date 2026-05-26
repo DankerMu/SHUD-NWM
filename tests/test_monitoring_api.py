@@ -839,6 +839,45 @@ def test_retry_rbac() -> None:
         assert denied.json()["error"]["details"]["policy_decision"]["roles"] == ["viewer"]
 
 
+def test_retry_rbac_denies_analyst_without_mutation() -> None:
+    with _store() as store:
+        gateway = _MockGateway()
+        _create_job(store, job_id="job_retry_analyst", run_id="run_retry_analyst", status="failed")
+        with _client(store, gateway, allow_dev_role_header=True) as client:
+            response = client.post("/api/v1/runs/run_retry_analyst/retry", headers={"X-User-Role": "analyst"})
+
+        assert response.status_code == 403
+        body = response.json()
+        assert body["error"]["code"] == "RBAC_FORBIDDEN"
+        decision = body["error"]["details"]["policy_decision"]
+        assert decision["action_id"] == "pipeline.retry_run"
+        assert decision["roles"] == ["analyst"]
+        assert decision["no_mutation_expected"] is True
+        assert gateway.submissions == []
+        assert [job.job_id for job in store.query_jobs_by_run("run_retry_analyst")] == ["job_retry_analyst"]
+        assert store.get_job("job_retry_analyst").status == "failed"
+        assert _events(store) == []
+
+
+def test_retry_all_operator_style_roles_are_allowed() -> None:
+    for role in ("operator", "model_admin", "sys_admin"):
+        with _store() as store:
+            _create_job(store, job_id=f"job_retry_{role}", run_id=f"run_retry_{role}", status="failed")
+            with _client(store, allow_dev_role_header=True) as client:
+                response = client.post(f"/api/v1/runs/run_retry_{role}/retry", headers={"X-User-Role": role})
+
+            assert response.status_code == 200
+            data = response.json()["data"]
+            assert data["run_id"] == f"run_retry_{role}"
+            assert data["status"] == "submitted"
+            decision = response.json()["auth_policy_decisions"][0]
+            assert decision["action_id"] == "pipeline.retry_run"
+            assert decision["decision"] == "allow"
+            assert decision["roles"] == [role]
+            retry_jobs = [job for job in store.query_jobs_by_run(f"run_retry_{role}") if job.status == "submitted"]
+            assert len(retry_jobs) == 1
+
+
 def test_retry_accepts_ops_mvp_failed_source_states_and_records_metadata() -> None:
     failed_statuses = ["failed", "submission_failed", "partially_failed", "permanently_failed"]
     for status in failed_statuses:

@@ -5913,7 +5913,90 @@ describe('App route state', () => {
     expect(screen.getByRole('heading', { name: '七阶段流水线' })).toBeInTheDocument()
   })
 
-  it('routes /ops through the same RBAC gate with active ops navigation and monitoring compatibility intact', async () => {
+  it.each(['operator', 'model_admin', 'sys_admin'] as const)(
+    'routes /ops for %s with log/retry controls but without cancel',
+    async (role) => {
+      useAuthStore.setState({ role })
+      useMonitoringStore.setState({
+        source: 'IFS',
+        cycleTime: '2026-05-18T00:00:00.000Z',
+        cycle: {
+          source: 'IFS',
+          cycle_time: '2026-05-18T00:00:00.000Z',
+          current_state: 'running',
+          started_at: '2026-05-09T00:00:30Z',
+          updated_at: '2026-05-09T00:08:00Z',
+          job_counts: { succeeded: 3, failed: 0, running: 1, pending: 2 },
+        },
+        cycleContext: { source: 'IFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+        stages: [],
+        jobs: [
+          {
+            job_id: 'job-ops',
+            run_id: 'run-ops',
+            cycle_id: 'cycle-ops',
+            job_type: 'forecast',
+            slurm_job_id: '2001',
+            model_id: 'model-ops',
+            status: 'failed',
+            stage: 'forecast',
+            submitted_at: '2026-05-09T00:03:00Z',
+            started_at: '2026-05-09T00:04:00Z',
+            finished_at: '2026-05-09T00:06:00Z',
+            exit_code: 1,
+            retry_count: 2,
+            error_code: 'E_MODEL',
+            error_message: 'model failed',
+            log_uri: 's3://logs/job-ops.log',
+            duration_seconds: 120,
+          },
+          {
+            job_id: 'job-ops-running',
+            run_id: 'run-ops-running',
+            cycle_id: 'cycle-ops',
+            job_type: 'forecast',
+            slurm_job_id: '2002',
+            model_id: 'model-ops-running',
+            status: 'running',
+            stage: 'forecast',
+            submitted_at: '2026-05-09T00:07:00Z',
+            started_at: '2026-05-09T00:08:00Z',
+            finished_at: null,
+            exit_code: null,
+            retry_count: 0,
+            error_code: null,
+            error_message: null,
+            log_uri: 's3://logs/job-ops-running.log',
+            duration_seconds: null,
+          },
+        ],
+        jobsContext: { source: 'IFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+        jobTotal: 2,
+        queue: { running: 2, pending: 4, idle: 6 },
+      })
+      window.history.pushState({}, '', '/ops?source=ifs&cycle=2026-05-18T00:00:00Z')
+
+      render(<App />)
+
+      expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+      await waitFor(() =>
+        expect(useMonitoringStore.getState()).toMatchObject({
+          source: 'IFS',
+          cycleTime: '2026-05-18T00:00:00.000Z',
+        }),
+      )
+      expect(screen.queryByText('权限不足')).not.toBeInTheDocument()
+      expect(screen.getByRole('link', { name: /系统运维/ })).toHaveClass('border-accent')
+      expect(screen.getByRole('link', { name: /产品监控/ })).toHaveAttribute('href', '/monitoring')
+      const failedRow = screen.getByRole('row', { name: /job-ops.*run-ops.*forecast.*model-ops.*failed.*2001.*2m.*2.*available/ })
+      expect(failedRow).toBeInTheDocument()
+      expect(within(failedRow).getByRole('button', { name: /查看日志/ })).toBeVisible()
+      expect(within(failedRow).getByRole('button', { name: /重试/ })).toBeVisible()
+      expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+    },
+  )
+
+  it('keeps /monitoring cancel controls compatible for authorized active jobs', async () => {
     useAuthStore.setState({ role: 'operator' })
     useMonitoringStore.setState({
       source: 'IFS',
@@ -5930,47 +6013,35 @@ describe('App route state', () => {
       stages: [],
       jobs: [
         {
-          job_id: 'job-ops',
-          run_id: 'run-ops',
-          cycle_id: 'cycle-ops',
+          job_id: 'job-monitoring-running',
+          run_id: 'run-monitoring-running',
+          cycle_id: 'cycle-monitoring',
           job_type: 'forecast',
           slurm_job_id: '2001',
-          model_id: 'model-ops',
-          status: 'failed',
+          model_id: 'model-monitoring',
+          status: 'running',
           stage: 'forecast',
           submitted_at: '2026-05-09T00:03:00Z',
           started_at: '2026-05-09T00:04:00Z',
-          finished_at: '2026-05-09T00:06:00Z',
-          exit_code: 1,
-          retry_count: 2,
-          error_code: 'E_MODEL',
-          error_message: 'model failed',
-          log_uri: 's3://logs/job-ops.log',
-          duration_seconds: 120,
+          finished_at: null,
+          exit_code: null,
+          retry_count: 0,
+          error_code: null,
+          error_message: null,
+          log_uri: 's3://logs/job-monitoring-running.log',
+          duration_seconds: null,
         },
       ],
       jobsContext: { source: 'IFS', cycleTime: '2026-05-18T00:00:00.000Z' },
       jobTotal: 1,
       queue: { running: 2, pending: 4, idle: 6 },
     })
-    window.history.pushState({}, '', '/ops?source=ifs&cycle=2026-05-18T00:00:00Z')
+    window.history.pushState({}, '', '/monitoring?source=ifs&cycle=2026-05-18T00:00:00Z')
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
-    await waitFor(() =>
-      expect(useMonitoringStore.getState()).toMatchObject({
-        source: 'IFS',
-        cycleTime: '2026-05-18T00:00:00.000Z',
-      }),
-    )
-    expect(screen.queryByText('权限不足')).not.toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /系统运维/ })).toHaveClass('border-accent')
-    expect(screen.getByRole('link', { name: /产品监控/ })).toHaveAttribute('href', '/monitoring')
-    expect(screen.getByRole('row', { name: /job-ops.*run-ops.*forecast.*model-ops.*failed.*2001.*2m.*2.*available/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /查看日志/ })).toBeVisible()
-    expect(screen.getByRole('button', { name: /重试/ })).toBeVisible()
-    expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
+    expect(within(screen.getByRole('row', { name: /run-monitoring-running/ })).getByRole('button', { name: /取消/ })).toBeVisible()
   })
 
   it.each(['failed', 'submission_failed', 'partially_failed', 'permanently_failed'] as const)(
@@ -6019,6 +6090,100 @@ describe('App route state', () => {
     },
   )
 
+  it.each(['operator', 'model_admin', 'sys_admin'] as const)(
+    'posts /ops retry for %s with compatible role header and never posts cancel',
+    async (role) => {
+      useAuthStore.setState({ role })
+      const user = userEvent.setup()
+      useMonitoringStore.setState({
+        source: 'GFS',
+        cycleTime: '2026-05-18T00:00:00.000Z',
+        cycleContext: { source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+        jobs: [
+          {
+            job_id: `job-ops-retry-${role}`,
+            run_id: `run-ops-retry-${role}`,
+            cycle_id: 'cycle-ops',
+            job_type: 'forecast',
+            slurm_job_id: '2001',
+            model_id: 'model-ops',
+            status: 'failed',
+            stage: 'forecast',
+            submitted_at: '2026-05-09T00:03:00Z',
+            started_at: '2026-05-09T00:04:00Z',
+            finished_at: '2026-05-09T00:06:00Z',
+            exit_code: 1,
+            retry_count: 2,
+            error_code: 'E_MODEL',
+            error_message: 'model failed',
+            log_uri: 's3://logs/job-ops.log',
+            duration_seconds: 120,
+          },
+        ],
+        jobsContext: { source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+        jobTotal: 1,
+        fetchAll: vi.fn().mockResolvedValue(undefined),
+        fetchJobs: vi.fn().mockResolvedValue(undefined),
+      })
+      vi.mocked(client.POST).mockResolvedValue({ data: success({ status: 'submitted' }), error: undefined } as never)
+      window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
+
+      render(<App />)
+
+      expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+      await user.click(await screen.findByRole('button', { name: /重试/ }))
+
+      await waitFor(() => expect(vi.mocked(client.POST)).toHaveBeenCalledTimes(1))
+      expect(vi.mocked(client.POST)).toHaveBeenCalledWith(
+        '/api/v1/runs/{run_id}/retry',
+        expect.objectContaining({
+          params: {
+            path: { run_id: `run-ops-retry-${role}` },
+            header: { 'X-User-Role': role },
+          },
+        }),
+      )
+      expect(vi.mocked(client.POST).mock.calls.some(([path]) => path === '/api/v1/runs/{run_id}/cancel')).toBe(false)
+    },
+  )
+
+  it.each(['analyst', 'viewer'] as const)('blocks /ops for %s before retry/log controls render', async (role) => {
+    useAuthStore.setState({ role })
+    useMonitoringStore.setState({
+      jobs: [
+        {
+          job_id: 'job-denied',
+          run_id: 'run-denied',
+          cycle_id: 'cycle-denied',
+          job_type: 'forecast',
+          slurm_job_id: '2001',
+          model_id: 'model-denied',
+          status: 'failed',
+          stage: 'forecast',
+          submitted_at: '2026-05-09T00:03:00Z',
+          started_at: '2026-05-09T00:04:00Z',
+          finished_at: '2026-05-09T00:06:00Z',
+          exit_code: 1,
+          retry_count: 0,
+          error_code: 'E_MODEL',
+          error_message: 'model failed',
+          log_uri: 's3://logs/job-denied.log',
+          duration_seconds: 120,
+        },
+      ],
+      jobTotal: 1,
+    })
+    window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('权限不足')
+    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+    expect(vi.mocked(client.POST)).not.toHaveBeenCalled()
+  })
+
   it('keeps /ops operational errors as explicit StageList unavailable state', async () => {
     useAuthStore.setState({ role: 'operator' })
     useMonitoringStore.setState({
@@ -6035,7 +6200,7 @@ describe('App route state', () => {
       fetchAll: vi.fn().mockResolvedValue(undefined),
       fetchJobs: vi.fn().mockResolvedValue(undefined),
     })
-    window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
+    window.history.pushState({}, '', '/ops')
 
     render(<App />)
 
@@ -6916,6 +7081,188 @@ describe('App route state', () => {
         { type: 'jobs', source: 'IFS', cycleTime: '2026-05-19T06:00:00.000Z' },
       ])),
     )
+  })
+
+  it('keeps /ops retry refresh from displaying stale jobs, stages, or log modal after source/cycle changes', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    const user = userEvent.setup()
+    const oldCycle = '2026-05-18T00:00:00.000Z'
+    const newCycle = '2026-05-19T06:00:00.000Z'
+    const retryRequest = deferred<unknown>()
+    const refreshContexts: Array<{ type: string; source: string; cycleTime: string }> = []
+
+    const oldJob = {
+      job_id: 'stale-retry-job',
+      run_id: 'stale-retry-run',
+      cycle_id: 'stale-retry-cycle',
+      job_type: 'forecast',
+      slurm_job_id: '1001',
+      model_id: 'stale-retry-model',
+      status: 'failed' as const,
+      stage: 'old-stage',
+      submitted_at: '2026-05-18T00:03:00Z',
+      started_at: '2026-05-18T00:04:00Z',
+      finished_at: '2026-05-18T00:06:00Z',
+      exit_code: 1,
+      retry_count: 0,
+      error_code: 'E_MODEL',
+      error_message: 'old failure',
+      log_uri: 's3://logs/stale-retry-job.log',
+      duration_seconds: 120,
+    }
+    const newJob = {
+      ...oldJob,
+      job_id: 'selected-retry-job',
+      run_id: 'selected-retry-run',
+      cycle_id: 'selected-retry-cycle',
+      model_id: 'selected-retry-model',
+      status: 'succeeded' as const,
+      stage: 'new-stage',
+      retry_count: 1,
+      error_code: null,
+      error_message: null,
+      log_uri: 's3://logs/selected-retry-job.log',
+      duration_seconds: 60,
+    }
+    const fetchAll = vi.fn().mockImplementation(async () => {
+      const { source, cycleTime } = useMonitoringStore.getState()
+      refreshContexts.push({ type: 'all', source, cycleTime })
+      if (source === 'IFS' && cycleTime === newCycle) {
+        useMonitoringStore.setState({
+          cycle: {
+            source: 'IFS',
+            cycle_time: newCycle,
+            current_state: 'selected-running',
+            started_at: '2026-05-19T06:00:30Z',
+            updated_at: '2026-05-19T06:08:00Z',
+            job_counts: { succeeded: 1, failed: 0, running: 0, pending: 0 },
+          },
+          cycleContext: { source: 'IFS', cycleTime: newCycle },
+          stages: [
+            {
+              stage: 'new-stage',
+              display_status: 'succeeded',
+              status: 'succeeded',
+              duration_seconds: 60,
+              basin_progress: { completed: 1, total: 1, failed: 0 },
+              basin_results_limit: 50,
+              basin_results_total: 0,
+              basin_results_returned: 0,
+              basin_results_truncated: false,
+              basin_results: [],
+            },
+          ],
+        })
+      }
+    })
+    const fetchJobs = vi.fn().mockImplementation(async () => {
+      const { source, cycleTime } = useMonitoringStore.getState()
+      refreshContexts.push({ type: 'jobs', source, cycleTime })
+      if (source === 'IFS' && cycleTime === newCycle) {
+        useMonitoringStore.setState({
+          jobs: [newJob],
+          jobsContext: { source: 'IFS', cycleTime: newCycle },
+          jobTotal: 1,
+        })
+      }
+    })
+
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: oldCycle,
+      cycle: {
+        source: 'GFS',
+        cycle_time: oldCycle,
+        current_state: 'old-failed',
+        started_at: '2026-05-18T00:00:30Z',
+        updated_at: '2026-05-18T00:08:00Z',
+        job_counts: { succeeded: 0, failed: 1, running: 0, pending: 0 },
+      },
+      cycleContext: { source: 'GFS', cycleTime: oldCycle },
+      stages: [
+        {
+          stage: 'old-stage',
+          display_status: 'failed',
+          status: 'failed',
+          duration_seconds: 120,
+          basin_progress: { completed: 0, total: 1, failed: 1 },
+          basin_results_limit: 50,
+          basin_results_total: 0,
+          basin_results_returned: 0,
+          basin_results_truncated: false,
+          basin_results: [],
+        },
+      ],
+      jobs: [oldJob],
+      jobsContext: { source: 'GFS', cycleTime: oldCycle },
+      jobTotal: 1,
+      fetchAll,
+      fetchJobs,
+    })
+    vi.mocked(client.GET).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/jobs/{job_id}/logs') {
+        return {
+          data: success({ job_id: 'stale-retry-job', log_uri: 's3://logs/stale-retry-job.log', content: 'old retry log content' }),
+          error: undefined,
+        } as never
+      }
+      if (path === '/api/v1/metrics/stage-duration' || path === '/api/v1/metrics/success-rate') {
+        return { data: success([]), error: undefined } as never
+      }
+      return { data: success({}), error: undefined } as never
+    })
+    vi.mocked(client.POST).mockReturnValueOnce(retryRequest.promise as never)
+    window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /stale-retry-run/ })).toBeInTheDocument()
+    expect(screen.getAllByText('old-stage').length).toBeGreaterThan(0)
+
+    await user.click(within(screen.getByRole('row', { name: /stale-retry-run/ })).getByRole('button', { name: /重试/ }))
+    await waitFor(() => expect(vi.mocked(client.POST)).toHaveBeenCalledTimes(1))
+
+    await user.click(within(screen.getByRole('row', { name: /stale-retry-run/ })).getByRole('button', { name: /查看日志/ }))
+    expect(await screen.findByText('old retry log content')).toBeInTheDocument()
+
+    act(() => {
+      useMonitoringStore.getState().setSource('IFS')
+      useMonitoringStore.getState().setCycleTime(newCycle)
+      useMonitoringStore.getState().clearSelectedContext()
+    })
+
+    await waitFor(() =>
+      expect(useMonitoringStore.getState()).toMatchObject({
+        source: 'IFS',
+        cycleTime: newCycle,
+      }),
+    )
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.queryByRole('row', { name: /stale-retry-run/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('old-stage')).not.toBeInTheDocument()
+    expect(screen.queryByText('old retry log content')).not.toBeInTheDocument()
+
+    await act(async () => {
+      retryRequest.resolve({ data: success({ status: 'submitted' }), error: undefined })
+      await retryRequest.promise
+    })
+
+    await waitFor(() =>
+      expect(refreshContexts).toEqual(expect.arrayContaining([
+        { type: 'all', source: 'IFS', cycleTime: newCycle },
+        { type: 'jobs', source: 'IFS', cycleTime: newCycle },
+      ])),
+    )
+    expect(useMonitoringStore.getState()).toMatchObject({
+      cycleContext: { source: 'IFS', cycleTime: newCycle },
+      jobsContext: { source: 'IFS', cycleTime: newCycle },
+      jobs: [expect.objectContaining({ run_id: 'selected-retry-run', model_id: 'selected-retry-model' })],
+      stages: [expect.objectContaining({ stage: 'new-stage', status: 'succeeded' })],
+    })
+    expect(screen.queryByRole('row', { name: /stale-retry-run/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('old-stage')).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('blocks /ops for non-operator roles with the same monitoring RBAC boundary', async () => {

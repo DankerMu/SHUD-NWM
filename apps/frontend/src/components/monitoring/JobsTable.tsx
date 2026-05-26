@@ -46,20 +46,24 @@ function SortIcon({ active, direction }: { active: boolean; direction: SortDirec
 interface JobsTableProps {
   actionsEnabled?: boolean
   autoFetch?: boolean
+  cancelControlsEnabled?: boolean
   clearOnFailure?: boolean
   displayEnabled?: boolean
   fetchEnabled?: boolean
   logControlsEnabled?: boolean
+  retryControlsEnabled?: boolean
   unavailableReason?: string | null
 }
 
 export function JobsTable({
   actionsEnabled = true,
   autoFetch = true,
+  cancelControlsEnabled,
   clearOnFailure = false,
   displayEnabled,
   fetchEnabled = true,
   logControlsEnabled = true,
+  retryControlsEnabled,
   unavailableReason = null,
 }: JobsTableProps) {
   const role = useAuthStore((state) => state.role)
@@ -81,7 +85,9 @@ export function JobsTable({
   const pageSize = filters.pageSize ?? 12
   const sortKey = filters.sortBy ?? 'submitted_at'
   const sortDirection = filters.sortOrder ?? 'desc'
-  const controlsVisible = logControlsEnabled || actionsEnabled
+  const retryActionsEnabled = retryControlsEnabled ?? actionsEnabled
+  const cancelActionsEnabled = cancelControlsEnabled ?? actionsEnabled
+  const controlsVisible = logControlsEnabled || retryActionsEnabled || cancelActionsEnabled
   const canDisplayRows = displayEnabled ?? fetchEnabled
   const visibleJobs = canDisplayRows ? jobs : []
   const visibleJobTotal = canDisplayRows ? jobTotal : 0
@@ -111,8 +117,10 @@ export function JobsTable({
     if (!visibleJobs.some((job) => job.job_id === logJobId)) setLogJobId(null)
   }, [logJobId, visibleJobs])
 
-  const actionRole = fetchEnabled && actionsEnabled && canUseDevRoleActions(role) ? role : null
-  const operatorHeaderRole = actionRole as OperatorHeaderRole | null
+  const retryActionRole = fetchEnabled && retryActionsEnabled && canUseDevRoleActions(role) ? role : null
+  const cancelActionRole = fetchEnabled && cancelActionsEnabled && canUseDevRoleActions(role) ? role : null
+  const retryHeaderRole = retryActionRole as OperatorHeaderRole | null
+  const cancelHeaderRole = cancelActionRole as OperatorHeaderRole | null
 
   const updateFilters = (nextFilters: JobFilterState) => {
     void requestJobs({ ...nextFilters, page: 1, pageSize }).catch(() => undefined)
@@ -126,6 +134,7 @@ export function JobsTable({
   const runAction = async (job: PipelineJob, action: 'retry' | 'cancel') => {
     if (!job.run_id) return
     if (!fetchEnabled) return
+    const operatorHeaderRole = action === 'retry' ? retryHeaderRole : cancelHeaderRole
     if (!operatorHeaderRole) return
 
     const actionKey = `${action}:${job.run_id}`
@@ -248,7 +257,7 @@ export function JobsTable({
                               查看日志
                             </Button>
                           ) : null}
-                          {actionRole && retryableStatuses.has(job.status) && job.run_id ? (
+                          {retryActionRole && retryableStatuses.has(job.status) && job.run_id ? (
                             <Button
                               variant="outline"
                               size="sm"
@@ -259,7 +268,7 @@ export function JobsTable({
                               重试
                             </Button>
                           ) : null}
-                          {actionRole && activeStatuses.has(job.status) && job.run_id ? (
+                          {cancelActionRole && activeStatuses.has(job.status) && job.run_id ? (
                             <Button
                               variant="destructive"
                               size="sm"

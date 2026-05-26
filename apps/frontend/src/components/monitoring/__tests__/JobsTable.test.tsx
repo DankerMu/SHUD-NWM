@@ -160,7 +160,37 @@ describe('JobsTable RBAC action boundary', () => {
     expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
   })
 
-  it('shows dev override operator actions and sends the compatible role header', async () => {
+  it.each(['operator', 'model_admin', 'sys_admin'] as const)(
+    'shows dev override %s retry/log actions and sends the compatible role header',
+    async (role) => {
+      mocks.authState.role = role
+      mocks.authState.canUseActions = true
+
+      render(<JobsTable cancelControlsEnabled={false} />)
+      await waitFor(() => expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(1))
+
+      const row = screen.getByRole('row', { name: /run-failed/ })
+      await userEvent.click(within(row).getByRole('button', { name: /重试/ }))
+      await waitFor(() => expect(mocks.postMock).toHaveBeenCalledTimes(1))
+      await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /查看日志/ }))
+
+      expect(await screen.findByRole('dialog')).toHaveTextContent('作业日志 job-failed')
+      expect(mocks.getMock).toHaveBeenCalledWith('/api/v1/jobs/{job_id}/logs', {
+        params: { path: { job_id: 'job-failed' } },
+      })
+      expect(mocks.postMock).toHaveBeenCalledWith(
+        '/api/v1/runs/{run_id}/retry',
+        expect.objectContaining({
+          params: {
+            path: { run_id: 'run-failed' },
+            header: { 'X-User-Role': role },
+          },
+        }),
+      )
+    },
+  )
+
+  it('shows dev override operator retry and cancel actions with separate compatible role headers', async () => {
     mocks.authState.role = 'operator'
     mocks.authState.canUseActions = true
 
@@ -222,6 +252,16 @@ describe('JobsTable RBAC action boundary', () => {
 
     const row = screen.getByRole('row', { name: /job-missing-run/ })
     expect(within(row).queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps retry available while cancel controls are explicitly disabled', () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+
+    render(<JobsTable cancelControlsEnabled={false} />)
+
+    expect(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ })).toBeVisible()
+    expect(within(screen.getByRole('row', { name: /run-running/ })).queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
   })
 
   it('posts one retry while pending and suppresses duplicate clicks until refresh completes', async () => {
@@ -434,6 +474,65 @@ describe('JobsTable RBAC action boundary', () => {
     expect(useToast.getState().toasts).not.toContainEqual(expect.objectContaining({ title: '重试已提交' }))
     expect(useMonitoringStore.getState().fetchAll).toHaveBeenCalledTimes(1)
     expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows retry success toast and clears pending state after scoped refresh', async () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    const retryRequest = deferred<unknown>()
+    const fetchAll = vi.fn().mockResolvedValue(undefined)
+    const fetchJobs = vi.fn().mockResolvedValue(undefined)
+    mocks.postMock.mockReturnValueOnce(retryRequest.promise)
+    useMonitoringStore.setState({
+      jobs: [failedJob],
+      jobTotal: 1,
+      fetchAll,
+      fetchJobs,
+    })
+
+    render(<JobsTable autoFetch={false} />)
+
+    const retryButton = within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ })
+    await userEvent.click(retryButton)
+    await waitFor(() => expect(retryButton).toBeDisabled())
+
+    retryRequest.resolve(success({ status: 'submitted' }))
+
+    await waitFor(() => expect(useToast.getState().toasts.at(-1)).toMatchObject({ title: '重试已提交' }))
+    expect(fetchAll).toHaveBeenCalledTimes(1)
+    expect(fetchJobs).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(retryButton).not.toBeDisabled())
+  })
+
+  it('shows retry network failures, refreshes, and clears pending state', async () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    const fetchAll = vi.fn().mockResolvedValue(undefined)
+    const fetchJobs = vi.fn().mockResolvedValue(undefined)
+    mocks.postMock.mockRejectedValueOnce(new Error('network down'))
+    useMonitoringStore.setState({
+      jobs: [failedJob],
+      jobTotal: 1,
+      fetchAll,
+      fetchJobs,
+    })
+
+    render(<JobsTable autoFetch={false} />)
+
+    const retryButton = within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ })
+    await userEvent.click(retryButton)
+
+    await waitFor(() =>
+      expect(useToast.getState().toasts.at(-1)).toMatchObject({
+        title: '重试失败',
+        description: 'network down',
+        variant: 'destructive',
+      }),
+    )
+    expect(useToast.getState().toasts).not.toContainEqual(expect.objectContaining({ title: '重试已提交' }))
+    expect(fetchAll).toHaveBeenCalledTimes(1)
+    expect(fetchJobs).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(retryButton).not.toBeDisabled())
   })
 
   it('refreshes monitoring state after terminal retry submission failures', async () => {
