@@ -16,20 +16,24 @@ interface LogModalProps {
   jobId: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
+  refreshKey?: number
 }
 
-export function LogModal({ jobId, open, onOpenChange }: LogModalProps) {
+export function LogModal({ jobId, open, onOpenChange, refreshKey = 0 }: LogModalProps) {
   const [content, setContent] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    if (!open || !jobId) return
+    setContent('')
+    setError(null)
+    if (!open || !jobId) {
+      setLoading(false)
+      return
+    }
 
     let active = true
     setLoading(true)
-    setError(null)
-    setContent('')
 
     async function fetchLogs() {
       const { data, error } = await client.GET('/api/v1/jobs/{job_id}/logs', {
@@ -55,7 +59,7 @@ export function LogModal({ jobId, open, onOpenChange }: LogModalProps) {
     return () => {
       active = false
     }
-  }, [jobId, open])
+  }, [jobId, open, refreshKey])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

@@ -1,8 +1,9 @@
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, RotateCcw, Square, Terminal } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { client } from '@/api/client'
 import { getApiErrorMessage } from '@/api/response'
+import type { components } from '@/api/types'
 import { JobFilters } from '@/components/monitoring/JobFilters'
 import { LogModal } from '@/components/monitoring/LogModal'
 import { Badge } from '@/components/ui/badge'
@@ -28,7 +29,7 @@ type SortDirection = 'asc' | 'desc'
 const failedStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'])
 const retryableStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'partially_failed'])
 const activeStatuses = new Set(['pending', 'queued', 'submitted', 'running'])
-const policyFailureCodes = new Set(['RBAC_FORBIDDEN', 'AUTH_REQUIRED', 'RELEASE_BLOCKED'])
+type OperatorHeaderRole = components['parameters']['UserRole']
 
 function statusClass(status: string) {
   if (status === 'succeeded') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -40,12 +41,6 @@ function statusClass(status: string) {
 function SortIcon({ active, direction }: { active: boolean; direction: SortDirection }) {
   if (!active) return <ArrowUpDown className="size-3.5" />
   return direction === 'asc' ? <ArrowUp className="size-3.5" /> : <ArrowDown className="size-3.5" />
-}
-
-function getApiErrorCode(error: unknown) {
-  if (!error || typeof error !== 'object') return null
-  const envelope = error as { error?: { code?: string } }
-  return envelope.error?.code ?? null
 }
 
 interface JobsTableProps {
@@ -78,7 +73,9 @@ export function JobsTable({
   const { toast } = useToast()
 
   const [logJobId, setLogJobId] = useState<string | null>(null)
+  const [logRefreshKey, setLogRefreshKey] = useState(0)
   const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const pendingActionRef = useRef<string | null>(null)
 
   const page = filters.page ?? 1
   const pageSize = filters.pageSize ?? 12
@@ -97,12 +94,25 @@ export function JobsTable({
     await fetchJobs(nextFilters, { clearOnFailure })
   }, [clearOnFailure, fetchEnabled, fetchJobs])
 
+  const refreshSelectedContext = useCallback(async () => {
+    await Promise.all([
+      fetchAll({ clearOnFailure }).catch(() => undefined),
+      requestJobs().catch(() => undefined),
+    ])
+  }, [clearOnFailure, fetchAll, requestJobs])
+
   useEffect(() => {
     if (!autoFetch || !fetchEnabled) return
     void requestJobs().catch(() => undefined)
   }, [autoFetch, fetchEnabled, requestJobs])
 
+  useEffect(() => {
+    if (!logJobId) return
+    if (!visibleJobs.some((job) => job.job_id === logJobId)) setLogJobId(null)
+  }, [logJobId, visibleJobs])
+
   const actionRole = fetchEnabled && actionsEnabled && canUseDevRoleActions(role) ? role : null
+  const operatorHeaderRole = actionRole as OperatorHeaderRole | null
 
   const updateFilters = (nextFilters: JobFilterState) => {
     void requestJobs({ ...nextFilters, page: 1, pageSize }).catch(() => undefined)
@@ -116,39 +126,26 @@ export function JobsTable({
   const runAction = async (job: PipelineJob, action: 'retry' | 'cancel') => {
     if (!job.run_id) return
     if (!fetchEnabled) return
-    if (!actionRole) return
+    if (!operatorHeaderRole) return
 
     const actionKey = `${action}:${job.run_id}`
+    if (pendingActionRef.current) return
+
+    pendingActionRef.current = actionKey
     setPendingAction(actionKey)
     try {
       const path = action === 'retry' ? '/api/v1/runs/{run_id}/retry' : '/api/v1/runs/{run_id}/cancel'
       const { error } = await client.POST(path, {
         params: {
           path: { run_id: job.run_id },
-          header: { 'X-User-Role': actionRole },
+          header: { 'X-User-Role': operatorHeaderRole },
         },
       })
       if (error) {
-        if (policyFailureCodes.has(getApiErrorCode(error) ?? '')) {
-          toast({
-            title: action === 'retry' ? '重试失败' : '取消失败',
-            description: getApiErrorMessage(error, '操作失败'),
-            variant: 'destructive',
-          })
-          await Promise.all([
-            fetchAll({ clearOnFailure }).catch(() => undefined),
-            requestJobs().catch(() => undefined),
-          ])
-          return
-        }
-        throw new Error(getApiErrorMessage(error, action === 'retry' ? '重试失败' : '取消失败'))
+        throw error
       }
 
       toast({ title: action === 'retry' ? '重试已提交' : '取消请求已提交' })
-      await Promise.all([
-        fetchAll({ clearOnFailure }).catch(() => undefined),
-        requestJobs().catch(() => undefined),
-      ])
     } catch (error) {
       toast({
         title: action === 'retry' ? '重试失败' : '取消失败',
@@ -156,6 +153,9 @@ export function JobsTable({
         variant: 'destructive',
       })
     } finally {
+      await refreshSelectedContext()
+      setLogRefreshKey((key) => key + 1)
+      pendingActionRef.current = null
       setPendingAction(null)
     }
   }
@@ -215,8 +215,6 @@ export function JobsTable({
           <TableBody>
             {visibleJobs.length ? (
               visibleJobs.map((job) => {
-                const retryKey = `retry:${job.run_id ?? ''}`
-                const cancelKey = `cancel:${job.run_id ?? ''}`
                 const logAvailable = Boolean(job.log_uri)
                 return (
                   <TableRow key={job.job_id}>
@@ -254,7 +252,7 @@ export function JobsTable({
                             <Button
                               variant="outline"
                               size="sm"
-                              disabled={pendingAction === retryKey}
+                              disabled={Boolean(pendingAction)}
                               onClick={() => void runAction(job, 'retry')}
                             >
                               <RotateCcw className="size-3.5" />
@@ -265,7 +263,7 @@ export function JobsTable({
                             <Button
                               variant="destructive"
                               size="sm"
-                              disabled={pendingAction === cancelKey}
+                              disabled={Boolean(pendingAction)}
                               onClick={() => void runAction(job, 'cancel')}
                             >
                               <Square className="size-3.5" />
@@ -321,7 +319,12 @@ export function JobsTable({
         </div>
       </CardContent>
       {logControlsEnabled ? (
-        <LogModal jobId={logJobId} open={Boolean(logJobId)} onOpenChange={(open) => !open && setLogJobId(null)} />
+        <LogModal
+          jobId={logJobId}
+          open={Boolean(logJobId)}
+          refreshKey={logRefreshKey}
+          onOpenChange={(open) => !open && setLogJobId(null)}
+        />
       ) : null}
     </Card>
   )

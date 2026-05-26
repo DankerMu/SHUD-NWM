@@ -5,13 +5,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { JobsTable } from '@/components/monitoring/JobsTable'
 import { useToast } from '@/hooks/useToast'
 import type { AuthRole } from '@/stores/auth'
-import { useMonitoringStore } from '@/stores/monitoring'
+import { type PipelineJob, useMonitoringStore } from '@/stores/monitoring'
 
 const mocks = vi.hoisted(() => ({
   authState: {
     role: 'viewer' as AuthRole,
     canUseActions: false,
   },
+  getMock: vi.fn(),
   postMock: vi.fn(),
 }))
 
@@ -28,6 +29,7 @@ vi.mock('@/stores/auth', async (importOriginal) => {
 
 vi.mock('@/api/client', () => ({
   client: {
+    GET: mocks.getMock,
     POST: mocks.postMock,
   },
 }))
@@ -36,6 +38,8 @@ const failedJob = {
   job_id: 'job-failed',
   run_id: 'run-failed',
   cycle_id: 'cycle-1',
+  run_type: 'forecast',
+  scenario: 'forecast_gfs_deterministic',
   job_type: 'forecast',
   slurm_job_id: '1001',
   model_id: 'model-b',
@@ -56,6 +60,8 @@ const runningJob = {
   job_id: 'job-running',
   run_id: 'run-running',
   cycle_id: 'cycle-1',
+  run_type: 'forecast',
+  scenario: 'forecast_gfs_deterministic',
   job_type: 'forecast',
   slurm_job_id: '1002',
   model_id: 'model-c',
@@ -76,6 +82,8 @@ const queuedJob = {
   job_id: 'job-queued',
   run_id: 'run-queued',
   cycle_id: 'cycle-1',
+  run_type: 'forecast',
+  scenario: 'forecast_gfs_deterministic',
   job_type: 'forecast',
   slurm_job_id: '1003',
   model_id: 'model-q',
@@ -92,10 +100,33 @@ const queuedJob = {
   duration_seconds: null,
 }
 
+function makeJob(overrides: Partial<PipelineJob> = {}): PipelineJob {
+  return {
+    ...failedJob,
+    ...overrides,
+  }
+}
+
+function success<T>(data: T) {
+  return { data: { status: 'success', data }, error: undefined }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve
+    reject = promiseReject
+  })
+  return { promise, resolve, reject }
+}
+
 describe('JobsTable RBAC action boundary', () => {
   beforeEach(() => {
     mocks.authState.role = 'viewer'
     mocks.authState.canUseActions = false
+    mocks.getMock.mockReset()
+    mocks.getMock.mockResolvedValue(success({ job_id: 'job-failed', log_uri: 's3://logs/job-failed.log', content: 'current log' }))
     mocks.postMock.mockReset()
     mocks.postMock.mockResolvedValue({ data: { status: 'ok' }, error: undefined })
     useMonitoringStore.setState({
@@ -159,6 +190,149 @@ describe('JobsTable RBAC action boundary', () => {
           header: { 'X-User-Role': 'operator' },
         },
       }),
+    )
+  })
+
+  it.each(['failed', 'submission_failed', 'partially_failed', 'permanently_failed'] as const)(
+    'shows retry for authorized retryable %s jobs with a run id',
+    (status) => {
+      mocks.authState.role = 'operator'
+      mocks.authState.canUseActions = true
+      useMonitoringStore.setState({
+        jobs: [makeJob({ job_id: `job-${status}`, run_id: `run-${status}`, status })],
+        jobTotal: 1,
+      })
+
+      render(<JobsTable />)
+
+      const row = screen.getByRole('row', { name: new RegExp(`run-${status}`) })
+      expect(within(row).getByRole('button', { name: /重试/ })).toBeVisible()
+    },
+  )
+
+  it('does not show retry for retryable jobs without a run id', () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    useMonitoringStore.setState({
+      jobs: [makeJob({ job_id: 'job-missing-run', run_id: null, status: 'failed' })],
+      jobTotal: 1,
+    })
+
+    render(<JobsTable />)
+
+    const row = screen.getByRole('row', { name: /job-missing-run/ })
+    expect(within(row).queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+  })
+
+  it('posts one retry while pending and suppresses duplicate clicks until refresh completes', async () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    const retryRequest = deferred<unknown>()
+    const fetchAll = vi.fn().mockResolvedValue(undefined)
+    const fetchJobs = vi.fn().mockResolvedValue(undefined)
+    mocks.postMock.mockReturnValueOnce(retryRequest.promise)
+    useMonitoringStore.setState({
+      jobs: [failedJob],
+      jobTotal: 1,
+      fetchAll,
+      fetchJobs,
+    })
+
+    render(<JobsTable />)
+    await waitFor(() => expect(fetchJobs).toHaveBeenCalledTimes(1))
+    fetchJobs.mockClear()
+
+    const retryButton = within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ })
+    await userEvent.click(retryButton)
+    await waitFor(() => expect(mocks.postMock).toHaveBeenCalledTimes(1))
+    expect(retryButton).toBeDisabled()
+
+    await userEvent.click(retryButton)
+    expect(mocks.postMock).toHaveBeenCalledTimes(1)
+    expect(fetchAll).not.toHaveBeenCalled()
+    expect(fetchJobs).not.toHaveBeenCalled()
+
+    retryRequest.resolve(success({ status: 'submitted' }))
+    await waitFor(() => expect(fetchAll).toHaveBeenCalledTimes(1))
+    expect(fetchJobs).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(retryButton).not.toBeDisabled())
+  })
+
+  it('refreshes status, stages, and jobs for the selected source/cycle after retry success', async () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    const events: string[] = []
+    const fetchAll = vi.fn().mockImplementation(async () => {
+      const { source, cycleTime } = useMonitoringStore.getState()
+      events.push(`all:${source}:${cycleTime}`)
+    })
+    const fetchJobs = vi.fn().mockImplementation(async () => {
+      const { source, cycleTime } = useMonitoringStore.getState()
+      events.push(`jobs:${source}:${cycleTime}`)
+    })
+    mocks.postMock.mockImplementationOnce(async () => {
+      events.push('post:run-failed')
+      return success({ status: 'submitted' })
+    })
+    useMonitoringStore.setState({
+      source: 'IFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      jobs: [failedJob],
+      jobTotal: 1,
+      fetchAll,
+      fetchJobs,
+    })
+
+    render(<JobsTable autoFetch={false} />)
+
+    await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ }))
+
+    await waitFor(() =>
+      expect(events).toEqual([
+        'post:run-failed',
+        'all:IFS:2026-05-18T00:00:00.000Z',
+        'jobs:IFS:2026-05-18T00:00:00.000Z',
+      ]),
+    )
+  })
+
+  it('refreshes the current selected source/cycle if selection changes before retry settles', async () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    const retryRequest = deferred<unknown>()
+    const refreshContexts: string[] = []
+    const fetchAll = vi.fn().mockImplementation(async () => {
+      const { source, cycleTime } = useMonitoringStore.getState()
+      refreshContexts.push(`all:${source}:${cycleTime}`)
+    })
+    const fetchJobs = vi.fn().mockImplementation(async () => {
+      const { source, cycleTime } = useMonitoringStore.getState()
+      refreshContexts.push(`jobs:${source}:${cycleTime}`)
+    })
+    mocks.postMock.mockReturnValueOnce(retryRequest.promise)
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: '2026-05-18T00:00:00.000Z',
+      jobs: [failedJob],
+      jobTotal: 1,
+      fetchAll,
+      fetchJobs,
+    })
+
+    render(<JobsTable autoFetch={false} />)
+
+    await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ }))
+    await waitFor(() => expect(mocks.postMock).toHaveBeenCalledTimes(1))
+    useMonitoringStore.getState().setSource('IFS')
+    useMonitoringStore.getState().setCycleTime('2026-05-19T06:00:00.000Z')
+
+    retryRequest.resolve(success({ status: 'submitted' }))
+
+    await waitFor(() =>
+      expect(refreshContexts).toEqual([
+        'all:IFS:2026-05-19T06:00:00.000Z',
+        'jobs:IFS:2026-05-19T06:00:00.000Z',
+      ]),
     )
   })
 
@@ -260,5 +434,51 @@ describe('JobsTable RBAC action boundary', () => {
     expect(useToast.getState().toasts).not.toContainEqual(expect.objectContaining({ title: '重试已提交' }))
     expect(useMonitoringStore.getState().fetchAll).toHaveBeenCalledTimes(1)
     expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(2)
+  })
+
+  it('refreshes monitoring state after terminal retry submission failures', async () => {
+    mocks.authState.role = 'operator'
+    mocks.authState.canUseActions = true
+    const fetchAll = vi.fn().mockResolvedValue(undefined)
+    const fetchJobs = vi.fn().mockResolvedValue(undefined)
+    mocks.postMock.mockResolvedValueOnce({
+      data: undefined,
+      error: { error: { code: 'RETRY_SUBMISSION_FAILED', message: 'Retry submission failed.' } },
+    })
+    useMonitoringStore.setState({
+      jobs: [failedJob],
+      jobTotal: 1,
+      fetchAll,
+      fetchJobs,
+    })
+
+    render(<JobsTable autoFetch={false} />)
+
+    await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /重试/ }))
+
+    await waitFor(() =>
+      expect(useToast.getState().toasts.at(-1)).toMatchObject({
+        title: '重试失败',
+        description: 'Retry submission failed.',
+        variant: 'destructive',
+      }),
+    )
+    expect(fetchAll).toHaveBeenCalledTimes(1)
+    expect(fetchJobs).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes an open log modal when the visible selected-context jobs no longer contain that job', async () => {
+    render(<JobsTable autoFetch={false} />)
+
+    await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /查看日志/ }))
+
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+
+    useMonitoringStore.setState({
+      jobs: [makeJob({ job_id: 'job-new-cycle', run_id: 'run-new-cycle', status: 'succeeded' })],
+      jobTotal: 1,
+    })
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 })

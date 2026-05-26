@@ -240,12 +240,12 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
           showPendingPlaceholders={!isOpsMode}
         />
         <JobsTable
-          actionsEnabled={!isOpsMode && isOperationalDataReady}
+          actionsEnabled={isOperationalDataReady}
           autoFetch={isOperationalDataReady}
           clearOnFailure={isOpsMode}
           displayEnabled={isOperationalDataReady && hasVisibleJobsPayload}
           fetchEnabled={isOperationalDataReady}
-          logControlsEnabled={!isOpsMode}
+          logControlsEnabled={isOperationalDataReady}
           unavailableReason={dataUnavailableReason ?? jobsPayloadUnavailableReason}
         />
         <div className="min-[800px]:col-span-2 min-[1200px]:col-span-1">

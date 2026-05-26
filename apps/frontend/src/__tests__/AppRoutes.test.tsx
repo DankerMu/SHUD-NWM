@@ -5968,10 +5968,56 @@ describe('App route state', () => {
     expect(screen.getByRole('link', { name: /系统运维/ })).toHaveClass('border-accent')
     expect(screen.getByRole('link', { name: /产品监控/ })).toHaveAttribute('href', '/monitoring')
     expect(screen.getByRole('row', { name: /job-ops.*run-ops.*forecast.*model-ops.*failed.*2001.*2m.*2.*available/ })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /查看日志/ })).toBeVisible()
+    expect(screen.getByRole('button', { name: /重试/ })).toBeVisible()
     expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
   })
+
+  it.each(['failed', 'submission_failed', 'partially_failed', 'permanently_failed'] as const)(
+    'shows authorized /ops log controls and retry for %s jobs with run ids',
+    async (status) => {
+      useAuthStore.setState({ role: 'operator' })
+      useMonitoringStore.setState({
+        source: 'GFS',
+        cycleTime: '2026-05-18T00:00:00.000Z',
+        cycleContext: { source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+        jobs: [
+          {
+            job_id: `job-ops-${status}`,
+            run_id: `run-ops-${status}`,
+            cycle_id: 'cycle-ops',
+            run_type: 'forecast',
+            scenario: 'forecast_gfs_deterministic',
+            job_type: 'forecast',
+            slurm_job_id: '2001',
+            model_id: 'model-ops',
+            status,
+            stage: 'forecast',
+            submitted_at: '2026-05-09T00:03:00Z',
+            started_at: '2026-05-09T00:04:00Z',
+            finished_at: '2026-05-09T00:06:00Z',
+            exit_code: 1,
+            retry_count: 2,
+            error_code: 'E_MODEL',
+            error_message: 'model failed',
+            log_uri: 's3://logs/job-ops.log',
+            duration_seconds: 120,
+          },
+        ],
+        jobsContext: { source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+        jobTotal: 1,
+      })
+      window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
+
+      render(<App />)
+
+      expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+      const row = await screen.findByRole('row', { name: new RegExp(`run-ops-${status}`) })
+      expect(within(row).getByRole('button', { name: /查看日志/ })).toBeVisible()
+      expect(within(row).getByRole('button', { name: /重试/ })).toBeVisible()
+      expect(within(row).queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+    },
+  )
 
   it('keeps /ops operational errors as explicit StageList unavailable state', async () => {
     useAuthStore.setState({ role: 'operator' })
@@ -6003,6 +6049,7 @@ describe('App route state', () => {
     useMonitoringStore.setState({
       source: 'GFS',
       cycleTime: '2026-05-18T00:00:00.000Z',
+      cycleContext: { source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z' },
       jobs: [
         {
           job_id: 'job-ops-slash',
@@ -6024,6 +6071,7 @@ describe('App route state', () => {
           duration_seconds: 120,
         },
       ],
+      jobsContext: { source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z' },
       jobTotal: 1,
       fetchAll: vi.fn().mockResolvedValue(undefined),
       fetchJobs: vi.fn().mockResolvedValue(undefined),
@@ -6033,9 +6081,9 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /重试/ })).toBeVisible()
     expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /查看日志/ })).toBeVisible()
 
     await user.click(screen.getByLabelText('Source'))
     await user.click(await screen.findByRole('option', { name: 'IFS' }))
