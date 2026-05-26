@@ -46,7 +46,12 @@
 ## 6. QHH Smoke, Evidence, and Documentation
 
 - [ ] 6.1 Add or update an MVP smoke command/runbook that validates one accepted QHH GFS cycle from download through station series, forecast-series, `/hydro-met`, and `/ops`, or records the exact missing live dependency with evidence mode and artifact path.
+  Keep qhh backend-smoke and qhh continuous evidence producers separated by command, run id, artifact root, and status.
 - [ ] 6.2 Add required IFS live or deterministic evidence for GFS/IFS parallel display and 06/18 UTC shorter-horizon labeling; skipped live IFS proof must record the exact dependency reason and must not claim IFS live readiness.
-- [ ] 6.3 Add controlled failure/retry evidence showing failed stage visibility, backend log visibility, authorized retry job creation, retry/submission event evidence, Slurm/job metadata update where available, `/ops` browser visibility, terminal outcome or documented terminal failure, and exact skipped live dependencies when Slurm/QHH are unavailable.
-- [ ] 6.4 Record validation commands for backend tests, OpenAPI drift/static contract checks, frontend API type check, frontend tests/build, browser smoke, OpenSpec validation, and opt-in live smoke dependencies, including skipped dependency reasons.
-- [ ] 6.5 Update `progress.md`, MVP launch plan, and QHH runbooks so they reflect delivered MVP scope, formal scheduler boundary, qhh diagnostic-script boundary, accepted `no_frequency_curve` boundary, explicit P2 exclusions, and no final production readiness claim.
+- [ ] 6.3 Add controlled failure/retry evidence showing failed stage visibility, backend log visibility, authorized retry job creation, retry/submission event evidence, Slurm/job metadata update where available, `/ops` browser visibility, terminal outcome or documented terminal failure.
+  Record exact skipped live dependencies when Slurm/QHH are unavailable.
+- [ ] 6.4 Record validation commands for focused backend/API tests, OpenAPI drift/static contract checks, frontend API type check, frontend tests/build, browser smoke, Markdown/static docs checks including progress/OpenSpec files, OpenSpec validation, and opt-in live receipt dependencies.
+  Include skipped dependency reasons.
+- [ ] 6.5 Update `progress.md`, MVP launch plan, and QHH runbooks so they reflect delivered station-series API, latest-product API, `/hydro-met` deterministic consumption, formal scheduler boundary, and qhh diagnostic-script boundary.
+  Include the accepted `no_frequency_curve` boundary and explicit P2/live receipt exclusions.
+  Keep the no-final-production-readiness claim boundary explicit.

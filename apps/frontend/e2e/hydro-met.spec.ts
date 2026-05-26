@@ -19,8 +19,14 @@ const units: Record<(typeof stationVariables)[number], string> = {
 
 interface HydroMetRequestRecords {
   latestProductSources: HydroMetSource[]
-  stationSeriesRequests: Array<{ forcingVersionId: string | null; search: string }>
-  forecastRequests: Array<{ scenario: string | null; variable: string | null; issueTime: string | null }>
+  stationSeriesRequests: Array<{ stationId: string; forcingVersionId: string | null; search: string }>
+  forecastRequests: Array<{
+    segmentId: string
+    riverNetworkVersionId: string | null
+    scenario: string | null
+    variable: string | null
+    issueTime: string | null
+  }>
 }
 
 function success<T>(data: T) {
@@ -132,6 +138,17 @@ const stationInventory = {
       properties_json: {},
       created_at: '2026-05-21T00:00:00.000Z',
     },
+    {
+      station_id: 'qhh_forc_002',
+      basin_version_id: 'basins_qhh_vbasins',
+      station_name: 'QHH Forcing 002',
+      geom: { type: 'Point', coordinates: [101.82, 35.93] },
+      elevation_m: 2924,
+      station_role: 'forcing',
+      active_flag: true,
+      properties_json: {},
+      created_at: '2026-05-21T00:00:00.000Z',
+    },
   ],
   total_count: 386,
   limit: 500,
@@ -163,25 +180,47 @@ const riverSegments = {
         ],
       },
     },
+    {
+      type: 'Feature',
+      properties: {
+        segment_id: 'seg-002',
+        river_segment_id: 'seg-002',
+        basin_version_id: 'basins_qhh_vbasins',
+        river_network_version_id: 'basins_qhh_rivnet_vbasins',
+        name: 'QHH Segment 002',
+        stream_order: 4,
+      },
+      geometry: {
+        type: 'LineString',
+        coordinates: [
+          [101.85, 35.92],
+          [102.2, 36.12],
+        ],
+      },
+    },
   ],
 }
 
-function stationSeries(source: HydroMetSource) {
+function stationSeries(source: HydroMetSource, stationId: string) {
   const cycle = cycles[source]
   const returnedFrom = addHours(cycle, 3)
   const returnedTo = addHours(cycle, 6)
+  const stationName = stationId === 'qhh_forc_002' ? 'QHH Forcing 002' : 'QHH Forcing 001'
+  const stationCoordinates = stationId === 'qhh_forc_002'
+    ? { longitude: 101.82, latitude: 35.93, elevation: 2924 }
+    : { longitude: 101.45, latitude: 35.72, elevation: 2850 }
 
   return {
-    station_id: 'qhh_forc_001',
+    station_id: stationId,
     station: {
-      station_id: 'qhh_forc_001',
+      station_id: stationId,
       basin_version_id: 'basins_qhh_vbasins',
-      station_name: 'QHH Forcing 001',
-      name: 'QHH Forcing 001',
-      longitude: 101.45,
-      latitude: 35.72,
-      elevation_m: 2850,
-      elevation: 2850,
+      station_name: stationName,
+      name: stationName,
+      longitude: stationCoordinates.longitude,
+      latitude: stationCoordinates.latitude,
+      elevation_m: stationCoordinates.elevation,
+      elevation: stationCoordinates.elevation,
       station_role: 'forcing',
       active_flag: true,
       properties_json: {},
@@ -220,13 +259,13 @@ function stationSeries(source: HydroMetSource) {
   }
 }
 
-function forecastSeries(source: HydroMetSource) {
+function forecastSeries(source: HydroMetSource, segmentId: string) {
   const cycle = cycles[source]
   const availableLeadHours = source === 'IFS' ? 144 : 168
 
   return {
-    segment_id: 'seg-001',
-    river_segment_id: 'seg-001',
+    segment_id: segmentId,
+    river_segment_id: segmentId,
     issue_time: cycle,
     variable: 'q_down',
     unit: 'm3/s',
@@ -238,8 +277,8 @@ function forecastSeries(source: HydroMetSource) {
         available_lead_hours: availableLeadHours,
         segment_role: 'forecast',
         points: [
-          [addHours(cycle, 3), 12.5],
-          [addHours(cycle, availableLeadHours), source === 'IFS' ? 18.2 : 20.4],
+          [addHours(cycle, 3), segmentId === 'seg-002' ? 22.5 : 12.5],
+          [addHours(cycle, availableLeadHours), segmentId === 'seg-002' ? (source === 'IFS' ? 28.2 : 30.4) : (source === 'IFS' ? 18.2 : 20.4)],
         ],
       },
     ],
@@ -282,20 +321,28 @@ async function mockHydroMetApi(page: Page): Promise<HydroMetRequestRecords> {
       return fulfill(route, riverSegments)
     }
 
-    if (url.pathname === '/api/v1/met/stations/qhh_forc_001/series') {
+    const stationSeriesMatch = /^\/api\/v1\/met\/stations\/([^/]+)\/series$/.exec(url.pathname)
+    if (stationSeriesMatch) {
+      const stationId = decodeURIComponent(stationSeriesMatch[1])
+      expect(['qhh_forc_001', 'qhh_forc_002']).toContain(stationId)
       const forcingVersion = url.searchParams.get('forcing_version_id')
-      records.stationSeriesRequests.push({ forcingVersionId: forcingVersion, search: url.search })
+      records.stationSeriesRequests.push({ stationId, forcingVersionId: forcingVersion, search: url.search })
       stationVariables.forEach((variable) => expect(url.search).toContain(variable))
-      return fulfill(route, stationSeries(sourceFromForcingVersion(forcingVersion)))
+      return fulfill(route, stationSeries(sourceFromForcingVersion(forcingVersion), stationId))
     }
 
-    if (url.pathname === '/api/v1/basin-versions/basins_qhh_vbasins/river-segments/seg-001/forecast-series') {
+    const forecastSeriesMatch = /^\/api\/v1\/basin-versions\/basins_qhh_vbasins\/river-segments\/([^/]+)\/forecast-series$/.exec(url.pathname)
+    if (forecastSeriesMatch) {
+      const segmentId = decodeURIComponent(forecastSeriesMatch[1])
+      expect(['seg-001', 'seg-002']).toContain(segmentId)
+      const riverNetworkVersionId = url.searchParams.get('river_network_version_id')
       const scenario = url.searchParams.get('scenarios')
       const variable = url.searchParams.get('variables')
       const issueTime = url.searchParams.get('issue_time')
-      records.forecastRequests.push({ scenario, variable, issueTime })
+      records.forecastRequests.push({ segmentId, riverNetworkVersionId, scenario, variable, issueTime })
+      expect(riverNetworkVersionId).toBe('basins_qhh_rivnet_vbasins')
       expect(variable).toBe('q_down')
-      return fulfill(route, forecastSeries(sourceFromScenario(scenario)))
+      return fulfill(route, forecastSeries(sourceFromScenario(scenario), segmentId))
     }
 
     throw new Error(`Unhandled mocked API route: ${request.method()} ${url.pathname}`)
@@ -311,21 +358,48 @@ test('loads deterministic QHH hydro-met evidence without live backend dependenci
 
   await expect(page.getByTestId('hydro-met-product-panel')).toContainText(runId('GFS'))
   await expect(page.getByTestId('hydro-met-station-list')).toContainText('qhh_forc_001')
+  await expect(page.getByTestId('hydro-met-station-list')).toContainText('qhh_forc_002')
   await expect(page.getByTestId('hydro-met-river-list')).toContainText('seg-001')
+  await expect(page.getByTestId('hydro-met-river-list')).toContainText('seg-002')
   await expect(page.getByTestId('hydro-met-no-fake-data')).toContainText('不绘制假曲线')
   await expect(page.getByTestId('hydro-met-station-series-loaded')).toContainText(forcingVersionId('GFS'))
+  await expect(page.getByTestId('hydro-met-station-series-loaded')).toContainText('qhh_forc_001')
 
   for (const variable of stationVariables) {
     await expect(page.getByTestId(`hydro-met-variable-${variable}-chart`)).toContainText(variable)
   }
 
   await expect(page.getByTestId('hydro-met-river-forecast-loaded')).toContainText('q_down')
+  await expect(page.getByTestId('hydro-met-river-forecast-loaded')).toContainText('seg-001')
   await expect(page.getByTestId('hydro-met-river-forecast-loaded')).toContainText('GFS / forecast_gfs_deterministic')
 
   expect(records.latestProductSources).toContain('GFS')
-  expect(records.stationSeriesRequests.some((record) => record.forcingVersionId === forcingVersionId('GFS'))).toBe(true)
+  expect(records.stationSeriesRequests).toContainEqual(expect.objectContaining({
+    stationId: 'qhh_forc_001',
+    forcingVersionId: forcingVersionId('GFS'),
+  }))
   expect(records.stationSeriesRequests.some((record) => stationVariables.every((variable) => record.search.includes(variable)))).toBe(true)
   expect(records.forecastRequests).toContainEqual({
+    segmentId: 'seg-001',
+    riverNetworkVersionId: 'basins_qhh_rivnet_vbasins',
+    scenario: 'forecast_gfs_deterministic',
+    variable: 'q_down',
+    issueTime: cycles.GFS,
+  })
+
+  await page.getByTestId('hydro-met-station-row').filter({ hasText: 'qhh_forc_002' }).click()
+  await expect(page.getByTestId('hydro-met-station-series-loaded')).toContainText('qhh_forc_002')
+  expect(records.stationSeriesRequests).toContainEqual(expect.objectContaining({
+    stationId: 'qhh_forc_002',
+    forcingVersionId: forcingVersionId('GFS'),
+  }))
+
+  await page.getByTestId('hydro-met-river-row').filter({ hasText: 'seg-002' }).click()
+  await expect(page.getByTestId('hydro-met-river-forecast-loaded')).toContainText('seg-002')
+  await expect(page.getByTestId('hydro-met-river-forecast-loaded')).toContainText('GFS / forecast_gfs_deterministic')
+  expect(records.forecastRequests).toContainEqual({
+    segmentId: 'seg-002',
+    riverNetworkVersionId: 'basins_qhh_rivnet_vbasins',
     scenario: 'forecast_gfs_deterministic',
     variable: 'q_down',
     issueTime: cycles.GFS,
@@ -336,13 +410,19 @@ test('loads deterministic QHH hydro-met evidence without live backend dependenci
   await expect(page.getByTestId('hydro-met-product-panel')).toContainText(runId('IFS'))
   await expect(page.getByTestId('hydro-met-shorter-horizon')).toContainText('可用时效短于预期')
   await expect(page.getByTestId('hydro-met-station-series-loaded')).toContainText(forcingVersionId('IFS'))
+  await expect(page.getByTestId('hydro-met-station-series-loaded')).toContainText('qhh_forc_001')
   await expect(page.getByTestId('hydro-met-river-forecast-loaded')).toContainText('IFS / forecast_ifs_deterministic')
   await expect(page.getByTestId('hydro-met-river-horizon')).toContainText('144h')
   await expect(page.getByTestId('hydro-met-river-horizon')).toContainText('expected 168h')
 
   expect(records.latestProductSources).toContain('IFS')
-  expect(records.stationSeriesRequests.some((record) => record.forcingVersionId === forcingVersionId('IFS'))).toBe(true)
+  expect(records.stationSeriesRequests).toContainEqual(expect.objectContaining({
+    stationId: 'qhh_forc_001',
+    forcingVersionId: forcingVersionId('IFS'),
+  }))
   expect(records.forecastRequests).toContainEqual({
+    segmentId: 'seg-001',
+    riverNetworkVersionId: 'basins_qhh_rivnet_vbasins',
     scenario: 'forecast_ifs_deterministic',
     variable: 'q_down',
     issueTime: cycles.IFS,
