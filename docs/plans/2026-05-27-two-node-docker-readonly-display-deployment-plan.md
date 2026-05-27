@@ -265,11 +265,13 @@ MVP 初期可先用 FastAPI 服务前端，后续再改 nginx/caddy。
 
 ## 7. Compose 设计
 
+本节示例是目标部署形态，不是当前代码可以直接生产运行的 Compose。真正运行 27 `display_readonly` 前，必须先完成第 9 节中的 service role、retry/cancel fail-closed、ArtifactReader 和 latest-product identity filters。否则 Docker 只会把当前单体控制面能力搬到 27 容器里。
+
 ## 7.1 `infra/compose.compute.yml`
 
 运行位置：22 节点。
 
-推荐服务：
+推荐目标服务：
 
 ```yaml
 services:
@@ -286,7 +288,7 @@ services:
     network_mode: bridge
     restart: unless-stopped
 
-  scheduler:
+  scheduler-once:
     image: nhms-app:${NHMS_IMAGE_TAG}
     env_file:
       - ./env/compute.env
@@ -296,15 +298,23 @@ services:
       - ${NHMS_BASINS_ROOT}:${NHMS_BASINS_ROOT}:ro
       - ${WORKSPACE_ROOT}:${WORKSPACE_ROOT}:rw
       - ${PUBLISHED_ARTIFACT_ROOT}:${PUBLISHED_ARTIFACT_ROOT}:rw
-    command: ["uv", "run", "nhms-pipeline", "scheduler-loop"]
-    restart: unless-stopped
+    command:
+      - uv
+      - run
+      - nhms-pipeline
+      - plan-production
+      - --plan
+    profiles: ["manual"]
+    restart: "no"
 ```
 
 注意：
 
-- 如果当前还没有 `scheduler-loop`，先用 systemd timer 或 cron 手工执行 `plan-production`。
+- `compute-api` 是可选服务。第一阶段 22 的硬需求是 scheduler/plan-production、published artifacts writer 和 Slurm/Gateway receipt；如果没有明确内部调用方，可以先不暴露 compute API。
+- 当前代码没有确认存在 `scheduler-loop`。第一阶段用 `docker compose run --rm scheduler-once ...`、systemd timer 或 cron 手工执行 `plan-production`；等 loop/daemon 入口真实存在且有幂等测试后，再引入长期运行的 scheduler service。
 - scheduler 容器必须能访问 DB、对象存储、published root。
 - 计算任务是否在容器中执行由 Slurm sbatch 模板决定；不要让 compute node 依赖 27。
+- compute compose 不应暴露公网入口。`compute-api` 和 gateway 如需监听端口，只绑定 22 localhost 或内网控制网段。
 
 ### 可选：22 上 Slurm Gateway 容器
 
@@ -705,7 +715,67 @@ final_production_readiness_claimed: false
 
 ## 13. 分阶段 PR 计划
 
-### PR A：Docker 文档和 env skeleton
+推荐顺序遵循“先安全边界，后可运行容器”。Docker skeleton 可以提前合并，但在 service role 和 display fail-closed 落地前，只能作为文档和配置草案，不能作为 27 生产运行入口。
+
+### PR A：Service role 代码落地
+
+对应 readonly refactor plan 的 PR 1。
+
+必须实现：
+
+```text
+apps/api/runtime_mode.py
+apps/api/main.py
+tests/test_runtime_mode.py
+```
+
+验收目标：
+
+- `dev_monolith` 保持现有本地开发行为。
+- `compute_control` 可注册 Slurm router。
+- `display_readonly` 不注册 `/api/v1/slurm/*`。
+- production 未显式设置 `NHMS_SERVICE_ROLE` 时 fail fast。
+
+### PR B：display 模式禁用控制面 mutation
+
+对应 readonly refactor plan 的 PR 2。
+
+目标：
+
+- 27 上 retry/cancel 返回人工处理提示。
+- 不创建 retry job。
+- 不更新 `pipeline_job`、`pipeline_event`、`hydro_run`、`forecast_cycle`。
+- 不调用 Slurm Gateway。
+
+### PR C：ArtifactReader 和 published logs
+
+对应 readonly refactor plan 的 PR 3。
+
+目标：
+
+- `/jobs/{job_id}/logs` 从 published artifacts 读取。
+- 禁止 27 读取 22 workspace、`.nhms-runs`、private `/scratch`、compute local `/tmp`。
+- 读取失败返回稳定错误码和安全 details。
+
+### PR D：latest-product identity filters
+
+对应 readonly refactor plan 的 PR 4。
+
+目标：
+
+- 业务 latest-only 查询继续可用。
+- E2E 可用 `source + cycle_time + run_id + model_id` 强约束锁定 22 本轮产物。
+
+### PR E：27 `/ops` 只读监控 UI
+
+对应 readonly refactor plan 的 PR 5。
+
+目标：
+
+- display mode 不显示真实 retry/cancel 按钮。
+- 显示诊断信息复制和 22 人工处理建议。
+
+### PR F：Docker 文档和 env skeleton
 
 新增：
 
@@ -717,9 +787,9 @@ infra/env/display.example
 infra/README.two-node-docker.md
 ```
 
-不改应用逻辑，只给出 skeleton 和安全注释。
+不改应用逻辑，只给出 skeleton 和安全注释。该 PR 合并后仍不得声明 27 Docker 部署可生产运行，除非 PR A-E 已经合并并通过验收。
 
-### PR B：Dockerfile.app 和 entrypoint
+### PR G：Dockerfile.app 和 entrypoint
 
 新增：
 
@@ -730,50 +800,45 @@ infra/docker/entrypoint.sh
 
 目标：一套镜像支持不同 role。
 
-### PR C：service role 代码落地
-
-对应 readonly refactor plan 的 PR 1。
-
-### PR D：display 模式禁用控制面 mutation
-
-对应 readonly refactor plan 的 PR 2。
-
-### PR E：ArtifactReader 和 published logs
-
-对应 readonly refactor plan 的 PR 3。
-
-### PR F：latest-product identity filters
-
-对应 readonly refactor plan 的 PR 4。
-
-### PR G：27 `/ops` 只读监控 UI
-
-对应 readonly refactor plan 的 PR 5。
-
 ### PR H：systemd + two-node Docker E2E 文档
 
 新增 systemd unit examples 和 E2E 证据模板。
 
+### PR I：Display readonly DB role 验证
+
+对应 readonly refactor plan 的 PR 7。
+
+目标：
+
+- 27 用只读 DB 账号跑 `/hydro-met` 和 `/ops` 查询。
+- display retry/cancel 直接 API 调用不触发 DB write。
+- Docker display compose 使用 readonly DB credential 作为默认示例。
+
 ## 14. 发布顺序
 
 1. 本地保持 `dev_monolith` 通过所有现有测试。
-2. 22 构建并运行 compute compose。
-3. 27 构建并运行 display compose。
-4. 验证 27 物理上没有 Slurm 能力。
-5. 22 dry-run scheduler。
-6. 22 production-like plan。
-7. 27 以 run_id/cycle_time 读取本轮产物。
-8. 浏览器访问 `/hydro-met` 和 `/ops`。
-9. 记录 blockers。
-10. 明确 `final_production_readiness_claimed=false`。
+2. 完成 service role、Slurm router 条件挂载、display retry/cancel fail-closed、ArtifactReader 和 latest-product identity filters。
+3. 在本地或单机测试中验证 `NHMS_SERVICE_ROLE=display_readonly`：`/api/v1/slurm/*` 不可用，retry/cancel 返回人工处理提示，不调用 Gateway，不写 DB。
+4. 构建 `nhms-app:<git-sha>`，记录镜像 digest 和 git sha。
+5. 22 构建并运行 compute compose 或手工 `scheduler-once`。
+6. 22 host systemd Slurm Gateway 通过 health 和最小 submit probe；如果 gateway 容器化，必须额外记录 Slurm/Munge/container receipt。
+7. 27 运行 display compose，使用只读 DB credential 和只读 published artifacts。
+8. 验证 27 物理上没有 Slurm 能力、没有 22 workspace、没有 Docker socket。
+9. 22 dry-run scheduler。
+10. 22 production-like plan。
+11. 27 以 `run_id/source/cycle_time/model_id` 读取本轮产物。
+12. 浏览器访问 `/hydro-met` 和 `/ops`，验证只读日志、诊断复制和人工处理建议。
+13. 记录 blockers。
+14. 明确 `final_production_readiness_claimed=false`。
 
 ## 15. 回滚策略
 
 - Docker skeleton 可直接停用，回到手工启动。
-- display_readonly 若阻塞展示，可临时回到 `dev_monolith`，但不得暴露公网。
+- display_readonly 若阻塞展示，不得直接把公网 27 回滚到 `dev_monolith`。允许的临时方式是：停掉公网入口，在受控内网或本机只读验证环境中排查；生产展示面继续保持 fail-closed 或降级为静态维护页。
 - Slurm Gateway 容器化若失败，回退到 22 host systemd gateway。
 - ArtifactReader 若失败，允许临时只显示 `log_uri` 和人工查看提示，不要挂载 22 私有 workspace 给 27。
 - latest-product identity filter 若失败，E2E 标记 BLOCKED，不允许用 historical latest 代替。
+- readonly DB role 若阻塞展示，先定位具体查询缺失的 SELECT 权限；不得用 27 rw 账号绕过并声明 production ready。
 
 ## 16. Codex 执行注意事项
 
