@@ -65,6 +65,9 @@ _STAGE_ORDER = ("download", "convert", "forcing", "forecast", "parse", "frequenc
 _MAX_JOBS_LIMIT = 200
 _MAX_LOG_BYTES = 1024 * 1024
 _MAX_PUBLIC_LOG_URI_LENGTH = PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH
+_DISPLAY_READONLY_MODE = "display_readonly"
+_CONTROL_PLANE_MANUAL_ACTION_REQUIRED = "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+_CONTROL_PLANE_QUEUE_UNAVAILABLE = "CONTROL_PLANE_QUEUE_UNAVAILABLE"
 LOG_ROOT = Path(os.getenv("LOG_ROOT", "workspace"))
 
 
@@ -74,6 +77,19 @@ class _StageStats:
     status_counts: dict[str, int] = field(default_factory=dict)
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class _RetryExecutionContext:
+    policy_decision: PolicyDecision
+    service: RetryService
+    gateway: SlurmGateway
+
+
+@dataclass(frozen=True)
+class _CancelExecutionContext:
+    store: PipelineStore
+    gateway: SlurmGateway
 
 
 @lru_cache
@@ -106,24 +122,109 @@ def get_slurm_gateway() -> SlurmGateway:
     return slurm_gateway
 
 
-def require_retry_action(run_id: str, request: Request) -> PolicyDecision:
+def _validated_run_id(run_id: str) -> str:
     if not _SAFE_RUN_ID_RE.fullmatch(run_id):
         raise ApiError(
             status_code=400,
             code="INVALID_RUN_ID",
             message="Invalid run identifier.",
         )
+    return run_id
+
+
+def require_retry_action(
+    request: Request,
+    run_id: str = Depends(_validated_run_id),
+) -> PolicyDecision:
     return require_action(request, "pipeline.retry_run", target_type="pipeline_run", target_id=run_id)
 
 
-def require_cancel_action(run_id: str, request: Request) -> PolicyDecision:
-    if not _SAFE_RUN_ID_RE.fullmatch(run_id):
-        raise ApiError(
-            status_code=400,
-            code="INVALID_RUN_ID",
-            message="Invalid run identifier.",
-        )
+def require_cancel_action(
+    request: Request,
+    run_id: str = Depends(_validated_run_id),
+) -> PolicyDecision:
     return require_action(request, "pipeline.cancel_run", target_type="pipeline_run", target_id=run_id)
+
+
+def require_retry_control_action(
+    request: Request,
+    policy_decision: PolicyDecision = Depends(require_retry_action),
+) -> PolicyDecision:
+    _raise_display_manual_action_if_needed(request, run_id=policy_decision.target_id, control_action="retry")
+    return policy_decision
+
+
+def require_cancel_control_action(
+    request: Request,
+    policy_decision: PolicyDecision = Depends(require_cancel_action),
+) -> PolicyDecision:
+    _raise_display_manual_action_if_needed(request, run_id=policy_decision.target_id, control_action="cancel")
+    return policy_decision
+
+
+def get_retry_execution_context(
+    policy_decision: PolicyDecision = Depends(require_retry_control_action),
+    service: RetryService = Depends(get_retry_service),
+    gateway: SlurmGateway = Depends(get_slurm_gateway),
+) -> _RetryExecutionContext:
+    return _RetryExecutionContext(policy_decision=policy_decision, service=service, gateway=gateway)
+
+
+def get_cancel_execution_context(
+    _policy_decision: PolicyDecision = Depends(require_cancel_control_action),
+    store: PipelineStore = Depends(get_pipeline_store),
+    gateway: SlurmGateway = Depends(get_slurm_gateway),
+) -> _CancelExecutionContext:
+    return _CancelExecutionContext(store=store, gateway=gateway)
+
+
+def require_queue_depth_available(request: Request) -> None:
+    if _display_readonly(request):
+        raise ApiError(
+            status_code=503,
+            code=_CONTROL_PLANE_QUEUE_UNAVAILABLE,
+            message="Queue depth is unavailable from a display_readonly API.",
+            details={
+                "display_mode": _DISPLAY_READONLY_MODE,
+                "queue_depth_mode": "display_readonly_unavailable",
+            },
+        )
+
+
+def get_queue_depth_gateway(
+    _guard: None = Depends(require_queue_depth_available),
+    gateway: SlurmGateway = Depends(get_slurm_gateway),
+) -> SlurmGateway:
+    return gateway
+
+
+def _raise_display_manual_action_if_needed(request: Request, *, run_id: str, control_action: str) -> None:
+    if not _display_readonly(request):
+        return
+    raise ApiError(
+        status_code=409,
+        code=_CONTROL_PLANE_MANUAL_ACTION_REQUIRED,
+        message=f"Control-plane {control_action} requires manual action in display_readonly mode.",
+        details={
+            "run_id": run_id,
+            "display_mode": _DISPLAY_READONLY_MODE,
+            "suggested_action": _manual_action_suggestion(control_action),
+            "recovery_runbook": "node22-control-plane-manual-recovery",
+        },
+    )
+
+
+def _display_readonly(request: Request) -> bool:
+    runtime_config = getattr(request.app.state, "runtime_config", None)
+    return bool(getattr(runtime_config, "display_readonly", False))
+
+
+def _manual_action_suggestion(control_action: str) -> str:
+    if control_action == "retry":
+        return "Ask a node 22 operator to rerun this run from the compute_control API or runbook."
+    if control_action == "cancel":
+        return "Ask a node 22 operator to stop this run from the compute_control API or runbook."
+    return "Ask a node 22 operator to handle this control-plane action from the compute_control runbook."
 
 
 @router.get("/pipeline/status")
@@ -289,19 +390,12 @@ def job_logs(
 def retry_run(
     run_id: str,
     request: Request,
-    policy_decision: PolicyDecision = Depends(require_retry_action),
-    service: RetryService = Depends(get_retry_service),
-    gateway: SlurmGateway = Depends(get_slurm_gateway),
+    context: _RetryExecutionContext = Depends(get_retry_execution_context),
 ) -> dict[str, Any]:
-    if not _SAFE_RUN_ID_RE.fullmatch(run_id):
-        raise ApiError(
-            status_code=400,
-            code="INVALID_RUN_ID",
-            message="Invalid run identifier.",
-        )
+    run_id = _validated_run_id(run_id)
 
     try:
-        retry_gateway = gateway if callable(getattr(gateway, "submit_job", None)) else None
+        retry_gateway = context.gateway if callable(getattr(context.gateway, "submit_job", None)) else None
         if retry_gateway is None:
             raise ApiError(
                 status_code=503,
@@ -309,7 +403,11 @@ def retry_run(
                 message="Retry execution path unavailable.",
                 details={"run_id": run_id},
             )
-        job = service.attempt_manual_retry(run_id, gateway=retry_gateway, policy_decision=policy_decision)
+        job = context.service.attempt_manual_retry(
+            run_id,
+            gateway=retry_gateway,
+            policy_decision=context.policy_decision,
+        )
     except RetryConflictError as error:
         raise _api_error(error) from error
     except RetryNotFoundError as error:
@@ -352,17 +450,12 @@ def retry_run(
 def cancel_run(
     run_id: str,
     request: Request,
-    _policy_decision: PolicyDecision = Depends(require_cancel_action),
-    store: PipelineStore = Depends(get_pipeline_store),
-    gateway: SlurmGateway = Depends(get_slurm_gateway),
+    context: _CancelExecutionContext = Depends(get_cancel_execution_context),
 ) -> dict[str, Any]:
-    if not _SAFE_RUN_ID_RE.fullmatch(run_id):
-        raise ApiError(
-            status_code=400,
-            code="INVALID_RUN_ID",
-            message="Invalid run identifier.",
-        )
+    run_id = _validated_run_id(run_id)
 
+    store = context.store
+    gateway = context.gateway
     active_jobs = [job for job in store.query_jobs_by_run(run_id) if job.status in _ACTIVE_JOB_STATUSES]
     cancelled_jobs: list[dict[str, Any]] = []
     failed_jobs: list[dict[str, Any]] = []
@@ -609,7 +702,7 @@ def success_rate_metrics(
 @router.get("/queue/depth")
 def queue_depth(
     request: Request,
-    gateway: SlurmGateway = Depends(get_slurm_gateway),
+    gateway: SlurmGateway = Depends(get_queue_depth_gateway),
 ) -> dict[str, Any]:
     queue_depth_method = getattr(gateway, "queue_depth", None)
     if callable(queue_depth_method):

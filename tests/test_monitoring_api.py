@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from apps.api.main import app
+from apps.api.main import app, create_app
 from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
@@ -1355,6 +1355,75 @@ def test_retry_auth_runs_before_mutation_dependencies(monkeypatch: Any) -> None:
     assert response.json()["error"]["code"] == "AUTH_REQUIRED"
 
 
+def test_display_retry_returns_manual_action_without_gateway_or_store_dependencies(monkeypatch: Any) -> None:
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    display_app = create_app(_display_env())
+    display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
+        "pipeline store must not be constructed"
+    )
+    display_app.dependency_overrides[pipeline_routes.get_retry_service] = _dependency_forbidden(
+        "retry service must not be constructed"
+    )
+    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
+        "gateway must not be constructed"
+    )
+    with TestClient(display_app) as client:
+        response = client.post("/api/v1/runs/run_display_retry/retry", headers={"X-User-Role": "operator"})
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+    details = body["error"]["details"]
+    assert details["run_id"] == "run_display_retry"
+    assert details["display_mode"] == "display_readonly"
+    assert details["suggested_action"]
+    assert details["recovery_runbook"]
+    assert "job_id" not in details
+    assert "slurm_job_id" not in details
+    assert "submitted" not in json.dumps(body).lower()
+
+
+def test_display_retry_invalid_run_id_returns_existing_validation_error(monkeypatch: Any) -> None:
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    display_app = create_app(_display_env())
+    display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
+        "pipeline store must not be constructed"
+    )
+    display_app.dependency_overrides[pipeline_routes.get_retry_service] = _dependency_forbidden(
+        "retry service must not be constructed"
+    )
+    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
+        "gateway must not be constructed"
+    )
+    with TestClient(display_app) as client:
+        response = client.post("/api/v1/runs/-bad/retry", headers={"X-User-Role": "operator"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "INVALID_RUN_ID"
+    assert body["error"]["details"] is None
+    assert _manual_action_details_absent(body)
+
+
+def test_display_retry_auth_and_rbac_run_before_manual_action_details(monkeypatch: Any) -> None:
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    display_app = create_app(_display_env())
+    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
+        "gateway must not be constructed"
+    )
+    with TestClient(display_app) as client:
+        unauthenticated = client.post("/api/v1/runs/run_display_retry/retry")
+        unauthorized = client.post("/api/v1/runs/run_display_retry/retry", headers={"X-User-Role": "viewer"})
+
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["error"]["code"] == "AUTH_REQUIRED"
+    assert _manual_action_details_absent(unauthenticated.json())
+    assert unauthorized.status_code == 403
+    assert unauthorized.json()["error"]["code"] == "RBAC_FORBIDDEN"
+    assert _manual_action_details_absent(unauthorized.json())
+
+
 def test_spoofed_live_headers_do_not_authorize_retry(monkeypatch: Any) -> None:
     monkeypatch.setenv("NHMS_LIVE_AUTH_PROOF_ACCEPTED", "true")
     monkeypatch.delenv("NHMS_TRUSTED_LIVE_PROOF_MODE", raising=False)
@@ -1444,6 +1513,71 @@ def test_cancel_endpoint() -> None:
         events = _events(store)
         assert [event.event_type for event in events] == ["cancel", "cancel"]
         assert {event.details["slurm_job_id"] for event in events} == {"slurm_1", "slurm_2"}
+
+
+def test_display_cancel_returns_manual_action_without_gateway_or_store_dependencies(monkeypatch: Any) -> None:
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    display_app = create_app(_display_env())
+    display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
+        "pipeline store must not be constructed"
+    )
+    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
+        "gateway must not be constructed"
+    )
+    with TestClient(display_app) as client:
+        response = client.post("/api/v1/runs/run_display_cancel/cancel", headers={"X-User-Role": "operator"})
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+    details = body["error"]["details"]
+    assert details == {
+        "run_id": "run_display_cancel",
+        "display_mode": "display_readonly",
+        "suggested_action": "Ask a node 22 operator to stop this run from the compute_control API or runbook.",
+        "recovery_runbook": "node22-control-plane-manual-recovery",
+    }
+    assert "cancelled_jobs" not in details
+    assert "slurm_job_id" not in details
+    assert "cancelled" not in details
+
+
+def test_display_cancel_invalid_run_id_returns_existing_validation_error(monkeypatch: Any) -> None:
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    display_app = create_app(_display_env())
+    display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
+        "pipeline store must not be constructed"
+    )
+    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
+        "gateway must not be constructed"
+    )
+    with TestClient(display_app) as client:
+        response = client.post("/api/v1/runs/-bad/cancel", headers={"X-User-Role": "operator"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "INVALID_RUN_ID"
+    assert body["error"]["details"] is None
+    assert _manual_action_details_absent(body)
+
+
+def test_display_cancel_auth_and_rbac_run_before_manual_action_details(monkeypatch: Any) -> None:
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    display_app = create_app(_display_env())
+    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
+        "gateway must not be constructed"
+    )
+    with TestClient(display_app) as client:
+        unauthenticated = client.post("/api/v1/runs/run_display_cancel/cancel")
+        unauthorized = client.post("/api/v1/runs/run_display_cancel/cancel", headers={"X-User-Role": "viewer"})
+
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["error"]["code"] == "AUTH_REQUIRED"
+    assert _manual_action_details_absent(unauthenticated.json())
+    assert unauthorized.status_code == 403
+    assert unauthorized.json()["error"]["code"] == "RBAC_FORBIDDEN"
+    assert _manual_action_details_absent(unauthorized.json())
 
 
 def test_cancel_rbac() -> None:
@@ -1964,6 +2098,24 @@ def test_queue_depth_list_jobs_error_redacts_secret_gateway_payload() -> None:
     assert "[redacted]" in response_text
 
 
+def test_display_queue_depth_unavailable_without_constructing_gateway() -> None:
+    display_app = create_app(_display_env())
+    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
+        "gateway must not be constructed"
+    )
+    with TestClient(display_app) as client:
+        response = client.get("/api/v1/queue/depth")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "CONTROL_PLANE_QUEUE_UNAVAILABLE"
+    assert body["error"]["details"] == {
+        "display_mode": "display_readonly",
+        "queue_depth_mode": "display_readonly_unavailable",
+    }
+
+
 def test_response_wrapper() -> None:
     with _store() as store:
         gateway = _MockGateway()
@@ -2111,6 +2263,30 @@ class _MockGateway:
 
     def queue_depth(self) -> dict[str, int]:
         return self.depth
+
+
+def _display_env() -> dict[str, str]:
+    return {
+        "NHMS_REQUIRE_SERVICE_ROLE": "true",
+        "NHMS_SERVICE_ROLE": "display_readonly",
+    }
+
+
+def _dependency_forbidden(message: str) -> Any:
+    def dependency() -> None:
+        raise AssertionError(message)
+
+    return dependency
+
+
+def _manual_action_details_absent(body: dict[str, Any]) -> bool:
+    body_text = json.dumps(body, sort_keys=True)
+    return (
+        "CONTROL_PLANE_MANUAL_ACTION_REQUIRED" not in body_text
+        and "display_readonly" not in body_text
+        and "suggested_action" not in body_text
+        and "recovery_runbook" not in body_text
+    )
 
 
 class _client:
