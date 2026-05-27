@@ -1,10 +1,11 @@
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +26,7 @@ from apps.api.routes.pipeline import (
 )
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
+from apps.api.runtime_mode import RuntimeConfig, load_runtime_config
 from packages.common.forecast_store import MAX_STATION_SERIES_LIMIT
 from services.slurm_gateway.routes import router as slurm_router
 from services.tiles.mvt import (
@@ -39,15 +41,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST_DIR = REPO_ROOT / "apps" / "frontend" / "dist"
 FRONTEND_INDEX = FRONTEND_DIST_DIR / "index.html"
 
-app = FastAPI(
-    title="NHMS API",
-    description="National Hydrological Modeling System API",
-    version="0.1.0",
-)
-
-register_error_handlers(app)
-
-
 _PRE_BODY_PROTECTED_MUTATIONS: dict[tuple[str, str], tuple[str, str, str]] = {
     ("POST", "/api/v1/basins"): ("models.switch_version", "model_registry", "basins"),
     ("POST", "/api/v1/river-networks"): ("models.switch_version", "model_registry", "river-networks"),
@@ -60,9 +53,9 @@ _PRE_BODY_PROTECTED_MUTATIONS: dict[tuple[str, str], tuple[str, str, str]] = {
     ("POST", "/api/v1/hindcast/submit"): ("pipeline.rerun_cycle", "hindcast", "pre-body"),
 }
 _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES = 4096
+runtime_router = APIRouter(prefix="/api/v1/runtime", tags=["runtime"])
 
 
-@app.middleware("http")
 async def protected_mutation_auth_guard(request: Any, call_next: Any) -> Any:
     path_policy = await _protected_mutation_policy(request)
     if path_policy is None:
@@ -286,18 +279,65 @@ def _ensure_request_id(request: Any) -> str:
     return request_id
 
 
-app.include_router(models_router)
-app.include_router(forecast_router)
-app.include_router(hindcast_router)
-app.include_router(best_available_router)
-app.include_router(data_sources_router)
-app.include_router(state_snapshots_router)
-app.include_router(pipeline_router)
-app.include_router(flood_alerts_router)
-app.include_router(slurm_router)
+@runtime_router.get("/config")
+def runtime_config(request: Request) -> dict[str, Any]:
+    config: RuntimeConfig = request.app.state.runtime_config
+    return _ok(request, config.public_dict())
 
 
-def custom_openapi():
+def create_app(env: Mapping[str, str] | None = None) -> FastAPI:
+    runtime_config = load_runtime_config(env)
+    api = FastAPI(
+        title="NHMS API",
+        description="National Hydrological Modeling System API",
+        version="0.1.0",
+    )
+    api.state.runtime_config = runtime_config
+
+    register_error_handlers(api)
+    api.middleware("http")(protected_mutation_auth_guard)
+
+    api.include_router(models_router)
+    api.include_router(forecast_router)
+    api.include_router(hindcast_router)
+    api.include_router(best_available_router)
+    api.include_router(data_sources_router)
+    api.include_router(state_snapshots_router)
+    api.include_router(pipeline_router)
+    api.include_router(flood_alerts_router)
+    api.include_router(runtime_router)
+    if runtime_config.slurm_routes_enabled:
+        api.include_router(slurm_router)
+
+    _register_static_and_health_routes(api)
+    api.openapi = _custom_openapi_factory(api)
+    return api
+
+
+def _custom_openapi_factory(api: FastAPI) -> Any:
+    def custom_openapi() -> dict[str, Any]:
+        if api.openapi_schema:
+            return api.openapi_schema
+        schema = get_openapi(
+            title=api.title,
+            version=api.version,
+            description=api.description,
+            routes=api.routes,
+        )
+        _patch_mvt_tile_openapi(schema)
+        _patch_flood_duration_openapi(schema)
+        _patch_station_series_openapi(schema)
+        _patch_qhh_latest_product_openapi(schema)
+        _patch_layer_metadata_openapi(schema)
+        _patch_pipeline_openapi(schema)
+        _patch_runtime_openapi(schema)
+        api.openapi_schema = schema
+        return api.openapi_schema
+
+    return custom_openapi
+
+
+def custom_openapi() -> dict[str, Any]:
     if app.openapi_schema:
         return app.openapi_schema
     schema = get_openapi(
@@ -312,6 +352,7 @@ def custom_openapi():
     _patch_qhh_latest_product_openapi(schema)
     _patch_layer_metadata_openapi(schema)
     _patch_pipeline_openapi(schema)
+    _patch_runtime_openapi(schema)
     app.openapi_schema = schema
     return app.openapi_schema
 
@@ -351,10 +392,6 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
                 parameter["description"] = TILE_Y_DESCRIPTION
                 parameter.setdefault("schema", {})["minimum"] = 0
                 parameter["schema"]["maximum"] = MVT_MAX_TILE_COORDINATE
-
-
-app.openapi = custom_openapi
-
 
 def _ensure_mvt_live_postgis_unavailable_response(schema: dict) -> None:
     responses = schema.setdefault("components", {}).setdefault("responses", {})
@@ -646,6 +683,40 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         data_schema={"$ref": "#/components/schemas/RetryRunResult"},
         description="Retry request accepted",
     )
+
+
+def _patch_runtime_openapi(schema: dict) -> None:
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["ErrorResponse"] = _error_response_schema()
+    schemas["ValidationErrorDetail"] = _validation_error_detail_schema()
+    schemas["RuntimeConfig"] = _runtime_config_schema()
+
+    responses = components.setdefault("responses", {})
+    responses["Error"] = {
+        "description": "Error response",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+    }
+
+    operation = schema.get("paths", {}).get("/api/v1/runtime/config", {}).get("get")
+    if not operation:
+        return
+    operation["operationId"] = "getRuntimeConfig"
+    operation["summary"] = "Get runtime service configuration"
+    operation["tags"] = ["runtime"]
+    operation["responses"] = {
+        "200": {
+            "description": "Runtime service configuration",
+            "content": {
+                "application/json": {
+                    "schema": _success_response_schema({"$ref": "#/components/schemas/RuntimeConfig"})
+                }
+            },
+        },
+        "4XX": {"$ref": "#/components/responses/Error"},
+        "5XX": {"$ref": "#/components/responses/Error"},
+    }
 
 
 def _patch_pipeline_operation(
@@ -1039,6 +1110,32 @@ def _job_logs_schema() -> dict:
             "job_id": {"type": "string"},
             "log_uri": {"type": "string", "maxLength": PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH},
             "content": {"type": "string"},
+        },
+    }
+
+
+def _runtime_config_schema() -> dict:
+    return {
+        "type": "object",
+        "required": [
+            "service_role",
+            "control_mutations_enabled",
+            "slurm_routes_enabled",
+            "queue_depth_mode",
+            "display_readonly",
+        ],
+        "properties": {
+            "service_role": {
+                "type": "string",
+                "enum": ["dev_monolith", "compute_control", "display_readonly", "slurm_gateway"],
+            },
+            "control_mutations_enabled": {"type": "boolean"},
+            "slurm_routes_enabled": {"type": "boolean"},
+            "queue_depth_mode": {
+                "type": "string",
+                "enum": ["slurm_gateway", "display_readonly_unavailable"],
+            },
+            "display_readonly": {"type": "boolean"},
         },
     }
 
@@ -1457,27 +1554,37 @@ def _layer_metadata_schema() -> dict:
     }
 
 
-@app.get("/health")
-async def health():
+def _register_static_and_health_routes(api: FastAPI) -> None:
+    @api.get("/health")
+    async def health() -> dict[str, str]:
+        return {
+            "status": "ok",
+            "service": "nhms-api",
+            "version": "0.1.0",
+        }
+
+    api.mount(
+        "/assets",
+        StaticFiles(directory=FRONTEND_DIST_DIR / "assets", check_dir=False),
+        name="frontend-assets",
+    )
+
+    @api.get("/{full_path:path}")
+    async def spa_fallback(full_path: str) -> FileResponse:
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="Not found")
+        return FileResponse(FRONTEND_INDEX)
+
+
+def _ok(request: Request, data: Any) -> dict[str, Any]:
     return {
+        "request_id": getattr(request.state, "request_id", None) or str(uuid4()),
         "status": "ok",
-        "service": "nhms-api",
-        "version": "0.1.0",
+        "data": data,
     }
 
 
-app.mount(
-    "/assets",
-    StaticFiles(directory=FRONTEND_DIST_DIR / "assets", check_dir=False),
-    name="frontend-assets",
-)
-
-
-@app.get("/{full_path:path}")
-async def spa_fallback(full_path: str):
-    if full_path.startswith("api/") or full_path == "api":
-        raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(FRONTEND_INDEX)
+app = create_app()
 
 
 if __name__ == "__main__":

@@ -165,6 +165,91 @@ Docker preflight records `docker info` DockerRootDir, `docker system df`, releva
 - **Risk: Docker image with Slurm client accidentally lands on 27.** Mitigation: default app image excludes Slurm/Munge; display compose tests assert no Slurm CLI/config/socket and no forbidden env/mounts.
 - **Risk: readonly DB causes latent write paths to fail.** Mitigation: targeted readonly DB smoke for display routes plus retry/cancel fail-closed tests before Docker deployment.
 
+## Issue #229 Fixture: Runtime Service Role Boundary
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: other
+
+Change surface:
+
+- `apps/api/main.py` FastAPI app construction, router registration, OpenAPI generation, and runtime config route.
+- New or updated backend runtime role/config helper module.
+- Static OpenAPI/generated frontend type surfaces touched by the runtime config contract.
+- Tests covering role parsing, startup failure, route inventory, runtime config, unsafe display config, and reserved `slurm_gateway`.
+
+Must preserve:
+
+- Local/test startup without explicit role defaults to `dev_monolith` when production-like signals are absent.
+- Existing compute/dev route inventory keeps Slurm routes available.
+- Existing auth/RBAC behavior remains the source of authorization decisions; this issue does not change retry/cancel handler semantics.
+- Business API routes other than `/api/v1/slurm/*` remain available for `dev_monolith`, `compute_control`, and `display_readonly`.
+
+Must add/change:
+
+- `NHMS_SERVICE_ROLE` supports `dev_monolith`, `compute_control`, `display_readonly`, and reserved `slurm_gateway`.
+- Missing or unknown role fails fast when `NHMS_REQUIRE_SERVICE_ROLE=true` or `NHMS_AUTH_MODE` is production-like (`production`, `live`, `live_idp`).
+- `display_readonly` does not register `/api/v1/slurm/*`, and display-mode OpenAPI does not advertise Slurm operations.
+- `display_readonly` reports unsafe Slurm gateway or compute-path configuration as startup/preflight blockers before serving.
+- `GET /api/v1/runtime/config` reports service role and capability flags for frontend gating.
+- `slurm_gateway` does not start the full business API unless a dedicated bounded gateway app exists in this issue; MVP choice is reserved/fail-fast.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - adds runtime config API and changes route inventory by role.
+- Config / project setup: selected - introduces role env and production-like missing-role behavior.
+- File IO / path safety / overwrite: not selected - no new file reads/writes or path traversal surface in this issue.
+- Schema / columns / units / field names: selected - runtime config/OpenAPI/frontend type contract changes.
+- Geospatial / CRS / shapefile sidecars: not selected - no geospatial data handling.
+- Time series / forcing / temporal boundaries: not selected - no forcing/time-series selection changes.
+- Numerical stability / conservation / NaN: not selected - no solver or numerical behavior.
+- Solver runtime / performance / threading: not selected - no solver runtime or threading behavior.
+- Resource limits / large input / discovery: not selected - no directory discovery, large reads, polling, or subprocess waits.
+- Legacy compatibility / examples: selected - local/dev monolith and compute-control tests must keep existing behavior.
+- Error handling / rollback / partial outputs: selected - startup/config errors must be stable and fail before serving unsafe routes.
+- Release / packaging / dependency compatibility: selected - Docker/systemd follow-up depends on stable env names and route contract.
+- Documentation / migration notes: not selected - docs/systemd are owned by later Docker/runbook issues.
+
+Invariant Matrix:
+
+- Governing invariant: A running API process exposes only the capabilities allowed by its explicit or safe local-default service role, and production-like startup never silently falls back to a broader role.
+- Source-of-truth identity/contract: `NHMS_SERVICE_ROLE`, `NHMS_REQUIRE_SERVICE_ROLE`, and production-like `NHMS_AUTH_MODE`.
+- Producers: environment parsing/runtime role helper.
+- Validators/preflight: role validation, production-like missing-role check, display unsafe-config guard, reserved `slurm_gateway` guard.
+- Storage/cache/query: none - this issue does not persist role state.
+- Public routes/entrypoints: FastAPI app startup, router registration, OpenAPI schema, `GET /api/v1/runtime/config`.
+- Frontend/downstream consumers: generated frontend API/types and future `/ops` runtime config consumer.
+- Failure paths/rollback/stale state: startup failure or stable config blocker before unsafe routes are served.
+- Evidence/audit/readiness: focused tests and OpenAPI drift/contract checks.
+- Regression rows:
+  - `display_readonly` with explicit safe env -> API starts, `/api/v1/runtime/config` reports display flags, `/api/v1/slurm/*` is absent from routes and OpenAPI.
+  - production-like startup with missing or unknown role -> stable configuration error before serving requests.
+  - `display_readonly` with Slurm gateway or compute-only env -> stable display boundary blocker before serving requests.
+  - `dev_monolith` local default and `compute_control` explicit role -> existing business routes and Slurm route availability remain compatible.
+  - `slurm_gateway` role without dedicated gateway app -> stable reserved-role startup failure and no business API surface.
+
+Boundary-surface checklist:
+
+- Shared helper roots: runtime role/config helper.
+- Public entrypoints: FastAPI app module import/startup, route inventory, OpenAPI route.
+- Read surfaces: environment variables used to derive role and production-like mode.
+- Write/delete/overwrite surfaces: none.
+- Staging/publish/rollback surfaces: none.
+- Producer/consumer evidence boundaries: runtime config OpenAPI schema and generated frontend types.
+- Stale-state/idempotency boundaries: repeated app construction under different env values in tests must not leak prior role state.
+- Unchanged downstream consumers: existing API contract tests and local/dev tests.
+
+Required evidence:
+
+- `uv run pytest -q tests/test_runtime_mode.py tests/test_api_contract.py tests/test_openapi_drift.py`: role parsing/startup, route inventory, runtime config contract, OpenAPI drift.
+- `uv run ruff check apps/api services/slurm_gateway tests/test_runtime_mode.py`: style/static verification for touched backend paths.
+- Frontend type generation/check command used by the repo after generated type changes, or an explicit no-op rationale if the static OpenAPI/type generation contract is unchanged by implementation mechanics.
+
+Non-goals:
+
+- Do not implement retry/cancel fail-closed behavior; that is #230.
+- Do not implement ArtifactReader, latest-product strict identity, Docker compose/image/systemd, frontend `/ops` behavior, or readonly DB validation in this issue.
+
 ## Migration Plan
 
 1. Add service role config and conditionally mount Slurm routes. Keep `dev_monolith` default for existing local tests.
