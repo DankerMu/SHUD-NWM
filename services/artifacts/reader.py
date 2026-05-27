@@ -123,7 +123,12 @@ class Boto3ObjectReader:
             kwargs["Range"] = range_header
         response = get_object(**kwargs)
         body = response["Body"]
-        return body.read(max_bytes)
+        try:
+            return body.read(max_bytes)
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
 
 
 class ArtifactReader:
@@ -178,14 +183,6 @@ class ArtifactReader:
         return self._read_local_tail(self.config.published_root / relative, self.config.published_root, safe_uri)
 
     def _read_file_uri(self, uri: str, *, safe_uri: str) -> ArtifactLogReadResult:
-        if self.config.published_root is None:
-            raise ArtifactLogError(
-                LOG_ERROR_URI_UNSUPPORTED,
-                "Published artifact root is not configured.",
-                status_code=400,
-                safe_uri=safe_uri,
-                reason="published_root_missing",
-            )
         parsed = urlsplit(uri)
         if parsed.netloc not in {"", "localhost"}:
             raise ArtifactLogError(
@@ -196,7 +193,23 @@ class ArtifactReader:
                 reason="file_host_unsupported",
             )
         path = _absolute_file_uri_path(parsed.path, safe_uri=safe_uri)
-        return self._read_local_tail(path, self.config.published_root, safe_uri)
+        if self.config.published_root is not None:
+            published_root = _absolute_path(self.config.published_root)
+            if _path_is_relative_to(path, published_root):
+                relative = _relative_posix_path(path, published_root)
+                _safe_relative_uri_path(relative, safe_uri=safe_uri, require_logs_prefix=True)
+                return self._read_local_tail(path, published_root, safe_uri)
+        if self.config.allow_legacy_local_file_logs:
+            legacy_root = _legacy_root_path(self.config)
+            if _path_is_relative_to(path, legacy_root):
+                return self._read_local_tail(path, legacy_root, safe_uri)
+        raise ArtifactLogError(
+            LOG_ERROR_ACCESS_DENIED,
+            "File log URI is outside the allowed log roots.",
+            status_code=403,
+            safe_uri=_unsafe_log_uri_summary(safe_uri),
+            reason="path_outside_root",
+        )
 
     def _read_s3_uri(self, uri: str, *, safe_uri: str) -> ArtifactLogReadResult:
         parsed = urlsplit(uri)
@@ -285,8 +298,10 @@ class ArtifactReader:
                 safe_uri=safe_uri,
                 reason="legacy_local_disabled",
             )
-        root = (self.config.legacy_log_root or Path("workspace")).expanduser()
-        root = root if root.is_absolute() else Path.cwd() / root
+        root = _legacy_root_path(self.config)
+        if Path(uri).is_absolute():
+            target = _absolute_local_path(uri, safe_uri=safe_uri)
+            return self._read_local_tail(target, root, safe_uri)
         relative = _safe_relative_uri_path(
             uri,
             safe_uri=safe_uri,
@@ -388,12 +403,29 @@ def _strip_unsafe_uri_parts(value: str) -> str:
     except ValueError:
         return "[redacted]"
     if parsed.scheme:
-        hostname = parsed.hostname or parsed.netloc.split("@")[-1]
+        if parsed.scheme == "file":
+            return "file://redacted"
+        try:
+            hostname = parsed.hostname or parsed.netloc.split("@")[-1]
+            port = parsed.port
+        except ValueError:
+            return "[redacted]"
         netloc = hostname
-        if parsed.port is not None:
-            netloc = f"{netloc}:{parsed.port}"
-        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
-    return value.split("?", maxsplit=1)[0].split("#", maxsplit=1)[0]
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+        path = (
+            "[redacted]"
+            if _local_path_needs_redaction(parsed.path, redact_absolute=False)
+            or _path_has_credential_like_part(parsed.path)
+            else parsed.path
+        )
+        return urlunsplit((parsed.scheme, netloc, path, "", ""))
+    stripped = value.split("?", maxsplit=1)[0].split("#", maxsplit=1)[0]
+    return (
+        "[redacted]"
+        if _local_path_needs_redaction(stripped, redact_absolute=True) or _path_has_credential_like_part(stripped)
+        else stripped
+    )
 
 
 def _relative_path_from_published_uri(uri: str, uri_prefix: str, *, safe_uri: str) -> Path:
@@ -410,7 +442,29 @@ def _absolute_file_uri_path(raw_path: str, *, safe_uri: str) -> Path:
             safe_uri=safe_uri,
             reason="file_path_not_absolute",
         )
-    return _absolute_path(Path(_safe_decoded_path(raw_path, safe_uri=safe_uri)))
+    return _absolute_local_path(raw_path, safe_uri=safe_uri)
+
+
+def _absolute_local_path(raw_path: str, *, safe_uri: str) -> Path:
+    path = _safe_decoded_path(raw_path, safe_uri=safe_uri)
+    pure = PurePosixPath(path)
+    if any(part in {".", ".."} for part in pure.parts):
+        raise ArtifactLogError(
+            LOG_ERROR_ACCESS_DENIED,
+            "Job log path contains unsafe components.",
+            status_code=403,
+            safe_uri=_unsafe_log_uri_summary(safe_uri),
+            reason="unsafe_path_component",
+        )
+    if ".nhms-runs" in pure.parts:
+        raise ArtifactLogError(
+            LOG_ERROR_ACCESS_DENIED,
+            "Private run workspace logs are not published artifacts.",
+            status_code=403,
+            safe_uri=_unsafe_log_uri_summary(safe_uri),
+            reason="private_workspace_path",
+        )
+    return _absolute_path(Path(path))
 
 
 def _safe_relative_uri_path(
@@ -492,6 +546,8 @@ def _safe_decoded_path(raw_path: str, *, safe_uri: str) -> str:
 def _reject_credential_bearing_uri(raw_uri: str, *, safe_uri: str) -> None:
     try:
         parsed = urlsplit(raw_uri)
+        parsed.hostname
+        parsed.port
     except ValueError as error:
         raise ArtifactLogError(
             LOG_ERROR_URI_UNSUPPORTED,
@@ -500,12 +556,13 @@ def _reject_credential_bearing_uri(raw_uri: str, *, safe_uri: str) -> None:
             safe_uri=safe_uri,
             reason="malformed_uri",
         ) from error
+    rejection_safe_uri = _unsafe_log_uri_summary(safe_uri) if _path_has_credential_like_part(parsed.path) else safe_uri
     if parsed.username or parsed.password:
         raise ArtifactLogError(
             LOG_ERROR_URI_UNSUPPORTED,
             "Job log URI must not include credentials.",
             status_code=400,
-            safe_uri=safe_uri,
+            safe_uri=rejection_safe_uri,
             reason="userinfo_forbidden",
         )
     if parsed.query or parsed.fragment:
@@ -513,7 +570,7 @@ def _reject_credential_bearing_uri(raw_uri: str, *, safe_uri: str) -> None:
             LOG_ERROR_URI_UNSUPPORTED,
             "Job log URI must not include query strings or fragments.",
             status_code=400,
-            safe_uri=safe_uri,
+            safe_uri=rejection_safe_uri,
             reason="query_or_fragment_forbidden",
         )
 
@@ -553,9 +610,51 @@ def _optional_path(raw: str | None) -> Path | None:
     return _absolute_path(Path(raw.strip()).expanduser())
 
 
+def _legacy_root_path(config: ArtifactReaderConfig) -> Path:
+    return _absolute_path((config.legacy_log_root or Path("workspace")).expanduser())
+
+
 def _absolute_path(path: Path) -> Path:
     expanded = Path(path).expanduser()
     return expanded if expanded.is_absolute() else Path.cwd() / expanded
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        _absolute_path(path).relative_to(_absolute_path(root))
+    except ValueError:
+        return False
+    return True
+
+
+def _relative_posix_path(path: Path, root: Path) -> str:
+    return _absolute_path(path).relative_to(_absolute_path(root)).as_posix()
+
+
+def _local_path_needs_redaction(raw_path: str, *, redact_absolute: bool) -> bool:
+    if not raw_path:
+        return False
+    try:
+        path = unquote(raw_path)
+    except Exception:
+        path = raw_path
+    path = path.replace("\\", "/")
+    parts = PurePosixPath(path).parts
+    if redact_absolute and PurePosixPath(path).is_absolute():
+        return True
+    if ".nhms-runs" in parts:
+        return True
+    return path == "/scratch" or path.startswith("/scratch/") or path == "/tmp" or path.startswith("/tmp/")
+
+
+def _path_has_credential_like_part(raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    try:
+        path = unquote(raw_path)
+    except Exception:
+        path = raw_path
+    return any(_CREDENTIAL_WORD_RE.search(part) for part in PurePosixPath(path).parts)
 
 
 def _redacted_text_from_bytes(data: bytes) -> str:

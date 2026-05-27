@@ -1838,6 +1838,92 @@ def test_slurm_accounting_available_is_recorded_in_pipeline_event_details(tmp_pa
     assert slurm["resource_metrics"]["alloc_tres"] == "cpu=2,mem=4G"
 
 
+def test_sync_cycle_statuses_emits_published_log_uri_when_publish_root_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(tmp_path / "published"))
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    repository.jobs["job_cycle_gfs_2026050100_forcing"] = {
+        "job_id": "job_cycle_gfs_2026050100_forcing",
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": cycle_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3001",
+        "model_id": None,
+        "status": "running",
+        "stage": "forcing",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": None,
+    }
+    client = FakeCycleSlurmClient()
+    client.jobs["3001"] = {
+        "job_id": "3001",
+        "run_id": "cycle_gfs_2026050100",
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "payload": {},
+        "stage_attempt": 0,
+    }
+    client.poll_counts["3001"] = 1
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    updates = orchestrator.sync_cycle_statuses(cycle_id)
+
+    expected = (
+        "published://logs/gfs/2026050100/"
+        "cycle_gfs_2026050100/"
+        "job_cycle_gfs_2026050100_forcing.out"
+    )
+    assert updates[0]["log_uri"] == expected
+    assert repository.jobs["job_cycle_gfs_2026050100_forcing"]["status"] == "succeeded"
+    assert repository.jobs["job_cycle_gfs_2026050100_forcing"]["log_uri"] == expected
+    status_event = next(event for event in repository.events if event["event_type"] == "status_change")
+    assert status_event["details"]["slurm"]["log_uri"] == expected
+
+
+def test_published_gateway_log_write_failure_keeps_published_uri_and_does_not_fallback_to_object_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_root_file = tmp_path / "published-as-file"
+    publish_root_file.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(publish_root_file))
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    assert job["log_uri"] == (
+        "published://logs/gfs/2026050100/"
+        "cycle_gfs_2026050100/"
+        "job_cycle_gfs_2026050100_download.out"
+    )
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": job["log_uri"]}
+    assert not (tmp_path / "object-store" / "runs").exists()
+    exception_text = str(exc_info.value)
+    assert "published-as-file" not in exception_text
+    assert "workspace" not in exception_text
+
+
 def test_malformed_array_accounting_records_gap_without_fabricating_metrics(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient(malformed_array_accounting_stages={"forcing"})

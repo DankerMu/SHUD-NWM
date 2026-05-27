@@ -1031,7 +1031,7 @@ def test_job_logs_response_redacts_and_bounds_log_uri(tmp_path: Path, monkeypatc
 
         assert response.status_code == 400
         assert "tok123" not in json.dumps(response.json(), sort_keys=True)
-        assert response.json()["error"]["details"]["log_uri"] == "qhh/retry-token.log"
+        assert response.json()["error"]["details"]["log_uri"] == "[redacted]"
 
 
 def test_job_logs_rejects_symlink_swap_between_path_check_and_open(tmp_path: Path, monkeypatch) -> None:

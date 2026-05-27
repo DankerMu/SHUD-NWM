@@ -1537,7 +1537,7 @@ def _artifact_reader_for_request(request: Request) -> ArtifactReader:
         uri_prefix=config.uri_prefix,
         s3_bucket=config.s3_bucket,
         s3_prefix=config.s3_prefix,
-        tail_max_bytes=_MAX_LOG_BYTES,
+        tail_max_bytes=min(config.tail_max_bytes, _MAX_LOG_BYTES),
         allow_legacy_local_file_logs=config.allow_legacy_local_file_logs,
         legacy_log_root=config.legacy_log_root,
         display_readonly=config.display_readonly,

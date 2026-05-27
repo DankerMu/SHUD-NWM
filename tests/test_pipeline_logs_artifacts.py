@@ -11,8 +11,9 @@ from apps.api.routes import pipeline as pipeline_routes
 from packages.common.object_store import LocalObjectStore
 from services.artifacts import ArtifactReader, ArtifactReaderConfig
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig
-from tests.test_monitoring_api import _create_job, _store
+from tests.test_monitoring_api import _create_job, _cycle_time, _insert_cycle, _store
 from tests.test_orchestration_chain import FakeCycleRepository, FakeCycleSlurmClient, _basins
+from workers.data_adapters.base import cycle_id_for
 
 
 def test_job_logs_api_reads_published_artifact(tmp_path: Path) -> None:
@@ -88,6 +89,152 @@ def test_job_logs_api_maps_supported_missing_file_to_not_found(tmp_path: Path) -
     assert response.json()["error"]["code"] == "JOB_LOG_NOT_FOUND"
 
 
+def test_job_logs_api_env_reader_honors_tail_max_bytes(tmp_path: Path, monkeypatch: Any) -> None:
+    published_root = tmp_path / "published"
+    log_path = published_root / "logs" / "GFS" / "2026050100" / "run_1" / "job_1.out"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("0123456789abcdef", encoding="utf-8")
+    _set_display_artifact_env(
+        monkeypatch,
+        published_root=published_root,
+        tail_max_bytes=8,
+        allow_legacy_local=False,
+    )
+
+    with _store() as store:
+        _create_job(store, job_id="job_env_tail", log_uri="published://logs/GFS/2026050100/run_1/job_1.out")
+        with _env_client(store) as client:
+            response = client.get("/api/v1/jobs/job_env_tail/logs")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "job_id": "job_env_tail",
+        "log_uri": "published://logs/GFS/2026050100/run_1/job_1.out",
+        "content": "89abcdef",
+    }
+
+
+def test_job_logs_api_env_reader_denies_private_legacy_when_disabled(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _set_display_artifact_env(
+        monkeypatch,
+        published_root=tmp_path / "published",
+        allow_legacy_local=False,
+        legacy_log_root=tmp_path / "legacy",
+    )
+    private_uri = "/scratch/node22/.nhms-runs/run_1/token-supersecret.out"
+
+    with _store() as store:
+        _create_job(store, job_id="job_private_legacy", log_uri=private_uri)
+        with _env_client(store) as client:
+            response = client.get("/api/v1/jobs/job_private_legacy/logs")
+
+    body = json.dumps(response.json(), sort_keys=True)
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "JOB_LOG_ACCESS_DENIED"
+    assert "/scratch" not in body
+    assert ".nhms-runs" not in body
+    assert "token-supersecret" not in body
+    assert str(tmp_path) not in body
+
+
+def test_job_logs_api_env_reader_maps_malformed_uri_without_500(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _set_display_artifact_env(monkeypatch, published_root=tmp_path / "published", allow_legacy_local=False)
+
+    with _store() as store:
+        _create_job(store, job_id="job_malformed", log_uri="http://example.test:bad/log.out")
+        with _env_client(store) as client:
+            response = client.get("/api/v1/jobs/job_malformed/logs")
+
+    body = json.dumps(response.json(), sort_keys=True)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "JOB_LOG_URI_UNSUPPORTED"
+    assert "example.test:bad" not in body
+
+
+def test_job_logs_api_env_reader_redacts_credential_path_before_query_rejection(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _set_display_artifact_env(monkeypatch, published_root=tmp_path / "published", allow_legacy_local=False)
+    secret_uri = "published://logs/GFS/2026050100/run_1/token-supersecret.out?x=y"
+
+    with _store() as store:
+        _create_job(store, job_id="job_secret_path", log_uri=secret_uri)
+        with _env_client(store) as client:
+            response = client.get("/api/v1/jobs/job_secret_path/logs")
+
+    body = json.dumps(response.json(), sort_keys=True)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "JOB_LOG_URI_UNSUPPORTED"
+    assert "token-supersecret" not in body
+    assert "?x=y" not in body
+
+
+def test_job_logs_api_env_reader_denies_file_uri_non_logs_namespace(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    published_root = tmp_path / "published"
+    internal_path = published_root / "internal" / "debug.txt"
+    internal_path.parent.mkdir(parents=True)
+    internal_path.write_text("private debug", encoding="utf-8")
+    _set_display_artifact_env(monkeypatch, published_root=published_root, allow_legacy_local=False)
+
+    with _store() as store:
+        _create_job(store, job_id="job_internal_file", log_uri=internal_path.as_uri())
+        with _env_client(store) as client:
+            response = client.get("/api/v1/jobs/job_internal_file/logs")
+
+    body = json.dumps(response.json(), sort_keys=True)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "JOB_LOG_URI_UNSUPPORTED"
+    assert "private debug" not in body
+    assert str(internal_path) not in body
+
+
+def test_jobs_and_stages_metadata_redacts_stale_private_log_uri(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _set_display_artifact_env(monkeypatch, published_root=tmp_path / "published", allow_legacy_local=False)
+    cycle_time = _cycle_time()
+    cycle_id = cycle_id_for("GFS", cycle_time)
+    private_uri = "/scratch/node22/.nhms-runs/run_1/private.out"
+
+    with _store() as store:
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(
+            store,
+            job_id="job_private_metadata",
+            cycle_id=cycle_id,
+            stage="forecast",
+            status="failed",
+            log_uri=private_uri,
+        )
+        with _env_client(store) as client:
+            jobs_response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "limit": 20},
+            )
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+    body = json.dumps({"jobs": jobs_response.json(), "stages": stages_response.json()}, sort_keys=True)
+    assert jobs_response.status_code == 200
+    assert stages_response.status_code == 200
+    assert "/scratch" not in body
+    assert ".nhms-runs" not in body
+    assert "private.out" not in body
+
+
 def test_compute_pipeline_emits_published_log_uri_and_writes_published_log(
     tmp_path: Path,
     monkeypatch: Any,
@@ -112,22 +259,22 @@ def test_compute_pipeline_emits_published_log_uri_and_writes_published_log(
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
 
     assert result.status == "complete"
-    first_stage = result.stages[0]
-    expected = (
-        "published://logs/gfs/2026050100/"
-        "cycle_gfs_2026050100/"
-        f"{first_stage.pipeline_job_id}.out"
-    )
-    assert first_stage.log_uri == expected
-    assert repository.jobs[first_stage.pipeline_job_id]["log_uri"] == expected
-    assert (
-        published_root
-        / "logs"
-        / "gfs"
-        / "2026050100"
-        / "cycle_gfs_2026050100"
-        / f"{first_stage.pipeline_job_id}.out"
-    ).read_text(encoding="utf-8") == "ok"
+    for stage in result.stages:
+        expected = (
+            "published://logs/gfs/2026050100/"
+            "cycle_gfs_2026050100/"
+            f"{stage.pipeline_job_id}.out"
+        )
+        assert stage.log_uri == expected
+        assert repository.jobs[stage.pipeline_job_id]["log_uri"] == expected
+        assert (
+            published_root
+            / "logs"
+            / "gfs"
+            / "2026050100"
+            / "cycle_gfs_2026050100"
+            / f"{stage.pipeline_job_id}.out"
+        ).read_text(encoding="utf-8") == "ok"
 
 
 def test_compute_pipeline_keeps_legacy_object_store_uri_without_publish_root(
@@ -179,6 +326,22 @@ class _client:
         self.client.close()
 
 
+class _env_client:
+    def __init__(self, store: Any) -> None:
+        self.store = store
+        self.client: TestClient | None = None
+
+    def __enter__(self) -> TestClient:
+        app = create_app(_display_env())
+        app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: self.store
+        self.client = TestClient(app)
+        return self.client
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        assert self.client is not None
+        self.client.close()
+
+
 def _reader(root: Path) -> ArtifactReader:
     return ArtifactReader(
         ArtifactReaderConfig(
@@ -189,3 +352,26 @@ def _reader(root: Path) -> ArtifactReader:
             legacy_log_root=root,
         )
     )
+
+
+def _display_env() -> dict[str, str]:
+    return {
+        "NHMS_SERVICE_ROLE": "display_readonly",
+        "NHMS_REQUIRE_SERVICE_ROLE": "true",
+        "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS": "false",
+    }
+
+
+def _set_display_artifact_env(
+    monkeypatch: Any,
+    *,
+    published_root: Path,
+    tail_max_bytes: int = 1024,
+    allow_legacy_local: bool,
+    legacy_log_root: Path | None = None,
+) -> None:
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(published_root))
+    monkeypatch.setenv("NHMS_LOG_TAIL_MAX_BYTES", str(tail_max_bytes))
+    monkeypatch.setenv("NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS", "true" if allow_legacy_local else "false")
+    if legacy_log_root is not None:
+        monkeypatch.setenv("LOG_ROOT", str(legacy_log_root))

@@ -3220,13 +3220,20 @@ class ForecastOrchestrator:
         published_path = self._published_log_path(log_uri)
         if published_path is not None:
             published_root = Path(os.environ["NHMS_PUBLISHED_ARTIFACT_ROOT"]).expanduser().resolve()
-            ensure_directory_no_follow(published_root)
-            atomic_write_bytes_no_follow(
-                published_path,
-                content.encode("utf-8"),
-                containment_root=published_root,
-                temp_suffix="part",
-            )
+            try:
+                ensure_directory_no_follow(published_root)
+                atomic_write_bytes_no_follow(
+                    published_path,
+                    content.encode("utf-8"),
+                    containment_root=published_root,
+                    temp_suffix="part",
+                )
+            except (OSError, SafeFilesystemError) as exc:
+                raise OrchestratorError(
+                    "PUBLISHED_LOG_WRITE_FAILED",
+                    "Failed to publish gateway logs.",
+                    {"log_uri": log_uri},
+                ) from exc
             return
         self.object_store.write_bytes_atomic(log_uri, content.encode("utf-8"))
 
