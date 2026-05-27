@@ -407,6 +407,17 @@ class ArrayAggregation:
         return "partially_failed"
 
 
+@dataclass(frozen=True)
+class DisplayLogPublication:
+    candidate_uri: str
+    advertised_uri: str | None
+    should_persist_logs: bool
+
+    @property
+    def requires_publish_before_advertise(self) -> bool:
+        return self.advertised_uri is None
+
+
 @dataclass
 class CycleOrchestrationContext:
     source_id: str
@@ -749,9 +760,14 @@ class ForecastOrchestrator:
             new_status = _status_from_gateway_job(gateway_job)
             if new_status == str(job.get("status")):
                 continue
-            log_uri = self._log_uri_for_pipeline_job(job) if new_status in TERMINAL_JOB_STATUSES else None
-            if log_uri and new_status in TERMINAL_JOB_STATUSES and not job.get("log_uri"):
-                self._persist_gateway_logs(str(job["slurm_job_id"]), log_uri)
+            publication = (
+                self._display_log_publication_for_pipeline_job(job) if new_status in TERMINAL_JOB_STATUSES else None
+            )
+            log_uri = (
+                self._publish_log_before_advertise(str(job["slurm_job_id"]), publication)
+                if publication is not None
+                else None
+            )
             previous_status, record = self.repository.update_pipeline_job_status(
                 str(job["job_id"]),
                 new_status,
@@ -911,6 +927,53 @@ class ForecastOrchestrator:
         if run_id and stage:
             return self.object_store.uri_for_key(f"runs/{run_id}/logs/{stage}.log")
         return None
+
+    def _display_log_publication_for_stage(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime | None,
+        run_id: str,
+        job_id: str,
+        stage: str,
+        existing_log_uri: str | None = None,
+    ) -> DisplayLogPublication:
+        candidate_uri = existing_log_uri or self._log_uri_for_stage(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            run_id=run_id,
+            job_id=job_id,
+            stage=stage,
+        )
+        should_persist_logs = existing_log_uri is None
+        advertised_uri = existing_log_uri or (
+            None if self._published_log_path(candidate_uri) is not None else candidate_uri
+        )
+        return DisplayLogPublication(
+            candidate_uri=candidate_uri,
+            advertised_uri=advertised_uri,
+            should_persist_logs=should_persist_logs,
+        )
+
+    def _display_log_publication_for_pipeline_job(self, job: Mapping[str, Any]) -> DisplayLogPublication | None:
+        candidate_uri = self._log_uri_for_pipeline_job(job)
+        if candidate_uri is None:
+            return None
+        existing_log_uri = str(job["log_uri"]) if job.get("log_uri") else None
+        should_persist_logs = existing_log_uri is None
+        advertised_uri = existing_log_uri or (
+            None if self._published_log_path(candidate_uri) is not None else candidate_uri
+        )
+        return DisplayLogPublication(
+            candidate_uri=candidate_uri,
+            advertised_uri=advertised_uri,
+            should_persist_logs=should_persist_logs,
+        )
+
+    def _publish_log_before_advertise(self, slurm_job_id: str, publication: DisplayLogPublication) -> str:
+        if publication.should_persist_logs:
+            self._persist_gateway_logs(slurm_job_id, publication.candidate_uri)
+        return publication.candidate_uri
 
     def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult:
         stage_results: list[StageRunResult] = []
@@ -1284,7 +1347,7 @@ class ForecastOrchestrator:
             return result, None
 
         slurm_job_id = str(submitted["job_id"])
-        log_uri = self._log_uri_for_stage(
+        log_publication = self._display_log_publication_for_stage(
             source_id=context.source_id,
             cycle_time=context.cycle_time,
             run_id=context.run_id,
@@ -1292,6 +1355,10 @@ class ForecastOrchestrator:
             stage=stage.stage,
         )
         submitted_status = _status_from_gateway_job(submitted)
+        submitted_log_uri = log_publication.advertised_uri
+        if submitted_status in TERMINAL_JOB_STATUSES:
+            submitted_log_uri = self._publish_log_before_advertise(slurm_job_id, log_publication)
+            submitted["log_uri"] = submitted_log_uri
         submitted_manifest = submitted.get("manifest") if isinstance(submitted.get("manifest"), Mapping) else {}
         submitted_manifest_index_path = (
             str(submitted_manifest.get("manifest_index_path") or submitted.get("manifest_index_path") or "")
@@ -1317,7 +1384,7 @@ class ForecastOrchestrator:
                 "exit_code": submitted.get("exit_code"),
                 "error_code": submitted.get("error_code"),
                 "error_message": submitted.get("error_message"),
-                "log_uri": log_uri,
+                "log_uri": submitted_log_uri,
             }
         )
         self.repository.insert_pipeline_event(
@@ -1337,7 +1404,7 @@ class ForecastOrchestrator:
                         "state": submitted_status,
                         "array_task_id": None,
                         "exit_code": submitted.get("exit_code"),
-                        "log_uri": log_uri,
+                        "log_uri": submitted_log_uri,
                     },
                     "manifest_index_path": actual_manifest_index_path or None,
                 }
@@ -1349,9 +1416,15 @@ class ForecastOrchestrator:
             pipeline_job_id=pipeline_job_id,
             initial_job=submitted,
             initial_status=submitted_status,
-            log_uri=log_uri,
+            log_publication=log_publication,
         )
-        self._persist_gateway_logs(slurm_job_id, log_uri)
+        log_uri = str(terminal.get("log_uri") or "")
+        if not log_uri:
+            log_uri = (
+                self._publish_log_before_advertise(slurm_job_id, log_publication)
+                if log_publication.should_persist_logs
+                else str(submitted_log_uri or "")
+            )
 
         poll_timed_out = isinstance(terminal, dict) and terminal.get("error_code") == "SLURM_JOB_TIMEOUT"
         aggregation = (
@@ -1404,7 +1477,7 @@ class ForecastOrchestrator:
                 pipeline_job_id=str(job["job_id"]),
                 initial_job={"job_id": job["slurm_job_id"], "status": status},
                 initial_status=status,
-                log_uri=job.get("log_uri"),
+                log_publication=self._display_log_publication_for_pipeline_job(job),
             )
             status = _status_from_gateway_job(terminal)
 
@@ -1417,11 +1490,17 @@ class ForecastOrchestrator:
             aggregation = self._aggregate_array_stage(stage, context, str(job["slurm_job_id"]), terminal)
             status = aggregation.status
             if str(job.get("status")) not in TERMINAL_JOB_STATUSES or status != str(job.get("status")):
-                log_uri = str(
-                    job.get("log_uri")
-                    or self._log_uri_for_pipeline_job(job)
-                    or self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
-                )
+                publication = self._display_log_publication_for_pipeline_job(job)
+                if publication is not None:
+                    log_uri = self._publish_log_before_advertise(str(job["slurm_job_id"]), publication)
+                elif not _published_artifact_root_configured():
+                    log_uri = self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
+                else:
+                    raise OrchestratorError(
+                        "PUBLISHED_LOG_URI_UNAVAILABLE",
+                        "Cannot compute a published log URI for the recovered pipeline job.",
+                        {"job_id": str(job["job_id"]), "stage": stage.stage},
+                    )
                 self._record_cycle_stage_status_override(
                     stage,
                     context,
@@ -1434,6 +1513,12 @@ class ForecastOrchestrator:
                 context.had_partial = True
                 context.last_partial_status = self._partial_cycle_status(stage)
 
+        result_log_uri = str(terminal.get("log_uri") or job.get("log_uri") or "") or None
+        get_pipeline_job = getattr(self.repository, "get_pipeline_job", None)
+        updated_job = get_pipeline_job(str(job["job_id"])) if callable(get_pipeline_job) else None
+        if updated_job is not None:
+            result_log_uri = str(updated_job.get("log_uri") or "") or None
+
         self._after_cycle_stage_terminal(stage, context, status, terminal, aggregation)
         return (
             StageRunResult(
@@ -1445,7 +1530,7 @@ class ForecastOrchestrator:
                 exit_code=job.get("exit_code"),
                 error_code=job.get("error_code"),
                 error_message=job.get("error_message"),
-                log_uri=str(job.get("log_uri") or "") or None,
+                log_uri=result_log_uri,
                 accounting=_slurm_accounting_from_payload(terminal),
                 task_results=_stage_task_result_evidence(aggregation, context=context),
             ),
@@ -1460,7 +1545,7 @@ class ForecastOrchestrator:
         pipeline_job_id: str,
         initial_job: dict[str, Any],
         initial_status: str,
-        log_uri: str | None,
+        log_publication: DisplayLogPublication | None,
     ) -> dict[str, Any]:
         job = dict(initial_job)
         current_status = initial_status
@@ -1473,7 +1558,7 @@ class ForecastOrchestrator:
                     pipeline_job_id=pipeline_job_id,
                     job=job,
                     current_status=current_status,
-                    log_uri=log_uri,
+                    log_publication=log_publication,
                 )
             time.sleep(self.config.poll_interval_seconds)
             job = _coerce_mapping(self.slurm_client.get_job_status(str(job["job_id"])))
@@ -1483,6 +1568,9 @@ class ForecastOrchestrator:
             if stage.is_array and new_status in TERMINAL_JOB_STATUSES:
                 current_status = new_status
                 continue
+            log_uri = log_publication.advertised_uri if log_publication is not None else None
+            if new_status in TERMINAL_JOB_STATUSES and log_publication is not None:
+                log_uri = self._publish_log_before_advertise(str(job["job_id"]), log_publication)
             previous_status, record = self.repository.update_pipeline_job_status(
                 pipeline_job_id,
                 new_status,
@@ -1493,6 +1581,8 @@ class ForecastOrchestrator:
                 error_message=job.get("error_message"),
                 log_uri=log_uri if new_status in TERMINAL_JOB_STATUSES else None,
             )
+            if log_uri and new_status in TERMINAL_JOB_STATUSES:
+                job["log_uri"] = log_uri
             persisted_status = str(record.get("status") or new_status)
             if persisted_status != new_status:
                 job["status"] = persisted_status
@@ -1536,7 +1626,7 @@ class ForecastOrchestrator:
         pipeline_job_id: str,
         job: dict[str, Any],
         current_status: str,
-        log_uri: str | None,
+        log_publication: DisplayLogPublication | None,
     ) -> dict[str, Any]:
         message = f"Stage {stage.stage} did not reach a terminal status before timeout."
         terminal = dict(job)
@@ -1547,6 +1637,11 @@ class ForecastOrchestrator:
                 "error_code": "SLURM_JOB_TIMEOUT",
                 "error_message": message,
             }
+        )
+        log_uri = (
+            self._publish_log_before_advertise(str(job["job_id"]), log_publication)
+            if log_publication is not None
+            else None
         )
         previous_status, record = self.repository.update_pipeline_job_status(
             pipeline_job_id,
@@ -2754,7 +2849,7 @@ class ForecastOrchestrator:
         submitted = self.slurm_client.submit_job(payload)
         slurm_job_id = str(submitted["job_id"])
         pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
-        log_uri = self._log_uri_for_stage(
+        log_publication = self._display_log_publication_for_stage(
             source_id=context.source_id,
             cycle_time=context.cycle_time,
             run_id=context.run_id,
@@ -2762,6 +2857,10 @@ class ForecastOrchestrator:
             stage=stage.stage,
         )
         current_status = _status_from_gateway_job(submitted)
+        submitted_log_uri = log_publication.advertised_uri
+        if current_status in TERMINAL_JOB_STATUSES:
+            submitted_log_uri = self._publish_log_before_advertise(slurm_job_id, log_publication)
+            submitted["log_uri"] = submitted_log_uri
         pipeline_record = self.repository.upsert_pipeline_job(
             {
                 "job_id": pipeline_job_id,
@@ -2778,7 +2877,7 @@ class ForecastOrchestrator:
                 "exit_code": submitted.get("exit_code"),
                 "error_code": submitted.get("error_code"),
                 "error_message": submitted.get("error_message"),
-                "log_uri": log_uri,
+                "log_uri": submitted_log_uri,
             }
         )
         entity_type, entity_id = self._pipeline_event_target(context, pipeline_job_id)
@@ -2797,7 +2896,7 @@ class ForecastOrchestrator:
                         "job_id": slurm_job_id,
                         "state": current_status,
                         "exit_code": submitted.get("exit_code"),
-                        "log_uri": log_uri,
+                        "log_uri": submitted_log_uri,
                         "accounting": _slurm_accounting_from_payload(submitted),
                         "resource_metrics": _resource_metrics_from_payload(submitted),
                     },
@@ -2813,8 +2912,15 @@ class ForecastOrchestrator:
             pipeline_job_id=pipeline_job_id,
             initial_job=submitted,
             initial_status=str(pipeline_record["status"]),
+            log_publication=log_publication,
         )
-        self._persist_gateway_logs(slurm_job_id, log_uri)
+        log_uri = str(terminal.get("log_uri") or "")
+        if not log_uri:
+            log_uri = (
+                self._publish_log_before_advertise(slurm_job_id, log_publication)
+                if log_publication.should_persist_logs
+                else str(submitted_log_uri or "")
+            )
 
         if terminal["status"] == "succeeded":
             self._after_stage_success(stage, context, terminal)
@@ -2901,6 +3007,7 @@ class ForecastOrchestrator:
         pipeline_job_id: str,
         initial_job: dict[str, Any],
         initial_status: str,
+        log_publication: DisplayLogPublication,
     ) -> dict[str, Any]:
         job = initial_job
         current_status = initial_status
@@ -2913,12 +3020,16 @@ class ForecastOrchestrator:
                     pipeline_job_id=pipeline_job_id,
                     job=dict(job),
                     current_status=current_status,
+                    log_publication=log_publication,
                 )
             time.sleep(self.config.poll_interval_seconds)
             job = self.slurm_client.get_job_status(str(job["job_id"]))
             new_status = _status_from_gateway_job(job)
             if new_status == current_status:
                 continue
+            log_uri = log_publication.advertised_uri
+            if new_status in TERMINAL_JOB_STATUSES:
+                log_uri = self._publish_log_before_advertise(str(job["job_id"]), log_publication)
             previous_status, record = self.repository.update_pipeline_job_status(
                 pipeline_job_id,
                 new_status,
@@ -2927,7 +3038,10 @@ class ForecastOrchestrator:
                 exit_code=job.get("exit_code"),
                 error_code=job.get("error_code"),
                 error_message=job.get("error_message"),
+                log_uri=log_uri if new_status in TERMINAL_JOB_STATUSES else None,
             )
+            if log_uri and new_status in TERMINAL_JOB_STATUSES:
+                job["log_uri"] = log_uri
             persisted_status = str(record.get("status") or new_status)
             if persisted_status != new_status:
                 job["status"] = persisted_status
@@ -2962,6 +3076,7 @@ class ForecastOrchestrator:
 
         terminal_status = _status_from_gateway_job(job)
         if terminal_status != current_status:
+            log_uri = self._publish_log_before_advertise(str(job["job_id"]), log_publication)
             previous_status, record = self.repository.update_pipeline_job_status(
                 pipeline_job_id,
                 terminal_status,
@@ -2970,7 +3085,9 @@ class ForecastOrchestrator:
                 exit_code=job.get("exit_code"),
                 error_code=job.get("error_code"),
                 error_message=job.get("error_message"),
+                log_uri=log_uri,
             )
+            job["log_uri"] = log_uri
             persisted_status = str(record.get("status") or terminal_status)
             if persisted_status != terminal_status:
                 job["status"] = persisted_status
@@ -3008,6 +3125,7 @@ class ForecastOrchestrator:
         pipeline_job_id: str,
         job: dict[str, Any],
         current_status: str,
+        log_publication: DisplayLogPublication,
     ) -> dict[str, Any]:
         message = f"Stage {stage.stage} did not reach a terminal status before timeout."
         terminal = dict(job)
@@ -3019,6 +3137,7 @@ class ForecastOrchestrator:
                 "error_message": message,
             }
         )
+        log_uri = self._publish_log_before_advertise(str(job["job_id"]), log_publication)
         previous_status, record = self.repository.update_pipeline_job_status(
             pipeline_job_id,
             "failed",
@@ -3026,6 +3145,7 @@ class ForecastOrchestrator:
             exit_code=terminal.get("exit_code"),
             error_code="SLURM_JOB_TIMEOUT",
             error_message=message,
+            log_uri=log_uri,
         )
         terminal.update(record)
         entity_type, entity_id = self._pipeline_event_target(context, pipeline_job_id)

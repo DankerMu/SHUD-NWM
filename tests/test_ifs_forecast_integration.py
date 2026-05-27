@@ -366,10 +366,13 @@ class FakeReadyRepository:
         exit_code: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        log_uri: str | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         del started_at, finished_at, exit_code, error_code, error_message
         previous = self.jobs[job_id]["status"]
         self.jobs[job_id]["status"] = status
+        if log_uri is not None:
+            self.jobs[job_id]["log_uri"] = log_uri
         return previous, dict(self.jobs[job_id])
 
     def insert_pipeline_event(
