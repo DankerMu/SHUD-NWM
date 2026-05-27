@@ -24,6 +24,7 @@ from packages.common.safe_fs import (
 )
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
+from services.artifacts import published_log_uri
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.slurm_gateway.config import SlurmGatewaySettings
@@ -896,6 +897,15 @@ class ForecastOrchestrator:
             return str(job["log_uri"])
         run_id = job.get("run_id")
         stage = job.get("stage")
+        job_id = job.get("job_id")
+        if run_id and stage and job_id:
+            return self._log_uri_for_stage(
+                source_id=_source_id_from_cycle_id(job.get("cycle_id")) or self.config.source_id,
+                cycle_time=_cycle_time_from_cycle_id(job.get("cycle_id")),
+                run_id=str(run_id),
+                job_id=str(job_id),
+                stage=str(stage),
+            )
         if run_id and stage:
             return self.object_store.uri_for_key(f"runs/{run_id}/logs/{stage}.log")
         return None
@@ -1272,7 +1282,13 @@ class ForecastOrchestrator:
             return result, None
 
         slurm_job_id = str(submitted["job_id"])
-        log_uri = self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
+        log_uri = self._log_uri_for_stage(
+            source_id=context.source_id,
+            cycle_time=context.cycle_time,
+            run_id=context.run_id,
+            job_id=pipeline_job_id,
+            stage=stage.stage,
+        )
         submitted_status = _status_from_gateway_job(submitted)
         submitted_manifest = submitted.get("manifest") if isinstance(submitted.get("manifest"), Mapping) else {}
         submitted_manifest_index_path = (
@@ -2736,7 +2752,13 @@ class ForecastOrchestrator:
         submitted = self.slurm_client.submit_job(payload)
         slurm_job_id = str(submitted["job_id"])
         pipeline_job_id = _pipeline_job_id(context.run_id, stage.stage)
-        log_uri = self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
+        log_uri = self._log_uri_for_stage(
+            source_id=context.source_id,
+            cycle_time=context.cycle_time,
+            run_id=context.run_id,
+            job_id=pipeline_job_id,
+            stage=stage.stage,
+        )
         current_status = _status_from_gateway_job(submitted)
         pipeline_record = self.repository.upsert_pipeline_job(
             {
@@ -3195,7 +3217,47 @@ class ForecastOrchestrator:
     def _persist_gateway_logs(self, slurm_job_id: str, log_uri: str) -> None:
         logs = _coerce_mapping(self.slurm_client.fetch_logs(slurm_job_id))
         content = str(logs.get("logs", ""))
+        published_path = self._published_log_path(log_uri)
+        if published_path is not None:
+            published_root = Path(os.environ["NHMS_PUBLISHED_ARTIFACT_ROOT"]).expanduser().resolve()
+            ensure_directory_no_follow(published_root)
+            atomic_write_bytes_no_follow(
+                published_path,
+                content.encode("utf-8"),
+                containment_root=published_root,
+                temp_suffix="part",
+            )
+            return
         self.object_store.write_bytes_atomic(log_uri, content.encode("utf-8"))
+
+    def _log_uri_for_stage(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime | None,
+        run_id: str,
+        job_id: str,
+        stage: str,
+    ) -> str:
+        if _published_artifact_root_configured():
+            return published_log_uri(
+                source=normalize_source_id(source_id),
+                cycle_time=cycle_time or _utcnow(),
+                run_id=run_id,
+                job_id=job_id,
+                stream=_log_stream_for_stage(stage),
+            )
+        return self.object_store.uri_for_key(f"runs/{run_id}/logs/{stage}.log")
+
+    def _published_log_path(self, log_uri: str) -> Path | None:
+        published_root = os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", "").strip()
+        if not published_root:
+            return None
+        prefix = os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://").strip() or "published://"
+        if not log_uri.startswith(prefix):
+            return None
+        relative = log_uri.removeprefix(prefix).lstrip("/")
+        return Path(published_root).expanduser().resolve() / relative
 
     def _build_run_context(
         self,
@@ -5771,6 +5833,34 @@ def _parse_slurm_exit_code(raw_exit_code: str) -> int | None:
 
 def _pipeline_job_id(run_id: str, stage: str) -> str:
     return f"job_{run_id}_{stage}"
+
+
+def _published_artifact_root_configured() -> bool:
+    return bool(os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", "").strip())
+
+
+def _log_stream_for_stage(stage: str) -> str:
+    return "err" if stage in {"submission_failed", "error"} else "out"
+
+
+def _source_id_from_cycle_id(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    source = str(value).split("_", maxsplit=1)[0]
+    try:
+        return normalize_source_id(source)
+    except ValueError:
+        return source or None
+
+
+def _cycle_time_from_cycle_id(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    compact_cycle = str(value).rsplit("_", maxsplit=1)[-1]
+    try:
+        return parse_cycle_time(compact_cycle)
+    except ValueError:
+        return None
 
 
 def _stage_status_message(stage: str, status: str, job: dict[str, Any]) -> str:

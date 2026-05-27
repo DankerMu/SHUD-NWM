@@ -7,7 +7,6 @@ from collections.abc import Generator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
-from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -20,8 +19,13 @@ from sqlalchemy.orm import Session
 from apps.api.auth import PolicyDecision, require_action
 from apps.api.errors import ApiError
 from packages.common.redaction import redact_payload
-from packages.common.safe_fs import SafeFilesystemError, read_tail_bytes_limited_no_follow
 from packages.common.source_identity import normalize_source_id
+from services.artifacts import (
+    ArtifactLogError,
+    ArtifactReader,
+    ArtifactReaderConfig,
+    safe_public_log_uri,
+)
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryConflictError, RetryError, RetryNotFoundError, RetryService
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
@@ -68,7 +72,6 @@ _MAX_PUBLIC_LOG_URI_LENGTH = PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH
 _DISPLAY_READONLY_MODE = "display_readonly"
 _CONTROL_PLANE_MANUAL_ACTION_REQUIRED = "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
 _CONTROL_PLANE_QUEUE_UNAVAILABLE = "CONTROL_PLANE_QUEUE_UNAVAILABLE"
-LOG_ROOT = Path(os.getenv("LOG_ROOT", "workspace"))
 
 
 @dataclass
@@ -358,30 +361,18 @@ def job_logs(
             message="Pipeline job was not found.",
             details={"job_id": job_id},
         )
-    if not job.log_uri:
-        raise ApiError(
-            status_code=404,
-            code="JOB_LOG_NOT_FOUND",
-            message="No log_uri is available for this job.",
-            details={"job_id": job_id},
-        )
 
-    safe_log_uri = _safe_public_log_uri(job.log_uri)
-    log_path = _local_log_path(job.log_uri)
-    if log_path is None or not log_path.is_file():
-        raise ApiError(
-            status_code=404,
-            code="JOB_LOG_NOT_FOUND",
-            message="Job log file was not found.",
-            details={"job_id": job_id, "log_uri": safe_log_uri},
-        )
+    try:
+        log_result = _artifact_reader_for_request(request).read_text_tail(job.log_uri)
+    except ArtifactLogError as error:
+        raise _job_log_api_error(error, job_id=job_id) from error
 
     return _ok(
         request,
         {
             "job_id": job.job_id,
-            "log_uri": safe_log_uri,
-            "content": _read_log_tail(log_path),
+            "log_uri": log_result.log_uri,
+            "content": log_result.content,
         },
     )
 
@@ -817,12 +808,7 @@ def _safe_redacted_text(value: str) -> str:
 
 
 def _safe_public_log_uri(value: str | None) -> str | None:
-    if value is None:
-        return None
-    redacted = _safe_redacted_text(value)
-    if len(redacted) <= _MAX_PUBLIC_LOG_URI_LENGTH:
-        return redacted
-    return f"{redacted[: _MAX_PUBLIC_LOG_URI_LENGTH - 14]}...[truncated]"
+    return safe_public_log_uri(value, max_length=_MAX_PUBLIC_LOG_URI_LENGTH)
 
 
 def _cancellation_payload_proven(response: dict[str, Any]) -> bool:
@@ -1539,60 +1525,35 @@ def _duration_seconds(started_at: datetime | None, finished_at: datetime | None)
     return max(0, int((finished_at - started_at).total_seconds()))
 
 
-def _log_root() -> Path:
-    configured_root = os.getenv("LOG_ROOT", "").strip()
-    return Path(configured_root or LOG_ROOT).expanduser().resolve()
-
-
-def _local_log_path(log_uri: str) -> Path | None:
-    if log_uri.startswith("file://"):
-        raw_path = Path(log_uri.removeprefix("file://")).expanduser()
-    elif "://" in log_uri:
-        return None
-    else:
-        raw_path = Path(log_uri).expanduser()
-
-    log_root = _log_root()
-    if raw_path.is_symlink():
-        _raise_log_path_forbidden(log_uri, log_root)
-
-    candidates = [raw_path.resolve()]
-    if not raw_path.is_absolute():
-        rooted_raw_path = log_root / raw_path
-        if rooted_raw_path.is_symlink():
-            _raise_log_path_forbidden(log_uri, log_root)
-        rooted_path = rooted_raw_path.resolve()
-        if rooted_path not in candidates:
-            candidates.append(rooted_path)
-
-    for candidate in candidates:
-        try:
-            candidate.relative_to(log_root)
-        except ValueError:
-            continue
-        return candidate
-
-    _raise_log_path_forbidden(log_uri, log_root)
-
-
-def _raise_log_path_forbidden(log_uri: str, log_root: Path) -> None:
-    del log_uri, log_root
-    raise ApiError(
-        status_code=403,
-        code="FORBIDDEN",
-        message="Job log path is outside the configured log root.",
-        details={"reason": "unsafe_log_path"},
+def _artifact_reader_for_request(request: Request) -> ArtifactReader:
+    reader = getattr(request.app.state, "artifact_reader", None)
+    if isinstance(reader, ArtifactReader):
+        return reader
+    runtime_config = getattr(request.app.state, "runtime_config", None)
+    display_readonly = bool(getattr(runtime_config, "display_readonly", False))
+    config = ArtifactReaderConfig.from_env(display_readonly=display_readonly)
+    config = ArtifactReaderConfig(
+        published_root=config.published_root,
+        uri_prefix=config.uri_prefix,
+        s3_bucket=config.s3_bucket,
+        s3_prefix=config.s3_prefix,
+        tail_max_bytes=_MAX_LOG_BYTES,
+        allow_legacy_local_file_logs=config.allow_legacy_local_file_logs,
+        legacy_log_root=config.legacy_log_root,
+        display_readonly=config.display_readonly,
     )
+    return ArtifactReader(config)
 
 
-def _read_log_tail(log_path: Path) -> str:
-    try:
-        data = read_tail_bytes_limited_no_follow(log_path, max_bytes=_MAX_LOG_BYTES, containment_root=_log_root())
-    except (OSError, SafeFilesystemError) as exc:
-        raise ApiError(
-            status_code=403,
-            code="FORBIDDEN",
-            message="Job log path is outside the configured log root.",
-            details={"reason": "unsafe_log_path"},
-        ) from exc
-    return _safe_redacted_text(data.decode("utf-8", errors="replace"))
+def _job_log_api_error(error: ArtifactLogError, *, job_id: str) -> ApiError:
+    details: dict[str, Any] = {"job_id": job_id}
+    if error.safe_uri is not None:
+        details["log_uri"] = error.safe_uri
+    if error.reason is not None:
+        details["reason"] = error.reason
+    return ApiError(
+        status_code=error.status_code,
+        code=error.code,
+        message=error.message,
+        details=details,
+    )

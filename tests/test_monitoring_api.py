@@ -1029,9 +1029,9 @@ def test_job_logs_response_redacts_and_bounds_log_uri(tmp_path: Path, monkeypatc
         with _client(store) as client:
             response = client.get("/api/v1/jobs/job_redacted_log_uri/logs")
 
-        assert response.status_code == 404
+        assert response.status_code == 400
         assert "tok123" not in json.dumps(response.json(), sort_keys=True)
-        assert response.json()["error"]["details"]["log_uri"].endswith("...[truncated]")
+        assert response.json()["error"]["details"]["log_uri"] == "qhh/retry-token.log"
 
 
 def test_job_logs_rejects_symlink_swap_between_path_check_and_open(tmp_path: Path, monkeypatch) -> None:
@@ -1072,7 +1072,7 @@ def test_job_logs_path_traversal(tmp_path: Path, monkeypatch) -> None:
             response = client.get("/api/v1/jobs/job_traversal/logs")
 
         assert response.status_code == 403
-        assert response.json()["error"]["code"] == "FORBIDDEN"
+        assert response.json()["error"]["code"] == "JOB_LOG_ACCESS_DENIED"
 
 
 def test_job_logs_error_does_not_leak_configured_root_or_resolved_path(tmp_path: Path, monkeypatch) -> None:
@@ -1086,7 +1086,8 @@ def test_job_logs_error_does_not_leak_configured_root_or_resolved_path(tmp_path:
         assert response.status_code == 403
         assert str(tmp_path) not in body
         assert "secret/job.log" not in body
-        assert response.json()["error"]["details"] == {"reason": "unsafe_log_path"}
+        assert response.json()["error"]["code"] == "JOB_LOG_ACCESS_DENIED"
+        assert response.json()["error"]["details"]["reason"] == "unsafe_path_component"
 
 
 def test_job_logs_not_found(tmp_path: Path, monkeypatch) -> None:
@@ -1099,7 +1100,7 @@ def test_job_logs_not_found(tmp_path: Path, monkeypatch) -> None:
             missing_log = client.get("/api/v1/jobs/job_missing_log/logs")
 
         assert no_log.status_code == 404
-        assert no_log.json()["error"]["code"] == "JOB_LOG_NOT_FOUND"
+        assert no_log.json()["error"]["code"] == "JOB_LOG_NOT_PUBLISHED"
         assert missing_log.status_code == 404
         assert missing_log.json()["error"]["code"] == "JOB_LOG_NOT_FOUND"
 
