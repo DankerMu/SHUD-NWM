@@ -559,17 +559,24 @@ def test_job_log_forbidden_response_redacts_secret_file_uri(monkeypatch: pytest.
 
     response_text = json.dumps(response.json())
     error = response.json()["error"]
-    assert response.status_code == 403
-    assert error["code"] == "FORBIDDEN"
-    assert error["details"] == {"reason": "unsafe_log_path"}
-    assert "job_forbidden_secret_log" not in response_text
+    assert response.status_code == 400
+    assert error["code"] == "JOB_LOG_URI_UNSUPPORTED"
+    assert error["details"] == {
+        "job_id": "job_forbidden_secret_log",
+        "log_uri": "file://redacted",
+        "reason": "query_or_fragment_forbidden",
+    }
     assert str(log_root.resolve()) not in response_text
     assert str(outside_root.resolve()) not in response_text
     assert "rawsecret" not in response_text
     assert "hunter2" not in response_text
     assert "signedsecret" not in response_text
+    assert "token=" not in response_text
     assert "password=" not in response_text
     assert "X-Amz-Signature" not in response_text
+    assert "unsafe_log_path" not in response_text
+    assert "Traceback" not in response_text
+    assert "ValueError" not in response_text
 
 
 def test_cancelled_run_does_not_block_active_guard() -> None:
