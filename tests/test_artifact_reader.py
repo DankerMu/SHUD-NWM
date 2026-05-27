@@ -114,6 +114,77 @@ def test_file_uri_under_published_root_requires_logs_namespace(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
+    ("uri_factory", "expected_safe_uri"),
+    [
+        (
+            lambda root: "published://logs/GFS/2026050100/run_1/bad%00.out",
+            "published://logs/[redacted]",
+        ),
+        (
+            lambda root: (root / "logs" / "GFS" / "2026050100" / "run_1" / "bad.out")
+            .as_uri()
+            .replace("bad.out", "bad%00.out"),
+            "file://redacted/[redacted]",
+        ),
+    ],
+)
+def test_decoded_nul_in_supported_local_uri_forms_maps_to_stable_error(
+    tmp_path: Path,
+    uri_factory,
+    expected_safe_uri: str,
+) -> None:
+    root = tmp_path / "published"
+    reader = ArtifactReader(_config(root))
+
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail(uri_factory(root))
+
+    body = json.dumps(
+        {
+            "code": error.value.code,
+            "safe_uri": error.value.safe_uri,
+            "reason": error.value.reason,
+        },
+        sort_keys=True,
+    )
+    assert error.value.code == "JOB_LOG_URI_UNSUPPORTED"
+    assert error.value.status_code == 400
+    assert error.value.safe_uri == expected_safe_uri
+    assert error.value.reason == "malformed_path"
+    assert "%00" not in body
+    assert "\\u0000" not in body
+    assert str(root) not in body
+    assert "bad.out" not in body
+
+
+def test_local_tail_value_error_maps_to_stable_artifact_log_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "published"
+    log_path = root / "logs" / "GFS" / "2026050100" / "run_1" / "job_1.out"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("published log", encoding="utf-8")
+    reader = ArtifactReader(_config(root))
+
+    def raise_value_error(*_args: object, **_kwargs: object) -> bytes:
+        raise ValueError("embedded null character in path")
+
+    monkeypatch.setattr(
+        "services.artifacts.reader.read_tail_bytes_limited_no_follow",
+        raise_value_error,
+    )
+
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail("published://logs/GFS/2026050100/run_1/job_1.out")
+
+    assert error.value.code == "JOB_LOG_URI_UNSUPPORTED"
+    assert error.value.status_code == 400
+    assert error.value.safe_uri == "published://logs/[redacted]"
+    assert error.value.reason == "malformed_path"
+
+
+@pytest.mark.parametrize(
     ("uri", "code"),
     [
         ("published://logs/GFS/2026050100/run_1/../secret.out", "JOB_LOG_ACCESS_DENIED"),

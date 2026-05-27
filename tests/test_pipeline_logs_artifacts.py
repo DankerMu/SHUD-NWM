@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
@@ -87,6 +88,40 @@ def test_job_logs_api_maps_supported_missing_file_to_not_found(tmp_path: Path) -
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "JOB_LOG_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    "uri_name",
+    ["published", "file"],
+)
+def test_job_logs_api_maps_decoded_nul_supported_uri_forms_without_500(
+    tmp_path: Path,
+    uri_name: str,
+) -> None:
+    published_root = tmp_path / "published"
+    if uri_name == "published":
+        log_uri = "published://logs/GFS/2026050100/run_1/bad%00.out"
+    else:
+        log_uri = (
+            (published_root / "logs" / "GFS" / "2026050100" / "run_1" / "bad.out")
+            .as_uri()
+            .replace("bad.out", "bad%00.out")
+        )
+
+    with _store() as store:
+        _create_job(store, job_id=f"job_nul_{uri_name}", log_uri=log_uri)
+        with _client(store, _reader(published_root)) as client:
+            response = client.get(f"/api/v1/jobs/job_nul_{uri_name}/logs")
+
+    body = json.dumps(response.json(), sort_keys=True)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "JOB_LOG_URI_UNSUPPORTED"
+    assert response.json()["error"]["details"]["reason"] == "malformed_path"
+    assert "%00" not in body
+    assert "\\u0000" not in body
+    assert "embedded null" not in body.lower()
+    assert str(published_root) not in body
+    assert "bad.out" not in body
 
 
 def test_job_logs_api_env_reader_honors_tail_max_bytes(tmp_path: Path, monkeypatch: Any) -> None:

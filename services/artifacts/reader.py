@@ -356,6 +356,14 @@ class ArtifactReader:
                 safe_uri=safe_uri,
                 reason="unsafe_local_path",
             ) from error
+        except ValueError as error:
+            raise ArtifactLogError(
+                LOG_ERROR_URI_UNSUPPORTED,
+                "Job log URI is malformed.",
+                status_code=400,
+                safe_uri=_unsafe_log_uri_summary(safe_uri),
+                reason="malformed_path",
+            ) from error
         return ArtifactLogReadResult(
             log_uri=safe_uri,
             content=_redacted_text_from_bytes(data),
@@ -535,6 +543,14 @@ def _safe_decoded_path(raw_path: str, *, safe_uri: str) -> str:
             reason="encoded_or_backslash_path",
         )
     decoded = unquote(raw_path)
+    if _contains_control_character(decoded):
+        raise ArtifactLogError(
+            LOG_ERROR_URI_UNSUPPORTED,
+            "Job log URI contains malformed path characters.",
+            status_code=400,
+            safe_uri=_unsafe_log_uri_summary(safe_uri),
+            reason="malformed_path",
+        )
     if "\\" in decoded:
         raise ArtifactLogError(
             LOG_ERROR_ACCESS_DENIED,
@@ -667,6 +683,10 @@ def _redacted_text_from_bytes(data: bytes) -> str:
 
 def _has_uri_scheme(value: str) -> bool:
     return re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value.strip()) is not None
+
+
+def _contains_control_character(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
 def _validate_public_uri_segment(value: str) -> None:
