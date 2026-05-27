@@ -272,6 +272,34 @@ def test_ops_runtime_openapi_matches_static_success_schema(
         assert runtime_spec["components"]["schemas"][schema_name] == static_spec["components"]["schemas"][schema_name]
 
 
+def test_runtime_config_runtime_openapi_matches_static_contract() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    runtime_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/runtime/config"
+    static_operation = static_spec["paths"][path]["get"]
+    runtime_operation = runtime_spec["paths"][path]["get"]
+
+    assert runtime_operation["operationId"] == static_operation["operationId"] == "getRuntimeConfig"
+    assert static_operation.get("parameters", []) == []
+    assert runtime_operation.get("parameters", []) == []
+
+    static_response = static_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    runtime_response = runtime_operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert runtime_response == static_response
+    assert static_response["allOf"][0]["$ref"] == "#/components/schemas/SuccessEnvelope"
+    assert static_response["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/RuntimeConfig"
+    assert runtime_operation["responses"]["4XX"] == static_operation["responses"]["4XX"]
+    assert runtime_operation["responses"]["5XX"] == static_operation["responses"]["5XX"]
+    assert runtime_spec["components"]["schemas"]["RuntimeConfig"] == static_spec["components"]["schemas"][
+        "RuntimeConfig"
+    ]
+    assert runtime_spec["components"]["schemas"]["SuccessEnvelope"] == static_spec["components"]["schemas"][
+        "SuccessEnvelope"
+    ]
+    assert runtime_spec["components"]["responses"]["Error"] == static_spec["components"]["responses"]["Error"]
+
+
 def test_flood_alert_timeline_river_network_query_parameter_matches_fastapi_openapi() -> None:
     static_spec = _openapi_spec()
     fastapi_spec: dict[str, Any] = app.openapi()

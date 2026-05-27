@@ -13,6 +13,7 @@ _ROLE_ENV_KEYS = (
     "NHMS_SERVICE_ROLE",
     "NHMS_REQUIRE_SERVICE_ROLE",
     "NHMS_AUTH_MODE",
+    "AUTH_BACKEND",
     "SLURM_GATEWAY_URL",
     "SLURM_GATEWAY_BACKEND",
     "WORKSPACE_ROOT",
@@ -39,6 +40,10 @@ def test_local_default_runtime_role_is_dev_monolith() -> None:
         {"NHMS_AUTH_MODE": "production"},
         {"NHMS_AUTH_MODE": "live"},
         {"NHMS_AUTH_MODE": "live_idp"},
+        {"AUTH_BACKEND": "live"},
+        {"AUTH_BACKEND": "live_idp"},
+        {"AUTH_BACKEND": "oidc"},
+        {"AUTH_BACKEND": "saml"},
     ],
 )
 def test_production_like_startup_requires_explicit_service_role(env: dict[str, str]) -> None:
@@ -49,9 +54,26 @@ def test_production_like_startup_requires_explicit_service_role(env: dict[str, s
     assert exc_info.value.details["env_var"] == "NHMS_SERVICE_ROLE"
 
 
-def test_unknown_service_role_fails_before_app_is_served() -> None:
+def test_malformed_require_service_role_fails_before_app_is_served() -> None:
     with pytest.raises(RuntimeModeError) as exc_info:
-        create_app(_clean_env({"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": "control"}))
+        create_app(_clean_env({"NHMS_REQUIRE_SERVICE_ROLE": "ture"}))
+
+    assert exc_info.value.code == "SERVICE_ROLE_REQUIRE_FLAG_INVALID"
+    assert exc_info.value.details["env_var"] == "NHMS_REQUIRE_SERVICE_ROLE"
+    assert "accepted_truthy_values" in exc_info.value.details
+    assert "accepted_falsy_values" in exc_info.value.details
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": "control"},
+        {"NHMS_SERVICE_ROLE": "control"},
+    ],
+)
+def test_unknown_service_role_fails_before_app_is_served(env: dict[str, str]) -> None:
+    with pytest.raises(RuntimeModeError) as exc_info:
+        create_app(_clean_env(env))
 
     assert exc_info.value.code == "SERVICE_ROLE_UNSUPPORTED"
     assert exc_info.value.details["service_role"] == "control"
@@ -108,6 +130,30 @@ def test_dev_and_compute_roles_keep_slurm_routes_and_runtime_config(role: str) -
     assert "/api/v1/slurm/health" in openapi["paths"]
 
 
+def test_display_route_inventory_preserves_non_slurm_business_routes() -> None:
+    display_app = create_app(_display_env())
+    compute_app = create_app(_clean_env({"NHMS_SERVICE_ROLE": "compute_control"}))
+    display_routes = _route_keys(display_app)
+    compute_routes = _route_keys(compute_app)
+    slurm_routes = {route for route in compute_routes if route[1].startswith("/api/v1/slurm/")}
+    expected_business_read_routes = {
+        ("GET", "/api/v1/models"),
+        ("GET", "/api/v1/runs"),
+        ("GET", "/api/v1/mvp/qhh/latest-product"),
+        ("GET", "/api/v1/jobs"),
+        ("GET", "/api/v1/pipeline/status"),
+        ("GET", "/api/v1/pipeline/stages"),
+        ("GET", "/api/v1/queue/depth"),
+        ("GET", "/api/v1/data-sources"),
+    }
+
+    assert slurm_routes
+    assert compute_routes - display_routes == slurm_routes
+    assert not display_routes - compute_routes
+    assert expected_business_read_routes <= display_routes
+    assert expected_business_read_routes <= compute_routes
+
+
 @pytest.mark.parametrize(
     ("env_var", "value", "expected_code"),
     [
@@ -155,3 +201,15 @@ def _route_paths(app: object, prefix: str) -> set[str]:
         for route in getattr(app, "routes", [])
         if str(getattr(route, "path", "")).startswith(prefix)
     }
+
+
+def _route_keys(app: object) -> set[tuple[str, str]]:
+    routes: set[tuple[str, str]] = set()
+    for route in getattr(app, "routes", []):
+        path = str(getattr(route, "path", ""))
+        methods = getattr(route, "methods", None)
+        if methods is None:
+            continue
+        for method in methods:
+            routes.add((str(method).upper(), path))
+    return routes
