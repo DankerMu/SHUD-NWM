@@ -49,6 +49,8 @@ tags:
     description: Raw vector and raster map tile delivery.
   - name: pipeline
     description: Forecast pipeline monitoring, jobs, logs, and queue state.
+  - name: runtime
+    description: Runtime service role and capability discovery.
   - name: flood-alerts
     description: Flood alert summaries, rankings, segments, and timelines.
   - name: lineage
@@ -1205,6 +1207,28 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/QueueDepth"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "5XX":
+          $ref: "#/components/responses/Error"
+  /api/v1/runtime/config:
+    get:
+      operationId: getRuntimeConfig
+      summary: Get runtime service configuration
+      tags: [runtime]
+      responses:
+        "200":
+          description: Runtime service configuration
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    required: [data]
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RuntimeConfig"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -3604,6 +3628,27 @@ components:
           type: integer
         idle:
           type: integer
+    RuntimeConfig:
+      type: object
+      required:
+        - service_role
+        - control_mutations_enabled
+        - slurm_routes_enabled
+        - queue_depth_mode
+        - display_readonly
+      properties:
+        service_role:
+          type: string
+          enum: [dev_monolith, compute_control, display_readonly, slurm_gateway]
+        control_mutations_enabled:
+          type: boolean
+        slurm_routes_enabled:
+          type: boolean
+        queue_depth_mode:
+          type: string
+          enum: [slurm_gateway, display_readonly_unavailable]
+        display_readonly:
+          type: boolean
     RetryRunResult:
       type: object
       required: [job_id, pipeline_job_id, run_id, retry_count, status, slurm_job_id, execution_status]

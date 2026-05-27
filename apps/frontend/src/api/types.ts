@@ -543,6 +543,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runtime/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get runtime service configuration */
+        get: operations["getRuntimeConfig"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/metrics/stage-duration": {
         parameters: {
             query?: never;
@@ -1445,6 +1462,15 @@ export interface components {
             running: number;
             pending: number;
             idle: number;
+        };
+        RuntimeConfig: {
+            /** @enum {string} */
+            service_role: "dev_monolith" | "compute_control" | "display_readonly" | "slurm_gateway";
+            control_mutations_enabled: boolean;
+            slurm_routes_enabled: boolean;
+            /** @enum {string} */
+            queue_depth_mode: "slurm_gateway" | "display_readonly_unavailable";
+            display_readonly: boolean;
         };
         RetryRunResult: {
             job_id: string;
@@ -2764,6 +2790,30 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data: components["schemas"]["QueueDepth"];
+                    };
+                };
+            };
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    getRuntimeConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime service configuration */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["RuntimeConfig"];
                     };
                 };
             };
