@@ -1448,15 +1448,20 @@ class ForecastOrchestrator:
                 }
             ),
         )
-        self._raise_publish_error_after_durable_update(submitted_publish_attempt)
-        terminal_observation = self._poll_cycle_stage_until_terminal(
-            stage=stage,
-            context=context,
-            pipeline_job_id=pipeline_job_id,
-            initial_job=submitted,
-            initial_status=submitted_status,
-            log_publication=log_publication,
-        )
+        if submitted_status in TERMINAL_JOB_STATUSES:
+            terminal_observation = TerminalJobObservation(
+                job=submitted,
+                publication_attempt=submitted_publish_attempt,
+            )
+        else:
+            terminal_observation = self._poll_cycle_stage_until_terminal(
+                stage=stage,
+                context=context,
+                pipeline_job_id=pipeline_job_id,
+                initial_job=submitted,
+                initial_status=submitted_status,
+                log_publication=log_publication,
+            )
         terminal = terminal_observation.job
         publication_attempt = terminal_observation.publication_attempt
         log_uri = str(terminal.get("log_uri") or "")
@@ -2968,16 +2973,21 @@ class ForecastOrchestrator:
         )
         if first_stage:
             self.repository.update_hydro_run_status(context.run_id, "submitted", slurm_job_id=slurm_job_id)
-        self._raise_publish_error_after_durable_update(submitted_publish_attempt)
 
-        terminal_observation = self._poll_until_terminal(
-            stage=stage,
-            context=context,
-            pipeline_job_id=pipeline_job_id,
-            initial_job=submitted,
-            initial_status=str(pipeline_record["status"]),
-            log_publication=log_publication,
-        )
+        if current_status in TERMINAL_JOB_STATUSES:
+            terminal_observation = TerminalJobObservation(
+                job=submitted,
+                publication_attempt=submitted_publish_attempt,
+            )
+        else:
+            terminal_observation = self._poll_until_terminal(
+                stage=stage,
+                context=context,
+                pipeline_job_id=pipeline_job_id,
+                initial_job=submitted,
+                initial_status=str(pipeline_record["status"]),
+                log_publication=log_publication,
+            )
         terminal = terminal_observation.job
         publication_attempt = terminal_observation.publication_attempt
         log_uri = str(terminal.get("log_uri") or "")
