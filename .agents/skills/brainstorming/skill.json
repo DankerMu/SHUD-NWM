@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "name": "brainstorming",
+  "displayName": "Brainstorming",
+  "description": "Manual-first brainstorming workflow for turning ambiguous ideas or competing directions into an approved decision before planning or implementation. Use when the user explicitly wants to brainstorm, explore options, compare approaches, or pressure-test a direction.",
+  "version": "0.2.3",
+  "maturity": "experimental",
+  "categories": [
+    "design",
+    "workflow",
+    "productivity"
+  ],
+  "tags": [
+    "brainstorming",
+    "design",
+    "ideation",
+    "decision-making",
+    "requirements",
+    "architecture"
+  ],
+  "authors": [
+    {
+      "name": "Qiongyu Li"
+    }
+  ],
+  "entrypoints": {
+    "skillDoc": "SKILL.md"
+  },
+  "capabilities": {
+    "shell": false,
+    "network": false,
+    "filesystemRead": true,
+    "filesystemWrite": true
+  }
+}

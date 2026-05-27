@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "name": "review",
+  "displayName": "Review",
+  "description": "Perform structured, agent-oriented reviews of PRs, diffs, commits, code, tests, frontend, docs, API specs, design docs, migrations, and infrastructure/config changes with severity-graded findings, behavioral-change checks, and actionable fix directions.",
+  "version": "0.5.0",
+  "maturity": "experimental",
+  "categories": [
+    "review",
+    "coding",
+    "security"
+  ],
+  "tags": [
+    "code-review",
+    "pull-request",
+    "diff",
+    "documentation",
+    "architecture",
+    "security",
+    "quality"
+  ],
+  "authors": [
+    {
+      "name": "Qiongyu Li"
+    }
+  ],
+  "entrypoints": {
+    "skillDoc": "SKILL.md",
+    "changelog": "CHANGELOG.md"
+  },
+  "requirements": {
+    "tools": [
+      "git",
+      "gh"
+    ]
+  },
+  "capabilities": {
+    "shell": true,
+    "filesystemRead": true,
+    "filesystemWrite": true
+  }
+}

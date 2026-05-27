@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "name": "gh-create-issue",
+  "displayName": "GitHub Issue Creation",
+  "description": "Create GitHub issues from PRDs, requirements, or feature descriptions, choosing between a single issue and an epic plus sub-issues using gh CLI labels and dependencies.",
+  "version": "0.1.0",
+  "maturity": "experimental",
+  "categories": [
+    "workflow",
+    "productivity",
+    "coding"
+  ],
+  "tags": [
+    "github",
+    "issues",
+    "epic",
+    "requirements",
+    "gh-cli"
+  ],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "entrypoints": {
+    "skillDoc": "SKILL.md",
+    "changelog": "CHANGELOG.md"
+  },
+  "requirements": {
+    "tools": [
+      "gh"
+    ],
+    "network": "required"
+  },
+  "capabilities": {
+    "shell": true,
+    "network": true,
+    "filesystemRead": true,
+    "filesystemWrite": false
+  }
+}

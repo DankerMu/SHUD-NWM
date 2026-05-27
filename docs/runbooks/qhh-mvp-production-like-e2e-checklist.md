@@ -1,8 +1,60 @@
 # QHH MVP 模拟生产环境 E2E 测试清单
 
-最后更新：2026-05-26  
+最后更新：2026-05-27
 适用范围：M21 QHH 水文气象展示 + 运维监控 MVP  
 推荐证据目录：`artifacts/mvp-e2e/<run_id>/`
+
+## 本次执行记录：2026-05-27 production-like E2E
+
+run_id: `qhh-mvp-e2e-20260527T004907Z`
+证据目录：`artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/`
+汇总：`artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/summary.md`
+问题清单：`docs/bugs.md`
+执行结论：`BLOCKED`，不声明 production ready。
+
+说明：本轮按清单在本地直接拉起真实 API + 静态前端，连接共享 PostgreSQL 和 Slurm live diagnostic；浏览器检查使用 `agent-browser`；未使用 API mock。现有 Playwright E2E specs 仍包含 `page.route('**/api/v1/**')`，仅作为 mocked regression，不计入 live E2E 通过证据。
+
+| 清单章节 | 本次状态 | 证据 | 复测/阻塞项 |
+| --- | --- | --- | --- |
+| 4.1 run id / 证据目录 | PASS | `environment.md`, `command_index.md`, `summary.md` | 无 |
+| 4.2 目标环境变量 | PARTIAL | `environment.md`, `storage_roots.log` | DB URL 已脱敏；`psql` CLI 缺失见 `BUG-20260527-001` |
+| 5.1 后端基础检查 | PASS | `backend/ruff.log`, `backend/backend_hydro_met_api.log`, `backend/backend_ops_api.log` | 137 + 98 tests passed |
+| 5.2 OpenSpec / OpenAPI / 前端类型 | PASS | `backend/openspec_m21.log`, `backend/openapi_lint.log`, `frontend/frontend_api_types.log` | 无 |
+| 5.3 前端单测与构建 | PASS | `frontend/frontend_unit.log`, `frontend/frontend_build.log`, `frontend/frontend_bundle.log` | 26 files / 536 tests passed；bundle check passed |
+| 6.1 数据库检查 | PARTIAL | `db/db_python_preflight.log` | DB/PostGIS/schema 通过；TimescaleDB 未启用；`alembic_version` 缺失见 `BUG-20260527-002` |
+| 6.2 对象存储和工作目录 | PASS | `storage_roots.log`, `scheduler_plan.log` | 登录节点可写；scheduler preflight 显示 compute-node-visible |
+| 6.3 Slurm 检查 | PASS | `slurm/slurm_preflight.log`, `slurm/slurm_smoke_sacct.log` | CLI smoke job `5858` completed |
+| 6.4 最小 Slurm smoke | PASS | `slurm/slurm_smoke_stdout.log`, `slurm/slurm_smoke_sacct.log` | `cn12`, exit `0:0` |
+| 计算节点 DB 访问 | PASS | `slurm/slurm_db_probe_stdout.log`, `slurm/slurm_db_probe_sacct.log` | job `5859` completed，client IP `10.0.2.112` |
+| 7.1-7.3 QHH 模型资产和基线数据 | PARTIAL | `db/qhh_baseline.log`, `db/qhh_schema_aware_counts.log`, `db/coverage_probe.log` | active model 和 386 stations 存在；清单 SQL basin id 假阴性见 `BUG-20260527-003`；segment universe 不一致见 `BUG-20260527-008` |
+| 8 GFS/IFS 气象源 E2E | PARTIAL | `db/coverage_probe.log`, `scheduler_dry_run.log` | 历史 GFS/IFS canonical/forcing/station 数据存在；本轮 scheduler 下载阶段未闭环，见 `BUG-20260527-006` |
+| 9 canonical / forcing / station series | PARTIAL | `db/coverage_probe.log`, `api/api_station_series.json` | GFS/IFS 六变量 station-series 可查；本轮新 cycle 未生成 forcing |
+| 10.1 production `plan-production` | FAIL | `scheduler_plan.log`, `scheduler_plan_compact_summary.json` | QHH-only GFS/IFS download stage 均 `SLURM_GATEWAY_ERROR` HTTP 404，见 `BUG-20260527-006` |
+| 10.1 dry-run | PARTIAL | `scheduler_dry_run.log`, `scheduler_dry_run_compact_summary.json` | dry-run 无 filters 选中 `yangtze`，且出现下载 side effect，见 `BUG-20260527-004`/`005` |
+| 10.2 pipeline job 持久化 | PARTIAL | `db/final_pipeline_jobs_snapshot.log`, `api/api_jobs_all.json` | scheduler failed jobs 已落库；历史 cycle 查询不一致见 `BUG-20260527-009` |
+| 10.3 hydro_run / river_timeseries | PARTIAL | `db/coverage_probe.log`, `api/api_forecast_series_qdown_gfs_issue.json` | 指定河段 q_down API 可查；全量 q_down 覆盖不足见 `BUG-20260527-007`/`008` |
+| 11.1 latest-product API | FAIL | `api/api_latest_product_gfs.json`, `api/api_latest_product_ifs.json` | GFS/IFS 均 `QHH_LATEST_PRODUCT_UNAVAILABLE`，见 `BUG-20260527-007` |
+| 11.2 station inventory API | PASS | `api/api_met_stations.json` | 返回 QHH stations |
+| 11.3 station-series API | PASS | `api/api_station_series.json` | 返回 6 个变量序列 |
+| 11.4 forecast-series q_down API | PASS | `api/api_forecast_series_qdown_gfs_issue.json`, `api/api_forecast_series_qdown_latest.json` | 指定样本可用；不代表全 segment 覆盖 |
+| 11.5 pipeline/status/stages/jobs/logs API | PARTIAL | `api/api_pipeline_status_gfs_00.json`, `api/api_pipeline_stages_gfs_00.json`, `api/api_jobs_gfs_00.json`, `api/api_job_logs_known_frequency.json` | jobs/stages 历史查询不一致、logs 404，见 `BUG-20260527-009`/`010` |
+| 12 `/hydro-met` 浏览器 E2E | FAIL | `browser/hydro-met.delayed.snapshot.txt`, `screenshots/hydro-met-delayed.png` | latest-product bootstrap 被阻塞，页面显示不可用，见 `BUG-20260527-007` |
+| 13 `/ops` 浏览器 E2E | PARTIAL | `browser/ops.snapshot.txt`, `browser/ops-sysadmin.snapshot.txt`, `browser/ops-scheduler-failed.snapshot.txt`, `screenshots/ops-scheduler-failed.png` | viewer 权限拒绝可见；sys_admin failed cycle 可见；日志/重试浏览器动作不完整见 `BUG-20260527-014` |
+| 14 retry / cancel E2E | PARTIAL | `api/api_retry_cycle_gfs_2026052618_operator.json`, `api/api_cancel_cycle_gfs_2026052618_operator.json`, `db/final_pipeline_jobs_snapshot.log` | RBAC 和 API 状态流可测；产生 `mock_1001/mock_1002`，不是 live Slurm receipt，见 `BUG-20260527-013` |
+| 15 负向和边界测试 | PARTIAL | `api/neg_*.json`, `api/api_summary.json` | 大部分验证稳定；operator cancel missing run 返回 200，见 `BUG-20260527-011` |
+| 16 性能和资源测试 | PARTIAL | `api/perf_api_20x_summary.json`, `slurm/slurm_smoke_sacct.log` | 可用 API 20 次循环通过；未能跑完整生产 pipeline 资源曲线 |
+| 17 权限和审计测试 | PARTIAL | `api/api_retry_cycle_gfs_2026052618_viewer.json`, `api/api_cancel_cycle_gfs_2026052618_viewer.json`, `evidence_secret_scan.log` | viewer forbidden 通过；test-mode sys_admin 不是 live IdP；证据扫描未发现 DB 明文密码，bundle 关键词为 false positive |
+| 18 证据打包 | PASS | `summary.md`, `command_index.md`, `current_evidence_listing.log` | 已生成本轮 summary |
+| 19 验收闸门 | BLOCKED | `summary.md`, `docs/bugs.md` | 未满足完整 GFS cycle、latest-product、`/hydro-met`、logs、live retry receipt |
+| 20 最终交付物 | PARTIAL | `summary.md`, `scheduler_plan_compact_summary.json`, `docs/bugs.md` | 有 blocker 列表；未形成通过结论 |
+
+补测优先级：
+
+1. 修复 Slurm Gateway HTTP 404，使 `plan-production --model-id basins_qhh_shud --basin-id basins_qhh` 能提交真实 download job。
+2. 对齐 QHH segment universe 和 q_down valid-time metadata，使 latest-product 对 GFS/IFS 至少一个源返回 200。
+3. 统一 cycle/run identity，使 `/ops` 能查到历史和新 run 的 jobs/stages/logs。
+4. 为正式 failed job 写入可读 `log_uri`，再用浏览器完成 log/retry/cancel live receipt。
+5. 新增无 `page.route` 的 live frontend E2E specs，保留现有 mocked specs 作为回归测试。
 
 ## 1. 文档目的
 

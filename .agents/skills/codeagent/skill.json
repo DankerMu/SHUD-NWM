@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "name": "codeagent",
+  "displayName": "Codeagent",
+  "description": "Execute codeagent-wrapper for multi-backend AI code tasks with Codex, Claude, and Gemini backends, file references, structured output, and parallel task execution.",
+  "version": "0.1.0",
+  "maturity": "experimental",
+  "categories": [
+    "coding",
+    "workflow",
+    "ai"
+  ],
+  "tags": [
+    "codeagent-wrapper",
+    "codex",
+    "claude",
+    "gemini",
+    "parallel"
+  ],
+  "authors": [
+    {
+      "name": "danker"
+    }
+  ],
+  "entrypoints": {
+    "skillDoc": "SKILL.md",
+    "changelog": "CHANGELOG.md"
+  },
+  "requirements": {
+    "tools": [
+      "codeagent-wrapper"
+    ],
+    "network": "optional"
+  },
+  "capabilities": {
+    "shell": true,
+    "network": true,
+    "filesystemRead": true,
+    "filesystemWrite": true
+  }
+}

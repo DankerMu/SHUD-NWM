@@ -34,6 +34,7 @@ minio-data/
 .nhms-runs/
 .nhms-workspace/
 .nhms-object-store/
+artifacts/
 .pgdata/
 .pglogs/
 .pgsocket/
