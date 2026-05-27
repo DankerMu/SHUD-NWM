@@ -512,6 +512,13 @@ class WriteFailingObjectStore(LocalObjectStore):
         return super().write_bytes_atomic(key_or_uri, content)
 
 
+class LogWriteFailingObjectStore(LocalObjectStore):
+    def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
+        if "/logs/" in key_or_uri:
+            raise OSError("log write failed")
+        return super().write_bytes_atomic(key_or_uri, content)
+
+
 class InvalidJsonForecastOrchestrator(ForecastOrchestrator):
     def _validate_forecast_runtime_manifest(
         self,
@@ -1581,6 +1588,46 @@ def test_poll_timeout_publish_failure_persists_failed_job_without_advertising_ur
     assert repository.cycle_statuses[-1] == "failed_download"
 
 
+def test_poll_timeout_legacy_log_write_failure_persists_failed_job_without_advertising_uri(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(never_terminal_stage="download")
+    object_store = LogWriteFailingObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        poll_interval_seconds=1,
+        job_timeout_seconds=1,
+    )
+    monotonic_values = iter([0.0, 0.0, 2.0, 2.0])
+    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
+
+    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log"
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    timed_out_job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert timed_out_job["status"] == "failed"
+    assert timed_out_job["error_code"] == "SLURM_JOB_TIMEOUT"
+    assert timed_out_job["log_uri"] is None
+    timeout_event = next(event for event in repository.events if event["event_type"] == "timeout")
+    assert timeout_event["status_to"] == "failed"
+    assert timeout_event["details"].get("slurm", {}).get("log_uri") is None
+    assert all(
+        event["details"].get("slurm", {}).get("log_uri") != expected
+        for event in repository.events
+    )
+    assert repository.cycle_statuses[-1] == "failed_download"
+
+
 def test_partial_array_retry_only_resubmits_failed_basin_tasks(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient(
@@ -1928,6 +1975,83 @@ def test_resume_array_status_override_publish_failure_does_not_advertise_missing
         event["details"].get("slurm", {}).get("log_uri") != expected
         for event in repository.events
     )
+
+
+def test_resume_array_status_override_legacy_log_write_failure_does_not_advertise_missing_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    run_id = "cycle_gfs_2026050100"
+    job_id = "job_cycle_gfs_2026050100_forcing"
+    repository.jobs[job_id] = {
+        "job_id": job_id,
+        "run_id": run_id,
+        "cycle_id": cycle_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3002",
+        "model_id": None,
+        "status": "running",
+        "stage": "forcing",
+        "submitted_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:03:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": None,
+    }
+    client = FakeCycleSlurmClient(array_results_by_stage={"forcing": ["succeeded", "succeeded"]})
+    client.jobs["3002"] = {
+        "job_id": "3002",
+        "run_id": run_id,
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+        "finished_at": _fmt(_dt("2026-05-01T00:04:00Z")),
+        "exit_code": 0,
+        "error_code": None,
+        "error_message": None,
+        "payload": {"tasks": [{}, {}]},
+        "stage_attempt": 0,
+    }
+    client.poll_counts["3002"] = 1
+    object_store = LogWriteFailingObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+
+    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/forcing.log"
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id=cycle_id,
+        run_id=run_id,
+        all_basins=_basins(2),
+        active_basins=_basins(2),
+        restart_stage="forcing",
+    )
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator._resume_cycle_stage(M3_STAGES[2], context, repository.jobs[job_id])
+
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert repository.jobs[job_id]["status"] == "succeeded"
+    assert repository.jobs[job_id]["exit_code"] == 0
+    assert repository.jobs[job_id]["error_code"] is None
+    assert repository.jobs[job_id]["log_uri"] is None
+    override_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == job_id and event["status_to"] == "succeeded"
+    )
+    assert override_event["details"]["slurm"].get("log_uri") is None
+    assert all(
+        event["details"].get("slurm", {}).get("log_uri") != expected
+        for event in repository.events
+    )
+    assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "forcing.log").exists()
 
 
 def test_resume_array_status_override_preserves_existing_log_uri_without_fetching_logs(
@@ -2296,6 +2420,71 @@ def test_sync_cycle_statuses_publish_failure_does_not_advertise_missing_publishe
     )
 
 
+def test_sync_cycle_statuses_legacy_log_write_failure_persists_terminal_state_without_advertising_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    job_id = "job_cycle_gfs_2026050100_forcing"
+    repository.jobs[job_id] = {
+        "job_id": job_id,
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": cycle_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3001",
+        "model_id": None,
+        "status": "running",
+        "stage": "forcing",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": None,
+    }
+    client = FakeCycleSlurmClient()
+    client.jobs["3001"] = {
+        "job_id": "3001",
+        "run_id": "cycle_gfs_2026050100",
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "payload": {},
+        "stage_attempt": 0,
+    }
+    client.poll_counts["3001"] = 1
+    object_store = LogWriteFailingObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+
+    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/forcing.log"
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.sync_cycle_statuses(cycle_id)
+
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert repository.jobs[job_id]["status"] == "succeeded"
+    assert repository.jobs[job_id]["exit_code"] == 0
+    assert repository.jobs[job_id]["error_code"] is None
+    assert repository.jobs[job_id]["log_uri"] is None
+    status_event = next(event for event in repository.events if event["event_type"] == "status_change")
+    assert status_event["status_to"] == "succeeded"
+    assert status_event["details"]["slurm"].get("log_uri") is None
+    assert all(
+        event["details"].get("slurm", {}).get("log_uri") != expected
+        for event in repository.events
+    )
+    assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "forcing.log").exists()
+
+
 def test_sync_cycle_statuses_preserves_existing_log_uri_without_fetching_logs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2399,6 +2588,42 @@ def test_direct_cycle_publish_failure_does_not_advertise_missing_published_log_u
     assert "workspace" not in exception_text
 
 
+def test_direct_cycle_legacy_log_write_failure_persists_terminal_state_before_raise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    object_store = LogWriteFailingObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log"
+    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert job["status"] == "succeeded"
+    assert job["exit_code"] == 0
+    assert job["error_code"] is None
+    assert job["log_uri"] is None
+    assert repository.cycle_statuses[-1] == "raw_complete"
+    terminal_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        and event["status_to"] == "succeeded"
+    )
+    assert terminal_event["details"]["slurm"].get("log_uri") is None
+    assert all(
+        event["details"].get("slurm", {}).get("log_uri") != expected
+        for event in repository.events
+    )
+    assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "download.log").exists()
+
+
 def test_direct_non_cycle_publish_failure_does_not_advertise_missing_published_log_uri(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2454,6 +2679,106 @@ def test_direct_non_cycle_publish_failure_does_not_advertise_missing_published_l
     assert not (tmp_path / "object-store" / "runs").exists()
 
 
+def test_direct_non_cycle_legacy_log_write_failure_persists_adjacent_state_before_raise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    object_store = LogWriteFailingObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+    context = orchestrator._build_run_context(
+        "gfs",
+        _dt("2026-05-01T00:00:00Z"),
+        ModelContext(
+            model_id="model_0",
+            basin_id="basin_0",
+            basin_version_id="basin_v0",
+            river_network_version_id="river_v0",
+            segment_count=1,
+            model_package_uri="s3://nhms/models/model_0/v1/package/",
+        ),
+        ForcingContext("forc_gfs_2026050100_model_0", "s3://nhms/forcing/gfs/2026050100/model_0/"),
+    )
+    repository.hydro_runs[context.run_id] = {"run_id": context.run_id, "status": "staged"}
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator._submit_and_wait(M3_STAGES[0], context, first_stage=True)
+
+    expected = "s3://nhms/runs/fcst_gfs_2026050100_model_0/logs/download.log"
+    job = repository.jobs["job_fcst_gfs_2026050100_model_0_download"]
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert job["status"] == "succeeded"
+    assert job["exit_code"] == 0
+    assert job["error_code"] is None
+    assert job["log_uri"] is None
+    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert repository.hydro_runs[context.run_id]["status"] == "submitted"
+    assert repository.hydro_runs[context.run_id]["slurm_job_id"] == "2001"
+    terminal_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_download"
+        and event["status_to"] == "succeeded"
+    )
+    assert terminal_event["details"]["slurm"].get("log_uri") is None
+    assert all(
+        event["details"].get("slurm", {}).get("log_uri") != expected
+        for event in repository.events
+    )
+    assert not (tmp_path / "object-store" / "runs" / "fcst_gfs_2026050100_model_0" / "logs" / "download.log").exists()
+
+
+def test_direct_non_cycle_polled_success_event_includes_readable_published_log_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published_root = tmp_path / "published"
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(published_root))
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    context = orchestrator._build_run_context(
+        "gfs",
+        _dt("2026-05-01T00:00:00Z"),
+        ModelContext(
+            model_id="model_0",
+            basin_id="basin_0",
+            basin_version_id="basin_v0",
+            river_network_version_id="river_v0",
+            segment_count=1,
+            model_package_uri="s3://nhms/models/model_0/v1/package/",
+        ),
+        ForcingContext("forc_gfs_2026050100_model_0", "s3://nhms/forcing/gfs/2026050100/model_0/"),
+    )
+    repository.hydro_runs[context.run_id] = {"run_id": context.run_id, "status": "staged"}
+
+    result = orchestrator._submit_and_wait(M3_STAGES[0], context, first_stage=True)
+
+    expected = (
+        "published://logs/gfs/2026050100/"
+        "fcst_gfs_2026050100_model_0/"
+        "job_fcst_gfs_2026050100_model_0_download.out"
+    )
+    job = repository.jobs["job_fcst_gfs_2026050100_model_0_download"]
+    terminal_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_download"
+        and event["status_to"] == "succeeded"
+    )
+    reader_result = ArtifactReader(
+        ArtifactReaderConfig(published_root=published_root)
+    ).read_text_tail(expected)
+    assert job["log_uri"] == expected
+    assert result.log_uri == expected
+    assert terminal_event["details"]["slurm"]["log_uri"] == expected
+    assert reader_result.log_uri == expected
+    assert reader_result.content == "ok"
+
+
 def test_direct_cycle_immediate_terminal_publish_failure_persists_terminal_state_before_raise(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2497,6 +2822,45 @@ def test_direct_cycle_immediate_terminal_publish_failure_persists_terminal_state
     assert client.fetch_log_calls == ["2001"]
     assert client.poll_counts["2001"] == 0
     assert not (tmp_path / "object-store" / "runs").exists()
+
+
+def test_direct_cycle_immediate_terminal_legacy_log_write_failure_persists_terminal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    repository = FakeCycleRepository()
+    client = ImmediateTerminalSlurmClient()
+    object_store = LogWriteFailingObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    expected = "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log"
+    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert job["status"] == "succeeded"
+    assert job["exit_code"] == 0
+    assert job["error_code"] is None
+    assert job["log_uri"] is None
+    assert repository.cycle_statuses[-1] == "raw_complete"
+    submission_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        and event["event_type"] == "submission"
+    )
+    assert submission_event["status_to"] == "succeeded"
+    assert submission_event["details"]["slurm"].get("log_uri") is None
+    assert all(
+        event["details"].get("slurm", {}).get("log_uri") != expected
+        for event in repository.events
+    )
+    assert client.fetch_log_calls == ["2001"]
+    assert client.poll_counts["2001"] == 0
+    assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "download.log").exists()
 
 
 def test_direct_non_cycle_immediate_terminal_publish_failure_persists_adjacent_state_before_raise(
@@ -2558,6 +2922,61 @@ def test_direct_non_cycle_immediate_terminal_publish_failure_persists_adjacent_s
     assert client.fetch_log_calls == ["2001"]
     assert client.poll_counts["2001"] == 0
     assert not (tmp_path / "object-store" / "runs").exists()
+
+
+def test_direct_non_cycle_immediate_terminal_legacy_log_write_failure_persists_adjacent_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    repository = FakeCycleRepository()
+    client = ImmediateTerminalSlurmClient()
+    object_store = LogWriteFailingObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+    context = orchestrator._build_run_context(
+        "gfs",
+        _dt("2026-05-01T00:00:00Z"),
+        ModelContext(
+            model_id="model_0",
+            basin_id="basin_0",
+            basin_version_id="basin_v0",
+            river_network_version_id="river_v0",
+            segment_count=1,
+            model_package_uri="s3://nhms/models/model_0/v1/package/",
+        ),
+        ForcingContext("forc_gfs_2026050100_model_0", "s3://nhms/forcing/gfs/2026050100/model_0/"),
+    )
+    repository.hydro_runs[context.run_id] = {"run_id": context.run_id, "status": "staged"}
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator._submit_and_wait(M3_STAGES[0], context, first_stage=True)
+
+    expected = "s3://nhms/runs/fcst_gfs_2026050100_model_0/logs/download.log"
+    job = repository.jobs["job_fcst_gfs_2026050100_model_0_download"]
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert job["status"] == "succeeded"
+    assert job["exit_code"] == 0
+    assert job["error_code"] is None
+    assert job["log_uri"] is None
+    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert repository.hydro_runs[context.run_id]["status"] == "submitted"
+    assert repository.hydro_runs[context.run_id]["slurm_job_id"] == "2001"
+    status_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_download"
+        and event["event_type"] == "status_change"
+    )
+    assert status_event["status_to"] == "succeeded"
+    assert status_event["details"]["slurm"].get("log_uri") is None
+    assert all(
+        event["details"].get("slurm", {}).get("log_uri") != expected
+        for event in repository.events
+    )
+    assert client.fetch_log_calls == ["2001"]
+    assert client.poll_counts["2001"] == 0
+    assert not (tmp_path / "object-store" / "runs" / "fcst_gfs_2026050100_model_0" / "logs" / "download.log").exists()
 
 
 def test_direct_submit_success_with_immediate_terminal_publish_root_advertises_readable_uri(

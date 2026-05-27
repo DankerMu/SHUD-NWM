@@ -415,7 +415,7 @@ class DisplayLogPublication:
 
     @property
     def requires_publish_before_advertise(self) -> bool:
-        return self.advertised_uri is None
+        return self.should_persist_logs
 
 
 @dataclass(frozen=True)
@@ -960,9 +960,7 @@ class ForecastOrchestrator:
             stage=stage,
         )
         should_persist_logs = existing_log_uri is None
-        advertised_uri = existing_log_uri or (
-            None if self._published_log_path(candidate_uri) is not None else candidate_uri
-        )
+        advertised_uri = existing_log_uri
         return DisplayLogPublication(
             candidate_uri=candidate_uri,
             advertised_uri=advertised_uri,
@@ -975,9 +973,7 @@ class ForecastOrchestrator:
             return None
         existing_log_uri = str(job["log_uri"]) if job.get("log_uri") else None
         should_persist_logs = existing_log_uri is None
-        advertised_uri = existing_log_uri or (
-            None if self._published_log_path(candidate_uri) is not None else candidate_uri
-        )
+        advertised_uri = existing_log_uri
         return DisplayLogPublication(
             candidate_uri=candidate_uri,
             advertised_uri=advertised_uri,
@@ -989,21 +985,24 @@ class ForecastOrchestrator:
     ) -> DisplayLogPublicationAttempt:
         if not publication.should_persist_logs:
             return DisplayLogPublicationAttempt(advertised_uri=publication.advertised_uri)
-        if not publication.requires_publish_before_advertise:
-            self._persist_gateway_logs(slurm_job_id, publication.candidate_uri)
-            return DisplayLogPublicationAttempt(advertised_uri=publication.candidate_uri)
         try:
             self._persist_gateway_logs(slurm_job_id, publication.candidate_uri)
-        except OrchestratorError as exc:
-            return DisplayLogPublicationAttempt(advertised_uri=publication.advertised_uri, error=exc)
-        except Exception:
-            publish_error = OrchestratorError(
-                "PUBLISHED_LOG_WRITE_FAILED",
-                "Failed to publish gateway logs.",
-                {"log_uri": publication.candidate_uri},
-            )
-            return DisplayLogPublicationAttempt(advertised_uri=publication.advertised_uri, error=publish_error)
+        except Exception as exc:
+            publish_error = self._log_persistence_error(publication.candidate_uri, exc)
+            return DisplayLogPublicationAttempt(advertised_uri=None, error=publish_error)
         return DisplayLogPublicationAttempt(advertised_uri=publication.candidate_uri)
+
+    @staticmethod
+    def _log_persistence_error(candidate_uri: str, error: Exception) -> OrchestratorError:
+        if isinstance(error, OrchestratorError) and error.error_code == "PUBLISHED_LOG_WRITE_FAILED":
+            details = dict(error.details)
+            if details.get("log_uri") == candidate_uri:
+                return error
+        return OrchestratorError(
+            "PUBLISHED_LOG_WRITE_FAILED",
+            "Failed to publish gateway logs.",
+            {"log_uri": candidate_uri},
+        )
 
     @staticmethod
     def _raise_publish_error_after_durable_update(attempt: DisplayLogPublicationAttempt | None) -> None:
@@ -1551,7 +1550,16 @@ class ForecastOrchestrator:
                     publication_attempt = self._try_publish_log_for_advertise(str(job["slurm_job_id"]), publication)
                     log_uri = publication_attempt.advertised_uri
                 elif not _published_artifact_root_configured():
-                    log_uri = self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
+                    legacy_log_uri = self.object_store.uri_for_key(f"runs/{context.run_id}/logs/{stage.stage}.log")
+                    publication_attempt = self._try_publish_log_for_advertise(
+                        str(job["slurm_job_id"]),
+                        DisplayLogPublication(
+                            candidate_uri=legacy_log_uri,
+                            advertised_uri=legacy_log_uri,
+                            should_persist_logs=True,
+                        ),
+                    )
+                    log_uri = publication_attempt.advertised_uri
                 else:
                     raise OrchestratorError(
                         "PUBLISHED_LOG_URI_UNAVAILABLE",
@@ -3142,6 +3150,7 @@ class ForecastOrchestrator:
                             "job_id": job["job_id"],
                             "state": job.get("state") or job.get("status"),
                             "exit_code": job.get("exit_code"),
+                            "log_uri": log_uri if new_status in TERMINAL_JOB_STATUSES else None,
                             "accounting": _slurm_accounting_from_payload(job),
                             "resource_metrics": _resource_metrics_from_payload(job),
                         },
@@ -3189,6 +3198,7 @@ class ForecastOrchestrator:
                             "job_id": job["job_id"],
                             "state": job.get("state") or job.get("status"),
                             "exit_code": job.get("exit_code"),
+                            "log_uri": log_uri,
                             "accounting": _slurm_accounting_from_payload(job),
                             "resource_metrics": _resource_metrics_from_payload(job),
                         },
