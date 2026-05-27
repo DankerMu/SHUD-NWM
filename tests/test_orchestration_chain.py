@@ -1538,6 +1538,47 @@ def test_poll_timeout_persists_failed_job_and_is_retry_eligible(monkeypatch, tmp
     )
 
 
+def test_poll_timeout_publish_failure_persists_failed_job_without_advertising_uri(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    publish_root_file = tmp_path / "published-as-file"
+    publish_root_file.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(publish_root_file))
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(never_terminal_stage="download")
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+        poll_interval_seconds=1,
+        job_timeout_seconds=1,
+    )
+    monotonic_values = iter([0.0, 0.0, 2.0, 2.0])
+    monkeypatch.setattr("services.orchestrator.chain.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("services.orchestrator.chain.time.sleep", lambda _seconds: None)
+
+    expected = (
+        "published://logs/gfs/2026050100/"
+        "cycle_gfs_2026050100/"
+        "job_cycle_gfs_2026050100_download.out"
+    )
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    timed_out_job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert timed_out_job["status"] == "failed"
+    assert timed_out_job["error_code"] == "SLURM_JOB_TIMEOUT"
+    assert timed_out_job["log_uri"] is None
+    timeout_event = next(event for event in repository.events if event["event_type"] == "timeout")
+    assert timeout_event["status_to"] == "failed"
+    assert timeout_event["details"].get("slurm", {}).get("log_uri") is None
+    assert repository.cycle_statuses[-1] == "failed_download"
+
+
 def test_partial_array_retry_only_resubmits_failed_basin_tasks(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient(
@@ -1871,12 +1912,93 @@ def test_resume_array_status_override_publish_failure_does_not_advertise_missing
 
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
-    assert repository.jobs[job_id]["status"] == "running"
+    assert repository.jobs[job_id]["status"] == "succeeded"
+    assert repository.jobs[job_id]["exit_code"] == 0
+    assert repository.jobs[job_id]["error_code"] is None
     assert repository.jobs[job_id]["log_uri"] is None
+    override_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == job_id and event["status_to"] == "succeeded"
+    )
+    assert override_event["details"]["slurm"].get("log_uri") is None
     assert all(
         event["details"].get("slurm", {}).get("log_uri") != expected
         for event in repository.events
     )
+
+
+def test_resume_array_status_override_preserves_existing_log_uri_without_fetching_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(tmp_path / "published"))
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    run_id = "cycle_gfs_2026050100"
+    job_id = "job_cycle_gfs_2026050100_forcing"
+    existing_log_uri = "published://logs/gfs/2026050100/existing/forcing.out"
+    repository.jobs[job_id] = {
+        "job_id": job_id,
+        "run_id": run_id,
+        "cycle_id": cycle_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3002",
+        "model_id": None,
+        "status": "running",
+        "stage": "forcing",
+        "submitted_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:03:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": existing_log_uri,
+    }
+    client = FakeCycleSlurmClient(array_results_by_stage={"forcing": ["succeeded", "succeeded"]})
+    client.jobs["3002"] = {
+        "job_id": "3002",
+        "run_id": run_id,
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+        "finished_at": _fmt(_dt("2026-05-01T00:04:00Z")),
+        "exit_code": 0,
+        "error_code": None,
+        "error_message": None,
+        "payload": {"tasks": [{}, {}]},
+        "stage_attempt": 0,
+    }
+    client.poll_counts["3002"] = 1
+
+    def fail_fetch_logs(job_id: str) -> dict[str, Any]:
+        raise AssertionError(f"existing log_uri should not be republished: {job_id}")
+
+    client.fetch_logs = fail_fetch_logs  # type: ignore[method-assign]
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id=cycle_id,
+        run_id=run_id,
+        all_basins=_basins(2),
+        active_basins=_basins(2),
+        restart_stage="forcing",
+    )
+
+    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[2], context, repository.jobs[job_id])
+
+    assert result.status == "succeeded"
+    assert result.log_uri == existing_log_uri
+    assert aggregation is not None
+    assert repository.jobs[job_id]["log_uri"] == existing_log_uri
+    override_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == job_id and event["status_to"] == "succeeded"
+    )
+    assert override_event["details"]["slurm"]["log_uri"] == existing_log_uri
 
 
 def test_partial_success_reindexes_downstream_and_keeps_partial_status(tmp_path: Path) -> None:
@@ -2159,9 +2281,76 @@ def test_sync_cycle_statuses_publish_failure_does_not_advertise_missing_publishe
 
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
-    assert repository.jobs[job_id]["status"] == "running"
+    assert repository.jobs[job_id]["status"] == "succeeded"
+    assert repository.jobs[job_id]["exit_code"] == 0
+    assert repository.jobs[job_id]["error_code"] is None
     assert repository.jobs[job_id]["log_uri"] is None
-    assert repository.events == []
+    status_event = next(event for event in repository.events if event["event_type"] == "status_change")
+    assert status_event["status_to"] == "succeeded"
+    assert status_event["details"]["slurm"].get("log_uri") is None
+    assert all(
+        event["details"].get("slurm", {}).get("log_uri") != expected
+        for event in repository.events
+    )
+
+
+def test_sync_cycle_statuses_preserves_existing_log_uri_without_fetching_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(tmp_path / "published"))
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    job_id = "job_cycle_gfs_2026050100_forcing"
+    existing_log_uri = "published://logs/gfs/2026050100/existing/job.out"
+    repository.jobs[job_id] = {
+        "job_id": job_id,
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": cycle_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3001",
+        "model_id": None,
+        "status": "running",
+        "stage": "forcing",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": existing_log_uri,
+    }
+    client = FakeCycleSlurmClient()
+    client.jobs["3001"] = {
+        "job_id": "3001",
+        "run_id": "cycle_gfs_2026050100",
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "payload": {},
+        "stage_attempt": 0,
+    }
+    client.poll_counts["3001"] = 1
+
+    def fail_fetch_logs(job_id: str) -> dict[str, Any]:
+        raise AssertionError(f"existing log_uri should not be republished: {job_id}")
+
+    client.fetch_logs = fail_fetch_logs  # type: ignore[method-assign]
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    updates = orchestrator.sync_cycle_statuses(cycle_id)
+
+    assert updates[0]["status"] == "succeeded"
+    assert updates[0]["log_uri"] == existing_log_uri
+    assert repository.jobs[job_id]["log_uri"] == existing_log_uri
+    status_event = next(event for event in repository.events if event["event_type"] == "status_change")
+    assert status_event["details"]["slurm"]["log_uri"] == existing_log_uri
 
 
 def test_direct_cycle_publish_failure_does_not_advertise_missing_published_log_uri(
@@ -2187,7 +2376,17 @@ def test_direct_cycle_publish_failure_does_not_advertise_missing_published_log_u
     job = repository.jobs["job_cycle_gfs_2026050100_download"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
+    assert job["status"] == "succeeded"
+    assert job["exit_code"] == 0
+    assert job["error_code"] is None
     assert job["log_uri"] is None
+    terminal_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_download"
+        and event["status_to"] == "succeeded"
+    )
+    assert terminal_event["details"]["slurm"].get("log_uri") is None
     assert all(
         event["details"].get("slurm", {}).get("log_uri") != expected
         for event in repository.events
@@ -2235,7 +2434,17 @@ def test_direct_non_cycle_publish_failure_does_not_advertise_missing_published_l
     job = repository.jobs["job_fcst_gfs_2026050100_model_0_download"]
     assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
     assert exc_info.value.details == {"log_uri": expected}
+    assert job["status"] == "succeeded"
+    assert job["exit_code"] == 0
+    assert job["error_code"] is None
     assert job["log_uri"] is None
+    terminal_event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_fcst_gfs_2026050100_model_0_download"
+        and event["status_to"] == "succeeded"
+    )
+    assert terminal_event["details"]["slurm"].get("log_uri") is None
     assert all(
         event["details"].get("slurm", {}).get("log_uri") != expected
         for event in repository.events
