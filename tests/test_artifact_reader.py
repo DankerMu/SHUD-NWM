@@ -37,6 +37,42 @@ def test_config_uses_canonical_env_names(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert config.tail_max_bytes == 17
 
 
+def test_env_tail_max_bytes_is_clamped_for_direct_reader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "published"
+    log_path = root / "logs" / "GFS" / "2026050100" / "run_1" / "job_1.out"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("published log", encoding="utf-8")
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(root))
+    monkeypatch.setenv("NHMS_LOG_TAIL_MAX_BYTES", str(1024 * 1024 * 1024))
+    observed_max_bytes: list[int] = []
+
+    def fake_read_tail_bytes_limited_no_follow(
+        path: Path,
+        *,
+        max_bytes: int,
+        containment_root: Path | None = None,
+    ) -> bytes:
+        del path, containment_root
+        observed_max_bytes.append(max_bytes)
+        return b"tail"
+
+    monkeypatch.setattr(
+        "services.artifacts.reader.read_tail_bytes_limited_no_follow",
+        fake_read_tail_bytes_limited_no_follow,
+    )
+
+    config = ArtifactReaderConfig.from_env()
+    result = ArtifactReader().read_text_tail("published://logs/GFS/2026050100/run_1/job_1.out")
+
+    assert config.tail_max_bytes == 1024 * 1024
+    assert observed_max_bytes == [1024 * 1024]
+    assert result.content == "tail"
+    assert result.truncated is False
+
+
 def test_published_uri_reads_bounded_tail(tmp_path: Path) -> None:
     root = tmp_path / "published"
     log_path = root / "logs" / "GFS" / "2026050100" / "run_1" / "job_1.out"

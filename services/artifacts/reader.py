@@ -60,7 +60,10 @@ class ArtifactReaderConfig:
             uri_prefix = DEFAULT_PUBLISHED_URI_PREFIX
         s3_bucket = source_env.get("NHMS_PUBLISHED_ARTIFACT_S3_BUCKET", "").strip() or None
         s3_prefix = source_env.get("NHMS_PUBLISHED_ARTIFACT_S3_PREFIX", "").strip().strip("/")
-        tail_max_bytes = _positive_int_env(source_env, "NHMS_LOG_TAIL_MAX_BYTES", DEFAULT_LOG_TAIL_MAX_BYTES)
+        tail_max_bytes = min(
+            _positive_int_env(source_env, "NHMS_LOG_TAIL_MAX_BYTES", DEFAULT_LOG_TAIL_MAX_BYTES),
+            DEFAULT_LOG_TAIL_MAX_BYTES,
+        )
         allow_local = _allow_legacy_local_file_logs(source_env, display_readonly=display_readonly)
         legacy_root = _optional_path(source_env.get("LOG_ROOT")) or Path("workspace")
         return cls(
