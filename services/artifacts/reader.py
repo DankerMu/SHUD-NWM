@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload
 from packages.common.safe_fs import SafeFilesystemError, read_tail_bytes_limited_no_follow
@@ -28,6 +28,8 @@ _CREDENTIAL_WORD_RE = re.compile(
     r"(token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|session[_-]?key|signature)",
     re.IGNORECASE,
 )
+_PUBLISHED_REDACTED_URI = "published://redacted/[redacted]"
+_PUBLISHED_LOGS_REDACTED_URI = "published://logs/[redacted]"
 
 
 class ObjectReader(Protocol):
@@ -414,6 +416,8 @@ def _strip_unsafe_uri_parts(value: str) -> str:
     except ValueError:
         return "[redacted]"
     if parsed.scheme:
+        if parsed.scheme == "published":
+            return _strip_unsafe_published_uri_parts(parsed)
         if parsed.scheme == "file":
             return "file://redacted"
         try:
@@ -437,6 +441,59 @@ def _strip_unsafe_uri_parts(value: str) -> str:
         if _local_path_needs_redaction(stripped, redact_absolute=True) or _path_has_credential_like_part(stripped)
         else stripped
     )
+
+
+def _strip_unsafe_published_uri_parts(parsed: SplitResult) -> str:
+    namespace = _published_namespace_from_parsed(parsed)
+    if namespace is None:
+        return _PUBLISHED_REDACTED_URI
+    if _published_namespace_is_public_safe(namespace):
+        return f"published://{namespace}"
+    if _published_namespace_has_logs_prefix(namespace):
+        return _PUBLISHED_LOGS_REDACTED_URI
+    return _PUBLISHED_REDACTED_URI
+
+
+def _published_namespace_from_parsed(parsed: SplitResult) -> str | None:
+    try:
+        username = parsed.username
+        password = parsed.password
+        port = parsed.port
+    except ValueError:
+        return None
+    if username or password:
+        return None
+    if parsed.netloc:
+        if port is not None:
+            return None
+        authority = parsed.hostname or parsed.netloc.rsplit("@", maxsplit=1)[-1]
+        path = parsed.path.lstrip("/")
+        return f"{authority}/{path}" if path else authority
+    return parsed.path.lstrip("/")
+
+
+def _published_namespace_is_public_safe(namespace: str) -> bool:
+    if not namespace or "%" in namespace or "\\" in namespace or _ENCODED_FORBIDDEN_RE.search(namespace):
+        return False
+    try:
+        decoded = unquote(namespace)
+    except Exception:
+        return False
+    if _contains_control_character(namespace) or _contains_control_character(decoded) or "\\" in decoded:
+        return False
+    raw_parts = namespace.split("/")
+    if any(part in {"", ".", ".."} for part in raw_parts):
+        return False
+    parts = PurePosixPath(decoded).parts
+    if not parts or parts[0] != "logs":
+        return False
+    if ".nhms-runs" in parts or _path_has_credential_like_part(namespace):
+        return False
+    return all(_SAFE_PUBLIC_SEGMENT_RE.fullmatch(part) for part in parts)
+
+
+def _published_namespace_has_logs_prefix(namespace: str) -> bool:
+    return namespace.split("/", maxsplit=1)[0] == "logs"
 
 
 def _relative_path_from_published_uri(uri: str, uri_prefix: str, *, safe_uri: str) -> Path:
@@ -709,6 +766,11 @@ def _unsafe_log_uri_summary(safe_uri: str) -> str:
         parsed = urlsplit(safe_uri)
     except ValueError:
         return "[redacted]"
+    if parsed.scheme == "published":
+        namespace = _published_namespace_from_parsed(parsed)
+        if namespace is not None and _published_namespace_has_logs_prefix(namespace):
+            return _PUBLISHED_LOGS_REDACTED_URI
+        return _PUBLISHED_REDACTED_URI
     if parsed.scheme and parsed.netloc:
         return urlunsplit((parsed.scheme, parsed.netloc, "[redacted]", "", ""))
     if parsed.scheme:

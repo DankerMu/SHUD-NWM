@@ -211,6 +211,47 @@ def test_job_logs_api_env_reader_redacts_credential_path_before_query_rejection(
     assert "?x=y" not in body
 
 
+@pytest.mark.parametrize(
+    ("uri", "reason", "unsafe"),
+    [
+        (
+            "published://token-supersecret/GFS/2026050100/run_1/job.out",
+            "credential_path_component",
+            "token-supersecret",
+        ),
+        (
+            "published://bad%00secret/GFS/2026050100/run_1/job.out",
+            "malformed_path",
+            "bad%00secret",
+        ),
+    ],
+)
+def test_job_logs_api_redacts_unsafe_published_authority_without_500(
+    tmp_path: Path,
+    monkeypatch: Any,
+    uri: str,
+    reason: str,
+    unsafe: str,
+) -> None:
+    _set_display_artifact_env(monkeypatch, published_root=tmp_path / "published", allow_legacy_local=False)
+
+    with _store() as store:
+        _create_job(store, job_id="job_unsafe_published_authority", log_uri=uri)
+        with _env_client(store) as client:
+            response = client.get("/api/v1/jobs/job_unsafe_published_authority/logs")
+
+    body = json.dumps(response.json(), sort_keys=True)
+    assert response.status_code in {400, 403}
+    assert response.json()["error"]["code"] in {"JOB_LOG_URI_UNSUPPORTED", "JOB_LOG_ACCESS_DENIED"}
+    assert response.json()["error"]["details"]["log_uri"] == "published://redacted/[redacted]"
+    assert response.json()["error"]["details"]["reason"] == reason
+    assert unsafe not in body
+    assert "GFS/2026050100/run_1/job.out" not in body
+    assert "%00" not in body
+    assert "\\u0000" not in body
+    assert "embedded null" not in body.lower()
+
+
 def test_job_logs_api_env_reader_denies_file_uri_non_logs_namespace(
     tmp_path: Path,
     monkeypatch: Any,
@@ -268,6 +309,53 @@ def test_jobs_and_stages_metadata_redacts_stale_private_log_uri(
     assert "/scratch" not in body
     assert ".nhms-runs" not in body
     assert "private.out" not in body
+
+
+def test_jobs_and_stages_metadata_redacts_stale_unsafe_published_authority(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _set_display_artifact_env(monkeypatch, published_root=tmp_path / "published", allow_legacy_local=False)
+    cycle_time = _cycle_time()
+    cycle_id = cycle_id_for("GFS", cycle_time)
+
+    with _store() as store:
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(
+            store,
+            job_id="job_secret_authority_metadata",
+            cycle_id=cycle_id,
+            stage="forecast",
+            status="failed",
+            log_uri="published://token-supersecret/GFS/2026050100/run_1/job.out",
+        )
+        _create_job(
+            store,
+            job_id="job_malformed_authority_metadata",
+            cycle_id=cycle_id,
+            stage="forecast",
+            status="failed",
+            log_uri="published://bad%00secret/GFS/2026050100/run_1/job.out",
+        )
+        with _env_client(store) as client:
+            jobs_response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "limit": 20},
+            )
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+    body = json.dumps({"jobs": jobs_response.json(), "stages": stages_response.json()}, sort_keys=True)
+    assert jobs_response.status_code == 200
+    assert stages_response.status_code == 200
+    assert "token-supersecret" not in body
+    assert "bad%00secret" not in body
+    assert "GFS/2026050100/run_1/job.out" not in body
+    assert "%00" not in body
+    assert "\\u0000" not in body
+    assert "published://redacted/[redacted]" in body
 
 
 def test_compute_pipeline_emits_published_log_uri_and_writes_published_log(

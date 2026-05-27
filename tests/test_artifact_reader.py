@@ -533,6 +533,63 @@ def test_safe_public_log_uri_redacts_credential_like_path_without_query() -> Non
 @pytest.mark.parametrize(
     "uri",
     [
+        "published://token-supersecret/GFS/2026050100/run_1/job.out",
+        "published://bad%00secret/GFS/2026050100/run_1/job.out",
+        "published://user:pass@logs/GFS/2026050100/run_1/job.out",
+    ],
+)
+def test_safe_public_log_uri_redacts_unsafe_published_authority(uri: str) -> None:
+    redacted = safe_public_log_uri(uri)
+
+    assert redacted == "published://redacted/[redacted]"
+    assert "token-supersecret" not in redacted
+    assert "bad%00secret" not in redacted
+    assert "user:pass" not in redacted
+    assert "%00" not in redacted
+
+
+@pytest.mark.parametrize(
+    ("uri", "reason", "unsafe"),
+    [
+        (
+            "published://token-supersecret/GFS/2026050100/run_1/job.out",
+            "credential_path_component",
+            "token-supersecret",
+        ),
+        (
+            "published://bad%00secret/GFS/2026050100/run_1/job.out",
+            "malformed_path",
+            "bad%00secret",
+        ),
+    ],
+)
+def test_reader_redacts_unsafe_published_authority_errors(tmp_path: Path, uri: str, reason: str, unsafe: str) -> None:
+    reader = ArtifactReader(_config(tmp_path / "published"))
+
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail(uri)
+
+    body = json.dumps(
+        {
+            "code": error.value.code,
+            "safe_uri": error.value.safe_uri,
+            "reason": error.value.reason,
+            "message": error.value.message,
+        },
+        sort_keys=True,
+    )
+    assert error.value.code == "JOB_LOG_URI_UNSUPPORTED"
+    assert error.value.status_code == 400
+    assert error.value.safe_uri == "published://redacted/[redacted]"
+    assert error.value.reason == reason
+    assert unsafe not in body
+    assert "%00" not in body
+    assert "\\u0000" not in body
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
         "/scratch/node22/.nhms-runs/run_1/job.out",
         "/tmp/nhms/job.out",
         "file:///scratch/node22/.nhms-runs/run_1/job.out",
