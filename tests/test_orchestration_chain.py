@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from packages.common.object_store import LocalObjectStore
+from services.artifacts import ArtifactReader, ArtifactReaderConfig
 from services.orchestrator.chain import (
     M3_STAGES,
     ForcingContext,
@@ -1891,8 +1892,84 @@ def test_sync_cycle_statuses_emits_published_log_uri_when_publish_root_configure
     assert updates[0]["log_uri"] == expected
     assert repository.jobs["job_cycle_gfs_2026050100_forcing"]["status"] == "succeeded"
     assert repository.jobs["job_cycle_gfs_2026050100_forcing"]["log_uri"] == expected
+    published_file = (
+        tmp_path
+        / "published"
+        / "logs"
+        / "gfs"
+        / "2026050100"
+        / "cycle_gfs_2026050100"
+        / "job_cycle_gfs_2026050100_forcing.out"
+    )
+    assert published_file.read_text(encoding="utf-8") == "ok"
+    reader_result = ArtifactReader(
+        ArtifactReaderConfig(published_root=tmp_path / "published")
+    ).read_text_tail(expected)
+    assert reader_result.content == "ok"
+    assert reader_result.log_uri == expected
     status_event = next(event for event in repository.events if event["event_type"] == "status_change")
     assert status_event["details"]["slurm"]["log_uri"] == expected
+
+
+def test_sync_cycle_statuses_publish_failure_does_not_advertise_missing_published_log_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_root_file = tmp_path / "published-as-file"
+    publish_root_file.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(publish_root_file))
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    job_id = "job_cycle_gfs_2026050100_forcing"
+    repository.jobs[job_id] = {
+        "job_id": job_id,
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": cycle_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3001",
+        "model_id": None,
+        "status": "running",
+        "stage": "forcing",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": None,
+    }
+    client = FakeCycleSlurmClient()
+    client.jobs["3001"] = {
+        "job_id": "3001",
+        "run_id": "cycle_gfs_2026050100",
+        "model_id": "model_0",
+        "stage": "forcing",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "payload": {},
+        "stage_attempt": 0,
+    }
+    client.poll_counts["3001"] = 1
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    expected = (
+        "published://logs/gfs/2026050100/"
+        "cycle_gfs_2026050100/"
+        "job_cycle_gfs_2026050100_forcing.out"
+    )
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.sync_cycle_statuses(cycle_id)
+
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert repository.jobs[job_id]["status"] == "running"
+    assert repository.jobs[job_id]["log_uri"] is None
+    assert repository.events == []
 
 
 def test_published_gateway_log_write_failure_keeps_published_uri_and_does_not_fallback_to_object_store(

@@ -750,6 +750,8 @@ class ForecastOrchestrator:
             if new_status == str(job.get("status")):
                 continue
             log_uri = self._log_uri_for_pipeline_job(job) if new_status in TERMINAL_JOB_STATUSES else None
+            if log_uri and new_status in TERMINAL_JOB_STATUSES and not job.get("log_uri"):
+                self._persist_gateway_logs(str(job["slurm_job_id"]), log_uri)
             previous_status, record = self.repository.update_pipeline_job_status(
                 str(job["job_id"]),
                 new_status,
