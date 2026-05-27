@@ -17,6 +17,16 @@ from tests.test_orchestration_chain import FakeCycleRepository, FakeCycleSlurmCl
 from workers.data_adapters.base import cycle_id_for
 
 
+class StubObjectReader:
+    def __init__(self, objects: dict[tuple[str, str], bytes]) -> None:
+        self.objects = objects
+        self.calls: list[tuple[str, str, int]] = []
+
+    def read_tail_bytes(self, bucket: str, key: str, *, max_bytes: int) -> bytes:
+        self.calls.append((bucket, key, max_bytes))
+        return self.objects[(bucket, key)][-max_bytes:]
+
+
 def test_job_logs_api_reads_published_artifact(tmp_path: Path) -> None:
     published_root = tmp_path / "published"
     log_path = published_root / "logs" / "GFS" / "2026050100" / "run_1" / "job_1.out"
@@ -34,6 +44,34 @@ def test_job_logs_api_reads_published_artifact(tmp_path: Path) -> None:
         "log_uri": "published://logs/GFS/2026050100/run_1/job_1.out",
         "content": "published api log",
     }
+
+
+def test_job_logs_api_reads_legacy_object_store_run_log_uri(tmp_path: Path) -> None:
+    log_uri = "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log"
+    object_reader = StubObjectReader({("nhms", "runs/cycle_gfs_2026050100/logs/download.log"): b"legacy api log"})
+    reader = ArtifactReader(
+        ArtifactReaderConfig(
+            published_root=tmp_path / "published",
+            s3_bucket="nhms",
+            s3_prefix="runs",
+            allow_legacy_local_file_logs=False,
+            display_readonly=True,
+        ),
+        object_reader=object_reader,
+    )
+
+    with _store() as store:
+        _create_job(store, job_id="job_legacy_s3", log_uri=log_uri)
+        with _client(store, reader) as client:
+            response = client.get("/api/v1/jobs/job_legacy_s3/logs")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "job_id": "job_legacy_s3",
+        "log_uri": log_uri,
+        "content": "legacy api log",
+    }
+    assert object_reader.calls == [("nhms", "runs/cycle_gfs_2026050100/logs/download.log", 1024 * 1024)]
 
 
 def test_job_logs_api_maps_missing_log_uri_to_not_published(tmp_path: Path) -> None:

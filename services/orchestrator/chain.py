@@ -765,6 +765,7 @@ class ForecastOrchestrator:
 
     def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
         updates: list[dict[str, Any]] = []
+        deferred_publish_attempt: DisplayLogPublicationAttempt | None = None
         for job in self._query_pipeline_jobs_by_cycle(cycle_id):
             if str(job.get("status")) in TERMINAL_JOB_STATUSES or not job.get("slurm_job_id"):
                 continue
@@ -819,7 +820,13 @@ class ForecastOrchestrator:
                 details=details,
             )
             updates.append(record)
-            self._raise_publish_error_after_durable_update(publication_attempt)
+            if (
+                deferred_publish_attempt is None
+                and publication_attempt is not None
+                and publication_attempt.error is not None
+            ):
+                deferred_publish_attempt = publication_attempt
+        self._raise_publish_error_after_durable_update(deferred_publish_attempt)
         return updates
 
     def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str = "operator_requested") -> list[dict[str, Any]]:

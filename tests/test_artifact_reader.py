@@ -431,6 +431,100 @@ def test_allowlisted_s3_without_prefix_requires_logs_prefix(tmp_path: Path) -> N
     assert object_reader.calls == [("nhms-published", "logs/GFS/2026050100/run_1/job_1.out", 1024 * 1024)]
 
 
+def test_allowlisted_s3_reads_legacy_run_log_namespace(tmp_path: Path) -> None:
+    object_reader = StubObjectReader(
+        {("nhms", "runs/cycle_gfs_2026050100/logs/download.log"): b"legacy log"}
+    )
+    reader = ArtifactReader(
+        ArtifactReaderConfig(
+            published_root=tmp_path / "published",
+            s3_bucket="nhms",
+            s3_prefix="runs",
+        ),
+        object_reader=object_reader,
+    )
+
+    result = reader.read_text_tail("s3://nhms/runs/cycle_gfs_2026050100/logs/download.log")
+
+    assert result.content == "legacy log"
+    assert object_reader.calls == [("nhms", "runs/cycle_gfs_2026050100/logs/download.log", 1024 * 1024)]
+
+
+def test_allowlisted_s3_reads_nested_legacy_run_log_namespace(tmp_path: Path) -> None:
+    object_reader = StubObjectReader(
+        {("nhms", "prod/runs/cycle_gfs_2026050100/logs/download.log"): b"nested legacy log"}
+    )
+    reader = ArtifactReader(
+        ArtifactReaderConfig(
+            published_root=tmp_path / "published",
+            s3_bucket="nhms",
+            s3_prefix="prod/runs",
+        ),
+        object_reader=object_reader,
+    )
+
+    result = reader.read_text_tail("s3://nhms/prod/runs/cycle_gfs_2026050100/logs/download.log")
+
+    assert result.content == "nested legacy log"
+    assert object_reader.calls == [("nhms", "prod/runs/cycle_gfs_2026050100/logs/download.log", 1024 * 1024)]
+
+
+def test_allowlisted_s3_reads_legacy_run_log_namespace_under_parent_prefix(tmp_path: Path) -> None:
+    object_reader = StubObjectReader(
+        {("nhms", "prod/runs/cycle_gfs_2026050100/logs/download.log"): b"parent legacy log"}
+    )
+    reader = ArtifactReader(
+        ArtifactReaderConfig(
+            published_root=tmp_path / "published",
+            s3_bucket="nhms",
+            s3_prefix="prod",
+        ),
+        object_reader=object_reader,
+    )
+
+    result = reader.read_text_tail("s3://nhms/prod/runs/cycle_gfs_2026050100/logs/download.log")
+
+    assert result.content == "parent legacy log"
+    assert object_reader.calls == [("nhms", "prod/runs/cycle_gfs_2026050100/logs/download.log", 1024 * 1024)]
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://nhms/runs/cycle_gfs_2026050100/private/download.log",
+        "s3://nhms/runs/cycle_gfs_2026050100/logs/../download.log",
+        "s3://nhms/runs/cycle_gfs_2026050100/logs/%2e%2e/download.log",
+        "s3://nhms/runs/cycle_gfs_2026050100/logs/private%2Fdownload.log",
+        "s3://nhms/runs/cycle_gfs_2026050100/logs/private%5Cdownload.log",
+        r"s3://nhms/runs/cycle_gfs_2026050100/logs/private\\download.log",
+        "s3://other/runs/cycle_gfs_2026050100/logs/download.log",
+        "s3://nhms/prod/runs/cycle_gfs_2026050100/logs/download.log",
+        "s3://user:pass@nhms/runs/cycle_gfs_2026050100/logs/download.log",
+        "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log?X-Amz-Signature=secret",
+        "s3://nhms/runs/cycle_gfs_2026050100/logs/download.log#fragment",
+    ],
+)
+def test_legacy_s3_run_log_allowlist_rejects_unsafe_or_unscoped_uris_without_read(
+    tmp_path: Path,
+    uri: str,
+) -> None:
+    object_reader = StubObjectReader()
+    reader = ArtifactReader(
+        ArtifactReaderConfig(
+            published_root=tmp_path / "published",
+            s3_bucket="nhms",
+            s3_prefix="runs",
+        ),
+        object_reader=object_reader,
+    )
+
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail(uri)
+
+    assert error.value.code in {"JOB_LOG_ACCESS_DENIED", "JOB_LOG_URI_UNSUPPORTED"}
+    assert object_reader.calls == []
+
+
 @pytest.mark.parametrize(
     "uri",
     [

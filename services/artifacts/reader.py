@@ -654,7 +654,28 @@ def _reject_credential_bearing_uri(raw_uri: str, *, safe_uri: str) -> None:
 def _s3_key_matches_prefix(key: str, prefix: str) -> bool:
     if not prefix:
         return key.startswith("logs/")
-    return key.startswith(f"{prefix}/logs/")
+    if key.startswith(f"{prefix}/logs/"):
+        return True
+    return _s3_key_matches_legacy_run_log_prefix(key, prefix)
+
+
+def _s3_key_matches_legacy_run_log_prefix(key: str, prefix: str) -> bool:
+    key_parts = PurePosixPath(key).parts
+    prefix_parts = PurePosixPath(prefix).parts
+    if not prefix_parts or key_parts[: len(prefix_parts)] != prefix_parts:
+        return False
+    legacy_parts = key_parts[len(prefix_parts) :] if prefix_parts[-1] == "runs" else key_parts[len(prefix_parts) + 1 :]
+    if prefix_parts[-1] != "runs" and (
+        len(key_parts) < len(prefix_parts) + 1 or key_parts[len(prefix_parts)] != "runs"
+    ):
+        return False
+    if len(legacy_parts) < 3 or legacy_parts[1] != "logs":
+        return False
+    run_id = legacy_parts[0]
+    log_parts = legacy_parts[2:]
+    return _SAFE_PUBLIC_SEGMENT_RE.fullmatch(run_id) is not None and all(
+        _SAFE_PUBLIC_SEGMENT_RE.fullmatch(part) is not None for part in log_parts
+    )
 
 
 def _allow_legacy_local_file_logs(env: Mapping[str, str], *, display_readonly: bool) -> bool:

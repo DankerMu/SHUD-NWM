@@ -519,6 +519,19 @@ class LogWriteFailingObjectStore(LocalObjectStore):
         return super().write_bytes_atomic(key_or_uri, content)
 
 
+class FirstLogWriteFailingObjectStore(LocalObjectStore):
+    def __init__(self, root: Path | str, object_store_prefix: str = "") -> None:
+        super().__init__(root, object_store_prefix)
+        self.log_write_calls = 0
+
+    def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
+        if "/logs/" in key_or_uri:
+            self.log_write_calls += 1
+            if self.log_write_calls == 1:
+                raise OSError("first log write failed")
+        return super().write_bytes_atomic(key_or_uri, content)
+
+
 class InvalidJsonForecastOrchestrator(ForecastOrchestrator):
     def _validate_forecast_runtime_manifest(
         self,
@@ -2483,6 +2496,94 @@ def test_sync_cycle_statuses_legacy_log_write_failure_persists_terminal_state_wi
         for event in repository.events
     )
     assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "forcing.log").exists()
+
+
+def test_sync_cycle_statuses_log_write_failure_does_not_block_terminal_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NHMS_PUBLISHED_ARTIFACT_ROOT", raising=False)
+    repository = FakeCycleRepository()
+    cycle_id = "gfs_2026050100"
+    first_job_id = "job_cycle_gfs_2026050100_forcing"
+    second_job_id = "job_cycle_gfs_2026050100_run"
+    base_job = {
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": cycle_id,
+        "model_id": None,
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": None,
+    }
+    repository.jobs[first_job_id] = {
+        **base_job,
+        "job_id": first_job_id,
+        "job_type": "produce_forcing_array",
+        "slurm_job_id": "3001",
+        "stage": "forcing",
+    }
+    repository.jobs[second_job_id] = {
+        **base_job,
+        "job_id": second_job_id,
+        "job_type": "run_forecast_array",
+        "slurm_job_id": "3002",
+        "stage": "forecast",
+        "submitted_at": _fmt(_dt("2026-05-01T00:05:00Z")),
+    }
+    client = FakeCycleSlurmClient()
+    for slurm_job_id, stage in [("3001", "forcing"), ("3002", "forecast")]:
+        client.jobs[slurm_job_id] = {
+            "job_id": slurm_job_id,
+            "run_id": "cycle_gfs_2026050100",
+            "model_id": "model_0",
+            "stage": stage,
+            "status": "running",
+            "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+            "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+            "finished_at": None,
+            "exit_code": None,
+            "error_code": None,
+            "error_message": None,
+            "payload": {},
+            "stage_attempt": 0,
+        }
+        client.poll_counts[slurm_job_id] = 1
+    object_store = FirstLogWriteFailingObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+
+    failed_uri = "s3://nhms/runs/cycle_gfs_2026050100/logs/forcing.log"
+    successful_uri = "s3://nhms/runs/cycle_gfs_2026050100/logs/forecast.log"
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.sync_cycle_statuses(cycle_id)
+
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": failed_uri}
+    assert repository.jobs[first_job_id]["status"] == "succeeded"
+    assert repository.jobs[first_job_id]["exit_code"] == 0
+    assert repository.jobs[first_job_id]["error_code"] is None
+    assert repository.jobs[first_job_id]["log_uri"] is None
+    assert repository.jobs[second_job_id]["status"] == "succeeded"
+    assert repository.jobs[second_job_id]["exit_code"] == 0
+    assert repository.jobs[second_job_id]["error_code"] is None
+    assert repository.jobs[second_job_id]["log_uri"] == successful_uri
+    events_by_job = {event["entity_id"]: event for event in repository.events if event["event_type"] == "status_change"}
+    assert events_by_job[first_job_id]["status_to"] == "succeeded"
+    assert events_by_job[first_job_id]["details"]["slurm"].get("log_uri") is None
+    assert events_by_job[second_job_id]["status_to"] == "succeeded"
+    assert events_by_job[second_job_id]["details"]["slurm"]["log_uri"] == successful_uri
+    assert all(
+        event["details"].get("slurm", {}).get("log_uri") != failed_uri
+        for event in repository.events
+    )
+    assert not (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "forcing.log").exists()
+    assert (tmp_path / "object-store" / "runs" / "cycle_gfs_2026050100" / "logs" / "forecast.log").read_text(
+        encoding="utf-8"
+    ) == "ok"
 
 
 def test_sync_cycle_statuses_preserves_existing_log_uri_without_fetching_logs(
