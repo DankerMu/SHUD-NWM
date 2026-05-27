@@ -13,7 +13,7 @@ from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from apps.api.main import app
+from apps.api.main import app, create_app
 from apps.api.routes import pipeline as pipeline_routes
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryNotFoundError, RetryService
@@ -732,6 +732,43 @@ def test_retry_api_rejects_terminal_hydro_status_without_mutation() -> None:
         assert _events(store) == []
 
 
+def test_display_retry_manual_action_does_not_mutate_pipeline_or_terminal_state(monkeypatch: Any) -> None:
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    with _store() as store:
+        _insert_hydro_run(store, "run_display_retry_state", status="failed")
+        _insert_forecast_cycle(store, "cycle_display_retry_state", status="failed_run")
+        _create_job(
+            store,
+            job_id="job_display_retry_failed",
+            run_id="run_display_retry_state",
+            cycle_id="cycle_display_retry_state",
+            status="failed",
+            error_code="NODE_FAILURE",
+        )
+        gateway = _MockGateway()
+        app = create_app(_display_env())
+        app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/runs/run_display_retry_state/retry",
+                headers=_operator_headers(),
+            )
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+        assert gateway.submissions == []
+        assert gateway.cancelled == []
+        assert [job.job_id for job in store.query_jobs_by_run("run_display_retry_state")] == [
+            "job_display_retry_failed"
+        ]
+        assert store.get_job("job_display_retry_failed").status == "failed"
+        assert _hydro_status(store, "run_display_retry_state") == "failed"
+        assert _cycle_status(store, "cycle_display_retry_state") == "failed_run"
+        assert _events(store) == []
+
+
 def test_manual_retry_uses_partial_failure_despite_later_success_when_hydro_run_failed() -> None:
     with _store() as store:
         _insert_hydro_run(store, "run_partial_then_publish", status="failed")
@@ -788,6 +825,43 @@ def test_cancel_preserves_terminal_hydro_run() -> None:
         assert response.json()["data"]["hydro_run"]["preserved"] is True
 
 
+def test_display_cancel_manual_action_does_not_mutate_pipeline_or_terminal_state(monkeypatch: Any) -> None:
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    with _store() as store:
+        _insert_hydro_run(store, "run_display_cancel_state", status="running")
+        _insert_forecast_cycle(store, "cycle_display_cancel_state", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_display_cancel_running",
+            run_id="run_display_cancel_state",
+            cycle_id="cycle_display_cancel_state",
+            status="running",
+            slurm_job_id="slurm_display_cancel",
+        )
+        gateway = _MockGateway()
+        app = create_app(_display_env())
+        app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/runs/run_display_cancel_state/cancel",
+                headers=_operator_headers(),
+            )
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+        assert gateway.submissions == []
+        assert gateway.cancelled == []
+        assert [job.job_id for job in store.query_jobs_by_run("run_display_cancel_state")] == [
+            "job_display_cancel_running"
+        ]
+        assert store.get_job("job_display_cancel_running").status == "running"
+        assert _hydro_status(store, "run_display_cancel_state") == "running"
+        assert _cycle_status(store, "cycle_display_cancel_state") == "forecast_running"
+        assert _events(store) == []
+
+
 def test_retry_nonexistent_run_raises_not_found_without_enum_write() -> None:
     with _store() as store:
         gateway = _MockGateway()
@@ -841,6 +915,13 @@ class _MockGateway:
         if job_id in self.responses:
             return self.responses[job_id]
         return {"job_id": job_id, "status": "cancelled"}
+
+
+def _display_env() -> dict[str, str]:
+    return {
+        "NHMS_REQUIRE_SERVICE_ROLE": "true",
+        "NHMS_SERVICE_ROLE": "display_readonly",
+    }
 
 
 class _client:

@@ -250,6 +250,91 @@ Non-goals:
 - Do not implement retry/cancel fail-closed behavior; that is #230.
 - Do not implement ArtifactReader, latest-product strict identity, Docker compose/image/systemd, frontend `/ops` behavior, or readonly DB validation in this issue.
 
+## Issue #230 Fixture: Display Control Mutation Guard
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: other
+
+Change surface:
+
+- `apps/api/routes/pipeline.py` retry, cancel, queue-depth dependencies and handler behavior.
+- Runtime role integration via `apps/api/runtime_mode.py` and `request.app.state.runtime_config`.
+- Backend tests for auth/RBAC ordering, no gateway construction, no DB writes, queue-depth display behavior, and compute/dev regressions.
+- Static OpenAPI/generated frontend type surfaces only if response/error contracts require schema or type changes.
+
+Must preserve:
+
+- Existing auth/RBAC ordering: unauthenticated and unauthorized callers still receive existing `401`/`403` responses before any display manual-action details.
+- Existing compute-control and dev-monolith retry/cancel behavior, including gateway submission/cancellation, retry metadata, partial cancellation handling, and audit behavior.
+- Existing compute-control and dev-monolith `/api/v1/queue/depth` gateway-backed behavior.
+- Existing public success response shapes for compute/dev retry, cancel, and queue-depth.
+
+Must add/change:
+
+- In `display_readonly`, otherwise-authorized retry and cancel calls return HTTP `409` with standard error envelope code `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`.
+- Manual-action details include safe `run_id`, `display_mode=display_readonly`, `suggested_action`, and `recovery_runbook`; they do not claim a submitted/cancelled job.
+- Display retry/cancel guards must not construct or call `get_slurm_gateway()`, must not call submit/cancel, and must not write pipeline events, pipeline jobs, hydro status, met/forecast-cycle status, or terminal state.
+- In `display_readonly`, `/api/v1/queue/depth` returns stable read-only unavailable error `CONTROL_PLANE_QUEUE_UNAVAILABLE` unless a DB-derived summary is implemented; MVP choice is stable unavailable.
+- Display queue-depth must not construct/call Slurm gateway, mock gateway, `queue_depth()`, or `list_jobs()`.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - changes public retry/cancel/queue-depth behavior by runtime role.
+- Config / project setup: selected - behavior depends on `NHMS_SERVICE_ROLE=display_readonly`.
+- File IO / path safety / overwrite: not selected - no new file reads/writes or path traversal surface.
+- Schema / columns / units / field names: selected - stable API error codes/details and OpenAPI/types must stay aligned.
+- Geospatial / CRS / shapefile sidecars: not selected - no geospatial data handling.
+- Time series / forcing / temporal boundaries: not selected - no forcing/time-series selection changes.
+- Numerical stability / conservation / NaN: not selected - no solver or numerical behavior.
+- Solver runtime / performance / threading: not selected - no solver runtime or threading behavior.
+- Resource limits / large input / discovery: not selected - no directory discovery, large reads, polling, or subprocess waits.
+- Legacy compatibility / examples: selected - compute/dev retry/cancel/queue-depth behavior must remain compatible.
+- Error handling / rollback / partial outputs: selected - display manual-action and queue-depth unavailable errors must be stable and no side effects.
+- Release / packaging / dependency compatibility: selected - Docker/display deployment depends on fail-closed backend behavior.
+- Documentation / migration notes: not selected - frontend/runbook text is owned by later issues.
+
+Invariant Matrix:
+
+- Governing invariant: A display-readonly API may reveal authorized manual recovery guidance but must never perform or prepare control-plane mutations, construct gateway dependencies, or write terminal state; compute/dev roles retain existing behavior.
+- Source-of-truth identity/contract: `request.app.state.runtime_config.service_role` after auth/RBAC succeeds for protected mutations.
+- Producers: runtime config from `apps/api/runtime_mode.py` and FastAPI app state.
+- Validators/preflight: retry/cancel auth dependencies, safe run-id validation, display guard dependency before gateway/store mutation dependencies.
+- Storage/cache/query: pipeline store, hydro/met/forecast tables, and pipeline event/job rows must remain unchanged for display retry/cancel.
+- Public routes/entrypoints: `POST /api/v1/runs/{run_id}/retry`, `POST /api/v1/runs/{run_id}/cancel`, `GET /api/v1/queue/depth`.
+- Frontend/downstream consumers: generated API types and future `/ops` UI that will consume manual-action/unavailable errors.
+- Failure paths/rollback/stale state: display guards return stable errors without partial writes; unauthorized display requests return auth errors without manual recovery details.
+- Evidence/audit/readiness: focused backend tests with gateway/store spies, state snapshots, API contract/OpenAPI drift tests, and compute/dev regression tests.
+- Regression rows:
+  - display authorized retry/cancel -> `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`, safe details, no gateway construction/calls, no DB writes/events/state changes.
+  - display unauthenticated or unauthorized retry/cancel -> existing `401`/`403`, no manual recovery details, no gateway/store mutation.
+  - display queue-depth -> `503 CONTROL_PLANE_QUEUE_UNAVAILABLE`, no gateway construction/calls.
+  - compute/dev retry/cancel/queue-depth -> existing successful and error behavior preserved.
+  - invalid `run_id` -> existing validation behavior remains stable and does not leak manual details.
+
+Boundary-surface checklist:
+
+- Shared helper roots: pipeline route dependency helpers and runtime role helper.
+- Public entrypoints: retry/cancel/queue-depth routes.
+- Read surfaces: runtime config role, auth context, existing pipeline store queries needed by compute/dev only.
+- Write/delete/overwrite surfaces: retry job/event writes, cancel job/event/hydro/forecast-cycle writes; display must not touch them.
+- Staging/publish/rollback surfaces: none.
+- Producer/consumer evidence boundaries: OpenAPI error responses, generated frontend types, future `/ops` consumer expectations.
+- Stale-state/idempotency boundaries: display retry/cancel repeated calls must remain side-effect free; compute/dev idempotency remains unchanged.
+- Unchanged downstream consumers: existing monitoring API and retry/cancel consistency tests.
+
+Required evidence:
+
+- `uv run pytest -q tests/test_runtime_mode.py tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py tests/test_api_contract.py tests/test_openapi_drift.py`: display fail-closed, auth ordering, no gateway/no-write, compute/dev regressions, OpenAPI/contract drift.
+- `uv run ruff check apps/api tests/test_runtime_mode.py tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py`: style/static verification.
+- Frontend API type check if OpenAPI/static schema changes are made, otherwise explicit no-op rationale.
+
+Non-goals:
+
+- Do not implement frontend `/ops` hiding/diagnostics; that is #235.
+- Do not implement ArtifactReader or published log reading; that is #231.
+- Do not implement Docker compose/image/systemd or readonly DB validation; those are later M22 issues.
+
 ## Migration Plan
 
 1. Add service role config and conditionally mount Slurm routes. Keep `dev_monolith` default for existing local tests.
