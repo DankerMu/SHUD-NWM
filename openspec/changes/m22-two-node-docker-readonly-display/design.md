@@ -335,6 +335,101 @@ Non-goals:
 - Do not implement ArtifactReader or published log reading; that is #231.
 - Do not implement Docker compose/image/systemd or readonly DB validation; those are later M22 issues.
 
+## Issue #231 Fixture: Published Artifact Log Writer and Reader Contract
+
+Fixture level: expanded
+Repair intensity: broad-expanded
+Project profile: other
+
+Change surface:
+
+- New `services/artifacts` reader/config/URI parsing/redaction boundary.
+- `apps/api/routes/pipeline.py` job log route and API error mapping.
+- Compute-side log URI emission/normalization in `services/orchestrator/chain.py` and any direct pipeline job persistence helpers it uses.
+- Existing object-store/storage/safe-fs helpers only where needed for shared validation or no-follow bounded reads.
+- OpenAPI/static generated frontend types only when response schema or documented error contracts require changes.
+- Backend tests for published local files, allowlisted S3, unsafe paths, credential redaction, missing objects, exact error mapping, and compute-side `log_uri` emission.
+
+Must preserve:
+
+- Existing `GET /api/v1/jobs/{job_id}/logs` success envelope shape for safe dev/local logs unless schema changes are explicitly made and generated types are updated.
+- Existing `404 JOB_NOT_FOUND` behavior when the pipeline job row does not exist.
+- Existing local/dev-monolith log usability for safe local `LOG_ROOT` paths when legacy local access is explicitly allowed.
+- Existing object-store key validation semantics for non-log artifacts unless this issue intentionally extends them for published log namespaces.
+- Existing scheduler/orchestrator job state transitions and retry/cancel behavior aside from normalizing supported log URIs.
+
+Must add/change:
+
+- Add `services/artifacts` config using canonical runtime env names `NHMS_PUBLISHED_ARTIFACT_ROOT`, `NHMS_PUBLISHED_ARTIFACT_URI_PREFIX`, `NHMS_PUBLISHED_ARTIFACT_S3_BUCKET`, `NHMS_PUBLISHED_ARTIFACT_S3_PREFIX`, and compose-only `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`.
+- Support bounded tail reads for `published://logs/...`, `file://` paths under the configured published artifact root, and `s3://` objects under the configured bucket/prefix allowlist.
+- Reject private local paths, `.nhms-runs`, 22 private `/scratch`, `/tmp`, relative local paths outside the publish root, path traversal, encoded traversal/separators, backslashes, symlink escapes, userinfo, query strings, fragments, tokens, signatures, and credential-like URI parts.
+- Migrate `/api/v1/jobs/{job_id}/logs` to `ArtifactReader` and map failures to exact stable errors: `JOB_LOG_NOT_PUBLISHED`, `JOB_LOG_URI_UNSUPPORTED`, `JOB_LOG_ACCESS_DENIED`, and `JOB_LOG_NOT_FOUND`.
+- Ensure API responses use safe public/redacted URI summaries and do not leak private absolute paths, credentials, signed query strings, or raw backend exception text.
+- Normalize newly recorded production pipeline job log URIs to a display-readable supported URI where practical, with canonical MVP form `published://logs/<source>/<cycle_time>/<run_id>/<job_id>.out|err`.
+- Gate legacy local `LOG_ROOT` fallback so `display_readonly` with `NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false` cannot read private local paths.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - changes public job log API failure contracts and safe URI metadata.
+- Config / project setup: selected - introduces canonical published artifact env and display local-file gating.
+- File IO / path safety / overwrite: selected - reader resolves local file URIs and must reject traversal, symlinks, private paths, and unsafe components.
+- Schema / columns / units / field names: selected - stable API error codes/details, possible response metadata, OpenAPI/static type alignment, and `ops.pipeline_job.log_uri` values.
+- Geospatial / CRS / shapefile sidecars: not selected - no geospatial file or CRS handling.
+- Time series / forcing / temporal boundaries: not selected - no forcing/time-series selection changes.
+- Numerical stability / conservation / NaN: not selected - no solver or numerical behavior.
+- Solver runtime / performance / threading: not selected - no solver runtime or threading behavior.
+- Resource limits / large input / discovery: selected - bounded log tail reads and no unbounded S3/local reads.
+- Legacy compatibility / examples: selected - dev/local log behavior and existing job log route compatibility must remain safe.
+- Error handling / rollback / partial outputs: selected - exact log error mapping must not depend on raw filesystem/S3 exceptions.
+- Release / packaging / dependency compatibility: selected - Docker/display deployment depends on published artifact env names and readonly log access.
+- Documentation / migration notes: not selected - Docker/runbook docs are owned by later issues except comments required to explain new env names in code/tests.
+
+Invariant Matrix:
+
+- Governing invariant: Display-readable job logs may be read only from an explicitly published artifact namespace, with bounded/redacted access, and newly produced production `log_uri` values must identify that same namespace without exposing private compute paths.
+- Source-of-truth identity/contract: normalized `PipelineJob.log_uri` plus `ArtifactReaderConfig` derived from canonical `NHMS_PUBLISHED_ARTIFACT_*` env and display local-file gating.
+- Producers: orchestrator/chain log URI emission and gateway log persistence; existing pipeline job persistence helpers that store `log_uri`.
+- Validators/preflight: URI parser, published-root resolver, S3 bucket/prefix allowlist, local-file legacy gate, credential/query/fragment rejection, traversal/encoded-separator rejection, symlink/no-follow checks, tail limit validation.
+- Storage/cache/query: `ops.pipeline_job.log_uri` rows, published artifact root files, allowlisted S3 objects, and legacy local `LOG_ROOT` only when explicitly allowed.
+- Public routes/entrypoints: `GET /api/v1/jobs/{job_id}/logs` and any compute-side job submission/status paths that set log URI.
+- Frontend/downstream consumers: generated API types and future `/ops` log diagnostics that distinguish not-published, unsupported, access-denied, and not-found failures.
+- Failure paths/rollback/stale state: unsafe/missing/unsupported logs return stable redacted errors without opening private paths or attempting unallowlisted S3 reads; publication failure must not corrupt job state.
+- Evidence/audit/readiness: artifact reader unit tests, API route tests, compute-side log URI emission tests, API contract/OpenAPI drift tests, and redaction assertions for every unsafe URI class.
+- Regression rows:
+  - `published://logs/<source>/<cycle_time>/<run_id>/<job_id>.out` under configured root -> bounded tail content, safe public `log_uri`, no private path leak.
+  - allowed `file://<published-root>/logs/...` -> bounded tail content; symlink or resolved path outside root -> `JOB_LOG_ACCESS_DENIED`.
+  - allowlisted `s3://<bucket>/<prefix>/logs/...` -> bounded tail content via mocked object reader; unallowlisted bucket/prefix -> stable forbidden/unsupported error and no read attempt.
+  - no `log_uri` -> `JOB_LOG_NOT_PUBLISHED`; unsupported scheme/private path/malformed credential-bearing URI -> stable redacted `JOB_LOG_URI_UNSUPPORTED` or `JOB_LOG_ACCESS_DENIED`.
+  - supported URI missing object -> `JOB_LOG_NOT_FOUND` without raw backend exception or credentials.
+  - oversized log -> at most `NHMS_LOG_TAIL_MAX_BYTES` returned with bounded/truncation indication when schema allows.
+  - compute-side production job emission -> newly recorded terminal/pipeline job log URI uses supported published URI or explicitly allowlisted S3 URI.
+  - dev/local legacy logs with explicit allow flag -> existing safe behavior preserved; display with `NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false` rejects private local paths.
+
+Boundary-surface checklist:
+
+- Shared helper roots: new `services/artifacts` parser/config/reader, existing `packages/common.safe_fs`, existing object-store/storage helpers if reused.
+- Public entrypoints: job logs route and compute-side pipeline job submission/status update paths that write log URI.
+- Read surfaces: published root files, allowlisted S3 objects, legacy local `LOG_ROOT` only under explicit allow conditions.
+- Write/delete/overwrite surfaces: compute-side log persistence/copy into published namespace if implemented; no delete/overwrite behavior should be added to display reader.
+- Staging/publish/rollback surfaces: gateway log fetch persistence and any object-store writes for canonical published logs.
+- Producer/consumer evidence boundaries: `ops.pipeline_job.log_uri`, API error envelope, OpenAPI/generated types, future `/ops` log UI.
+- Stale-state/idempotency boundaries: old job rows with private/unsupported `log_uri` must fail safely; repeated reads must not mutate artifacts or DB.
+- Unchanged downstream consumers: existing monitoring API tests, orchestrator chain tests, retry/cancel tests, and frontend generated API consumers.
+
+Required evidence:
+
+- `uv run pytest -q tests/test_artifact_reader.py tests/test_pipeline_logs_artifacts.py tests/test_monitoring_api.py tests/test_api_contract.py tests/test_openapi_drift.py`: artifact URI safety, API error mapping, compute-side log URI emission, legacy compatibility, OpenAPI/contract drift.
+- `uv run ruff check services/artifacts apps/api services/orchestrator tests/test_artifact_reader.py tests/test_pipeline_logs_artifacts.py`: style/static verification for touched backend paths.
+- Frontend API type generation/check if OpenAPI/static schema changes are made; otherwise explicit no-op rationale with `git diff --quiet -- openapi/nhms.v1.yaml apps/frontend/src/api/types.ts`.
+- If S3 support is implemented through a pluggable reader rather than real AWS credentials, tests must use a deterministic mock/stub and prove unallowlisted S3 does not call the reader.
+
+Non-goals:
+
+- Do not implement Docker mounts, compose files, systemd units, or two-node E2E evidence; those are later M22 issues.
+- Do not implement frontend `/ops` log UI rendering or diagnostic copy; that is #235.
+- Do not migrate historical DB rows in place; old unsupported/private rows must fail safely unless explicitly normalized by this PR.
+- Do not add real cloud credentials or network-dependent tests.
+
 ## Migration Plan
 
 1. Add service role config and conditionally mount Slurm routes. Keep `dev_monolith` default for existing local tests.
