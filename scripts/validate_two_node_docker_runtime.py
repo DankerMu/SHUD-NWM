@@ -28,6 +28,9 @@ _VAR_PATTERN = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])([^}]
 _COMPOSE_INTERPOLATION_PATTERN = re.compile(
     r"(?<!\$)\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])[^}]*)?\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
 )
+_REQUIRED_MOUNT_ENV_IDENTITY_PATTERN = re.compile(
+    r"^(?:\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<operator>:\?|\?)[^}]*)?\}|\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*))$"
+)
 
 DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
     {
@@ -38,6 +41,7 @@ DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
         "WORKSPACE_ROOT",
         "RUN_WORKSPACE_ROOT",
         "SHARED_LOG_ROOT",
+        "OBJECT_STORE_ROOT",
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
         "SHUD_EXECUTABLE",
@@ -134,11 +138,16 @@ BROAD_HOST_ROOTS = frozenset({"/", "/root", "/home", "/etc", "/run", "/var", "/s
 FORBIDDEN_MOUNT_TOKENS = frozenset(
     {
         "/etc/slurm",
+        "/etc/munge",
         "/run/munge",
+        "/var/run/munge",
+        "munge.key",
         ".nhms-runs",
         "WORKSPACE_ROOT",
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
+        "MUNGE_SOCKET",
+        "MUNGE_KEY",
     }
 )
 PREFLIGHT_COMMANDS = (
@@ -148,9 +157,31 @@ PREFLIGHT_COMMANDS = (
     ("docker_system_df", ("docker", "system", "df")),
     ("df_h", ("df", "-h")),
 )
-DISPLAY_DYNAMIC_HOSTCONFIG_FIELDS = ("privileged", "network_mode", "pid", "ipc", "cap_add", "read_only")
+DISPLAY_DYNAMIC_HOSTCONFIG_FIELDS = (
+    "privileged",
+    "network_mode",
+    "pid",
+    "ipc",
+    "cap_add",
+    "cap_drop",
+    "security_opt",
+    "read_only",
+)
 PUBLISHED_ARTIFACT_MOUNT_SOURCE_VAR = "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"
 PUBLISHED_ARTIFACT_MOUNT_TARGET_VAR = "NHMS_PUBLISHED_ARTIFACT_ROOT"
+DISPLAY_ALLOWED_TMPFS_TARGETS = frozenset({"/tmp", "/run"})
+DISPLAY_AUDITED_INTERPOLATION_ENV = frozenset(
+    {
+        "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "DATABASE_URL",
+        "NHMS_SERVICE_ROLE",
+        "NHMS_REQUIRE_SERVICE_ROLE",
+        "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS",
+        "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS",
+    }
+)
+SECRET_ENV_KEYS = frozenset({"DATABASE_URL", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID"})
 
 
 @dataclass(frozen=True)
@@ -274,6 +305,7 @@ def run_static_check(
     compute_yaml = load_compose(compute_compose)
     display_yaml = load_compose(display_compose)
 
+    findings.extend(_display_ambient_env_override_findings(display_compose, display_yaml, display_env_map))
     findings.extend(_validate_env_file(compute_env, compute_env_map, role="compute"))
     findings.extend(_validate_env_file(display_env, display_env_map, role="display"))
     findings.extend(_validate_compute_compose(compute_compose, compute_yaml, compute_env_map))
@@ -386,7 +418,7 @@ def ensure_approved_evidence_root(path: Path, repo_root: Path) -> Path:
 
 
 def write_static_report(result: StaticCheckResult, report_path: Path, repo_root: Path) -> Path:
-    report_path = _resolve_path(report_path, repo_root)
+    report_path = _resolve_output_path(report_path, repo_root)
     ensure_approved_evidence_root(report_path.parent, repo_root)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -395,7 +427,7 @@ def write_static_report(result: StaticCheckResult, report_path: Path, repo_root:
         "checked_at": _now_iso(),
         **result.to_dict(),
     }
-    report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_json_atomic_replace(report_path, payload)
     return report_path
 
 
@@ -589,6 +621,8 @@ def _compute_mount_findings(
             read_only=False,
             missing_code="COMPUTE_WORKSPACE_MOUNT_MISSING",
             readonly_code="COMPUTE_WORKSPACE_MOUNT_READONLY",
+            type_code="COMPUTE_WORKSPACE_MOUNT_TYPE_INVALID",
+            identity_code="COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID",
         )
     )
     findings.extend(
@@ -602,6 +636,8 @@ def _compute_mount_findings(
             read_only=False,
             missing_code="COMPUTE_PUBLISHED_MOUNT_MISSING",
             readonly_code="COMPUTE_PUBLISHED_MOUNT_READONLY",
+            type_code="COMPUTE_PUBLISHED_MOUNT_TYPE_INVALID",
+            identity_code="COMPUTE_PUBLISHED_MOUNT_IDENTITY_INVALID",
         )
     )
     findings.extend(
@@ -615,6 +651,8 @@ def _compute_mount_findings(
             read_only=True,
             missing_code="COMPUTE_BASINS_MOUNT_MISSING",
             readonly_code="COMPUTE_BASINS_MOUNT_WRITABLE",
+            type_code="COMPUTE_BASINS_MOUNT_TYPE_INVALID",
+            identity_code="COMPUTE_BASINS_MOUNT_IDENTITY_INVALID",
         )
     )
     findings.extend(
@@ -628,6 +666,8 @@ def _compute_mount_findings(
             read_only=True,
             missing_code="COMPUTE_MODEL_ASSET_MOUNT_MISSING",
             readonly_code="COMPUTE_MODEL_ASSET_MOUNT_WRITABLE",
+            type_code="COMPUTE_MODEL_ASSET_MOUNT_TYPE_INVALID",
+            identity_code="COMPUTE_MODEL_ASSET_MOUNT_IDENTITY_INVALID",
         )
     )
     return findings
@@ -728,6 +768,7 @@ def _validate_display_compose(
                     )
                 )
         findings.extend(_display_hostconfig_findings(path, service_name, service, env))
+        findings.extend(_display_tmpfs_findings(path, service_name, service, env))
         findings.extend(_display_mount_findings(path, service_name, service, env, compute_roots, named_volumes))
     return findings
 
@@ -833,6 +874,26 @@ def _display_hostconfig_findings(
                 service=service_name,
             )
         )
+    if not _cap_drop_all_literal(service.get("cap_drop")):
+        findings.append(
+            Finding(
+                "DISPLAY_HOSTCONFIG_CAP_DROP_INVALID",
+                "display service must literally drop all Linux capabilities with cap_drop: [ALL].",
+                path=str(path),
+                service=service_name,
+                details={"actual": service.get("cap_drop")},
+            )
+        )
+    if not _security_opt_no_new_privileges_literal(service.get("security_opt")):
+        findings.append(
+            Finding(
+                "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID",
+                "display service must literally set security_opt: [no-new-privileges:true].",
+                path=str(path),
+                service=service_name,
+                details={"actual": service.get("security_opt")},
+            )
+        )
     read_only = _compose_bool(_resolve_compose_object(service.get("read_only"), env))
     if read_only is not True:
         findings.append(
@@ -846,6 +907,49 @@ def _display_hostconfig_findings(
     return findings
 
 
+def _display_tmpfs_findings(
+    path: Path,
+    service_name: str,
+    service: Mapping[str, Any],
+    env: Mapping[str, str],
+) -> list[Finding]:
+    findings: list[Finding] = []
+    for tmpfs in _tmpfs_infos(service.get("tmpfs", []) or [], env):
+        raw_target = str(tmpfs["raw_target"])
+        target = str(tmpfs["target"])
+        if _compose_contains_interpolation(raw_target):
+            findings.append(
+                Finding(
+                    "DISPLAY_TMPFS_DYNAMIC_INTERPOLATION",
+                    "display tmpfs targets must use literal audited paths.",
+                    path=str(path),
+                    service=service_name,
+                    details={"tmpfs": tmpfs["text"], "variables": sorted(_compose_interpolation_keys(raw_target))},
+                )
+            )
+        if _targets_artifact_root_or_child(target, env):
+            findings.append(
+                Finding(
+                    "DISPLAY_TMPFS_ARTIFACT_OVERLAY",
+                    "display tmpfs entries must not overlay the published artifact root.",
+                    path=str(path),
+                    service=service_name,
+                    details={"tmpfs": tmpfs["text"], "target": target},
+                )
+            )
+        if _normalize_posix_path(target) not in DISPLAY_ALLOWED_TMPFS_TARGETS:
+            findings.append(
+                Finding(
+                    "DISPLAY_UNAPPROVED_TMPFS",
+                    "display tmpfs entries are limited to /tmp and /run.",
+                    path=str(path),
+                    service=service_name,
+                    details={"tmpfs": tmpfs["text"], "target": target},
+                )
+            )
+    return findings
+
+
 def _display_mount_findings(
     path: Path,
     service_name: str,
@@ -856,20 +960,45 @@ def _display_mount_findings(
 ) -> list[Finding]:
     findings: list[Finding] = []
     volumes = [_volume_info(volume, env) for volume in service.get("volumes", []) or []]
+    approved_artifact_volumes: list[Mapping[str, Any]] = []
     for volume in volumes:
         findings.extend(_display_mount_dynamic_interpolation_findings(path, service_name, volume, env))
-    artifact_volumes = [
-        volume
-        for volume in volumes
-        if "NHMS_PUBLISHED_ARTIFACT" in volume["text"]
-        or volume["source"]
-        in {
-            env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", ""),
-            env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
-        }
-        or volume["target"] == env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", "")
-    ]
-    if not artifact_volumes:
+        findings.extend(_display_mount_relative_path_findings(path, service_name, volume))
+        if _is_approved_display_published_mount(volume, env):
+            approved_artifact_volumes.append(volume)
+        else:
+            findings.append(
+                Finding(
+                    "DISPLAY_UNAPPROVED_MOUNT",
+                    "display service may only mount the exact readonly published artifact bind.",
+                    path=str(path),
+                    service=service_name,
+                    details={"volume": volume["text"]},
+                )
+            )
+        if _targets_artifact_root_or_child(volume["target"], env) and not _is_approved_display_published_mount(
+            volume, env
+        ):
+            findings.append(
+                Finding(
+                    "DISPLAY_ARTIFACT_OVERLAY_MOUNT",
+                    "display service must not overlay or shadow the published artifact root.",
+                    path=str(path),
+                    service=service_name,
+                    details={"volume": volume["text"], "target": volume["target"]},
+                )
+            )
+        if not volume["read_only"] and not _is_approved_display_published_mount(volume, env):
+            findings.append(
+                Finding(
+                    "DISPLAY_UNAPPROVED_WRITABLE_MOUNT",
+                    "display service must not define writable non-published mounts.",
+                    path=str(path),
+                    service=service_name,
+                    details={"volume": volume["text"], "target": volume["target"]},
+                )
+            )
+    if not approved_artifact_volumes:
         findings.append(
             Finding(
                 "DISPLAY_PUBLISHED_MOUNT_MISSING",
@@ -878,9 +1007,52 @@ def _display_mount_findings(
                 service=service_name,
             )
         )
-    for volume in artifact_volumes:
+    if len(approved_artifact_volumes) > 1:
+        findings.append(
+            Finding(
+                "DISPLAY_PUBLISHED_MOUNT_DUPLICATE",
+                "display service must have exactly one readonly published artifact bind.",
+                path=str(path),
+                service=service_name,
+                details={"count": len(approved_artifact_volumes)},
+            )
+        )
+    for volume in volumes:
+        if not _is_published_mount_candidate(volume, env):
+            continue
         expected_source = env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", "")
         expected_target = env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", "")
+        if not _raw_mount_type_is_literal_bind(volume):
+            findings.append(
+                Finding(
+                    "DISPLAY_PUBLISHED_MOUNT_TYPE_INVALID",
+                    "display published artifact mount must be a canonical bind mount.",
+                    path=str(path),
+                    service=service_name,
+                    details={"actual_type": volume["type"] or "short-form-or-implicit"},
+                )
+            )
+        identity_fields = _required_mount_identity_fields(
+            volume,
+            source_key=PUBLISHED_ARTIFACT_MOUNT_SOURCE_VAR,
+            target_key=PUBLISHED_ARTIFACT_MOUNT_TARGET_VAR,
+        )
+        if identity_fields:
+            findings.append(
+                Finding(
+                    "DISPLAY_PUBLISHED_MOUNT_IDENTITY_INVALID",
+                    "display published artifact mount must use canonical Compose env-variable identity.",
+                    path=str(path),
+                    service=service_name,
+                    details={
+                        "fields": identity_fields,
+                        "source_key": PUBLISHED_ARTIFACT_MOUNT_SOURCE_VAR,
+                        "target_key": PUBLISHED_ARTIFACT_MOUNT_TARGET_VAR,
+                        "raw_source": volume.get("raw_source", ""),
+                        "raw_target": volume.get("raw_target", ""),
+                    },
+                )
+            )
         if volume["source"] != expected_source:
             findings.append(
                 Finding(
@@ -916,6 +1088,8 @@ def _display_mount_findings(
         mount_text = "\n".join((text, volume["source"], volume["target"]))
         if any(token in mount_text for token in FORBIDDEN_MOUNT_TOKENS) or any(
             _is_docker_socket_path(part) for part in (volume["source"], volume["target"])
+        ) or any(
+            _is_munge_path(part) for part in (volume["source"], volume["target"])
         ):
             findings.append(
                 Finding(
@@ -1019,6 +1193,61 @@ def _display_mount_dynamic_interpolation_findings(
     ]
 
 
+def _display_mount_relative_path_findings(
+    path: Path,
+    service_name: str,
+    volume: Mapping[str, Any],
+) -> list[Finding]:
+    raw_source = str(volume.get("raw_source", "")).strip()
+    if not raw_source or _compose_contains_interpolation(raw_source) or not _is_relative_host_path(raw_source):
+        return []
+    return [
+        Finding(
+            "DISPLAY_RELATIVE_MOUNT_SOURCE",
+            "display bind sources must be absolute approved roots; relative paths are not allowed.",
+            path=str(path),
+            service=service_name,
+            details={
+                "volume": volume["text"],
+                "source": raw_source,
+                "resolved_from_compose": str((path.parent / raw_source).resolve()),
+            },
+        )
+    ]
+
+
+def _is_approved_display_published_mount(volume: Mapping[str, Any], env: Mapping[str, str]) -> bool:
+    return (
+        _raw_mount_type_is_literal_bind(volume)
+        and volume["source"] == env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", "")
+        and volume["target"] == env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", "")
+        and _raw_mount_field_has_canonical_identity(
+            volume.get("raw_source", ""),
+            PUBLISHED_ARTIFACT_MOUNT_SOURCE_VAR,
+        )
+        and _raw_mount_field_has_canonical_identity(
+            volume.get("raw_target", ""),
+            PUBLISHED_ARTIFACT_MOUNT_TARGET_VAR,
+        )
+        and volume["read_only"]
+    )
+
+
+def _is_published_mount_candidate(volume: Mapping[str, Any], env: Mapping[str, str]) -> bool:
+    expected_source = env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", "")
+    expected_target = env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", "")
+    return (
+        "NHMS_PUBLISHED_ARTIFACT" in volume["text"]
+        or volume["source"] in {expected_source, expected_target}
+        or _targets_artifact_root_or_child(volume["target"], env)
+    )
+
+
+def _targets_artifact_root_or_child(target: str, env: Mapping[str, str]) -> bool:
+    artifact_root = env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", "").strip()
+    return bool(artifact_root) and _is_path_equal_or_child(target, artifact_root)
+
+
 def _is_allowed_published_artifact_mount_interpolation(
     volume: Mapping[str, Any],
     env: Mapping[str, str],
@@ -1032,15 +1261,15 @@ def _is_allowed_published_artifact_mount_interpolation(
         return False
     if not volume["read_only"]:
         return False
-    if volume.get("type") not in {"", "bind"}:
+    if not _raw_mount_type_is_literal_bind(volume):
         return False
-    source_keys = _compose_interpolation_keys(volume.get("raw_source", ""))
-    target_keys = _compose_interpolation_keys(volume.get("raw_target", ""))
-    if source_keys and source_keys != {PUBLISHED_ARTIFACT_MOUNT_SOURCE_VAR}:
-        return False
-    if target_keys and target_keys != {PUBLISHED_ARTIFACT_MOUNT_TARGET_VAR}:
-        return False
-    return bool(source_keys or target_keys)
+    return _raw_mount_field_has_canonical_identity(
+        volume.get("raw_source", ""),
+        PUBLISHED_ARTIFACT_MOUNT_SOURCE_VAR,
+    ) and _raw_mount_field_has_canonical_identity(
+        volume.get("raw_target", ""),
+        PUBLISHED_ARTIFACT_MOUNT_TARGET_VAR,
+    )
 
 
 def _display_named_volume_findings(
@@ -1078,9 +1307,26 @@ def _display_named_volume_findings(
                 },
             )
         )
+    if _is_relative_host_path(raw_device):
+        findings.append(
+            Finding(
+                "DISPLAY_NAMED_VOLUME_RELATIVE_DEVICE",
+                "display named volume bind devices must not use relative host paths.",
+                path=str(path),
+                service=service_name,
+                details={
+                    "volume": volume["text"],
+                    "volume_name": volume_name,
+                    "device": raw_device,
+                    "resolved_from_compose": str((path.parent / raw_device).resolve()),
+                },
+            )
+        )
     reasons: list[dict[str, str]] = []
     if _is_docker_socket_path(device_path):
         reasons.append({"reason": "docker_socket", "path": device_path})
+    if _is_munge_path(device_path):
+        reasons.append({"reason": "munge_path", "path": device_path})
     if _is_broad_host_path(device_path):
         reasons.append({"reason": "broad_host_root", "path": device_path})
     if any(token in device_path for token in FORBIDDEN_MOUNT_TOKENS):
@@ -1089,6 +1335,8 @@ def _display_named_volume_findings(
     if matched_root:
         root_key, root_value = matched_root
         reasons.append({"reason": "compute_root", "path": device_path, "root_key": root_key, "root": root_value})
+    if _is_local_bind_volume(volume_definition):
+        reasons.append({"reason": "unapproved_named_bind", "path": device_path})
     if reasons:
         findings.append(
             Finding(
@@ -1107,6 +1355,34 @@ def _display_named_volume_findings(
     return findings
 
 
+def _raw_mount_type_is_literal_bind(volume: Mapping[str, Any]) -> bool:
+    raw_type = str(volume.get("raw_type", "")).strip()
+    return raw_type == "bind" and not _compose_contains_interpolation(raw_type)
+
+
+def _raw_mount_field_has_canonical_identity(raw_value: Any, expected_key: str) -> bool:
+    raw_text = str(raw_value).strip()
+    match = _REQUIRED_MOUNT_ENV_IDENTITY_PATTERN.fullmatch(raw_text)
+    if match is None:
+        return False
+    key = match.group("braced") or match.group("plain")
+    return key == expected_key
+
+
+def _required_mount_identity_fields(
+    volume: Mapping[str, Any],
+    *,
+    source_key: str,
+    target_key: str,
+) -> list[str]:
+    fields: list[str] = []
+    if not _raw_mount_field_has_canonical_identity(volume.get("raw_source", ""), source_key):
+        fields.append("source")
+    if not _raw_mount_field_has_canonical_identity(volume.get("raw_target", ""), target_key):
+        fields.append("target")
+    return fields
+
+
 def _require_mount(
     volumes: Sequence[dict[str, Any]],
     *,
@@ -1118,6 +1394,8 @@ def _require_mount(
     read_only: bool,
     missing_code: str,
     readonly_code: str,
+    type_code: str,
+    identity_code: str,
 ) -> list[Finding]:
     expected_source = env.get(source_key, "")
     expected_target = env.get(target_key, "")
@@ -1138,6 +1416,37 @@ def _require_mount(
         ]
     findings: list[Finding] = []
     for volume in matches:
+        if not _raw_mount_type_is_literal_bind(volume):
+            findings.append(
+                Finding(
+                    type_code,
+                    f"{target_key} mount must be a canonical bind mount.",
+                    path=str(path),
+                    service=service,
+                    details={
+                        "source_key": source_key,
+                        "target_key": target_key,
+                        "actual_type": volume["type"] or "short-form-or-implicit",
+                    },
+                )
+            )
+        identity_fields = _required_mount_identity_fields(volume, source_key=source_key, target_key=target_key)
+        if identity_fields:
+            findings.append(
+                Finding(
+                    identity_code,
+                    f"{target_key} mount must use canonical Compose env-variable identity.",
+                    path=str(path),
+                    service=service,
+                    details={
+                        "source_key": source_key,
+                        "target_key": target_key,
+                        "fields": identity_fields,
+                        "raw_source": volume.get("raw_source", ""),
+                        "raw_target": volume.get("raw_target", ""),
+                    },
+                )
+            )
         if read_only and not volume["read_only"]:
             findings.append(
                 Finding(
@@ -1224,6 +1533,35 @@ def _named_volumes(compose: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
     if not isinstance(volumes, dict):
         return {}
     return {str(name): volume for name, volume in volumes.items() if isinstance(volume, dict)}
+
+
+def _display_ambient_env_override_findings(
+    path: Path,
+    compose: Mapping[str, Any],
+    env: Mapping[str, str],
+) -> list[Finding]:
+    audited_keys = DISPLAY_AUDITED_INTERPOLATION_ENV & _compose_interpolation_keys(compose)
+    findings: list[Finding] = []
+    for key in sorted(audited_keys):
+        if key not in os.environ:
+            continue
+        process_value = os.environ[key]
+        env_file_value = env.get(key, "")
+        if process_value == env_file_value:
+            continue
+        findings.append(
+            Finding(
+                "DISPLAY_AMBIENT_ENV_OVERRIDE",
+                "ambient process environment overrides an audited display Compose interpolation variable.",
+                path=str(path),
+                details={
+                    "key": key,
+                    "env_file_value": _redact_env_value(key, env_file_value),
+                    "process_value": _redact_env_value(key, process_value),
+                },
+            )
+        )
+    return findings
 
 
 def _display_environment_list_findings(
@@ -1340,6 +1678,29 @@ def _volume_info(volume: Any, env: Mapping[str, str]) -> dict[str, Any]:
         "raw_mode": raw_mode,
         "raw_read_only": "",
     }
+
+
+def _tmpfs_infos(tmpfs_entries: Any, env: Mapping[str, str]) -> list[dict[str, str]]:
+    if isinstance(tmpfs_entries, (str, bytes)) or not isinstance(tmpfs_entries, Sequence):
+        entries = [tmpfs_entries]
+    else:
+        entries = list(tmpfs_entries)
+    infos: list[dict[str, str]] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            raw_target = str(entry.get("target", entry.get("destination", entry.get("path", ""))))
+            text = json.dumps(entry, sort_keys=True)
+        else:
+            text = str(entry)
+            raw_target = _split_compose_short_volume(text)[0] if text else ""
+        infos.append(
+            {
+                "target": _resolve_compose_value(raw_target, env),
+                "raw_target": raw_target,
+                "text": text,
+            }
+        )
+    return infos
 
 
 def _parse_short_volume(volume: str, env: Mapping[str, str]) -> tuple[str, str, str, str, str, str]:
@@ -1533,6 +1894,38 @@ def _nonempty_compose_sequence(value: Any, env: Mapping[str, str]) -> list[str]:
     return [str(value)] if str(value).strip() else []
 
 
+def _cap_drop_all_literal(value: Any) -> bool:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        return False
+    items = [str(item).strip() for item in value]
+    return items == ["ALL"] and not _compose_contains_interpolation(value)
+
+
+def _security_opt_no_new_privileges_literal(value: Any) -> bool:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        return False
+    items = [str(item).strip().lower() for item in value]
+    return "no-new-privileges:true" in items and not _compose_contains_interpolation(value)
+
+
+def _is_local_bind_volume(volume_definition: Mapping[str, Any]) -> bool:
+    driver = str(volume_definition.get("driver", "local") or "local")
+    driver_opts = volume_definition.get("driver_opts", {})
+    if driver != "local" or not isinstance(driver_opts, Mapping):
+        return False
+    option_text = " ".join(
+        str(driver_opts.get(key, ""))
+        for key in ("type", "o", "device")
+    ).lower()
+    return "bind" in option_text or "type none" in option_text or str(driver_opts.get("type", "")).lower() == "none"
+
+
+def _redact_env_value(key: str, value: str) -> str:
+    if key in SECRET_ENV_KEYS:
+        return "<redacted>" if value else ""
+    return value
+
+
 def _is_namespace_sharing_mode(value: str) -> bool:
     mode = value.strip().lower()
     return mode.startswith("service:") or mode.startswith("container:")
@@ -1570,6 +1963,36 @@ def _is_docker_socket_path(value: str) -> bool:
     return normalized in {"/var/run/docker.sock", "/run/docker.sock"} or (
         normalized.startswith("/") and normalized.endswith("/docker.sock")
     )
+
+
+def _is_munge_path(value: str) -> bool:
+    normalized = _normalize_posix_path(value)
+    if not normalized.startswith("/"):
+        return False
+    return (
+        normalized in {"/run/munge", "/var/run/munge", "/etc/munge"}
+        or normalized.startswith("/run/munge/")
+        or normalized.startswith("/var/run/munge/")
+        or normalized.startswith("/etc/munge/")
+        or normalized.endswith("/munge.key")
+        or normalized.endswith("/munge.socket")
+        or "/munge.socket." in normalized
+    )
+
+
+def _is_relative_host_path(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped or stripped.startswith("/") or stripped.startswith("$"):
+        return False
+    return stripped in {".", ".."} or stripped.startswith(("./", "../")) or "/" in stripped
+
+
+def _is_path_equal_or_child(value: str, root: str) -> bool:
+    normalized = _normalize_posix_path(value)
+    normalized_root = _normalize_posix_path(root)
+    if not normalized.startswith("/") or not normalized_root.startswith("/"):
+        return False
+    return normalized == normalized_root or normalized.startswith(f"{normalized_root.rstrip('/')}/")
 
 
 def _matching_compute_root(value: str, roots: Mapping[str, str]) -> tuple[str, str] | None:
@@ -1711,6 +2134,11 @@ def _resolve_path(path: Path, repo_root: Path) -> Path:
     return (repo_root / path).resolve()
 
 
+def _resolve_output_path(path: Path, repo_root: Path) -> Path:
+    candidate = path if path.is_absolute() else repo_root / path
+    return candidate.parent.resolve() / candidate.name
+
+
 def _is_relative_to(path: Path, parent: Path) -> bool:
     try:
         path.relative_to(parent)
@@ -1741,21 +2169,54 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _static_setup_failure_result(error: Exception) -> StaticCheckResult:
+    return StaticCheckResult(
+        status="FAIL",
+        findings=(
+            Finding(
+                "STATIC_VALIDATION_SETUP_FAILED",
+                "static validation failed before normal findings were produced.",
+                details={"error_type": type(error).__name__, "error": str(error)},
+            ),
+        ),
+    )
+
+
+def _run_static_command(args: argparse.Namespace, repo_root: Path) -> int:
+    try:
+        result = run_static_check(
+            compute_compose=args.compute_compose,
+            display_compose=args.display_compose,
+            compute_env=args.compute_env,
+            display_env=args.display_env,
+            repo_root=repo_root,
+        )
+    except Exception as error:
+        result = _static_setup_failure_result(error)
+        report_path = write_static_report(result, args.report, repo_root)
+        print(
+            json.dumps(
+                {
+                    "status": result.status,
+                    "report": str(report_path),
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
+    report_path = write_static_report(result, args.report, repo_root)
+    print(json.dumps({"status": result.status, "report": str(report_path)}, sort_keys=True))
+    return 0 if result.status == "PASS" else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     repo_root = args.repo_root.resolve()
     try:
         if args.command == "static":
-            result = run_static_check(
-                compute_compose=args.compute_compose,
-                display_compose=args.display_compose,
-                compute_env=args.compute_env,
-                display_env=args.display_env,
-                repo_root=repo_root,
-            )
-            report_path = write_static_report(result, args.report, repo_root)
-            print(json.dumps({"status": result.status, "report": str(report_path)}, sort_keys=True))
-            return 0 if result.status == "PASS" else 1
+            return _run_static_command(args, repo_root)
         if args.command == "preflight":
             result = run_preflight(
                 evidence_root=args.evidence_root,

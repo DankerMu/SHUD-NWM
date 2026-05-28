@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,12 @@ import yaml
 from scripts import validate_two_node_docker_runtime as docker_runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _clear_audited_display_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in docker_runtime.DISPLAY_AUDITED_INTERPOLATION_ENV:
+        monkeypatch.delenv(key, raising=False)
 
 
 def test_static_checker_accepts_safe_compute_and_display_skeletons() -> None:
@@ -24,6 +31,59 @@ def test_static_checker_accepts_safe_compute_and_display_skeletons() -> None:
     )
 
     assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
+
+
+@pytest.mark.parametrize("bad_input", ["display_env", "display_compose"])
+def test_static_cli_replaces_stale_pass_report_when_setup_fails(tmp_path: Path, bad_input: str) -> None:
+    repo_root = tmp_path
+    report_path = repo_root / "artifacts" / "stage-change" / "static.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "nhms.two_node_docker.static_check.v1",
+                "change_id": docker_runtime.CHANGE_ID,
+                "checked_at": "2000-01-01T00:00:00Z",
+                "status": "PASS",
+                "finding_count": 0,
+                "findings": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bad_display_env = tmp_path / "bad-display.env"
+    bad_display_env.write_text("NHMS_SERVICE_ROLE=display_readonly\nnot-a-key-value-line\n", encoding="utf-8")
+    bad_display_compose = tmp_path / "bad-compose.yml"
+    bad_display_compose.write_text("services:\n  display-api:\n    image: [unterminated\n", encoding="utf-8")
+
+    args = [
+        sys.executable,
+        str(REPO_ROOT / "scripts/validate_two_node_docker_runtime.py"),
+        "--repo-root",
+        str(repo_root),
+        "static",
+        "--compute-compose",
+        str(REPO_ROOT / "infra/compose.compute.yml"),
+        "--display-compose",
+        str(bad_display_compose if bad_input == "display_compose" else REPO_ROOT / "infra/compose.display.yml"),
+        "--compute-env",
+        str(REPO_ROOT / "infra/env/compute.example"),
+        "--display-env",
+        str(bad_display_env if bad_input == "display_env" else REPO_ROOT / "infra/env/display.example"),
+        "--report",
+        str(report_path),
+    ]
+
+    completed = subprocess.run(args, cwd=REPO_ROOT, check=False, capture_output=True, text=True)
+
+    assert completed.returncode != 0
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "nhms.two_node_docker.static_check.v1"
+    assert payload["status"] == "FAIL"
+    assert payload["checked_at"] != "2000-01-01T00:00:00Z"
+    assert payload["finding_count"] == 1
+    assert payload["findings"][0]["code"] == "STATIC_VALIDATION_SETUP_FAILED"
 
 
 def test_static_checker_rejects_forbidden_display_env(tmp_path: Path) -> None:
@@ -398,6 +458,143 @@ services:
     assert any("/tmp/runtime/docker.sock" in volume for volume in forbidden_mounts)
 
 
+def test_static_checker_rejects_extra_display_literal_bind(tmp_path: Path) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["volumes"].append(
+        {"type": "bind", "source": "/mnt/public", "target": "/extra", "read_only": True}
+    )
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert "DISPLAY_UNAPPROVED_MOUNT" in _codes(result)
+
+
+def test_static_checker_rejects_extra_display_named_bind(tmp_path: Path) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["volumes"].append("public-data:/extra:ro")
+    compose["volumes"] = {
+        "public-data": {
+            "driver": "local",
+            "driver_opts": {"type": "none", "o": "bind", "device": "/mnt/public"},
+        }
+    }
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {"DISPLAY_UNAPPROVED_MOUNT", "DISPLAY_NAMED_VOLUME_FORBIDDEN_SOURCE"}
+
+
+@pytest.mark.parametrize(
+    "volume",
+    [
+        "../../nhms-production/workspace:/workspace:ro",
+        {"type": "bind", "source": "../../../../var/run/docker.sock", "target": "/socket", "read_only": True},
+    ],
+)
+def test_static_checker_rejects_display_relative_bind_sources(tmp_path: Path, volume: Any) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["volumes"].append(volume)
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {"DISPLAY_RELATIVE_MOUNT_SOURCE", "DISPLAY_UNAPPROVED_MOUNT"}
+
+
+def test_static_checker_rejects_display_named_volume_relative_device(tmp_path: Path) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["volumes"].append("relative-workspace:/workspace:ro")
+    compose["volumes"] = {
+        "relative-workspace": {
+            "driver": "local",
+            "driver_opts": {"type": "none", "o": "bind", "device": "../../nhms-production/workspace"},
+        }
+    }
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {
+        "DISPLAY_UNAPPROVED_MOUNT",
+        "DISPLAY_NAMED_VOLUME_RELATIVE_DEVICE",
+        "DISPLAY_NAMED_VOLUME_FORBIDDEN_SOURCE",
+    }
+
+
+@pytest.mark.parametrize(
+    "volume",
+    [
+        "/etc/munge:/etc/munge:ro",
+        {"type": "bind", "source": "/tmp/munge.key", "target": "/run/secrets/munge.key", "read_only": True},
+    ],
+)
+def test_static_checker_rejects_display_munge_mounts(tmp_path: Path, volume: Any) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["volumes"].append(volume)
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {"DISPLAY_FORBIDDEN_MOUNT", "DISPLAY_UNAPPROVED_MOUNT"}
+
+
+def test_static_checker_rejects_display_named_volume_munge_key(tmp_path: Path) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["volumes"].append("munge-key:/run/secrets/munge.key:ro")
+    compose["volumes"] = {
+        "munge-key": {
+            "driver": "local",
+            "driver_opts": {"type": "none", "o": "bind", "device": "/etc/munge/munge.key"},
+        }
+    }
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {"DISPLAY_UNAPPROVED_MOUNT", "DISPLAY_NAMED_VOLUME_FORBIDDEN_SOURCE"}
+
+
+def test_static_checker_rejects_writable_display_artifact_submount(tmp_path: Path) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["volumes"].append(
+        {
+            "type": "bind",
+            "source": "/mnt/display-cache",
+            "target": "/var/lib/nhms/published/logs",
+            "read_only": False,
+        }
+    )
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {
+        "DISPLAY_UNAPPROVED_MOUNT",
+        "DISPLAY_ARTIFACT_OVERLAY_MOUNT",
+        "DISPLAY_UNAPPROVED_WRITABLE_MOUNT",
+    }
+
+
+def test_static_checker_rejects_display_tmpfs_under_artifact_root(tmp_path: Path) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["tmpfs"].append("/var/lib/nhms/published/cache:size=16m")
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert "DISPLAY_TMPFS_ARTIFACT_OVERLAY" in _codes(result)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -479,6 +676,41 @@ services:
         "DISPLAY_HOSTCONFIG_CAP_ADD",
         "DISPLAY_ROOT_FILESYSTEM_WRITABLE",
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_code"),
+    [
+        ("cap_drop", None, "DISPLAY_HOSTCONFIG_CAP_DROP_INVALID"),
+        ("cap_drop", ["NET_RAW"], "DISPLAY_HOSTCONFIG_CAP_DROP_INVALID"),
+        ("cap_drop", ["${DISPLAY_CAP_DROP:-ALL}"], "DISPLAY_HOSTCONFIG_DYNAMIC_INTERPOLATION"),
+        ("security_opt", None, "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID"),
+        ("security_opt", ["no-new-privileges:false"], "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID"),
+        (
+            "security_opt",
+            ["${DISPLAY_SECURITY_OPT:-no-new-privileges:true}"],
+            "DISPLAY_HOSTCONFIG_DYNAMIC_INTERPOLATION",
+        ),
+    ],
+)
+def test_static_checker_rejects_display_capability_hardening_drift(
+    tmp_path: Path,
+    field: str,
+    value: Any,
+    expected_code: str,
+) -> None:
+    compose = _safe_display_compose()
+    service = compose["services"]["display-api"]
+    if value is None:
+        service.pop(field)
+    else:
+        service[field] = value
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert expected_code in _codes(result)
 
 
 @pytest.mark.parametrize(
@@ -618,6 +850,53 @@ def test_static_checker_accepts_display_environment_list_literal_entries(tmp_pat
     assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
 
 
+def test_static_checker_rejects_display_env_file_object_store_root(tmp_path: Path) -> None:
+    display_env = tmp_path / "display.example"
+    display_env.write_text(
+        (REPO_ROOT / "infra/env/display.example").read_text(encoding="utf-8")
+        + "\nOBJECT_STORE_ROOT=/scratch/private/object-store\n",
+        encoding="utf-8",
+    )
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=display_env,
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert "DISPLAY_FORBIDDEN_ENV" in _codes(result)
+
+
+@pytest.mark.parametrize(
+    "environment_entry",
+    [
+        {"OBJECT_STORE_ROOT": "/scratch/private/object-store"},
+        ["OBJECT_STORE_ROOT=/scratch/private/object-store"],
+        ["${EXTRA_ENV:-OBJECT_STORE_ROOT=/scratch/private/object-store}"],
+    ],
+)
+def test_static_checker_rejects_display_service_object_store_root(
+    tmp_path: Path,
+    environment_entry: dict[str, str] | list[str],
+) -> None:
+    compose = _safe_display_compose()
+    service = compose["services"]["display-api"]
+    if isinstance(environment_entry, dict):
+        service["environment"]["OBJECT_STORE_ROOT"] = environment_entry["OBJECT_STORE_ROOT"]
+    else:
+        service["environment"] = _environment_dict_to_list(service["environment"])
+        service["environment"].extend(environment_entry)
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert "DISPLAY_FORBIDDEN_ENV" in _codes(result)
+
+
 def test_static_checker_rejects_display_hard_coded_compute_roots(tmp_path: Path) -> None:
     display_compose = tmp_path / "compose.display.yml"
     display_compose.write_text(
@@ -666,6 +945,167 @@ services:
         if finding.code == "DISPLAY_FORBIDDEN_MOUNT"
     }
     assert {"WORKSPACE_ROOT", "NHMS_BASINS_ROOT", "NHMS_MODEL_ASSET_ROOT"} <= matched_roots
+
+
+def test_static_checker_rejects_ambient_display_published_host_root_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", "/scratch/frd_muziyao/private-leak")
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert "DISPLAY_AMBIENT_ENV_OVERRIDE" in _codes(result)
+
+
+def test_static_checker_rejects_compute_workspace_volume_mount_type(tmp_path: Path) -> None:
+    compose = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
+    for service in compose["services"].values():
+        for volume in service["volumes"]:
+            if volume.get("target") == "${WORKSPACE_ROOT:?set compute workspace root}":
+                volume["type"] = "volume"
+    compute_compose = tmp_path / "compose.compute.yml"
+    compute_compose.write_text(yaml.safe_dump(compose, sort_keys=False), encoding="utf-8")
+
+    result = docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert "COMPUTE_WORKSPACE_MOUNT_TYPE_INVALID" in _codes(result)
+
+
+def test_static_checker_rejects_compute_published_volume_mount_type(tmp_path: Path) -> None:
+    compose = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
+    for service in compose["services"].values():
+        for volume in service["volumes"]:
+            if volume.get("target") == "${NHMS_PUBLISHED_ARTIFACT_ROOT:?set container published artifact root}":
+                volume["type"] = "volume"
+    compute_compose = tmp_path / "compose.compute.yml"
+    compute_compose.write_text(yaml.safe_dump(compose, sort_keys=False), encoding="utf-8")
+
+    result = docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert "COMPUTE_PUBLISHED_MOUNT_TYPE_INVALID" in _codes(result)
+
+
+def test_static_checker_rejects_display_published_volume_mount_type(tmp_path: Path) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["volumes"][0]["type"] = "volume"
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {"DISPLAY_PUBLISHED_MOUNT_TYPE_INVALID", "DISPLAY_PUBLISHED_MOUNT_MISSING"}
+
+
+def test_static_checker_rejects_display_published_mount_literal_identity(tmp_path: Path) -> None:
+    env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/display.example")
+    compose = _safe_display_compose()
+    volume = compose["services"]["display-api"]["volumes"][0]
+    volume["source"] = env["NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"]
+    volume["target"] = env["NHMS_PUBLISHED_ARTIFACT_ROOT"]
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert "DISPLAY_PUBLISHED_MOUNT_IDENTITY_INVALID" in _codes(result)
+    identity_findings = [
+        finding for finding in result.findings if finding.code == "DISPLAY_PUBLISHED_MOUNT_IDENTITY_INVALID"
+    ]
+    assert set(identity_findings[0].details["fields"]) == {"source", "target"}
+
+
+@pytest.mark.parametrize(
+    ("source_key", "target_key", "expected_code"),
+    [
+        ("WORKSPACE_ROOT", "WORKSPACE_ROOT", "COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID"),
+        (
+            "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT",
+            "NHMS_PUBLISHED_ARTIFACT_ROOT",
+            "COMPUTE_PUBLISHED_MOUNT_IDENTITY_INVALID",
+        ),
+        ("NHMS_BASINS_ROOT", "NHMS_BASINS_ROOT", "COMPUTE_BASINS_MOUNT_IDENTITY_INVALID"),
+        ("NHMS_MODEL_ASSET_ROOT", "NHMS_MODEL_ASSET_ROOT", "COMPUTE_MODEL_ASSET_MOUNT_IDENTITY_INVALID"),
+    ],
+)
+def test_static_checker_rejects_compute_required_mount_literal_identity(
+    tmp_path: Path,
+    source_key: str,
+    target_key: str,
+    expected_code: str,
+) -> None:
+    env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")
+    compose = _safe_compute_compose()
+    _mutate_compute_required_mount(
+        compose,
+        target_key=target_key,
+        values={
+            "source": env[source_key],
+            "target": env[target_key],
+        },
+    )
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert expected_code in _codes(result)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_code"),
+    [
+        ("type", "${COMPUTE_WORKSPACE_MOUNT_TYPE:-bind}", "COMPUTE_WORKSPACE_MOUNT_TYPE_INVALID"),
+        (
+            "source",
+            "${COMPUTE_WORKSPACE_MOUNT_SOURCE:-/scratch/frd_muziyao/nhms-production/workspace}",
+            "COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID",
+        ),
+        (
+            "target",
+            "${COMPUTE_WORKSPACE_MOUNT_TARGET:-/scratch/frd_muziyao/nhms-production/workspace}",
+            "COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID",
+        ),
+    ],
+)
+def test_static_checker_rejects_compute_required_mount_dynamic_identity(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    expected_code: str,
+) -> None:
+    compose = _safe_compute_compose()
+    _mutate_compute_required_mount(
+        compose,
+        target_key="WORKSPACE_ROOT",
+        values={field: value},
+    )
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert expected_code in _codes(result)
 
 
 def test_static_checker_rejects_compute_api_missing_required_env_and_mounts(tmp_path: Path) -> None:
@@ -830,6 +1270,25 @@ def test_evidence_roots_reject_repo_config_paths_and_allow_approved_roots(tmp_pa
         docker_runtime.ensure_approved_evidence_root(tmp_path / "outside", other_repo)
 
 
+def test_static_report_replaces_output_symlink_without_writing_target(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    target = repo_root / "infra" / "env" / "display.example"
+    target.parent.mkdir(parents=True)
+    target.write_text("unchanged config\n", encoding="utf-8")
+    report_path = repo_root / "artifacts" / "static" / "static-compose-env-check.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.symlink_to(target)
+    result = docker_runtime.StaticCheckResult(status="PASS", findings=())
+
+    written_path = docker_runtime.write_static_report(result, report_path, repo_root)
+
+    assert written_path == report_path
+    assert report_path.is_file()
+    assert not report_path.is_symlink()
+    assert target.read_text(encoding="utf-8") == "unchanged config\n"
+    assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "PASS"
+
+
 def test_preflight_defaults_tmpdir_to_repo_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = tmp_path
     evidence_root = repo_root / "artifacts" / "preflight"
@@ -935,6 +1394,30 @@ def _safe_display_compose() -> dict[str, Any]:
     return docker_runtime.load_compose(REPO_ROOT / "infra/compose.display.yml")
 
 
+def _safe_compute_compose() -> dict[str, Any]:
+    return docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
+
+
+def _mutate_compute_required_mount(
+    compose: dict[str, Any],
+    *,
+    target_key: str,
+    values: dict[str, str],
+) -> None:
+    for service in compose["services"].values():
+        for volume in service["volumes"]:
+            if isinstance(volume, dict) and target_key in str(volume.get("target", "")):
+                volume.update(values)
+                return
+    raise AssertionError(f"required compute mount for {target_key} not found")
+
+
+def _write_compute_compose(tmp_path: Path, compose: dict[str, Any]) -> Path:
+    compute_compose = tmp_path / "compose.compute.yml"
+    compute_compose.write_text(yaml.safe_dump(compose, sort_keys=False), encoding="utf-8")
+    return compute_compose
+
+
 def _write_display_compose(tmp_path: Path, compose: dict[str, Any]) -> Path:
     display_compose = tmp_path / "compose.display.yml"
     display_compose.write_text(yaml.safe_dump(compose, sort_keys=False), encoding="utf-8")
@@ -949,6 +1432,16 @@ def _run_display_static_check(display_compose: Path) -> docker_runtime.StaticChe
     return docker_runtime.run_static_check(
         compute_compose=Path("infra/compose.compute.yml"),
         display_compose=display_compose,
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+
+def _run_compute_static_check(compute_compose: Path) -> docker_runtime.StaticCheckResult:
+    return docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=Path("infra/compose.display.yml"),
         compute_env=Path("infra/env/compute.example"),
         display_env=Path("infra/env/display.example"),
         repo_root=REPO_ROOT,

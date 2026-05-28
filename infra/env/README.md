@@ -39,9 +39,23 @@ Display role, node 27:
   `NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false`, readonly `DATABASE_URL`, and a
   readonly published artifact mount.
 - Forbidden: `SLURM_GATEWAY_URL`, `SLURM_GATEWAY_BACKEND`, `WORKSPACE_ROOT`,
-  `NHMS_BASINS_ROOT`, `NHMS_MODEL_ASSET_ROOT`, `SHUD_EXECUTABLE`,
-  `/etc/slurm`, `/run/munge`, `.nhms-runs`, `/var/run/docker.sock`, and 22
+  `OBJECT_STORE_ROOT`, `NHMS_BASINS_ROOT`, `NHMS_MODEL_ASSET_ROOT`,
+  `SHUD_EXECUTABLE`, `/etc/slurm`, `/run/munge`, `/var/run/munge`,
+  `/etc/munge`, `munge.key`, `.nhms-runs`, `/var/run/docker.sock`, and 22
   private `/scratch` mounts.
+- The display compose filesystem surface is a strict allowlist: exactly one
+  `type: bind` mount from `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT` to
+  `NHMS_PUBLISHED_ARTIFACT_ROOT`, marked read-only. Extra binds, named
+  volumes, relative bind sources, local named-volume bind devices, and tmpfs
+  entries below the published artifact root are validation failures.
+- The display service must keep `read_only: true`, `cap_drop: [ALL]`, and
+  `security_opt: [no-new-privileges:true]` as literal compose values.
+- Run static validation from the same shell used for compose rendering. Ambient
+  process environment overrides for audited display interpolation variables
+  such as `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`,
+  `DATABASE_URL`, and display role flags are treated as static failures when
+  they are used for display compose interpolation and differ from the display
+  env file.
 
 Validation commands:
 
