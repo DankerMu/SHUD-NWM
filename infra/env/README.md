@@ -34,7 +34,7 @@ Compute role, node 22:
 Display role, node 27:
 
 - Required: `NHMS_SERVICE_ROLE=display_readonly`,
-  `NHMS_REQUIRE_SERVICE_ROLE=true`,
+  `NHMS_REQUIRE_SERVICE_ROLE=true`, `NHMS_AUTH_MODE=production`,
   `NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true`,
   `NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false`, readonly `DATABASE_URL`, and a
   readonly published artifact mount.
@@ -47,15 +47,20 @@ Display role, node 27:
   `type: bind` mount from `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT` to
   `NHMS_PUBLISHED_ARTIFACT_ROOT`, marked read-only. Extra binds, named
   volumes, relative bind sources, local named-volume bind devices, and tmpfs
-  entries below the published artifact root are validation failures.
+  entries below the published artifact root are validation failures. Display
+  `configs`, `secrets`, `devices`, `device_cgroup_rules`, and
+  `device_requests` are not allowed.
 - The display service must keep `read_only: true`, `cap_drop: [ALL]`, and
-  `security_opt: [no-new-privileges:true]` as literal compose values.
+  exactly `security_opt: [no-new-privileges:true]` as literal compose values.
 - Run static validation from the same shell used for compose rendering. Ambient
-  process environment overrides for audited display interpolation variables
-  such as `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`,
-  `DATABASE_URL`, and display role flags are treated as static failures when
-  they are used for display compose interpolation and differ from the display
-  env file.
+  process environment overrides for any compute or display compose
+  interpolation variable are treated as static failures when that variable is
+  present in the corresponding env file and the process value differs. This
+  covers mount roots, image/tag/user/port variables, `DATABASE_URL`,
+  `NHMS_AUTH_MODE`, published artifact metadata, and role/safety flags.
+  Display audited runtime env keys must be literal values or interpolate through
+  their same canonical env key; null imports and alias variables such as
+  `DISPLAY_DATABASE_URL` are rejected.
 
 Validation commands:
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -16,8 +17,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
-def _clear_audited_display_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for key in docker_runtime.DISPLAY_AUDITED_INTERPOLATION_ENV:
+def _clear_audited_compose_ambient_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    audited_keys = (
+        docker_runtime.COMPUTE_AUDITED_INTERPOLATION_ENV
+        | docker_runtime.DISPLAY_AUDITED_INTERPOLATION_ENV
+        | set(docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example"))
+        | set(docker_runtime.parse_env_file(REPO_ROOT / "infra/env/display.example"))
+    )
+    for key in audited_keys:
         monkeypatch.delenv(key, raising=False)
 
 
@@ -31,6 +38,36 @@ def test_static_checker_accepts_safe_compute_and_display_skeletons() -> None:
     )
 
     assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
+
+
+def test_docker_compose_examples_render_when_cli_is_available() -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("docker CLI is not available")
+
+    commands = [
+        ["docker", "compose", "--env-file", "infra/env/compute.example", "-f", "infra/compose.compute.yml", "config"],
+        ["docker", "compose", "--env-file", "infra/env/display.example", "-f", "infra/compose.display.yml", "config"],
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            "infra/env/compute.example",
+            "--profile",
+            "manual",
+            "-f",
+            "infra/compose.compute.yml",
+            "config",
+        ],
+    ]
+    for command in commands:
+        completed = subprocess.run(command, cwd=REPO_ROOT, check=False, capture_output=True, text=True)
+        if completed.returncode != 0 and (
+            "not a docker command" in completed.stderr
+            or "unknown command" in completed.stderr
+            or "unknown shorthand flag" in completed.stderr
+        ):
+            pytest.skip("docker compose plugin is not available")
+        assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize("bad_input", ["display_env", "display_compose"])
@@ -309,6 +346,79 @@ services:
 
     assert result.status == "FAIL"
     assert _codes(result) >= {"DISPLAY_ENV_FILE_UNSUPPORTED", "DISPLAY_VOLUMES_FROM_UNSUPPORTED"}
+
+
+@pytest.mark.parametrize("surface", ["configs", "secrets"])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/etc/slurm/slurm.conf",
+        "/etc/munge/munge.key",
+        "/run/munge/munge.socket",
+        "/extra/config",
+    ],
+)
+def test_static_checker_rejects_display_configs_and_secrets(
+    tmp_path: Path,
+    surface: str,
+    target: str,
+) -> None:
+    compose = _safe_display_compose()
+    service = compose["services"]["display-api"]
+    source_name = f"{surface[:-1]}_fixture"
+    service[surface] = [{"source": source_name, "target": target}]
+    compose[surface] = {source_name: {"file": f"/host{target}"}}
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    expected_code = "DISPLAY_CONFIG_UNSUPPORTED" if surface == "configs" else "DISPLAY_SECRET_UNSUPPORTED"
+    assert result.status == "FAIL"
+    assert expected_code in _codes(result)
+    findings = [finding for finding in result.findings if finding.code == expected_code]
+    assert findings[0].details["target"] == target
+    assert findings[0].details["top_level"]["file"] == f"/host{target}"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_code"),
+    [
+        ("devices", ["/dev/sda:/dev/sda:r"], "DISPLAY_HOST_DEVICE_UNSUPPORTED"),
+        ("devices", ["${DISPLAY_DEVICE:-/dev/kmsg:/dev/kmsg:r}"], "DISPLAY_HOST_DEVICE_UNSUPPORTED"),
+        ("device_cgroup_rules", ["c 1:3 rmw"], "DISPLAY_DEVICE_CGROUP_RULE_UNSUPPORTED"),
+        (
+            "device_cgroup_rules",
+            ["${DISPLAY_DEVICE_RULE:-c 1:3 rmw}"],
+            "DISPLAY_DEVICE_CGROUP_RULE_UNSUPPORTED",
+        ),
+        (
+            "device_requests",
+            [{"driver": "nvidia", "count": 1, "capabilities": [["gpu"]]}],
+            "DISPLAY_DEVICE_REQUEST_UNSUPPORTED",
+        ),
+        (
+            "device_requests",
+            [{"driver": "${DISPLAY_DEVICE_DRIVER:-nvidia}", "count": 1, "capabilities": [["gpu"]]}],
+            "DISPLAY_DEVICE_REQUEST_UNSUPPORTED",
+        ),
+    ],
+)
+def test_static_checker_rejects_display_device_ingress_surfaces(
+    tmp_path: Path,
+    field: str,
+    value: Any,
+    expected_code: str,
+) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"][field] = value
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert expected_code in _codes(result)
+    if "${" in str(value):
+        assert "DISPLAY_HOSTCONFIG_DYNAMIC_INTERPOLATION" in _codes(result)
 
 
 @pytest.mark.parametrize(
@@ -688,6 +798,26 @@ services:
         ("security_opt", ["no-new-privileges:false"], "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID"),
         (
             "security_opt",
+            ["no-new-privileges:true", "seccomp=unconfined"],
+            "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID",
+        ),
+        (
+            "security_opt",
+            ["no-new-privileges:true", "apparmor=unconfined"],
+            "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID",
+        ),
+        (
+            "security_opt",
+            ["no-new-privileges:true", "label:disable"],
+            "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID",
+        ),
+        (
+            "security_opt",
+            ["no-new-privileges:true", "no-new-privileges:false"],
+            "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID",
+        ),
+        (
+            "security_opt",
             ["${DISPLAY_SECURITY_OPT:-no-new-privileges:true}"],
             "DISPLAY_HOSTCONFIG_DYNAMIC_INTERPOLATION",
         ),
@@ -962,6 +1092,160 @@ def test_static_checker_rejects_ambient_display_published_host_root_override(
 
     assert result.status == "FAIL"
     assert "DISPLAY_AMBIENT_ENV_OVERRIDE" in _codes(result)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("WORKSPACE_ROOT", "/scratch/frd_muziyao/ambient-workspace"),
+        ("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", "/scratch/frd_muziyao/ambient-published"),
+        ("NHMS_BASINS_ROOT", "/volume/data/nwm/ambient-basins"),
+        ("NHMS_MODEL_ASSET_ROOT", "/volume/data/nwm/ambient-model-assets"),
+        ("DATABASE_URL", "postgresql://ambient-writer:change-me@db.internal.example:5432/nhms"),
+        ("NHMS_AUTH_MODE", "dev"),
+        ("NHMS_APP_IMAGE", "ambient-app"),
+        ("NHMS_IMAGE_TAG", "ambient-tag"),
+        ("NHMS_CONTAINER_UID", "4242"),
+        ("NHMS_CONTAINER_GID", "4242"),
+        ("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "other://"),
+        ("NHMS_PUBLISHED_ARTIFACT_S3_BUCKET", "ambient-bucket"),
+        ("NHMS_PUBLISHED_ARTIFACT_S3_PREFIX", "ambient-prefix"),
+    ],
+)
+def test_static_checker_rejects_compute_ambient_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(key, value)
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_AMBIENT_ENV_OVERRIDE" and finding.details["key"] == key
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("NHMS_APP_IMAGE", "ambient-display-app"),
+        ("NHMS_IMAGE_TAG", "ambient-display-tag"),
+        ("NHMS_CONTAINER_UID", "5252"),
+        ("NHMS_CONTAINER_GID", "5252"),
+        ("NHMS_DISPLAY_API_PORT", "18000"),
+        ("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", "/scratch/frd_muziyao/display-private-leak"),
+        ("NHMS_PUBLISHED_ARTIFACT_ROOT", "/wrong/container/published"),
+        ("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "other://"),
+        ("NHMS_PUBLISHED_ARTIFACT_S3_BUCKET", "other-bucket"),
+        ("NHMS_PUBLISHED_ARTIFACT_S3_PREFIX", "other-prefix"),
+        ("NHMS_AUTH_MODE", "dev"),
+        ("DATABASE_URL", "postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms"),
+    ],
+)
+def test_static_checker_rejects_display_ambient_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(key, value)
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "DISPLAY_AMBIENT_ENV_OVERRIDE" and finding.details["key"] == key
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("env_key", "value", "alias_key", "process_value"),
+    [
+        (
+            "DATABASE_URL",
+            "${DISPLAY_DATABASE_URL:-postgresql://nhms_display_ro:change-me@db.internal.example:5432/nhms}",
+            "DISPLAY_DATABASE_URL",
+            "postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms",
+        ),
+        (
+            "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS",
+            "${DISPLAY_MUTATIONS_DISABLED:-true}",
+            "DISPLAY_MUTATIONS_DISABLED",
+            "false",
+        ),
+    ],
+)
+def test_static_checker_rejects_display_critical_env_alias_interpolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_key: str,
+    value: str,
+    alias_key: str,
+    process_value: str,
+) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["environment"][env_key] = value
+    display_compose = _write_display_compose(tmp_path, compose)
+    monkeypatch.setenv(alias_key, process_value)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "DISPLAY_RUNTIME_ENV_ALIAS_INTERPOLATION" and finding.details["key"] == env_key
+        for finding in result.findings
+    )
+
+
+def test_static_checker_rejects_display_critical_env_literal_drift(tmp_path: Path) -> None:
+    compose = _safe_display_compose()
+    service_env = compose["services"]["display-api"]["environment"]
+    service_env["DATABASE_URL"] = "postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms"
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "DISPLAY_RUNTIME_ENV_LITERAL_DRIFT" and finding.details["key"] == "DATABASE_URL"
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    "env_key",
+    sorted(docker_runtime.DISPLAY_AUDITED_RUNTIME_ENV),
+)
+def test_static_checker_rejects_display_required_env_null_imports(
+    tmp_path: Path,
+    env_key: str,
+) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["environment"][env_key] = None
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "DISPLAY_RUNTIME_ENV_NULL_IMPORT" and finding.details["key"] == env_key
+        for finding in result.findings
+    )
 
 
 def test_static_checker_rejects_compute_workspace_volume_mount_type(tmp_path: Path) -> None:
