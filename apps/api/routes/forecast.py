@@ -7,7 +7,11 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Query, Request
 
 from apps.api.errors import ApiError
-from packages.common.forecast_store import ForecastStoreError, PsycopgForecastStore
+from packages.common.forecast_store import (
+    QHH_LATEST_REFLECTED_VALUE_LIMIT,
+    ForecastStoreError,
+    PsycopgForecastStore,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["forecast"])
 
@@ -205,7 +209,7 @@ def _validate_qhh_latest_identity_query(
             details=[
                 {
                     "field": "query.source",
-                    "rejected_value": source,
+                    "rejected_value": None if source is None else _bounded_qhh_latest_reflected_value(source),
                     "reason": "source is required.",
                 }
             ],
@@ -216,23 +220,79 @@ def _validate_qhh_latest_identity_query(
         if field not in raw_fields or value is None or str(value).strip() == ""
     ]
     if not missing_fields:
+        _validate_qhh_latest_exact_text_field("run_id", run_id)
+        _validate_qhh_latest_exact_text_field("model_id", model_id)
+        _validate_qhh_latest_cycle_time(cycle_time)
         return
     provided_fields = [
         field
         for field, value in fields.items()
         if field in raw_fields and value is not None and str(value).strip() != ""
     ]
+    details: dict[str, Any] = {
+        "missing_fields": missing_fields,
+        "provided_fields": provided_fields,
+        "required_fields": ["source", "run_id", "cycle_time", "model_id"],
+        "strict_identity_required": True,
+    }
+    rejected_values = {
+        field: _bounded_qhh_latest_reflected_value(value)
+        for field, value in fields.items()
+        if field in missing_fields and field in raw_fields and value is not None
+    }
+    if rejected_values:
+        details["rejected_values"] = rejected_values
     raise ApiError(
         status_code=422,
         code="VALIDATION_ERROR",
         message="source, run_id, cycle_time, and model_id are required when using strict latest-product identity.",
+        details=details,
+    )
+
+
+def _validate_qhh_latest_exact_text_field(field: str, value: str | None) -> None:
+    text = str(value or "")
+    if text == text.strip():
+        return
+    raise ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message=f"{field} must not include leading or trailing whitespace.",
         details={
-            "missing_fields": missing_fields,
-            "provided_fields": provided_fields,
-            "required_fields": ["source", "run_id", "cycle_time", "model_id"],
-            "strict_identity_required": True,
+            "field": field,
+            "rejected_value": _bounded_qhh_latest_reflected_value(text),
+            "reason": f"{field} must not include leading or trailing whitespace.",
         },
     )
+
+
+def _validate_qhh_latest_cycle_time(value: str | None) -> None:
+    text = str(value or "").strip()
+    if "T" not in text and "t" not in text:
+        raise _qhh_latest_cycle_time_api_error(text)
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise _qhh_latest_cycle_time_api_error(text) from error
+
+
+def _qhh_latest_cycle_time_api_error(value: str) -> ApiError:
+    return ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="cycle_time must be an ISO 8601 timestamp.",
+        details={
+            "field": "cycle_time",
+            "rejected_value": _bounded_qhh_latest_reflected_value(value),
+        },
+    )
+
+
+def _bounded_qhh_latest_reflected_value(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= QHH_LATEST_REFLECTED_VALUE_LIMIT:
+        return text
+    return f"{text[: QHH_LATEST_REFLECTED_VALUE_LIMIT - 3]}..."
 
 
 def _require_hindcast_access_role(request: Request) -> None:

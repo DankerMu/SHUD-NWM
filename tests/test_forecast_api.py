@@ -14,6 +14,7 @@ from apps.api.routes.forecast import get_forecast_store
 from packages.common.forecast_store import (
     QHH_LATEST_CONTEXT_LIMIT,
     QHH_LATEST_EXPECTED_HORIZON_HOURS,
+    QHH_LATEST_REFLECTED_VALUE_LIMIT,
     QHH_LATEST_SEARCH_LIMIT,
     ForecastStoreError,
     PsycopgForecastStore,
@@ -22,6 +23,8 @@ from packages.common.forecast_store import (
     _spliced_response_from_rows,
     analysis_window_for_issue_time,
 )
+
+QHH_LATEST_REFLECTED_PREFIX_LIMIT = QHH_LATEST_REFLECTED_VALUE_LIMIT - 3
 
 
 class FakeForecastStore:
@@ -365,23 +368,42 @@ class FakeForecastStore:
                 details={"field": "source", "rejected_value": reflected_source, "allowed_values": ["GFS", "IFS"]},
             )
         if self.latest_qhh_unavailable:
+            reflected = {
+                "run_id": str(run_id) if run_id is not None else None,
+                "model_id": str(model_id) if model_id is not None else None,
+            }
+            for field, value in list(reflected.items()):
+                if value is not None and len(value) > 64:
+                    reflected[field] = f"{value[:61]}..."
+            requested_cycle_time = (
+                cycle_time.isoformat().replace("+00:00", "Z") if isinstance(cycle_time, datetime) else cycle_time
+            )
+            requested_identity = {
+                "source": str(source).strip().upper(),
+                "source_id": str(source).strip().upper(),
+                "run_id": reflected["run_id"],
+                "cycle_time": requested_cycle_time,
+                "model_id": reflected["model_id"],
+            }
+            unavailable_reason = {
+                "code": "Q_DOWN_MISSING",
+                "message": "No river q_down samples.",
+            }
+            if run_id or cycle_time or model_id:
+                unavailable_reason = {
+                    "code": "STRICT_IDENTITY_NOT_FOUND",
+                    "message": "No QHH display-product candidate matched the requested strict identity.",
+                    "requested_identity": requested_identity,
+                }
             details: dict[str, Any] = {
                 "source_id": str(source).strip().upper(),
                 "basin_id": "basins_qhh",
                 "status": "unavailable",
-                "unavailable_reasons": [{"code": "Q_DOWN_MISSING", "message": "No river q_down samples."}],
+                "unavailable_reasons": [unavailable_reason],
             }
             if run_id or cycle_time or model_id:
                 details["strict_identity"] = True
-                details["requested_identity"] = {
-                    "source": str(source).strip().upper(),
-                    "source_id": str(source).strip().upper(),
-                    "run_id": run_id,
-                    "cycle_time": cycle_time.isoformat().replace("+00:00", "Z")
-                    if isinstance(cycle_time, datetime)
-                    else cycle_time,
-                    "model_id": model_id,
-                }
+                details["requested_identity"] = requested_identity
             raise ForecastStoreError(
                 status_code=404,
                 code="QHH_LATEST_PRODUCT_UNAVAILABLE",
@@ -1681,6 +1703,64 @@ def test_latest_qhh_display_product_strict_match_uses_all_identity_predicates() 
     assert response["source_id"] == "GFS"
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        (
+            {
+                "run_id": " qhh_gfs_2026050700 ",
+                "cycle_time": "2026-05-07T00:00:00Z",
+                "model_id": "basins_qhh_shud",
+            },
+            "run_id",
+        ),
+        (
+            {
+                "run_id": "qhh_gfs_2026050700",
+                "cycle_time": "2026-05-07T00:00:00Z",
+                "model_id": " basins_qhh_shud ",
+            },
+            "model_id",
+        ),
+    ],
+)
+def test_latest_qhh_display_product_rejects_whitespace_padded_strict_identity_before_sql(
+    kwargs: dict[str, str],
+    field: str,
+) -> None:
+    store = SqlCaptureForecastStore([[_qhh_candidate_row()]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS", **kwargs)
+
+    assert error.value.status_code == 422
+    assert error.value.code == "VALIDATION_ERROR"
+    assert error.value.details["field"] == field
+    assert error.value.details["rejected_value"].startswith(" ")
+    assert store.cursor.executions == []
+
+
+@pytest.mark.parametrize("cycle_time", ["2026-05-07", "not-a-time"])
+def test_latest_qhh_display_product_rejects_invalid_strict_cycle_time_before_sql(cycle_time: str) -> None:
+    store = SqlCaptureForecastStore([[_qhh_candidate_row()]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product(
+            "GFS",
+            run_id="qhh_gfs_2026050700",
+            cycle_time=cycle_time,
+            model_id="basins_qhh_shud",
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.code == "VALIDATION_ERROR"
+    assert error.value.details == {
+        "field": "cycle_time",
+        "rejected_value": cycle_time,
+    }
+    assert store.cursor.executions == []
+
+
 def test_latest_qhh_display_product_strict_older_ready_run_does_not_return_newer_latest() -> None:
     older_ready = _qhh_candidate_row(
         run_id="qhh_gfs_older_ready_2026050700",
@@ -1746,6 +1826,32 @@ def test_latest_qhh_display_product_strict_mismatch_returns_unavailable_without_
     assert context_parameters[6] == 1
 
 
+def test_latest_qhh_display_product_bounds_strict_mismatch_requested_identity() -> None:
+    run_id = "run-" + ("r" * 200)
+    model_id = "model-" + ("m" * 200)
+    store = SqlCaptureForecastStore([[], []])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product(
+            "GFS",
+            run_id=run_id,
+            cycle_time="2026-05-07T00:00:00Z",
+            model_id=model_id,
+        )
+
+    details = error.value.details
+    expected_run_id = f"{run_id[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+    expected_model_id = f"{model_id[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+    assert details["requested_identity"]["run_id"] == expected_run_id
+    assert details["requested_identity"]["model_id"] == expected_model_id
+    assert len(details["requested_identity"]["run_id"]) == QHH_LATEST_REFLECTED_VALUE_LIMIT
+    nested_identity = details["unavailable_reasons"][0]["requested_identity"]
+    assert nested_identity["run_id"] == expected_run_id
+    assert nested_identity["model_id"] == expected_model_id
+    assert run_id not in str(details)
+    assert model_id not in str(details)
+
+
 def test_latest_qhh_display_product_strict_same_source_cycle_sibling_run_model_cannot_satisfy_query() -> None:
     store = SqlCaptureForecastStore([[], []])
 
@@ -1779,6 +1885,28 @@ def test_latest_qhh_display_product_rejects_partial_strict_identity_before_sql()
         "required_fields": ["source", "run_id", "cycle_time", "model_id"],
         "strict_identity_required": True,
     }
+    assert store.cursor.executions == []
+
+
+def test_latest_qhh_display_product_bounds_blank_strict_identity_detail_before_sql() -> None:
+    store = SqlCaptureForecastStore()
+    run_id = " " * 200
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product(
+            "GFS",
+            run_id=run_id,
+            cycle_time="2026-05-07T00:00:00Z",
+            model_id="basins_qhh_shud",
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.code == "VALIDATION_ERROR"
+    details = error.value.details
+    assert details["missing_fields"] == ["run_id"]
+    assert details["provided_fields"] == ["source", "cycle_time", "model_id"]
+    assert details["rejected_values"]["run_id"] == f"{run_id[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+    assert len(details["rejected_values"]["run_id"]) == QHH_LATEST_REFLECTED_VALUE_LIMIT
     assert store.cursor.executions == []
 
 
@@ -2439,6 +2567,40 @@ def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_r
     }
 
 
+def test_latest_qhh_display_product_strict_nonready_candidate_reports_full_identity() -> None:
+    nonready_context = _qhh_candidate_row(
+        run_id="qhh_gfs_2026050700",
+        cycle_time=_dt("2026-05-07T00:00:00Z"),
+        status="pending",
+    )
+    store = SqlCaptureForecastStore([[], [nonready_context]])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product(
+            "GFS",
+            run_id="qhh_gfs_2026050700",
+            cycle_time="2026-05-07T00:00:00Z",
+            model_id="basins_qhh_shud",
+        )
+
+    details = error.value.details
+    expected_identity = {
+        "run_id": "qhh_gfs_2026050700",
+        "source_id": "GFS",
+        "cycle_time": "2026-05-07T00:00:00Z",
+        "model_id": "basins_qhh_shud",
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "forcing_version_id": "forc_qhh_gfs_2026050700_basins_qhh_shud",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+    }
+    assert details["strict_identity"] is True
+    assert details["candidate_count"] == 1
+    assert details["candidates"][0].items() >= expected_identity.items()
+    assert details["unavailable_reasons"][0].items() >= expected_identity.items()
+    assert details["unavailable_reasons"][0]["code"] == "RUN_STATUS_NOT_READY"
+
+
 def test_latest_qhh_display_product_unavailable_details_keep_diagnostics_bounded() -> None:
     incomplete_candidates = [
         _qhh_candidate_row(
@@ -2538,6 +2700,58 @@ async def test_qhh_latest_product_strict_identity_forwards_all_filters(fake_stor
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "field"),
+    [
+        (
+            "source=GFS&run_id=%20qhh_gfs_2026050700%20"
+            "&cycle_time=2026-05-07T00%3A00%3A00Z&model_id=basins_qhh_shud",
+            "run_id",
+        ),
+        (
+            "source=GFS&run_id=qhh_gfs_2026050700"
+            "&cycle_time=2026-05-07T00%3A00%3A00Z&model_id=%20basins_qhh_shud%20",
+            "model_id",
+        ),
+    ],
+)
+async def test_qhh_latest_product_rejects_whitespace_padded_strict_identity_before_store_lookup(
+    fake_store: FakeForecastStore,
+    query: str,
+    field: str,
+) -> None:
+    response = await _get(f"/api/v1/mvp/qhh/latest-product?{query}")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["details"]["field"] == field
+    assert body["error"]["details"]["rejected_value"].startswith(" ")
+    assert fake_store.latest_qhh_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cycle_time", ["2026-05-07", "not-a-time"])
+async def test_qhh_latest_product_rejects_invalid_strict_cycle_time_before_store_lookup(
+    fake_store: FakeForecastStore,
+    cycle_time: str,
+) -> None:
+    response = await _get(
+        "/api/v1/mvp/qhh/latest-product?source=GFS&run_id=qhh_gfs_2026050700"
+        f"&cycle_time={cycle_time}&model_id=basins_qhh_shud"
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["details"] == {
+        "field": "cycle_time",
+        "rejected_value": cycle_time,
+    }
+    assert fake_store.latest_qhh_calls == []
+
+
+@pytest.mark.asyncio
 async def test_qhh_latest_product_partial_strict_identity_returns_422_before_store_lookup(
     fake_store: FakeForecastStore,
 ) -> None:
@@ -2557,6 +2771,27 @@ async def test_qhh_latest_product_partial_strict_identity_returns_422_before_sto
 
 
 @pytest.mark.asyncio
+async def test_qhh_latest_product_bounds_blank_strict_identity_validation_detail(
+    fake_store: FakeForecastStore,
+) -> None:
+    run_id = " " * 200
+
+    response = await _get(
+        "/api/v1/mvp/qhh/latest-product?source=GFS"
+        f"&run_id={run_id}&cycle_time=2026-05-07T00%3A00%3A00Z&model_id=basins_qhh_shud"
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    details = body["error"]["details"]
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert details["missing_fields"] == ["run_id"]
+    assert details["rejected_values"]["run_id"] == f"{run_id[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+    assert len(details["rejected_values"]["run_id"]) == QHH_LATEST_REFLECTED_VALUE_LIMIT
+    assert fake_store.latest_qhh_calls == []
+
+
+@pytest.mark.asyncio
 async def test_qhh_latest_product_strict_identity_requires_source_before_store_lookup(
     fake_store: FakeForecastStore,
 ) -> None:
@@ -2571,6 +2806,26 @@ async def test_qhh_latest_product_strict_identity_requires_source_before_store_l
     assert body["error"]["details"]["missing_fields"] == ["source"]
     assert body["error"]["details"]["provided_fields"] == ["run_id", "cycle_time", "model_id"]
     assert body["error"]["details"]["strict_identity_required"] is True
+    assert fake_store.latest_qhh_calls == []
+
+
+@pytest.mark.asyncio
+async def test_qhh_latest_product_bounds_blank_source_validation_detail(fake_store: FakeForecastStore) -> None:
+    source = " " * 200
+
+    response = await _get(
+        "/api/v1/mvp/qhh/latest-product"
+        f"?source={source}&run_id=qhh_gfs_2026050700"
+        "&cycle_time=2026-05-07T00%3A00%3A00Z&model_id=basins_qhh_shud"
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    details = body["error"]["details"]
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert details["missing_fields"] == ["source"]
+    assert details["rejected_values"]["source"] == f"{source[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+    assert len(details["rejected_values"]["source"]) == QHH_LATEST_REFLECTED_VALUE_LIMIT
     assert fake_store.latest_qhh_calls == []
 
 
@@ -2594,6 +2849,33 @@ async def test_qhh_latest_product_strict_mismatch_returns_requested_identity(fak
         "cycle_time": "2026-05-07T00:00:00Z",
         "model_id": "basins_qhh_shud",
     }
+
+
+@pytest.mark.asyncio
+async def test_qhh_latest_product_bounds_strict_unavailable_reflected_identity(
+    fake_store: FakeForecastStore,
+) -> None:
+    fake_store.latest_qhh_unavailable = True
+    run_id = "run-" + ("r" * 200)
+    model_id = "model-" + ("m" * 200)
+
+    response = await _get(
+        "/api/v1/mvp/qhh/latest-product?source=GFS"
+        f"&run_id={run_id}&cycle_time=2026-05-07T00%3A00%3A00Z&model_id={model_id}"
+    )
+
+    assert response.status_code == 404
+    body = response.json()
+    details = body["error"]["details"]
+    expected_run_id = f"{run_id[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+    expected_model_id = f"{model_id[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+    assert details["requested_identity"]["run_id"] == expected_run_id
+    assert details["requested_identity"]["model_id"] == expected_model_id
+    assert len(details["requested_identity"]["run_id"]) == QHH_LATEST_REFLECTED_VALUE_LIMIT
+    assert details["unavailable_reasons"][0]["requested_identity"]["run_id"] == expected_run_id
+    assert details["unavailable_reasons"][0]["requested_identity"]["model_id"] == expected_model_id
+    assert run_id not in response.text
+    assert model_id not in response.text
 
 
 @pytest.mark.asyncio

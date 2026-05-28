@@ -2224,22 +2224,38 @@ def _qhh_latest_strict_identity(
             )
             if not _qhh_latest_identity_value_missing(value)
         ]
+        details: dict[str, Any] = {
+            "missing_fields": missing_fields,
+            "provided_fields": provided_fields,
+            "required_fields": list(QHH_LATEST_STRICT_IDENTITY_FIELDS),
+            "strict_identity_required": True,
+        }
+        rejected_values = {
+            field: _bounded_reflected_value(value)
+            for field, value in (
+                ("run_id", run_id),
+                ("cycle_time", cycle_time),
+                ("model_id", model_id),
+            )
+            if field in missing_fields and value is not None
+        }
+        if rejected_values:
+            details["rejected_values"] = rejected_values
         raise ForecastStoreError(
             status_code=422,
             code="VALIDATION_ERROR",
             message="source, run_id, cycle_time, and model_id are required when using strict latest-product identity.",
-            details={
-                "missing_fields": missing_fields,
-                "provided_fields": provided_fields,
-                "required_fields": list(QHH_LATEST_STRICT_IDENTITY_FIELDS),
-                "strict_identity_required": True,
-            },
+            details=details,
         )
+    run_id_text = str(run_id)
+    model_id_text = str(model_id)
+    _reject_qhh_latest_surrounding_whitespace("run_id", run_id_text)
+    _reject_qhh_latest_surrounding_whitespace("model_id", model_id_text)
     return _QhhLatestStrictIdentity(
         source_id=source_id,
-        run_id=str(run_id).strip(),
+        run_id=run_id_text,
         cycle_time=_parse_qhh_latest_cycle_time(cycle_time),
-        model_id=str(model_id).strip(),
+        model_id=model_id_text,
     )
 
 
@@ -2247,10 +2263,32 @@ def _qhh_latest_identity_value_missing(value: Any) -> bool:
     return value is None or str(value).strip() == ""
 
 
+def _reject_qhh_latest_surrounding_whitespace(field: str, value: str) -> None:
+    if value == value.strip():
+        return
+    raise ForecastStoreError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message=f"{field} must not include leading or trailing whitespace.",
+        details={
+            "field": field,
+            "rejected_value": _bounded_reflected_value(value),
+            "reason": f"{field} must not include leading or trailing whitespace.",
+        },
+    )
+
+
 def _parse_qhh_latest_cycle_time(value: datetime | str | None) -> datetime:
     if isinstance(value, datetime):
         return _ensure_utc(value)
     text = str(value or "").strip()
+    if "T" not in text and "t" not in text:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="cycle_time must be an ISO 8601 timestamp.",
+            details={"field": "cycle_time", "rejected_value": _bounded_reflected_value(text)},
+        )
     try:
         return _ensure_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
     except ValueError as error:
@@ -2279,9 +2317,9 @@ def _qhh_latest_requested_identity_details(identity: _QhhLatestStrictIdentity) -
     return {
         "source": identity.source_id,
         "source_id": identity.source_id,
-        "run_id": identity.run_id,
+        "run_id": _bounded_reflected_value(identity.run_id),
         "cycle_time": _format_time(identity.cycle_time),
-        "model_id": identity.model_id,
+        "model_id": _bounded_reflected_value(identity.model_id),
     }
 
 
@@ -2377,6 +2415,7 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
     reasons: list[dict[str, Any]] = []
     run_id = str(row.get("run_id") or "")
     source_id = _display_source_id(str(row.get("source_id") or ""))
+    identity = _qhh_latest_candidate_identity(row)
 
     def add(code: str, message: str, **extra: Any) -> None:
         reasons.append(
@@ -2386,6 +2425,7 @@ def _qhh_latest_unavailable_reasons(row: Mapping[str, Any]) -> list[dict[str, An
                 "run_id": run_id or None,
                 "source_id": source_id,
                 **{key: value for key, value in extra.items() if value is not None},
+                **identity,
             }
         )
 
@@ -2849,14 +2889,42 @@ def _qhh_station_variable_coverage(value: Any) -> list[dict[str, Any]]:
 def _qhh_latest_candidate_summary(evaluation: Mapping[str, Any]) -> dict[str, Any]:
     product = evaluation["product"]
     return {
-        "run_id": product.get("run_id"),
+        "run_id": _bounded_reflected_value(product.get("run_id")),
         "source_id": product.get("source_id"),
         "cycle_time": product.get("cycle_time"),
+        "model_id": _bounded_reflected_value(product.get("model_id")),
+        "basin_id": _bounded_reflected_value(product.get("basin_id")),
+        "basin_version_id": _bounded_reflected_value(product.get("basin_version_id")),
+        "forcing_version_id": _bounded_reflected_value(product.get("forcing_version_id")),
+        "river_network_version_id": _bounded_reflected_value(product.get("river_network_version_id")),
         "run_status": product.get("run_status"),
         "status": product.get("status"),
         "unavailable_reason_codes": [
             reason["code"] for reason in evaluation.get("unavailable_reasons", []) if reason.get("code")
         ],
+    }
+
+
+def _qhh_latest_candidate_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "run_id": _bounded_reflected_value(row.get("run_id")) if row.get("run_id") else None,
+            "source_id": _display_source_id(str(row.get("source_id") or "")) if row.get("source_id") else None,
+            "cycle_time": _format_time_value(row.get("cycle_time")),
+            "model_id": _bounded_reflected_value(row.get("model_id")) if row.get("model_id") else None,
+            "basin_id": _bounded_reflected_value(row.get("basin_id")) if row.get("basin_id") else None,
+            "basin_version_id": _bounded_reflected_value(row.get("basin_version_id"))
+            if row.get("basin_version_id")
+            else None,
+            "forcing_version_id": _bounded_reflected_value(row.get("forcing_version_id"))
+            if row.get("forcing_version_id")
+            else None,
+            "river_network_version_id": _bounded_reflected_value(row.get("river_network_version_id"))
+            if row.get("river_network_version_id")
+            else None,
+        }.items()
+        if value is not None
     }
 
 
