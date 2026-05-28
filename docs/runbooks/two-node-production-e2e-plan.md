@@ -355,6 +355,38 @@ curl -i 'http://127.0.0.1:8000/api/v1/slurm/health'
 - QHH active model 和 stations 可查。
 - `/api/v1/slurm/*` 在 27 display mode 下不可用或未注册；如果返回 200，本段 FAIL。
 
+### 7.2A Readonly DB 边界验证
+
+在 27 节点用真实只读账号执行 readonly DB 验证。缺少真实只读 DB URL 时，本 lane 必须输出 `BLOCKED`，不能记为 `PASS`。
+
+```bash
+export NHMS_SERVICE_ROLE=display_readonly
+export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
+export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
+export NHMS_DISPLAY_READONLY_DATABASE_URL='postgresql://<readonly-user>:<secret>@<db-host>:5432/<db-name>'
+export NHMS_READONLY_DB_VALIDATION_SOURCE=GFS
+export NHMS_READONLY_DB_VALIDATION_CYCLE_TIME='<cycle_time>'
+export NHMS_READONLY_DB_VALIDATION_RUN_ID='<run_id>'
+export NHMS_READONLY_DB_VALIDATION_MODEL_ID=basins_qhh_shud
+export NHMS_READONLY_DB_VALIDATION_JOB_ID='<job_id-with-published-log>'
+export EVIDENCE_RUN_ID="readonly-db-$(date -u +%Y%m%dT%H%M%SZ)"
+
+uv run python scripts/validate_readonly_db_boundary.py \
+  --evidence-root "artifacts/two-node-e2e/$EVIDENCE_RUN_ID" \
+  --run-id "$EVIDENCE_RUN_ID" \
+  --force
+```
+
+其中 `--run-id` 是 evidence bundle ID；`NHMS_READONLY_DB_VALIDATION_RUN_ID` 是被验证的业务 `hydro.hydro_run.run_id`。如需只通过环境变量指定 evidence bundle ID，使用 `NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID`。
+
+验证内容：
+
+- 记录脱敏 DB URL、`current_user`、role type、route smoke、permission probe 和 retry/cancel 结果。
+- `/health`、runtime config、models、stations、latest-product、pipeline status/stages、jobs、job logs 只在真实只读 DB 请求成功时记为 `PASS`；fixture 缺失必须记为 `BLOCKED`。
+- `hydro.hydro_run`、`hydro.river_timeseries`、`met.forecast_cycle`、`met.forcing_station_timeseries`、`ops.pipeline_job`、`ops.pipeline_event` 和 `ops` schema DDL probe 的 `INSERT`、`UPDATE`、`DELETE`、DDL 必须在提交前被拒绝。任何 DML/DDL 成功执行都记为 `FAIL`，即使 harness 已回滚清理。
+- retry/cancel 必须返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，且不构造 DB write 或 Gateway 依赖。
+- evidence 只允许写入仓库 `artifacts/` 或 `/scratch/frd_muziyao` 下，输出中不得包含明文 DSN 密码、token 或 signature。
+
 ### 7.3 展示产品 API 检查
 
 针对 22 本轮生产出来的 `run_id/source/cycle/model_id`，优先使用强身份约束查询：
