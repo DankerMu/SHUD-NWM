@@ -286,6 +286,7 @@ DISPLAY_AUDITED_RUNTIME_ENV = (
 SECRET_ENV_KEYS = frozenset({"DATABASE_URL", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID"})
 MAX_COMPOSE_INTERPOLATION_TEXT_CHARS = 65_536
 MAX_COMPOSE_INTERPOLATION_DEPTH = 64
+MAX_COMPOSE_INTERPOLATION_OBJECT_NODES = 20_000
 MAX_COMPOSE_INTERPOLATION_OCCURRENCES = 4_096
 API_SERVICE_COMMAND = (
     "uv",
@@ -312,27 +313,45 @@ class ComposeInterpolationLimitError(ValueError):
 
 
 _SECRET_ENV_KEY_ALTERNATION = "|".join(re.escape(key) for key in sorted(SECRET_ENV_KEYS, key=len, reverse=True))
-_SECRET_ASSIGNMENT_PATTERN = re.compile(
-    rf"(?<![A-Za-z0-9_])(?P<key>{_SECRET_ENV_KEY_ALTERNATION})\s*=\s*(?P<value>[^\s,;}}\]]+)"
+_SECRET_MAPPING_LINE_PATTERN = re.compile(
+    rf"(?<![A-Za-z0-9_])[\"']?(?:{_SECRET_ENV_KEY_ALTERNATION})[\"']?\s*(?:=|:)\s*"
 )
 _SECRET_INTERPOLATION_PATTERN = re.compile(rf"\$(?:\{{)?(?P<key>{_SECRET_ENV_KEY_ALTERNATION})(?=\b|[:+\-?}}])")
 _SECRET_URL_PATTERN = re.compile(r"\b(?:postgres|postgresql|mysql|mariadb|mongodb|redis)://[^\s,;}\]]+")
 _SECRET_DETAIL_VALUE_FIELDS = frozenset(
     {
-        "entry",
-        "candidate_value",
-        "expression",
-        "env_file_value",
-        "literal_value",
-        "rendered_value",
-        "process_value",
         "actual",
         "actual_rendered",
+        "candidate_value",
+        "device",
+        "entry",
+        "env_file_value",
+        "error",
+        "expression",
+        "literal_value",
+        "path",
+        "process_value",
+        "rendered_value",
+        "root",
+        "source",
+        "target",
+        "tmpfs",
+        "volume",
         "expected",
         "expected_rendered",
         "value",
         "raw_value",
-        "error",
+    }
+)
+_SECRET_PRESERVED_VALUE_FIELDS = frozenset(
+    {
+        "candidate_key",
+        "field",
+        "key",
+        "operator",
+        "root_key",
+        "source_key",
+        "target_key",
     }
 )
 
@@ -2180,9 +2199,9 @@ def _compose_field_render_drift_findings(
                 continue
             raw_value = service.get(field_name)
             if expected is _FIELD_MUST_BE_ABSENT:
-                if not _has_compose_value(service, field_name):
+                if _absent_field_contract_is_satisfied(service, field_name, role=role):
                     continue
-                expected_detail: Any = "<absent>"
+                expected_detail: Any = _absent_field_expected_detail(field_name, role=role)
             else:
                 expected_detail = expected
             actual = _render_deployment_field(field_name, raw_value, env)
@@ -2205,6 +2224,23 @@ def _compose_field_render_drift_findings(
                 )
             )
     return findings
+
+
+def _absent_field_contract_is_satisfied(service: Mapping[str, Any], field_name: str, *, role: str) -> bool:
+    if field_name not in service:
+        return True
+    value = service.get(field_name)
+    if value is None:
+        return True
+    if role == "compute" and field_name == "ports":
+        return isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) == 0
+    return False
+
+
+def _absent_field_expected_detail(field_name: str, *, role: str) -> str:
+    if role == "compute" and field_name == "ports":
+        return "<absent-or-empty-list>"
+    return "<absent>"
 
 
 def _canonical_service_field_render_contract(
@@ -2570,19 +2606,30 @@ def _compose_contains_interpolation(value: Any) -> bool:
 
 
 def _compose_interpolation_text_nodes(value: Any, compose_path: str = "$") -> Iterator[tuple[str, str]]:
-    if isinstance(value, str):
-        yield compose_path, value
-        return
-    if isinstance(value, Mapping):
-        for raw_key, raw_value in value.items():
-            key_path = f"{compose_path}.{_compose_path_segment(raw_key)}"
-            if isinstance(raw_key, str):
-                yield f"{key_path}<key>", raw_key
-            yield from _compose_interpolation_text_nodes(raw_value, key_path)
-        return
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        for index, item in enumerate(value):
-            yield from _compose_interpolation_text_nodes(item, f"{compose_path}[{index}]")
+    stack: list[tuple[str, Any, int]] = [(compose_path, value, 0)]
+    visited_nodes = 0
+    scheduled_nodes = 1
+    while stack:
+        current_path, current, depth = stack.pop()
+        visited_nodes += 1
+        _check_compose_interpolation_object_bounds(visited_nodes=visited_nodes, depth=depth)
+        if isinstance(current, str):
+            yield current_path, current
+            continue
+        if isinstance(current, Mapping):
+            for raw_key, raw_value in current.items():
+                key_path = f"{current_path}.{_compose_path_segment(raw_key)}"
+                for child in ((key_path, raw_value, depth + 1), (f"{key_path}<key>", raw_key, depth + 1)):
+                    scheduled_nodes += 1
+                    _check_compose_interpolation_object_bounds(visited_nodes=scheduled_nodes, depth=child[2])
+                    stack.append(child)
+            continue
+        if isinstance(current, Sequence) and not isinstance(current, (str, bytes)):
+            for index in range(len(current) - 1, -1, -1):
+                child = (f"{current_path}[{index}]", current[index], depth + 1)
+                scheduled_nodes += 1
+                _check_compose_interpolation_object_bounds(visited_nodes=scheduled_nodes, depth=child[2])
+                stack.append(child)
 
 
 def _compose_path_segment(value: Any) -> str:
@@ -2593,21 +2640,10 @@ def _compose_path_segment(value: Any) -> str:
 
 
 def _compose_interpolation_keys(value: Any) -> set[str]:
-    if isinstance(value, str):
-        return _compose_interpolation_keys_from_text(value)
-    if isinstance(value, Mapping):
-        keys: set[str] = set()
-        for item in value.keys():
-            keys.update(_compose_interpolation_keys(item))
-        for item in value.values():
-            keys.update(_compose_interpolation_keys(item))
-        return keys
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        keys: set[str] = set()
-        for item in value:
-            keys.update(_compose_interpolation_keys(item))
-        return keys
-    return set()
+    keys: set[str] = set()
+    for _compose_path, text in _compose_interpolation_text_nodes(value):
+        keys.update(_compose_interpolation_keys_from_text(text))
+    return keys
 
 
 def _compose_interpolation_keys_from_text(value: str) -> set[str]:
@@ -2618,24 +2654,28 @@ def _compose_interpolation_occurrences_from_text(
     value: str,
     *,
     _depth: int = 0,
+    _count: list[int] | None = None,
 ) -> list[ComposeInterpolationOccurrence]:
     _check_compose_interpolation_bounds(value, depth=_depth)
+    count = _count if _count is not None else [0]
     occurrences: list[ComposeInterpolationOccurrence] = []
     for token in _compose_dollar_run_tokens(value):
         if token.occurrence is None:
             continue
-        occurrences.append(token.occurrence)
-        if len(occurrences) > MAX_COMPOSE_INTERPOLATION_OCCURRENCES:
+        count[0] += 1
+        if count[0] > MAX_COMPOSE_INTERPOLATION_OCCURRENCES:
             raise ComposeInterpolationLimitError(
                 "Compose interpolation occurrence count exceeds the static validation limit.",
                 metric="occurrences",
                 limit=MAX_COMPOSE_INTERPOLATION_OCCURRENCES,
             )
+        occurrences.append(token.occurrence)
         if token.occurrence.operator is not None and token.occurrence.payload:
             occurrences.extend(
                 _compose_interpolation_occurrences_from_text(
                     token.occurrence.payload,
                     _depth=_depth + 1,
+                    _count=count,
                 )
             )
     return occurrences
@@ -2835,6 +2875,21 @@ def _check_compose_interpolation_bounds(value: str, *, depth: int) -> None:
         )
 
 
+def _check_compose_interpolation_object_bounds(*, visited_nodes: int, depth: int) -> None:
+    if visited_nodes > MAX_COMPOSE_INTERPOLATION_OBJECT_NODES:
+        raise ComposeInterpolationLimitError(
+            "Compose interpolation YAML object traversal exceeds the static validation node limit.",
+            metric="object_nodes",
+            limit=MAX_COMPOSE_INTERPOLATION_OBJECT_NODES,
+        )
+    if depth > MAX_COMPOSE_INTERPOLATION_DEPTH:
+        raise ComposeInterpolationLimitError(
+            "Compose interpolation YAML object nesting exceeds the static validation depth limit.",
+            metric="object_depth",
+            limit=MAX_COMPOSE_INTERPOLATION_DEPTH,
+        )
+
+
 def _redact_finding_details(details: Mapping[str, Any]) -> dict[str, Any]:
     redacted = _redact_detail_value(details, secret_context=False, field_name=None)
     return redacted if isinstance(redacted, dict) else {}
@@ -2878,14 +2933,53 @@ def _mapping_has_secret_key_context(value: Mapping[str, Any]) -> bool:
 def _redact_detail_text(value: str, *, secret_context: bool, field_name: str | None) -> str:
     if not value:
         return value
-    text = _SECRET_ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group('key')}=<redacted>", value)
+    if value in SECRET_ENV_KEYS and field_name in _SECRET_PRESERVED_VALUE_FIELDS:
+        return value
+    if field_name in _SECRET_DETAIL_VALUE_FIELDS:
+        return "<redacted>"
+    if secret_context and value in SECRET_ENV_KEYS:
+        return value
+    text = _redact_secret_mapping_lines(value)
     if _SECRET_INTERPOLATION_PATTERN.search(text) or _SECRET_URL_PATTERN.search(text):
         return "<redacted>"
-    if secret_context and field_name in _SECRET_DETAIL_VALUE_FIELDS:
-        if field_name == "entry" and text in SECRET_ENV_KEYS:
-            return text
+    if secret_context:
         return text if text != value else "<redacted>"
     return text
+
+
+def _redact_secret_mapping_lines(value: str) -> str:
+    lines = value.splitlines(keepends=True)
+    if not lines:
+        return value
+    redacted_lines = [
+        _redact_secret_mapping_line(line)
+        if _SECRET_MAPPING_LINE_PATTERN.search(line)
+        else line
+        for line in lines
+    ]
+    return "".join(redacted_lines)
+
+
+def _redact_secret_mapping_line(line: str) -> str:
+    line_ending = ""
+    body = line
+    if body.endswith("\r\n"):
+        body = body[:-2]
+        line_ending = "\r\n"
+    elif body.endswith("\n"):
+        body = body[:-1]
+        line_ending = "\n"
+    elif body.endswith("\r"):
+        body = body[:-1]
+        line_ending = "\r"
+    if "=" in body:
+        separator = "="
+    elif ":" in body:
+        separator = ":"
+    else:
+        return f"<redacted>{line_ending}"
+    prefix = body.split(separator, 1)[0].strip()
+    return f"{prefix}{separator} <redacted>{line_ending}"
 
 
 def _redact_env_value(key: str, value: str) -> str:
@@ -3167,16 +3261,21 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def _static_setup_failure_result(error: Exception) -> StaticCheckResult:
+    redacted_error = _redact_static_output_text(str(error))
     return StaticCheckResult(
         status="FAIL",
         findings=(
             Finding(
                 "STATIC_VALIDATION_SETUP_FAILED",
                 "static validation failed before normal findings were produced.",
-                details={"error_type": type(error).__name__, "error": str(error)},
+                details={"error_type": type(error).__name__, "error": redacted_error},
             ),
         ),
     )
+
+
+def _redact_static_output_text(value: str) -> str:
+    return _redact_detail_text(value, secret_context=True, field_name="error")
 
 
 def _run_static_command(args: argparse.Namespace, repo_root: Path) -> int:
@@ -3191,12 +3290,13 @@ def _run_static_command(args: argparse.Namespace, repo_root: Path) -> int:
     except Exception as error:
         result = _static_setup_failure_result(error)
         report_path = write_static_report(result, args.report, repo_root)
+        redacted_error = _redact_static_output_text(str(error))
         print(
             json.dumps(
                 {
                     "status": result.status,
                     "report": str(report_path),
-                    "error": str(error),
+                    "error": redacted_error,
                     "error_type": type(error).__name__,
                 },
                 sort_keys=True,
@@ -3223,7 +3323,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"status": result.status, "evidence_path": str(result.evidence_path)}, sort_keys=True))
             return 0 if result.status == "PASS" else 3
     except ValueError as error:
-        print(json.dumps({"status": "FAIL", "error": str(error)}, sort_keys=True), file=sys.stderr)
+        print(
+            json.dumps({"status": "FAIL", "error": _redact_static_output_text(str(error))}, sort_keys=True),
+            file=sys.stderr,
+        )
         return 2
     raise AssertionError(f"unsupported command: {args.command}")
 

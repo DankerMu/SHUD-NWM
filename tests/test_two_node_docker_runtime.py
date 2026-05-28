@@ -123,6 +123,60 @@ def test_static_cli_replaces_stale_pass_report_when_setup_fails(tmp_path: Path, 
     assert payload["findings"][0]["code"] == "STATIC_VALIDATION_SETUP_FAILED"
 
 
+@pytest.mark.parametrize(
+    ("secret_key", "fake_secret"),
+    [
+        ("AWS_SECRET_ACCESS_KEY", "SETUP_AWS_SECRET left,comma;tail"),
+        ("DATABASE_URL", "postgresql://setup:SETUP_DB_SECRET left,comma;tail@db/nhms"),
+    ],
+)
+def test_static_cli_redacts_setup_failure_secret_parse_messages(
+    tmp_path: Path,
+    secret_key: str,
+    fake_secret: str,
+) -> None:
+    repo_root = tmp_path
+    report_path = repo_root / "artifacts" / "stage-change" / "static.json"
+    bad_display_compose = tmp_path / "bad-compose.yml"
+    bad_display_compose.write_text(
+        f"""
+services:
+  display-api:
+    environment:
+      {secret_key}: [{fake_secret}
+""",
+        encoding="utf-8",
+    )
+    args = [
+        sys.executable,
+        str(REPO_ROOT / "scripts/validate_two_node_docker_runtime.py"),
+        "--repo-root",
+        str(repo_root),
+        "static",
+        "--compute-compose",
+        str(REPO_ROOT / "infra/compose.compute.yml"),
+        "--display-compose",
+        str(bad_display_compose),
+        "--compute-env",
+        str(REPO_ROOT / "infra/env/compute.example"),
+        "--display-env",
+        str(REPO_ROOT / "infra/env/display.example"),
+        "--report",
+        str(report_path),
+    ]
+
+    completed = subprocess.run(args, cwd=REPO_ROOT, check=False, capture_output=True, text=True)
+    report_text = report_path.read_text(encoding="utf-8")
+    combined_output = completed.stdout + completed.stderr + report_text
+
+    assert completed.returncode != 0
+    assert fake_secret not in combined_output
+    assert fake_secret.split()[0] not in combined_output
+    assert "<redacted>" in combined_output
+    payload = json.loads(report_text)
+    assert payload["findings"][0]["code"] == "STATIC_VALIDATION_SETUP_FAILED"
+
+
 def test_static_checker_rejects_forbidden_display_env(tmp_path: Path) -> None:
     display_env = tmp_path / "display.example"
     display_env.write_text(
@@ -1663,6 +1717,75 @@ def test_static_checker_rejects_compute_field_render_drift(
     assert expected_rendered in json.dumps(field_findings[0].details["actual_rendered"])
 
 
+@pytest.mark.parametrize("role", ["display", "compute"])
+@pytest.mark.parametrize("entrypoint", [[], ""])
+def test_static_checker_rejects_present_empty_entrypoint_overrides(
+    tmp_path: Path,
+    role: str,
+    entrypoint: Any,
+) -> None:
+    if role == "display":
+        compose = _safe_display_compose()
+        compose["services"]["display-api"]["entrypoint"] = entrypoint
+        result = _run_display_static_check(_write_display_compose(tmp_path, compose))
+    elif role == "compute":
+        compose = _safe_compute_compose()
+        for service in compose["services"].values():
+            service["entrypoint"] = entrypoint
+        result = _run_compute_static_check(_write_compute_compose(tmp_path, compose))
+    else:
+        raise AssertionError(f"unhandled role: {role}")
+
+    expected_code = f"{role.upper()}_INTERPOLATION_FIELD_RENDER_DRIFT"
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == expected_code and finding.details["field"] == "entrypoint"
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize("role", ["display", "compute"])
+def test_static_checker_accepts_null_entrypoint_as_absent(tmp_path: Path, role: str) -> None:
+    if role == "display":
+        compose = _safe_display_compose()
+        compose["services"]["display-api"]["entrypoint"] = None
+        result = _run_display_static_check(_write_display_compose(tmp_path, compose))
+    elif role == "compute":
+        compose = _safe_compute_compose()
+        for service in compose["services"].values():
+            service["entrypoint"] = None
+        result = _run_compute_static_check(_write_compute_compose(tmp_path, compose))
+    else:
+        raise AssertionError(f"unhandled role: {role}")
+
+    assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
+
+
+@pytest.mark.parametrize("ports", [None, []])
+def test_static_checker_accepts_compute_ports_absent_or_empty_list(tmp_path: Path, ports: Any) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["ports"] = ports
+
+    result = _run_compute_static_check(_write_compute_compose(tmp_path, compose))
+
+    assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
+
+
+@pytest.mark.parametrize("ports", ["", {}])
+def test_static_checker_rejects_invalid_falsey_compute_ports(tmp_path: Path, ports: Any) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["compute-api"]["ports"] = ports
+
+    result = _run_compute_static_check(_write_compute_compose(tmp_path, compose))
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_INTERPOLATION_FIELD_RENDER_DRIFT" and finding.details["field"] == "ports"
+        for finding in result.findings
+    )
+
+
 def test_compose_dollar_escape_parser_keeps_escaped_braced_interpolation_literal() -> None:
     env = {"NHMS_APP_IMAGE": "nhms-app"}
 
@@ -1680,6 +1803,13 @@ def test_compose_interpolation_accepts_bounded_nested_payloads() -> None:
     assert docker_runtime._resolve_compose_value(nested, {}) == "fallback"
 
 
+def test_compose_interpolation_accepts_bounded_nested_objects() -> None:
+    nested: dict[str, Any] = {"services": {"display-api": {"environment": [{"SAFE": "${DATABASE_URL}"}]}}}
+
+    assert docker_runtime._compose_interpolation_keys(nested) == {"DATABASE_URL"}
+    assert list(docker_runtime._compose_interpolation_text_nodes(nested))
+
+
 def test_compose_interpolation_rejects_over_limit_nesting_without_recursion_error() -> None:
     levels = docker_runtime.MAX_COMPOSE_INTERPOLATION_DEPTH + 2
     over_limit = "${A:-" * levels + "fallback" + "}" * levels
@@ -1690,11 +1820,86 @@ def test_compose_interpolation_rejects_over_limit_nesting_without_recursion_erro
         docker_runtime._resolve_compose_value(over_limit, {})
 
 
+@pytest.mark.parametrize("shape", ["mapping", "sequence"])
+def test_compose_interpolation_rejects_over_limit_object_traversal_without_recursion_error(shape: str) -> None:
+    nested: Any = "${DATABASE_URL}"
+    for index in range(docker_runtime.MAX_COMPOSE_INTERPOLATION_DEPTH + 2):
+        nested = {f"level_{index}": nested} if shape == "mapping" else [nested]
+
+    with pytest.raises(docker_runtime.ComposeInterpolationLimitError):
+        docker_runtime._compose_interpolation_keys(nested)
+    with pytest.raises(docker_runtime.ComposeInterpolationLimitError):
+        list(docker_runtime._compose_interpolation_text_nodes(nested))
+
+
+def test_compose_interpolation_accepts_below_limit_aggregate_occurrences() -> None:
+    payload_occurrences = (docker_runtime.MAX_COMPOSE_INTERPOLATION_OCCURRENCES - 2) // 2
+    aggregate = (
+        "${A:-"
+        + "$A" * payload_occurrences
+        + "}${B:-"
+        + "$B" * payload_occurrences
+        + "}"
+    )
+
+    occurrences = docker_runtime._compose_interpolation_occurrences_from_text(aggregate)
+
+    assert len(occurrences) == docker_runtime.MAX_COMPOSE_INTERPOLATION_OCCURRENCES
+
+
+def test_compose_interpolation_rejects_over_limit_aggregate_occurrences_without_recursion_error() -> None:
+    payload_occurrences = docker_runtime.MAX_COMPOSE_INTERPOLATION_OCCURRENCES // 2
+    aggregate = (
+        "${A:-"
+        + "$A" * payload_occurrences
+        + "}${B:-"
+        + "$B" * payload_occurrences
+        + "}"
+    )
+
+    with pytest.raises(docker_runtime.ComposeInterpolationLimitError):
+        docker_runtime._compose_interpolation_occurrences_from_text(aggregate)
+
+
 def test_static_checker_reports_over_limit_interpolation_as_finding(tmp_path: Path) -> None:
     levels = docker_runtime.MAX_COMPOSE_INTERPOLATION_DEPTH + 2
     over_limit = "${NHMS_APP_IMAGE:-" * levels + "nhms-app" + "}" * levels
     compose = _safe_display_compose()
     compose["services"]["display-api"]["image"] = f"{over_limit}:${{NHMS_IMAGE_TAG}}"
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert "COMPOSE_INTERPOLATION_COMPLEXITY_LIMIT_EXCEEDED" in _codes(result)
+
+
+@pytest.mark.parametrize("shape", ["mapping", "sequence"])
+def test_static_checker_reports_over_limit_object_traversal_as_finding(tmp_path: Path, shape: str) -> None:
+    nested: Any = "${DATABASE_URL}"
+    for index in range(docker_runtime.MAX_COMPOSE_INTERPOLATION_DEPTH + 2):
+        nested = {f"level_{index}": nested} if shape == "mapping" else [nested]
+    compose = _safe_display_compose()
+    compose["x-over-limit"] = nested
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert "COMPOSE_INTERPOLATION_COMPLEXITY_LIMIT_EXCEEDED" in _codes(result)
+
+
+def test_static_checker_reports_over_limit_aggregate_occurrences_as_finding(tmp_path: Path) -> None:
+    payload_occurrences = docker_runtime.MAX_COMPOSE_INTERPOLATION_OCCURRENCES // 2
+    aggregate = (
+        "${DATABASE_URL:-"
+        + "$DATABASE_URL" * payload_occurrences
+        + "}${DATABASE_URL:+"
+        + "$DATABASE_URL" * payload_occurrences
+        + "}"
+    )
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["image"] = f"nhms-app:{aggregate}"
     display_compose = _write_display_compose(tmp_path, compose)
 
     result = _run_display_static_check(display_compose)
@@ -2074,6 +2279,116 @@ def test_static_result_serialization_redacts_secret_list_entries_and_payloads(
     assert result.status == "FAIL"
     assert expected_code in _codes(result)
     assert fake_secret not in serialized
+    assert "<redacted>" in serialized
+
+
+def test_static_result_serialization_redacts_secret_values_across_finding_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file_secret = "ENV_SECRET_VALUE left,env-comma;env-tail]"
+    list_secret = "LIST_SECRET_VALUE left,list-comma;list-tail]"
+    payload_secret = "PAYLOAD_SECRET_VALUE left,payload-comma;payload-tail]"
+    ambient_secret = "AMBIENT_SECRET_VALUE left,ambient-comma;ambient-tail]"
+    display_env = tmp_path / "display.example"
+    display_env.write_text(
+        "\n".join(
+            "AWS_SECRET_ACCESS_KEY=" + env_file_secret
+            if line.startswith("AWS_SECRET_ACCESS_KEY=")
+            else line
+            for line in (REPO_ROOT / "infra/env/display.example").read_text(encoding="utf-8").splitlines()
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", ambient_secret)
+    compose = _safe_display_compose()
+    service = compose["services"]["display-api"]
+    canonical_volume = dict(service["volumes"][0])
+    source_secret_volume = dict(canonical_volume)
+    source_secret_volume["source"] = "${AWS_SECRET_ACCESS_KEY}"
+    target_secret_volume = dict(canonical_volume)
+    target_secret_volume["target"] = "${AWS_SECRET_ACCESS_KEY}"
+    service["volumes"] = [
+        source_secret_volume,
+        target_secret_volume,
+        "secret-device:/secret:ro",
+    ]
+    compose["volumes"] = {
+        "secret-device": {
+            "driver": "local",
+            "driver_opts": {"type": "none", "o": "bind", "device": "${AWS_SECRET_ACCESS_KEY}"},
+        }
+    }
+    service["tmpfs"].append({"target": "${AWS_SECRET_ACCESS_KEY}"})
+    service["image"] = "nhms-app-${AWS_SECRET_ACCESS_KEY}:${NHMS_IMAGE_TAG:-m22-placeholder}"
+    service["environment"] = _environment_dict_to_list(service["environment"])
+    service["environment"].append(f"AWS_SECRET_ACCESS_KEY={list_secret}")
+    service["environment"].append(f"${{DISPLAY_SECRET_ENTRY:-AWS_SECRET_ACCESS_KEY={payload_secret}}}")
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=display_compose,
+        compute_env=Path("infra/env/compute.example"),
+        display_env=display_env,
+        repo_root=REPO_ROOT,
+    )
+    serialized = json.dumps(result.to_dict(), sort_keys=True)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {
+        "DISPLAY_PUBLISHED_SOURCE_DRIFT",
+        "DISPLAY_PUBLISHED_TARGET_DRIFT",
+        "DISPLAY_UNAPPROVED_TMPFS",
+        "DISPLAY_NAMED_VOLUME_FORBIDDEN_SOURCE",
+        "DISPLAY_INTERPOLATION_FIELD_RENDER_DRIFT",
+        "DISPLAY_RUNTIME_ENV_LITERAL_DRIFT",
+        "DISPLAY_AMBIENT_ENV_OVERRIDE",
+    }
+    for secret_fragment in (
+        "ENV_SECRET_VALUE",
+        "env-comma;env-tail]",
+        "LIST_SECRET_VALUE",
+        "list-comma;list-tail]",
+        "PAYLOAD_SECRET_VALUE",
+        "payload-comma;payload-tail]",
+        "AMBIENT_SECRET_VALUE",
+        "ambient-comma;ambient-tail]",
+    ):
+        assert secret_fragment not in serialized
+    assert "<redacted>" in serialized
+
+
+def test_static_result_serialization_redacts_nested_secret_key_mappings() -> None:
+    nested_secret = "NESTED_SECRET_VALUE left,nested-comma;nested-tail]"
+    nested_database_secret = "postgresql://user:NESTED_DB_SECRET left,nested-db-tail]@db/nhms"
+    json_mapping_secret = "JSON_DB_SECRET left,json-db-tail]"
+    result = docker_runtime.StaticCheckResult(
+        status="FAIL",
+        findings=(
+            docker_runtime.Finding(
+                "TEST_SECRET_MAPPING",
+                "synthetic finding for redaction coverage.",
+                details={
+                    "outer": {
+                        "AWS_SECRET_ACCESS_KEY": nested_secret,
+                        "nested": {"DATABASE_URL": nested_database_secret},
+                    },
+                    "json_line": f'"DATABASE_URL": "{json_mapping_secret}"',
+                },
+            ),
+        ),
+    )
+
+    serialized = json.dumps(result.to_dict(), sort_keys=True)
+
+    assert "NESTED_SECRET_VALUE" not in serialized
+    assert "nested-comma;nested-tail]" not in serialized
+    assert "NESTED_DB_SECRET" not in serialized
+    assert "nested-db-tail]" not in serialized
+    assert "JSON_DB_SECRET" not in serialized
+    assert "json-db-tail]" not in serialized
     assert "<redacted>" in serialized
 
 
