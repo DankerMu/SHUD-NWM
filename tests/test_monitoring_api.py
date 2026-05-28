@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event, select, text
+from sqlalchemy import create_engine, event, inspect, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -896,6 +896,621 @@ def test_jobs_list_source_cycle_requires_matching_forecast_cycle_and_excludes_si
         assert [job["job_id"] for job in page["items"]] == ["job_target"]
         assert missing_cycle.status_code == 404
         assert missing_cycle.json()["error"]["code"] == "PIPELINE_CYCLE_NOT_FOUND"
+
+
+def test_strict_ops_identity_scopes_status_stages_jobs_and_logs_to_single_run(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS", current_state="forecast_running")
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_selected",
+        )
+        _insert_hydro_run(
+            store,
+            "run_sibling",
+            status="failed",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_sibling",
+        )
+        (tmp_path / "selected.log").write_text("selected log", encoding="utf-8")
+        (tmp_path / "sibling.log").write_text("sibling log", encoding="utf-8")
+        _create_job(
+            store,
+            job_id="job_selected_download",
+            run_id="run_selected",
+            cycle_id=cycle_id,
+            model_id="model_selected",
+            stage="download",
+            status="succeeded",
+            log_uri="selected.log",
+        )
+        _create_job(
+            store,
+            job_id="job_selected_forecast",
+            run_id="run_selected",
+            cycle_id=cycle_id,
+            model_id="model_selected",
+            stage="forecast",
+            status="running",
+        )
+        _create_job(
+            store,
+            job_id="job_sibling_failed",
+            run_id="run_sibling",
+            cycle_id=cycle_id,
+            model_id="model_sibling",
+            stage="download",
+            status="failed",
+            log_uri="sibling.log",
+        )
+        strict_params = {
+            "source": "GFS",
+            "cycle_time": cycle_time.isoformat(),
+            "run_id": "run_selected",
+            "model_id": "model_selected",
+        }
+        with _client(store) as client:
+            status_response = client.get("/api/v1/pipeline/status", params=strict_params)
+            stages_response = client.get("/api/v1/pipeline/stages", params=strict_params)
+            jobs_response = client.get("/api/v1/jobs", params={**strict_params, "limit": 10, "sort_order": "asc"})
+            logs_response = client.get("/api/v1/jobs/job_selected_download/logs", params=strict_params)
+
+    assert status_response.status_code == 200
+    assert status_response.json()["data"]["job_counts"] == {
+        "succeeded": 1,
+        "failed": 0,
+        "running": 1,
+        "pending": 0,
+    }
+    assert stages_response.status_code == 200
+    stages = stages_response.json()["data"]
+    download = next(stage for stage in stages if stage["stage"] == "download")
+    forecast = next(stage for stage in stages if stage["stage"] == "forecast")
+    assert download["basin_progress"] == {"completed": 1, "total": 1, "failed": 0}
+    assert [result["job_id"] for result in download["basin_results"]] == ["job_selected_download"]
+    assert forecast["basin_progress"] == {"completed": 0, "total": 1, "failed": 0}
+    assert jobs_response.status_code == 200
+    jobs_page = jobs_response.json()["data"]
+    assert jobs_page["total"] == 2
+    assert [job["job_id"] for job in jobs_page["items"]] == ["job_selected_download", "job_selected_forecast"]
+    assert logs_response.status_code == 200
+    assert logs_response.json()["data"]["content"] == "selected log"
+    assert "sibling" not in json.dumps(
+        {
+            "status": status_response.json(),
+            "stages": stages_response.json(),
+            "jobs": jobs_response.json(),
+            "logs": logs_response.json(),
+        },
+        sort_keys=True,
+    )
+
+
+def test_jobs_model_id_with_stage_preserves_legacy_filtering() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        _create_job(
+            store,
+            job_id="job_model_a_forecast",
+            run_id="run_a",
+            cycle_id=cycle_id_for("GFS", cycle_time),
+            model_id="model_a",
+            stage="forecast",
+            status="running",
+        )
+        _create_job(
+            store,
+            job_id="job_model_a_download",
+            run_id="run_a",
+            cycle_id=cycle_id_for("GFS", cycle_time),
+            model_id="model_a",
+            stage="download",
+            status="succeeded",
+        )
+        _create_job(
+            store,
+            job_id="job_model_b_forecast",
+            run_id="run_b",
+            cycle_id=cycle_id_for("GFS", cycle_time),
+            model_id="model_b",
+            stage="forecast",
+            status="running",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={"model_id": "model_a", "stage": "forecast"},
+            )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["total"] == 1
+    assert [job["job_id"] for job in data["items"]] == ["job_model_a_forecast"]
+
+
+def test_jobs_source_cycle_model_id_without_run_id_rejects_strict_bypass() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "model_id": "model_a",
+                },
+            )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "VALIDATION_ERROR"
+    assert error["details"] == {
+        "missing_fields": ["run_id"],
+        "provided_fields": ["source", "cycle_time", "model_id"],
+        "required_fields": ["source", "cycle_time", "run_id", "model_id"],
+        "strict_identity_required": True,
+    }
+
+
+def test_strict_jobs_do_not_mix_same_model_sibling_runs() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_shared",
+        )
+        _insert_hydro_run(
+            store,
+            "run_sibling",
+            status="failed",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_shared",
+        )
+        _create_job(
+            store,
+            job_id="job_selected_shared_model",
+            run_id="run_selected",
+            cycle_id=cycle_id,
+            model_id="model_shared",
+        )
+        _create_job(
+            store,
+            job_id="job_sibling_shared_model",
+            run_id="run_sibling",
+            cycle_id=cycle_id,
+            model_id="model_shared",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run_selected",
+                    "model_id": "model_shared",
+                },
+            )
+
+    assert response.status_code == 200
+    page = response.json()["data"]
+    assert page["total"] == 1
+    assert [job["job_id"] for job in page["items"]] == ["job_selected_shared_model"]
+
+
+def test_strict_jobs_require_matching_forecast_cycle_source_of_truth() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_selected",
+        )
+        _create_job(
+            store,
+            job_id="job_selected_without_cycle",
+            run_id="run_selected",
+            cycle_id=cycle_id,
+            model_id="model_selected",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run_selected",
+                    "model_id": "model_selected",
+                },
+            )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "PIPELINE_CYCLE_NOT_FOUND"
+
+
+def test_strict_pipeline_status_reports_selected_hydro_state_not_aggregate_cycle_state() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS", current_state="published")
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="failed",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_selected",
+        )
+        _insert_hydro_run(
+            store,
+            "run_sibling",
+            status="published",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_sibling",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/status",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run_selected",
+                    "model_id": "model_selected",
+                },
+            )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["current_state"] == "failed"
+    assert data["current_state"] != "published"
+    assert data["started_at"] is not None
+    assert data["updated_at"] is not None
+
+
+def test_strict_jobs_run_filters_do_not_materialize_broad_matching_run_ids() -> None:
+    with _store(hydro_run_shape="full") as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_selected",
+            run_type="forecast",
+            scenario_id="deterministic",
+        )
+        _create_job(
+            store,
+            job_id="job_selected",
+            run_id="run_selected",
+            cycle_id=cycle_id,
+            model_id="model_selected",
+        )
+        captured_sql: list[str] = []
+
+        @event.listens_for(store.session.get_bind(), "before_cursor_execute")
+        def _capture_sql(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+            captured_sql.append(" ".join(str(statement).lower().split()))
+
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run_selected",
+                    "model_id": "model_selected",
+                    "run_type": "forecast",
+                    "scenario": "deterministic",
+                },
+            )
+
+        event.remove(store.session.get_bind(), "before_cursor_execute", _capture_sql)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["total"] == 1
+    assert not any(
+        "select run_id from hydro.hydro_run where run_type = ?" in statement
+        or "select run_id from hydro.hydro_run where run_type = :run_type" in statement
+        for statement in captured_sql
+    )
+    assert any(
+        "select run_id from hydro.hydro_run where run_id =" in statement
+        and "run_type =" in statement
+        and "scenario_id =" in statement
+        for statement in captured_sql
+    )
+
+
+def test_strict_ops_identity_rejects_partial_before_source_cycle_lookup() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/status",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "run_id": "run_only"},
+            )
+            jobs_response = client.get("/api/v1/jobs", params={"run_id": "run_only"})
+
+    for candidate in (response, jobs_response):
+        assert candidate.status_code == 422
+        error = candidate.json()["error"]
+        assert error["code"] == "VALIDATION_ERROR"
+    assert response.json()["error"]["details"] == {
+        "missing_fields": ["model_id"],
+        "provided_fields": ["source", "cycle_time", "run_id"],
+        "required_fields": ["source", "cycle_time", "run_id", "model_id"],
+        "strict_identity_required": True,
+    }
+    assert jobs_response.json()["error"]["details"] == {
+        "missing_fields": ["source", "cycle_time", "model_id"],
+        "provided_fields": ["run_id"],
+        "required_fields": ["source", "cycle_time", "run_id", "model_id"],
+        "strict_identity_required": True,
+    }
+
+
+def test_strict_ops_identity_reports_bounded_blank_and_overlong_values() -> None:
+    long_model_id = "model-" + ("m" * 200)
+    with _store() as store:
+        cycle_time = _cycle_time()
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/stages",
+                params={
+                    "source": " " * 200,
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run-1",
+                    "model_id": long_model_id,
+                },
+            )
+
+    assert response.status_code == 422
+    details = response.json()["error"]["details"]
+    assert details["missing_fields"] == ["source"]
+    assert details["provided_fields"] == ["cycle_time", "run_id", "model_id"]
+    assert details["required_fields"] == ["source", "cycle_time", "run_id", "model_id"]
+    assert details["strict_identity_required"] is True
+    assert details["rejected_values"]["source"] == f"{' ' * 61}..."
+    assert details["rejected_values"]["model_id"] == f"{long_model_id[:61]}..."
+    assert long_model_id not in response.text
+
+
+def test_strict_ops_identity_rejects_overlong_run_and_model_before_db_lookup(monkeypatch: Any) -> None:
+    def forbidden_resolve(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("strict overlong identity must be rejected before DB lookup")
+
+    monkeypatch.setattr(pipeline_routes, "_resolve_strict_pipeline_identity", forbidden_resolve)
+    long_run_id = "run-" + ("r" * 200)
+    long_model_id = "model-" + ("m" * 200)
+    with _store() as store:
+        cycle_time = _cycle_time()
+        with _client(store) as client:
+            run_response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": long_run_id,
+                    "model_id": "model-1",
+                },
+            )
+            model_response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run-1",
+                    "model_id": long_model_id,
+                },
+            )
+
+    assert run_response.status_code == 422
+    assert run_response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert run_response.json()["error"]["details"] == {
+        "field": "run_id",
+        "rejected_value": f"{long_run_id[:61]}...",
+        "reason": "run_id must be at most 128 characters.",
+    }
+    assert long_run_id not in run_response.text
+    assert model_response.status_code == 422
+    assert model_response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert model_response.json()["error"]["details"] == {
+        "field": "model_id",
+        "rejected_value": f"{long_model_id[:61]}...",
+        "reason": "model_id must be at most 128 characters.",
+    }
+    assert long_model_id not in model_response.text
+
+
+def test_strict_ops_identity_rejects_unsupported_source_and_date_only_cycle() -> None:
+    with _store() as store:
+        with _client(store) as client:
+            unsupported_source = client.get(
+                "/api/v1/pipeline/status",
+                params={
+                    "source": "UNKNOWN-" + ("x" * 200),
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "run_id": "run-1",
+                    "model_id": "model-1",
+                },
+            )
+            date_only_cycle = client.get(
+                "/api/v1/pipeline/status",
+                params={
+                    "source": "GFS",
+                    "cycle_time": "2026-05-07",
+                    "run_id": "run-1",
+                    "model_id": "model-1",
+                },
+            )
+
+    assert unsupported_source.status_code == 422
+    unsupported_details = unsupported_source.json()["error"]["details"]
+    assert unsupported_source.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert unsupported_details["field"] == "source"
+    assert unsupported_details["rejected_value"].endswith("...")
+    assert "x" * 200 not in unsupported_source.text
+    assert date_only_cycle.status_code == 422
+    assert date_only_cycle.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert date_only_cycle.json()["error"]["details"] == {
+        "field": "cycle_time",
+        "rejected_value": "2026-05-07",
+        "reason": "cycle_time must be an ISO 8601 timestamp.",
+    }
+
+
+def test_strict_ops_identity_not_found_and_same_cycle_mismatch_details_are_safe() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        _insert_hydro_run(
+            store,
+            "run_sibling",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_sibling",
+        )
+        with _client(store) as client:
+            run_not_found = client.get(
+                "/api/v1/pipeline/status",
+                params={
+                    "source": "GFS",
+                    "cycle_time": (cycle_time + timedelta(hours=6)).isoformat(),
+                    "run_id": "missing_run",
+                    "model_id": "model_missing",
+                },
+            )
+            mismatch = client.get(
+                "/api/v1/pipeline/status",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "missing_run",
+                    "model_id": "model_missing",
+                },
+            )
+
+    assert run_not_found.status_code == 404
+    run_not_found_error = run_not_found.json()["error"]
+    assert run_not_found_error["code"] == "PIPELINE_STRICT_IDENTITY_NOT_FOUND"
+    assert run_not_found_error["details"] == {
+        "strict_identity": True,
+        "requested_identity": {
+            "source": "GFS",
+            "source_id": "gfs",
+            "cycle_time": (cycle_time + timedelta(hours=6)).isoformat(),
+            "run_id": "missing_run",
+            "model_id": "model_missing",
+        },
+        "reason": "run_not_found",
+    }
+    assert mismatch.status_code == 404
+    mismatch_details = mismatch.json()["error"]["details"]
+    assert mismatch.json()["error"]["code"] == "PIPELINE_STRICT_IDENTITY_NOT_FOUND"
+    assert mismatch_details["reason"] == "run_model_cycle_source_mismatch"
+    assert mismatch_details["strict_identity"] is True
+    assert mismatch_details["candidate_count"] == 1
+    assert mismatch_details["candidate_sample"] == [
+        {
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "run_id": "run_sibling",
+            "model_id": "model_sibling",
+        }
+    ]
+
+
+def test_strict_job_log_identity_mismatch_returns_409_before_artifact_read(monkeypatch: Any) -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_selected",
+        )
+        _insert_hydro_run(
+            store,
+            "run_sibling",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_sibling",
+        )
+        _create_job(
+            store,
+            job_id="job_sibling_log",
+            run_id="run_sibling",
+            cycle_id=cycle_id,
+            model_id="model_sibling",
+            log_uri="sibling.log",
+        )
+
+        def forbidden_artifact_reader(_request: Any) -> None:
+            raise AssertionError("artifact reader must not be constructed on identity mismatch")
+
+        monkeypatch.setattr(pipeline_routes, "_artifact_reader_for_request", forbidden_artifact_reader)
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs/job_sibling_log/logs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run_selected",
+                    "model_id": "model_selected",
+                },
+            )
+
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "PIPELINE_STRICT_IDENTITY_MISMATCH"
+    assert error["details"] == {
+        "strict_identity": True,
+        "requested_identity": {
+            "source": "GFS",
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+            "run_id": "run_selected",
+            "model_id": "model_selected",
+        },
+        "actual_identity": {
+            "job_id": "job_sibling_log",
+            "run_id": "run_sibling",
+            "model_id": "model_sibling",
+            "cycle_id": cycle_id,
+            "source_id": "gfs",
+            "cycle_time": cycle_time.isoformat(),
+        },
+        "reason": "job_identity_mismatch",
+    }
 
 
 def test_jobs_list_endpoint_server_side_sorting() -> None:
@@ -2140,7 +2755,7 @@ def test_error_response_wrapper() -> None:
         assert response.json()["error"]["code"] == "JOB_NOT_FOUND"
 
 
-def _store(*, forecast_cycle_shape: str = "current") -> "_ClosingStore":
+def _store(*, forecast_cycle_shape: str = "current", hydro_run_shape: str = "minimal") -> "_ClosingStore":
     engine = create_engine(
         "sqlite://",
         future=True,
@@ -2152,6 +2767,7 @@ def _store(*, forecast_cycle_shape: str = "current") -> "_ClosingStore":
     def _attach_schemas(dbapi_connection, _connection_record) -> None:
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS met")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS hydro")
 
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
@@ -2179,6 +2795,42 @@ def _store(*, forecast_cycle_shape: str = "current") -> "_ClosingStore":
                         started_at DATETIME,
                         updated_at DATETIME,
                         created_at DATETIME
+                    )
+                    """
+                )
+            )
+        if hydro_run_shape == "full":
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE hydro.hydro_run (
+                        run_id TEXT PRIMARY KEY,
+                        run_type TEXT,
+                        scenario_id TEXT,
+                        source_id TEXT,
+                        cycle_time DATETIME,
+                        model_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        start_time DATETIME,
+                        updated_at DATETIME,
+                        error_code TEXT,
+                        error_message TEXT
+                    )
+                    """
+                )
+            )
+        else:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE hydro.hydro_run (
+                        run_id TEXT PRIMARY KEY,
+                        source_id TEXT,
+                        cycle_time DATETIME,
+                        model_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        error_code TEXT,
+                        error_message TEXT
                     )
                     """
                 )
@@ -2383,15 +3035,47 @@ def _insert_cycle(
     store.session.commit()
 
 
-def _insert_hydro_run(store: PipelineStore, run_id: str, *, status: str) -> None:
+def _insert_hydro_run(
+    store: PipelineStore,
+    run_id: str,
+    *,
+    status: str,
+    source_id: str = "gfs",
+    cycle_time: datetime | None = None,
+    model_id: str = "model_a",
+    run_type: str = "forecast",
+    scenario_id: str = "deterministic",
+) -> None:
+    column_names = {
+        column["name"] for column in inspect(store.session.get_bind()).get_columns("hydro_run", schema="hydro")
+    }
+    values: dict[str, Any] = {
+        "run_id": run_id,
+        "status": status,
+    }
+    if "source_id" in column_names:
+        values["source_id"] = source_id
+    if "cycle_time" in column_names:
+        values["cycle_time"] = cycle_time or _cycle_time()
+    if "model_id" in column_names:
+        values["model_id"] = model_id
+    if "run_type" in column_names:
+        values["run_type"] = run_type
+    if "scenario_id" in column_names:
+        values["scenario_id"] = scenario_id
+    if "start_time" in column_names:
+        values["start_time"] = cycle_time or _cycle_time()
+    if "updated_at" in column_names:
+        values["updated_at"] = (cycle_time or _cycle_time()) + timedelta(minutes=10)
+    columns = list(values)
     store.session.execute(
         text(
-            """
-            INSERT INTO hydro.hydro_run (run_id, status)
-            VALUES (:run_id, :status)
+            f"""
+            INSERT INTO hydro.hydro_run ({", ".join(columns)})
+            VALUES ({", ".join(f":{column}" for column in columns)})
             """
         ),
-        {"run_id": run_id, "status": status},
+        values,
     )
     store.session.commit()
 

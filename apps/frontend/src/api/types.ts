@@ -1822,6 +1822,7 @@ export interface components {
         ProductId: string;
         RunId: string;
         RunIdQuery: string;
+        RunIdQueryOptional: string;
         SegmentId: string;
         SegmentIdQuery: string;
         SourceId: string;
@@ -2668,6 +2669,8 @@ export interface operations {
             query: {
                 source: components["parameters"]["SourceQueryRequired"];
                 cycle_time: components["parameters"]["CycleTimeQueryRequired"];
+                run_id?: components["parameters"]["RunIdQueryOptional"];
+                model_id?: string;
             };
             header?: never;
             path?: never;
@@ -2695,6 +2698,8 @@ export interface operations {
             query: {
                 source: components["parameters"]["SourceQueryRequired"];
                 cycle_time: components["parameters"]["CycleTimeQueryRequired"];
+                run_id?: components["parameters"]["RunIdQueryOptional"];
+                model_id?: string;
             };
             header?: never;
             path?: never;
@@ -2722,8 +2727,9 @@ export interface operations {
             query?: {
                 source?: components["parameters"]["SourceQuery"];
                 cycle_time?: components["parameters"]["CycleTimeQuery"];
+                run_id?: components["parameters"]["RunIdQueryOptional"];
                 status?: string;
-                model_id?: components["parameters"]["ModelIdQuery"];
+                model_id?: string;
                 stage?: string;
                 run_type?: string;
                 scenario?: string;
@@ -2755,7 +2761,12 @@ export interface operations {
     };
     getPipelineJobLogs: {
         parameters: {
-            query?: never;
+            query?: {
+                source?: components["parameters"]["SourceQuery"];
+                cycle_time?: components["parameters"]["CycleTimeQuery"];
+                run_id?: components["parameters"]["RunIdQueryOptional"];
+                model_id?: string;
+            };
             header?: never;
             path: {
                 job_id: components["parameters"]["JobId"];

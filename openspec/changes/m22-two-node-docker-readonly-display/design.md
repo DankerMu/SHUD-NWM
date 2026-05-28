@@ -540,3 +540,107 @@ Non-goals:
 - Do not implement `/ops` stages/jobs/logs strict identity filtering; that is #233.
 - Do not implement readonly DB validation, Docker compose/image/systemd, or final cross-plane E2E evidence; those are later issues.
 - Do not change QHH readiness math, station/river aggregation semantics, or historical source-only browsing semantics except to share safe helper code.
+
+## Issue #233 Fixture: Pipeline Ops Strict Run Identity Filters
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: other
+
+Change surface:
+
+- Pipeline monitoring query contract in `apps/api/routes/pipeline.py` for `GET /api/v1/pipeline/status`, `GET /api/v1/pipeline/stages`, `GET /api/v1/jobs`, and `GET /api/v1/jobs/{job_id}/logs`.
+- Pipeline store/query helper logic used to resolve or validate `source`, `cycle_time`, `run_id`, and `model_id` together.
+- Static OpenAPI, runtime OpenAPI patch if present, and generated frontend API types touched by the added query parameters or response metadata.
+- Backend tests for source/cycle compatibility, strict identity success, duplicate same-source/cycle run/model mismatch, job/log evidence binding, and contract drift.
+
+Must preserve:
+
+- Existing source/cycle monitoring behavior remains compatible for non-strict browsing and current `/ops` consumers.
+- Existing pipeline status, stages, jobs page, job log success envelope, pagination, sorting, status filtering, stage filtering, run type/scenario filtering, and published log error behavior remain stable.
+- Existing display retry/cancel fail-closed behavior from #230 and published log URI safety from #231 are not weakened.
+- Existing pipeline stage aggregation semantics for legacy jobs without `run_id` remain compatible when strict run identity is not requested.
+
+Must add/change:
+
+- Add optional strict identity inputs `run_id` and `model_id` alongside existing `source` and `cycle_time` where needed for pipeline status/stages/jobs/log evidence.
+- If any strict identity field is present for ops evidence, all four fields `source`, `cycle_time`, `run_id`, and `model_id` are required.
+- Strict ops identity must match a concrete `hydro.hydro_run` row after documented source/cycle normalization and must not fall back to source/cycle-only monitoring data.
+- Strict pipeline status and stage responses must be scoped to the selected run identity or include stable mismatch/unavailable metadata that lets consumers reject wrong-run evidence.
+- Strict jobs and logs must only return evidence for jobs matching the selected `run_id` and `model_id`; a job from the same source/cycle but different run/model must not satisfy strict evidence.
+- Partial strict identity returns `422 VALIDATION_ERROR` with safe `missing_fields`, `provided_fields`, `required_fields`, and `strict_identity_required=true`, and must not perform source/cycle-only evidence lookup.
+- Strict status/stages/jobs identity resolution failure returns HTTP `404` with code `PIPELINE_STRICT_IDENTITY_NOT_FOUND`, safe `requested_identity`, `strict_identity=true`, and a `reason` such as `run_not_found` or `run_model_cycle_source_mismatch`; it must not return source/cycle-only evidence.
+- Strict job or log identity mismatch returns HTTP `409` with code `PIPELINE_STRICT_IDENTITY_MISMATCH`, safe `requested_identity`, safe `actual_identity` when available, `job_id` when applicable, `strict_identity=true`, and no mixed-run jobs or logs.
+- Strict log identity mismatch must be rejected before constructing or invoking `ArtifactReader.read_text_tail()` so the wrong job's published log content is never read.
+- Update OpenAPI, generated frontend types, API contract tests, and OpenAPI drift tests.
+
+Strict ops identity error contract:
+
+- `422 VALIDATION_ERROR`: any of `source`, `cycle_time`, `run_id`, or `model_id` is missing or blank when another strict identity field is present. Required details: `missing_fields`, `provided_fields`, `required_fields=["source","cycle_time","run_id","model_id"]`, `strict_identity_required=true`, and bounded `rejected_values` for supplied blank/overlong values when applicable.
+- `422 VALIDATION_ERROR`: unsupported source or malformed/date-only `cycle_time`. Required details include bounded `field` and `rejected_value`, matching existing monitoring validation style where possible.
+- `404 PIPELINE_STRICT_IDENTITY_NOT_FOUND`: no `hydro.hydro_run` row matches all four normalized strict identity fields. Required details: `strict_identity=true`, `requested_identity` with safe bounded `source`, `source_id`, `cycle_time`, `run_id`, and `model_id`, plus `reason="run_not_found"`.
+- `404 PIPELINE_STRICT_IDENTITY_NOT_FOUND`: a source/cycle forecast cycle exists but the requested run/model is not part of that source/cycle identity. Required details: same as above, plus `reason="run_model_cycle_source_mismatch"` and bounded `candidate_count` or `available_run_ids_sample` only when safe and capped.
+- `409 PIPELINE_STRICT_IDENTITY_MISMATCH`: a strict `/jobs` or `/jobs/{job_id}/logs` request encounters a job whose `run_id`/`model_id` does not match the requested identity. Required details: `strict_identity=true`, safe `requested_identity`, safe `actual_identity` with `job_id`, `run_id`, `model_id`, `cycle_id`, and any resolved `source_id/cycle_time` when available, plus `reason="job_identity_mismatch"`.
+- Log mismatch rejection order: `PIPELINE_STRICT_IDENTITY_MISMATCH` must be raised before any published log read or artifact reader call. `JOB_NOT_FOUND`, `JOB_LOG_NOT_PUBLISHED`, `JOB_LOG_URI_UNSUPPORTED`, `JOB_LOG_ACCESS_DENIED`, and `JOB_LOG_NOT_FOUND` remain the log-specific errors only after the job identity has been validated.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - extends public monitoring status/stages/jobs/logs query contracts.
+- Config / project setup: not selected - no new runtime env or deployment settings.
+- File IO / path safety / overwrite: selected - job logs are a read surface and must preserve #231 published artifact safety when strict identity is added.
+- Schema / columns / units / field names: selected - new query params, response metadata/error details, OpenAPI/static types, and hydro/job identity fields are in scope.
+- Geospatial / CRS / shapefile sidecars: not selected - no geospatial file handling.
+- Time series / forcing / temporal boundaries: selected - strict `cycle_time` parsing/normalization and source/cycle duplicate handling are central.
+- Numerical stability / conservation / NaN: not selected - no numerical calculations.
+- Solver runtime / performance / threading: not selected - no solver runtime behavior.
+- Resource limits / large input / discovery: selected - monitoring queries, stage samples, and job pages must remain bounded under strict filters.
+- Legacy compatibility / examples: selected - source/cycle browsing and legacy job rows must remain compatible outside strict mode.
+- Error handling / rollback / partial outputs: selected - strict mismatch and partial identity must return stable typed errors without ambiguous evidence.
+- Release / packaging / dependency compatibility: selected - `/ops`, cross-plane E2E, OpenAPI, and generated frontend types depend on the contract.
+- Documentation / migration notes: not selected - frontend UI/runbook docs are owned by later issues.
+
+Invariant Matrix:
+
+- Governing invariant: Ops status, stages, jobs, and log evidence for a strict request must be bound to one concrete `source/cycle_time/run_id/model_id` identity, or fail with a typed validation/unavailable error; it must never mix jobs/logs from a same-source/cycle sibling run or silently fall back to source/cycle-only evidence.
+- Source-of-truth identity/contract: request query parameters `source`, `cycle_time`, `run_id`, and `model_id`, normalized to the store's `source_id` and timestamp representation, then resolved against `hydro.hydro_run` and `ops.pipeline_job`.
+- Producers: 22 run evidence, `hydro.hydro_run` rows, `met.forecast_cycle` rows, `ops.pipeline_job` rows, and published artifact log URIs.
+- Validators/preflight: FastAPI query validation, partial strict identity guard, source normalization, cycle-time parsing, hydro run identity lookup, job/log identity match checks, and safe error detail construction.
+- Storage/cache/query: forecast-cycle lookup, hydro-run identity lookup, pipeline job status/stage/job queries, published log reads, bounded stage sample/job pagination limits, and no source/cycle-only fallback in strict mode.
+- Public routes/entrypoints: `GET /api/v1/pipeline/status`, `GET /api/v1/pipeline/stages`, `GET /api/v1/jobs`, `GET /api/v1/jobs/{job_id}/logs`.
+- Frontend/downstream consumers: generated API types and future `/ops` strict identity UI/cross-plane E2E consumers.
+- Failure paths/rollback/stale state: partial strict identity, unsupported source, malformed cycle time, no matching hydro run, same-source/cycle sibling run/model mismatch, job/log identity mismatch, and legacy rows missing identity all return stable errors or explicit non-strict compatibility behavior.
+- Evidence/audit/readiness: focused monitoring API tests, API contract/OpenAPI drift tests, generated frontend type diff, duplicate same-source/cycle fixtures, and published-log strict identity checks.
+- Regression rows:
+  - source/cycle request without strict fields -> existing status/stages/jobs/log browsing remains compatible.
+  - strict request with matching `source/cycle_time/run_id/model_id` -> status/stages/jobs/log evidence is scoped to the selected run identity.
+  - strict request when a sibling run shares source/cycle but has different run/model -> sibling jobs/logs cannot satisfy the strict request.
+  - strict status/stages for nonexistent run/model -> `404 PIPELINE_STRICT_IDENTITY_NOT_FOUND` with safe requested identity and no source/cycle fallback.
+  - partial strict identity -> `422 VALIDATION_ERROR` before source/cycle-only lookup with safe missing/provided/required details.
+  - strict `GET /api/v1/jobs/{job_id}/logs` for a job not matching requested run/model -> `409 PIPELINE_STRICT_IDENTITY_MISMATCH` and no log read attempt.
+  - unsupported or overlong source / malformed cycle_time -> existing validation and bounded reflection remain stable.
+  - legacy jobs without run identity -> remain visible in non-strict source/cycle browsing but cannot satisfy strict run evidence.
+
+Boundary-surface checklist:
+
+- Shared helper roots: pipeline source/cycle parsing, hydro-run identity lookup, monitoring query helpers, job payload/log helpers, and published log reader integration.
+- Public entrypoints: pipeline status, stages, jobs, and job logs routes.
+- Read surfaces: `met.forecast_cycle`, `hydro.hydro_run`, `ops.pipeline_job`, published log artifacts.
+- Write/delete/overwrite surfaces: none - this issue must not add writes or mutate pipeline state.
+- Staging/publish/rollback surfaces: none.
+- Producer/consumer evidence boundaries: requested identity, resolved run identity, job payload identity, log request identity, OpenAPI/generated types, future `/ops` and cross-plane E2E evidence.
+- Stale-state/idempotency boundaries: repeated strict reads must be side-effect free; stale source/cycle jobs must not be used as strict evidence for a sibling run.
+- Unchanged downstream consumers: existing monitoring API tests, frontend generated API consumers, retry/cancel fail-closed tests, and published log tests.
+
+Required evidence:
+
+- `uv run pytest -q tests/test_monitoring_api.py tests/test_api_contract.py tests/test_openapi_drift.py`: strict ops identity success/mismatch/partial validation, named `PIPELINE_STRICT_IDENTITY_NOT_FOUND` and `PIPELINE_STRICT_IDENTITY_MISMATCH` errors/details, source/cycle compatibility, jobs/logs evidence binding, OpenAPI/contract drift.
+- `uv run ruff check apps/api tests/test_monitoring_api.py tests/test_api_contract.py tests/test_openapi_drift.py`: style/static verification for touched backend paths.
+- Frontend API type generation/check after OpenAPI/generated type changes; commit those schema/type updates and verify there is no additional uncommitted drift with `git diff --quiet -- openapi/nhms.v1.yaml apps/frontend/src/api/types.ts`.
+- If strict log identity validation touches published artifact reading, include focused log tests proving `PIPELINE_STRICT_IDENTITY_MISMATCH` rejects before `ArtifactReader.read_text_tail()` and safe published-log behavior remains intact.
+
+Non-goals:
+
+- Do not implement frontend `/ops` rendering, diagnostic copy, hidden controls, or browser tests; that is #235.
+- Do not change latest-product strict identity; that is #232 and already landed.
+- Do not implement readonly DB validation, Docker compose/image/systemd, or final cross-plane E2E evidence; those are later issues.
+- Do not change retry/cancel mutation behavior except preserving #230 compatibility.

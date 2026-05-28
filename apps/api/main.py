@@ -23,6 +23,7 @@ from apps.api.routes.pipeline import (
     PIPELINE_JOB_STATUS_VALUES,
     PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH,
     PIPELINE_STAGE_BASIN_RESULTS_LIMIT,
+    PIPELINE_STRICT_IDENTITY_TEXT_MAX_LENGTH,
 )
 from apps.api.routes.pipeline import router as pipeline_router
 from apps.api.routes.state_snapshots import router as state_snapshots_router
@@ -625,7 +626,12 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         operation_id="getPipelineStatus",
         summary="Get pipeline status for a cycle",
         tags=["pipeline"],
-        parameters=[_source_query_parameter(required=True), _cycle_time_query_parameter(required=True)],
+        parameters=[
+            _source_query_parameter(required=True),
+            _cycle_time_query_parameter(required=True),
+            _run_id_query_parameter(required=False),
+            _strict_model_id_query_parameter(required=False),
+        ],
         data_schema={"$ref": "#/components/schemas/PipelineStatus"},
         description="Pipeline status",
     )
@@ -636,7 +642,12 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         operation_id="listPipelineStages",
         summary="List pipeline stages for a cycle",
         tags=["pipeline"],
-        parameters=[_source_query_parameter(required=True), _cycle_time_query_parameter(required=True)],
+        parameters=[
+            _source_query_parameter(required=True),
+            _cycle_time_query_parameter(required=True),
+            _run_id_query_parameter(required=False),
+            _strict_model_id_query_parameter(required=False),
+        ],
         data_schema={"type": "array", "items": {"$ref": "#/components/schemas/PipelineStage"}},
         description="Pipeline stage list",
     )
@@ -650,8 +661,9 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         parameters=[
             _source_query_parameter(required=False),
             _cycle_time_query_parameter(required=False),
+            _run_id_query_parameter(required=False),
             {"name": "status", "in": "query", "required": False, "schema": {"type": "string"}},
-            {"name": "model_id", "in": "query", "required": False, "schema": {"type": "string"}},
+            _strict_model_id_query_parameter(required=False),
             {"name": "stage", "in": "query", "required": False, "schema": {"type": "string"}},
             {"name": "run_type", "in": "query", "required": False, "schema": {"type": "string"}},
             {"name": "scenario", "in": "query", "required": False, "schema": {"type": "string"}},
@@ -690,7 +702,13 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         operation_id="getPipelineJobLogs",
         summary="Get pipeline job logs",
         tags=["pipeline"],
-        parameters=[{"name": "job_id", "in": "path", "required": True, "schema": {"type": "string"}}],
+        parameters=[
+            {"name": "job_id", "in": "path", "required": True, "schema": {"type": "string"}},
+            _source_query_parameter(required=False),
+            _cycle_time_query_parameter(required=False),
+            _run_id_query_parameter(required=False),
+            _strict_model_id_query_parameter(required=False),
+        ],
         data_schema={"$ref": "#/components/schemas/JobLogs"},
         description="Pipeline job logs",
     )
@@ -788,6 +806,28 @@ def _cycle_time_query_parameter(*, required: bool) -> dict[str, Any]:
         "in": "query",
         "required": required,
         "schema": {"type": "string", "format": "date-time"},
+    }
+
+
+def _run_id_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {
+        "name": "run_id",
+        "in": "query",
+        "required": required,
+        "schema": {"type": "string", "maxLength": PIPELINE_STRICT_IDENTITY_TEXT_MAX_LENGTH},
+    }
+
+
+def _model_id_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {"name": "model_id", "in": "query", "required": required, "schema": {"type": "string"}}
+
+
+def _strict_model_id_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {
+        "name": "model_id",
+        "in": "query",
+        "required": required,
+        "schema": {"type": "string", "maxLength": PIPELINE_STRICT_IDENTITY_TEXT_MAX_LENGTH},
     }
 
 

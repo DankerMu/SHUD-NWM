@@ -52,6 +52,17 @@ Issue ownership note:
 - #235 owns `/hydro-met` frontend bootstrap, frontend strict query behavior, and browser/UI tests.
 - #239 owns final cross-plane E2E evidence and pass/fail/partial reporting.
 
+## 4A. Pipeline Ops Strict Run Identity
+
+- [ ] 4A.1 Extend pipeline status, stages, jobs, and logs APIs or response metadata so strict consumers can bind `source`, `cycle_time`, `run_id`, and `model_id` together.
+- [ ] 4A.2 Preserve existing source/cycle status, stages, jobs, pagination, sorting, status/stage filters, and log behavior for non-strict browsing.
+- [ ] 4A.3 Reject partial strict ops identity with `422 VALIDATION_ERROR`, safe `missing_fields`, `provided_fields`, `required_fields`, and `strict_identity_required=true` before source/cycle-only lookup.
+- [ ] 4A.4 Ensure strict status/stages/jobs evidence resolves to a concrete `hydro.hydro_run` identity and cannot use jobs from a same-source/cycle sibling run or model.
+- [ ] 4A.5 Ensure strict job log evidence validates the requested `run_id` and `model_id` before reading the published log, and wrong-run jobs/logs return HTTP `409` with code `PIPELINE_STRICT_IDENTITY_MISMATCH`.
+- [ ] 4A.6 Add duplicate same-source/cycle fixtures where two runs differ by `run_id` or `model_id`, including jobs/logs that would otherwise be mixed by source/cycle-only queries.
+- [ ] 4A.7 Add strict identity error contract tests for `422 VALIDATION_ERROR`, `404 PIPELINE_STRICT_IDENTITY_NOT_FOUND`, and `409 PIPELINE_STRICT_IDENTITY_MISMATCH`, including safe details and log mismatch before artifact read.
+- [ ] 4A.8 Update static/runtime OpenAPI, generated frontend API types, API contract tests, and OpenAPI drift tests for the strict ops identity contract.
+
 ## 5. Readonly DB Boundary
 
 - [ ] 5.1 Add readonly DB validation tests or runbook commands proving display APIs work with readonly credentials for health, models, stations, latest-product, pipeline status, stages, jobs, logs, and runtime config.

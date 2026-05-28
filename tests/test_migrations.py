@@ -29,6 +29,7 @@ EXPECTED_MIGRATIONS = [
     "000023_interp_weight_grid_signature.sql",
     "000024_qhh_latest_display_product_indexes.sql",
     "000025_active_manual_retry_guard.sql",
+    "000026_ops_strict_identity_indexes.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -455,6 +456,7 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         "cycle_time DESC",
         "run_id DESC",
     )
+    assert "hydro_run_ops_strict_identity_candidates_idx" not in migration
     assert "WHERE cycle_time IS NOT NULL" in migration
     assert "AND status IN ('frequency_done', 'published')" in migration
     assert _index_columns_by_name(migration, "basin_version_qhh_latest_lookup_idx") == (
@@ -547,6 +549,29 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "fst.valid_time <= cr.display_end_time" in query_source
     assert "rt.valid_time >= cr.display_start_time" in query_source
     assert "rt.valid_time <= cr.display_end_time" in query_source
+
+
+def test_ops_strict_identity_index_migration_is_forward_upgrade_safe() -> None:
+    migration_sql = dict(_migration_sql())
+    migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    migration = migration_sql["000026_ops_strict_identity_indexes.sql"]
+
+    assert migration_names.index("000024_qhh_latest_display_product_indexes.sql") < migration_names.index(
+        "000026_ops_strict_identity_indexes.sql"
+    )
+    assert migration_names.index("000025_active_manual_retry_guard.sql") < migration_names.index(
+        "000026_ops_strict_identity_indexes.sql"
+    )
+    assert "hydro_run_ops_strict_identity_candidates_idx" not in migration_sql[
+        "000024_qhh_latest_display_product_indexes.sql"
+    ]
+    assert "CREATE INDEX IF NOT EXISTS hydro_run_ops_strict_identity_candidates_idx" in migration
+    assert _index_columns_by_name(migration, "hydro_run_ops_strict_identity_candidates_idx") == (
+        "source_id",
+        "cycle_time",
+        "run_id",
+        "model_id",
+    )
 
 
 def test_fresh_tile_cache_schema_requires_non_null_cache_key_identity() -> None:
