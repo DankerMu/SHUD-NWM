@@ -48,19 +48,20 @@ Display role, node 27:
   `NHMS_PUBLISHED_ARTIFACT_ROOT`, marked read-only. Extra binds, named
   volumes, relative bind sources, local named-volume bind devices, and tmpfs
   entries below the published artifact root are validation failures. Display
-  `configs`, `secrets`, `devices`, `device_cgroup_rules`, and
+  `configs`, `secrets`, `deploy`, `devices`, `device_cgroup_rules`, and
   `device_requests` are not allowed.
 - The display service must keep `read_only: true`, `cap_drop: [ALL]`, and
   exactly `security_opt: [no-new-privileges:true]` as literal compose values.
-- Run static validation from the same shell used for compose rendering. Ambient
-  process environment overrides for any compute or display compose
-  interpolation variable are treated as static failures when that variable is
-  present in the corresponding env file and the process value differs. This
-  covers mount roots, image/tag/user/port variables, `DATABASE_URL`,
-  `NHMS_AUTH_MODE`, published artifact metadata, and role/safety flags.
-  Display audited runtime env keys must be literal values or interpolate through
-  their same canonical env key; null imports and alias variables such as
-  `DISPLAY_DATABASE_URL` are rejected.
+- Run static validation from the same shell used for compose rendering. For
+  each role, every compose interpolation variable must be declared in that
+  role's env file and must be part of the approved role contract. Ambient
+  process environment overrides for any approved compose interpolation variable
+  are static failures when the process value differs from the env-file value.
+  This covers mount roots, image/tag/user/port variables, `DATABASE_URL`,
+  `NHMS_AUTH_MODE`, published artifact metadata, object-store/CORS settings,
+  and role/safety flags. Display audited runtime env keys must be literal
+  values or interpolate through their same canonical env key; null imports and
+  alias variables such as `DISPLAY_DATABASE_URL` are rejected.
 
 Validation commands:
 

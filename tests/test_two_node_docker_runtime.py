@@ -422,6 +422,24 @@ def test_static_checker_rejects_display_device_ingress_surfaces(
 
 
 @pytest.mark.parametrize(
+    "deploy",
+    [
+        {"resources": {"reservations": {"devices": [{"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}]}}},
+        {"replicas": 1, "restart_policy": {"condition": "on-failure"}},
+    ],
+)
+def test_static_checker_rejects_display_deploy_subtree(tmp_path: Path, deploy: dict[str, Any]) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["deploy"] = deploy
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert "DISPLAY_DEPLOY_UNSUPPORTED" in _codes(result)
+
+
+@pytest.mark.parametrize(
     ("surface", "field", "value", "expected_code"),
     [
         ("include", None, ["./compose.extra.yml"], "DISPLAY_INCLUDE_UNSUPPORTED"),
@@ -816,6 +834,8 @@ services:
             ["no-new-privileges:true", "no-new-privileges:false"],
             "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID",
         ),
+        ("security_opt", ["NO-NEW-PRIVILEGES:TRUE"], "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID"),
+        ("security_opt", ["No-New-Privileges:True"], "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID"),
         (
             "security_opt",
             ["${DISPLAY_SECURITY_OPT:-no-new-privileges:true}"],
@@ -1174,6 +1194,128 @@ def test_static_checker_rejects_display_ambient_overrides(
 
 
 @pytest.mark.parametrize(
+    ("mutation", "alias_key", "process_value"),
+    [
+        ("image", "DISPLAY_APP_IMAGE", "ambient-display-app"),
+        ("port", "DISPLAY_PORT", "18000"),
+        ("aws_secret", "DISPLAY_AWS_SECRET_ACCESS_KEY", "ambient-secret"),
+    ],
+)
+def test_static_checker_rejects_display_compose_alias_interpolation_keys_absent_from_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    alias_key: str,
+    process_value: str,
+) -> None:
+    compose = _safe_display_compose()
+    service = compose["services"]["display-api"]
+    if mutation == "image":
+        service["image"] = "${DISPLAY_APP_IMAGE:-nhms-app}:${NHMS_IMAGE_TAG:-m22-placeholder}"
+    elif mutation == "port":
+        service["ports"] = ["127.0.0.1:${DISPLAY_PORT:-8000}:8000"]
+    elif mutation == "aws_secret":
+        service["environment"]["AWS_SECRET_ACCESS_KEY"] = (
+            "${DISPLAY_AWS_SECRET_ACCESS_KEY:-readonly-secret-placeholder}"
+        )
+    else:
+        raise AssertionError(f"unhandled mutation: {mutation}")
+    display_compose = _write_display_compose(tmp_path, compose)
+    monkeypatch.setenv(alias_key, process_value)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {"DISPLAY_INTERPOLATION_ENV_MISSING", "DISPLAY_INTERPOLATION_ENV_UNAPPROVED"}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "alias_key", "process_value"),
+    [
+        ("image", "COMPUTE_APP_IMAGE", "ambient-compute-app"),
+        ("workspace", "COMPUTE_WORKSPACE_ROOT", "/scratch/frd_muziyao/ambient-workspace"),
+        ("published", "COMPUTE_PUBLISHED_ARTIFACT_HOST_ROOT", "/scratch/frd_muziyao/ambient-published"),
+    ],
+)
+def test_static_checker_rejects_compute_compose_alias_interpolation_keys_absent_from_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    alias_key: str,
+    process_value: str,
+) -> None:
+    compose = _safe_compute_compose()
+    if mutation == "image":
+        for service in compose["services"].values():
+            service["image"] = "${COMPUTE_APP_IMAGE:-nhms-app}:${NHMS_IMAGE_TAG:-m22-placeholder}"
+    elif mutation == "workspace":
+        _mutate_compute_required_mount(
+            compose,
+            target_key="WORKSPACE_ROOT",
+            values={"source": "${COMPUTE_WORKSPACE_ROOT:-/scratch/frd_muziyao/ambient-workspace}"},
+        )
+    elif mutation == "published":
+        _mutate_compute_required_mount(
+            compose,
+            target_key="NHMS_PUBLISHED_ARTIFACT_ROOT",
+            values={"source": "${COMPUTE_PUBLISHED_ARTIFACT_HOST_ROOT:-/scratch/frd_muziyao/ambient-published}"},
+        )
+    else:
+        raise AssertionError(f"unhandled mutation: {mutation}")
+    compute_compose = _write_compute_compose(tmp_path, compose)
+    monkeypatch.setenv(alias_key, process_value)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= {"COMPUTE_INTERPOLATION_ENV_MISSING", "COMPUTE_INTERPOLATION_ENV_UNAPPROVED"}
+
+
+@pytest.mark.parametrize(
+    ("role", "omitted_key", "process_value"),
+    [
+        ("compute", "OBJECT_STORE_ROOT", "/scratch/frd_muziyao/ambient-object-store"),
+        ("display", "S3_ENDPOINT_URL", "https://ambient-object-store.internal.example"),
+    ],
+)
+def test_static_checker_rejects_custom_env_omitting_optional_compose_used_keys_with_ambient_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    omitted_key: str,
+    process_value: str,
+) -> None:
+    source = REPO_ROOT / f"infra/env/{role}.example"
+    custom_env = tmp_path / f"{role}.example"
+    custom_env.write_text(
+        "\n".join(
+            line
+            for line in source.read_text(encoding="utf-8").splitlines()
+            if not line.startswith(f"{omitted_key}=")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(omitted_key, process_value)
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=custom_env if role == "compute" else Path("infra/env/compute.example"),
+        display_env=custom_env if role == "display" else Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    expected_code = f"{role.upper()}_INTERPOLATION_ENV_MISSING"
+    assert expected_code in _codes(result)
+    assert any(
+        finding.code == expected_code and omitted_key in finding.details["missing_keys"]
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
     ("env_key", "value", "alias_key", "process_value"),
     [
         (
@@ -1191,6 +1333,45 @@ def test_static_checker_rejects_display_ambient_overrides(
     ],
 )
 def test_static_checker_rejects_display_critical_env_alias_interpolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_key: str,
+    value: str,
+    alias_key: str,
+    process_value: str,
+) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["environment"][env_key] = value
+    display_compose = _write_display_compose(tmp_path, compose)
+    monkeypatch.setenv(alias_key, process_value)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "DISPLAY_RUNTIME_ENV_ALIAS_INTERPOLATION" and finding.details["key"] == env_key
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("env_key", "value", "alias_key", "process_value"),
+    [
+        (
+            "AWS_SECRET_ACCESS_KEY",
+            "${DISPLAY_AWS_SECRET_ACCESS_KEY:-readonly-secret-placeholder}",
+            "DISPLAY_AWS_SECRET_ACCESS_KEY",
+            "ambient-secret",
+        ),
+        (
+            "S3_ENDPOINT_URL",
+            "${DISPLAY_S3_ENDPOINT_URL:-https://object-store.internal.example}",
+            "DISPLAY_S3_ENDPOINT_URL",
+            "https://ambient-object-store.internal.example",
+        ),
+    ],
+)
+def test_static_checker_rejects_display_optional_env_alias_interpolation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     env_key: str,
@@ -1244,6 +1425,75 @@ def test_static_checker_rejects_display_required_env_null_imports(
     assert result.status == "FAIL"
     assert any(
         finding.code == "DISPLAY_RUNTIME_ENV_NULL_IMPORT" and finding.details["key"] == env_key
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("env_key", "process_value"),
+    [
+        ("DATABASE_URL", "postgresql://ambient-writer:change-me@db.internal.example:5432/nhms"),
+        ("NHMS_SERVICE_ROLE", "dev_monolith"),
+        ("NHMS_REQUIRE_SERVICE_ROLE", "false"),
+        ("NHMS_AUTH_MODE", "dev"),
+        ("WORKSPACE_ROOT", "/scratch/frd_muziyao/ambient-workspace"),
+        ("OBJECT_STORE_ROOT", "/scratch/frd_muziyao/ambient-object-store"),
+        ("SLURM_GATEWAY_URL", "http://ambient-slurm-gateway.internal.example:8081"),
+        ("SHUD_EXECUTABLE", "/ambient/bin/shud"),
+        ("SLURM_GATEWAY_TEMPLATE_DIR", "/ambient/slurm/templates"),
+        ("SLURM_GATEWAY_WORKSPACE_DIR", "/ambient/slurm/workspace"),
+        ("NHMS_PUBLISHED_ARTIFACT_ROOT", "/ambient/published"),
+    ],
+)
+def test_static_checker_rejects_compute_audited_env_null_imports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_key: str,
+    process_value: str,
+) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"][env_key] = None
+    compute_compose = _write_compute_compose(tmp_path, compose)
+    monkeypatch.setenv(env_key, process_value)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_RUNTIME_ENV_NULL_IMPORT" and finding.details["key"] == env_key
+        for finding in result.findings
+    )
+
+
+def test_static_checker_rejects_compute_audited_env_alias_fallback_when_env_file_value_empty(tmp_path: Path) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"]["SLURM_GATEWAY_URL"] = "${SLURM_GATEWAY_URL:-${WORKSPACE_ROOT}}"
+    compute_compose = _write_compute_compose(tmp_path, compose)
+    compute_env = tmp_path / "compute.example"
+    compute_env.write_text(
+        "\n".join(
+            line
+            for line in (REPO_ROOT / "infra/env/compute.example").read_text(encoding="utf-8").splitlines()
+            if not line.startswith("SLURM_GATEWAY_URL=")
+        )
+        + "\nSLURM_GATEWAY_URL=\n",
+        encoding="utf-8",
+    )
+
+    result = docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=compute_env,
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_RUNTIME_ENV_ALIAS_INTERPOLATION"
+        and finding.details["key"] == "SLURM_GATEWAY_URL"
         for finding in result.findings
     )
 

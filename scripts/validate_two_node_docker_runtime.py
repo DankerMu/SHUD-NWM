@@ -204,6 +204,16 @@ DISPLAY_AUDITED_INTERPOLATION_ENV = frozenset(
         "CORS_ALLOWED_ORIGINS",
     }
 )
+DISPLAY_OPTIONAL_RUNTIME_ENV = frozenset(
+    {
+        "OBJECT_STORE_PREFIX",
+        "S3_ENDPOINT_URL",
+        "S3_BUCKET_NAME",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "CORS_ALLOWED_ORIGINS",
+    }
+)
 COMPUTE_AUDITED_INTERPOLATION_ENV = frozenset(
     {
         "NHMS_APP_IMAGE",
@@ -231,7 +241,48 @@ COMPUTE_AUDITED_INTERPOLATION_ENV = frozenset(
         "IFS_OPEN_DATA_SOURCE",
     }
 )
-DISPLAY_AUDITED_RUNTIME_ENV = DISPLAY_REQUIRED_RUNTIME_ENV | frozenset(DISPLAY_REQUIRED_ENV)
+COMPUTE_AUDITED_RUNTIME_ENV = frozenset(
+    {
+        "NHMS_SERVICE_ROLE",
+        "NHMS_REQUIRE_SERVICE_ROLE",
+        "NHMS_AUTH_MODE",
+        "DATABASE_URL",
+        "WORKSPACE_ROOT",
+        "OBJECT_STORE_ROOT",
+        "OBJECT_STORE_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_S3_BUCKET",
+        "NHMS_PUBLISHED_ARTIFACT_S3_PREFIX",
+        "NHMS_BASINS_ROOT",
+        "NHMS_MODEL_ASSET_ROOT",
+        "SHUD_EXECUTABLE",
+        "SLURM_GATEWAY_URL",
+        "SLURM_GATEWAY_BACKEND",
+        "SLURM_GATEWAY_TEMPLATE_DIR",
+        "SLURM_GATEWAY_WORKSPACE_DIR",
+        "GFS_NOMADS_BASE_URL",
+        "IFS_OPEN_DATA_SOURCE",
+    }
+)
+COMPUTE_CANONICAL_RUNTIME_ENV = frozenset(
+    {
+        "NHMS_SERVICE_ROLE",
+        "NHMS_REQUIRE_SERVICE_ROLE",
+        "NHMS_AUTH_MODE",
+        "DATABASE_URL",
+        "WORKSPACE_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_S3_BUCKET",
+        "NHMS_PUBLISHED_ARTIFACT_S3_PREFIX",
+        "NHMS_BASINS_ROOT",
+        "NHMS_MODEL_ASSET_ROOT",
+    }
+)
+DISPLAY_AUDITED_RUNTIME_ENV = (
+    DISPLAY_REQUIRED_RUNTIME_ENV | DISPLAY_OPTIONAL_RUNTIME_ENV | frozenset(DISPLAY_REQUIRED_ENV)
+)
 SECRET_ENV_KEYS = frozenset({"DATABASE_URL", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID"})
 
 
@@ -356,8 +407,12 @@ def run_static_check(
     compute_yaml = load_compose(compute_compose)
     display_yaml = load_compose(display_compose)
 
-    findings.extend(_ambient_env_override_findings(compute_compose, compute_yaml, compute_env_map, role="compute"))
-    findings.extend(_ambient_env_override_findings(display_compose, display_yaml, display_env_map, role="display"))
+    findings.extend(
+        _compose_interpolation_contract_findings(compute_compose, compute_yaml, compute_env_map, role="compute")
+    )
+    findings.extend(
+        _compose_interpolation_contract_findings(display_compose, display_yaml, display_env_map, role="display")
+    )
     findings.extend(_validate_env_file(compute_env, compute_env_map, role="compute"))
     findings.extend(_validate_env_file(display_env, display_env_map, role="display"))
     findings.extend(_validate_compute_compose(compute_compose, compute_yaml, compute_env_map))
@@ -605,6 +660,7 @@ def _validate_compute_compose(path: Path, compose: Mapping[str, Any], env: Mappi
                 role="compute",
             )
         )
+        findings.extend(_compute_runtime_env_contract_findings(path, service_name, service, env))
         if service_env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
             findings.append(
                 Finding(
@@ -789,6 +845,7 @@ def _validate_display_compose(
                     details={"extends": service.get("extends")},
                 )
             )
+        findings.extend(_display_deploy_findings(path, service_name, service))
         findings.extend(_display_file_ingress_findings(path, service_name, service, compose))
         findings.extend(_display_device_ingress_findings(path, service_name, service))
         findings.extend(_display_runtime_env_contract_findings(path, service_name, service, env))
@@ -998,6 +1055,28 @@ def _display_file_ingress_findings(
     return findings
 
 
+def _display_deploy_findings(
+    path: Path,
+    service_name: str,
+    service: Mapping[str, Any],
+) -> list[Finding]:
+    if not _has_compose_value(service, "deploy"):
+        return []
+    return [
+        Finding(
+            "DISPLAY_DEPLOY_UNSUPPORTED",
+            "display service must not configure deploy; #236 has no approved display deploy/device surface.",
+            path=str(path),
+            service=service_name,
+            details={
+                "field": "deploy",
+                "value": service.get("deploy"),
+                "variables": sorted(_compose_interpolation_keys(service.get("deploy"))),
+            },
+        )
+    ]
+
+
 def _display_device_ingress_findings(
     path: Path,
     service_name: str,
@@ -1026,6 +1105,99 @@ def _display_device_ingress_findings(
             )
         )
     return findings
+
+
+def _compute_runtime_env_contract_findings(
+    path: Path,
+    service_name: str,
+    service: Mapping[str, Any],
+    env: Mapping[str, str],
+) -> list[Finding]:
+    environment = service.get("environment", {})
+    findings: list[Finding] = []
+    if isinstance(environment, Mapping):
+        for raw_key, raw_value in environment.items():
+            key = str(raw_key)
+            findings.extend(
+                _compute_audited_env_value_findings(
+                    path=path,
+                    service_name=service_name,
+                    key=key,
+                    value=raw_value,
+                    entry=key,
+                    env=env,
+                )
+            )
+        return findings
+    if isinstance(environment, list):
+        for item in environment:
+            text = str(item)
+            key, value = _split_environment_list_entry(text)
+            findings.extend(
+                _compute_audited_env_value_findings(
+                    path=path,
+                    service_name=service_name,
+                    key=key,
+                    value=value,
+                    entry=text,
+                    env=env,
+                )
+            )
+    return findings
+
+
+def _compute_audited_env_value_findings(
+    *,
+    path: Path,
+    service_name: str,
+    key: str,
+    value: Any,
+    entry: str,
+    env: Mapping[str, str],
+) -> list[Finding]:
+    if key not in COMPUTE_AUDITED_RUNTIME_ENV:
+        return []
+    if value is None:
+        return [
+            Finding(
+                "COMPUTE_RUNTIME_ENV_NULL_IMPORT",
+                "compute audited runtime env keys must not import values from the ambient process environment.",
+                path=str(path),
+                service=service_name,
+                details={"key": key, "entry": entry},
+            )
+        ]
+    variables = _compose_interpolation_keys(value)
+    if _compose_interpolation_uses_env_file_value(value, key, env):
+        return []
+    if variables and variables != {key}:
+        return [
+            Finding(
+                "COMPUTE_RUNTIME_ENV_ALIAS_INTERPOLATION",
+                "compute audited runtime env interpolation must use the same audited env key.",
+                path=str(path),
+                service=service_name,
+                details={"key": key, "entry": entry, "variables": sorted(variables)},
+            )
+        ]
+    if not variables and key in env:
+        literal_value = _resolved_compose_text(value, {})
+        if literal_value != env[key]:
+            return [
+                Finding(
+                    "COMPUTE_RUNTIME_ENV_LITERAL_DRIFT",
+                    "compute audited runtime env literal must match the audited compute env file value.",
+                    path=str(path),
+                    service=service_name,
+                    details={
+                        "key": key,
+                        "entry": entry,
+                        "env_file_value": _redact_env_value(key, env[key]),
+                        "literal_value": _redact_env_value(key, literal_value),
+                    },
+                )
+            ]
+    return []
 
 
 def _display_runtime_env_contract_findings(
@@ -1787,7 +1959,7 @@ def _file_ingress_definition_details(definition: Any) -> dict[str, Any]:
     return details
 
 
-def _ambient_env_override_findings(
+def _compose_interpolation_contract_findings(
     path: Path,
     compose: Mapping[str, Any],
     env: Mapping[str, str],
@@ -1796,9 +1968,32 @@ def _ambient_env_override_findings(
 ) -> list[Finding]:
     if role not in {"compute", "display"}:
         raise AssertionError(f"unsupported role: {role}")
-    audited_keys = set(env) & _compose_interpolation_keys(compose)
+    used_keys = _compose_interpolation_keys(compose)
+    approved_keys = COMPUTE_AUDITED_INTERPOLATION_ENV if role == "compute" else DISPLAY_AUDITED_INTERPOLATION_ENV
     findings: list[Finding] = []
-    for key in sorted(audited_keys):
+    missing_keys = sorted(used_keys - set(env))
+    if missing_keys:
+        findings.append(
+            Finding(
+                f"{role.upper()}_INTERPOLATION_ENV_MISSING",
+                f"{role} env file must declare every Compose interpolation variable used by the role compose file.",
+                path=str(path),
+                details={"missing_keys": missing_keys},
+            )
+        )
+    unapproved_keys = sorted(used_keys - approved_keys)
+    if unapproved_keys:
+        findings.append(
+            Finding(
+                f"{role.upper()}_INTERPOLATION_ENV_UNAPPROVED",
+                f"{role} compose file references interpolation variables outside the approved role contract.",
+                path=str(path),
+                details={"unapproved_keys": unapproved_keys},
+            )
+        )
+    for key in sorted(used_keys & approved_keys):
+        if key not in env:
+            continue
         if key not in os.environ:
             continue
         process_value = os.environ[key]
@@ -2020,6 +2215,27 @@ def _compose_interpolation_default_or_alternate_values(value: str) -> set[str]:
     } - {""}
 
 
+def _compose_interpolation_uses_env_file_value(value: Any, key: str, env: Mapping[str, str]) -> bool:
+    if not isinstance(value, str):
+        return False
+    if key not in env:
+        return False
+    return any(
+        match.group(1) == key and _compose_interpolation_uses_current_env_value(match.group(2), env[key])
+        for match in _VAR_PATTERN.finditer(value)
+    )
+
+
+def _compose_interpolation_uses_current_env_value(operator: str | None, current: str) -> bool:
+    if operator is None:
+        return True
+    if operator in {"-", "?"}:
+        return True
+    if operator in {":-", ":?"}:
+        return current != ""
+    return False
+
+
 def _mode_is_readonly(mode: str) -> bool:
     return "ro" in {part.strip().lower() for part in mode.split(",")}
 
@@ -2209,7 +2425,7 @@ def _cap_drop_all_literal(value: Any) -> bool:
 def _security_opt_no_new_privileges_literal(value: Any) -> bool:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         return False
-    items = [str(item).strip().lower() for item in value]
+    items = [str(item).strip() for item in value]
     return items == ["no-new-privileges:true"] and not _compose_contains_interpolation(value)
 
 
