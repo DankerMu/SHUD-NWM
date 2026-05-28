@@ -372,7 +372,7 @@ export NHMS_READONLY_DB_VALIDATION_JOB_ID='<job_id-with-published-log>'
 export EVIDENCE_RUN_ID="readonly-db-$(date -u +%Y%m%dT%H%M%SZ)"
 
 uv run python scripts/validate_readonly_db_boundary.py \
-  --evidence-root "artifacts/two-node-e2e/$EVIDENCE_RUN_ID" \
+  --evidence-root "artifacts/two-node-e2e" \
   --run-id "$EVIDENCE_RUN_ID" \
   --force
 ```

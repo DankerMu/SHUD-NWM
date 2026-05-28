@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import pytest
+from fastapi import FastAPI
 
+from services.production_closure import readonly_db_validation
 from services.production_closure.readonly_db_validation import (
     ProbeExecution,
     ProbeTarget,
+    PsycopgReadonlyDbProbeAdapter,
     ReadonlyDbValidationConfig,
     ReadonlyDbValidationError,
     RouteHttpResponse,
@@ -17,6 +22,9 @@ from services.production_closure.readonly_db_validation import (
     run_display_route_smoke,
     run_permission_probe_matrix,
     validate_readonly_db_boundary,
+)
+from services.production_closure.readonly_db_validation import (
+    main as validation_main,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +46,32 @@ def test_absent_readonly_database_url_writes_blocked_evidence_without_pass(monke
     assert summary["blockers"][0]["code"] == "READONLY_DB_URL_MISSING"
     evidence = _evidence_text(config.lane_dir)
     assert "READONLY_DB_URL_MISSING" in evidence
+
+
+def test_cli_missing_readonly_database_url_exits_blocked_without_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("NHMS_DISPLAY_READONLY_DATABASE_URL", raising=False)
+    monkeypatch.delenv("NHMS_READONLY_DB_VALIDATION_DATABASE_URL", raising=False)
+    run_id = _run_id("missing-db-cli")
+
+    exit_code = validation_main(
+        [
+            "--evidence-root",
+            str(_evidence_root()),
+            "--run-id",
+            run_id,
+            "--force",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    assert exit_code == 2
+    assert summary["status"] == "BLOCKED"
+    assert summary["status"] != "PASS"
+    assert summary["blockers"][0]["code"] == "READONLY_DB_URL_MISSING"
 
 
 def test_unapproved_evidence_root_is_rejected() -> None:
@@ -91,11 +125,44 @@ def test_evidence_redacts_database_url_and_secret_shaped_values() -> None:
     assert summary["database_url"] == "postgresql://db.example:5432/nhms"
     assert summary["role"]["current_user"] == "display_ro"
     assert summary["role"]["role_type"] == "readonly_candidate"
+    assert summary["status"] == "BLOCKED"
+    assert summary["schema"] == "nhms.readonly_db_boundary.evidence.simulated.v1"
+    assert summary["validation_provenance"]["mode"] == "simulated"
+    assert summary["validation_provenance"]["live_readonly_proof"] is False
     evidence = _evidence_text(config.lane_dir)
     assert "supersecret" not in evidence
     assert "token=secret" not in evidence
     assert ":supersecret@" not in evidence
     assert "[redacted]" in evidence or "postgresql://db.example:5432/nhms" in evidence
+    assert "READONLY_DB_VALIDATION_SIMULATED" in evidence
+
+
+def test_injected_validation_cannot_emit_normal_live_pass_evidence() -> None:
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("simulated"),
+        database_url="postgresql://display_ro:secret@db.example/nhms",
+        force=True,
+    )
+
+    summary = validate_readonly_db_boundary(
+        config,
+        adapter=_FakeReadonlyAdapter(),
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+
+    assert summary["status"] == "BLOCKED"
+    assert summary["schema"] == "nhms.readonly_db_boundary.evidence.simulated.v1"
+    assert summary["validation_provenance"] == {
+        "mode": "simulated",
+        "live_readonly_proof": False,
+        "injected_components": ["adapter", "route_requester", "manual_action_probe_runner"],
+    }
+    assert summary["blockers"][0]["code"] == "READONLY_DB_VALIDATION_SIMULATED"
+    summary_file = json.loads((config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary_file["status"] != "PASS"
+    assert summary_file["schema"] == "nhms.readonly_db_boundary.evidence.simulated.v1"
 
 
 def test_writer_privilege_marks_validation_fail_even_when_probe_denied() -> None:
@@ -121,6 +188,8 @@ def test_writer_privilege_marks_validation_fail_even_when_probe_denied() -> None
     insert = next(item for item in hydro["operations"] if item["operation"] == "INSERT")
     assert insert["status"] == "FAIL"
     assert insert["reason"] == "tested_credential_has_mutating_table_privilege"
+    assert insert["execution_outcome"] == "not_executed_due_to_catalog_mutating_privilege"
+    assert not any(spec.target and spec.target.qualified_name == target for spec in adapter.executed_specs)
 
 
 def test_mutating_probe_success_is_fail_and_rollback_is_cleanup_only() -> None:
@@ -138,6 +207,62 @@ def test_mutating_probe_success_is_fail_and_rollback_is_cleanup_only() -> None:
     assert delete_probe["reason"] == "mutating_probe_executed_successfully_before_rollback"
     assert adapter.persisted_mutations == 0
     assert len(first) == len(second)
+
+
+def test_column_level_mutating_grant_fails_without_executing_dml() -> None:
+    target = "hydro.river_timeseries"
+    adapter = _FakeReadonlyAdapter(column_privileges={target: {"insert": [], "update": ["q_cms"]}})
+
+    probes = run_permission_probe_matrix(adapter, ddl_suffix="column-grant")
+
+    target_result = next(item for item in probes if item["target"] == target)
+    update_probe = next(item for item in target_result["operations"] if item["operation"] == "UPDATE")
+    assert target_result["status"] == "FAIL"
+    assert update_probe["status"] == "FAIL"
+    assert update_probe["reason"] == "tested_credential_has_mutating_column_privilege"
+    assert update_probe["column_privilege_allowed"] is True
+    assert update_probe["column_privilege_columns"] == ["q_cms"]
+    assert update_probe["execution_outcome"] == "not_executed_due_to_catalog_mutating_privilege"
+    assert not any(spec.target and spec.target.qualified_name == target for spec in adapter.executed_specs)
+
+
+def test_schema_create_grant_fails_without_executing_ddl() -> None:
+    adapter = _FakeReadonlyAdapter(schema_privileges_by_schema={"ops": {"create": True}})
+
+    probes = run_permission_probe_matrix(adapter, ddl_suffix="schema-grant")
+
+    ddl = next(item for item in probes if item["target"] == "ops.*")
+    operation = ddl["operations"][0]
+    assert ddl["status"] == "FAIL"
+    assert operation["status"] == "FAIL"
+    assert operation["reason"] == "tested_credential_has_schema_create_privilege"
+    assert operation["execution_outcome"] == "not_executed_due_to_catalog_mutating_privilege"
+    assert not any(spec.operation == "DDL_CREATE_TABLE" for spec in adapter.executed_specs)
+
+
+def test_denied_dml_and_ddl_without_mutating_grants_pass_permission_probes() -> None:
+    adapter = _FakeReadonlyAdapter()
+
+    probes = run_permission_probe_matrix(adapter, ddl_suffix="denied")
+
+    assert all(item["status"] == "PASS" for item in probes)
+    operations = [operation for item in probes for operation in item["operations"]]
+    assert operations
+    assert all(operation["status"] == "PASS" for operation in operations)
+    assert all(operation["reason"].endswith("_denied_before_commit") for operation in operations)
+
+
+def test_successful_ddl_execution_despite_no_catalog_grant_fails_with_rollback_cleanup_only() -> None:
+    adapter = _FakeReadonlyAdapter(successful_operations={("ops.*", "DDL_CREATE_TABLE")})
+
+    probes = run_permission_probe_matrix(adapter, ddl_suffix="ddl-success")
+
+    ddl = next(item for item in probes if item["target"] == "ops.*")
+    operation = ddl["operations"][0]
+    assert ddl["status"] == "FAIL"
+    assert operation["status"] == "FAIL"
+    assert operation["reason"] == "ddl_probe_executed_successfully_before_rollback"
+    assert operation["rolled_back"] is True
 
 
 def test_permission_matrix_covers_required_targets_and_blocks_absent_reduced_fixture_table() -> None:
@@ -186,6 +311,140 @@ def test_display_route_smoke_pass_requires_success_and_fixture_misses_are_blocke
     assert models["http_status"] == 500
 
 
+def test_bare_missing_route_404_is_fail_but_allowlisted_fixture_error_is_blocked() -> None:
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("route-404"),
+        database_url="postgresql://readonly:secret@db.example/nhms",
+    )
+    identity = {
+        "source": "GFS",
+        "cycle_time": "2026-05-03T00:00:00+00:00",
+        "run_id": "run_routes",
+        "model_id": "model_routes",
+        "job_id": "job_routes",
+    }
+
+    results = run_display_route_smoke(config, identity, route_requester=_bare_404_route_requester)
+
+    latest = next(item for item in results if item["name"] == "latest_product")
+    logs = next(item for item in results if item["name"] == "job_logs")
+    assert latest["status"] == "FAIL"
+    assert latest["http_status"] == 404
+    assert logs["status"] == "BLOCKED"
+    assert logs["error_code"] == "JOB_LOG_NOT_PUBLISHED"
+
+
+def test_display_route_smoke_forces_safe_env_and_bounded_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_env: list[dict[str, str | None]] = []
+
+    def fake_create_app(env: dict[str, str] | None = None) -> FastAPI:
+        app = FastAPI()
+        app.state.create_app_env = env
+
+        @app.api_route("/{path:path}", methods=["GET"])
+        def catch_all(path: str) -> dict[str, Any]:
+            del path
+            observed_env.append(
+                {
+                    "local_logs": os.environ.get("NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS"),
+                    "database_url": os.environ.get("DATABASE_URL"),
+                    "pgoptions": os.environ.get("PGOPTIONS"),
+                    "service_role": os.environ.get("NHMS_SERVICE_ROLE"),
+                }
+            )
+            return {"status": "ok"}
+
+        return app
+
+    monkeypatch.setenv("NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS", "true")
+    monkeypatch.setattr("apps.api.main.create_app", fake_create_app)
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("safe-env"),
+        database_url="postgresql://readonly:secret@db.example/nhms?connect_timeout=0&sslmode=require",
+    )
+
+    results = run_display_route_smoke(
+        config,
+        {
+            "source": "GFS",
+            "cycle_time": "2026-05-03T00:00:00+00:00",
+            "run_id": "run_routes",
+            "model_id": "model_routes",
+            "job_id": "job_routes",
+        },
+    )
+
+    assert all(item["status"] == "PASS" for item in results)
+    assert observed_env
+    assert {item["local_logs"] for item in observed_env} == {"false"}
+    assert {item["service_role"] for item in observed_env} == {"display_readonly"}
+    assert all("connect_timeout=5" in str(item["database_url"]) for item in observed_env)
+    assert all("statement_timeout%3D10000" in str(item["database_url"]) for item in observed_env)
+    assert {item["pgoptions"] for item in observed_env} == {
+        "-c statement_timeout=10000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000"
+    }
+
+
+def test_runbook_command_uses_evidence_root_without_double_nested_run_id() -> None:
+    runbook = (REPO_ROOT / "docs" / "runbooks" / "two-node-production-e2e-plan.md").read_text(encoding="utf-8")
+
+    assert '--evidence-root "artifacts/two-node-e2e"' in runbook
+    assert '--evidence-root "artifacts/two-node-e2e/$EVIDENCE_RUN_ID"' not in runbook
+
+
+def test_psycopg_adapter_uses_bounded_validation_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    connect_calls: list[dict[str, Any]] = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self) -> FakeCursor:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: object) -> None:
+            del query
+
+    class FakeConnection:
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_connect(*args: object, **kwargs: Any) -> FakeConnection:
+        del args
+        connect_calls.append(kwargs)
+        return FakeConnection()
+
+    monkeypatch.setattr(readonly_db_validation.psycopg2, "connect", fake_connect)
+    adapter = PsycopgReadonlyDbProbeAdapter("postgresql://readonly:secret@db.example/nhms", ddl_suffix="timeouts")
+
+    result = adapter.execute_probe(
+        readonly_db_validation.PermissionProbeSpec(
+            operation="DELETE",
+            target=ProbeTarget("ops", "pipeline_event", "pipeline_event_audit"),
+            command="DELETE FROM ops.pipeline_event WHERE FALSE",
+        )
+    )
+
+    assert result.outcome == "succeeded"
+    assert connect_calls
+    assert connect_calls[0]["connect_timeout"] == 5
+    assert connect_calls[0]["options"] == (
+        "-c statement_timeout=10000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000"
+    )
+
+
 def test_display_retry_cancel_manual_action_ordering_does_not_construct_write_dependencies() -> None:
     results = run_display_manual_action_probes("run-display-ordering")
 
@@ -201,14 +460,20 @@ class _FakeReadonlyAdapter:
         self,
         *,
         privileges: dict[str, dict[str, bool]] | None = None,
+        column_privileges: dict[str, dict[str, list[str]]] | None = None,
+        schema_privileges_by_schema: dict[str, dict[str, bool]] | None = None,
         absent_tables: set[str] | None = None,
         successful_operations: set[tuple[str, str]] | None = None,
         role_overrides: dict[str, Any] | None = None,
+        no_probe_column_targets: set[str] | None = None,
     ) -> None:
         self.privileges = privileges or {}
+        self.column_privilege_overrides = column_privileges or {}
+        self.schema_privilege_overrides = schema_privileges_by_schema or {}
         self.absent_tables = absent_tables or set()
         self.successful_operations = successful_operations or set()
         self.role_overrides = role_overrides or {}
+        self.no_probe_column_targets = no_probe_column_targets or set()
         self.executed_specs: list[Any] = []
         self.persisted_mutations = 0
 
@@ -244,10 +509,15 @@ class _FakeReadonlyAdapter:
     def table_privileges(self, target: ProbeTarget) -> dict[str, bool]:
         return {"insert": False, "update": False, "delete": False, **self.privileges.get(target.qualified_name, {})}
 
+    def column_privileges(self, target: ProbeTarget) -> dict[str, list[str]]:
+        return {"insert": [], "update": [], **self.column_privilege_overrides.get(target.qualified_name, {})}
+
     def schema_privileges(self, schema: str) -> dict[str, bool]:
-        return {"create": False}
+        return {"create": False, **self.schema_privilege_overrides.get(schema, {})}
 
     def first_updatable_column(self, target: ProbeTarget) -> str | None:
+        if target.qualified_name in self.no_probe_column_targets:
+            return None
         return "validation_probe_column"
 
     def execute_probe(self, spec: Any) -> ProbeExecution:
@@ -285,6 +555,18 @@ def _mixed_route_requester(method: str, path: str) -> RouteHttpResponse:
         return RouteHttpResponse(
             status_code=500,
             body={"error": {"code": "DATABASE_WRITE_ATTEMPT", "message": "unexpected write"}},
+        )
+    return RouteHttpResponse(status_code=200, body={"status": "ok", "data": {}})
+
+
+def _bare_404_route_requester(method: str, path: str) -> RouteHttpResponse:
+    del method
+    if path.startswith("/api/v1/mvp/qhh/latest-product"):
+        return RouteHttpResponse(status_code=404, body={"detail": "Not Found"})
+    if path.startswith("/api/v1/jobs/") and path.endswith("/logs"):
+        return RouteHttpResponse(
+            status_code=404,
+            body={"error": {"code": "JOB_LOG_NOT_PUBLISHED", "message": "published log fixture unavailable"}},
         )
     return RouteHttpResponse(status_code=200, body={"status": "ok", "data": {}})
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import psycopg2
 from psycopg2 import sql
@@ -29,12 +29,18 @@ SAFE_DDL_SUFFIX_RE = re.compile(r"[^a-z0-9_]+")
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
+LIVE_EVIDENCE_SCHEMA = "nhms.readonly_db_boundary.evidence.v1"
+SIMULATED_EVIDENCE_SCHEMA = "nhms.readonly_db_boundary.evidence.simulated.v1"
 
 READONLY_DB_URL_ENVS = (
     "NHMS_DISPLAY_READONLY_DATABASE_URL",
     "NHMS_READONLY_DB_VALIDATION_DATABASE_URL",
 )
 VALIDATION_ENV_PREFIX = "NHMS_READONLY_DB_VALIDATION_"
+VALIDATION_CONNECT_TIMEOUT_SECONDS = 5
+VALIDATION_STATEMENT_TIMEOUT_MS = 10_000
+VALIDATION_LOCK_TIMEOUT_MS = 2_000
+VALIDATION_IDLE_TIMEOUT_MS = 10_000
 DENIED_SQLSTATES = frozenset({"25006", "42501"})
 BLOCKED_SQLSTATES = frozenset({"3F000", "42P01", "42703"})
 ROLE_ATTRIBUTE_WRITE_FLAGS = (
@@ -43,6 +49,18 @@ ROLE_ATTRIBUTE_WRITE_FLAGS = (
     "rolcreaterole",
     "rolreplication",
     "rolbypassrls",
+)
+ROUTE_FIXTURE_BLOCKER_ERROR_CODES = frozenset(
+    {
+        "QHH_LATEST_PRODUCT_UNAVAILABLE",
+        "PIPELINE_CYCLE_NOT_FOUND",
+        "PIPELINE_STRICT_IDENTITY_NOT_FOUND",
+        "JOB_NOT_FOUND",
+        "JOB_LOG_NOT_PUBLISHED",
+        "JOB_LOG_NOT_FOUND",
+        "JOB_LOG_URI_UNSUPPORTED",
+        "JOB_LOG_ACCESS_DENIED",
+    }
 )
 
 
@@ -69,7 +87,7 @@ class PermissionProbeSpec:
     operation: str
     target: ProbeTarget | None
     command: str
-    update_column: str | None = None
+    probe_column: str | None = None
     ddl_schema: str | None = None
     ddl_table: str | None = None
 
@@ -104,6 +122,9 @@ class ReadonlyDbProbeAdapter(Protocol):
         ...
 
     def table_privileges(self, target: ProbeTarget) -> dict[str, bool]:
+        ...
+
+    def column_privileges(self, target: ProbeTarget) -> dict[str, list[str]]:
         ...
 
     def schema_privileges(self, schema: str) -> dict[str, bool]:
@@ -377,6 +398,38 @@ class PsycopgReadonlyDbProbeAdapter:
                 )
                 return {key: bool(value) for key, value in dict(cursor.fetchone()).items()}
 
+    def column_privileges(self, target: ProbeTarget) -> dict[str, list[str]]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        a.attname AS column_name,
+                        has_column_privilege(current_user, c.oid, a.attname, 'INSERT') AS insert,
+                        has_column_privilege(current_user, c.oid, a.attname, 'UPDATE') AS update
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    JOIN pg_attribute a ON a.attrelid = c.oid
+                    WHERE n.nspname = %s
+                      AND c.relname = %s
+                      AND c.relkind IN ('r', 'p')
+                      AND a.attnum > 0
+                      AND NOT a.attisdropped
+                      AND a.attgenerated = ''
+                    ORDER BY a.attnum
+                    """,
+                    (target.schema, target.table),
+                )
+                rows = cursor.fetchall()
+        privileges = {"insert": [], "update": []}
+        for row in rows:
+            column_name = str(row["column_name"])
+            if row.get("insert"):
+                privileges["insert"].append(column_name)
+            if row.get("update"):
+                privileges["update"].append(column_name)
+        return privileges
+
     def schema_privileges(self, schema: str) -> dict[str, bool]:
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -396,6 +449,7 @@ class PsycopgReadonlyDbProbeAdapter:
                     WHERE table_schema = %s
                       AND table_name = %s
                       AND is_generated = 'NEVER'
+                      AND is_identity = 'NO'
                     ORDER BY ordinal_position
                     LIMIT 1
                     """,
@@ -405,7 +459,7 @@ class PsycopgReadonlyDbProbeAdapter:
         return str(row["column_name"]) if row else None
 
     def execute_probe(self, spec: PermissionProbeSpec) -> ProbeExecution:
-        connection = psycopg2.connect(self.database_url)
+        connection = psycopg2.connect(self.database_url, **_validation_connect_kwargs())
         try:
             with connection.cursor() as cursor:
                 cursor.execute(self._probe_sql(spec))
@@ -430,17 +484,21 @@ class PsycopgReadonlyDbProbeAdapter:
             connection.close()
 
     def _probe_sql(self, spec: PermissionProbeSpec) -> sql.SQL:
-        if spec.operation == "INSERT" and spec.target is not None:
-            return sql.SQL("INSERT INTO {}.{} DEFAULT VALUES").format(
+        if spec.operation == "INSERT" and spec.target is not None and spec.probe_column is not None:
+            return sql.SQL("INSERT INTO {}.{} ({}) SELECT {} FROM {}.{} WHERE FALSE").format(
+                sql.Identifier(spec.target.schema),
+                sql.Identifier(spec.target.table),
+                sql.Identifier(spec.probe_column),
+                sql.Identifier(spec.probe_column),
                 sql.Identifier(spec.target.schema),
                 sql.Identifier(spec.target.table),
             )
-        if spec.operation == "UPDATE" and spec.target is not None and spec.update_column is not None:
+        if spec.operation == "UPDATE" and spec.target is not None and spec.probe_column is not None:
             return sql.SQL("UPDATE {}.{} SET {} = {} WHERE FALSE").format(
                 sql.Identifier(spec.target.schema),
                 sql.Identifier(spec.target.table),
-                sql.Identifier(spec.update_column),
-                sql.Identifier(spec.update_column),
+                sql.Identifier(spec.probe_column),
+                sql.Identifier(spec.probe_column),
             )
         if spec.operation == "DELETE" and spec.target is not None:
             return sql.SQL("DELETE FROM {}.{} WHERE FALSE").format(
@@ -456,7 +514,11 @@ class PsycopgReadonlyDbProbeAdapter:
 
     @contextmanager
     def _connection(self) -> Iterator[Any]:
-        connection = psycopg2.connect(self.database_url, cursor_factory=RealDictCursor)
+        connection = psycopg2.connect(
+            self.database_url,
+            cursor_factory=RealDictCursor,
+            **_validation_connect_kwargs(),
+        )
         try:
             yield connection
             connection.rollback()
@@ -472,6 +534,11 @@ def validate_readonly_db_boundary(
     manual_action_probe_runner: Callable[[str], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     config = replace(config, evidence_root=_safe_resolved_evidence_root(config.evidence_root))
+    provenance = _validation_provenance(
+        adapter_injected=adapter is not None,
+        route_requester_injected=route_requester is not None,
+        manual_action_probe_runner_injected=manual_action_probe_runner is not None,
+    )
     writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=config.force)
     writer.prepare()
 
@@ -483,6 +550,7 @@ def validate_readonly_db_boundary(
                 "A real readonly database URL is required via NHMS_DISPLAY_READONLY_DATABASE_URL, "
                 "NHMS_READONLY_DB_VALIDATION_DATABASE_URL, or --database-url."
             ),
+            provenance=provenance,
         )
         writer.write_json(config.lane_dir / "summary.json", summary)
         return summary
@@ -497,6 +565,7 @@ def validate_readonly_db_boundary(
             config,
             code="READONLY_DB_CONNECT_FAILED",
             message=_safe_db_error_message(error),
+            provenance=provenance,
         )
         writer.write_json(config.lane_dir / "summary.json", summary)
         return summary
@@ -517,14 +586,29 @@ def validate_readonly_db_boundary(
         route_smoke=route_smoke,
         manual_actions=manual_actions,
     )
+    blockers: list[dict[str, Any]] = []
+    if provenance["mode"] == "simulated" and status == STATUS_PASS:
+        status = STATUS_BLOCKED
+        blockers.append(
+            {
+                "code": "READONLY_DB_VALIDATION_SIMULATED",
+                "message": (
+                    "Injected adapter/requester/manual probe results are test-only and cannot be used as "
+                    "live readonly DB PASS evidence."
+                ),
+                "injected_components": provenance["injected_components"],
+            }
+        )
     summary = {
-        "schema": "nhms.readonly_db_boundary.evidence.v1",
+        "schema": _evidence_schema(provenance),
         "status": status,
         "run_id": config.run_id,
         "generated_at": datetime.now(UTC).isoformat(),
         "evidence_dir": _public_path(config.lane_dir),
         "database_url": _redact_database_url(database_url),
         "source_env_vars": list(READONLY_DB_URL_ENVS),
+        "validation_provenance": provenance,
+        "validation_timeouts": _validation_timeout_evidence(),
         "runtime": {
             "service_role": "display_readonly",
             "control_mutations_expected": False,
@@ -541,6 +625,8 @@ def validate_readonly_db_boundary(
             "evidence_root_approved": True,
         },
     }
+    if blockers:
+        summary["blockers"] = blockers
     writer.write_json(config.lane_dir / "role.json", role_evidence)
     writer.write_json(config.lane_dir / "route_smoke.json", route_smoke)
     writer.write_json(config.lane_dir / "permission_probes.json", permission_probes)
@@ -580,15 +666,15 @@ def run_display_manual_action_probes(run_id: str, *, database_url: str | None = 
     def forbidden_dependency() -> None:
         raise AssertionError("display_readonly manual action probe reached a write or gateway dependency")
 
-    app = create_app(_display_app_env())
-    app.dependency_overrides[pipeline_routes.get_pipeline_store] = forbidden_dependency
-    app.dependency_overrides[pipeline_routes.get_retry_service] = forbidden_dependency
-    app.dependency_overrides[pipeline_routes.get_slurm_gateway] = forbidden_dependency
     results: list[dict[str, Any]] = []
-    validation_env = _validation_auth_env()
+    validation_env = _display_validation_env()
     if database_url:
-        validation_env["DATABASE_URL"] = database_url
+        validation_env["DATABASE_URL"] = _bounded_database_url(database_url)
     with _temporary_env(validation_env):
+        app = create_app(_display_app_env())
+        app.dependency_overrides[pipeline_routes.get_pipeline_store] = forbidden_dependency
+        app.dependency_overrides[pipeline_routes.get_retry_service] = forbidden_dependency
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = forbidden_dependency
         with TestClient(app) as client:
             for action in ("retry", "cancel"):
                 path = f"/api/v1/runs/{run_id}/{action}"
@@ -636,49 +722,67 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
             "operations": [],
         }
     privileges = adapter.table_privileges(target)
-    update_column = adapter.first_updatable_column(target)
+    column_privileges = adapter.column_privileges(target)
+    probe_column = adapter.first_updatable_column(target)
+    insert_privilege = _catalog_mutating_privilege(
+        privileges,
+        column_privileges,
+        operation="INSERT",
+    )
+    update_privilege = _catalog_mutating_privilege(
+        privileges,
+        column_privileges,
+        operation="UPDATE",
+    )
+    delete_privilege = _catalog_mutating_privilege(
+        privileges,
+        column_privileges,
+        operation="DELETE",
+    )
+    target_has_catalog_mutating_privilege = any(
+        privilege["allowed"] for privilege in (insert_privilege, update_privilege, delete_privilege)
+    )
     operations = [
-        _dml_operation_result(
+        _dml_probe_or_blocked(
             adapter,
-            PermissionProbeSpec(
-                operation="INSERT",
-                target=target,
-                command=f"INSERT INTO {target.qualified_name} DEFAULT VALUES",
+            target=target,
+            operation="INSERT",
+            command=(
+                f"INSERT INTO {target.qualified_name} ({probe_column}) "
+                f"SELECT {probe_column} FROM {target.qualified_name} WHERE FALSE"
+                if probe_column is not None
+                else f"INSERT INTO {target.qualified_name} (<column>) SELECT <column> WHERE FALSE"
             ),
-            privilege_allowed=privileges.get("insert", False),
+            probe_column=probe_column,
+            privilege=insert_privilege,
+            skip_due_to_target_catalog_privilege=target_has_catalog_mutating_privilege,
         )
     ]
-    if update_column is None:
-        operations.append(
-            {
-                "operation": "UPDATE",
-                "command": f"UPDATE {target.qualified_name} SET <column> = <column> WHERE FALSE",
-                "status": STATUS_BLOCKED,
-                "reason": "no_updatable_column_available",
-            }
-        )
-    else:
-        operations.append(
-            _dml_operation_result(
-                adapter,
-                PermissionProbeSpec(
-                    operation="UPDATE",
-                    target=target,
-                    update_column=update_column,
-                    command=f"UPDATE {target.qualified_name} SET {update_column} = {update_column} WHERE FALSE",
-                ),
-                privilege_allowed=privileges.get("update", False),
-            )
-        )
     operations.append(
-        _dml_operation_result(
+        _dml_probe_or_blocked(
             adapter,
-            PermissionProbeSpec(
-                operation="DELETE",
-                target=target,
-                command=f"DELETE FROM {target.qualified_name} WHERE FALSE",
+            target=target,
+            operation="UPDATE",
+            command=(
+                f"UPDATE {target.qualified_name} SET {probe_column} = {probe_column} WHERE FALSE"
+                if probe_column is not None
+                else f"UPDATE {target.qualified_name} SET <column> = <column> WHERE FALSE"
             ),
-            privilege_allowed=privileges.get("delete", False),
+            probe_column=probe_column,
+            privilege=update_privilege,
+            skip_due_to_target_catalog_privilege=target_has_catalog_mutating_privilege,
+        )
+    )
+    operations.append(
+        _dml_probe_or_blocked(
+            adapter,
+            target=target,
+            operation="DELETE",
+            command=f"DELETE FROM {target.qualified_name} WHERE FALSE",
+            probe_column=None,
+            privilege=delete_privilege,
+            skip_due_to_target_catalog_privilege=target_has_catalog_mutating_privilege,
+            requires_probe_column=False,
         )
     )
     return {
@@ -686,23 +790,65 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
         "surface": target.surface,
         "status": _status_from_children(operations),
         "table_privileges": privileges,
+        "column_privileges": column_privileges,
         "operations": operations,
     }
+
+
+def _dml_probe_or_blocked(
+    adapter: ReadonlyDbProbeAdapter,
+    *,
+    target: ProbeTarget,
+    operation: str,
+    command: str,
+    probe_column: str | None,
+    privilege: dict[str, Any],
+    skip_due_to_target_catalog_privilege: bool,
+    requires_probe_column: bool = True,
+) -> dict[str, Any]:
+    spec = PermissionProbeSpec(
+        operation=operation,
+        target=target,
+        probe_column=probe_column,
+        command=command,
+    )
+    if privilege["allowed"]:
+        return _dml_operation_result(adapter, spec, privilege=privilege)
+    if skip_due_to_target_catalog_privilege:
+        return _catalog_target_skip_operation_result(spec)
+    if requires_probe_column and probe_column is None:
+        return {
+            "operation": operation,
+            "command": command,
+            "status": STATUS_BLOCKED,
+            "reason": "no_mutation_probe_column_available",
+            "privilege_allowed": False,
+            "table_privilege_allowed": False,
+            "column_privilege_allowed": False,
+            "execution_outcome": "not_executed",
+            "rolled_back": False,
+        }
+    return _dml_operation_result(adapter, spec, privilege=privilege)
 
 
 def _dml_operation_result(
     adapter: ReadonlyDbProbeAdapter,
     spec: PermissionProbeSpec,
     *,
-    privilege_allowed: bool,
+    privilege: dict[str, Any],
 ) -> dict[str, Any]:
+    if privilege["allowed"]:
+        return _catalog_short_circuit_operation_result(spec, privilege=privilege)
+
     execution = adapter.execute_probe(spec)
-    status = _operation_status(execution, privilege_allowed=privilege_allowed)
+    status = _operation_status(execution, privilege_allowed=False)
     result = {
         "operation": spec.operation,
         "command": spec.command,
         "status": status,
-        "privilege_allowed": privilege_allowed,
+        "privilege_allowed": False,
+        "table_privilege_allowed": False,
+        "column_privilege_allowed": False,
         "execution_outcome": execution.outcome,
         "sqlstate": execution.sqlstate,
         "rolled_back": execution.rolled_back,
@@ -711,15 +857,76 @@ def _dml_operation_result(
         result["message"] = execution.message
     if execution.rowcount is not None:
         result["rowcount"] = execution.rowcount
-    if privilege_allowed:
-        result["reason"] = "tested_credential_has_mutating_table_privilege"
-    elif execution.outcome == "succeeded":
+    if execution.outcome == "succeeded":
         result["reason"] = "mutating_probe_executed_successfully_before_rollback"
     elif execution.outcome == "denied":
         result["reason"] = "mutating_probe_denied_before_commit"
     else:
         result["reason"] = "mutating_probe_blocked_by_fixture_or_unexpected_database_error"
     return result
+
+
+def _catalog_mutating_privilege(
+    table_privileges: Mapping[str, bool],
+    column_privileges: Mapping[str, list[str]],
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    key = operation.lower()
+    table_allowed = bool(table_privileges.get(key, False))
+    columns = list(column_privileges.get(key, [])) if key in {"insert", "update"} else []
+    column_allowed = bool(columns)
+    if table_allowed:
+        reason = "tested_credential_has_mutating_table_privilege"
+    elif column_allowed:
+        reason = "tested_credential_has_mutating_column_privilege"
+    else:
+        reason = None
+    return {
+        "allowed": table_allowed or column_allowed,
+        "reason": reason,
+        "table_allowed": table_allowed,
+        "column_allowed": column_allowed,
+        "columns": columns,
+    }
+
+
+def _catalog_short_circuit_operation_result(
+    spec: PermissionProbeSpec,
+    *,
+    privilege: Mapping[str, Any],
+) -> dict[str, Any]:
+    result = {
+        "operation": spec.operation,
+        "command": spec.command,
+        "status": STATUS_FAIL,
+        "privilege_allowed": True,
+        "table_privilege_allowed": bool(privilege.get("table_allowed", False)),
+        "column_privilege_allowed": bool(privilege.get("column_allowed", False)),
+        "execution_outcome": "not_executed_due_to_catalog_mutating_privilege",
+        "rolled_back": False,
+        "catalog_short_circuited": True,
+        "reason": str(privilege.get("reason") or "tested_credential_has_mutating_catalog_privilege"),
+    }
+    columns = [str(column) for column in privilege.get("columns", [])]
+    if columns:
+        result["column_privilege_columns"] = columns
+    return result
+
+
+def _catalog_target_skip_operation_result(spec: PermissionProbeSpec) -> dict[str, Any]:
+    return {
+        "operation": spec.operation,
+        "command": spec.command,
+        "status": STATUS_FAIL,
+        "privilege_allowed": False,
+        "table_privilege_allowed": False,
+        "column_privilege_allowed": False,
+        "execution_outcome": "not_executed_due_to_target_catalog_mutating_privilege",
+        "rolled_back": False,
+        "catalog_short_circuited": True,
+        "reason": "target_has_catalog_mutating_privilege_probe_skipped",
+    }
 
 
 def _ddl_probe_result(adapter: ReadonlyDbProbeAdapter, *, ddl_suffix: str) -> dict[str, Any]:
@@ -735,36 +942,47 @@ def _ddl_probe_result(adapter: ReadonlyDbProbeAdapter, *, ddl_suffix: str) -> di
             "operations": [],
         }
     privileges = adapter.schema_privileges(schema_name)
-    execution = adapter.execute_probe(
-        PermissionProbeSpec(
-            operation="DDL_CREATE_TABLE",
-            target=None,
-            ddl_schema=schema_name,
-            ddl_table=probe_table,
-            command=command,
-        )
-    )
     privilege_allowed = privileges.get("create", False)
-    operation = {
-        "operation": "DDL_CREATE_TABLE",
-        "command": command,
-        "status": _operation_status(execution, privilege_allowed=privilege_allowed),
-        "privilege_allowed": privilege_allowed,
-        "execution_outcome": execution.outcome,
-        "sqlstate": execution.sqlstate,
-        "rolled_back": execution.rolled_back,
-        "reason": (
-            "tested_credential_has_schema_create_privilege"
-            if privilege_allowed
-            else "ddl_probe_executed_successfully_before_rollback"
-            if execution.outcome == "succeeded"
-            else "ddl_probe_denied_before_commit"
-            if execution.outcome == "denied"
-            else "ddl_probe_blocked_by_fixture_or_unexpected_database_error"
-        ),
-    }
-    if execution.message:
-        operation["message"] = execution.message
+    spec = PermissionProbeSpec(
+        operation="DDL_CREATE_TABLE",
+        target=None,
+        ddl_schema=schema_name,
+        ddl_table=probe_table,
+        command=command,
+    )
+    if privilege_allowed:
+        operation = _catalog_short_circuit_operation_result(
+            spec,
+            privilege={
+                "allowed": True,
+                "reason": "tested_credential_has_schema_create_privilege",
+                "table_allowed": False,
+                "column_allowed": False,
+                "columns": [],
+            },
+        )
+    else:
+        execution = adapter.execute_probe(spec)
+        operation = {
+            "operation": "DDL_CREATE_TABLE",
+            "command": command,
+            "status": _operation_status(execution, privilege_allowed=False),
+            "privilege_allowed": False,
+            "table_privilege_allowed": False,
+            "column_privilege_allowed": False,
+            "execution_outcome": execution.outcome,
+            "sqlstate": execution.sqlstate,
+            "rolled_back": execution.rolled_back,
+            "reason": (
+                "ddl_probe_executed_successfully_before_rollback"
+                if execution.outcome == "succeeded"
+                else "ddl_probe_denied_before_commit"
+                if execution.outcome == "denied"
+                else "ddl_probe_blocked_by_fixture_or_unexpected_database_error"
+            ),
+        }
+        if execution.message:
+            operation["message"] = execution.message
     return {
         "target": f"{schema_name}.*",
         "surface": "schema_table_ddl",
@@ -881,6 +1099,8 @@ def _route_result(spec: Mapping[str, Any], *, route_requester: RouteRequester) -
         }
     body = response.body if isinstance(response.body, dict) else {}
     error = body.get("error") if isinstance(body, dict) else {}
+    if not isinstance(error, dict):
+        error = {}
     if 200 <= response.status_code < 300:
         status = STATUS_PASS
         reason = "display_read_route_succeeded"
@@ -905,17 +1125,9 @@ def _route_result(spec: Mapping[str, Any], *, route_requester: RouteRequester) -
 
 
 def _route_fixture_blocked(status_code: int, error: Mapping[str, Any]) -> bool:
+    del status_code
     code = str(error.get("code") or "")
-    return status_code == 404 or code in {
-        "QHH_LATEST_PRODUCT_UNAVAILABLE",
-        "PIPELINE_CYCLE_NOT_FOUND",
-        "PIPELINE_STRICT_IDENTITY_NOT_FOUND",
-        "JOB_NOT_FOUND",
-        "JOB_LOG_NOT_PUBLISHED",
-        "JOB_LOG_NOT_FOUND",
-        "JOB_LOG_URI_UNSUPPORTED",
-        "JOB_LOG_ACCESS_DENIED",
-    }
+    return code in ROUTE_FIXTURE_BLOCKER_ERROR_CODES
 
 
 def _url_value(value: str) -> str:
@@ -928,8 +1140,8 @@ def _fastapi_display_route_requester(database_url: str) -> Iterator[RouteRequest
 
     from apps.api.main import create_app
 
-    app = create_app(_display_app_env())
-    with _temporary_env({"DATABASE_URL": database_url, **_validation_auth_env()}):
+    with _temporary_env(_display_validation_env(database_url=database_url)):
+        app = create_app(_display_app_env())
         with TestClient(app) as client:
 
             def requester(method: str, path: str) -> RouteHttpResponse:
@@ -1008,14 +1220,27 @@ def _permission_summary(permission_probes: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def _blocked_summary(config: ReadonlyDbValidationConfig, *, code: str, message: str) -> dict[str, Any]:
+def _blocked_summary(
+    config: ReadonlyDbValidationConfig,
+    *,
+    code: str,
+    message: str,
+    provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    selected_provenance = provenance or _validation_provenance(
+        adapter_injected=False,
+        route_requester_injected=False,
+        manual_action_probe_runner_injected=False,
+    )
     return {
-        "schema": "nhms.readonly_db_boundary.evidence.v1",
+        "schema": _evidence_schema(selected_provenance),
         "status": STATUS_BLOCKED,
         "run_id": config.run_id,
         "generated_at": datetime.now(UTC).isoformat(),
         "evidence_dir": _public_path(config.lane_dir),
         "database_url": _redact_database_url(config.database_url),
+        "validation_provenance": selected_provenance,
+        "validation_timeouts": _validation_timeout_evidence(),
         "blockers": [{"code": code, "message": redact_text(message)}],
         "redaction": {
             "database_url_redacted": True,
@@ -1173,6 +1398,87 @@ def _path_env(name: str, default: Path) -> Path:
     return Path(value) if value else default
 
 
+def _validation_provenance(
+    *,
+    adapter_injected: bool,
+    route_requester_injected: bool,
+    manual_action_probe_runner_injected: bool,
+) -> dict[str, Any]:
+    injected_components = [
+        name
+        for name, injected in (
+            ("adapter", adapter_injected),
+            ("route_requester", route_requester_injected),
+            ("manual_action_probe_runner", manual_action_probe_runner_injected),
+        )
+        if injected
+    ]
+    return {
+        "mode": "simulated" if injected_components else "live",
+        "live_readonly_proof": not injected_components,
+        "injected_components": injected_components,
+    }
+
+
+def _evidence_schema(provenance: Mapping[str, Any]) -> str:
+    return SIMULATED_EVIDENCE_SCHEMA if provenance.get("mode") == "simulated" else LIVE_EVIDENCE_SCHEMA
+
+
+def _validation_pgoptions() -> str:
+    return (
+        f"-c statement_timeout={VALIDATION_STATEMENT_TIMEOUT_MS} "
+        f"-c lock_timeout={VALIDATION_LOCK_TIMEOUT_MS} "
+        f"-c idle_in_transaction_session_timeout={VALIDATION_IDLE_TIMEOUT_MS}"
+    )
+
+
+def _validation_connect_kwargs() -> dict[str, Any]:
+    return {
+        "connect_timeout": VALIDATION_CONNECT_TIMEOUT_SECONDS,
+        "options": _validation_pgoptions(),
+    }
+
+
+def _validation_timeout_evidence() -> dict[str, int]:
+    return {
+        "connect_timeout_seconds": VALIDATION_CONNECT_TIMEOUT_SECONDS,
+        "statement_timeout_ms": VALIDATION_STATEMENT_TIMEOUT_MS,
+        "lock_timeout_ms": VALIDATION_LOCK_TIMEOUT_MS,
+        "idle_in_transaction_session_timeout_ms": VALIDATION_IDLE_TIMEOUT_MS,
+    }
+
+
+def _bounded_database_url(database_url: str) -> str:
+    if not database_url:
+        return database_url
+    try:
+        parsed = urlsplit(database_url)
+    except ValueError:
+        return database_url
+    if not parsed.scheme:
+        return database_url
+    query_items = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key not in {"connect_timeout", "options"}
+    ]
+    query_items.extend(
+        (
+            ("connect_timeout", str(VALIDATION_CONNECT_TIMEOUT_SECONDS)),
+            ("options", _validation_pgoptions()),
+        )
+    )
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urlencode(query_items),
+            parsed.fragment,
+        )
+    )
+
+
 def _display_app_env() -> dict[str, str]:
     return {
         "NHMS_REQUIRE_SERVICE_ROLE": "true",
@@ -1180,6 +1486,17 @@ def _display_app_env() -> dict[str, str]:
         "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS": "true",
         "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS": "false",
     }
+
+
+def _display_validation_env(*, database_url: str | None = None) -> dict[str, str | None]:
+    env: dict[str, str | None] = {
+        **_display_app_env(),
+        **_validation_auth_env(),
+        "PGOPTIONS": _validation_pgoptions(),
+    }
+    if database_url is not None:
+        env["DATABASE_URL"] = _bounded_database_url(database_url)
+    return env
 
 
 def _validation_auth_env() -> dict[str, str | None]:
