@@ -1471,6 +1471,126 @@ def test_static_checker_accepts_same_key_alternate_when_it_matches_env_file(
 
 
 @pytest.mark.parametrize(
+    ("field", "operator", "key", "expected_rendered"),
+    [
+        ("image", ":+", "NHMS_APP_IMAGE", "unexpected-display-app"),
+        ("image", "+", "NHMS_APP_IMAGE", "unexpected-display-app"),
+        ("user", ":+", "NHMS_CONTAINER_UID", "0"),
+        ("user", "+", "NHMS_CONTAINER_UID", "0"),
+        ("ports", ":+", "NHMS_DISPLAY_API_PORT", "18000"),
+        ("ports", "+", "NHMS_DISPLAY_API_PORT", "18000"),
+    ],
+)
+def test_static_checker_rejects_display_full_tree_same_key_interpolation_drift(
+    tmp_path: Path,
+    field: str,
+    operator: str,
+    key: str,
+    expected_rendered: str,
+) -> None:
+    compose = _safe_display_compose()
+    service = compose["services"]["display-api"]
+    display_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/display.example")
+    if field == "image":
+        service["image"] = f"${{{key}{operator}{expected_rendered}}}:${{NHMS_IMAGE_TAG}}"
+        assert docker_runtime._resolve_compose_value(service["image"], display_env).startswith(expected_rendered)
+    elif field == "user":
+        service["user"] = f"${{{key}{operator}{expected_rendered}}}:${{NHMS_CONTAINER_GID}}"
+        assert docker_runtime._resolve_compose_value(service["user"], display_env).startswith(f"{expected_rendered}:")
+    elif field == "ports":
+        service["ports"] = [f"127.0.0.1:${{{key}{operator}{expected_rendered}}}:8000"]
+        assert expected_rendered in docker_runtime._resolve_compose_value(service["ports"][0], display_env)
+    else:
+        raise AssertionError(f"unhandled field: {field}")
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "DISPLAY_INTERPOLATION_VALUE_DRIFT"
+        and finding.details["key"] == key
+        and finding.details["rendered_value"] == expected_rendered
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "operator", "key", "expected_rendered"),
+    [
+        ("image", ":+", "NHMS_APP_IMAGE", "unexpected-compute-app"),
+        ("image", "+", "NHMS_APP_IMAGE", "unexpected-compute-app"),
+        ("user", ":+", "NHMS_CONTAINER_UID", "0"),
+        ("user", "+", "NHMS_CONTAINER_UID", "0"),
+    ],
+)
+def test_static_checker_rejects_compute_full_tree_same_key_interpolation_drift(
+    tmp_path: Path,
+    field: str,
+    operator: str,
+    key: str,
+    expected_rendered: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compute_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")
+    for service in compose["services"].values():
+        if field == "image":
+            service["image"] = f"${{{key}{operator}{expected_rendered}}}:${{NHMS_IMAGE_TAG}}"
+            assert docker_runtime._resolve_compose_value(service["image"], compute_env).startswith(expected_rendered)
+        elif field == "user":
+            service["user"] = f"${{{key}{operator}{expected_rendered}}}:${{NHMS_CONTAINER_GID}}"
+            resolved_user = docker_runtime._resolve_compose_value(service["user"], compute_env)
+            assert resolved_user.startswith(f"{expected_rendered}:")
+        else:
+            raise AssertionError(f"unhandled field: {field}")
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_INTERPOLATION_VALUE_DRIFT"
+        and finding.details["key"] == key
+        and finding.details["rendered_value"] == expected_rendered
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize("operator", [":+", "+"])
+def test_static_checker_accepts_full_tree_same_key_alternate_when_it_matches_env_file(
+    tmp_path: Path,
+    operator: str,
+) -> None:
+    display_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/display.example")
+    compute_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")
+    display_compose = _safe_display_compose()
+    display_service = display_compose["services"]["display-api"]
+    display_service["image"] = (
+        f"${{NHMS_APP_IMAGE{operator}{display_env['NHMS_APP_IMAGE']}}}:"
+        f"${{NHMS_IMAGE_TAG{operator}{display_env['NHMS_IMAGE_TAG']}}}"
+    )
+    display_service["ports"] = [
+        f"127.0.0.1:${{NHMS_DISPLAY_API_PORT{operator}{display_env['NHMS_DISPLAY_API_PORT']}}}:8000"
+    ]
+    compute_compose = _safe_compute_compose()
+    for service in compute_compose["services"].values():
+        service["user"] = (
+            f"${{NHMS_CONTAINER_UID{operator}{compute_env['NHMS_CONTAINER_UID']}}}:"
+            f"${{NHMS_CONTAINER_GID{operator}{compute_env['NHMS_CONTAINER_GID']}}}"
+        )
+
+    result = docker_runtime.run_static_check(
+        compute_compose=_write_compute_compose(tmp_path, compute_compose),
+        display_compose=_write_display_compose(tmp_path, display_compose),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
+
+
+@pytest.mark.parametrize(
     "env_key",
     sorted(docker_runtime.DISPLAY_AUDITED_RUNTIME_ENV),
 )
@@ -1589,6 +1709,112 @@ def test_static_checker_rejects_compute_same_key_alternate_env_drift(
         and finding.details["rendered_value"] == alternate_value
         for finding in result.findings
     )
+
+
+def test_static_checker_rejects_same_key_alternate_payload_drift_when_env_file_value_is_empty(
+    tmp_path: Path,
+) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"]["OBJECT_STORE_PREFIX"] = "${OBJECT_STORE_PREFIX:+s3://alternate-prefix}"
+    compute_compose = _write_compute_compose(tmp_path, compose)
+    compute_env = tmp_path / "compute.example"
+    compute_env.write_text(
+        "\n".join(
+            line
+            for line in (REPO_ROOT / "infra/env/compute.example").read_text(encoding="utf-8").splitlines()
+            if not line.startswith("OBJECT_STORE_PREFIX=")
+        )
+        + "\nOBJECT_STORE_PREFIX=\n",
+        encoding="utf-8",
+    )
+
+    result = docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=compute_env,
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_INTERPOLATION_VALUE_DRIFT"
+        and finding.details["key"] == "OBJECT_STORE_PREFIX"
+        and finding.details["rendered_value"] == "s3://alternate-prefix"
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "target_key", "expected_rendered", "extra_env_line", "expected_codes"),
+    [
+        (
+            "${DATABASE_URL:+DATABASE_URL=postgresql://nhms_other_rw:change-me@db.internal.example:5432/nhms}",
+            "DATABASE_URL",
+            "postgresql://nhms_other_rw:change-me@db.internal.example:5432/nhms",
+            None,
+            {"COMPUTE_INTERPOLATION_VALUE_DRIFT", "COMPUTE_RUNTIME_ENV_LITERAL_DRIFT"},
+        ),
+        (
+            "${DATABASE_URL:+OBJECT_STORE_ROOT=/ambient/object-store}",
+            "OBJECT_STORE_ROOT",
+            "/ambient/object-store",
+            None,
+            {"COMPUTE_INTERPOLATION_VALUE_DRIFT", "COMPUTE_RUNTIME_ENV_LITERAL_DRIFT"},
+        ),
+        (
+            "${WORKSPACE_ROOT:+SLURM_GATEWAY_WORKSPACE_DIR=/ambient/slurm/workspace}",
+            "SLURM_GATEWAY_WORKSPACE_DIR",
+            "/ambient/slurm/workspace",
+            None,
+            {"COMPUTE_INTERPOLATION_VALUE_DRIFT", "COMPUTE_RUNTIME_ENV_LITERAL_DRIFT"},
+        ),
+        (
+            "${COMPUTE_DYNAMIC_ENV:+DATABASE_URL=postgresql://nhms_other_rw:change-me@db.internal.example:5432/nhms}",
+            "DATABASE_URL",
+            "postgresql://nhms_other_rw:change-me@db.internal.example:5432/nhms",
+            "COMPUTE_DYNAMIC_ENV=1",
+            {"COMPUTE_INTERPOLATION_ENV_UNAPPROVED", "COMPUTE_RUNTIME_ENV_LITERAL_DRIFT"},
+        ),
+    ],
+)
+def test_static_checker_rejects_compute_environment_list_dynamic_audited_overwrite(
+    tmp_path: Path,
+    entry: str,
+    target_key: str,
+    expected_rendered: str,
+    extra_env_line: str | None,
+    expected_codes: set[str],
+) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"] = _environment_dict_to_list(service["environment"])
+        service["environment"].append(entry)
+    compute_compose = _write_compute_compose(tmp_path, compose)
+    compute_env = Path("infra/env/compute.example")
+    if extra_env_line is not None:
+        compute_env = tmp_path / "compute.example"
+        compute_env.write_text(
+            (REPO_ROOT / "infra/env/compute.example").read_text(encoding="utf-8") + f"\n{extra_env_line}\n",
+            encoding="utf-8",
+        )
+    compute_env_path = compute_env if compute_env.is_absolute() else REPO_ROOT / compute_env
+    compute_env_map = docker_runtime.parse_env_file(compute_env_path)
+    rendered_env = docker_runtime._service_environment(next(iter(compose["services"].values())), compute_env_map)
+    assert rendered_env[target_key] == expected_rendered
+    assert rendered_env[target_key] != compute_env_map[target_key]
+
+    result = docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=compute_env,
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert _codes(result) >= expected_codes
 
 
 def test_static_checker_rejects_compute_workspace_volume_mount_type(tmp_path: Path) -> None:

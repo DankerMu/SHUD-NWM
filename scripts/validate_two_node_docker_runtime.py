@@ -324,6 +324,14 @@ class StaticCheckResult:
 
 
 @dataclass(frozen=True)
+class ComposeInterpolationOccurrence:
+    key: str
+    operator: str | None
+    payload: str
+    expression: str
+
+
+@dataclass(frozen=True)
 class CommandResult:
     args: tuple[str, ...]
     returncode: int
@@ -1143,6 +1151,18 @@ def _compute_runtime_env_contract_findings(
                     env=env,
                 )
             )
+            if _compose_contains_interpolation(text):
+                for candidate_key, candidate_value in _environment_entry_candidates(text):
+                    findings.extend(
+                        _compute_audited_env_value_findings(
+                            path=path,
+                            service_name=service_name,
+                            key=_resolve_compose_value(candidate_key, env),
+                            value=candidate_value,
+                            entry=text,
+                            env=env,
+                        )
+                    )
     return findings
 
 
@@ -1249,6 +1269,18 @@ def _display_runtime_env_contract_findings(
                     env=env,
                 )
             )
+            if _compose_contains_interpolation(text):
+                for candidate_key, candidate_value in _environment_entry_candidates(text):
+                    findings.extend(
+                        _display_critical_env_value_findings(
+                            path=path,
+                            service_name=service_name,
+                            key=_resolve_compose_value(candidate_key, env),
+                            value=candidate_value,
+                            entry=text,
+                            env=env,
+                        )
+                    )
     return findings
 
 
@@ -1999,6 +2031,15 @@ def _compose_interpolation_contract_findings(
                 details={"unapproved_keys": unapproved_keys},
             )
         )
+    findings.extend(
+        _compose_interpolation_value_drift_findings(
+            path=path,
+            compose=compose,
+            env=env,
+            role=role,
+            approved_keys=approved_keys,
+        )
+    )
     for key in sorted(used_keys & approved_keys):
         if key not in env:
             continue
@@ -2020,6 +2061,42 @@ def _compose_interpolation_contract_findings(
                 },
             )
         )
+    return findings
+
+
+def _compose_interpolation_value_drift_findings(
+    *,
+    path: Path,
+    compose: Mapping[str, Any],
+    env: Mapping[str, str],
+    role: str,
+    approved_keys: frozenset[str],
+) -> list[Finding]:
+    findings: list[Finding] = []
+    for compose_path, text in _compose_interpolation_text_nodes(compose):
+        for occurrence in _compose_interpolation_occurrences_from_text(text):
+            key = occurrence.key
+            if key not in approved_keys or key not in env:
+                continue
+            rendered = _compose_interpolation_contract_value(occurrence, env)
+            expected = env[key]
+            if rendered == expected:
+                continue
+            findings.append(
+                Finding(
+                    f"{role.upper()}_INTERPOLATION_VALUE_DRIFT",
+                    f"{role} Compose interpolation must resolve to the matching env-file value.",
+                    path=str(path),
+                    details={
+                        "compose_path": compose_path,
+                        "key": key,
+                        "operator": occurrence.operator,
+                        "expression": _redact_interpolation_expression(key, occurrence.expression),
+                        "env_file_value": _redact_env_value(key, expected),
+                        "rendered_value": _redact_env_value(key, rendered),
+                    },
+                )
+            )
     return findings
 
 
@@ -2217,9 +2294,9 @@ def _environment_entry_candidates(entry: str) -> set[tuple[str, str]]:
 
 def _compose_interpolation_default_or_alternate_values(value: str) -> set[str]:
     return {
-        match.group(3) or ""
-        for match in _VAR_PATTERN.finditer(value)
-        if match.group(2) in {":-", "-", ":+", "+"}
+        occurrence.payload
+        for occurrence in _compose_interpolation_occurrences_from_text(value)
+        if occurrence.operator in {":-", "-", ":+", "+"}
     } - {""}
 
 
@@ -2229,8 +2306,8 @@ def _compose_interpolation_uses_env_file_value(value: Any, key: str, env: Mappin
     if key not in env:
         return False
     return any(
-        match.group(1) == key and _compose_interpolation_uses_current_env_value(match.group(2), env[key])
-        for match in _VAR_PATTERN.finditer(value)
+        occurrence.key == key and _compose_interpolation_uses_current_env_value(occurrence.operator, env[key])
+        for occurrence in _compose_interpolation_occurrences_from_text(value)
     )
 
 
@@ -2239,6 +2316,13 @@ def _compose_interpolation_matches_env_file_value(value: Any, key: str, env: Map
         return False
     if key not in env:
         return False
+    for occurrence in _compose_interpolation_occurrences_from_text(value):
+        if (
+            occurrence.key == key
+            and occurrence.operator in {":+", "+"}
+            and _compose_interpolation_contract_value(occurrence, env) != env[key]
+        ):
+            return False
     if _resolved_compose_text(value, env) != env[key]:
         return False
     variables = _compose_interpolation_keys(value)
@@ -2253,6 +2337,15 @@ def _compose_interpolation_uses_current_env_value(operator: str | None, current:
     if operator in {":-", ":?"}:
         return current != ""
     return False
+
+
+def _compose_interpolation_contract_value(
+    occurrence: ComposeInterpolationOccurrence,
+    env: Mapping[str, str],
+) -> str:
+    if occurrence.operator in {":+", "+"}:
+        return _resolve_compose_value(occurrence.payload, env)
+    return _resolve_compose_value(occurrence.expression, env)
 
 
 def _mode_is_readonly(mode: str) -> bool:
@@ -2325,6 +2418,29 @@ def _compose_contains_interpolation(value: Any) -> bool:
     return bool(_compose_interpolation_keys(value))
 
 
+def _compose_interpolation_text_nodes(value: Any, compose_path: str = "$") -> Iterator[tuple[str, str]]:
+    if isinstance(value, str):
+        yield compose_path, value
+        return
+    if isinstance(value, Mapping):
+        for raw_key, raw_value in value.items():
+            key_path = f"{compose_path}.{_compose_path_segment(raw_key)}"
+            if isinstance(raw_key, str):
+                yield f"{key_path}<key>", raw_key
+            yield from _compose_interpolation_text_nodes(raw_value, key_path)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for index, item in enumerate(value):
+            yield from _compose_interpolation_text_nodes(item, f"{compose_path}[{index}]")
+
+
+def _compose_path_segment(value: Any) -> str:
+    text = str(value)
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", text):
+        return text
+    return json.dumps(text)
+
+
 def _compose_interpolation_keys(value: Any) -> set[str]:
     if isinstance(value, str):
         return _compose_interpolation_keys_from_text(value)
@@ -2344,7 +2460,11 @@ def _compose_interpolation_keys(value: Any) -> set[str]:
 
 
 def _compose_interpolation_keys_from_text(value: str) -> set[str]:
-    keys: set[str] = set()
+    return {occurrence.key for occurrence in _compose_interpolation_occurrences_from_text(value)}
+
+
+def _compose_interpolation_occurrences_from_text(value: str) -> list[ComposeInterpolationOccurrence]:
+    occurrences: list[ComposeInterpolationOccurrence] = []
     index = 0
     while index < len(value):
         if value[index] != "$" or (index > 0 and value[index - 1] == "$"):
@@ -2359,25 +2479,49 @@ def _compose_interpolation_keys_from_text(value: str) -> set[str]:
                 index += 1
                 continue
             payload = value[next_index + 1 : close_index]
-            match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)(.*)", payload, flags=re.DOTALL)
-            if match is not None:
-                keys.add(match.group(1))
-                suffix = match.group(2)
-                for operator in (":-", ":+", ":?", "-", "+", "?"):
-                    if suffix.startswith(operator):
-                        keys.update(_compose_interpolation_keys_from_text(suffix[len(operator) :]))
-                        break
+            parsed = _parse_compose_interpolation_payload(payload)
+            if parsed is not None:
+                key, operator, operator_payload = parsed
+                occurrences.append(
+                    ComposeInterpolationOccurrence(
+                        key=key,
+                        operator=operator,
+                        payload=operator_payload,
+                        expression=value[index : close_index + 1],
+                    )
+                )
+                if operator is not None and operator_payload:
+                    occurrences.extend(_compose_interpolation_occurrences_from_text(operator_payload))
             index = close_index + 1
             continue
         if value[next_index].isalpha() or value[next_index] == "_":
             end = next_index + 1
             while end < len(value) and (value[end].isalnum() or value[end] == "_"):
                 end += 1
-            keys.add(value[next_index:end])
+            occurrences.append(
+                ComposeInterpolationOccurrence(
+                    key=value[next_index:end],
+                    operator=None,
+                    payload="",
+                    expression=value[index:end],
+                )
+            )
             index = end
             continue
         index += 1
-    return keys
+    return occurrences
+
+
+def _parse_compose_interpolation_payload(payload: str) -> tuple[str, str | None, str] | None:
+    match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)(.*)", payload, flags=re.DOTALL)
+    if match is None:
+        return None
+    key = match.group(1)
+    suffix = match.group(2)
+    for operator in (":-", ":+", ":?", "-", "+", "?"):
+        if suffix.startswith(operator):
+            return key, operator, suffix[len(operator) :]
+    return key, None, suffix
 
 
 def _find_matching_interpolation_brace(value: str, open_index: int) -> int | None:
@@ -2464,6 +2608,12 @@ def _redact_env_value(key: str, value: str) -> str:
     if key in SECRET_ENV_KEYS:
         return "<redacted>" if value else ""
     return value
+
+
+def _redact_interpolation_expression(key: str, expression: str) -> str:
+    if key in SECRET_ENV_KEYS:
+        return "<redacted>"
+    return expression
 
 
 def _is_namespace_sharing_mode(value: str) -> bool:
@@ -2572,6 +2722,14 @@ def _resolve_compose_value_once(value: str, env: Mapping[str, str]) -> str:
             continue
         next_index = index + 1
         if next_index >= len(value) or value[next_index] != "{":
+            if next_index < len(value) and (value[next_index].isalpha() or value[next_index] == "_"):
+                end = next_index + 1
+                while end < len(value) and (value[end].isalnum() or value[end] == "_"):
+                    end += 1
+                key = value[next_index:end]
+                parts.append(env.get(key, value[index:end]))
+                index = end
+                continue
             parts.append(value[index])
             index += 1
             continue
@@ -2588,22 +2746,14 @@ def _resolve_compose_value_once(value: str, env: Mapping[str, str]) -> str:
 
 def _resolve_braced_compose_expression(expression: str, env: Mapping[str, str]) -> str:
     payload = expression[2:-1]
-    match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)(.*)", payload, flags=re.DOTALL)
-    if match is None:
+    parsed = _parse_compose_interpolation_payload(payload)
+    if parsed is None:
         return expression
-    key = match.group(1)
-    suffix = match.group(2)
-    operator: str | None = None
-    fallback = ""
-    for candidate in (":-", ":+", ":?", "-", "+", "?"):
-        if suffix.startswith(candidate):
-            operator = candidate
-            fallback = suffix[len(candidate) :]
-            break
+    key, operator, fallback = parsed
     current = env.get(key)
     is_set = key in env
     is_nonempty = current not in (None, "")
-    if operator is None and not suffix:
+    if operator is None and not fallback:
         return current if is_set else expression
     if operator is None:
         return expression
