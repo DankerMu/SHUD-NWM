@@ -1,0 +1,78 @@
+name: nhms-compute
+
+x-compute-env: &compute-env
+  NHMS_SERVICE_ROLE: compute_control
+  NHMS_REQUIRE_SERVICE_ROLE: "true"
+  NHMS_AUTH_MODE: ${NHMS_AUTH_MODE:-production}
+  DATABASE_URL: ${DATABASE_URL:?set compute writer database url}
+  WORKSPACE_ROOT: ${WORKSPACE_ROOT:?set compute workspace root}
+  OBJECT_STORE_ROOT: ${OBJECT_STORE_ROOT:-}
+  OBJECT_STORE_PREFIX: ${OBJECT_STORE_PREFIX:-}
+  NHMS_PUBLISHED_ARTIFACT_ROOT: ${NHMS_PUBLISHED_ARTIFACT_ROOT:?set container published artifact root}
+  NHMS_PUBLISHED_ARTIFACT_URI_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_URI_PREFIX:-published://}
+  NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
+  NHMS_PUBLISHED_ARTIFACT_S3_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_S3_PREFIX:-}
+  NHMS_BASINS_ROOT: ${NHMS_BASINS_ROOT:?set Basins root}
+  NHMS_MODEL_ASSET_ROOT: ${NHMS_MODEL_ASSET_ROOT:?set model asset root}
+  SHUD_EXECUTABLE: ${SHUD_EXECUTABLE:-}
+  SLURM_GATEWAY_URL: ${SLURM_GATEWAY_URL:-}
+  SLURM_GATEWAY_BACKEND: ${SLURM_GATEWAY_BACKEND:-}
+  SLURM_GATEWAY_TEMPLATE_DIR: ${SLURM_GATEWAY_TEMPLATE_DIR:-infra/sbatch}
+  SLURM_GATEWAY_WORKSPACE_DIR: ${SLURM_GATEWAY_WORKSPACE_DIR:-${WORKSPACE_ROOT}}
+  GFS_NOMADS_BASE_URL: ${GFS_NOMADS_BASE_URL:-}
+  IFS_OPEN_DATA_SOURCE: ${IFS_OPEN_DATA_SOURCE:-ecmwf}
+
+x-compute-volumes: &compute-volumes
+  - type: bind
+    source: ${WORKSPACE_ROOT:?set compute workspace root}
+    target: ${WORKSPACE_ROOT:?set compute workspace root}
+  - type: bind
+    source: ${NHMS_PUBLISHED_ARTIFACT_HOST_ROOT:?set host published artifact root}
+    target: ${NHMS_PUBLISHED_ARTIFACT_ROOT:?set container published artifact root}
+  - type: bind
+    source: ${NHMS_BASINS_ROOT:?set Basins root}
+    target: ${NHMS_BASINS_ROOT:?set Basins root}
+    read_only: true
+  - type: bind
+    source: ${NHMS_MODEL_ASSET_ROOT:?set model asset root}
+    target: ${NHMS_MODEL_ASSET_ROOT:?set model asset root}
+    read_only: true
+
+services:
+  compute-api:
+    image: ${NHMS_APP_IMAGE:-nhms-app}:${NHMS_IMAGE_TAG:-m22-placeholder}
+    user: "${NHMS_CONTAINER_UID:-1000}:${NHMS_CONTAINER_GID:-1000}"
+    working_dir: /app
+    init: true
+    environment: *compute-env
+    volumes: *compute-volumes
+    expose:
+      - "8000"
+    command:
+      - uv
+      - run
+      - python
+      - -m
+      - uvicorn
+      - apps.api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    restart: unless-stopped
+
+  scheduler-once:
+    image: ${NHMS_APP_IMAGE:-nhms-app}:${NHMS_IMAGE_TAG:-m22-placeholder}
+    profiles: ["manual"]
+    user: "${NHMS_CONTAINER_UID:-1000}:${NHMS_CONTAINER_GID:-1000}"
+    working_dir: /app
+    init: true
+    environment: *compute-env
+    volumes: *compute-volumes
+    command:
+      - uv
+      - run
+      - nhms-pipeline
+      - plan-production
+      - --plan
+    restart: "no"

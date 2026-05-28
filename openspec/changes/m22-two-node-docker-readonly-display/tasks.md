@@ -87,11 +87,18 @@ Issue ownership note:
 
 ## 7. Docker Env and Compose Skeleton
 
-- [ ] 7.1 Add `infra/env/compute.example`, `infra/env/display.example`, and shared env documentation with canonical `NHMS_PUBLISHED_ARTIFACT_*` names plus role-specific required and forbidden variables.
-- [ ] 7.2 Add Docker preflight commands/scripts that record `docker version`, `docker compose version`, DockerRootDir, `docker system df`, `df -h`, configured `TMPDIR`, and evidence root before builds; low space is `BLOCKED`.
-- [ ] 7.3 Add `infra/compose.compute.yml` with compute-control services, writable workspace/published mounts, `scheduler-once` using an existing tested command, and no public control exposure by default.
-- [ ] 7.4 Add `infra/compose.display.yml` with display API, optional reverse proxy, readonly published artifact mount, readonly DB env, display role env, and no forbidden Slurm/Munge/workspace/Docker-socket mounts.
-- [ ] 7.5 Add compose/env static tests or scripts that detect forbidden display mounts/env, HostConfig hazards (`privileged`, host PID/IPC/network, broad host-root bind, Docker socket, `cap_add`), publish-root env drift, and accidental use of `infra/docker-compose.dev.yml` as a two-node production file.
+- [x] 7.1 Add `infra/env/compute.example`, `infra/env/display.example`, and shared env documentation with canonical `NHMS_PUBLISHED_ARTIFACT_*` names plus role-specific required and forbidden variables.
+- [x] 7.2 Add Docker preflight commands/scripts that record `docker version`, `docker compose version`, DockerRootDir, `docker system df`, `df -h`, configured `TMPDIR`, and evidence root before builds; low space is `BLOCKED`.
+- [x] 7.3 Add `infra/compose.compute.yml` with compute-control services, writable workspace/published mounts, `scheduler-once` using an existing tested command, and no public control exposure by default.
+- [x] 7.4 Add `infra/compose.display.yml` with display API, optional reverse proxy, readonly published artifact mount, readonly DB env, display role env, and no forbidden Slurm/Munge/workspace/Docker-socket mounts.
+- [x] 7.5 Add compose/env static tests or scripts that detect forbidden display mounts/env, HostConfig hazards (`privileged`, host PID/IPC/network, broad host-root bind, Docker socket, `cap_add`), publish-root env drift, and accidental use of `infra/docker-compose.dev.yml` as a two-node production file.
+
+Required evidence for #236:
+
+- [x] 7.6 Static compose/env test command validates safe compute/display skeletons, unsafe display env/mount/HostConfig cases, publish-root drift, and dev-compose misuse.
+- [x] 7.7 Docker preflight is run locally when Docker is available and writes evidence under `artifacts/` or `/scratch/frd_muziyao`; Docker unavailable or low space is reported as `BLOCKED`, not PASS.
+- [x] 7.8 `docker compose -f infra/compose.compute.yml config` and `docker compose -f infra/compose.display.yml config` pass, or produce documented BLOCKED evidence if #237 image assets are required.
+- [x] 7.9 `uv run ruff check <new Python script/test paths if Python>` and `openspec validate m22-two-node-docker-readonly-display --strict --no-interactive` pass.
 
 ## 8. Docker Image and Entrypoint
 

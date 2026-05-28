@@ -1,0 +1,1006 @@
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+CHANGE_ID = "m22-two-node-docker-readonly-display"
+DEFAULT_STATIC_REPORT = Path("artifacts/stage-change") / CHANGE_ID / "static-compose-env-check.json"
+DEFAULT_PREFLIGHT_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-preflight"
+DEFAULT_MIN_FREE_GB = 5.0
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?])([^}]*))?\}")
+
+DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
+    {
+        "SLURM_GATEWAY_URL",
+        "SLURM_GATEWAY_BACKEND",
+        "SLURM_GATEWAY_TEMPLATE_DIR",
+        "SLURM_GATEWAY_WORKSPACE_DIR",
+        "WORKSPACE_ROOT",
+        "RUN_WORKSPACE_ROOT",
+        "SHARED_LOG_ROOT",
+        "NHMS_BASINS_ROOT",
+        "NHMS_MODEL_ASSET_ROOT",
+        "SHUD_EXECUTABLE",
+        "MUNGE_SOCKET",
+        "MUNGE_KEY",
+        "DOCKER_HOST",
+    }
+)
+DISPLAY_REQUIRED_ENV = {
+    "NHMS_SERVICE_ROLE": "display_readonly",
+    "NHMS_REQUIRE_SERVICE_ROLE": "true",
+    "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS": "true",
+    "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS": "false",
+}
+COMPUTE_REQUIRED_ENV = {
+    "NHMS_SERVICE_ROLE": "compute_control",
+    "NHMS_REQUIRE_SERVICE_ROLE": "true",
+}
+CANONICAL_PUBLISHED_ENV = frozenset(
+    {
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_S3_BUCKET",
+        "NHMS_PUBLISHED_ARTIFACT_S3_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT",
+    }
+)
+LEGACY_PUBLISHED_ENV = "PUBLISHED_ARTIFACT_ROOT"
+
+
+@dataclass(frozen=True)
+class Finding:
+    code: str
+    message: str
+    severity: str = "error"
+    path: str | None = None
+    service: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+        }
+        if self.path is not None:
+            payload["path"] = self.path
+        if self.service is not None:
+            payload["service"] = self.service
+        if self.details:
+            payload["details"] = self.details
+        return payload
+
+
+@dataclass(frozen=True)
+class StaticCheckResult:
+    status: str
+    findings: tuple[Finding, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "finding_count": len(self.findings),
+            "findings": [finding.to_dict() for finding in self.findings],
+        }
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    args: tuple[str, ...]
+    returncode: int
+    stdout: str
+    stderr: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "args": list(self.args),
+            "returncode": self.returncode,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+        }
+
+
+@dataclass(frozen=True)
+class DiskSpace:
+    total: int
+    used: int
+    free: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"total_bytes": self.total, "used_bytes": self.used, "free_bytes": self.free}
+
+
+@dataclass(frozen=True)
+class PreflightResult:
+    status: str
+    evidence_path: Path
+    blockers: tuple[dict[str, Any], ...]
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            raise ValueError(f"{path}:{line_number}: expected KEY=VALUE")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"{path}:{line_number}: empty environment key")
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        env[key] = value
+    return env
+
+
+def load_compose(path: Path) -> dict[str, Any]:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: compose file must be a YAML mapping")
+    return payload
+
+
+def run_static_check(
+    *,
+    compute_compose: Path,
+    display_compose: Path,
+    compute_env: Path,
+    display_env: Path,
+    repo_root: Path,
+) -> StaticCheckResult:
+    repo_root = repo_root.resolve()
+    compute_compose = _resolve_path(compute_compose, repo_root)
+    display_compose = _resolve_path(display_compose, repo_root)
+    compute_env = _resolve_path(compute_env, repo_root)
+    display_env = _resolve_path(display_env, repo_root)
+
+    findings: list[Finding] = []
+    findings.extend(_dev_compose_findings(compute_compose, repo_root, role="compute"))
+    findings.extend(_dev_compose_findings(display_compose, repo_root, role="display"))
+
+    compute_env_map = parse_env_file(compute_env)
+    display_env_map = parse_env_file(display_env)
+    compute_yaml = load_compose(compute_compose)
+    display_yaml = load_compose(display_compose)
+
+    findings.extend(_validate_env_file(compute_env, compute_env_map, role="compute"))
+    findings.extend(_validate_env_file(display_env, display_env_map, role="display"))
+    findings.extend(_validate_compute_compose(compute_compose, compute_yaml, compute_env_map))
+    findings.extend(_validate_display_compose(display_compose, display_yaml, display_env_map))
+
+    status = "PASS" if not findings else "FAIL"
+    return StaticCheckResult(status=status, findings=tuple(findings))
+
+
+def run_preflight(
+    *,
+    evidence_root: Path,
+    repo_root: Path,
+    min_free_bytes: int = int(DEFAULT_MIN_FREE_GB * 1024**3),
+    command_runner: Callable[[Sequence[str]], CommandResult] | None = None,
+    disk_usage_provider: Callable[[Path], DiskSpace] | None = None,
+) -> PreflightResult:
+    repo_root = repo_root.resolve()
+    evidence_root = ensure_approved_evidence_root(evidence_root, repo_root)
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    evidence_path = evidence_root / "docker-preflight.json"
+    runner = command_runner or _run_command
+    disk_provider = disk_usage_provider or _disk_usage
+    tmpdir = Path(os.getenv("TMPDIR") or tempfile.gettempdir())
+
+    commands = {
+        "docker_version": runner(("docker", "version")),
+        "docker_compose_version": runner(("docker", "compose", "version")),
+        "docker_info_docker_root": runner(("docker", "info", "--format", "{{json .DockerRootDir}}")),
+        "docker_system_df": runner(("docker", "system", "df")),
+        "df_h": runner(("df", "-h")),
+    }
+
+    docker_root = _parse_docker_root(commands["docker_info_docker_root"].stdout)
+    disk_paths = {
+        "evidence_root": evidence_root,
+        "tmpdir": tmpdir,
+    }
+    if docker_root:
+        disk_paths["docker_root"] = Path(docker_root)
+
+    disk: dict[str, dict[str, Any]] = {}
+    blockers: list[dict[str, Any]] = []
+    for label, path in disk_paths.items():
+        try:
+            snapshot = disk_provider(path)
+        except OSError as error:
+            blockers.append(
+                {
+                    "code": "DISK_USAGE_UNAVAILABLE",
+                    "label": label,
+                    "path": str(path),
+                    "message": str(error),
+                }
+            )
+            continue
+        disk[label] = {"path": str(path), **snapshot.to_dict()}
+        if snapshot.free < min_free_bytes:
+            blockers.append(
+                {
+                    "code": "LOW_DISK_SPACE",
+                    "label": label,
+                    "path": str(path),
+                    "free_bytes": snapshot.free,
+                    "min_free_bytes": min_free_bytes,
+                }
+            )
+
+    blockers.extend(_docker_command_blockers(commands, docker_root=docker_root))
+    status = "BLOCKED" if blockers else "PASS"
+
+    payload = {
+        "schema_version": "nhms.two_node_docker.preflight.v1",
+        "change_id": CHANGE_ID,
+        "status": status,
+        "checked_at": _now_iso(),
+        "evidence_root": str(evidence_root),
+        "tmpdir": str(tmpdir),
+        "docker_root_dir": docker_root,
+        "min_free_bytes": min_free_bytes,
+        "commands": {name: result.to_dict() for name, result in commands.items()},
+        "disk": disk,
+        "blockers": blockers,
+    }
+    evidence_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return PreflightResult(status=status, evidence_path=evidence_path, blockers=tuple(blockers))
+
+
+def ensure_approved_evidence_root(path: Path, repo_root: Path) -> Path:
+    resolved = _resolve_path(path, repo_root)
+    artifacts_root = (repo_root / "artifacts").resolve()
+    scratch_root = Path("/scratch/frd_muziyao").resolve()
+    if _is_relative_to(resolved, artifacts_root) or _is_relative_to(resolved, scratch_root):
+        return resolved
+    raise ValueError(
+        "evidence root must be under repository artifacts/ or /scratch/frd_muziyao: "
+        f"{resolved}"
+    )
+
+
+def write_static_report(result: StaticCheckResult, report_path: Path, repo_root: Path) -> Path:
+    report_path = _resolve_path(report_path, repo_root)
+    ensure_approved_evidence_root(report_path.parent, repo_root)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "nhms.two_node_docker.static_check.v1",
+        "change_id": CHANGE_ID,
+        "checked_at": _now_iso(),
+        **result.to_dict(),
+    }
+    report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report_path
+
+
+def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list[Finding]:
+    findings: list[Finding] = []
+    required = COMPUTE_REQUIRED_ENV if role == "compute" else DISPLAY_REQUIRED_ENV
+    for key, expected in required.items():
+        actual = env.get(key)
+        if actual is None:
+            findings.append(
+                Finding("ENV_REQUIRED_MISSING", f"{role} env must define {key}.", path=str(path), details={"key": key})
+            )
+            continue
+        if actual.strip().lower() != expected:
+            findings.append(
+                Finding(
+                    "ENV_REQUIRED_VALUE_INVALID",
+                    f"{role} env {key} must be {expected}.",
+                    path=str(path),
+                    details={"key": key, "expected": expected, "actual": actual},
+                )
+            )
+    for key in ("NHMS_PUBLISHED_ARTIFACT_ROOT", "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX"):
+        if not env.get(key, "").strip():
+            findings.append(
+                Finding(
+                    "ENV_REQUIRED_MISSING",
+                    f"{role} env must define {key}.",
+                    path=str(path),
+                    details={"key": key},
+                )
+            )
+    missing_canonical = sorted(key for key in CANONICAL_PUBLISHED_ENV if key not in env)
+    if missing_canonical:
+        findings.append(
+            Finding(
+                "CANONICAL_PUBLISHED_ENV_MISSING",
+                f"{role} env is missing canonical published artifact variables.",
+                path=str(path),
+                details={"missing_keys": missing_canonical},
+            )
+        )
+    if LEGACY_PUBLISHED_ENV in env:
+        findings.append(
+            Finding(
+                "LEGACY_PUBLISHED_ARTIFACT_ENV",
+                "Use NHMS_PUBLISHED_ARTIFACT_ROOT instead of PUBLISHED_ARTIFACT_ROOT.",
+                path=str(path),
+                details={"key": LEGACY_PUBLISHED_ENV},
+            )
+        )
+    if role == "compute":
+        for key in ("WORKSPACE_ROOT", "DATABASE_URL", "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
+            if not env.get(key, "").strip():
+                findings.append(
+                    Finding(
+                        "ENV_REQUIRED_MISSING",
+                        f"compute env must define {key}.",
+                        path=str(path),
+                        details={"key": key},
+                    )
+                )
+    if role == "display":
+        for key in ("DATABASE_URL", "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
+            if not env.get(key, "").strip():
+                findings.append(
+                    Finding(
+                        "ENV_REQUIRED_MISSING",
+                        f"display env must define {key}.",
+                        path=str(path),
+                        details={"key": key},
+                    )
+                )
+        for key in sorted(DISPLAY_FORBIDDEN_ENV_KEYS):
+            if key in env:
+                findings.append(
+                    Finding(
+                        "DISPLAY_FORBIDDEN_ENV",
+                        f"display env must not configure {key}.",
+                        path=str(path),
+                        details={"key": key},
+                    )
+                )
+    return findings
+
+
+def _validate_compute_compose(path: Path, compose: Mapping[str, Any], env: Mapping[str, str]) -> list[Finding]:
+    findings: list[Finding] = []
+    services = _services(compose)
+    if not services:
+        return [Finding("COMPUTE_SERVICE_MISSING", "compute compose must define services.", path=str(path))]
+    for service_name, service in services.items():
+        service_env = _service_environment(service)
+        if service_env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
+            findings.append(
+                Finding(
+                    "COMPOSE_ONLY_ENV_LEAK",
+                    "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT must stay compose-only, not app runtime env.",
+                    path=str(path),
+                    service=service_name,
+                )
+            )
+        if LEGACY_PUBLISHED_ENV in service_env:
+            findings.append(
+                Finding(
+                    "LEGACY_PUBLISHED_ARTIFACT_ENV",
+                    "compose service must not expose legacy PUBLISHED_ARTIFACT_ROOT.",
+                    path=str(path),
+                    service=service_name,
+                )
+            )
+        if service_env.get("NHMS_SERVICE_ROLE") != "compute_control":
+            findings.append(
+                Finding(
+                    "COMPUTE_SERVICE_ROLE_INVALID",
+                    "compute services must run with NHMS_SERVICE_ROLE=compute_control.",
+                    path=str(path),
+                    service=service_name,
+                    details={"actual": service_env.get("NHMS_SERVICE_ROLE")},
+                )
+            )
+        findings.extend(_compute_port_findings(path, service_name, service))
+
+    scheduler = services.get("scheduler-once")
+    if scheduler is None:
+        findings.append(
+            Finding("COMPUTE_SCHEDULER_SERVICE_MISSING", "compute compose must define scheduler-once.", path=str(path))
+        )
+    elif _command_list(scheduler.get("command")) != ["uv", "run", "nhms-pipeline", "plan-production", "--plan"]:
+        findings.append(
+            Finding(
+                "COMPUTE_SCHEDULER_COMMAND_INVALID",
+                "scheduler-once must use uv run nhms-pipeline plan-production --plan.",
+                path=str(path),
+                service="scheduler-once",
+                details={"actual": _command_list(scheduler.get("command"))},
+            )
+        )
+
+    checked_service = scheduler or next(iter(services.values()))
+    checked_name = "scheduler-once" if scheduler else next(iter(services.keys()))
+    volumes = [_volume_info(volume, env) for volume in checked_service.get("volumes", []) or []]
+    findings.extend(
+        _require_mount(
+            volumes,
+            path=path,
+            service=checked_name,
+            env=env,
+            source_key="WORKSPACE_ROOT",
+            target_key="WORKSPACE_ROOT",
+            read_only=False,
+            missing_code="COMPUTE_WORKSPACE_MOUNT_MISSING",
+            readonly_code="COMPUTE_WORKSPACE_MOUNT_READONLY",
+        )
+    )
+    findings.extend(
+        _require_mount(
+            volumes,
+            path=path,
+            service=checked_name,
+            env=env,
+            source_key="NHMS_PUBLISHED_ARTIFACT_HOST_ROOT",
+            target_key="NHMS_PUBLISHED_ARTIFACT_ROOT",
+            read_only=False,
+            missing_code="COMPUTE_PUBLISHED_MOUNT_MISSING",
+            readonly_code="COMPUTE_PUBLISHED_MOUNT_READONLY",
+        )
+    )
+    findings.extend(
+        _require_mount(
+            volumes,
+            path=path,
+            service=checked_name,
+            env=env,
+            source_key="NHMS_BASINS_ROOT",
+            target_key="NHMS_BASINS_ROOT",
+            read_only=True,
+            missing_code="COMPUTE_BASINS_MOUNT_MISSING",
+            readonly_code="COMPUTE_BASINS_MOUNT_WRITABLE",
+        )
+    )
+    findings.extend(
+        _require_mount(
+            volumes,
+            path=path,
+            service=checked_name,
+            env=env,
+            source_key="NHMS_MODEL_ASSET_ROOT",
+            target_key="NHMS_MODEL_ASSET_ROOT",
+            read_only=True,
+            missing_code="COMPUTE_MODEL_ASSET_MOUNT_MISSING",
+            readonly_code="COMPUTE_MODEL_ASSET_MOUNT_WRITABLE",
+        )
+    )
+    return findings
+
+
+def _validate_display_compose(path: Path, compose: Mapping[str, Any], env: Mapping[str, str]) -> list[Finding]:
+    findings: list[Finding] = []
+    services = _services(compose)
+    if not services:
+        return [Finding("DISPLAY_SERVICE_MISSING", "display compose must define services.", path=str(path))]
+    for service_name, service in services.items():
+        service_env = _service_environment(service)
+        for key, expected in DISPLAY_REQUIRED_ENV.items():
+            if service_env.get(key, "").strip().lower() != expected:
+                findings.append(
+                    Finding(
+                        "DISPLAY_ROLE_FLAG_INVALID",
+                        f"display service must set {key}={expected}.",
+                        path=str(path),
+                        service=service_name,
+                        details={"key": key, "actual": service_env.get(key)},
+                    )
+                )
+        if service_env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
+            findings.append(
+                Finding(
+                    "COMPOSE_ONLY_ENV_LEAK",
+                    "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT must stay compose-only, not app runtime env.",
+                    path=str(path),
+                    service=service_name,
+                )
+            )
+        if LEGACY_PUBLISHED_ENV in service_env:
+            findings.append(
+                Finding(
+                    "LEGACY_PUBLISHED_ARTIFACT_ENV",
+                    "display service must not expose legacy PUBLISHED_ARTIFACT_ROOT.",
+                    path=str(path),
+                    service=service_name,
+                )
+            )
+        for key in sorted(DISPLAY_FORBIDDEN_ENV_KEYS):
+            if key in service_env:
+                findings.append(
+                    Finding(
+                        "DISPLAY_FORBIDDEN_ENV",
+                        f"display service must not configure {key}.",
+                        path=str(path),
+                        service=service_name,
+                        details={"key": key},
+                    )
+                )
+        findings.extend(_display_hostconfig_findings(path, service_name, service))
+        findings.extend(_display_mount_findings(path, service_name, service, env))
+    return findings
+
+
+def _display_hostconfig_findings(path: Path, service_name: str, service: Mapping[str, Any]) -> list[Finding]:
+    findings: list[Finding] = []
+    if service.get("privileged") is True:
+        findings.append(
+            Finding(
+                "DISPLAY_HOSTCONFIG_PRIVILEGED",
+                "display service must not be privileged.",
+                path=str(path),
+                service=service_name,
+            )
+        )
+    if str(service.get("network_mode", "")).lower() == "host":
+        findings.append(
+            Finding(
+                "DISPLAY_HOSTCONFIG_HOST_NETWORK",
+                "display service must not use host network.",
+                path=str(path),
+                service=service_name,
+            )
+        )
+    if str(service.get("pid", "")).lower() == "host":
+        findings.append(
+            Finding(
+                "DISPLAY_HOSTCONFIG_HOST_PID",
+                "display service must not use host PID.",
+                path=str(path),
+                service=service_name,
+            )
+        )
+    if str(service.get("ipc", "")).lower() == "host":
+        findings.append(
+            Finding(
+                "DISPLAY_HOSTCONFIG_HOST_IPC",
+                "display service must not use host IPC.",
+                path=str(path),
+                service=service_name,
+            )
+        )
+    if service.get("cap_add"):
+        findings.append(
+            Finding(
+                "DISPLAY_HOSTCONFIG_CAP_ADD",
+                "display service must not add Linux capabilities.",
+                path=str(path),
+                service=service_name,
+            )
+        )
+    if service.get("read_only") is not True:
+        findings.append(
+            Finding(
+                "DISPLAY_ROOT_FILESYSTEM_WRITABLE",
+                "display service must use a readonly root filesystem where feasible.",
+                path=str(path),
+                service=service_name,
+            )
+        )
+    return findings
+
+
+def _display_mount_findings(
+    path: Path,
+    service_name: str,
+    service: Mapping[str, Any],
+    env: Mapping[str, str],
+) -> list[Finding]:
+    findings: list[Finding] = []
+    volumes = [_volume_info(volume, env) for volume in service.get("volumes", []) or []]
+    artifact_volumes = [
+        volume
+        for volume in volumes
+        if "NHMS_PUBLISHED_ARTIFACT" in volume["text"]
+        or volume["source"]
+        in {
+            env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", ""),
+            env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
+        }
+        or volume["target"] == env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", "")
+    ]
+    if not artifact_volumes:
+        findings.append(
+            Finding(
+                "DISPLAY_PUBLISHED_MOUNT_MISSING",
+                "display service must mount published artifacts read-only.",
+                path=str(path),
+                service=service_name,
+            )
+        )
+    for volume in artifact_volumes:
+        expected_source = env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT", "")
+        expected_target = env.get("NHMS_PUBLISHED_ARTIFACT_ROOT", "")
+        if volume["source"] != expected_source:
+            findings.append(
+                Finding(
+                    "DISPLAY_PUBLISHED_SOURCE_DRIFT",
+                    "display published artifact source must use NHMS_PUBLISHED_ARTIFACT_HOST_ROOT.",
+                    path=str(path),
+                    service=service_name,
+                    details={"actual": volume["source"], "expected": expected_source},
+                )
+            )
+        if volume["target"] != expected_target:
+            findings.append(
+                Finding(
+                    "DISPLAY_PUBLISHED_TARGET_DRIFT",
+                    "display published artifact target must equal NHMS_PUBLISHED_ARTIFACT_ROOT.",
+                    path=str(path),
+                    service=service_name,
+                    details={"actual": volume["target"], "expected": expected_target},
+                )
+            )
+        if not volume["read_only"]:
+            findings.append(
+                Finding(
+                    "DISPLAY_PUBLISHED_MOUNT_NOT_READONLY",
+                    "display published artifact mount must be read-only.",
+                    path=str(path),
+                    service=service_name,
+                )
+            )
+
+    forbidden_tokens = (
+        "/etc/slurm",
+        "/run/munge",
+        "/var/run/docker.sock",
+        ".nhms-runs",
+        "WORKSPACE_ROOT",
+        "NHMS_BASINS_ROOT",
+        "NHMS_MODEL_ASSET_ROOT",
+    )
+    for volume in volumes:
+        text = volume["text"]
+        mount_text = "\n".join((text, volume["source"], volume["target"]))
+        if any(token in mount_text for token in forbidden_tokens):
+            findings.append(
+                Finding(
+                    "DISPLAY_FORBIDDEN_MOUNT",
+                    "display service contains a forbidden compute-control mount.",
+                    path=str(path),
+                    service=service_name,
+                    details={"volume": text},
+                )
+            )
+        for side in ("source", "target"):
+            mount_path = volume[side]
+            broad_roots = {"/", "/root", "/home", "/etc", "/run", "/var", "/scratch"}
+            if mount_path in broad_roots or mount_path.startswith("/scratch/"):
+                findings.append(
+                    Finding(
+                        "DISPLAY_BROAD_HOST_ROOT_BIND",
+                        "display service must not bind broad host roots or private scratch paths.",
+                        path=str(path),
+                        service=service_name,
+                        details={"side": side, "path": mount_path},
+                    )
+                )
+    return findings
+
+
+def _require_mount(
+    volumes: Sequence[dict[str, Any]],
+    *,
+    path: Path,
+    service: str,
+    env: Mapping[str, str],
+    source_key: str,
+    target_key: str,
+    read_only: bool,
+    missing_code: str,
+    readonly_code: str,
+) -> list[Finding]:
+    expected_source = env.get(source_key, "")
+    expected_target = env.get(target_key, "")
+    matches = [
+        volume
+        for volume in volumes
+        if volume["source"] == expected_source and volume["target"] == expected_target
+    ]
+    if not matches:
+        return [
+            Finding(
+                missing_code,
+                f"missing bind mount from {source_key} to {target_key}.",
+                path=str(path),
+                service=service,
+                details={"source_key": source_key, "target_key": target_key},
+            )
+        ]
+    findings: list[Finding] = []
+    for volume in matches:
+        if read_only and not volume["read_only"]:
+            findings.append(
+                Finding(
+                    readonly_code,
+                    f"{target_key} mount must be read-only.",
+                    path=str(path),
+                    service=service,
+                )
+            )
+        if not read_only and volume["read_only"]:
+            findings.append(
+                Finding(
+                    readonly_code,
+                    f"{target_key} mount must be writable.",
+                    path=str(path),
+                    service=service,
+                )
+            )
+    return findings
+
+
+def _compute_port_findings(path: Path, service_name: str, service: Mapping[str, Any]) -> list[Finding]:
+    findings: list[Finding] = []
+    for port in service.get("ports", []) or []:
+        if not _port_is_loopback(port):
+            findings.append(
+                Finding(
+                    "COMPUTE_PUBLIC_PORT_EXPOSURE",
+                    "compute control ports must bind localhost or stay unexposed by default.",
+                    path=str(path),
+                    service=service_name,
+                    details={"port": port},
+                )
+            )
+    return findings
+
+
+def _docker_command_blockers(commands: Mapping[str, CommandResult], *, docker_root: str | None) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    checks = {
+        "docker_version": "DOCKER_UNAVAILABLE",
+        "docker_compose_version": "DOCKER_COMPOSE_UNAVAILABLE",
+        "docker_info_docker_root": "DOCKER_ROOT_UNAVAILABLE",
+        "docker_system_df": "DOCKER_SYSTEM_DF_UNAVAILABLE",
+    }
+    for name, code in checks.items():
+        result = commands[name]
+        if result.returncode != 0:
+            blockers.append(
+                {
+                    "code": code,
+                    "command": list(result.args),
+                    "returncode": result.returncode,
+                }
+            )
+    if commands["docker_info_docker_root"].returncode == 0 and not docker_root:
+        blockers.append({"code": "DOCKER_ROOT_PARSE_FAILED", "command": list(commands["docker_info_docker_root"].args)})
+    return blockers
+
+
+def _dev_compose_findings(path: Path, repo_root: Path, *, role: str) -> list[Finding]:
+    dev_compose = (repo_root / "infra" / "docker-compose.dev.yml").resolve()
+    if path.resolve() != dev_compose:
+        return []
+    return [
+        Finding(
+            "DEV_COMPOSE_PRODUCTION_MISUSE",
+            "infra/docker-compose.dev.yml is development-only and cannot be a production two-node compose input.",
+            path=str(path),
+            details={"role": role},
+        )
+    ]
+
+
+def _services(compose: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    services = compose.get("services", {})
+    if not isinstance(services, dict):
+        return {}
+    return {str(name): service for name, service in services.items() if isinstance(service, dict)}
+
+
+def _service_environment(service: Mapping[str, Any]) -> dict[str, str]:
+    environment = service.get("environment", {})
+    if isinstance(environment, dict):
+        return {str(key): "" if value is None else str(value) for key, value in environment.items()}
+    if isinstance(environment, list):
+        parsed: dict[str, str] = {}
+        for item in environment:
+            text = str(item)
+            if "=" in text:
+                key, value = text.split("=", 1)
+                parsed[key] = value
+            else:
+                parsed[text] = ""
+        return parsed
+    return {}
+
+
+def _volume_info(volume: Any, env: Mapping[str, str]) -> dict[str, Any]:
+    if isinstance(volume, dict):
+        source = _resolve_compose_value(str(volume.get("source", "")), env)
+        target = _resolve_compose_value(str(volume.get("target", volume.get("destination", ""))), env)
+        mode = str(volume.get("mode", ""))
+        read_only = volume.get("read_only") is True or _mode_is_readonly(mode)
+        return {"source": source, "target": target, "read_only": read_only, "text": json.dumps(volume, sort_keys=True)}
+    text = str(volume)
+    source, target, mode = _parse_short_volume(text, env)
+    return {"source": source, "target": target, "read_only": _mode_is_readonly(mode), "text": text}
+
+
+def _parse_short_volume(volume: str, env: Mapping[str, str]) -> tuple[str, str, str]:
+    parts = _split_compose_short_volume(volume)
+    if len(parts) == 1:
+        return "", _resolve_compose_value(parts[0], env), ""
+    if len(parts) == 2:
+        source, target = parts
+        return _resolve_compose_value(source, env), _resolve_compose_value(target, env), ""
+    source, target, *mode_parts = parts
+    mode = _resolve_compose_value(":".join(mode_parts), env)
+    return _resolve_compose_value(source, env), _resolve_compose_value(target, env), mode
+
+
+def _split_compose_short_volume(volume: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    brace_depth = 0
+    for index, char in enumerate(volume):
+        if char == "{" and index > 0 and volume[index - 1] == "$":
+            brace_depth += 1
+        elif char == "}" and brace_depth:
+            brace_depth -= 1
+        elif char == ":" and not brace_depth:
+            parts.append(volume[start:index])
+            start = index + 1
+    parts.append(volume[start:])
+    return parts
+
+
+def _mode_is_readonly(mode: str) -> bool:
+    return "ro" in {part.strip().lower() for part in mode.split(",")}
+
+
+def _resolve_compose_value(value: str, env: Mapping[str, str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        operator = match.group(2)
+        fallback = match.group(3) or ""
+        current = env.get(key)
+        if current not in (None, ""):
+            return current
+        if operator in {":-", "-"}:
+            return fallback
+        return match.group(0)
+
+    resolved = value
+    for _ in range(4):
+        next_value = _VAR_PATTERN.sub(replace, resolved)
+        if next_value == resolved:
+            return next_value
+        resolved = next_value
+    return resolved
+
+
+def _command_list(command: Any) -> list[str]:
+    if isinstance(command, list):
+        return [str(item) for item in command]
+    if isinstance(command, str):
+        return command.split()
+    return []
+
+
+def _port_is_loopback(port: Any) -> bool:
+    if isinstance(port, dict):
+        host_ip = str(port.get("host_ip", ""))
+        return host_ip in {"127.0.0.1", "::1", "localhost"}
+    text = str(port)
+    return text.startswith("127.0.0.1:") or text.startswith("[::1]:") or text.startswith("localhost:")
+
+
+def _run_command(args: Sequence[str]) -> CommandResult:
+    try:
+        completed = subprocess.run(args, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return CommandResult(tuple(args), 127, "", str(error))
+    return CommandResult(tuple(args), completed.returncode, completed.stdout, completed.stderr)
+
+
+def _disk_usage(path: Path) -> DiskSpace:
+    existing = path
+    while not existing.exists() and existing.parent != existing:
+        existing = existing.parent
+    usage = shutil.disk_usage(existing)
+    return DiskSpace(total=usage.total, used=usage.used, free=usage.free)
+
+
+def _parse_docker_root(raw_stdout: str) -> str | None:
+    raw = raw_stdout.strip()
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = raw.strip('"')
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _resolve_path(path: Path, repo_root: Path) -> Path:
+    if path.is_absolute():
+        return path.resolve()
+    return (repo_root / path).resolve()
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _now_iso() -> str:
+    return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Validate M22 two-node Docker compose/env boundaries.")
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    static_parser = subparsers.add_parser("static", help="Run static compose/env checks.")
+    static_parser.add_argument("--compute-compose", type=Path, default=Path("infra/compose.compute.yml"))
+    static_parser.add_argument("--display-compose", type=Path, default=Path("infra/compose.display.yml"))
+    static_parser.add_argument("--compute-env", type=Path, default=Path("infra/env/compute.example"))
+    static_parser.add_argument("--display-env", type=Path, default=Path("infra/env/display.example"))
+    static_parser.add_argument("--report", type=Path, default=DEFAULT_STATIC_REPORT)
+
+    preflight_parser = subparsers.add_parser("preflight", help="Record Docker disk/cache preflight evidence.")
+    preflight_parser.add_argument("--evidence-root", type=Path, default=DEFAULT_PREFLIGHT_ROOT)
+    preflight_parser.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parse_args(argv)
+    repo_root = args.repo_root.resolve()
+    if args.command == "static":
+        result = run_static_check(
+            compute_compose=args.compute_compose,
+            display_compose=args.display_compose,
+            compute_env=args.compute_env,
+            display_env=args.display_env,
+            repo_root=repo_root,
+        )
+        report_path = write_static_report(result, args.report, repo_root)
+        print(json.dumps({"status": result.status, "report": str(report_path)}, sort_keys=True))
+        return 0 if result.status == "PASS" else 1
+    if args.command == "preflight":
+        result = run_preflight(
+            evidence_root=args.evidence_root,
+            repo_root=repo_root,
+            min_free_bytes=int(args.min_free_gb * 1024**3),
+        )
+        print(json.dumps({"status": result.status, "evidence_path": str(result.evidence_path)}, sort_keys=True))
+        return 0 if result.status == "PASS" else 3
+    raise AssertionError(f"unsupported command: {args.command}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

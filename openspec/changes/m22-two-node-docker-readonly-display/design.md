@@ -852,3 +852,95 @@ Non-goals:
 - Do not implement backend strict identity, retry/cancel, runtime config, or published log APIs; those are prerequisite issues #229 through #233.
 - Do not add Docker compose/image/systemd or final E2E evidence lanes; those are #236 through #239.
 - Do not add a 27-to-22 control API or persistent notified/acknowledged backend state.
+
+## Issue #236 Fixture: Docker Env, Compose Skeleton, and Disk Preflight
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: other
+
+Change surface:
+
+- Role-specific Docker env examples under `infra/env/`, including shared env documentation for canonical published artifact variables.
+- `infra/compose.compute.yml` and `infra/compose.display.yml` skeletons that encode the 22 compute-control and 27 display-readonly capability split.
+- Docker preflight script or commands that write evidence under approved roots before large Docker build/smoke work.
+- Static compose/env checks for forbidden display env, forbidden mounts, HostConfig hazards, publish-root env drift, and accidental production use of `infra/docker-compose.dev.yml`.
+- Tests for the static checks and preflight evidence behavior. Dockerfile image build, entrypoint, systemd units, and final E2E are follow-up issues.
+
+Must preserve:
+
+- `infra/docker-compose.dev.yml` remains a development-only DB/MinIO/worker compose file and is not converted into a production two-node compose.
+- Existing service role, display mutation guard, published-log, strict identity, readonly DB validation, and frontend read-only behavior remain unchanged.
+- Compose skeletons do not claim final production readiness and do not require a Docker image to exist before #237.
+- Project-created temporary, review, Docker smoke, and evidence outputs stay under repository `artifacts/` or `/scratch/frd_muziyao`.
+
+Must add/change:
+
+- Add `infra/env/compute.example`, `infra/env/display.example`, and shared env documentation using canonical runtime names `NHMS_PUBLISHED_ARTIFACT_ROOT`, `NHMS_PUBLISHED_ARTIFACT_URI_PREFIX`, `NHMS_PUBLISHED_ARTIFACT_S3_BUCKET`, `NHMS_PUBLISHED_ARTIFACT_S3_PREFIX`, and compose-only `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`.
+- Compute env/compose uses `NHMS_SERVICE_ROLE=compute_control`, `NHMS_REQUIRE_SERVICE_ROLE=true`, writable `WORKSPACE_ROOT`, writable published artifact root, optional Basins/SHUD/Slurm settings, and a manual `scheduler-once` service invoking the existing `nhms-pipeline plan-production --plan` entrypoint.
+- Display env/compose uses `NHMS_SERVICE_ROLE=display_readonly`, `NHMS_REQUIRE_SERVICE_ROLE=true`, `NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true`, `NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false`, readonly DB guidance, and a readonly published artifact mount.
+- Display compose physically lacks `/etc/slurm`, `/run/munge`, workspace, Basins root, `.nhms-runs`, Docker socket, broad host-root binds, `privileged`, host PID/IPC/network, and `cap_add`.
+- Docker preflight records `docker version`, `docker compose version`, DockerRootDir, `docker system df`, `df -h`, `TMPDIR`, and evidence root; low-space results are `BLOCKED`, not a continued build/smoke.
+- Static checks fail unsafe display configurations, publish-root env drift between host/container names, and attempts to treat `infra/docker-compose.dev.yml` as a production two-node compose.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - adds operator-run preflight/static-check commands and compose entry commands.
+- Config / project setup: selected - introduces role-specific env examples, compose files, Docker preflight inputs, and production-like role requirements.
+- File IO / path safety / overwrite: selected - evidence roots and Docker mount paths must stay bounded and display mounts must not expose private compute paths or broad host roots.
+- Schema / columns / units / field names: selected - canonical env names and compose service/mount contracts are deployment-facing schemas.
+- Geospatial / CRS / shapefile sidecars: not selected - no GIS files or CRS handling changes.
+- Time series / forcing / temporal boundaries: not selected - no forecast cycle/time-series behavior changes.
+- Numerical stability / conservation / NaN: not selected - no solver or numerical behavior.
+- Solver runtime / performance / threading: not selected - no solver runtime or threading behavior.
+- Resource limits / large input / discovery: selected - Docker disk/cache preflight must gate low-space builds and keep evidence bounded.
+- Legacy compatibility / examples: selected - dev compose remains a dev-only example and existing local flows are not repurposed.
+- Error handling / rollback / partial outputs: selected - preflight/static checks must report stable PASS/FAIL/BLOCKED results without partial unsafe smoke continuation.
+- Release / packaging / dependency compatibility: selected - follow-up Dockerfile, entrypoint, systemd, and final E2E depend on these config contracts.
+- Documentation / migration notes: selected - shared env docs must explain required/forbidden variables, dev-compose non-goal, and evidence-root constraints.
+
+Invariant Matrix:
+
+- Governing invariant: The Docker skeleton may grant compute-control capabilities only to 22-side compose/env, while 27-side display compose/env and all validation evidence remain physically read-only, control-free, and bounded to approved evidence roots.
+- Source-of-truth identity/contract: `infra/env/*.example`, `infra/compose.compute.yml`, `infra/compose.display.yml`, canonical `NHMS_PUBLISHED_ARTIFACT_*` env names, and static/preflight check outputs.
+- Producers: env example files, compose files, Docker preflight script/command output, and static check reports.
+- Validators/preflight: compose/env static checker, Docker disk/cache preflight, Docker/Compose version checks, evidence-root validator, low-space classifier.
+- Storage/cache/query: Docker root/cache inspection, host filesystem free-space checks, approved evidence directories, and compose mount definitions.
+- Public routes/entrypoints: operator commands documented by env docs and check scripts; no backend API route changes in this issue.
+- Frontend/downstream consumers: follow-up Dockerfile/entrypoint/systemd/E2E issues and operators using the env/compose skeletons.
+- Failure paths/rollback/stale state: unsafe display env/mounts, HostConfig hazards, dev-compose misuse, publish-root drift, Docker unavailable, and low disk space produce stable FAIL/BLOCKED evidence before smoke/build steps.
+- Evidence/audit/readiness: focused static tests, Docker preflight evidence under `artifacts/` or `/scratch/frd_muziyao`, compose render/config checks where possible, and OpenSpec validation.
+- Regression rows:
+  - compute env/compose with host and container publish roots -> uses `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT` for host source and `NHMS_PUBLISHED_ARTIFACT_ROOT` for container target, with writable compute mount and no public control exposure by default.
+  - display env/compose -> no Slurm/Munge/workspace/Basins/Docker-socket env or mounts, readonly published artifact mount target equals `NHMS_PUBLISHED_ARTIFACT_ROOT`, and display runtime flags are explicit.
+  - injected display `SLURM_GATEWAY_URL`, `SLURM_GATEWAY_BACKEND=slurm`, `WORKSPACE_ROOT`, `NHMS_BASINS_ROOT`, broad host-root bind, Docker socket, `privileged`, host network/PID/IPC, or `cap_add` -> static check fails with a stable finding.
+  - publish-root host/container drift or legacy unprefixed `PUBLISHED_ARTIFACT_ROOT` as runtime app env -> static check fails or reports the value as compose-only migration guidance.
+  - Docker unavailable or low Docker/root/evidence space -> preflight records Docker/evidence context and returns `BLOCKED` without continuing to build/smoke.
+  - `infra/docker-compose.dev.yml` passed to production static check -> fails as a dev-compose misuse, while the file remains available for local development.
+
+Boundary-surface checklist:
+
+- Shared helper roots: static compose/env validator and preflight evidence writer.
+- Public entrypoints: preflight/static-check CLI or script commands and operator-facing env docs.
+- Read surfaces: compose YAML, env examples, Docker info/version/system-df output, filesystem free-space checks.
+- Write/delete/overwrite surfaces: evidence file creation only; no Docker build/image mutation is required by this issue.
+- Staging/publish/rollback surfaces: none - no production artifact publication or deployment rollback is implemented in #236.
+- Producer/consumer evidence boundaries: structured static-check/preflight reports consumed by #237 through #239.
+- Stale-state/idempotency boundaries: repeated preflight/check runs overwrite or create bounded evidence under approved roots without reusing stale PASS results.
+- Unchanged downstream consumers: existing dev compose, backend/frontend behavior, readonly DB validation, and Dockerfile/systemd follow-up scopes.
+
+Required evidence:
+
+- `uv run pytest -q <new static compose/env test target>`: validates forbidden display env/mounts, HostConfig hazards, publish-root drift, dev-compose misuse, and safe compute/display skeletons.
+- `uv run ruff check <new Python script/test paths>` if Python scripts are added.
+- Docker preflight command on this machine when Docker is available: evidence includes `docker version`, `docker compose version`, DockerRootDir, `docker system df`, `df -h`, `TMPDIR`, evidence root, and PASS/BLOCKED classification.
+- `docker compose -f infra/compose.compute.yml config` and `docker compose -f infra/compose.display.yml config` or documented skip/BLOCKED evidence if the image placeholder prevents full render before #237.
+- `openspec validate m22-two-node-docker-readonly-display --strict --no-interactive`.
+- `git diff --check`.
+
+Non-goals:
+
+- Do not add `infra/docker/Dockerfile.app` or `infra/docker/entrypoint.sh`; that is #237.
+- Do not add systemd units or the full two-node Docker runbook; that is #238.
+- Do not run final display container E2E, readonly DB target validation, Slurm capability probes, or cross-plane PASS evidence; those are #239.
+- Do not modify backend/frontend runtime behavior in this issue.
