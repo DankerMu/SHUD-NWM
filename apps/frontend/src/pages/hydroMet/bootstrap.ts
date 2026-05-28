@@ -1,7 +1,7 @@
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
-import { normalizeHydroMetCycle, type HydroMetSource } from '@/lib/hydroMet/queryState'
+import { normalizeHydroMetCycle, type HydroMetSource, type HydroMetStrictIdentity } from '@/lib/hydroMet/queryState'
 import { normalizeHydroMetStation, sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 
 export const HYDRO_MET_STATION_LIMIT = 500
@@ -18,10 +18,12 @@ export type HydroMetBootstrapStatus =
   | 'latest-unavailable'
   | 'latest-incomplete'
   | 'cycle-unavailable'
+  | 'strict-identity-mismatch'
 
 export interface HydroMetBootstrapRequest {
   source: HydroMetSource
   cycle: string | null
+  strictIdentity?: HydroMetStrictIdentity | null
   stationLimit?: number
   riverSegmentLimit?: number
 }
@@ -40,9 +42,17 @@ export interface HydroMetBootstrapResult {
   riverError: string | null
 }
 
-async function getLatestProduct(source: HydroMetSource) {
+async function getLatestProduct(request: HydroMetBootstrapRequest) {
+  const query = request.strictIdentity
+    ? {
+      source: request.strictIdentity.source,
+      cycle_time: request.strictIdentity.cycleTime,
+      run_id: request.strictIdentity.runId,
+      model_id: request.strictIdentity.modelId,
+    }
+    : { source: request.source }
   const { data, error } = await client.GET('/api/v1/mvp/qhh/latest-product', {
-    params: { query: { source } },
+    params: { query },
   })
   if (error) throw new Error(getApiErrorMessage(error, 'latest-product 不可用'))
   const product = unwrapApiData<QhhLatestProduct>(data, 'latest-product 不可用')
@@ -133,6 +143,25 @@ function validateLatestProduct(product: QhhLatestProduct, request: HydroMetBoots
     }
   }
 
+  if (request.strictIdentity) {
+    const identityReasons: string[] = []
+    if (product.source_id !== request.strictIdentity.source) {
+      identityReasons.push(`source_id=${product.source_id} 与 URL source=${request.strictIdentity.source} 不一致`)
+    }
+    if (productCycle !== request.strictIdentity.cycleTime) {
+      identityReasons.push(`cycle_time=${productCycle ?? 'unavailable'} 与 URL cycle_time=${request.strictIdentity.cycleTime} 不一致`)
+    }
+    if (product.run_id !== request.strictIdentity.runId) {
+      identityReasons.push(`run_id=${product.run_id} 与 URL run_id=${request.strictIdentity.runId} 不一致`)
+    }
+    if (product.model_id !== request.strictIdentity.modelId) {
+      identityReasons.push(`model_id=${product.model_id} 与 URL model_id=${request.strictIdentity.modelId} 不一致`)
+    }
+    if (identityReasons.length > 0) {
+      return { status: 'strict-identity-mismatch', reasons: identityReasons }
+    }
+  }
+
   return { status: 'ready', reasons: [] }
 }
 
@@ -167,7 +196,7 @@ export async function loadHydroMetBootstrap(request: HydroMetBootstrapRequest): 
   let product: QhhLatestProduct
 
   try {
-    product = await getLatestProduct(request.source)
+    product = await getLatestProduct(request)
   } catch (error) {
     return baseResult(request, null, 'latest-unavailable', [
       sanitizeHydroMetMessage(getApiErrorMessage(error, 'latest-product 不可用'), 'latest-product 不可用'),

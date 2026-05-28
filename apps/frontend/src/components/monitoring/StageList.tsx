@@ -4,11 +4,15 @@ import { useMemo, useState } from 'react'
 import { StageDurationBar } from '@/components/charts/StageDurationBar'
 import { BasinFailures } from '@/components/monitoring/BasinFailures'
 import { StageCard } from '@/components/monitoring/StageCard'
+import type { DiagnosticContext } from '@/components/monitoring/diagnostics'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { STAGE_NAMES } from '@/lib/constants'
 import type { PipelineStage } from '@/stores/monitoring'
 
 interface StageListProps {
+  diagnosticContext?: DiagnosticContext | null
+  diagnosticsDisplayReadonly?: boolean
+  diagnosticsEnabled?: boolean
   stages: PipelineStage[]
   unavailableReason?: string | null
   showPendingPlaceholders?: boolean
@@ -31,7 +35,14 @@ function pendingStage(stage: string): PipelineStage {
   }
 }
 
-export function StageList({ stages, unavailableReason, showPendingPlaceholders = true }: StageListProps) {
+export function StageList({
+  diagnosticContext = null,
+  diagnosticsDisplayReadonly = false,
+  diagnosticsEnabled = false,
+  stages,
+  unavailableReason,
+  showPendingPlaceholders = true,
+}: StageListProps) {
   const [expandedStage, setExpandedStage] = useState<string | null>(null)
 
   const orderedStages = useMemo(() => {
@@ -95,7 +106,14 @@ export function StageList({ stages, unavailableReason, showPendingPlaceholders =
                   expanded={expanded}
                   onToggle={() => setExpandedStage(expanded ? null : stage.stage)}
                 />
-                {canExpand && expanded ? <BasinFailures stage={stage} /> : null}
+                {canExpand && expanded ? (
+                  <BasinFailures
+                    diagnosticContext={diagnosticContext}
+                    diagnosticsDisplayReadonly={diagnosticsDisplayReadonly}
+                    diagnosticsEnabled={diagnosticsEnabled}
+                    stage={stage}
+                  />
+                ) : null}
                 {index < orderedStages.length - 1 ? (
                   <div className="flex justify-center text-muted" aria-hidden="true">
                     <ArrowDown className="size-4" />

@@ -3,8 +3,17 @@ export type MonitoringSource = 'GFS' | 'IFS' | 'ERA5'
 export interface MonitoringQueryState {
   source: MonitoringSource | null
   cycle: string | null
+  strictIdentity: MonitoringStrictIdentity | null
   sourceError: string | null
   cycleError: string | null
+  strictIdentityError: string | null
+}
+
+export interface MonitoringStrictIdentity {
+  source: MonitoringSource
+  cycleTime: string
+  runId: string
+  modelId: string
 }
 
 export const monitoringSources: MonitoringSource[] = ['GFS', 'IFS', 'ERA5']
@@ -91,15 +100,61 @@ function parseMonitoringCycle(value: string | null) {
   return { cycle: null, error: `cycle=${value} 不是有效 RFC3339 时间。` }
 }
 
+function parseStrictToken(value: string | null) {
+  if (!value?.trim()) return null
+  return value.trim()
+}
+
+function parseStrictIdentity(params: URLSearchParams) {
+  const sourceValue = params.get('source')
+  const cycleTimeValue = params.get('cycle_time')
+  const runId = parseStrictToken(params.get('run_id'))
+  const modelId = parseStrictToken(params.get('model_id'))
+  const strictParamPresent = cycleTimeValue !== null || params.get('run_id') !== null || params.get('model_id') !== null
+
+  if (!strictParamPresent) return { identity: null, error: null }
+
+  const missing: string[] = []
+  if (!sourceValue?.trim()) missing.push('source')
+  if (!cycleTimeValue?.trim()) missing.push('cycle_time')
+  if (!runId) missing.push('run_id')
+  if (!modelId) missing.push('model_id')
+
+  const source = parseMonitoringSource(sourceValue)
+  const cycle = normalizeMonitoringQueryCycle(cycleTimeValue)
+  if (sourceValue?.trim() && source.error) return { identity: null, error: source.error }
+  if (cycleTimeValue?.trim() && !cycle) return { identity: null, error: `cycle_time=${cycleTimeValue} 不是有效 RFC3339 时间。` }
+
+  if (missing.length > 0) {
+    return {
+      identity: null,
+      error: `严格 identity 参数不完整：缺少 ${missing.join(', ')}；需要 source、cycle_time、run_id、model_id。`,
+    }
+  }
+
+  return {
+    identity: {
+      source: source.source as MonitoringSource,
+      cycleTime: cycle as string,
+      runId: runId as string,
+      modelId: modelId as string,
+    },
+    error: null,
+  }
+}
+
 export function parseMonitoringQueryState(input: string | URLSearchParams): MonitoringQueryState {
   const params = typeof input === 'string' ? new URLSearchParams(input) : input
-  const source = parseMonitoringSource(params.get('source'))
-  const cycle = parseMonitoringCycle(params.get('cycle'))
+  const strictIdentity = parseStrictIdentity(params)
+  const source = strictIdentity.identity ? { source: strictIdentity.identity.source, error: null } : parseMonitoringSource(params.get('source'))
+  const cycle = strictIdentity.identity ? { cycle: strictIdentity.identity.cycleTime, error: null } : parseMonitoringCycle(params.get('cycle'))
 
   return {
     source: source.source,
     cycle: cycle.cycle,
+    strictIdentity: strictIdentity.identity,
     sourceError: source.error,
     cycleError: cycle.error,
+    strictIdentityError: strictIdentity.error,
   }
 }

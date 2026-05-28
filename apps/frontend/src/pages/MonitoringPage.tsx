@@ -17,7 +17,13 @@ import { useToast } from '@/hooks/useToast'
 import { getApiErrorMessage } from '@/api/response'
 import { formatDate } from '@/lib/format'
 import { parseMonitoringQueryState } from '@/lib/monitoring/queryState'
-import { monitoringContextMatches, normalizeMonitoringCycleTime, useMonitoringStore } from '@/stores/monitoring'
+import {
+  isDisplayReadonlyRuntimeConfig,
+  monitoringContextMatches,
+  normalizeMonitoringCycleTime,
+  type MonitoringStrictIdentity,
+  useMonitoringStore,
+} from '@/stores/monitoring'
 
 const sourceOptions = ['GFS', 'ERA5', 'IFS']
 
@@ -49,9 +55,14 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const jobFilters = useMonitoringStore((state) => state.jobFilters)
   const isPolling = useMonitoringStore((state) => state.isPolling)
   const error = useMonitoringStore((state) => state.error)
+  const strictIdentity = useMonitoringStore((state) => state.strictIdentity)
+  const runtimeConfig = useMonitoringStore((state) => state.runtimeConfig)
+  const runtimeConfigError = useMonitoringStore((state) => state.runtimeConfigError)
   const setSource = useMonitoringStore((state) => state.setSource)
   const setCycleTime = useMonitoringStore((state) => state.setCycleTime)
+  const setStrictIdentity = useMonitoringStore((state) => state.setStrictIdentity)
   const clearSelectedContext = useMonitoringStore((state) => state.clearSelectedContext)
+  const fetchRuntimeConfig = useMonitoringStore((state) => state.fetchRuntimeConfig)
   const fetchAll = useMonitoringStore((state) => state.fetchAll)
   const fetchJobs = useMonitoringStore((state) => state.fetchJobs)
   const { toast } = useToast()
@@ -59,11 +70,17 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const [trendRefreshKey, setTrendRefreshKey] = useState(0)
   const isOpsMode = mode === 'ops'
   const canonicalRoute = isOpsMode ? '/ops' : '/monitoring'
-  const routeError = isOpsMode ? routeState.sourceError ?? routeState.cycleError : null
+  const routeError = isOpsMode ? routeState.sourceError ?? routeState.cycleError ?? routeState.strictIdentityError : null
   const routeSource = routeState.source
   const routeCycle = !isOpsMode && routeState.sourceError ? null : routeState.cycle
+  const routeStrictIdentity = isOpsMode ? routeState.strictIdentity : null
   const isRouteSupported = !routeError
-  const hasExplicitRouteContext = Boolean(routeSource || routeCycle)
+  const hasExplicitRouteContext = Boolean(routeSource || routeCycle || routeStrictIdentity)
+  const runtimeConfigUnavailableReason = runtimeConfigError ? `runtime config 不可用：${runtimeConfigError}` : null
+  const isRuntimeConfigReady = Boolean(runtimeConfig) && !runtimeConfigError
+  const isDisplayReadonly = isDisplayReadonlyRuntimeConfig(runtimeConfig)
+  const controlMutationsEnabled = Boolean(runtimeConfig?.control_mutations_enabled) && !isDisplayReadonly
+  const queueReadonlyUnavailable = isDisplayReadonly || runtimeConfig?.queue_depth_mode === 'display_readonly_unavailable'
   const isRouteContextReady = useMemo(() => {
     if (!isOpsMode) return true
     if (!isRouteSupported) return false
@@ -71,17 +88,24 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
 
     const sourceReady = !routeSource || routeSource === source.toUpperCase()
     const cycleReady = !routeCycle || routeCycle === normalizeMonitoringCycleTime(cycleTime)
-    return sourceReady && cycleReady
-  }, [cycleTime, hasExplicitRouteContext, isOpsMode, isRouteSupported, routeCycle, routeSource, source])
-  const isOperationalDataReady = isRouteSupported && isRouteContextReady
+    const strictReady = !routeStrictIdentity || (
+      strictIdentity?.runId === routeStrictIdentity.runId &&
+      strictIdentity?.modelId === routeStrictIdentity.modelId &&
+      strictIdentity?.source === routeStrictIdentity.source &&
+      strictIdentity?.cycleTime === routeStrictIdentity.cycleTime
+    )
+    return sourceReady && cycleReady && strictReady
+  }, [cycleTime, hasExplicitRouteContext, isOpsMode, isRouteSupported, routeCycle, routeSource, routeStrictIdentity, source, strictIdentity])
+  const isOperationalDataReady = isRouteSupported && isRouteContextReady && isRuntimeConfigReady
   const routeContextUnavailableReason = isOpsMode && isRouteSupported && !isRouteContextReady
     ? '正在应用 URL source/cycle 上下文。'
     : null
-  const dataUnavailableReason = routeError ?? routeContextUnavailableReason
+  const dataUnavailableReason = runtimeConfigUnavailableReason ?? routeError ?? routeContextUnavailableReason
   const visibleSource = isOpsMode && routeSource ? routeSource : source
   const visibleCycleTime = isOpsMode && routeCycle ? routeCycle : cycleTime
-  const hasVisibleCyclePayload = !isOpsMode || monitoringContextMatches(cycleContext, visibleSource, visibleCycleTime)
-  const hasVisibleJobsPayload = !isOpsMode || monitoringContextMatches(jobsContext, visibleSource, visibleCycleTime)
+  const visibleStrictIdentity = routeStrictIdentity
+  const hasVisibleCyclePayload = !isOpsMode || monitoringContextMatches(cycleContext, visibleSource, visibleCycleTime, visibleStrictIdentity)
+  const hasVisibleJobsPayload = !isOpsMode || monitoringContextMatches(jobsContext, visibleSource, visibleCycleTime, visibleStrictIdentity)
   const displayPayloadUnavailableReason = isOpsMode && isOperationalDataReady && !hasVisibleCyclePayload
     ? '当前 source/cycle 的流水线数据尚未加载完成。'
     : null
@@ -100,14 +124,23 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
     const params = new URLSearchParams(location.search)
     const normalizedSource = nextSource.toLowerCase()
     const normalizedCycleTime = normalizeMonitoringCycleTime(nextCycleTime)
+    params.delete('cycle_time')
+    params.delete('run_id')
+    params.delete('model_id')
     params.set('source', normalizedSource)
     params.set('cycle', normalizedCycleTime)
     navigate(`${canonicalRoute}?${params.toString()}`, { replace: true })
   }, [canonicalRoute, location.search, navigate])
 
   useEffect(() => {
+    if (runtimeConfig || runtimeConfigError) return
+    void fetchRuntimeConfig()
+  }, [fetchRuntimeConfig, runtimeConfig, runtimeConfigError])
+
+  useEffect(() => {
     if (routeError) {
       clearSelectedContext()
+      setStrictIdentity(null)
       return
     }
 
@@ -116,10 +149,14 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
     const currentState = useMonitoringStore.getState()
     const sourceChanged = Boolean(nextSource && nextSource !== currentState.source)
     const cycleChanged = Boolean(nextCycleTime && nextCycleTime !== currentState.cycleTime)
+    const strictChanged = isOpsMode
+      ? !monitoringStrictIdentityEquals(routeStrictIdentity, currentState.strictIdentity)
+      : currentState.strictIdentity !== null
     if (sourceChanged && nextSource) setSource(nextSource)
     if (cycleChanged && nextCycleTime) setCycleTime(nextCycleTime)
-    if (isOpsMode && (sourceChanged || cycleChanged)) clearSelectedContext()
-  }, [clearSelectedContext, isOpsMode, routeCycle, routeError, routeSource, setCycleTime, setSource])
+    if (strictChanged) setStrictIdentity(isOpsMode ? routeStrictIdentity : null)
+    if ((isOpsMode || strictChanged) && (sourceChanged || cycleChanged || strictChanged)) clearSelectedContext()
+  }, [clearSelectedContext, isOpsMode, routeCycle, routeError, routeSource, routeStrictIdentity, setCycleTime, setSource, setStrictIdentity])
 
   const refreshOperationalData = useCallback(async () => {
     if (!isOperationalDataReady) return
@@ -142,7 +179,10 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const handleSourceChange = (nextSource: string) => {
     if (nextSource === source) return
     setSource(nextSource)
-    if (canonicalRoute === '/ops') clearSelectedContext()
+    if (canonicalRoute === '/ops') {
+      setStrictIdentity(null)
+      clearSelectedContext()
+    }
     updateQueryState(nextSource, cycleTime)
     refreshAfterSelectionChange()
   }
@@ -150,7 +190,10 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const handleCycleTimeChange = (nextCycleTime: string) => {
     if (!nextCycleTime) return
     setCycleTime(nextCycleTime)
-    if (canonicalRoute === '/ops') clearSelectedContext()
+    if (canonicalRoute === '/ops') {
+      setStrictIdentity(null)
+      clearSelectedContext()
+    }
     updateQueryState(source, nextCycleTime)
     refreshAfterSelectionChange()
   }
@@ -222,12 +265,25 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
         </div>
       ) : null}
 
+      {runtimeConfigUnavailableReason ? (
+        <div className="rounded-md border border-danger/30 bg-danger/10 p-3 text-sm text-danger" role="status">
+          {runtimeConfigUnavailableReason}
+        </div>
+      ) : null}
+
+      {isDisplayReadonly ? (
+        <div className="rounded-md border border-border bg-background p-3 text-sm text-muted" role="status">
+          display_readonly：当前前端从后端 runtime config 判定为只读展示节点，重试、取消和 Slurm 控制请求已禁用；需要恢复时在 22 compute-control 节点按恢复 runbook 处理。
+        </div>
+      ) : null}
+
       <SummaryBar
         source={visibleSource}
         cycleTime={visibleCycleTime}
         cycle={visibleCycle}
         queue={visibleQueue}
         queueError={visibleQueueError}
+        queueReadonlyUnavailable={isDisplayReadonly && queueReadonlyUnavailable}
         isRefreshing={isOperationalDataReady && (manualRefreshing || isPolling)}
         onRefresh={() => void handleManualRefresh()}
         disabled={!isOperationalDataReady}
@@ -235,18 +291,29 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
 
       <div className="grid gap-4 min-[800px]:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.2fr)] min-[1200px]:grid-cols-[20rem_minmax(0,1fr)_22rem]">
         <StageList
+          diagnosticContext={{
+            sourceId: visibleStrictIdentity?.source ?? visibleSource,
+            cycleTime: visibleStrictIdentity?.cycleTime ?? normalizeMonitoringCycleTime(visibleCycleTime),
+            runId: visibleStrictIdentity?.runId ?? null,
+            modelId: visibleStrictIdentity?.modelId ?? null,
+          }}
+          diagnosticsDisplayReadonly={isDisplayReadonly}
+          diagnosticsEnabled={isOpsMode}
           stages={visibleStages}
           unavailableReason={stageListUnavailableReason}
           showPendingPlaceholders={!isOpsMode}
         />
         <JobsTable
           autoFetch={isOperationalDataReady}
-          cancelControlsEnabled={!isOpsMode && isOperationalDataReady}
+          cancelControlsEnabled={!isOpsMode && controlMutationsEnabled && isOperationalDataReady}
           clearOnFailure={isOpsMode}
+          diagnosticsDisplayReadonly={isDisplayReadonly}
+          diagnosticsEnabled={isOpsMode}
           displayEnabled={isOperationalDataReady && hasVisibleJobsPayload}
           fetchEnabled={isOperationalDataReady}
           logControlsEnabled={isOperationalDataReady}
-          retryControlsEnabled={isOperationalDataReady}
+          retryControlsEnabled={controlMutationsEnabled && isOperationalDataReady}
+          strictIdentity={visibleStrictIdentity}
           unavailableReason={dataUnavailableReason ?? jobsPayloadUnavailableReason}
         />
         <div className="min-[800px]:col-span-2 min-[1200px]:col-span-1">
@@ -260,5 +327,19 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
         </div>
       </div>
     </div>
+  )
+}
+
+function monitoringStrictIdentityEquals(
+  left: MonitoringStrictIdentity | null,
+  right: MonitoringStrictIdentity | null,
+) {
+  if (!left && !right) return true
+  if (!left || !right) return false
+  return (
+    left.source === right.source &&
+    left.cycleTime === right.cycleTime &&
+    left.runId === right.runId &&
+    left.modelId === right.modelId
   )
 }

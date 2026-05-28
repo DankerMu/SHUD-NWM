@@ -221,6 +221,33 @@ describe('hydro-met query state', () => {
     expect(serializeHydroMetQueryState(state)).toBe('source=GFS')
     expect(needsHydroMetQueryReplacement('?source=ERA5&cycle=2026-02-30T00:00:00Z')).toBe(true)
   })
+
+  it('parses and serializes complete strict handoff identity', () => {
+    const state = parseHydroMetQueryState(
+      'source=gfs&cycle_time=2026-05-21T08:00:00%2B08:00&run_id=qhh_gfs_2026052100_smoke&model_id=basins_qhh_shud',
+    )
+
+    expect(state.source).toBe('GFS')
+    expect(state.cycle).toBe('2026-05-21T00:00:00.000Z')
+    expect(state.strictIdentity).toEqual({
+      source: 'GFS',
+      cycleTime: '2026-05-21T00:00:00.000Z',
+      runId: 'qhh_gfs_2026052100_smoke',
+      modelId: 'basins_qhh_shud',
+    })
+    expect(state.strictIdentityError).toBeNull()
+    expect(serializeHydroMetQueryState(state)).toBe(
+      'source=GFS&cycle_time=2026-05-21T00%3A00%3A00.000Z&run_id=qhh_gfs_2026052100_smoke&model_id=basins_qhh_shud',
+    )
+  })
+
+  it('keeps partial strict handoff invalid without normalizing to source-only browsing', () => {
+    const state = parseHydroMetQueryState('source=GFS&run_id=qhh_gfs_2026052100_smoke')
+
+    expect(state.strictIdentity).toBeNull()
+    expect(state.strictIdentityError).toContain('缺少 cycle_time, model_id')
+    expect(needsHydroMetQueryReplacement('?source=GFS&run_id=qhh_gfs_2026052100_smoke')).toBe(false)
+  })
 })
 
 describe('loadHydroMetBootstrap', () => {
@@ -261,6 +288,61 @@ describe('loadHydroMetBootstrap', () => {
     expect(serializedCalls).not.toContain('manual')
     expect(serializedCalls).not.toContain('run_id')
     expect(serializedCalls).not.toContain('forcing_version_id')
+  })
+
+  it('loads strict latest product with source, cycle_time, run_id, and model_id', async () => {
+    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+    vi.mocked(client.GET).mockImplementation(async (path: string, options?: { params?: { query?: Record<string, unknown> } }) => {
+      calls.push({ path, query: options?.params?.query })
+      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
+      if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const result = await loadHydroMetBootstrap({
+      source: 'GFS',
+      cycle: '2026-05-21T00:00:00.000Z',
+      strictIdentity: {
+        source: 'GFS',
+        cycleTime: '2026-05-21T00:00:00.000Z',
+        runId: 'qhh_gfs_2026052100_smoke',
+        modelId: 'basins_qhh_shud',
+      },
+    })
+
+    expect(result.status).toBe('ready')
+    expect(calls[0]).toEqual({
+      path: '/api/v1/mvp/qhh/latest-product',
+      query: {
+        source: 'GFS',
+        cycle_time: '2026-05-21T00:00:00.000Z',
+        run_id: 'qhh_gfs_2026052100_smoke',
+        model_id: 'basins_qhh_shud',
+      },
+    })
+  })
+
+  it('blocks downstream bootstrap when strict latest-product identity mismatches', async () => {
+    vi.mocked(client.GET).mockResolvedValueOnce({
+      data: success(latestProduct({ run_id: 'other-run' })),
+      error: undefined,
+    } as never)
+
+    const result = await loadHydroMetBootstrap({
+      source: 'GFS',
+      cycle: '2026-05-21T00:00:00.000Z',
+      strictIdentity: {
+        source: 'GFS',
+        cycleTime: '2026-05-21T00:00:00.000Z',
+        runId: 'qhh_gfs_2026052100_smoke',
+        modelId: 'basins_qhh_shud',
+      },
+    })
+
+    expect(result.status).toBe('strict-identity-mismatch')
+    expect(result.latestReasons.join(' ')).toContain('run_id=other-run')
+    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
   it('normalizes runtime-shaped station inventory coordinates without losing river candidates', async () => {

@@ -3,16 +3,27 @@ export type HydroMetSource = 'GFS' | 'IFS'
 export interface HydroMetQueryState {
   source: HydroMetSource
   cycle: string | null
+  strictIdentity: HydroMetStrictIdentity | null
+  strictIdentityError: string | null
   validationReasons: string[]
 }
 
 export type HydroMetQueryPatch = Partial<Pick<HydroMetQueryState, 'source' | 'cycle'>>
+
+export interface HydroMetStrictIdentity {
+  source: HydroMetSource
+  cycleTime: string
+  runId: string
+  modelId: string
+}
 
 export const hydroMetSources: HydroMetSource[] = ['GFS', 'IFS']
 
 export const defaultHydroMetQueryState: HydroMetQueryState = {
   source: 'GFS',
   cycle: null,
+  strictIdentity: null,
+  strictIdentityError: null,
   validationReasons: [],
 }
 
@@ -92,15 +103,65 @@ function parseCycle(value: string | null, reasons: string[]) {
   return null
 }
 
+function parseStrictToken(value: string | null) {
+  if (!value?.trim()) return null
+  return value.trim()
+}
+
+function parseStrictSource(value: string | null) {
+  if (!value?.trim()) return null
+  const normalized = value.trim().toUpperCase()
+  return normalized === 'GFS' || normalized === 'IFS' ? normalized : null
+}
+
+function parseStrictIdentity(params: URLSearchParams) {
+  const strictParamPresent = params.has('cycle_time') || params.has('run_id') || params.has('model_id')
+  if (!strictParamPresent) return { identity: null, error: null }
+
+  const sourceValue = params.get('source')
+  const cycleTimeValue = params.get('cycle_time')
+  const runId = parseStrictToken(params.get('run_id'))
+  const modelId = parseStrictToken(params.get('model_id'))
+  const missing: string[] = []
+  if (!sourceValue?.trim()) missing.push('source')
+  if (!cycleTimeValue?.trim()) missing.push('cycle_time')
+  if (!runId) missing.push('run_id')
+  if (!modelId) missing.push('model_id')
+
+  const source = parseStrictSource(sourceValue)
+  const cycleTime = normalizeHydroMetCycle(cycleTimeValue)
+  if (sourceValue?.trim() && !source) return { identity: null, error: `source=${sourceValue} 不属于 GFS/IFS。` }
+  if (cycleTimeValue?.trim() && !cycleTime) return { identity: null, error: `cycle_time=${cycleTimeValue} 不是有效 RFC3339 UTC 时间。` }
+  if (missing.length > 0) {
+    return {
+      identity: null,
+      error: `严格 handoff 参数不完整：缺少 ${missing.join(', ')}；需要 source、cycle_time、run_id、model_id。`,
+    }
+  }
+
+  return {
+    identity: {
+      source: source as HydroMetSource,
+      cycleTime: cycleTime as string,
+      runId: runId as string,
+      modelId: modelId as string,
+    },
+    error: null,
+  }
+}
+
 export function parseHydroMetQueryState(input: string | URLSearchParams): HydroMetQueryState {
   const params = typeof input === 'string' ? new URLSearchParams(input) : input
   const validationReasons: string[] = []
-  const source = parseSource(params.get('source'), validationReasons)
-  const cycle = parseCycle(params.get('cycle'), validationReasons)
+  const strictIdentity = parseStrictIdentity(params)
+  const source = strictIdentity.identity?.source ?? parseSource(params.get('source'), validationReasons)
+  const cycle = strictIdentity.identity?.cycleTime ?? parseCycle(params.get('cycle'), validationReasons)
 
   return {
     source,
     cycle,
+    strictIdentity: strictIdentity.identity,
+    strictIdentityError: strictIdentity.error,
     validationReasons,
   }
 }
@@ -108,12 +169,21 @@ export function parseHydroMetQueryState(input: string | URLSearchParams): HydroM
 export function serializeHydroMetQueryState(state: HydroMetQueryState) {
   const params = new URLSearchParams()
   params.set('source', state.source)
-  if (state.cycle) params.set('cycle', state.cycle)
+  if (state.strictIdentity) {
+    params.set('cycle_time', state.strictIdentity.cycleTime)
+    params.set('run_id', state.strictIdentity.runId)
+    params.set('model_id', state.strictIdentity.modelId)
+  } else if (state.cycle) {
+    params.set('cycle', state.cycle)
+  }
   return params.toString()
 }
 
 export function mergeHydroMetQueryState(state: HydroMetQueryState, patch: HydroMetQueryPatch) {
-  const params = new URLSearchParams(serializeHydroMetQueryState(state))
+  const params = new URLSearchParams()
+  params.set('source', patch.source ?? state.source)
+  const nextCycle = Object.prototype.hasOwnProperty.call(patch, 'cycle') ? patch.cycle : state.cycle
+  if (nextCycle) params.set('cycle', nextCycle)
   Object.entries(patch).forEach(([key, value]) => {
     if (value === undefined || value === null || value === '') {
       params.delete(key)
@@ -125,7 +195,9 @@ export function mergeHydroMetQueryState(state: HydroMetQueryState, patch: HydroM
 }
 
 export function needsHydroMetQueryReplacement(search: string) {
-  const normalized = serializeHydroMetQueryState(parseHydroMetQueryState(search))
+  const state = parseHydroMetQueryState(search)
+  if (state.strictIdentityError) return false
+  const normalized = serializeHydroMetQueryState(state)
   const current = search.startsWith('?') ? search.slice(1) : search
   return normalized !== current
 }

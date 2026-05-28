@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, RotateCcw, Square, Terminal } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCopy, RotateCcw, Square, Terminal } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { client } from '@/api/client'
@@ -6,6 +6,10 @@ import { getApiErrorMessage } from '@/api/response'
 import type { components } from '@/api/types'
 import { JobFilters } from '@/components/monitoring/JobFilters'
 import { LogModal } from '@/components/monitoring/LogModal'
+import {
+  buildJobDiagnosticPayload,
+  type DiagnosticContext,
+} from '@/components/monitoring/diagnostics'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -21,7 +25,13 @@ import { useToast } from '@/hooks/useToast'
 import { cn } from '@/lib/cn'
 import { formatDate, formatDuration } from '@/lib/format'
 import { canUseDevRoleActions, useAuthStore } from '@/stores/auth'
-import { type JobFilters as JobFilterState, type PipelineJob, useMonitoringStore } from '@/stores/monitoring'
+import {
+  type JobFilters as JobFilterState,
+  type MonitoringStrictIdentity,
+  type PipelineJob,
+  normalizeMonitoringCycleTime,
+  useMonitoringStore,
+} from '@/stores/monitoring'
 
 type SortKey = 'submitted_at' | 'duration_seconds'
 type SortDirection = 'asc' | 'desc'
@@ -48,10 +58,13 @@ interface JobsTableProps {
   autoFetch?: boolean
   cancelControlsEnabled?: boolean
   clearOnFailure?: boolean
+  diagnosticsDisplayReadonly?: boolean
+  diagnosticsEnabled?: boolean
   displayEnabled?: boolean
   fetchEnabled?: boolean
   logControlsEnabled?: boolean
   retryControlsEnabled?: boolean
+  strictIdentity?: MonitoringStrictIdentity | null
   unavailableReason?: string | null
 }
 
@@ -60,13 +73,18 @@ export function JobsTable({
   autoFetch = true,
   cancelControlsEnabled,
   clearOnFailure = false,
+  diagnosticsDisplayReadonly = false,
+  diagnosticsEnabled = false,
   displayEnabled,
   fetchEnabled = true,
   logControlsEnabled = true,
   retryControlsEnabled,
+  strictIdentity = null,
   unavailableReason = null,
 }: JobsTableProps) {
   const role = useAuthStore((state) => state.role)
+  const source = useMonitoringStore((state) => state.source)
+  const cycleTime = useMonitoringStore((state) => state.cycleTime)
   const jobs = useMonitoringStore((state) => state.jobs)
   const jobTotal = useMonitoringStore((state) => state.jobTotal)
   const jobsError = useMonitoringStore((state) => state.jobsError)
@@ -79,6 +97,7 @@ export function JobsTable({
   const [logJobId, setLogJobId] = useState<string | null>(null)
   const [logRefreshKey, setLogRefreshKey] = useState(0)
   const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const [notifiedJobs, setNotifiedJobs] = useState<Set<string>>(() => new Set())
   const pendingActionRef = useRef<string | null>(null)
 
   const page = filters.page ?? 1
@@ -87,7 +106,10 @@ export function JobsTable({
   const sortDirection = filters.sortOrder ?? 'desc'
   const retryActionsEnabled = retryControlsEnabled ?? actionsEnabled
   const cancelActionsEnabled = cancelControlsEnabled ?? actionsEnabled
-  const controlsVisible = logControlsEnabled || retryActionsEnabled || cancelActionsEnabled
+  const controlsVisible = logControlsEnabled || retryActionsEnabled || cancelActionsEnabled || diagnosticsEnabled
+  const manualRecoveryGuidance = diagnosticsDisplayReadonly
+    ? '失败诊断用于交给 22 compute-control 节点处理；在 27 display_readonly 页面只做只读查看和本地通知标记，不写入数据库或审计 API。'
+    : '失败诊断用于交给 22 compute-control 节点处理；当前运维页面复制诊断和本地通知标记不写入数据库或审计 API。'
   const canDisplayRows = displayEnabled ?? fetchEnabled
   const visibleJobs = canDisplayRows ? jobs : []
   const visibleJobTotal = canDisplayRows ? jobTotal : 0
@@ -121,6 +143,25 @@ export function JobsTable({
   const cancelActionRole = fetchEnabled && cancelActionsEnabled && canUseDevRoleActions(role) ? role : null
   const retryHeaderRole = retryActionRole as OperatorHeaderRole | null
   const cancelHeaderRole = cancelActionRole as OperatorHeaderRole | null
+
+  const copyDiagnostic = async (job: PipelineJob) => {
+    const diagnostic = buildDiagnosticPayload(job, {
+      sourceId: strictIdentity?.source ?? source,
+      cycleTime: strictIdentity?.cycleTime ?? normalizeMonitoringCycleTime(cycleTime),
+      runId: strictIdentity?.runId ?? job.run_id ?? null,
+      modelId: strictIdentity?.modelId ?? job.model_id ?? null,
+    })
+    await navigator.clipboard?.writeText(JSON.stringify(diagnostic, null, 2))
+    toast({ title: '诊断已复制' })
+  }
+
+  const markNotified = (jobId: string) => {
+    setNotifiedJobs((current) => {
+      const next = new Set(current)
+      next.add(jobId)
+      return next
+    })
+  }
 
   const updateFilters = (nextFilters: JobFilterState) => {
     void requestJobs({ ...nextFilters, page: 1, pageSize }).catch(() => undefined)
@@ -181,6 +222,11 @@ export function JobsTable({
         <JobFilters filters={filters} disabled={!fetchEnabled} onChange={updateFilters} />
       </CardHeader>
       <CardContent className="space-y-3">
+        {diagnosticsEnabled ? (
+          <div className="rounded-md border border-border bg-background p-3 text-xs text-muted" data-testid="ops-manual-recovery-guidance">
+            {manualRecoveryGuidance}
+          </div>
+        ) : null}
         <Table>
           <TableHeader>
             <TableRow>
@@ -225,6 +271,8 @@ export function JobsTable({
             {visibleJobs.length ? (
               visibleJobs.map((job) => {
                 const logAvailable = Boolean(job.log_uri)
+                const diagnosticAvailable = diagnosticsEnabled && failedStatuses.has(job.status)
+                const notified = notifiedJobs.has(job.job_id)
                 return (
                   <TableRow key={job.job_id}>
                     <TableCell className="max-w-36 truncate font-mono text-xs">{job.job_id}</TableCell>
@@ -256,6 +304,23 @@ export function JobsTable({
                               <Terminal className="size-3.5" />
                               查看日志
                             </Button>
+                          ) : null}
+                          {diagnosticAvailable ? (
+                            <>
+                              <Button variant="outline" size="sm" onClick={() => void copyDiagnostic(job)}>
+                                <ClipboardCopy className="size-3.5" />
+                                复制诊断
+                              </Button>
+                              <Button
+                                variant={notified ? 'secondary' : 'outline'}
+                                size="sm"
+                                disabled={notified}
+                                onClick={() => markNotified(job.job_id)}
+                              >
+                                <CheckCircle2 className="size-3.5" />
+                                {notified ? '已通知' : '标记已通知'}
+                              </Button>
+                            </>
                           ) : null}
                           {retryActionRole && retryableStatuses.has(job.status) && job.run_id ? (
                             <Button
@@ -332,9 +397,14 @@ export function JobsTable({
           jobId={logJobId}
           open={Boolean(logJobId)}
           refreshKey={logRefreshKey}
+          strictIdentity={strictIdentity}
           onOpenChange={(open) => !open && setLogJobId(null)}
         />
       ) : null}
     </Card>
   )
+}
+
+export function buildDiagnosticPayload(job: PipelineJob, context: DiagnosticContext) {
+  return buildJobDiagnosticPayload(job, context)
 }

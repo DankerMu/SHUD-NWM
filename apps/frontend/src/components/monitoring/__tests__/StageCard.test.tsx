@@ -1,4 +1,5 @@
 import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import { StageCard } from '@/components/monitoring/StageCard'
@@ -93,5 +94,37 @@ describe('StageCard', () => {
       expect(within(cards[index]).getByText(stage)).toBeInTheDocument()
       expect(within(cards[index]).getByText(new RegExp(`完成率 .*\\(${index + 1}/7\\)`))).toBeInTheDocument()
     })
+  })
+
+  it('keeps non-display failed-stage diagnostics guidance role-neutral', async () => {
+    const user = userEvent.setup()
+
+    render(
+      <StageList
+        diagnosticContext={{
+          sourceId: 'GFS',
+          cycleTime: '2026-05-18T00:00:00.000Z',
+          runId: 'run-stage',
+          modelId: 'model-stage',
+        }}
+        diagnosticsDisplayReadonly={false}
+        diagnosticsEnabled
+        showPendingPlaceholders={false}
+        stages={[
+          makeStage({
+            stage: 'forecast',
+            display_status: 'failed',
+            status: 'failed',
+            duration_seconds: 120,
+            basin_progress: { completed: 0, total: 1, failed: 1 },
+          }),
+        ]}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: /预报.*forecast.*failed/ }))
+
+    expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
+    expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).not.toHaveTextContent(/display_readonly|27/)
   })
 })

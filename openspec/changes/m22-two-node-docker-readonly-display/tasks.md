@@ -82,7 +82,8 @@ Issue ownership note:
 - [ ] 6.4 Add strict identity context to `/ops` so stages, jobs, diagnostics, and log requests use or validate `source`, `cycle_time`, `run_id`, and `model_id`.
 - [ ] 6.5 Add diagnostic copy behavior for failed jobs/stages with available `source_id`, `cycle_time`, `run_id`, `model_id`, `stage`, `job_id`, `slurm_job_id`, `status`, `error_code`, `error_message`, and `log_uri`.
 - [ ] 6.6 Add manual 22 recovery guidance and local-only notified/acknowledged UI state without DB writes.
-- [ ] 6.7 Add frontend tests for runtime config role source, display-mode hidden controls, no control POSTs, optional queue-depth unavailable state, strict ops identity, diagnostic payload content, published-log error display, compute/dev controls still available, and role/query-state regressions.
+- [ ] 6.7 Add `/hydro-met` strict latest-product bootstrap from complete URL `source`, `cycle_time`, `run_id`, and `model_id`; partial strict identity is invalid and must not issue source-only fallback, while non-strict source-only browsing remains compatible. Direct local E2E handoff-file parsing is #239 harness scope.
+- [ ] 6.8 Add frontend tests for runtime config role source, display-mode hidden controls, no control POSTs, optional queue-depth unavailable state, strict ops identity, strict hydro-met handoff/non-strict compatibility, diagnostic payload content, published-log success/error display, local-only notified state, compute/dev controls still available, and role/query-state regressions.
 
 ## 7. Docker Env and Compose Skeleton
 

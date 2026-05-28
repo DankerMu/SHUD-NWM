@@ -13,6 +13,7 @@ interface SummaryBarProps {
   cycle: PipelineCycle | null
   queue: QueueState | null
   queueError?: string | null
+  queueReadonlyUnavailable?: boolean
   isRefreshing?: boolean
   disabled?: boolean
   onRefresh: () => void
@@ -26,6 +27,7 @@ export function SummaryBar({
   cycle,
   queue,
   queueError,
+  queueReadonlyUnavailable = false,
   isRefreshing,
   disabled,
   onRefresh,
@@ -84,10 +86,16 @@ export function SummaryBar({
 
       <Card>
         <CardHeader>
-          <CardTitle>Slurm 队列深度</CardTitle>
+          <CardTitle>{queueReadonlyUnavailable ? '队列深度不可用' : 'Slurm 队列深度'}</CardTitle>
         </CardHeader>
         <CardContent>
-          <QueueDonut queue={queue} error={queueError} />
+          {queueReadonlyUnavailable ? (
+            <div className="rounded-md border border-dashed border-border p-4 text-sm text-muted" role="status">
+              display_readonly 只读展示节点不读取 Slurm 队列深度；阶段、作业和日志仍可查看。
+            </div>
+          ) : (
+            <QueueDonut queue={queue} error={queueError} />
+          )}
         </CardContent>
       </Card>
     </section>

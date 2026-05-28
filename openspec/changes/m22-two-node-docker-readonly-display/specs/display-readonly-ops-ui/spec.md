@@ -49,6 +49,29 @@ The `/ops` display SHALL bind jobs, stages, and logs to the same run identity us
 - **THEN** the backend returns `PIPELINE_STRICT_IDENTITY_MISMATCH`
 - **AND** it does not read or return the wrong job's published log content.
 
+### Requirement: Hydro-met strict latest-product handoff
+
+The `/hydro-met` frontend SHALL support a strict cross-plane latest-product handoff without breaking source-only browsing.
+
+#### Scenario: Strict hydro-met URL identity
+- **WHEN** `/hydro-met` is opened with strict `source`, `cycle_time`, `run_id`, and `model_id` query parameters
+- **THEN** the latest-product request includes all four fields
+- **AND** downstream station and river bootstrap only proceeds when the returned product matches the strict identity.
+
+#### Scenario: Partial strict hydro-met identity
+- **WHEN** any strict identity query parameter is present but one or more of `source`, `cycle_time`, `run_id`, or `model_id` is missing or malformed
+- **THEN** `/hydro-met` renders an invalid or blocked strict handoff state
+- **AND** it does not issue a source-only latest-product fallback request for cross-plane evidence.
+
+#### Scenario: Non-strict browsing compatibility
+- **WHEN** `/hydro-met` is opened without strict identity query parameters
+- **THEN** the existing source-only latest-product browsing mode remains available.
+
+#### Scenario: E2E handoff file boundary
+- **WHEN** final E2E starts from `artifacts/two-node-e2e/<run_id>/cross-plane/identity.json`
+- **THEN** the E2E harness converts the approved identity file into complete URL parameters
+- **AND** the #235 frontend code does not directly read local artifact files.
+
 ### Requirement: Ops diagnostic copy
 
 The display readonly `/ops` page SHALL provide a diagnostic payload that an operator can copy for manual 22-node recovery.

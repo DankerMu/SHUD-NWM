@@ -240,6 +240,14 @@ async function installM15NetworkGuard(page: Page) {
   })
 }
 
+const computeRuntimeConfig = {
+  service_role: 'compute_control',
+  control_mutations_enabled: true,
+  slurm_routes_enabled: true,
+  queue_depth_mode: 'slurm_gateway',
+  display_readonly: false,
+} as const
+
 const basinVersion = {
   basin_version_id: 'bv-001',
   basin_id: 'basin-demo',
@@ -414,6 +422,9 @@ async function mockM15Apis(page: Page) {
     const url = new URL(route.request().url())
     const state = pageFixtureStates.get(page) ?? new URL(page.url()).searchParams.get('m15State')
 
+    if (route.request().method() === 'GET' && url.pathname === '/api/v1/runtime/config') {
+      return fulfill(route, computeRuntimeConfig)
+    }
     if (state === 'loading' && url.pathname === '/api/v1/basins') return
     if (state === 'error' && url.pathname === '/api/v1/basins') {
       return fulfillError(route, 'm15 fixture API error')
