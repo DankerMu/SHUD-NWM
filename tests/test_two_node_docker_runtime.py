@@ -1409,6 +1409,68 @@ def test_static_checker_rejects_display_critical_env_literal_drift(tmp_path: Pat
 
 
 @pytest.mark.parametrize(
+    ("env_key", "alternate_value", "operator"),
+    [
+        (
+            "DATABASE_URL",
+            "postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms",
+            ":+",
+        ),
+        (
+            "DATABASE_URL",
+            "postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms",
+            "+",
+        ),
+        ("AWS_SECRET_ACCESS_KEY", "not-env-file-secret", ":+"),
+        ("AWS_SECRET_ACCESS_KEY", "not-env-file-secret", "+"),
+    ],
+)
+def test_static_checker_rejects_display_same_key_alternate_env_drift(
+    tmp_path: Path,
+    env_key: str,
+    alternate_value: str,
+    operator: str,
+) -> None:
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["environment"][env_key] = f"${{{env_key}{operator}{alternate_value}}}"
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "DISPLAY_RUNTIME_ENV_LITERAL_DRIFT" and finding.details["key"] == env_key
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize("operator", [":+", "+"])
+def test_static_checker_accepts_same_key_alternate_when_it_matches_env_file(
+    tmp_path: Path,
+    operator: str,
+) -> None:
+    display_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/display.example")
+    compute_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")
+    display_compose = _safe_display_compose()
+    display_compose["services"]["display-api"]["environment"]["AWS_SECRET_ACCESS_KEY"] = (
+        f"${{AWS_SECRET_ACCESS_KEY{operator}{display_env['AWS_SECRET_ACCESS_KEY']}}}"
+    )
+    compute_compose = _safe_compute_compose()
+    for service in compute_compose["services"].values():
+        service["environment"]["WORKSPACE_ROOT"] = f"${{WORKSPACE_ROOT{operator}{compute_env['WORKSPACE_ROOT']}}}"
+
+    result = docker_runtime.run_static_check(
+        compute_compose=_write_compute_compose(tmp_path, compute_compose),
+        display_compose=_write_display_compose(tmp_path, display_compose),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
+
+
+@pytest.mark.parametrize(
     "env_key",
     sorted(docker_runtime.DISPLAY_AUDITED_RUNTIME_ENV),
 )
@@ -1494,6 +1556,37 @@ def test_static_checker_rejects_compute_audited_env_alias_fallback_when_env_file
     assert any(
         finding.code == "COMPUTE_RUNTIME_ENV_ALIAS_INTERPOLATION"
         and finding.details["key"] == "SLURM_GATEWAY_URL"
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("env_key", "alternate_value", "operator"),
+    [
+        ("WORKSPACE_ROOT", "/scratch/frd_muziyao/alternate-workspace", ":+"),
+        ("WORKSPACE_ROOT", "/scratch/frd_muziyao/alternate-workspace", "+"),
+        ("SLURM_GATEWAY_URL", "http://alternate-slurm-gateway.internal.example:8081", ":+"),
+        ("SLURM_GATEWAY_URL", "http://alternate-slurm-gateway.internal.example:8081", "+"),
+    ],
+)
+def test_static_checker_rejects_compute_same_key_alternate_env_drift(
+    tmp_path: Path,
+    env_key: str,
+    alternate_value: str,
+    operator: str,
+) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"][env_key] = f"${{{env_key}{operator}{alternate_value}}}"
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_RUNTIME_ENV_LITERAL_DRIFT"
+        and finding.details["key"] == env_key
+        and finding.details["rendered_value"] == alternate_value
         for finding in result.findings
     )
 

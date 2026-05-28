@@ -1168,7 +1168,7 @@ def _compute_audited_env_value_findings(
             )
         ]
     variables = _compose_interpolation_keys(value)
-    if _compose_interpolation_uses_env_file_value(value, key, env):
+    if variables and _compose_interpolation_matches_env_file_value(value, key, env):
         return []
     if variables and variables != {key}:
         return [
@@ -1180,21 +1180,24 @@ def _compute_audited_env_value_findings(
                 details={"key": key, "entry": entry, "variables": sorted(variables)},
             )
         ]
-    if not variables and key in env:
-        literal_value = _resolved_compose_text(value, {})
-        if literal_value != env[key]:
+    if key in env:
+        actual_value = _resolved_compose_text(value, env if variables else {})
+        if actual_value != env[key]:
+            details = {
+                "key": key,
+                "entry": entry,
+                "env_file_value": _redact_env_value(key, env[key]),
+                "literal_value": _redact_env_value(key, actual_value),
+            }
+            if variables:
+                details["rendered_value"] = _redact_env_value(key, actual_value)
             return [
                 Finding(
                     "COMPUTE_RUNTIME_ENV_LITERAL_DRIFT",
-                    "compute audited runtime env literal must match the audited compute env file value.",
+                    "compute audited runtime env value must match the audited compute env file value.",
                     path=str(path),
                     service=service_name,
-                    details={
-                        "key": key,
-                        "entry": entry,
-                        "env_file_value": _redact_env_value(key, env[key]),
-                        "literal_value": _redact_env_value(key, literal_value),
-                    },
+                    details=details,
                 )
             ]
     return []
@@ -1271,6 +1274,8 @@ def _display_critical_env_value_findings(
             )
         ]
     variables = _compose_interpolation_keys(value)
+    if variables and _compose_interpolation_matches_env_file_value(value, key, env):
+        return []
     if variables and variables != {key}:
         return [
             Finding(
@@ -1281,21 +1286,24 @@ def _display_critical_env_value_findings(
                 details={"key": key, "entry": entry, "variables": sorted(variables)},
             )
         ]
-    if not variables and key in env:
-        literal_value = _resolved_compose_text(value, {})
-        if literal_value != env[key]:
+    if key in env:
+        actual_value = _resolved_compose_text(value, env if variables else {})
+        if actual_value != env[key]:
+            details = {
+                "key": key,
+                "entry": entry,
+                "env_file_value": _redact_env_value(key, env[key]),
+                "literal_value": _redact_env_value(key, actual_value),
+            }
+            if variables:
+                details["rendered_value"] = _redact_env_value(key, actual_value)
             return [
                 Finding(
                     "DISPLAY_RUNTIME_ENV_LITERAL_DRIFT",
-                    "display audited runtime env literal must match the audited display env file value.",
+                    "display audited runtime env value must match the audited display env file value.",
                     path=str(path),
                     service=service_name,
-                    details={
-                        "key": key,
-                        "entry": entry,
-                        "env_file_value": _redact_env_value(key, env[key]),
-                        "literal_value": _redact_env_value(key, literal_value),
-                    },
+                    details=details,
                 )
             ]
     return []
@@ -2226,6 +2234,17 @@ def _compose_interpolation_uses_env_file_value(value: Any, key: str, env: Mappin
     )
 
 
+def _compose_interpolation_matches_env_file_value(value: Any, key: str, env: Mapping[str, str]) -> bool:
+    if not isinstance(value, str):
+        return False
+    if key not in env:
+        return False
+    if _resolved_compose_text(value, env) != env[key]:
+        return False
+    variables = _compose_interpolation_keys(value)
+    return variables == {key} or _compose_interpolation_uses_env_file_value(value, key, env)
+
+
 def _compose_interpolation_uses_current_env_value(operator: str | None, current: str) -> bool:
     if operator is None:
         return True
@@ -2534,38 +2553,73 @@ def _normalize_posix_path(value: str) -> str:
 
 
 def _resolve_compose_value(value: str, env: Mapping[str, str]) -> str:
-    def replace(match: re.Match[str]) -> str:
-        key = match.group(1)
-        operator = match.group(2)
-        fallback = match.group(3) or ""
-        current = env.get(key)
-        is_set = key in env
-        is_nonempty = current not in (None, "")
-        if operator is None:
-            return current if is_set else match.group(0)
-        if operator == ":-":
-            return current if is_nonempty else fallback
-        if operator == "-":
-            return current if is_set else fallback
-        if operator == ":+":
-            return fallback if is_nonempty else ""
-        if operator == "+":
-            return fallback if is_set else ""
-        if operator == ":?":
-            return current if is_nonempty else match.group(0)
-        if operator == "?":
-            return current if is_set else match.group(0)
-        if is_nonempty:
-            return current
-        return match.group(0)
-
     resolved = value
     for _ in range(4):
-        next_value = _VAR_PATTERN.sub(replace, resolved)
+        next_value = _resolve_compose_value_once(resolved, env)
         if next_value == resolved:
             return next_value
         resolved = next_value
     return resolved
+
+
+def _resolve_compose_value_once(value: str, env: Mapping[str, str]) -> str:
+    parts: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != "$" or (index > 0 and value[index - 1] == "$"):
+            parts.append(value[index])
+            index += 1
+            continue
+        next_index = index + 1
+        if next_index >= len(value) or value[next_index] != "{":
+            parts.append(value[index])
+            index += 1
+            continue
+        close_index = _find_matching_interpolation_brace(value, next_index)
+        if close_index is None:
+            parts.append(value[index])
+            index += 1
+            continue
+        expression = value[index : close_index + 1]
+        parts.append(_resolve_braced_compose_expression(expression, env))
+        index = close_index + 1
+    return "".join(parts)
+
+
+def _resolve_braced_compose_expression(expression: str, env: Mapping[str, str]) -> str:
+    payload = expression[2:-1]
+    match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)(.*)", payload, flags=re.DOTALL)
+    if match is None:
+        return expression
+    key = match.group(1)
+    suffix = match.group(2)
+    operator: str | None = None
+    fallback = ""
+    for candidate in (":-", ":+", ":?", "-", "+", "?"):
+        if suffix.startswith(candidate):
+            operator = candidate
+            fallback = suffix[len(candidate) :]
+            break
+    current = env.get(key)
+    is_set = key in env
+    is_nonempty = current not in (None, "")
+    if operator is None and not suffix:
+        return current if is_set else expression
+    if operator is None:
+        return expression
+    if operator == ":-":
+        return current if is_nonempty else _resolve_compose_value(fallback, env)
+    if operator == "-":
+        return current if is_set else _resolve_compose_value(fallback, env)
+    if operator == ":+":
+        return _resolve_compose_value(fallback, env) if is_nonempty else ""
+    if operator == "+":
+        return _resolve_compose_value(fallback, env) if is_set else ""
+    if operator == ":?":
+        return current if is_nonempty else expression
+    if operator == "?":
+        return current if is_set else expression
+    return current if is_nonempty else expression
 
 
 def _command_list(command: Any) -> list[str]:
