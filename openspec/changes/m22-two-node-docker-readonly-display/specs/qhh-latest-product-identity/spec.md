@@ -16,9 +16,9 @@ The QHH latest-product API SHALL support strict identity filters for cross-plane
 
 #### Scenario: Strict identity unavailable
 - **WHEN** strict filters do not match a ready product
-- **THEN** the API returns a typed unavailable error
+- **THEN** the API returns `QHH_LATEST_PRODUCT_UNAVAILABLE`
 - **AND** details include safe unavailable reasons and the requested identity
-- **AND** the response cannot be mistaken for a historical latest success.
+- **AND** it does not fall back to source-only latest selection or return a historical latest success.
 
 ### Requirement: Latest product response identity completeness
 
@@ -29,15 +29,16 @@ The latest-product response SHALL carry enough identity fields to bind 22 comput
 - **THEN** the product includes `run_id`, `source_id`, `cycle_time`, `model_id`, `basin_id` or basin identity, `forcing_version_id`, `basin_version_id`, and `river_network_version_id`
 - **AND** station and segment counts remain present when available.
 
-#### Scenario: Frontend bootstrap passes strict filters when known
-- **WHEN** `/hydro-met` has URL query parameters `source`, `cycle_time`, `run_id`, and `model_id`, or E2E provides the same four fields from `artifacts/two-node-e2e/<run_id>/cross-plane/identity.json`
-- **THEN** it passes `run_id`, `cycle_time`, `source`, and `model_id` to latest-product
-- **AND** it renders unavailable state instead of silently reusing a different product.
+#### Scenario: Backend accepts complete strict filters for downstream consumers
+- **WHEN** a downstream consumer such as `/hydro-met` or cross-plane E2E has `source`, `cycle_time`, `run_id`, and `model_id`
+- **THEN** the backend latest-product API accepts those four filters in one request
+- **AND** the response identity can be compared by downstream issues without needing source-only fallback.
 
-#### Scenario: Partial strict identity rejected
+#### Scenario: Backend partial strict identity rejected
 - **WHEN** any strict identity parameter is present without all of `source`, `cycle_time`, `run_id`, and `model_id`
-- **THEN** `/hydro-met` and E2E bootstrap treat the identity as invalid
-- **AND** they do not fall back to source-only latest-product for cross-plane proof.
+- **THEN** the backend latest-product API returns HTTP `422` with code `VALIDATION_ERROR` using the standard error envelope
+- **AND** the error details include safe `missing_fields`, `provided_fields`, `required_fields`, and `strict_identity_required=true`
+- **AND** the backend does not run source-only latest selection.
 
 ### Requirement: Cross-plane E2E latest proof
 
@@ -45,10 +46,10 @@ Cross-plane E2E SHALL prove that 27 consumed the same run identity produced by 2
 
 #### Scenario: Matching 22 and 27 evidence
 - **WHEN** 22 evidence records `run_id/source/cycle_time/model_id`
-- **THEN** 27 latest-product API evidence uses those exact filters
-- **AND** the returned product identity matches all four values before browser E2E can be marked pass.
+- **THEN** 27 latest-product API evidence can use those exact filters
+- **AND** the returned product identity contains all four values needed by later browser/E2E validation.
 
 #### Scenario: Historical latest cannot pass cross-plane E2E
 - **WHEN** source-only latest-product succeeds but strict run identity latest-product fails
-- **THEN** cross-plane E2E is marked `BLOCKED`, `PARTIAL`, or `FAIL` according to the runbook
-- **AND** it is not reported as pass based on historical data.
+- **THEN** the backend exposes the strict failure as a typed latest-product validation or unavailable error
+- **AND** later E2E issues can mark the run `BLOCKED`, `PARTIAL`, or `FAIL` instead of reporting pass based on historical data.
