@@ -644,3 +644,96 @@ Non-goals:
 - Do not change latest-product strict identity; that is #232 and already landed.
 - Do not implement readonly DB validation, Docker compose/image/systemd, or final cross-plane E2E evidence; those are later issues.
 - Do not change retry/cancel mutation behavior except preserving #230 compatibility.
+
+## Issue #234 Fixture: Readonly DB Boundary Validation
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: other
+
+Change surface:
+
+- A readonly DB validation entrypoint, tests, or runbook command that can exercise the display API with readonly credentials and write structured evidence under `artifacts/` or `/scratch/frd_muziyao`.
+- Database permission probes for hydro, met, ops, and pipeline-critical tables, including `INSERT`, `UPDATE`, `DELETE`, and DDL attempts that are rejected by DB permissions or readonly transaction semantics before commit.
+- Display-mode retry/cancel validation proving `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` is returned before any write attempt when readonly credentials are used.
+- Tests and evidence helpers for secret redaction, `current_user`, DB role type, redacted DSN, command list, pass/fail/blocker status, and fixture skip/block behavior when a real DB is unavailable.
+
+Must preserve:
+
+- Existing display retry/cancel fail-closed behavior from #230, including auth/RBAC ordering and no gateway construction in display mode.
+- Existing published artifact log safety from #231 and strict latest-product / ops identity behavior from #232 and #233.
+- Existing normal test runs must not require a real PostgreSQL server unless the readonly DB validation env is explicitly enabled.
+- Existing application route contracts and OpenAPI/type surfaces remain unchanged unless a validation endpoint is explicitly added, which is not expected for this issue.
+
+Must add/change:
+
+- Add a focused readonly DB validation command or pytest entrypoint that records a structured evidence object with `current_user`, DB role type, redacted DB URL, command/probe results, route smoke results, and final `PASS` / `FAIL` / `BLOCKED`.
+- Route smoke must cover display-safe reads for health, runtime config, models, stations or station-equivalent read APIs, latest-product, pipeline status, stages, jobs, job logs, and any required setup preconditions.
+- Permission probes must prove controlled writes and DDL are rejected before commit for representative hydro, met, ops, and pipeline-critical surfaces. Rollback is cleanup only; any DML or DDL probe that executes successfully under the tested credential is `FAIL`, even if it is later rolled back.
+- Retry/cancel probes must run with `NHMS_SERVICE_ROLE=display_readonly` and prove manual-action `409` is returned before any DB write is attempted.
+- Evidence must redact secrets from DSNs, connection strings, errors, and command output; project-created evidence and temporary files must stay under the repository `artifacts/` tree or `/scratch/frd_muziyao`.
+- When no real readonly DB URL is configured, the validation command must produce an explicit `BLOCKED` / skipped result rather than a false pass.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - adds a validation command/test entrypoint and exercises public display routes.
+- Config / project setup: selected - depends on explicit readonly DB connection env, `NHMS_SERVICE_ROLE=display_readonly`, and safe skip/block semantics.
+- File IO / path safety / overwrite: selected - evidence artifacts and temporary outputs must stay under approved roots and avoid leaking secrets.
+- Schema / columns / units / field names: selected - permission probes target named schemas/tables and evidence has a structured schema.
+- Geospatial / CRS / shapefile sidecars: not selected - no geometry or shapefile processing changes.
+- Time series / forcing / temporal boundaries: selected - latest-product, station, and pipeline route smoke may require cycle/source identity and timestamp fixtures.
+- Numerical stability / conservation / NaN: not selected - no solver or numerical behavior.
+- Solver runtime / performance / threading: not selected - no solver runtime behavior.
+- Resource limits / large input / discovery: selected - validation must bound route smoke, probes, evidence size, and DB work; no broad destructive scans.
+- Legacy compatibility / examples: selected - normal dev/test flows and existing writer-credential integration tests must remain compatible.
+- Error handling / rollback / partial outputs: selected - failed probes must roll back, produce stable evidence, and never leave partial DB writes.
+- Release / packaging / dependency compatibility: selected - later Docker/display deployment uses this validation as a readiness gate.
+- Documentation / migration notes: selected - runbook or command documentation must explain env, redaction, evidence path, and blocked/pass/fail semantics.
+
+Invariant Matrix:
+
+- Governing invariant: A display readonly DB validation pass means the API can read required display surfaces with readonly credentials, cannot write hydro/met/ops/pipeline-critical state, and retry/cancel fail closed before any DB mutation; writer credentials or missing evidence must not be mislabeled as readonly PASS.
+- Source-of-truth identity/contract: readonly DB connection env, `current_user`, DB role attributes/privileges, `NHMS_SERVICE_ROLE=display_readonly`, and the structured validation evidence schema.
+- Producers: validation command/test harness, DB role introspection queries, route smoke responses, permission probe results, and retry/cancel manual-action responses.
+- Validators/preflight: env/config validation, DSN redaction, approved evidence-root selection, display runtime config check, DB role/user query, permission-denied classifier, transaction rollback handling.
+- Storage/cache/query: PostgreSQL schemas/tables for hydro, met, ops, pipeline jobs/events, latest-product read surfaces, monitoring read surfaces, and published log rows.
+- Public routes/entrypoints: `/health`, `/api/v1/runtime/config`, models/stations read routes, `/api/v1/mvp/qhh/latest-product`, `/api/v1/pipeline/status`, `/api/v1/pipeline/stages`, `/api/v1/jobs`, `/api/v1/jobs/{job_id}/logs`, retry, and cancel.
+- Frontend/downstream consumers: later Docker/E2E gates and runbooks that consume readonly validation evidence; no frontend code is owned by this issue.
+- Failure paths/rollback/stale state: missing DB env, writer credentials, unavailable fixture data, route failures, permission probes unexpectedly succeeding, retry/cancel attempting writes, secret redaction failures, and evidence write failures.
+- Evidence/audit/readiness: structured evidence file, focused pytest/CLI tests, readonly DB smoke command output, redacted DSN/current user, probe matrix, and CI or local skip/block status.
+- Regression rows:
+  - readonly DB env absent -> validation reports `BLOCKED` or pytest skip, not `PASS`.
+  - readonly credential with display role -> display read routes succeed or report explicit fixture blockers without DB writes.
+  - writer credential labeled readonly -> write/DDL probes succeed and validation returns `FAIL`, never `PASS`.
+  - readonly credential write/DDL probes -> permission-denied or readonly-transaction errors recorded for hydro/met/ops/pipeline-critical surfaces before commit.
+  - any tested credential can execute DML/DDL successfully -> validation returns `FAIL`, even when the harness rolls back for cleanup.
+  - display retry/cancel with readonly credentials -> `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` before write/gateway side effects.
+  - evidence containing DSN/password/token-like values -> secrets redacted before file write and assertion output.
+  - normal local unit test run without readonly DB env -> existing backend tests remain runnable without external DB.
+
+Boundary-surface checklist:
+
+- Shared helper roots: DB engine/session setup, validation evidence writer/redactor, permission probe helpers, display route smoke helpers.
+- Public entrypoints: validation CLI/pytest entrypoint and display API routes exercised by the smoke.
+- Read surfaces: health/runtime config, model/station/latest-product/pipeline/job/log read APIs.
+- Write/delete/overwrite surfaces: controlled DB `INSERT`, `UPDATE`, `DELETE`, DDL probes inside rollback-safe transactions, where successful execution is a failure and rollback is only cleanup.
+- Staging/publish/rollback surfaces: evidence file creation and DB transaction rollback for probes.
+- Producer/consumer evidence boundaries: redacted evidence schema, local artifact path, CI/log output, future Docker/E2E consumers.
+- Stale-state/idempotency boundaries: repeated validation runs must not accumulate writes, reuse stale PASS evidence, or depend on dirty DB state without reporting blockers.
+- Unchanged downstream consumers: existing API tests, migration tests, retry/cancel tests, latest-product tests, and monitoring tests.
+
+Required evidence:
+
+- Focused readonly DB validation command or pytest target added by this issue: readonly env -> route smoke and permission probe matrix with redacted evidence.
+- Minimum permission probe matrix: `hydro.hydro_run`, `hydro.river_timeseries`, `met.forecast_cycle`, `met.forcing_station_timeseries` or the available station-equivalent table, `ops.pipeline_job`, `ops.pipeline_event`, plus at least one schema-level or table-level DDL probe. If a table is absent in a reduced fixture, evidence must mark that row `BLOCKED` or out-of-scope with a concrete reason rather than silently skipping it.
+- `uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py tests/test_forecast_api.py`: display fail-closed, logs, latest-product, and monitoring compatibility.
+- `uv run pytest -q <new readonly validation tests>`: evidence schema, redaction, blocked/skip behavior, writer-credential FAIL simulation, permission-denied classification, rollback/idempotency.
+- `uv run ruff check tests services apps/api`: style/static verification for touched validation code.
+- If the validation command writes evidence, inspect generated sample evidence under `artifacts/` or `/scratch/frd_muziyao` and prove no secrets or unapproved output paths are present.
+
+Non-goals:
+
+- Do not implement Docker compose/image/systemd or container HostConfig checks; those are #236 through #239.
+- Do not implement frontend `/ops` or `/hydro-met` behavior; that is #235.
+- Do not create production DB roles, grant/revoke privileges, or require privileged DDL outside controlled probes.
+- Do not seed or mutate production-like data as part of a PASS; missing fixture data should be a blocker or reduced-scope result, not an unsafe write.

@@ -6,7 +6,7 @@ The display service SHALL be validated with readonly database credentials for di
 
 #### Scenario: Readonly display smoke
 - **WHEN** the API starts with `NHMS_SERVICE_ROLE=display_readonly` and a readonly DB user
-- **THEN** read-only display routes such as health, models, stations, latest-product, pipeline status, jobs, and job logs can be exercised
+- **THEN** read-only display routes such as health, runtime config, models, stations, latest-product, pipeline status, pipeline stages, jobs, and job logs can be exercised
 - **AND** no display smoke step requires writing hydro, met, or pipeline terminal state.
 
 #### Scenario: Mutating API blocked with readonly DB
@@ -21,7 +21,9 @@ The display service SHALL be validated with readonly database credentials for di
 
 #### Scenario: Write privileges denied
 - **WHEN** readonly DB validation runs against hydro, met, ops, and pipeline-critical tables
-- **THEN** controlled `INSERT`, `UPDATE`, `DELETE`, and DDL probes are denied or rolled back with permission errors
+- **THEN** controlled `INSERT`, `UPDATE`, `DELETE`, and DDL probes are rejected by DB permissions or readonly transaction semantics before commit
+- **AND** rollback is cleanup only, not proof of readonly behavior
+- **AND** any successful DML or DDL execution under the tested credential is recorded as `FAIL` even if the harness rolls it back
 - **AND** a display PASS cannot be claimed by merely labeling a writer credential as readonly.
 
 ### Requirement: Docker and E2E evidence location
