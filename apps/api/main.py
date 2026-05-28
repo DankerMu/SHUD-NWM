@@ -625,7 +625,12 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         operation_id="getPipelineStatus",
         summary="Get pipeline status for a cycle",
         tags=["pipeline"],
-        parameters=[_source_query_parameter(required=True), _cycle_time_query_parameter(required=True)],
+        parameters=[
+            _source_query_parameter(required=True),
+            _cycle_time_query_parameter(required=True),
+            _run_id_query_parameter(required=False),
+            _model_id_query_parameter(required=False),
+        ],
         data_schema={"$ref": "#/components/schemas/PipelineStatus"},
         description="Pipeline status",
     )
@@ -636,7 +641,12 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         operation_id="listPipelineStages",
         summary="List pipeline stages for a cycle",
         tags=["pipeline"],
-        parameters=[_source_query_parameter(required=True), _cycle_time_query_parameter(required=True)],
+        parameters=[
+            _source_query_parameter(required=True),
+            _cycle_time_query_parameter(required=True),
+            _run_id_query_parameter(required=False),
+            _model_id_query_parameter(required=False),
+        ],
         data_schema={"type": "array", "items": {"$ref": "#/components/schemas/PipelineStage"}},
         description="Pipeline stage list",
     )
@@ -650,8 +660,9 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         parameters=[
             _source_query_parameter(required=False),
             _cycle_time_query_parameter(required=False),
+            _run_id_query_parameter(required=False),
             {"name": "status", "in": "query", "required": False, "schema": {"type": "string"}},
-            {"name": "model_id", "in": "query", "required": False, "schema": {"type": "string"}},
+            _model_id_query_parameter(required=False),
             {"name": "stage", "in": "query", "required": False, "schema": {"type": "string"}},
             {"name": "run_type", "in": "query", "required": False, "schema": {"type": "string"}},
             {"name": "scenario", "in": "query", "required": False, "schema": {"type": "string"}},
@@ -690,7 +701,13 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         operation_id="getPipelineJobLogs",
         summary="Get pipeline job logs",
         tags=["pipeline"],
-        parameters=[{"name": "job_id", "in": "path", "required": True, "schema": {"type": "string"}}],
+        parameters=[
+            {"name": "job_id", "in": "path", "required": True, "schema": {"type": "string"}},
+            _source_query_parameter(required=False),
+            _cycle_time_query_parameter(required=False),
+            _run_id_query_parameter(required=False),
+            _model_id_query_parameter(required=False),
+        ],
         data_schema={"$ref": "#/components/schemas/JobLogs"},
         description="Pipeline job logs",
     )
@@ -789,6 +806,14 @@ def _cycle_time_query_parameter(*, required: bool) -> dict[str, Any]:
         "required": required,
         "schema": {"type": "string", "format": "date-time"},
     }
+
+
+def _run_id_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {"name": "run_id", "in": "query", "required": required, "schema": {"type": "string"}}
+
+
+def _model_id_query_parameter(*, required: bool) -> dict[str, Any]:
+    return {"name": "model_id", "in": "query", "required": required, "schema": {"type": "string"}}
 
 
 def _station_series_parameters() -> list[dict[str, Any]]:

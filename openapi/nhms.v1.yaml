@@ -1067,6 +1067,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SourceQueryRequired"
         - $ref: "#/components/parameters/CycleTimeQueryRequired"
+        - $ref: "#/components/parameters/RunIdQueryOptional"
+        - $ref: "#/components/parameters/ModelIdQuery"
       responses:
         "200":
           description: Pipeline status
@@ -1092,6 +1094,8 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SourceQueryRequired"
         - $ref: "#/components/parameters/CycleTimeQueryRequired"
+        - $ref: "#/components/parameters/RunIdQueryOptional"
+        - $ref: "#/components/parameters/ModelIdQuery"
       responses:
         "200":
           description: Pipeline stage list
@@ -1119,6 +1123,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SourceQuery"
         - $ref: "#/components/parameters/CycleTimeQuery"
+        - $ref: "#/components/parameters/RunIdQueryOptional"
         - name: status
           in: query
           required: false
@@ -1193,6 +1198,10 @@ paths:
       tags: [pipeline]
       parameters:
         - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/SourceQuery"
+        - $ref: "#/components/parameters/CycleTimeQuery"
+        - $ref: "#/components/parameters/RunIdQueryOptional"
+        - $ref: "#/components/parameters/ModelIdQuery"
       responses:
         "200":
           description: Pipeline job logs
@@ -1819,6 +1828,12 @@ components:
       name: run_id
       in: query
       required: true
+      schema:
+        type: string
+    RunIdQueryOptional:
+      name: run_id
+      in: query
+      required: false
       schema:
         type: string
     SegmentId:

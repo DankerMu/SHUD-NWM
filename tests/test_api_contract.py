@@ -382,6 +382,59 @@ def test_pipeline_status_contract_uses_success_envelope() -> None:
     assert data["job_counts"] == {"succeeded": 3, "failed": 1, "running": 1, "pending": 0}
 
 
+def test_pipeline_ops_strict_identity_query_contract() -> None:
+    spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    paths = spec["paths"]
+
+    status_params = _parameter_names(paths["/api/v1/pipeline/status"]["get"], spec)
+    stages_params = _parameter_names(paths["/api/v1/pipeline/stages"]["get"], spec)
+    jobs_params = _parameter_names(paths["/api/v1/jobs"]["get"], spec)
+    logs_params = _parameter_names(paths["/api/v1/jobs/{job_id}/logs"]["get"], spec)
+    assert status_params == ["source", "cycle_time", "run_id", "model_id"]
+    assert stages_params == ["source", "cycle_time", "run_id", "model_id"]
+    assert jobs_params[:4] == ["source", "cycle_time", "run_id", "status"]
+    assert "model_id" in jobs_params
+    assert logs_params == ["job_id", "source", "cycle_time", "run_id", "model_id"]
+
+    generated_types = (
+        Path(__file__).resolve().parents[1] / "apps" / "frontend" / "src" / "api" / "types.ts"
+    ).read_text(encoding="utf-8")
+    status_start = generated_types.index("getPipelineStatus:")
+    stages_start = generated_types.index("listPipelineStages:")
+    jobs_start = generated_types.index("listPipelineJobs:")
+    logs_start = generated_types.index("getPipelineJobLogs:")
+    queue_start = generated_types.index("getQueueDepth:")
+    status_types = generated_types[status_start:stages_start]
+    stages_types = generated_types[stages_start:jobs_start]
+    jobs_types = generated_types[jobs_start:logs_start]
+    logs_types = generated_types[logs_start:queue_start]
+    for snippet in (status_types, stages_types, jobs_types, logs_types):
+        assert "run_id?: components[\"parameters\"][\"RunIdQueryOptional\"];" in snippet
+    assert "source: components[\"parameters\"][\"SourceQueryRequired\"];" in status_types
+    assert "cycle_time: components[\"parameters\"][\"CycleTimeQueryRequired\"];" in status_types
+    assert "source: components[\"parameters\"][\"SourceQueryRequired\"];" in stages_types
+    assert "cycle_time: components[\"parameters\"][\"CycleTimeQueryRequired\"];" in stages_types
+    assert "source?: components[\"parameters\"][\"SourceQuery\"];" in logs_types
+    assert "model_id?: components[\"parameters\"][\"ModelIdQuery\"];" in logs_types
+
+
+def _parameter_names(operation: dict[str, Any], spec: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for parameter in operation.get("parameters", []):
+        resolved = _resolve_parameter(parameter, spec)
+        names.append(str(resolved["name"]))
+    return names
+
+
+def _resolve_parameter(parameter: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    reference = parameter.get("$ref")
+    if not reference:
+        return parameter
+    _, _, name = reference.rpartition("/")
+    return spec["components"]["parameters"][name]
+
+
 def test_pipeline_stage_contract_exposes_formal_job_evidence_and_ops_statuses() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml"
     spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))

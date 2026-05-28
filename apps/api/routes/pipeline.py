@@ -72,6 +72,9 @@ _MAX_PUBLIC_LOG_URI_LENGTH = PIPELINE_PUBLIC_LOG_URI_MAX_LENGTH
 _DISPLAY_READONLY_MODE = "display_readonly"
 _CONTROL_PLANE_MANUAL_ACTION_REQUIRED = "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
 _CONTROL_PLANE_QUEUE_UNAVAILABLE = "CONTROL_PLANE_QUEUE_UNAVAILABLE"
+_STRICT_IDENTITY_FIELDS = ("source", "cycle_time", "run_id", "model_id")
+_STRICT_REFLECTED_VALUE_LIMIT = 64
+_STRICT_CANDIDATE_SAMPLE_LIMIT = 5
 
 
 @dataclass
@@ -93,6 +96,16 @@ class _RetryExecutionContext:
 class _CancelExecutionContext:
     store: PipelineStore
     gateway: SlurmGateway
+
+
+@dataclass(frozen=True)
+class _StrictPipelineIdentity:
+    source: str
+    source_id: str
+    cycle_time: datetime
+    cycle_id: str
+    run_id: str
+    model_id: str
 
 
 @lru_cache
@@ -233,22 +246,46 @@ def _manual_action_suggestion(control_action: str) -> str:
 @router.get("/pipeline/status")
 def pipeline_status(
     request: Request,
-    source: str = Query(...),
-    cycle_time: str = Query(...),
+    source: str | None = Query(default=None),
+    cycle_time: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
+    model_id: str | None = Query(default=None),
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
-    parsed_cycle_time = _parse_cycle_time(cycle_time)
-    cycle_id = _cycle_id_for_source(source, parsed_cycle_time)
+    strict_identity = _strict_pipeline_identity_or_none(
+        store,
+        source=source,
+        cycle_time=cycle_time,
+        run_id=run_id,
+        model_id=model_id,
+        raw_fields=set(request.query_params),
+        trigger_fields={"run_id", "model_id"},
+    )
+    if strict_identity is not None:
+        source = strict_identity.source
+        parsed_cycle_time = strict_identity.cycle_time
+        cycle_id = strict_identity.cycle_id
+    else:
+        source, cycle_time = _require_source_cycle_for_non_strict(source=source, cycle_time=cycle_time)
+        parsed_cycle_time = _parse_cycle_time(cycle_time)
+        cycle_id = _cycle_id_for_source(source, parsed_cycle_time)
     cycle = _fetch_forecast_cycle(store, source=source, cycle_time=parsed_cycle_time, cycle_id=cycle_id)
     if cycle is None:
         raise ApiError(
             status_code=404,
             code="PIPELINE_CYCLE_NOT_FOUND",
             message="No forecast cycle found for the requested source and cycle_time.",
-            details={"source": source, "cycle_time": parsed_cycle_time.isoformat(), "cycle_id": cycle_id},
+            details=_bounded_mapping(
+                {"source": source, "cycle_time": parsed_cycle_time.isoformat(), "cycle_id": cycle_id}
+            ),
         )
 
     resolved_cycle_id = str(cycle.get("cycle_id") or cycle_id)
+    job_counts = (
+        _job_count_summary_for_strict_identity(store, strict_identity)
+        if strict_identity is not None
+        else _job_count_summary(store, resolved_cycle_id)
+    )
     return _ok(
         request,
         {
@@ -258,7 +295,7 @@ def pipeline_status(
             "current_state": cycle["current_state"],
             "started_at": cycle.get("started_at"),
             "updated_at": cycle.get("updated_at"),
-            "job_counts": _job_count_summary(store, resolved_cycle_id),
+            "job_counts": job_counts,
         },
     )
 
@@ -266,22 +303,44 @@ def pipeline_status(
 @router.get("/pipeline/stages")
 def pipeline_stages(
     request: Request,
-    source: str = Query(...),
-    cycle_time: str = Query(...),
+    source: str | None = Query(default=None),
+    cycle_time: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
+    model_id: str | None = Query(default=None),
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
-    parsed_cycle_time = _parse_cycle_time(cycle_time)
-    cycle_id = _cycle_id_for_source(source, parsed_cycle_time)
+    strict_identity = _strict_pipeline_identity_or_none(
+        store,
+        source=source,
+        cycle_time=cycle_time,
+        run_id=run_id,
+        model_id=model_id,
+        raw_fields=set(request.query_params),
+        trigger_fields={"run_id", "model_id"},
+    )
+    if strict_identity is not None:
+        source = strict_identity.source
+        parsed_cycle_time = strict_identity.cycle_time
+        cycle_id = strict_identity.cycle_id
+    else:
+        source, cycle_time = _require_source_cycle_for_non_strict(source=source, cycle_time=cycle_time)
+        parsed_cycle_time = _parse_cycle_time(cycle_time)
+        cycle_id = _cycle_id_for_source(source, parsed_cycle_time)
     cycle = _fetch_forecast_cycle(store, source=source, cycle_time=parsed_cycle_time, cycle_id=cycle_id)
     if cycle is None:
         raise ApiError(
             status_code=404,
             code="PIPELINE_CYCLE_NOT_FOUND",
             message="No forecast cycle found for the requested source and cycle_time.",
-            details={"source": source, "cycle_time": parsed_cycle_time.isoformat(), "cycle_id": cycle_id},
+            details=_bounded_mapping(
+                {"source": source, "cycle_time": parsed_cycle_time.isoformat(), "cycle_id": cycle_id}
+            ),
         )
 
-    return _ok(request, _stage_summaries(store, str(cycle.get("cycle_id") or cycle_id)))
+    resolved_cycle_id = str(cycle.get("cycle_id") or cycle_id)
+    if strict_identity is not None:
+        return _ok(request, _stage_summaries_for_strict_identity(store, strict_identity))
+    return _ok(request, _stage_summaries(store, resolved_cycle_id))
 
 
 @router.get("/jobs")
@@ -289,6 +348,7 @@ def list_jobs(
     request: Request,
     source: str | None = None,
     cycle_time: str | None = None,
+    run_id: str | None = None,
     status: str | None = None,
     model_id: str | None = None,
     stage: str | None = None,
@@ -301,8 +361,19 @@ def list_jobs(
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
     statement = select(PipelineJob)
+    strict_identity = _strict_pipeline_identity_or_none(
+        store,
+        source=source,
+        cycle_time=cycle_time,
+        run_id=run_id,
+        model_id=model_id,
+        raw_fields=set(request.query_params),
+        trigger_fields={"run_id"},
+    )
 
-    if cycle_time is not None:
+    if strict_identity is not None:
+        statement = _where_strict_identity(statement, strict_identity)
+    elif cycle_time is not None:
         parsed_cycle_time = _parse_cycle_time(cycle_time)
         if source is not None:
             cycle = _fetch_forecast_cycle_or_404(store, source=source, cycle_time=parsed_cycle_time)
@@ -316,7 +387,7 @@ def list_jobs(
 
     if status is not None:
         statement = statement.where(PipelineJob.status == status)
-    if model_id is not None:
+    if model_id is not None and strict_identity is None:
         statement = statement.where(PipelineJob.model_id == model_id)
     if stage is not None:
         statement = statement.where(PipelineJob.stage == stage)
@@ -351,8 +422,21 @@ def list_jobs(
 def job_logs(
     job_id: str,
     request: Request,
+    source: str | None = Query(default=None),
+    cycle_time: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
+    model_id: str | None = Query(default=None),
     store: PipelineStore = Depends(get_pipeline_store),
 ) -> dict[str, Any]:
+    strict_identity = _strict_pipeline_identity_or_none(
+        store,
+        source=source,
+        cycle_time=cycle_time,
+        run_id=run_id,
+        model_id=model_id,
+        raw_fields=set(request.query_params),
+        trigger_fields=set(_STRICT_IDENTITY_FIELDS),
+    )
     job = store.get_job(job_id)
     if job is None:
         raise ApiError(
@@ -361,6 +445,9 @@ def job_logs(
             message="Pipeline job was not found.",
             details={"job_id": job_id},
         )
+
+    if strict_identity is not None:
+        _raise_if_job_identity_mismatch(store, job, strict_identity)
 
     try:
         log_result = _artifact_reader_for_request(request).read_text_tail(job.log_uri)
@@ -1151,7 +1238,7 @@ def _fetch_forecast_cycle_or_404(
             status_code=404,
             code="PIPELINE_CYCLE_NOT_FOUND",
             message="No forecast cycle found for the requested source and cycle_time.",
-            details={"source": source, "cycle_time": cycle_time.isoformat(), "cycle_id": cycle_id},
+            details=_bounded_mapping({"source": source, "cycle_time": cycle_time.isoformat(), "cycle_id": cycle_id}),
         )
     return cycle
 
@@ -1160,6 +1247,381 @@ def _source_aliases_for_query(source: str) -> list[str]:
     normalized = _normalize_source_for_query(source)
     aliases = {source, normalized, normalized.upper(), normalized.lower()}
     return sorted(alias for alias in aliases if alias)
+
+
+def _require_source_cycle_for_non_strict(*, source: str | None, cycle_time: str | None) -> tuple[str, str]:
+    missing_details: list[dict[str, Any]] = []
+    if source is None:
+        missing_details.append({"field": "query.source", "rejected_value": None, "reason": "Field required"})
+    if cycle_time is None:
+        missing_details.append({"field": "query.cycle_time", "rejected_value": None, "reason": "Field required"})
+    if missing_details:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Request validation failed.",
+            details=missing_details,
+        )
+    return source, cycle_time
+
+
+def _strict_pipeline_identity_or_none(
+    store: PipelineStore,
+    *,
+    source: str | None,
+    cycle_time: str | None,
+    run_id: str | None,
+    model_id: str | None,
+    raw_fields: set[str],
+    trigger_fields: set[str],
+) -> _StrictPipelineIdentity | None:
+    fields = {
+        "source": source,
+        "cycle_time": cycle_time,
+        "run_id": run_id,
+        "model_id": model_id,
+    }
+    if not (raw_fields & trigger_fields):
+        return None
+
+    missing_fields = [
+        field
+        for field, value in fields.items()
+        if field not in raw_fields or value is None or str(value).strip() == ""
+    ]
+    if missing_fields:
+        provided_fields = [
+            field
+            for field, value in fields.items()
+            if field in raw_fields and value is not None and str(value).strip() != ""
+        ]
+        details: dict[str, Any] = {
+            "missing_fields": missing_fields,
+            "provided_fields": provided_fields,
+            "required_fields": list(_STRICT_IDENTITY_FIELDS),
+            "strict_identity_required": True,
+        }
+        rejected_values = {
+            field: _bounded_reflected_value(value)
+            for field, value in fields.items()
+            if field in raw_fields and value is not None and (str(value).strip() == "" or _is_overlong_reflected(value))
+        }
+        if rejected_values:
+            details["rejected_values"] = rejected_values
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="source, cycle_time, run_id, and model_id are required when using strict pipeline identity.",
+            details=details,
+        )
+
+    normalized_source = _normalize_source_for_strict(source)
+    parsed_cycle_time = _parse_strict_cycle_time(cycle_time)
+    run_id_text = _validate_strict_text_field("run_id", run_id)
+    model_id_text = _validate_strict_text_field("model_id", model_id)
+    cycle_id = _cycle_id_for_source(normalized_source, parsed_cycle_time)
+    requested = _StrictPipelineIdentity(
+        source=str(source),
+        source_id=normalized_source,
+        cycle_time=parsed_cycle_time,
+        cycle_id=cycle_id,
+        run_id=run_id_text,
+        model_id=model_id_text,
+    )
+    return _resolve_strict_pipeline_identity(store, requested)
+
+
+def _normalize_source_for_strict(value: str | None) -> str:
+    try:
+        return _normalize_source_for_query(str(value))
+    except ApiError as error:
+        if error.code != "INVALID_SOURCE":
+            raise
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="source must be a supported monitoring source.",
+            details={
+                "field": "source",
+                "rejected_value": _bounded_reflected_value(value),
+                "supported_sources": ["GFS", "IFS", "ERA5"],
+            },
+        ) from error
+
+
+def _parse_strict_cycle_time(value: str | None) -> datetime:
+    text_value = str(value or "")
+    if "T" not in text_value and "t" not in text_value:
+        raise _strict_validation_error(
+            field="cycle_time",
+            rejected_value=text_value,
+            reason="cycle_time must be an ISO 8601 timestamp.",
+        )
+    try:
+        return parse_cycle_time(text_value)
+    except ValueError as error:
+        raise _strict_validation_error(
+            field="cycle_time",
+            rejected_value=text_value,
+            reason="cycle_time must be a valid ISO 8601 timestamp.",
+        ) from error
+
+
+def _validate_strict_text_field(field: str, value: str | None) -> str:
+    text_value = str(value or "")
+    if text_value != text_value.strip():
+        raise _strict_validation_error(
+            field=field,
+            rejected_value=text_value,
+            reason=f"{field} must not include leading or trailing whitespace.",
+        )
+    if _is_overlong_reflected(text_value):
+        return text_value
+    return text_value
+
+
+def _strict_validation_error(*, field: str, rejected_value: Any, reason: str) -> ApiError:
+    return ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="Request validation failed.",
+        details={"field": field, "rejected_value": _bounded_reflected_value(rejected_value), "reason": reason},
+    )
+
+
+def _resolve_strict_pipeline_identity(
+    store: PipelineStore,
+    requested: _StrictPipelineIdentity,
+) -> _StrictPipelineIdentity:
+    column_names = _table_columns(store, "hydro_run", "hydro")
+    required_columns = {"run_id", "source_id", "cycle_time", "model_id"}
+    if not required_columns <= column_names:
+        raise ApiError(
+            status_code=404,
+            code="PIPELINE_STRICT_IDENTITY_NOT_FOUND",
+            message="No hydro run found for the requested strict pipeline identity.",
+            details={
+                "strict_identity": True,
+                "requested_identity": _requested_identity_payload(requested),
+                "reason": "run_not_found",
+            },
+        )
+
+    row = _hydro_run_row_for_strict_identity(store, requested)
+    if row is not None:
+        return requested
+
+    source_cycle_candidates = _hydro_run_identity_candidates_for_source_cycle(store, requested)
+    reason = "run_model_cycle_source_mismatch" if source_cycle_candidates else "run_not_found"
+    details: dict[str, Any] = {
+        "strict_identity": True,
+        "requested_identity": _requested_identity_payload(requested),
+        "reason": reason,
+    }
+    if source_cycle_candidates:
+        details["candidate_count"] = len(source_cycle_candidates)
+        details["candidate_sample"] = [_candidate_identity_payload(candidate) for candidate in source_cycle_candidates]
+    raise ApiError(
+        status_code=404,
+        code="PIPELINE_STRICT_IDENTITY_NOT_FOUND",
+        message="No hydro run found for the requested strict pipeline identity.",
+        details=details,
+    )
+
+
+def _hydro_run_row_for_strict_identity(
+    store: PipelineStore,
+    identity: _StrictPipelineIdentity,
+) -> dict[str, Any] | None:
+    source_aliases = _source_aliases_for_query(identity.source_id)
+    bind_names = [f"source_{index}" for index, _source in enumerate(source_aliases)]
+    source_placeholders = ", ".join(f":{name}" for name in bind_names)
+    params: dict[str, Any] = {
+        "run_id": identity.run_id,
+        "cycle_time": identity.cycle_time,
+        "model_id": identity.model_id,
+        **dict(zip(bind_names, source_aliases, strict=True)),
+    }
+    try:
+        row = (
+            store.session.execute(
+                text(
+                    f"""
+                    SELECT run_id, source_id, cycle_time, model_id
+                    FROM hydro.hydro_run
+                    WHERE run_id = :run_id
+                      AND source_id IN ({source_placeholders})
+                      AND cycle_time = :cycle_time
+                      AND model_id = :model_id
+                    LIMIT 1
+                    """
+                ),
+                params,
+            )
+            .mappings()
+            .first()
+        )
+    except SQLAlchemyError as error:
+        raise ApiError(
+            status_code=500,
+            code="PIPELINE_STRICT_IDENTITY_QUERY_FAILED",
+            message="Failed to query hydro run identity.",
+            details={
+                "strict_identity": True,
+                "requested_identity": _requested_identity_payload(identity),
+            },
+        ) from error
+    return dict(row) if row is not None else None
+
+
+def _hydro_run_identity_candidates_for_source_cycle(
+    store: PipelineStore,
+    identity: _StrictPipelineIdentity,
+) -> list[dict[str, Any]]:
+    source_aliases = _source_aliases_for_query(identity.source_id)
+    bind_names = [f"source_{index}" for index, _source in enumerate(source_aliases)]
+    source_placeholders = ", ".join(f":{name}" for name in bind_names)
+    params: dict[str, Any] = {
+        "cycle_time": identity.cycle_time,
+        "limit": _STRICT_CANDIDATE_SAMPLE_LIMIT,
+        **dict(zip(bind_names, source_aliases, strict=True)),
+    }
+    try:
+        rows = store.session.execute(
+            text(
+                f"""
+                SELECT run_id, source_id, cycle_time, model_id
+                FROM hydro.hydro_run
+                WHERE source_id IN ({source_placeholders})
+                  AND cycle_time = :cycle_time
+                ORDER BY run_id ASC, model_id ASC
+                LIMIT :limit
+                """
+            ),
+            params,
+        ).mappings()
+    except SQLAlchemyError:
+        return []
+    return [dict(row) for row in rows]
+
+
+def _where_strict_identity(statement: Any, identity: _StrictPipelineIdentity) -> Any:
+    return statement.where(
+        PipelineJob.cycle_id == identity.cycle_id,
+        PipelineJob.run_id == identity.run_id,
+        PipelineJob.model_id == identity.model_id,
+    )
+
+
+def _raise_if_job_identity_mismatch(
+    store: PipelineStore,
+    job: PipelineJob,
+    identity: _StrictPipelineIdentity,
+) -> None:
+    if job.cycle_id == identity.cycle_id and job.run_id == identity.run_id and job.model_id == identity.model_id:
+        return
+    raise ApiError(
+        status_code=409,
+        code="PIPELINE_STRICT_IDENTITY_MISMATCH",
+        message="Pipeline job does not match the requested strict pipeline identity.",
+        details={
+            "strict_identity": True,
+            "requested_identity": _requested_identity_payload(identity),
+            "actual_identity": _actual_job_identity_payload(store, job),
+            "reason": "job_identity_mismatch",
+        },
+    )
+
+
+def _actual_job_identity_payload(store: PipelineStore, job: PipelineJob) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "job_id": _bounded_reflected_value(job.job_id),
+        "run_id": _bounded_reflected_value(job.run_id),
+        "model_id": _bounded_reflected_value(job.model_id),
+        "cycle_id": _bounded_reflected_value(job.cycle_id),
+    }
+    source_id, cycle_time = _source_cycle_for_job(store, job)
+    if source_id is not None:
+        payload["source_id"] = _bounded_reflected_value(source_id)
+    if cycle_time is not None:
+        payload["cycle_time"] = cycle_time.isoformat()
+    return payload
+
+
+def _source_cycle_for_job(store: PipelineStore, job: PipelineJob) -> tuple[str | None, datetime | None]:
+    if not job.run_id:
+        return (None, None)
+    column_names = _table_columns(store, "hydro_run", "hydro")
+    selected_columns = ["run_id"]
+    if "source_id" in column_names:
+        selected_columns.append("source_id")
+    if "cycle_time" in column_names:
+        selected_columns.append("cycle_time")
+    if len(selected_columns) == 1:
+        return (None, None)
+    try:
+        row = (
+            store.session.execute(
+                text(
+                    f"""
+                    SELECT {", ".join(selected_columns)}
+                    FROM hydro.hydro_run
+                    WHERE run_id = :run_id
+                    LIMIT 1
+                    """
+                ),
+                {"run_id": job.run_id},
+            )
+            .mappings()
+            .first()
+        )
+    except SQLAlchemyError:
+        return (None, None)
+    if row is None:
+        return (None, None)
+    return (
+        str(row["source_id"]) if row.get("source_id") is not None else None,
+        _coerce_datetime(row.get("cycle_time")),
+    )
+
+
+def _requested_identity_payload(identity: _StrictPipelineIdentity) -> dict[str, Any]:
+    return {
+        "source": _bounded_reflected_value(identity.source),
+        "source_id": _bounded_reflected_value(identity.source_id),
+        "cycle_time": identity.cycle_time.isoformat(),
+        "run_id": _bounded_reflected_value(identity.run_id),
+        "model_id": _bounded_reflected_value(identity.model_id),
+    }
+
+
+def _candidate_identity_payload(row: dict[str, Any]) -> dict[str, Any]:
+    cycle_time = _coerce_datetime(row.get("cycle_time"))
+    return _bounded_mapping(
+        {
+            "source_id": row.get("source_id"),
+            "cycle_time": cycle_time.isoformat() if cycle_time is not None else row.get("cycle_time"),
+            "run_id": row.get("run_id"),
+            "model_id": row.get("model_id"),
+        }
+    )
+
+
+def _bounded_mapping(values: dict[str, Any]) -> dict[str, Any]:
+    return {key: _bounded_reflected_value(value) for key, value in values.items()}
+
+
+def _bounded_reflected_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= _STRICT_REFLECTED_VALUE_LIMIT:
+        return text
+    return f"{text[: _STRICT_REFLECTED_VALUE_LIMIT - 3]}..."
+
+
+def _is_overlong_reflected(value: Any) -> bool:
+    return len(str(value)) > _STRICT_REFLECTED_VALUE_LIMIT
 
 
 def _run_ids_matching_filters(
@@ -1271,6 +1733,34 @@ def _job_count_summary(store: PipelineStore, cycle_id: str) -> dict[str, int]:
     return counts
 
 
+def _job_count_summary_for_strict_identity(
+    store: PipelineStore,
+    identity: _StrictPipelineIdentity | None,
+) -> dict[str, int]:
+    if identity is None:
+        return {"succeeded": 0, "failed": 0, "running": 0, "pending": 0}
+
+    counts = {"succeeded": 0, "failed": 0, "running": 0, "pending": 0}
+    failed_statuses = _FAILED_JOB_STATUSES | {"partially_failed"}
+    rows = store.session.execute(
+        select(PipelineJob.status, func.count())
+        .where(PipelineJob.cycle_id == identity.cycle_id)
+        .where(PipelineJob.run_id == identity.run_id)
+        .where(PipelineJob.model_id == identity.model_id)
+        .group_by(PipelineJob.status)
+    )
+    for status, count in rows:
+        if status == "succeeded":
+            counts["succeeded"] += count
+        elif status in failed_statuses:
+            counts["failed"] += count
+        elif status in {"running", "submitted"}:
+            counts["running"] += count
+        else:
+            counts["pending"] += count
+    return counts
+
+
 def _job_sort_clauses(
     store: PipelineStore,
     sort_by: Literal["submitted_at", "duration_seconds"],
@@ -1340,6 +1830,48 @@ def _stage_summaries(store: PipelineStore, cycle_id: str) -> list[dict[str, Any]
     return summaries
 
 
+def _stage_summaries_for_strict_identity(
+    store: PipelineStore,
+    identity: _StrictPipelineIdentity,
+) -> list[dict[str, Any]]:
+    stats_by_stage = _stage_stats_by_strict_identity(store, identity)
+    samples_by_stage = _stage_result_samples_by_strict_identity(store, identity)
+
+    stages = list(_STAGE_ORDER)
+    for stage in stats_by_stage:
+        if stage not in stages:
+            stages.append(stage)
+
+    summaries: list[dict[str, Any]] = []
+    previous_failed = False
+    for stage in stages:
+        stats = stats_by_stage.get(stage, _StageStats())
+        stage_jobs = samples_by_stage.get(stage, [])
+        display_status = _stage_display_status(stats.status_counts)
+        if stats.total == 0 and previous_failed:
+            display_status = "skipped"
+        if display_status in {"failed", "partially_failed"}:
+            previous_failed = True
+        basin_results_total = stats.total
+        basin_results_returned = len(stage_jobs)
+
+        summaries.append(
+            {
+                "stage": stage,
+                "display_status": display_status,
+                "status": display_status,
+                "duration_seconds": _duration_seconds(stats.started_at, stats.finished_at),
+                "basin_progress": _basin_progress(stats),
+                "basin_results_limit": PIPELINE_STAGE_BASIN_RESULTS_LIMIT,
+                "basin_results_total": basin_results_total,
+                "basin_results_returned": basin_results_returned,
+                "basin_results_truncated": basin_results_returned < basin_results_total,
+                "basin_results": [_basin_result(job) for job in stage_jobs],
+            }
+        )
+    return summaries
+
+
 def _stage_stats_by_cycle(store: PipelineStore, cycle_id: str) -> dict[str, _StageStats]:
     stats_by_stage: dict[str, _StageStats] = {}
     latest_jobs = _latest_stage_truth_job_ids_by_cycle(cycle_id)
@@ -1354,6 +1886,43 @@ def _stage_stats_by_cycle(store: PipelineStore, cycle_id: str) -> dict[str, _Sta
         .join(latest_jobs, PipelineJob.job_id == latest_jobs.c.job_id)
         .where(latest_jobs.c.truth_row_number == 1)
         .where(PipelineJob.cycle_id == cycle_id)
+        .where(PipelineJob.stage.is_not(None))
+        .group_by(PipelineJob.stage, PipelineJob.status)
+    )
+    for stage, status, count, started_at, finished_at in rows:
+        if stage is None:
+            continue
+        stats = stats_by_stage.setdefault(str(stage), _StageStats())
+        status_text = str(status)
+        count_int = int(count)
+        stats.total += count_int
+        stats.status_counts[status_text] = stats.status_counts.get(status_text, 0) + count_int
+        if started_at is not None and (stats.started_at is None or started_at < stats.started_at):
+            stats.started_at = started_at
+        if finished_at is not None and (stats.finished_at is None or finished_at > stats.finished_at):
+            stats.finished_at = finished_at
+    return stats_by_stage
+
+
+def _stage_stats_by_strict_identity(
+    store: PipelineStore,
+    identity: _StrictPipelineIdentity,
+) -> dict[str, _StageStats]:
+    stats_by_stage: dict[str, _StageStats] = {}
+    latest_jobs = _latest_stage_truth_job_ids_by_strict_identity(identity)
+    rows = store.session.execute(
+        select(
+            PipelineJob.stage,
+            PipelineJob.status,
+            func.count(),
+            func.min(PipelineJob.started_at),
+            func.max(PipelineJob.finished_at),
+        )
+        .join(latest_jobs, PipelineJob.job_id == latest_jobs.c.job_id)
+        .where(latest_jobs.c.truth_row_number == 1)
+        .where(PipelineJob.cycle_id == identity.cycle_id)
+        .where(PipelineJob.run_id == identity.run_id)
+        .where(PipelineJob.model_id == identity.model_id)
         .where(PipelineJob.stage.is_not(None))
         .group_by(PipelineJob.stage, PipelineJob.status)
     )
@@ -1409,6 +1978,48 @@ def _stage_result_samples_by_cycle(store: PipelineStore, cycle_id: str) -> dict[
     return samples_by_stage
 
 
+def _stage_result_samples_by_strict_identity(
+    store: PipelineStore,
+    identity: _StrictPipelineIdentity,
+) -> dict[str, list[PipelineJob]]:
+    latest_jobs = _latest_stage_truth_job_ids_by_strict_identity(identity)
+    ranked_jobs = (
+        select(
+            PipelineJob.job_id.label("job_id"),
+            func.row_number()
+            .over(
+                partition_by=PipelineJob.stage,
+                order_by=(PipelineJob.submitted_at.asc(), PipelineJob.created_at.asc(), PipelineJob.job_id.asc()),
+            )
+            .label("stage_row_number"),
+        )
+        .join(latest_jobs, PipelineJob.job_id == latest_jobs.c.job_id)
+        .where(latest_jobs.c.truth_row_number == 1)
+        .where(PipelineJob.cycle_id == identity.cycle_id)
+        .where(PipelineJob.run_id == identity.run_id)
+        .where(PipelineJob.model_id == identity.model_id)
+        .where(PipelineJob.stage.is_not(None))
+        .subquery()
+    )
+    statement = (
+        select(PipelineJob)
+        .join(ranked_jobs, PipelineJob.job_id == ranked_jobs.c.job_id)
+        .where(ranked_jobs.c.stage_row_number <= PIPELINE_STAGE_BASIN_RESULTS_LIMIT)
+        .order_by(
+            PipelineJob.stage.asc(),
+            PipelineJob.submitted_at.asc(),
+            PipelineJob.created_at.asc(),
+            PipelineJob.job_id.asc(),
+        )
+    )
+    samples_by_stage: dict[str, list[PipelineJob]] = defaultdict(list)
+    for job in store.session.scalars(statement):
+        if job.stage is None:
+            continue
+        samples_by_stage[str(job.stage)].append(job)
+    return samples_by_stage
+
+
 def _latest_stage_truth_job_ids_by_cycle(cycle_id: str) -> Any:
     logical_run_id = func.coalesce(func.nullif(PipelineJob.run_id, ""), PipelineJob.job_id)
     return (
@@ -1422,6 +2033,26 @@ def _latest_stage_truth_job_ids_by_cycle(cycle_id: str) -> Any:
             .label("truth_row_number"),
         )
         .where(PipelineJob.cycle_id == cycle_id)
+        .where(PipelineJob.stage.is_not(None))
+        .subquery()
+    )
+
+
+def _latest_stage_truth_job_ids_by_strict_identity(identity: _StrictPipelineIdentity) -> Any:
+    logical_run_id = func.coalesce(func.nullif(PipelineJob.run_id, ""), PipelineJob.job_id)
+    return (
+        select(
+            PipelineJob.job_id.label("job_id"),
+            func.row_number()
+            .over(
+                partition_by=(PipelineJob.cycle_id, PipelineJob.stage, logical_run_id, PipelineJob.model_id),
+                order_by=_latest_stage_truth_order(descending=True),
+            )
+            .label("truth_row_number"),
+        )
+        .where(PipelineJob.cycle_id == identity.cycle_id)
+        .where(PipelineJob.run_id == identity.run_id)
+        .where(PipelineJob.model_id == identity.model_id)
         .where(PipelineJob.stage.is_not(None))
         .subquery()
     )
