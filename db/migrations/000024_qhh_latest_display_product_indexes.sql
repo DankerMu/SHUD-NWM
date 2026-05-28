@@ -3,6 +3,9 @@ CREATE INDEX IF NOT EXISTS hydro_run_qhh_latest_candidate_idx
   WHERE cycle_time IS NOT NULL
     AND status IN ('frequency_done', 'published');
 
+CREATE INDEX IF NOT EXISTS hydro_run_ops_strict_identity_candidates_idx
+  ON hydro.hydro_run (source_id, cycle_time, run_id, model_id);
+
 CREATE INDEX IF NOT EXISTS basin_version_qhh_latest_lookup_idx
   ON core.basin_version (basin_id, basin_version_id);
 

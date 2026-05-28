@@ -994,6 +994,214 @@ def test_strict_ops_identity_scopes_status_stages_jobs_and_logs_to_single_run(tm
     )
 
 
+def test_jobs_model_id_without_run_id_requires_full_strict_identity_before_fallback() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "model_id": "model_selected",
+                },
+            )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "VALIDATION_ERROR"
+    assert error["details"] == {
+        "missing_fields": ["run_id"],
+        "provided_fields": ["source", "cycle_time", "model_id"],
+        "required_fields": ["source", "cycle_time", "run_id", "model_id"],
+        "strict_identity_required": True,
+    }
+
+
+def test_strict_jobs_do_not_mix_same_model_sibling_runs() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_shared",
+        )
+        _insert_hydro_run(
+            store,
+            "run_sibling",
+            status="failed",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_shared",
+        )
+        _create_job(
+            store,
+            job_id="job_selected_shared_model",
+            run_id="run_selected",
+            cycle_id=cycle_id,
+            model_id="model_shared",
+        )
+        _create_job(
+            store,
+            job_id="job_sibling_shared_model",
+            run_id="run_sibling",
+            cycle_id=cycle_id,
+            model_id="model_shared",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run_selected",
+                    "model_id": "model_shared",
+                },
+            )
+
+    assert response.status_code == 200
+    page = response.json()["data"]
+    assert page["total"] == 1
+    assert [job["job_id"] for job in page["items"]] == ["job_selected_shared_model"]
+
+
+def test_strict_jobs_require_matching_forecast_cycle_source_of_truth() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_selected",
+        )
+        _create_job(
+            store,
+            job_id="job_selected_without_cycle",
+            run_id="run_selected",
+            cycle_id=cycle_id,
+            model_id="model_selected",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run_selected",
+                    "model_id": "model_selected",
+                },
+            )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "PIPELINE_CYCLE_NOT_FOUND"
+
+
+def test_strict_pipeline_status_reports_selected_hydro_state_not_aggregate_cycle_state() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS", current_state="published")
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="failed",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_selected",
+        )
+        _insert_hydro_run(
+            store,
+            "run_sibling",
+            status="published",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_sibling",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/pipeline/status",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run_selected",
+                    "model_id": "model_selected",
+                },
+            )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["current_state"] == "failed"
+    assert data["current_state"] != "published"
+    assert data["started_at"] is not None
+    assert data["updated_at"] is not None
+
+
+def test_strict_jobs_run_filters_do_not_materialize_broad_matching_run_ids() -> None:
+    with _store(hydro_run_shape="full") as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        _insert_hydro_run(
+            store,
+            "run_selected",
+            status="succeeded",
+            source_id="gfs",
+            cycle_time=cycle_time,
+            model_id="model_selected",
+            run_type="forecast",
+            scenario_id="deterministic",
+        )
+        _create_job(
+            store,
+            job_id="job_selected",
+            run_id="run_selected",
+            cycle_id=cycle_id,
+            model_id="model_selected",
+        )
+        captured_sql: list[str] = []
+
+        @event.listens_for(store.session.get_bind(), "before_cursor_execute")
+        def _capture_sql(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+            captured_sql.append(" ".join(str(statement).lower().split()))
+
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run_selected",
+                    "model_id": "model_selected",
+                    "run_type": "forecast",
+                    "scenario": "deterministic",
+                },
+            )
+
+        event.remove(store.session.get_bind(), "before_cursor_execute", _capture_sql)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["total"] == 1
+    assert not any(
+        "select run_id from hydro.hydro_run where run_type = ?" in statement
+        or "select run_id from hydro.hydro_run where run_type = :run_type" in statement
+        for statement in captured_sql
+    )
+    assert any(
+        "select run_id from hydro.hydro_run where run_id =" in statement
+        and "run_type =" in statement
+        and "scenario_id =" in statement
+        for statement in captured_sql
+    )
+
+
 def test_strict_ops_identity_rejects_partial_before_source_cycle_lookup() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
@@ -1003,19 +1211,30 @@ def test_strict_ops_identity_rejects_partial_before_source_cycle_lookup() -> Non
                 params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "run_id": "run_only"},
             )
             jobs_response = client.get("/api/v1/jobs", params={"run_id": "run_only"})
+            jobs_model_response = client.get("/api/v1/jobs", params={"model_id": "model_only"})
 
-    for candidate in (response, jobs_response):
+    for candidate in (response, jobs_response, jobs_model_response):
         assert candidate.status_code == 422
         error = candidate.json()["error"]
         assert error["code"] == "VALIDATION_ERROR"
-        assert error["details"] == {
-            "missing_fields": ["model_id"]
-            if candidate is response
-            else ["source", "cycle_time", "model_id"],
-            "provided_fields": ["source", "cycle_time", "run_id"] if candidate is response else ["run_id"],
-            "required_fields": ["source", "cycle_time", "run_id", "model_id"],
-            "strict_identity_required": True,
-        }
+    assert response.json()["error"]["details"] == {
+        "missing_fields": ["model_id"],
+        "provided_fields": ["source", "cycle_time", "run_id"],
+        "required_fields": ["source", "cycle_time", "run_id", "model_id"],
+        "strict_identity_required": True,
+    }
+    assert jobs_response.json()["error"]["details"] == {
+        "missing_fields": ["source", "cycle_time", "model_id"],
+        "provided_fields": ["run_id"],
+        "required_fields": ["source", "cycle_time", "run_id", "model_id"],
+        "strict_identity_required": True,
+    }
+    assert jobs_model_response.json()["error"]["details"] == {
+        "missing_fields": ["source", "cycle_time", "run_id"],
+        "provided_fields": ["model_id"],
+        "required_fields": ["source", "cycle_time", "run_id", "model_id"],
+        "strict_identity_required": True,
+    }
 
 
 def test_strict_ops_identity_reports_bounded_blank_and_overlong_values() -> None:
@@ -1042,6 +1261,53 @@ def test_strict_ops_identity_reports_bounded_blank_and_overlong_values() -> None
     assert details["rejected_values"]["source"] == f"{' ' * 61}..."
     assert details["rejected_values"]["model_id"] == f"{long_model_id[:61]}..."
     assert long_model_id not in response.text
+
+
+def test_strict_ops_identity_rejects_overlong_run_and_model_before_db_lookup(monkeypatch: Any) -> None:
+    def forbidden_resolve(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("strict overlong identity must be rejected before DB lookup")
+
+    monkeypatch.setattr(pipeline_routes, "_resolve_strict_pipeline_identity", forbidden_resolve)
+    long_run_id = "run-" + ("r" * 200)
+    long_model_id = "model-" + ("m" * 200)
+    with _store() as store:
+        cycle_time = _cycle_time()
+        with _client(store) as client:
+            run_response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": long_run_id,
+                    "model_id": "model-1",
+                },
+            )
+            model_response = client.get(
+                "/api/v1/jobs",
+                params={
+                    "source": "GFS",
+                    "cycle_time": cycle_time.isoformat(),
+                    "run_id": "run-1",
+                    "model_id": long_model_id,
+                },
+            )
+
+    assert run_response.status_code == 422
+    assert run_response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert run_response.json()["error"]["details"] == {
+        "field": "run_id",
+        "rejected_value": f"{long_run_id[:61]}...",
+        "reason": "run_id must be at most 128 characters.",
+    }
+    assert long_run_id not in run_response.text
+    assert model_response.status_code == 422
+    assert model_response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert model_response.json()["error"]["details"] == {
+        "field": "model_id",
+        "rejected_value": f"{long_model_id[:61]}...",
+        "reason": "model_id must be at most 128 characters.",
+    }
+    assert long_model_id not in model_response.text
 
 
 def test_strict_ops_identity_rejects_unsupported_source_and_date_only_cycle() -> None:
@@ -2453,7 +2719,7 @@ def test_error_response_wrapper() -> None:
         assert response.json()["error"]["code"] == "JOB_NOT_FOUND"
 
 
-def _store(*, forecast_cycle_shape: str = "current") -> "_ClosingStore":
+def _store(*, forecast_cycle_shape: str = "current", hydro_run_shape: str = "minimal") -> "_ClosingStore":
     engine = create_engine(
         "sqlite://",
         future=True,
@@ -2497,21 +2763,42 @@ def _store(*, forecast_cycle_shape: str = "current") -> "_ClosingStore":
                     """
                 )
             )
-        connection.execute(
-            text(
-                """
-                CREATE TABLE hydro.hydro_run (
-                    run_id TEXT PRIMARY KEY,
-                    source_id TEXT,
-                    cycle_time DATETIME,
-                    model_id TEXT,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    error_code TEXT,
-                    error_message TEXT
+        if hydro_run_shape == "full":
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE hydro.hydro_run (
+                        run_id TEXT PRIMARY KEY,
+                        run_type TEXT,
+                        scenario_id TEXT,
+                        source_id TEXT,
+                        cycle_time DATETIME,
+                        model_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        start_time DATETIME,
+                        updated_at DATETIME,
+                        error_code TEXT,
+                        error_message TEXT
+                    )
+                    """
                 )
-                """
             )
-        )
+        else:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE hydro.hydro_run (
+                        run_id TEXT PRIMARY KEY,
+                        source_id TEXT,
+                        cycle_time DATETIME,
+                        model_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending',
+                        error_code TEXT,
+                        error_message TEXT
+                    )
+                    """
+                )
+            )
     return _ClosingStore(Session(engine))
 
 
@@ -2720,6 +3007,8 @@ def _insert_hydro_run(
     source_id: str = "gfs",
     cycle_time: datetime | None = None,
     model_id: str = "model_a",
+    run_type: str = "forecast",
+    scenario_id: str = "deterministic",
 ) -> None:
     column_names = {
         column["name"] for column in inspect(store.session.get_bind()).get_columns("hydro_run", schema="hydro")
@@ -2734,6 +3023,14 @@ def _insert_hydro_run(
         values["cycle_time"] = cycle_time or _cycle_time()
     if "model_id" in column_names:
         values["model_id"] = model_id
+    if "run_type" in column_names:
+        values["run_type"] = run_type
+    if "scenario_id" in column_names:
+        values["scenario_id"] = scenario_id
+    if "start_time" in column_names:
+        values["start_time"] = cycle_time or _cycle_time()
+    if "updated_at" in column_names:
+        values["updated_at"] = (cycle_time or _cycle_time()) + timedelta(minutes=10)
     columns = list(values)
     store.session.execute(
         text(

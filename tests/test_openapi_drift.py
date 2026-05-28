@@ -275,6 +275,25 @@ def test_ops_runtime_openapi_matches_static_success_schema(
         assert runtime_spec["components"]["schemas"][schema_name] == static_spec["components"]["schemas"][schema_name]
 
 
+def test_ops_strict_identity_parameters_publish_explicit_length_bounds() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    runtime_spec: dict[str, Any] = app.openapi()
+    strict_paths = (
+        "/api/v1/pipeline/status",
+        "/api/v1/pipeline/stages",
+        "/api/v1/jobs",
+        "/api/v1/jobs/{job_id}/logs",
+    )
+
+    for spec in (static_spec, runtime_spec):
+        for path in strict_paths:
+            run_id = _operation_parameter(spec, path, "get", "query", "run_id")
+            model_id = _operation_parameter(spec, path, "get", "query", "model_id")
+            assert run_id["schema"] == {"type": "string", "maxLength": 128}
+            assert model_id["schema"] == {"type": "string", "maxLength": 128}
+
+
 def test_runtime_config_runtime_openapi_matches_static_contract() -> None:
     static_spec = _openapi_spec()
     app.openapi_schema = None

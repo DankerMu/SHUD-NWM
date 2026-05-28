@@ -416,7 +416,23 @@ def test_pipeline_ops_strict_identity_query_contract() -> None:
     assert "source: components[\"parameters\"][\"SourceQueryRequired\"];" in stages_types
     assert "cycle_time: components[\"parameters\"][\"CycleTimeQueryRequired\"];" in stages_types
     assert "source?: components[\"parameters\"][\"SourceQuery\"];" in logs_types
-    assert "model_id?: components[\"parameters\"][\"ModelIdQuery\"];" in logs_types
+    assert "model_id?: string;" in logs_types
+    assert spec["components"]["parameters"]["RunIdQueryOptional"]["schema"] == {
+        "type": "string",
+        "maxLength": 128,
+    }
+    for path in (
+        "/api/v1/pipeline/status",
+        "/api/v1/pipeline/stages",
+        "/api/v1/jobs",
+        "/api/v1/jobs/{job_id}/logs",
+    ):
+        model_id = next(
+            parameter
+            for parameter in paths[path]["get"]["parameters"]
+            if parameter.get("name") == "model_id"
+        )
+        assert model_id["schema"] == {"type": "string", "maxLength": 128}
 
 
 def _parameter_names(operation: dict[str, Any], spec: dict[str, Any]) -> list[str]:

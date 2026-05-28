@@ -1068,7 +1068,12 @@ paths:
         - $ref: "#/components/parameters/SourceQueryRequired"
         - $ref: "#/components/parameters/CycleTimeQueryRequired"
         - $ref: "#/components/parameters/RunIdQueryOptional"
-        - $ref: "#/components/parameters/ModelIdQuery"
+        - name: model_id
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 128
       responses:
         "200":
           description: Pipeline status
@@ -1095,7 +1100,12 @@ paths:
         - $ref: "#/components/parameters/SourceQueryRequired"
         - $ref: "#/components/parameters/CycleTimeQueryRequired"
         - $ref: "#/components/parameters/RunIdQueryOptional"
-        - $ref: "#/components/parameters/ModelIdQuery"
+        - name: model_id
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 128
       responses:
         "200":
           description: Pipeline stage list
@@ -1129,7 +1139,12 @@ paths:
           required: false
           schema:
             type: string
-        - $ref: "#/components/parameters/ModelIdQuery"
+        - name: model_id
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 128
         - name: stage
           in: query
           required: false
@@ -1201,7 +1216,12 @@ paths:
         - $ref: "#/components/parameters/SourceQuery"
         - $ref: "#/components/parameters/CycleTimeQuery"
         - $ref: "#/components/parameters/RunIdQueryOptional"
-        - $ref: "#/components/parameters/ModelIdQuery"
+        - name: model_id
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 128
       responses:
         "200":
           description: Pipeline job logs
@@ -1836,6 +1856,7 @@ components:
       required: false
       schema:
         type: string
+        maxLength: 128
     SegmentId:
       name: segment_id
       in: path

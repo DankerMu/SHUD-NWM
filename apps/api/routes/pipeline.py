@@ -74,6 +74,7 @@ _CONTROL_PLANE_MANUAL_ACTION_REQUIRED = "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
 _CONTROL_PLANE_QUEUE_UNAVAILABLE = "CONTROL_PLANE_QUEUE_UNAVAILABLE"
 _STRICT_IDENTITY_FIELDS = ("source", "cycle_time", "run_id", "model_id")
 _STRICT_REFLECTED_VALUE_LIMIT = 64
+PIPELINE_STRICT_IDENTITY_TEXT_MAX_LENGTH = 128
 _STRICT_CANDIDATE_SAMPLE_LIMIT = 5
 
 
@@ -106,6 +107,9 @@ class _StrictPipelineIdentity:
     cycle_id: str
     run_id: str
     model_id: str
+    hydro_status: str | None = None
+    hydro_started_at: datetime | None = None
+    hydro_updated_at: datetime | None = None
 
 
 @lru_cache
@@ -292,9 +296,21 @@ def pipeline_status(
             "cycle_id": resolved_cycle_id,
             "source": cycle.get("source") or source,
             "cycle_time": cycle.get("cycle_time") or parsed_cycle_time,
-            "current_state": cycle["current_state"],
-            "started_at": cycle.get("started_at"),
-            "updated_at": cycle.get("updated_at"),
+            "current_state": (
+                strict_identity.hydro_status
+                if strict_identity is not None and strict_identity.hydro_status is not None
+                else cycle["current_state"]
+            ),
+            "started_at": (
+                strict_identity.hydro_started_at
+                if strict_identity is not None and strict_identity.hydro_started_at is not None
+                else cycle.get("started_at")
+            ),
+            "updated_at": (
+                strict_identity.hydro_updated_at
+                if strict_identity is not None and strict_identity.hydro_updated_at is not None
+                else cycle.get("updated_at")
+            ),
             "job_counts": job_counts,
         },
     )
@@ -368,11 +384,16 @@ def list_jobs(
         run_id=run_id,
         model_id=model_id,
         raw_fields=set(request.query_params),
-        trigger_fields={"run_id"},
+        trigger_fields={"run_id", "model_id"},
     )
 
     if strict_identity is not None:
         statement = _where_strict_identity(statement, strict_identity)
+        _fetch_forecast_cycle_or_404(
+            store,
+            source=strict_identity.source,
+            cycle_time=strict_identity.cycle_time,
+        )
     elif cycle_time is not None:
         parsed_cycle_time = _parse_cycle_time(cycle_time)
         if source is not None:
@@ -392,16 +413,25 @@ def list_jobs(
     if stage is not None:
         statement = statement.where(PipelineJob.stage == stage)
 
-    run_ids = _run_ids_matching_filters(store, run_type=run_type, scenario=scenario)
-    if run_ids is not None:
-        if not run_ids:
+    if strict_identity is not None:
+        if not _strict_identity_matches_run_filters(
+            store,
+            strict_identity,
+            run_type=run_type,
+            scenario=scenario,
+        ):
             return _ok(request, {"items": [], "total": 0, "limit": limit, "offset": offset})
-        statement = statement.where(PipelineJob.run_id.in_(run_ids))
     else:
-        if run_type is not None:
-            statement = statement.where(PipelineJob.run_id.like(f"%{run_type}%"))
-        if scenario is not None:
-            statement = statement.where(PipelineJob.run_id.like(f"%{scenario}%"))
+        run_ids = _run_ids_matching_filters(store, run_type=run_type, scenario=scenario)
+        if run_ids is not None:
+            if not run_ids:
+                return _ok(request, {"items": [], "total": 0, "limit": limit, "offset": offset})
+            statement = statement.where(PipelineJob.run_id.in_(run_ids))
+        else:
+            if run_type is not None:
+                statement = statement.where(PipelineJob.run_id.like(f"%{run_type}%"))
+            if scenario is not None:
+                statement = statement.where(PipelineJob.run_id.like(f"%{scenario}%"))
 
     total = store.session.scalar(select(func.count()).select_from(statement.subquery())) or 0
     statement = statement.order_by(*_job_sort_clauses(store, sort_by, sort_order)).limit(limit).offset(offset)
@@ -1375,8 +1405,12 @@ def _validate_strict_text_field(field: str, value: str | None) -> str:
             rejected_value=text_value,
             reason=f"{field} must not include leading or trailing whitespace.",
         )
-    if _is_overlong_reflected(text_value):
-        return text_value
+    if len(text_value) > PIPELINE_STRICT_IDENTITY_TEXT_MAX_LENGTH:
+        raise _strict_validation_error(
+            field=field,
+            rejected_value=text_value,
+            reason=f"{field} must be at most {PIPELINE_STRICT_IDENTITY_TEXT_MAX_LENGTH} characters.",
+        )
     return text_value
 
 
@@ -1409,7 +1443,7 @@ def _resolve_strict_pipeline_identity(
 
     row = _hydro_run_row_for_strict_identity(store, requested)
     if row is not None:
-        return requested
+        return _strict_identity_from_hydro_row(requested, row)
 
     source_cycle_candidates = _hydro_run_identity_candidates_for_source_cycle(store, requested)
     reason = "run_model_cycle_source_mismatch" if source_cycle_candidates else "run_not_found"
@@ -1433,6 +1467,10 @@ def _hydro_run_row_for_strict_identity(
     store: PipelineStore,
     identity: _StrictPipelineIdentity,
 ) -> dict[str, Any] | None:
+    column_names = _table_columns(store, "hydro_run", "hydro")
+    status_expression = "status" if "status" in column_names else "NULL"
+    started_expression = _first_present_column(column_names, ("start_time", "created_at")) or "NULL"
+    updated_expression = _first_present_column(column_names, ("updated_at", "created_at", "start_time")) or "NULL"
     source_aliases = _source_aliases_for_query(identity.source_id)
     bind_names = [f"source_{index}" for index, _source in enumerate(source_aliases)]
     source_placeholders = ", ".join(f":{name}" for name in bind_names)
@@ -1447,7 +1485,14 @@ def _hydro_run_row_for_strict_identity(
             store.session.execute(
                 text(
                     f"""
-                    SELECT run_id, source_id, cycle_time, model_id
+                    SELECT
+                      run_id,
+                      source_id,
+                      cycle_time,
+                      model_id,
+                      {status_expression} AS status,
+                      {started_expression} AS started_at,
+                      {updated_expression} AS updated_at
                     FROM hydro.hydro_run
                     WHERE run_id = :run_id
                       AND source_id IN ({source_placeholders})
@@ -1472,6 +1517,23 @@ def _hydro_run_row_for_strict_identity(
             },
         ) from error
     return dict(row) if row is not None else None
+
+
+def _strict_identity_from_hydro_row(
+    requested: _StrictPipelineIdentity,
+    row: dict[str, Any],
+) -> _StrictPipelineIdentity:
+    return _StrictPipelineIdentity(
+        source=requested.source,
+        source_id=requested.source_id,
+        cycle_time=requested.cycle_time,
+        cycle_id=requested.cycle_id,
+        run_id=requested.run_id,
+        model_id=requested.model_id,
+        hydro_status=str(row["status"]) if row.get("status") is not None else None,
+        hydro_started_at=_coerce_datetime(row.get("started_at")),
+        hydro_updated_at=_coerce_datetime(row.get("updated_at")),
+    )
 
 
 def _hydro_run_identity_candidates_for_source_cycle(
@@ -1664,6 +1726,65 @@ def _run_ids_matching_filters(
     except SQLAlchemyError:
         return None
     return {str(row["run_id"]) for row in rows if row.get("run_id") is not None}
+
+
+def _strict_identity_matches_run_filters(
+    store: PipelineStore,
+    identity: _StrictPipelineIdentity,
+    *,
+    run_type: str | None,
+    scenario: str | None,
+) -> bool:
+    if run_type is None and scenario is None:
+        return True
+
+    try:
+        inspector = inspect(store.session.get_bind())
+        column_names = {column["name"] for column in inspector.get_columns("hydro_run", schema="hydro")}
+    except (NoSuchTableError, SQLAlchemyError):
+        return _strict_identity_matches_legacy_run_filter_tokens(identity, run_type=run_type, scenario=scenario)
+
+    if "run_id" not in column_names:
+        return _strict_identity_matches_legacy_run_filter_tokens(identity, run_type=run_type, scenario=scenario)
+
+    filters = ["run_id = :run_id"]
+    params: dict[str, str] = {"run_id": identity.run_id}
+    legacy_fallback_tokens: list[str] = []
+    if run_type is not None:
+        if "run_type" in column_names:
+            filters.append("run_type = :run_type")
+            params["run_type"] = run_type
+        else:
+            legacy_fallback_tokens.append(run_type)
+    if scenario is not None:
+        scenario_column = "scenario_id" if "scenario_id" in column_names else "scenario"
+        if scenario_column in column_names:
+            filters.append(f"{scenario_column} = :scenario")
+            params["scenario"] = scenario
+        else:
+            legacy_fallback_tokens.append(scenario)
+
+    try:
+        row = store.session.execute(
+            text(f"SELECT run_id FROM hydro.hydro_run WHERE {' AND '.join(filters)} LIMIT 1"),
+            params,
+        ).first()
+    except SQLAlchemyError:
+        return _strict_identity_matches_legacy_run_filter_tokens(identity, run_type=run_type, scenario=scenario)
+    return row is not None and all(token in identity.run_id for token in legacy_fallback_tokens)
+
+
+def _strict_identity_matches_legacy_run_filter_tokens(
+    identity: _StrictPipelineIdentity,
+    *,
+    run_type: str | None,
+    scenario: str | None,
+) -> bool:
+    if run_type is not None and run_type not in identity.run_id:
+        return False
+    if scenario is not None and scenario not in identity.run_id:
+        return False
+    return True
 
 
 def _run_metadata_by_ids(store: PipelineStore, run_ids: set[str]) -> dict[str, dict[str, str | None]]:

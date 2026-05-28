@@ -455,6 +455,12 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
         "cycle_time DESC",
         "run_id DESC",
     )
+    assert _index_columns_by_name(migration, "hydro_run_ops_strict_identity_candidates_idx") == (
+        "source_id",
+        "cycle_time",
+        "run_id",
+        "model_id",
+    )
     assert "WHERE cycle_time IS NOT NULL" in migration
     assert "AND status IN ('frequency_done', 'published')" in migration
     assert _index_columns_by_name(migration, "basin_version_qhh_latest_lookup_idx") == (
