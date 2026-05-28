@@ -1590,6 +1590,104 @@ def test_static_checker_accepts_full_tree_same_key_alternate_when_it_matches_env
     assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
 
 
+def test_compose_dollar_escape_parser_keeps_escaped_braced_interpolation_literal() -> None:
+    env = {"NHMS_APP_IMAGE": "nhms-app"}
+
+    escaped = "$${NHMS_APP_IMAGE:+wrong}"
+
+    assert docker_runtime._compose_interpolation_occurrences_from_text(escaped) == []
+    assert docker_runtime._compose_interpolation_keys_from_text(escaped) == set()
+    assert docker_runtime._resolve_compose_value(escaped, env) == "${NHMS_APP_IMAGE:+wrong}"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "key", "expected_rendered"),
+    [
+        (
+            "image",
+            "$$${NHMS_APP_IMAGE:+unexpected-display-app}:${NHMS_IMAGE_TAG}",
+            "NHMS_APP_IMAGE",
+            "$unexpected-display-app",
+        ),
+        ("image", "$$$NHMS_APP_IMAGE:${NHMS_IMAGE_TAG}", "NHMS_APP_IMAGE", "$nhms-app"),
+        (
+            "user",
+            "$$${NHMS_CONTAINER_UID:+0}:${NHMS_CONTAINER_GID}",
+            "NHMS_CONTAINER_UID",
+            "$0",
+        ),
+        ("user", "$$$NHMS_CONTAINER_UID:${NHMS_CONTAINER_GID}", "NHMS_CONTAINER_UID", "$1000"),
+    ],
+)
+def test_static_checker_rejects_display_dollar_run_interpolation_drift(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    key: str,
+    expected_rendered: str,
+) -> None:
+    compose = _safe_display_compose()
+    service = compose["services"]["display-api"]
+    display_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/display.example")
+    service[field] = value
+    assert docker_runtime._resolve_compose_value(value, display_env).startswith(expected_rendered)
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "DISPLAY_INTERPOLATION_VALUE_DRIFT"
+        and finding.details["key"] == key
+        and finding.details["rendered_value"] == expected_rendered
+        for finding in result.findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "key", "expected_rendered"),
+    [
+        (
+            "image",
+            "$$${NHMS_APP_IMAGE:+unexpected-compute-app}:${NHMS_IMAGE_TAG}",
+            "NHMS_APP_IMAGE",
+            "$unexpected-compute-app",
+        ),
+        ("image", "$$$NHMS_APP_IMAGE:${NHMS_IMAGE_TAG}", "NHMS_APP_IMAGE", "$nhms-app"),
+        (
+            "user",
+            "$$${NHMS_CONTAINER_UID:+0}:${NHMS_CONTAINER_GID}",
+            "NHMS_CONTAINER_UID",
+            "$0",
+        ),
+        ("user", "$$$NHMS_CONTAINER_UID:${NHMS_CONTAINER_GID}", "NHMS_CONTAINER_UID", "$1000"),
+    ],
+)
+def test_static_checker_rejects_compute_dollar_run_interpolation_drift(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    key: str,
+    expected_rendered: str,
+) -> None:
+    compose = _safe_compute_compose()
+    compute_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")
+    for service in compose["services"].values():
+        service[field] = value
+    assert docker_runtime._resolve_compose_value(value, compute_env).startswith(expected_rendered)
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_INTERPOLATION_VALUE_DRIFT"
+        and finding.details["key"] == key
+        and finding.details["rendered_value"] == expected_rendered
+        for finding in result.findings
+    )
+
+
 @pytest.mark.parametrize(
     "env_key",
     sorted(docker_runtime.DISPLAY_AUDITED_RUNTIME_ENV),

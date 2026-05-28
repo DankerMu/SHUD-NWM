@@ -329,6 +329,15 @@ class ComposeInterpolationOccurrence:
     operator: str | None
     payload: str
     expression: str
+    literal_prefix: str = ""
+
+
+@dataclass(frozen=True)
+class ComposeDollarRunToken:
+    start: int
+    end: int
+    literal_dollars: str
+    occurrence: ComposeInterpolationOccurrence | None = None
 
 
 @dataclass(frozen=True)
@@ -2344,8 +2353,8 @@ def _compose_interpolation_contract_value(
     env: Mapping[str, str],
 ) -> str:
     if occurrence.operator in {":+", "+"}:
-        return _resolve_compose_value(occurrence.payload, env)
-    return _resolve_compose_value(occurrence.expression, env)
+        return occurrence.literal_prefix + _resolve_compose_value(occurrence.payload, env)
+    return occurrence.literal_prefix + _resolve_compose_value(occurrence.expression, env)
 
 
 def _mode_is_readonly(mode: str) -> bool:
@@ -2465,51 +2474,86 @@ def _compose_interpolation_keys_from_text(value: str) -> set[str]:
 
 def _compose_interpolation_occurrences_from_text(value: str) -> list[ComposeInterpolationOccurrence]:
     occurrences: list[ComposeInterpolationOccurrence] = []
+    for token in _compose_dollar_run_tokens(value):
+        if token.occurrence is None:
+            continue
+        occurrences.append(token.occurrence)
+        if token.occurrence.operator is not None and token.occurrence.payload:
+            occurrences.extend(_compose_interpolation_occurrences_from_text(token.occurrence.payload))
+    return occurrences
+
+
+def _compose_dollar_run_tokens(value: str) -> Iterator[ComposeDollarRunToken]:
     index = 0
     while index < len(value):
-        if value[index] != "$" or (index > 0 and value[index - 1] == "$"):
+        if value[index] != "$":
             index += 1
             continue
-        next_index = index + 1
-        if next_index >= len(value):
-            break
-        if value[next_index] == "{":
-            close_index = _find_matching_interpolation_brace(value, next_index)
-            if close_index is None:
-                index += 1
+        run_start = index
+        run_end = index
+        while run_end < len(value) and value[run_end] == "$":
+            run_end += 1
+        run_length = run_end - run_start
+        literal_dollars = "$" * (run_length // 2)
+        if run_length % 2:
+            interpolation_start = run_end - 1
+            occurrence, token_end = _compose_interpolation_from_dollar(value, interpolation_start, literal_dollars)
+            if occurrence is not None:
+                yield ComposeDollarRunToken(
+                    start=run_start,
+                    end=token_end,
+                    literal_dollars=literal_dollars,
+                    occurrence=occurrence,
+                )
+                index = token_end
                 continue
-            payload = value[next_index + 1 : close_index]
-            parsed = _parse_compose_interpolation_payload(payload)
-            if parsed is not None:
-                key, operator, operator_payload = parsed
-                occurrences.append(
-                    ComposeInterpolationOccurrence(
-                        key=key,
-                        operator=operator,
-                        payload=operator_payload,
-                        expression=value[index : close_index + 1],
-                    )
-                )
-                if operator is not None and operator_payload:
-                    occurrences.extend(_compose_interpolation_occurrences_from_text(operator_payload))
-            index = close_index + 1
-            continue
-        if value[next_index].isalpha() or value[next_index] == "_":
-            end = next_index + 1
-            while end < len(value) and (value[end].isalnum() or value[end] == "_"):
-                end += 1
-            occurrences.append(
-                ComposeInterpolationOccurrence(
-                    key=value[next_index:end],
-                    operator=None,
-                    payload="",
-                    expression=value[index:end],
-                )
-            )
-            index = end
-            continue
-        index += 1
-    return occurrences
+            literal_dollars += "$"
+        yield ComposeDollarRunToken(start=run_start, end=run_end, literal_dollars=literal_dollars)
+        index = run_end
+
+
+def _compose_interpolation_from_dollar(
+    value: str,
+    dollar_index: int,
+    literal_prefix: str,
+) -> tuple[ComposeInterpolationOccurrence | None, int]:
+    next_index = dollar_index + 1
+    if next_index >= len(value):
+        return None, next_index
+    if value[next_index] == "{":
+        close_index = _find_matching_interpolation_brace(value, next_index)
+        if close_index is None:
+            return None, next_index
+        payload = value[next_index + 1 : close_index]
+        parsed = _parse_compose_interpolation_payload(payload)
+        if parsed is None:
+            return None, next_index
+        key, operator, operator_payload = parsed
+        return (
+            ComposeInterpolationOccurrence(
+                key=key,
+                operator=operator,
+                payload=operator_payload,
+                expression=value[dollar_index : close_index + 1],
+                literal_prefix=literal_prefix,
+            ),
+            close_index + 1,
+        )
+    if value[next_index].isalpha() or value[next_index] == "_":
+        end = next_index + 1
+        while end < len(value) and (value[end].isalnum() or value[end] == "_"):
+            end += 1
+        return (
+            ComposeInterpolationOccurrence(
+                key=value[next_index:end],
+                operator=None,
+                payload="",
+                expression=value[dollar_index:end],
+                literal_prefix=literal_prefix,
+            ),
+            end,
+        )
+    return None, next_index
 
 
 def _parse_compose_interpolation_payload(payload: str) -> tuple[str, str | None, str] | None:
@@ -2703,45 +2747,26 @@ def _normalize_posix_path(value: str) -> str:
 
 
 def _resolve_compose_value(value: str, env: Mapping[str, str]) -> str:
-    resolved = value
-    for _ in range(4):
-        next_value = _resolve_compose_value_once(resolved, env)
-        if next_value == resolved:
-            return next_value
-        resolved = next_value
-    return resolved
+    return _resolve_compose_value_once(value, env)
 
 
 def _resolve_compose_value_once(value: str, env: Mapping[str, str]) -> str:
     parts: list[str] = []
-    index = 0
-    while index < len(value):
-        if value[index] != "$" or (index > 0 and value[index - 1] == "$"):
-            parts.append(value[index])
-            index += 1
-            continue
-        next_index = index + 1
-        if next_index >= len(value) or value[next_index] != "{":
-            if next_index < len(value) and (value[next_index].isalpha() or value[next_index] == "_"):
-                end = next_index + 1
-                while end < len(value) and (value[end].isalnum() or value[end] == "_"):
-                    end += 1
-                key = value[next_index:end]
-                parts.append(env.get(key, value[index:end]))
-                index = end
-                continue
-            parts.append(value[index])
-            index += 1
-            continue
-        close_index = _find_matching_interpolation_brace(value, next_index)
-        if close_index is None:
-            parts.append(value[index])
-            index += 1
-            continue
-        expression = value[index : close_index + 1]
-        parts.append(_resolve_braced_compose_expression(expression, env))
-        index = close_index + 1
+    cursor = 0
+    for token in _compose_dollar_run_tokens(value):
+        parts.append(value[cursor : token.start])
+        parts.append(token.literal_dollars)
+        if token.occurrence is not None:
+            parts.append(_resolve_compose_occurrence(token.occurrence, env))
+        cursor = token.end
+    parts.append(value[cursor:])
     return "".join(parts)
+
+
+def _resolve_compose_occurrence(occurrence: ComposeInterpolationOccurrence, env: Mapping[str, str]) -> str:
+    if occurrence.expression.startswith("${"):
+        return _resolve_braced_compose_expression(occurrence.expression, env)
+    return env.get(occurrence.key, occurrence.expression)
 
 
 def _resolve_braced_compose_expression(expression: str, env: Mapping[str, str]) -> str:
