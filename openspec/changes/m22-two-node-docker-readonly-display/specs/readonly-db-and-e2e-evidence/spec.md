@@ -22,8 +22,10 @@ The display service SHALL be validated with readonly database credentials for di
 #### Scenario: Write privileges denied
 - **WHEN** readonly DB validation runs against hydro, met, ops, and pipeline-critical tables
 - **THEN** controlled `INSERT`, `UPDATE`, `DELETE`, and DDL probes are rejected by DB permissions or readonly transaction semantics before commit
+- **AND** table-owned or dependent serial/BIGSERIAL/identity sequences for probed tables have no `USAGE` or `UPDATE` privilege under the tested credential
 - **AND** rollback is cleanup only, not proof of readonly behavior
 - **AND** any successful DML or DDL execution under the tested credential is recorded as `FAIL` even if the harness rolls it back
+- **AND** any sequence `USAGE` or `UPDATE` privilege under the tested credential is recorded as `FAIL` without executing `nextval`, `setval`, DML, or DDL
 - **AND** a display PASS cannot be claimed by merely labeling a writer credential as readonly.
 
 ### Requirement: Docker and E2E evidence location

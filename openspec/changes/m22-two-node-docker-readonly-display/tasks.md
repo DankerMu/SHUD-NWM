@@ -66,7 +66,7 @@ Issue ownership note:
 ## 5. Readonly DB Boundary
 
 - [ ] 5.1 Add readonly DB validation tests or runbook commands proving display APIs work with readonly credentials for health, models, stations, latest-product, pipeline status, stages, jobs, logs, and runtime config.
-- [ ] 5.2 Add readonly DB permission-denied probes that record `current_user` and prove controlled `INSERT`, `UPDATE`, `DELETE`, and DDL attempts are rejected before commit for hydro, met, ops, and pipeline-critical tables; successful DML/DDL execution is `FAIL` even when rolled back for cleanup.
+- [ ] 5.2 Add readonly DB permission-denied probes that record `current_user` and prove controlled `INSERT`, `UPDATE`, `DELETE`, and DDL attempts are rejected before commit for hydro, met, ops, and pipeline-critical tables; table-owned/dependent serial/BIGSERIAL/identity sequences must have no `USAGE` or `UPDATE` privilege; successful DML/DDL execution or related sequence mutating privilege is `FAIL`, and sequence privilege detection must not execute `nextval`, `setval`, DML, or DDL.
 - [ ] 5.3 Ensure display retry/cancel returns manual action before any write attempt when using readonly DB credentials.
 - [ ] 5.4 Record readonly DB validation evidence with redacted DSN, DB role type, commands, pass/fail/blocker status, and secret redaction.
 - [ ] 5.5 Add a focused validation entrypoint that reports `BLOCKED` or pytest skip when a real readonly DB URL is absent; it must not claim PASS from mock-only or writer credentials.

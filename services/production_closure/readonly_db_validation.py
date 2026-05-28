@@ -127,6 +127,9 @@ class ReadonlyDbProbeAdapter(Protocol):
     def column_privileges(self, target: ProbeTarget) -> dict[str, list[str]]:
         ...
 
+    def sequence_privileges(self, target: ProbeTarget) -> list[dict[str, Any]]:
+        ...
+
     def schema_privileges(self, schema: str) -> dict[str, bool]:
         ...
 
@@ -430,6 +433,53 @@ class PsycopgReadonlyDbProbeAdapter:
                 privileges["update"].append(column_name)
         return privileges
 
+    def sequence_privileges(self, target: ProbeTarget) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        seq_ns.nspname AS sequence_schema,
+                        seq.relname AS sequence_name,
+                        seq_ns.nspname || '.' || seq.relname AS qualified_name,
+                        array_remove(array_agg(DISTINCT a.attname ORDER BY a.attname), NULL) AS columns,
+                        has_sequence_privilege(current_user, seq.oid, 'USAGE') AS usage,
+                        has_sequence_privilege(current_user, seq.oid, 'UPDATE') AS update
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    JOIN pg_depend d ON d.refobjid = c.oid
+                    JOIN pg_class seq ON seq.oid = d.objid
+                    JOIN pg_namespace seq_ns ON seq_ns.oid = seq.relnamespace
+                    LEFT JOIN pg_attribute a
+                        ON a.attrelid = c.oid
+                       AND a.attnum = d.refobjsubid
+                       AND NOT a.attisdropped
+                    WHERE n.nspname = %s
+                      AND c.relname = %s
+                      AND c.relkind IN ('r', 'p')
+                      AND seq.relkind = 'S'
+                      AND d.classid = 'pg_class'::regclass
+                      AND d.refclassid = 'pg_class'::regclass
+                      AND d.deptype IN ('a', 'i')
+                    GROUP BY seq_ns.nspname, seq.relname, seq.oid
+                    ORDER BY seq_ns.nspname, seq.relname
+                    """,
+                    (target.schema, target.table),
+                )
+                rows = cursor.fetchall()
+        return [
+            {
+                "sequence_schema": str(row["sequence_schema"]),
+                "sequence_name": str(row["sequence_name"]),
+                "qualified_name": str(row["qualified_name"]),
+                "columns": [str(column) for column in (row.get("columns") or [])],
+                "usage": bool(row["usage"]),
+                "update": bool(row["update"]),
+                "mutating_privilege_allowed": bool(row["usage"]) or bool(row["update"]),
+            }
+            for row in rows
+        ]
+
     def schema_privileges(self, schema: str) -> dict[str, bool]:
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -640,7 +690,13 @@ def run_permission_probe_matrix(
     ddl_suffix: str,
 ) -> list[dict[str, Any]]:
     results = [_table_probe_result(adapter, target) for target in PERMISSION_PROBE_TARGETS]
-    results.append(_ddl_probe_result(adapter, ddl_suffix=ddl_suffix))
+    results.append(
+        _ddl_probe_result(
+            adapter,
+            ddl_suffix=ddl_suffix,
+            skip_due_to_sequence_mutating_privilege=_has_sequence_mutating_privilege(results),
+        )
+    )
     return results
 
 
@@ -723,6 +779,7 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
         }
     privileges = adapter.table_privileges(target)
     column_privileges = adapter.column_privileges(target)
+    sequence_privileges = adapter.sequence_privileges(target)
     probe_column = adapter.first_updatable_column(target)
     insert_privilege = _catalog_mutating_privilege(
         privileges,
@@ -739,10 +796,15 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
         column_privileges,
         operation="DELETE",
     )
+    sequence_privilege = _sequence_mutating_privilege(sequence_privileges)
     target_has_catalog_mutating_privilege = any(
-        privilege["allowed"] for privilege in (insert_privilege, update_privilege, delete_privilege)
+        privilege["allowed"]
+        for privilege in (insert_privilege, update_privilege, delete_privilege, sequence_privilege)
     )
-    operations = [
+    operations = []
+    if sequence_privilege["allowed"]:
+        operations.append(_sequence_short_circuit_operation_result(target, sequence_privilege))
+    operations.append(
         _dml_probe_or_blocked(
             adapter,
             target=target,
@@ -757,7 +819,7 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
             privilege=insert_privilege,
             skip_due_to_target_catalog_privilege=target_has_catalog_mutating_privilege,
         )
-    ]
+    )
     operations.append(
         _dml_probe_or_blocked(
             adapter,
@@ -791,6 +853,7 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
         "status": _status_from_children(operations),
         "table_privileges": privileges,
         "column_privileges": column_privileges,
+        "sequence_privileges": sequence_privileges,
         "operations": operations,
     }
 
@@ -825,6 +888,7 @@ def _dml_probe_or_blocked(
             "privilege_allowed": False,
             "table_privilege_allowed": False,
             "column_privilege_allowed": False,
+            "sequence_privilege_allowed": False,
             "execution_outcome": "not_executed",
             "rolled_back": False,
         }
@@ -849,6 +913,7 @@ def _dml_operation_result(
         "privilege_allowed": False,
         "table_privilege_allowed": False,
         "column_privilege_allowed": False,
+        "sequence_privilege_allowed": False,
         "execution_outcome": execution.outcome,
         "sqlstate": execution.sqlstate,
         "rolled_back": execution.rolled_back,
@@ -891,6 +956,46 @@ def _catalog_mutating_privilege(
     }
 
 
+def _sequence_mutating_privilege(sequence_privileges: list[dict[str, Any]]) -> dict[str, Any]:
+    mutating_sequences = [
+        {
+            "sequence_schema": str(sequence.get("sequence_schema") or ""),
+            "sequence_name": str(sequence.get("sequence_name") or ""),
+            "qualified_name": str(sequence.get("qualified_name") or ""),
+            "columns": [str(column) for column in sequence.get("columns", [])],
+            "usage": bool(sequence.get("usage", False)),
+            "update": bool(sequence.get("update", False)),
+        }
+        for sequence in sequence_privileges
+        if sequence.get("mutating_privilege_allowed")
+        or sequence.get("usage")
+        or sequence.get("update")
+    ]
+    return {
+        "allowed": bool(mutating_sequences),
+        "reason": (
+            "tested_credential_has_mutating_sequence_privilege" if mutating_sequences else None
+        ),
+        "table_allowed": False,
+        "column_allowed": False,
+        "sequence_allowed": bool(mutating_sequences),
+        "columns": [],
+        "sequences": mutating_sequences,
+    }
+
+
+def _sequence_short_circuit_operation_result(
+    target: ProbeTarget,
+    privilege: Mapping[str, Any],
+) -> dict[str, Any]:
+    spec = PermissionProbeSpec(
+        operation="SEQUENCE_USAGE_UPDATE",
+        target=target,
+        command=f"CATALOG CHECK sequence USAGE/UPDATE privileges for {target.qualified_name}",
+    )
+    return _catalog_short_circuit_operation_result(spec, privilege=privilege)
+
+
 def _catalog_short_circuit_operation_result(
     spec: PermissionProbeSpec,
     *,
@@ -903,6 +1008,7 @@ def _catalog_short_circuit_operation_result(
         "privilege_allowed": True,
         "table_privilege_allowed": bool(privilege.get("table_allowed", False)),
         "column_privilege_allowed": bool(privilege.get("column_allowed", False)),
+        "sequence_privilege_allowed": bool(privilege.get("sequence_allowed", False)),
         "execution_outcome": "not_executed_due_to_catalog_mutating_privilege",
         "rolled_back": False,
         "catalog_short_circuited": True,
@@ -911,6 +1017,9 @@ def _catalog_short_circuit_operation_result(
     columns = [str(column) for column in privilege.get("columns", [])]
     if columns:
         result["column_privilege_columns"] = columns
+    sequences = [dict(sequence) for sequence in privilege.get("sequences", [])]
+    if sequences:
+        result["sequence_privilege_sequences"] = sequences
     return result
 
 
@@ -922,6 +1031,7 @@ def _catalog_target_skip_operation_result(spec: PermissionProbeSpec) -> dict[str
         "privilege_allowed": False,
         "table_privilege_allowed": False,
         "column_privilege_allowed": False,
+        "sequence_privilege_allowed": False,
         "execution_outcome": "not_executed_due_to_target_catalog_mutating_privilege",
         "rolled_back": False,
         "catalog_short_circuited": True,
@@ -929,10 +1039,45 @@ def _catalog_target_skip_operation_result(spec: PermissionProbeSpec) -> dict[str
     }
 
 
-def _ddl_probe_result(adapter: ReadonlyDbProbeAdapter, *, ddl_suffix: str) -> dict[str, Any]:
+def _has_sequence_mutating_privilege(permission_probes: list[dict[str, Any]]) -> bool:
+    return any(
+        operation.get("sequence_privilege_allowed") is True
+        for target in permission_probes
+        for operation in target.get("operations", [])
+    )
+
+
+def _ddl_probe_result(
+    adapter: ReadonlyDbProbeAdapter,
+    *,
+    ddl_suffix: str,
+    skip_due_to_sequence_mutating_privilege: bool = False,
+) -> dict[str, Any]:
     schema_name = "ops"
     probe_table = f"__nhms_readonly_validation_probe_{ddl_suffix}"
     command = f"CREATE TABLE {schema_name}.{probe_table} (id integer)"
+    if skip_due_to_sequence_mutating_privilege:
+        return {
+            "target": f"{schema_name}.*",
+            "surface": "schema_table_ddl",
+            "status": STATUS_FAIL,
+            "reason": "sequence_mutating_privilege_detected_ddl_probe_skipped",
+            "operations": [
+                {
+                    "operation": "DDL_CREATE_TABLE",
+                    "command": command,
+                    "status": STATUS_FAIL,
+                    "privilege_allowed": False,
+                    "table_privilege_allowed": False,
+                    "column_privilege_allowed": False,
+                    "sequence_privilege_allowed": True,
+                    "execution_outcome": "not_executed_due_to_sequence_mutating_privilege",
+                    "rolled_back": False,
+                    "catalog_short_circuited": True,
+                    "reason": "sequence_mutating_privilege_detected_ddl_probe_skipped",
+                }
+            ],
+        }
     if not adapter.schema_exists(schema_name):
         return {
             "target": f"{schema_name}.*",
@@ -970,6 +1115,7 @@ def _ddl_probe_result(adapter: ReadonlyDbProbeAdapter, *, ddl_suffix: str) -> di
             "privilege_allowed": False,
             "table_privilege_allowed": False,
             "column_privilege_allowed": False,
+            "sequence_privilege_allowed": False,
             "execution_outcome": execution.outcome,
             "sqlstate": execution.sqlstate,
             "rolled_back": execution.rolled_back,
@@ -1182,13 +1328,16 @@ def _privilege_findings(permission_probes: list[dict[str, Any]]) -> list[dict[st
     for target in permission_probes:
         for operation in target.get("operations", []):
             if operation.get("privilege_allowed") is True:
-                findings.append(
-                    {
-                        "target": target.get("target"),
-                        "operation": operation.get("operation"),
-                        "reason": operation.get("reason"),
-                    }
-                )
+                finding = {
+                    "target": target.get("target"),
+                    "operation": operation.get("operation"),
+                    "reason": operation.get("reason"),
+                }
+                if operation.get("column_privilege_columns"):
+                    finding["columns"] = operation.get("column_privilege_columns")
+                if operation.get("sequence_privilege_sequences"):
+                    finding["sequences"] = operation.get("sequence_privilege_sequences")
+                findings.append(finding)
     return findings
 
 

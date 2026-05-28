@@ -226,6 +226,72 @@ def test_column_level_mutating_grant_fails_without_executing_dml() -> None:
     assert not any(spec.target and spec.target.qualified_name == target for spec in adapter.executed_specs)
 
 
+@pytest.mark.parametrize(
+    "grant",
+    [
+        {"usage": True, "update": False},
+        {"usage": False, "update": True},
+    ],
+)
+def test_sequence_mutating_grant_fails_without_executing_probes(grant: dict[str, bool]) -> None:
+    target = "ops.pipeline_event"
+    adapter = _FakeReadonlyAdapter(
+        sequence_privileges={
+            target: [
+                {
+                    "sequence_schema": "ops",
+                    "sequence_name": "pipeline_event_event_id_seq",
+                    "qualified_name": "ops.pipeline_event_event_id_seq",
+                    "columns": ["event_id"],
+                    **grant,
+                }
+            ]
+        }
+    )
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("sequence-grant"),
+        database_url="postgresql://writer:secret@db.example/nhms",
+        force=True,
+    )
+
+    summary = validate_readonly_db_boundary(
+        config,
+        adapter=adapter,
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+
+    assert summary["status"] == "FAIL"
+    assert summary["role"]["role_type"] == "writer_or_mutating"
+    role_finding = next(
+        finding
+        for finding in summary["role"]["mutating_privilege_findings"]
+        if finding["target"] == target and finding["operation"] == "SEQUENCE_USAGE_UPDATE"
+    )
+    assert role_finding["reason"] == "tested_credential_has_mutating_sequence_privilege"
+    assert role_finding["sequences"][0]["qualified_name"] == "ops.pipeline_event_event_id_seq"
+    event_probe = next(item for item in summary["permission_probes"] if item["target"] == target)
+    sequence_probe = next(
+        item for item in event_probe["operations"] if item["operation"] == "SEQUENCE_USAGE_UPDATE"
+    )
+    assert event_probe["status"] == "FAIL"
+    assert event_probe["sequence_privileges"][0]["mutating_privilege_allowed"] is True
+    assert sequence_probe["status"] == "FAIL"
+    assert sequence_probe["sequence_privilege_allowed"] is True
+    assert sequence_probe["execution_outcome"] == "not_executed_due_to_catalog_mutating_privilege"
+    assert sequence_probe["reason"] == "tested_credential_has_mutating_sequence_privilege"
+    for operation in event_probe["operations"]:
+        if operation["operation"] in {"INSERT", "UPDATE", "DELETE"}:
+            assert operation["execution_outcome"] == "not_executed_due_to_target_catalog_mutating_privilege"
+    ddl_probe = next(item for item in summary["permission_probes"] if item["target"] == "ops.*")
+    ddl_operation = ddl_probe["operations"][0]
+    assert ddl_operation["operation"] == "DDL_CREATE_TABLE"
+    assert ddl_operation["execution_outcome"] == "not_executed_due_to_sequence_mutating_privilege"
+    assert not any(spec.target and spec.target.qualified_name == target for spec in adapter.executed_specs)
+    assert not any(spec.operation == "DDL_CREATE_TABLE" for spec in adapter.executed_specs)
+
+
 def test_schema_create_grant_fails_without_executing_ddl() -> None:
     adapter = _FakeReadonlyAdapter(schema_privileges_by_schema={"ops": {"create": True}})
 
@@ -461,6 +527,7 @@ class _FakeReadonlyAdapter:
         *,
         privileges: dict[str, dict[str, bool]] | None = None,
         column_privileges: dict[str, dict[str, list[str]]] | None = None,
+        sequence_privileges: dict[str, list[dict[str, Any]]] | None = None,
         schema_privileges_by_schema: dict[str, dict[str, bool]] | None = None,
         absent_tables: set[str] | None = None,
         successful_operations: set[tuple[str, str]] | None = None,
@@ -469,6 +536,7 @@ class _FakeReadonlyAdapter:
     ) -> None:
         self.privileges = privileges or {}
         self.column_privilege_overrides = column_privileges or {}
+        self.sequence_privilege_overrides = sequence_privileges or {}
         self.schema_privilege_overrides = schema_privileges_by_schema or {}
         self.absent_tables = absent_tables or set()
         self.successful_operations = successful_operations or set()
@@ -511,6 +579,23 @@ class _FakeReadonlyAdapter:
 
     def column_privileges(self, target: ProbeTarget) -> dict[str, list[str]]:
         return {"insert": [], "update": [], **self.column_privilege_overrides.get(target.qualified_name, {})}
+
+    def sequence_privileges(self, target: ProbeTarget) -> list[dict[str, Any]]:
+        return [
+            {
+                "sequence_schema": str(sequence.get("sequence_schema") or target.schema),
+                "sequence_name": str(sequence.get("sequence_name") or "validation_probe_seq"),
+                "qualified_name": str(
+                    sequence.get("qualified_name") or f"{target.schema}.validation_probe_seq"
+                ),
+                "columns": [str(column) for column in sequence.get("columns", [])],
+                "usage": bool(sequence.get("usage", False)),
+                "update": bool(sequence.get("update", False)),
+                "mutating_privilege_allowed": bool(sequence.get("usage", False))
+                or bool(sequence.get("update", False)),
+            }
+            for sequence in self.sequence_privilege_overrides.get(target.qualified_name, [])
+        ]
 
     def schema_privileges(self, schema: str) -> dict[str, bool]:
         return {"create": False, **self.schema_privilege_overrides.get(schema, {})}
