@@ -133,6 +133,7 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "return_period_result_map_idx",
                 "river_segment_network_order_idx",
                 "river_network_version_basin_lookup_idx",
+                "hydro_run_ops_strict_identity_candidates_idx",
             } <= indexes
 
             constraints = {

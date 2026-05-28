@@ -994,7 +994,50 @@ def test_strict_ops_identity_scopes_status_stages_jobs_and_logs_to_single_run(tm
     )
 
 
-def test_jobs_model_id_without_run_id_requires_full_strict_identity_before_fallback() -> None:
+def test_jobs_model_id_with_stage_preserves_legacy_filtering() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time, source="GFS")
+        _create_job(
+            store,
+            job_id="job_model_a_forecast",
+            run_id="run_a",
+            cycle_id=cycle_id_for("GFS", cycle_time),
+            model_id="model_a",
+            stage="forecast",
+            status="running",
+        )
+        _create_job(
+            store,
+            job_id="job_model_a_download",
+            run_id="run_a",
+            cycle_id=cycle_id_for("GFS", cycle_time),
+            model_id="model_a",
+            stage="download",
+            status="succeeded",
+        )
+        _create_job(
+            store,
+            job_id="job_model_b_forecast",
+            run_id="run_b",
+            cycle_id=cycle_id_for("GFS", cycle_time),
+            model_id="model_b",
+            stage="forecast",
+            status="running",
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={"model_id": "model_a", "stage": "forecast"},
+            )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["total"] == 1
+    assert [job["job_id"] for job in data["items"]] == ["job_model_a_forecast"]
+
+
+def test_jobs_source_cycle_model_id_without_run_id_rejects_strict_bypass() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
         _insert_cycle(store, cycle_time=cycle_time, source="GFS")
@@ -1004,7 +1047,7 @@ def test_jobs_model_id_without_run_id_requires_full_strict_identity_before_fallb
                 params={
                     "source": "GFS",
                     "cycle_time": cycle_time.isoformat(),
-                    "model_id": "model_selected",
+                    "model_id": "model_a",
                 },
             )
 
@@ -1211,9 +1254,8 @@ def test_strict_ops_identity_rejects_partial_before_source_cycle_lookup() -> Non
                 params={"source": "GFS", "cycle_time": cycle_time.isoformat(), "run_id": "run_only"},
             )
             jobs_response = client.get("/api/v1/jobs", params={"run_id": "run_only"})
-            jobs_model_response = client.get("/api/v1/jobs", params={"model_id": "model_only"})
 
-    for candidate in (response, jobs_response, jobs_model_response):
+    for candidate in (response, jobs_response):
         assert candidate.status_code == 422
         error = candidate.json()["error"]
         assert error["code"] == "VALIDATION_ERROR"
@@ -1226,12 +1268,6 @@ def test_strict_ops_identity_rejects_partial_before_source_cycle_lookup() -> Non
     assert jobs_response.json()["error"]["details"] == {
         "missing_fields": ["source", "cycle_time", "model_id"],
         "provided_fields": ["run_id"],
-        "required_fields": ["source", "cycle_time", "run_id", "model_id"],
-        "strict_identity_required": True,
-    }
-    assert jobs_model_response.json()["error"]["details"] == {
-        "missing_fields": ["source", "cycle_time", "run_id"],
-        "provided_fields": ["model_id"],
         "required_fields": ["source", "cycle_time", "run_id", "model_id"],
         "strict_identity_required": True,
     }

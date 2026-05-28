@@ -384,7 +384,7 @@ def list_jobs(
         run_id=run_id,
         model_id=model_id,
         raw_fields=set(request.query_params),
-        trigger_fields={"run_id", "model_id"},
+        trigger_fields=_jobs_strict_identity_trigger_fields(set(request.query_params)),
     )
 
     if strict_identity is not None:
@@ -446,6 +446,14 @@ def list_jobs(
             "offset": offset,
         },
     )
+
+
+def _jobs_strict_identity_trigger_fields(raw_fields: set[str]) -> set[str]:
+    if "run_id" in raw_fields:
+        return {"run_id"}
+    if {"source", "cycle_time", "model_id"} <= raw_fields:
+        return {"model_id"}
+    return set()
 
 
 @router.get("/jobs/{job_id}/logs")
