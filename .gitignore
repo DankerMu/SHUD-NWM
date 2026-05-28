@@ -35,6 +35,8 @@ minio-data/
 .nhms-workspace/
 .nhms-object-store/
 artifacts/
+!services/artifacts/
+!services/artifacts/*.py
 .pgdata/
 .pglogs/
 .pgsocket/

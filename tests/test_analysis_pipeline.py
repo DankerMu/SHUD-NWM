@@ -220,6 +220,7 @@ class FakeAnalysisRepository:
         exit_code: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        log_uri: str | None = None,
     ) -> tuple[str | None, dict[str, Any]]:
         previous = self.jobs[job_id]["status"]
         self.jobs[job_id].update(
@@ -230,6 +231,7 @@ class FakeAnalysisRepository:
                 "exit_code": exit_code,
                 "error_code": error_code,
                 "error_message": error_message,
+                "log_uri": log_uri or self.jobs[job_id].get("log_uri"),
             }
         )
         return previous, dict(self.jobs[job_id])

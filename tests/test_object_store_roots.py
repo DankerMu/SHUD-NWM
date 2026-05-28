@@ -8,10 +8,9 @@ import pytest
 from jinja2 import StrictUndefined
 from jinja2.sandbox import SandboxedEnvironment
 
-from apps.api.errors import ApiError
-from apps.api.routes.pipeline import _local_log_path, _read_log_tail
 from packages.common.object_store import LocalObjectStore
 from packages.common.state_manager import StateManager, StateSnapshot
+from services.artifacts import ArtifactLogError, ArtifactReader, ArtifactReaderConfig
 from workers.forcing_producer.producer import ForcingProducer, ForcingProducerConfig
 
 INFRA_SBATCH_TEMPLATES = (
@@ -159,28 +158,75 @@ def test_log_path_rejects_symlink(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     secret_path = tmp_path / "secret.log"
     secret_path.write_text("secret", encoding="utf-8")
     (tmp_path / "job.log").symlink_to(secret_path)
+    reader = _legacy_log_reader(tmp_path)
 
-    with pytest.raises(ApiError) as error:
-        _local_log_path("job.log")
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail("job.log")
 
     assert error.value.status_code == 403
-    assert error.value.code == "FORBIDDEN"
+    assert error.value.code == "JOB_LOG_ACCESS_DENIED"
+
+
+def test_log_path_rejects_symlinked_log_root_parent_without_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    private_workspace = tmp_path / "private" / ".nhms-runs"
+    private_workspace.mkdir(parents=True)
+    parent_link = tmp_path / "log_parent_link"
+    parent_link.symlink_to(private_workspace, target_is_directory=True)
+    log_root = parent_link / "logs"
+    log_path = log_root / "job.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("private legacy log", encoding="utf-8")
+    monkeypatch.setenv("LOG_ROOT", str(log_root))
+    reader = _legacy_log_reader(log_root)
+
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail("job.log")
+
+    body = str(
+        {
+            "code": error.value.code,
+            "safe_uri": error.value.safe_uri,
+            "reason": error.value.reason,
+            "message": error.value.message,
+        }
+    )
+    assert error.value.status_code == 403
+    assert error.value.code == "JOB_LOG_ACCESS_DENIED"
+    assert error.value.reason == "unsafe_local_path"
+    assert "private legacy log" not in body
+    assert str(tmp_path) not in body
+    assert ".nhms-runs" not in body
 
 
 def test_log_path_rejects_traversal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("LOG_ROOT", str(tmp_path))
+    reader = _legacy_log_reader(tmp_path)
 
-    with pytest.raises(ApiError) as error:
-        _local_log_path("../../../etc/passwd")
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail("../../../etc/passwd")
 
     assert error.value.status_code == 403
-    assert error.value.code == "FORBIDDEN"
+    assert error.value.code == "JOB_LOG_ACCESS_DENIED"
 
 
 def test_log_tail_reads_regular_file_with_no_follow_bound(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     log_path = tmp_path / "bounded.log"
     log_path.write_text("0123456789abcdef", encoding="utf-8")
-    monkeypatch.setattr("apps.api.routes.pipeline._MAX_LOG_BYTES", 8)
+    reader = _legacy_log_reader(tmp_path, tail_max_bytes=8)
 
-    assert _read_log_tail(log_path) == "89abcdef"
+    assert reader.read_text_tail("bounded.log").content == "89abcdef"
+
+
+def _legacy_log_reader(root: Path, *, tail_max_bytes: int = 1024 * 1024) -> ArtifactReader:
+    return ArtifactReader(
+        ArtifactReaderConfig(
+            published_root=None,
+            legacy_log_root=root,
+            tail_max_bytes=tail_max_bytes,
+            allow_legacy_local_file_logs=True,
+        )
+    )
