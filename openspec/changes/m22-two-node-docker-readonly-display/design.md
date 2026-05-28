@@ -739,3 +739,116 @@ Non-goals:
 - Do not implement frontend `/ops` or `/hydro-met` behavior; that is #235.
 - Do not create production DB roles, grant/revoke privileges, or require privileged DDL outside controlled probes.
 - Do not seed or mutate production-like data as part of a PASS; missing fixture data should be a blocker or reduced-scope result, not an unsafe write.
+
+## Issue #235 Fixture: Display Readonly Ops UI Diagnostics and Strict Handoff
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: other
+
+Change surface:
+
+- Frontend runtime config consumption, `/ops` and monitoring components, jobs/logs diagnostic UI, queue-depth presentation, `/hydro-met` strict latest-product bootstrap, and frontend tests.
+- Generated or existing frontend API/type contracts only as consumed by the UI; backend API implementation is prerequisite scope and must not be reimplemented here.
+
+Mandatory expanded triggers:
+
+- Shared frontend entrypoints (`/ops`, monitoring widgets, `/hydro-met`) change request behavior and user-visible controls.
+- Public API consumption changes for runtime config, retry/cancel suppression, strict ops filters, job logs, and latest-product strict filters.
+- Evidence-visible schema/field names change for diagnostic copy payload and strict cross-plane identity.
+- Compatibility must be preserved for compute/dev control workflows and non-strict hydro-met browsing.
+
+Must preserve:
+
+- `compute_control` and `dev_monolith` users with existing authorization keep the current retry/cancel affordances and monitoring workflows.
+- Existing monitoring, jobs/logs, and hydro-met browsing behavior remains compatible when no strict cross-plane handoff is active.
+- UI-only notified/acknowledged state in display mode must not persist to DB or call control endpoints.
+
+Must add/change:
+
+- `/ops` uses backend runtime config as the role/capability source of truth.
+- `display_readonly` hides or disables retry/cancel controls for all frontend roles and never sends retry/cancel, Slurm, or other control POSTs.
+- Queue depth degrades to hidden/read-only unavailable state in display mode when backend queue depth is unavailable.
+- `/ops` strict identity context binds stages, jobs, logs, diagnostics, and copy payloads to `source`, `cycle_time`, `run_id`, and `model_id`; partial identity is invalid for cross-plane proof.
+- `/hydro-met` strict latest-product bootstrap consumes complete URL query parameters and does not fall back to historical latest when strict identity is partial or mismatched. If final E2E starts from `artifacts/two-node-e2e/<run_id>/cross-plane/identity.json`, the #239 harness converts that file to URL parameters; #235 frontend does not directly read local artifact files.
+- Failed job/stage diagnostics expose copyable safe fields and 22-node recovery guidance without fabricating absent identity/log/error fields.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: frontend calls must stop sending control POSTs in display mode and must send strict identity query/path parameters where required.
+- Config / project setup: runtime config is the production role source; build-time defaults are development-only.
+- Schema / columns / units / field names: diagnostic payload and strict identity fields must use stable API names without fabricating absent data.
+- Legacy compatibility / examples: compute/dev monitoring controls and non-strict browsing remain compatible.
+- Error handling / rollback / partial outputs: partial strict identity, unavailable queue depth, missing logs, and failed stages render stable read-only UI states.
+- Release / packaging / dependency compatibility: frontend build/test/type contracts must remain valid for Docker follow-up issues.
+- Documentation / migration notes: UI copy and runbook guidance must distinguish 22 control actions from 27 display-only evidence.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - UI request behavior changes and must prove no control POSTs in display mode.
+- Config / project setup: selected - runtime config role/capability flags drive production behavior.
+- File IO / path safety / overwrite: not selected - #235 frontend does not directly read local artifact files; final E2E handoff-file parsing and approved-root checks are #239 harness scope.
+- Schema / columns / units / field names: selected - strict identity and diagnostic payload field names are user/evidence-visible.
+- Geospatial / CRS / shapefile sidecars: not selected - no GIS geometry or CRS handling changes.
+- Time series / forcing / temporal boundaries: selected - strict `cycle_time` and latest-product handoff must not collapse historical cycles.
+- Numerical stability / conservation / NaN: not selected - no numerical computation changes.
+- Solver runtime / performance / threading: not selected - no solver/runtime behavior.
+- Resource limits / large input / discovery: selected - log modal and diagnostic payload rendering must stay bounded by backend responses and avoid unbounded UI state.
+- Legacy compatibility / examples: selected - compute/dev controls and existing monitoring tests must remain valid.
+- Error handling / rollback / partial outputs: selected - display unavailable/error states must be stable and read-only.
+- Release / packaging / dependency compatibility: selected - frontend build/test must stay green for Docker image follow-up.
+- Documentation / migration notes: selected - UI guidance and runbook references must not imply 27 can control compute.
+
+Invariant Matrix:
+
+- Governing invariant: A frontend running against `display_readonly` runtime config can inspect strict run/job/log diagnostics but cannot initiate control-plane mutations or present mismatched/historical evidence as cross-plane PASS; compute/dev modes keep existing authorized control behavior.
+- Source-of-truth identity/contract: backend runtime config capability flags plus strict `source`, `cycle_time`, `run_id`, `model_id`, and optional `job_id` context.
+- Producers: runtime config client, URL query parser, monitoring store/query layer, jobs/logs responses, and #239 E2E harness when it converts an identity handoff file to URL parameters.
+- Validators/preflight: frontend role/capability guards, strict identity completeness checks, route/query builders, diagnostic payload builder.
+- Storage/cache/query: frontend stores/query caches for monitoring, jobs, logs, latest-product bootstrap, and local notified state.
+- Public routes/entrypoints: `/ops`, monitoring components, jobs table/log modal, `/hydro-met` bootstrap and latest-product request.
+- Frontend/downstream consumers: operator UI, copied diagnostic payload, browser E2E evidence, future Docker display smoke.
+- Failure paths/rollback/stale state: partial strict identity, wrong-run job/log, queue unavailable, missing/unsupported log, failed control attempt, role-config load failure.
+- Evidence/audit/readiness: focused frontend tests, build, and browser/E2E evidence hooks.
+- Regression rows:
+  - runtime config `display_readonly` -> retry/cancel hidden or disabled and no retry/cancel/Slurm POST is emitted.
+  - runtime config `compute_control` or `dev_monolith` with authorized user -> existing retry/cancel controls remain covered by current tests.
+  - display mode queue unavailable -> queue UI hidden/read-only unavailable while stages/jobs/logs remain usable.
+  - complete strict identity from URL or handoff -> `/ops` and `/hydro-met` requests include/validate `source`, `cycle_time`, `run_id`, and `model_id`.
+  - partial strict identity -> cross-plane proof is blocked/invalid and must not fall back to historical latest/jobs/logs.
+  - wrong-run job/log under same source/cycle -> rendered as mismatch/failure, not PASS evidence.
+  - failed job/stage -> copyable diagnostic includes only available safe identity/status/error/log fields and 22 recovery guidance.
+  - display notified/acknowledged action -> local UI state only and no DB/API write.
+
+Boundary-surface checklist:
+
+- Shared helper roots: runtime config client, monitoring store/query helpers, strict identity parsing/building helpers, diagnostic payload builder.
+- Public entrypoints: `/ops`, monitoring widgets, jobs table, log modal, `/hydro-met` bootstrap.
+- Read surfaces: runtime config, pipeline status/stages/jobs/logs, latest-product, URL query params.
+- Write/delete/overwrite surfaces: retry/cancel buttons, Slurm/control POST clients, local notified state.
+- Staging/publish/rollback surfaces: none - no artifact publication or DB writes in this issue.
+- Producer/consumer evidence boundaries: diagnostic copy payload and browser E2E strict identity URL handoff.
+- Stale-state/idempotency boundaries: route/query changes must not reuse old jobs/logs/latest data after strict identity changes.
+- Unchanged downstream consumers: existing monitoring tests, hydro-met browsing tests, frontend build.
+
+Required evidence:
+
+- Runtime config display fixture -> `/ops` hides/disables retry/cancel for operator/sys_admin, emits no retry/cancel or Slurm POSTs, and renders read-only display state.
+- Runtime config compute/dev fixture -> existing authorized retry/cancel controls and tests remain valid.
+- Display queue-unavailable fixture -> queue widget is hidden/read-only unavailable and stages/jobs/logs remain usable.
+- Complete strict ops identity fixture -> status/stages/jobs/log requests include or validate `source`, `cycle_time`, `run_id`, and `model_id`; wrong-run job/log fixture renders mismatch/failure.
+- Complete strict `/hydro-met` URL fixture -> latest-product request includes `source`, `cycle_time`, `run_id`, and `model_id`; source-only browsing fixture remains compatible when no strict params are present.
+- Partial or malformed strict `/hydro-met` URL fixture -> bootstrap returns invalid/blocked state and does not issue a source-only fallback latest-product request.
+- Failed job/stage fixture -> diagnostic copy contains only available `source_id`, `cycle_time`, `run_id`, `model_id`, `stage`, `job_id`, `slurm_job_id`, `status`, `error_code`, `error_message`, and `log_uri`; absent fields are omitted or marked unavailable.
+- Published-log success/error fixtures -> log modal shows bounded log content or stable backend error without 22 private path instructions.
+- Local notified/acknowledged fixture -> UI state changes locally and no DB/API write is emitted.
+- `cd apps/frontend && corepack pnpm test -- ops monitoring hydroMet` or the repo-supported focused equivalent must cover the fixtures above.
+- `cd apps/frontend && corepack pnpm build`: production build/type compatibility.
+- Frontend type check command used by the repo, or explicit no-op rationale if `pnpm build` is the type gate.
+- Local E2E identity file reads are out of scope for #235 frontend code; #239 final E2E harness must parse approved-root handoff files and pass complete URL params to the browser.
+
+Non-goals:
+
+- Do not implement backend strict identity, retry/cancel, runtime config, or published log APIs; those are prerequisite issues #229 through #233.
+- Do not add Docker compose/image/systemd or final E2E evidence lanes; those are #236 through #239.
+- Do not add a 27-to-22 control API or persistent notified/acknowledged backend state.
