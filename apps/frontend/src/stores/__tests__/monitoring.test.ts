@@ -39,6 +39,14 @@ const displayRuntimeConfig: RuntimeConfig = {
   display_readonly: true,
 }
 
+const driftedDisplayRuntimeConfig: RuntimeConfig = {
+  service_role: 'display_readonly',
+  control_mutations_enabled: true,
+  slurm_routes_enabled: true,
+  queue_depth_mode: 'slurm_gateway',
+  display_readonly: false,
+}
+
 function makeStage(
   stage: string,
   status: PipelineStage['display_status'],
@@ -58,6 +66,31 @@ function makeStage(
     basin_results_returned: 0,
     basin_results_truncated: false,
     basin_results: [],
+  }
+}
+
+function makeBasinResult(
+  overrides: Partial<PipelineStage['basin_results'][number]> = {},
+): PipelineStage['basin_results'][number] {
+  return {
+    job_id: 'basin-job-1',
+    run_id: 'run-selected',
+    cycle_id: 'cycle-1',
+    job_type: 'forecast',
+    slurm_job_id: '123',
+    model_id: 'model-selected',
+    basin_id: 'qhh-001',
+    status: 'failed',
+    stage: 'forecast',
+    submitted_at: '2026-05-09T00:05:00Z',
+    started_at: '2026-05-09T00:06:00Z',
+    finished_at: '2026-05-09T00:12:00Z',
+    duration_seconds: 360,
+    retry_count: 0,
+    error_code: 'E_MODEL',
+    error_message: 'Model failed',
+    log_uri: 's3://logs/basin-job-1.log',
+    ...overrides,
   }
 }
 
@@ -586,6 +619,32 @@ describe('useMonitoringStore', () => {
     expect(useMonitoringStore.getState().stages).toHaveLength(3)
   })
 
+  it('normalizes drifted display runtime config and skips queue depth fail-closed', async () => {
+    const paths: string[] = []
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      paths.push(path)
+      if (path === '/api/v1/runtime/config') return success(driftedDisplayRuntimeConfig) as never
+      if (path === '/api/v1/pipeline/status') return success(cycle) as never
+      if (path === '/api/v1/pipeline/stages') return success(stages) as never
+      if (path === '/api/v1/queue/depth') throw new Error('queue depth must not be called for display_readonly')
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    await useMonitoringStore.getState().fetchRuntimeConfig()
+    await useMonitoringStore.getState().fetchAll()
+
+    expect(useMonitoringStore.getState().runtimeConfig).toMatchObject({
+      service_role: 'display_readonly',
+      control_mutations_enabled: false,
+      slurm_routes_enabled: false,
+      queue_depth_mode: 'display_readonly_unavailable',
+      display_readonly: true,
+    })
+    expect(paths).toEqual(['/api/v1/runtime/config', '/api/v1/pipeline/status', '/api/v1/pipeline/stages'])
+    expect(useMonitoringStore.getState().queueError).toContain('display_readonly')
+  })
+
   it('rejects wrong-run strict jobs instead of storing mismatched PASS evidence', async () => {
     useMonitoringStore.setState({
       strictIdentity: {
@@ -607,5 +666,71 @@ describe('useMonitoringStore', () => {
     expect(useMonitoringStore.getState().jobs).toEqual([])
     expect(useMonitoringStore.getState().jobsError).toContain('strict identity mismatch')
     expect(useMonitoringStore.getState().jobsContext).toBeNull()
+  })
+
+  it('rejects strict status source/cycle mismatches before storing ops context', async () => {
+    useMonitoringStore.setState({
+      runtimeConfig: displayRuntimeConfig,
+      cycle: { ...cycle, current_state: 'old-selected' },
+      cycleContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME, runId: 'run-selected', modelId: 'model-selected' },
+      stages,
+      strictIdentity: {
+        source: 'GFS',
+        cycleTime: TEST_CYCLE_TIME,
+        runId: 'run-selected',
+        modelId: 'model-selected',
+      },
+    })
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      if (path === '/api/v1/pipeline/status') {
+        return success({ ...cycle, source: 'IFS', cycle_time: '2026-05-10T00:00:00Z' }) as never
+      }
+      if (path === '/api/v1/pipeline/stages') return success(stages) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    await expect(useMonitoringStore.getState().fetchAll({ clearOnFailure: true })).rejects.toThrow('strict identity mismatch')
+
+    const state = useMonitoringStore.getState()
+    expect(state.cycle).toBeNull()
+    expect(state.cycleContext).toBeNull()
+    expect(state.stages).toEqual([])
+    expect(state.operationalError).toContain('strict identity mismatch')
+  })
+
+  it.each([
+    ['missing run/model identity', makeBasinResult({ run_id: null, model_id: null })],
+    ['mismatched run/model identity', makeBasinResult({ run_id: 'run-other', model_id: 'model-other' })],
+  ])('rejects strict stage basin results with %s', async (_caseName, basinResult) => {
+    const failedStage = makeStage('forecast', 'failed', 120, 1, 0, 1)
+    failedStage.basin_results = [basinResult]
+    const strictStages = [failedStage]
+    useMonitoringStore.setState({
+      runtimeConfig: displayRuntimeConfig,
+      cycle,
+      cycleContext: { source: 'GFS', cycleTime: TEST_CYCLE_TIME, runId: 'run-selected', modelId: 'model-selected' },
+      stages,
+      strictIdentity: {
+        source: 'GFS',
+        cycleTime: TEST_CYCLE_TIME,
+        runId: 'run-selected',
+        modelId: 'model-selected',
+      },
+    })
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      if (path === '/api/v1/pipeline/status') return success(cycle) as never
+      if (path === '/api/v1/pipeline/stages') return success(strictStages) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    await expect(useMonitoringStore.getState().fetchAll({ clearOnFailure: true })).rejects.toThrow('strict identity mismatch')
+
+    const state = useMonitoringStore.getState()
+    expect(state.cycle).toBeNull()
+    expect(state.cycleContext).toBeNull()
+    expect(state.stages).toEqual([])
+    expect(state.operationalError).toContain('strict identity mismatch')
   })
 })

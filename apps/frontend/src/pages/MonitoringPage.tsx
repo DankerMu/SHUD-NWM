@@ -18,6 +18,7 @@ import { getApiErrorMessage } from '@/api/response'
 import { formatDate } from '@/lib/format'
 import { parseMonitoringQueryState } from '@/lib/monitoring/queryState'
 import {
+  isDisplayReadonlyRuntimeConfig,
   monitoringContextMatches,
   normalizeMonitoringCycleTime,
   type MonitoringStrictIdentity,
@@ -77,9 +78,9 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const hasExplicitRouteContext = Boolean(routeSource || routeCycle || routeStrictIdentity)
   const runtimeConfigUnavailableReason = runtimeConfigError ? `runtime config 不可用：${runtimeConfigError}` : null
   const isRuntimeConfigReady = Boolean(runtimeConfig) && !runtimeConfigError
-  const isDisplayReadonly = Boolean(runtimeConfig?.display_readonly)
+  const isDisplayReadonly = isDisplayReadonlyRuntimeConfig(runtimeConfig)
   const controlMutationsEnabled = Boolean(runtimeConfig?.control_mutations_enabled) && !isDisplayReadonly
-  const queueReadonlyUnavailable = runtimeConfig?.queue_depth_mode === 'display_readonly_unavailable'
+  const queueReadonlyUnavailable = isDisplayReadonly || runtimeConfig?.queue_depth_mode === 'display_readonly_unavailable'
   const isRouteContextReady = useMemo(() => {
     if (!isOpsMode) return true
     if (!isRouteSupported) return false
@@ -178,7 +179,10 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const handleSourceChange = (nextSource: string) => {
     if (nextSource === source) return
     setSource(nextSource)
-    if (canonicalRoute === '/ops') clearSelectedContext()
+    if (canonicalRoute === '/ops') {
+      setStrictIdentity(null)
+      clearSelectedContext()
+    }
     updateQueryState(nextSource, cycleTime)
     refreshAfterSelectionChange()
   }
@@ -186,7 +190,10 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const handleCycleTimeChange = (nextCycleTime: string) => {
     if (!nextCycleTime) return
     setCycleTime(nextCycleTime)
-    if (canonicalRoute === '/ops') clearSelectedContext()
+    if (canonicalRoute === '/ops') {
+      setStrictIdentity(null)
+      clearSelectedContext()
+    }
     updateQueryState(source, nextCycleTime)
     refreshAfterSelectionChange()
   }
@@ -284,6 +291,13 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
 
       <div className="grid gap-4 min-[800px]:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.2fr)] min-[1200px]:grid-cols-[20rem_minmax(0,1fr)_22rem]">
         <StageList
+          diagnosticContext={{
+            sourceId: visibleStrictIdentity?.source ?? visibleSource,
+            cycleTime: visibleStrictIdentity?.cycleTime ?? normalizeMonitoringCycleTime(visibleCycleTime),
+            runId: visibleStrictIdentity?.runId ?? null,
+            modelId: visibleStrictIdentity?.modelId ?? null,
+          }}
+          diagnosticsEnabled={isOpsMode}
           stages={visibleStages}
           unavailableReason={stageListUnavailableReason}
           showPendingPlaceholders={!isOpsMode}

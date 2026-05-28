@@ -24,10 +24,10 @@ function success(content: string, jobId = 'job-1') {
   }
 }
 
-function failure(message: string) {
+function failure(message: string, code = 'JOB_LOG_NOT_FOUND') {
   return {
     data: undefined,
-    error: { error: { code: 'JOB_LOG_NOT_FOUND', message } },
+    error: { error: { code, message } },
   }
 }
 
@@ -104,6 +104,55 @@ describe('LogModal', () => {
         },
       },
     })
+  })
+
+  it('renders backend strict identity mismatch as unavailable and clears stale content', async () => {
+    vi.mocked(client.GET)
+      .mockResolvedValueOnce(success('current strict log', 'job-strict') as never)
+      .mockResolvedValueOnce(failure(
+        'PIPELINE_STRICT_IDENTITY_MISMATCH: requested log does not belong to the selected run.',
+        'PIPELINE_STRICT_IDENTITY_MISMATCH',
+      ) as never)
+
+    const strictIdentity = {
+      source: 'GFS',
+      cycleTime: '2026-05-09T00:00:00.000Z',
+      runId: 'run-strict',
+      modelId: 'model-strict',
+    } as const
+    const { rerender } = render(
+      <LogModal
+        jobId="job-strict"
+        open
+        onOpenChange={vi.fn()}
+        refreshKey={0}
+        strictIdentity={strictIdentity}
+      />,
+    )
+
+    expect(await screen.findByText('current strict log')).toBeInTheDocument()
+
+    rerender(
+      <LogModal
+        jobId="job-strict"
+        open
+        onOpenChange={vi.fn()}
+        refreshKey={1}
+        strictIdentity={strictIdentity}
+      />,
+    )
+
+    await waitFor(() => expect(screen.queryByText('current strict log')).not.toBeInTheDocument())
+    expect(await screen.findByText(/加载失败: PIPELINE_STRICT_IDENTITY_MISMATCH/)).toBeInTheDocument()
+  })
+
+  it('rejects returned log content when backend job_id differs from the open modal job', async () => {
+    vi.mocked(client.GET).mockResolvedValue(success('wrong run log content', 'job-other') as never)
+
+    render(<LogModal jobId="job-current" open onOpenChange={vi.fn()} />)
+
+    expect(await screen.findByText('加载失败: 日志身份与当前作业不匹配')).toBeInTheDocument()
+    expect(screen.queryByText('wrong run log content')).not.toBeInTheDocument()
   })
 
   it('sanitizes backend log errors before rendering them to browser users', async () => {

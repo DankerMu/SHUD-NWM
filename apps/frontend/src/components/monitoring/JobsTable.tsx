@@ -6,6 +6,10 @@ import { getApiErrorMessage } from '@/api/response'
 import type { components } from '@/api/types'
 import { JobFilters } from '@/components/monitoring/JobFilters'
 import { LogModal } from '@/components/monitoring/LogModal'
+import {
+  buildJobDiagnosticPayload,
+  type DiagnosticContext,
+} from '@/components/monitoring/diagnostics'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -396,46 +400,6 @@ export function JobsTable({
   )
 }
 
-interface DiagnosticContext {
-  sourceId: string
-  cycleTime: string
-  runId: string | null
-  modelId: string | null
-}
-
-const diagnosticFields = [
-  'source_id',
-  'cycle_time',
-  'run_id',
-  'model_id',
-  'stage',
-  'job_id',
-  'slurm_job_id',
-  'status',
-  'error_code',
-  'error_message',
-  'log_uri',
-] as const
-
-type DiagnosticField = (typeof diagnosticFields)[number]
-
-function addDiagnosticField(payload: Partial<Record<DiagnosticField, string>>, key: DiagnosticField, value: string | null | undefined) {
-  const trimmed = typeof value === 'string' ? value.trim() : ''
-  if (trimmed) payload[key] = trimmed
-}
-
 export function buildDiagnosticPayload(job: PipelineJob, context: DiagnosticContext) {
-  const payload: Partial<Record<DiagnosticField, string>> = {}
-  addDiagnosticField(payload, 'source_id', context.sourceId)
-  addDiagnosticField(payload, 'cycle_time', context.cycleTime)
-  addDiagnosticField(payload, 'run_id', context.runId)
-  addDiagnosticField(payload, 'model_id', context.modelId)
-  addDiagnosticField(payload, 'stage', job.stage ?? job.job_type)
-  addDiagnosticField(payload, 'job_id', job.job_id)
-  addDiagnosticField(payload, 'slurm_job_id', job.slurm_job_id)
-  addDiagnosticField(payload, 'status', job.status)
-  addDiagnosticField(payload, 'error_code', job.error_code)
-  addDiagnosticField(payload, 'error_message', job.error_message)
-  addDiagnosticField(payload, 'log_uri', job.log_uri)
-  return payload
+  return buildJobDiagnosticPayload(job, context)
 }

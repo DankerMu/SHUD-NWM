@@ -192,6 +192,10 @@ function strictIdentityQuery(identity: MonitoringStrictIdentity | null) {
   return identity ? { run_id: identity.runId, model_id: identity.modelId } : {}
 }
 
+export function isDisplayReadonlyRuntimeConfig(runtimeConfig: RuntimeConfig | null) {
+  return runtimeConfig?.service_role === 'display_readonly' || Boolean(runtimeConfig?.display_readonly)
+}
+
 function validateRuntimeConfig(value: RuntimeConfig) {
   const role = value?.service_role
   if (
@@ -201,6 +205,15 @@ function validateRuntimeConfig(value: RuntimeConfig) {
     role !== 'slurm_gateway'
   ) {
     throw new Error('runtime config 响应缺少有效 service_role')
+  }
+  if (role === 'display_readonly') {
+    return {
+      ...value,
+      control_mutations_enabled: false,
+      slurm_routes_enabled: false,
+      queue_depth_mode: 'display_readonly_unavailable',
+      display_readonly: true,
+    } satisfies RuntimeConfig
   }
   return value
 }
@@ -216,17 +229,40 @@ async function getPipelineStatus(source: string, cycleTime: string, identity: Mo
     params: { query: { source, cycle_time: cycleTime, ...strictIdentityQuery(identity) } },
   })
   if (error) throw new Error(getApiErrorMessage(error, '获取周期状态失败'))
-  return unwrapApiData<PipelineCycle>(data, '获取周期状态失败')
+  return validatePipelineStatus(
+    unwrapApiData<PipelineCycle>(data, '获取周期状态失败'),
+    source,
+    cycleTime,
+  )
+}
+
+function cycleInstant(value: string | null | undefined) {
+  if (!value) return ''
+  const normalized = normalizeMonitoringCycleTime(value)
+  const date = new Date(normalized)
+  return Number.isNaN(date.getTime()) ? normalized : date.toISOString()
+}
+
+function validatePipelineStatus(cycle: PipelineCycle, source: string, cycleTime: string) {
+  const responseSource = cycle.source?.toUpperCase() ?? null
+  const responseCycleTime = cycle.cycle_time ? cycleInstant(cycle.cycle_time) : null
+  const expectedSource = source.toUpperCase()
+  const expectedCycleTime = cycleInstant(cycleTime)
+
+  if (responseSource !== expectedSource || responseCycleTime !== expectedCycleTime) {
+    throw new Error(`strict identity mismatch：周期状态不属于 source=${expectedSource} / cycle_time=${expectedCycleTime}`)
+  }
+  return cycle
 }
 
 function validateStrictStages(stages: PipelineStage[], identity: MonitoringStrictIdentity | null) {
   if (!identity) return stages
   const mismatches = stages.flatMap((stage) =>
-    (stage.basin_results ?? []).filter((result) => (
-      result.run_id !== null &&
-      result.model_id !== null &&
-      (result.run_id !== identity.runId || result.model_id !== identity.modelId)
-    )),
+    (stage.basin_results ?? []).filter((result) => {
+      const runId = result.run_id?.trim()
+      const modelId = result.model_id?.trim()
+      return !runId || !modelId || runId !== identity.runId || modelId !== identity.modelId
+    }),
   )
   if (mismatches.length > 0) {
     throw new Error(`strict identity mismatch：阶段失败明细不属于 run_id=${identity.runId} / model_id=${identity.modelId}`)
@@ -249,7 +285,7 @@ async function getQueueDepth() {
 }
 
 function isDisplayQueueUnavailable(runtimeConfig: RuntimeConfig | null) {
-  return runtimeConfig?.queue_depth_mode === 'display_readonly_unavailable'
+  return isDisplayReadonlyRuntimeConfig(runtimeConfig) || runtimeConfig?.queue_depth_mode === 'display_readonly_unavailable'
 }
 
 async function getQueueDepthState(runtimeConfig: RuntimeConfig | null) {
