@@ -35,6 +35,22 @@ function success<T>(data: T) {
   return { status: 'success', data }
 }
 
+const computeRuntimeConfig = {
+  service_role: 'compute_control',
+  control_mutations_enabled: true,
+  slurm_routes_enabled: true,
+  queue_depth_mode: 'slurm_gateway',
+  display_readonly: false,
+} as const
+
+const displayRuntimeConfig = {
+  service_role: 'display_readonly',
+  control_mutations_enabled: false,
+  slurm_routes_enabled: false,
+  queue_depth_mode: 'display_readonly_unavailable',
+  display_readonly: true,
+} as const
+
 vi.mock('@/components/map/MapView', () => ({
   MapView: ({
     onBasinContextLoaded,
@@ -1100,7 +1116,12 @@ beforeEach(() => {
     true,
   )
   useModelAssetsStore.setState(useModelAssetsStore.getInitialState(), true)
-  vi.mocked(client.GET).mockResolvedValue({ data: success([]), error: undefined } as never)
+  vi.mocked(client.GET).mockImplementation(async (path: string) => {
+    if (path === '/api/v1/runtime/config') {
+      return { data: success(computeRuntimeConfig), error: undefined } as never
+    }
+    return { data: success([]), error: undefined } as never
+  })
   useMonitoringStore.setState({
     source: 'GFS',
     cycleTime: '2026-05-09T00:00:00Z',
@@ -1118,6 +1139,9 @@ beforeEach(() => {
     isPolling: false,
     isJobsLoading: false,
     error: null,
+    strictIdentity: null,
+    runtimeConfig: computeRuntimeConfig,
+    runtimeConfigError: null,
     fetchAll: noopAsync,
     fetchJobs: noopAsync,
   })
@@ -1247,6 +1271,39 @@ describe('App route state', () => {
     })
     expect(JSON.stringify(vi.mocked(client.GET).mock.calls)).not.toContain('manual')
     expect(findHydroMetRiverChartOption()?.series?.[0]?.data).toHaveLength(2)
+  })
+
+  it('routes /hydro-met strict URL handoff through latest-product with complete identity', async () => {
+    mockHydroMetRouteClient()
+    window.history.pushState(
+      {},
+      '',
+      '/hydro-met?source=GFS&cycle_time=2026-05-21T00:00:00Z&run_id=qhh_gfs_2026052100_smoke&model_id=basins_qhh_shud',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-product-panel')).toHaveTextContent('qhh_gfs_2026052100_smoke')
+    expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
+      params: {
+        query: {
+          source: 'GFS',
+          cycle_time: '2026-05-21T00:00:00.000Z',
+          run_id: 'qhh_gfs_2026052100_smoke',
+          model_id: 'basins_qhh_shud',
+        },
+      },
+    })
+  })
+
+  it('blocks partial /hydro-met strict handoff without falling back to source-only latest-product', async () => {
+    vi.mocked(client.GET).mockResolvedValue({ data: success(hydroMetLatestProduct()), error: undefined } as never)
+    window.history.pushState({}, '', '/hydro-met?source=GFS&run_id=qhh_gfs_2026052100_smoke')
+
+    render(<App />)
+
+    expect(await screen.findByTestId('hydro-met-strict-handoff-invalid')).toHaveTextContent('严格 handoff 参数不完整')
+    expect(vi.mocked(client.GET).mock.calls.some(([path]) => path === '/api/v1/mvp/qhh/latest-product')).toBe(false)
   })
 
   it('shows /hydro-met loading state while bootstrap is pending', async () => {
@@ -5996,6 +6053,96 @@ describe('App route state', () => {
     },
   )
 
+  it.each(['operator', 'sys_admin'] as const)(
+    'renders /ops as display_readonly diagnostics without retry, cancel, or queue control for %s',
+    async (role) => {
+      useAuthStore.setState({ role })
+      const user = userEvent.setup()
+      useMonitoringStore.setState({
+        runtimeConfig: displayRuntimeConfig,
+        runtimeConfigError: null,
+        source: 'GFS',
+        cycleTime: '2026-05-18T00:00:00.000Z',
+        cycle: {
+          source: 'GFS',
+          cycle_time: '2026-05-18T00:00:00.000Z',
+          current_state: 'failed',
+          started_at: '2026-05-18T00:00:30Z',
+          updated_at: '2026-05-18T00:08:00Z',
+          job_counts: { succeeded: 0, failed: 1, running: 0, pending: 0 },
+        },
+        cycleContext: { source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+        stages: [
+          {
+            stage: 'forecast',
+            display_status: 'failed',
+            status: 'failed',
+            duration_seconds: 120,
+            basin_progress: { completed: 0, total: 1, failed: 1 },
+            basin_results_limit: 50,
+            basin_results_total: 0,
+            basin_results_returned: 0,
+            basin_results_truncated: false,
+            basin_results: [],
+          },
+        ],
+        jobs: [
+          {
+            job_id: 'job-display',
+            run_id: 'run-display',
+            cycle_id: 'cycle-display',
+            run_type: 'forecast',
+            scenario: 'forecast_gfs_deterministic',
+            job_type: 'forecast',
+            slurm_job_id: '2001',
+            model_id: 'model-display',
+            status: 'failed',
+            stage: 'forecast',
+            submitted_at: '2026-05-18T00:03:00Z',
+            started_at: '2026-05-18T00:04:00Z',
+            finished_at: '2026-05-18T00:06:00Z',
+            exit_code: 1,
+            retry_count: 0,
+            error_code: 'E_MODEL',
+            error_message: 'display failure',
+            log_uri: 'published://logs/job-display.log',
+            duration_seconds: 120,
+          },
+        ],
+        jobsContext: { source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z' },
+        jobTotal: 1,
+      })
+      vi.mocked(client.GET).mockImplementation(async (path: string) => {
+        if (path === '/api/v1/jobs/{job_id}/logs') {
+          return {
+            data: success({ job_id: 'job-display', log_uri: 'published://logs/job-display.log', content: 'published display log' }),
+            error: undefined,
+          } as never
+        }
+        throw new Error(`Unexpected GET ${path}`)
+      })
+      window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
+
+      render(<App />)
+
+      expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+      expect(screen.getAllByText(/display_readonly/).some((node) =>
+        node.textContent?.includes('重试、取消和 Slurm 控制请求已禁用'),
+      )).toBe(true)
+      expect(screen.getByRole('heading', { name: '队列深度不可用' })).toBeInTheDocument()
+      expect(screen.getByText(/display_readonly 只读展示节点不读取 Slurm 队列深度/)).toBeInTheDocument()
+      expect(screen.getByRole('row', { name: /run-display.*model-display.*failed/ })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: /查看日志/ }))
+      expect(await screen.findByText('published display log')).toBeInTheDocument()
+
+      expect(vi.mocked(client.POST)).not.toHaveBeenCalled()
+      expect(vi.mocked(client.GET).mock.calls.some(([path]) => String(path).startsWith('/api/v1/slurm/'))).toBe(false)
+    },
+  )
+
   it('keeps /monitoring cancel controls compatible for authorized active jobs', async () => {
     useAuthStore.setState({ role: 'operator' })
     useMonitoringStore.setState({
@@ -6552,6 +6699,8 @@ describe('App route state', () => {
     useMonitoringStore.setState(
       {
         ...useMonitoringStore.getInitialState(),
+        runtimeConfig: computeRuntimeConfig,
+        runtimeConfigError: null,
         source: 'GFS',
         cycleTime: '2026-05-09T00:00:00Z',
         jobs: [staleJob],
@@ -6657,6 +6806,8 @@ describe('App route state', () => {
     useMonitoringStore.setState(
       {
         ...useMonitoringStore.getInitialState(),
+        runtimeConfig: computeRuntimeConfig,
+        runtimeConfigError: null,
         source: 'GFS',
         cycleTime: oldCycle,
         cycle: {
@@ -6806,6 +6957,8 @@ describe('App route state', () => {
     useMonitoringStore.setState(
       {
         ...useMonitoringStore.getInitialState(),
+        runtimeConfig: computeRuntimeConfig,
+        runtimeConfigError: null,
         source: 'IFS',
         cycleTime: selectedCycle,
         cycle: {
@@ -6996,6 +7149,52 @@ describe('App route state', () => {
       ])),
     )
     expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
+  })
+
+  it('initializes complete /ops strict identity query into scoped monitoring fetches', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    const contexts: Array<{ type: string; source: string; cycleTime: string; runId?: string; modelId?: string }> = []
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: '2026-05-09T00:00:00Z',
+      runtimeConfig: computeRuntimeConfig,
+      runtimeConfigError: null,
+      fetchAll: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime, strictIdentity } = useMonitoringStore.getState()
+        contexts.push({ type: 'all', source, cycleTime, runId: strictIdentity?.runId, modelId: strictIdentity?.modelId })
+      }),
+      fetchJobs: vi.fn().mockImplementation(async () => {
+        const { source, cycleTime, strictIdentity } = useMonitoringStore.getState()
+        contexts.push({ type: 'jobs', source, cycleTime, runId: strictIdentity?.runId, modelId: strictIdentity?.modelId })
+      }),
+    })
+    window.history.pushState(
+      {},
+      '',
+      '/ops?source=gfs&cycle_time=2026-05-18T00:00:00Z&run_id=run-strict&model_id=model-strict',
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(useMonitoringStore.getState()).toMatchObject({
+        source: 'GFS',
+        cycleTime: '2026-05-18T00:00:00.000Z',
+        strictIdentity: {
+          source: 'GFS',
+          cycleTime: '2026-05-18T00:00:00.000Z',
+          runId: 'run-strict',
+          modelId: 'model-strict',
+        },
+      }),
+    )
+    await waitFor(() =>
+      expect(contexts).toEqual(expect.arrayContaining([
+        { type: 'all', source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z', runId: 'run-strict', modelId: 'model-strict' },
+        { type: 'jobs', source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z', runId: 'run-strict', modelId: 'model-strict' },
+      ])),
+    )
   })
 
   it('keeps /ops selector changes, query state, store state, and scoped fetch context aligned', async () => {

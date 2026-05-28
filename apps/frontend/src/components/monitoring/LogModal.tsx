@@ -9,6 +9,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import type { components } from '@/api/types'
+import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
+import type { MonitoringStrictIdentity } from '@/stores/monitoring'
 
 type JobLogs = components['schemas']['JobLogs']
 
@@ -17,9 +19,10 @@ interface LogModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   refreshKey?: number
+  strictIdentity?: MonitoringStrictIdentity | null
 }
 
-export function LogModal({ jobId, open, onOpenChange, refreshKey = 0 }: LogModalProps) {
+export function LogModal({ jobId, open, onOpenChange, refreshKey = 0, strictIdentity = null }: LogModalProps) {
   const [content, setContent] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -36,11 +39,22 @@ export function LogModal({ jobId, open, onOpenChange, refreshKey = 0 }: LogModal
     setLoading(true)
 
     async function fetchLogs() {
-      const { data, error } = await client.GET('/api/v1/jobs/{job_id}/logs', {
-        params: { path: { job_id: jobId as string } },
-      })
+      const params = strictIdentity
+        ? {
+          path: { job_id: jobId as string },
+          query: {
+            source: strictIdentity.source,
+            cycle_time: strictIdentity.cycleTime,
+            run_id: strictIdentity.runId,
+            model_id: strictIdentity.modelId,
+          },
+        }
+        : { path: { job_id: jobId as string } }
+      const { data, error } = await client.GET('/api/v1/jobs/{job_id}/logs', { params })
       if (error) throw new Error(getApiErrorMessage(error, '日志加载失败'))
-      return unwrapApiData<JobLogs>(data, '日志加载失败')
+      const logs = unwrapApiData<JobLogs>(data, '日志加载失败')
+      if (logs.job_id !== jobId) throw new Error('日志身份与当前作业不匹配')
+      return logs
     }
 
     fetchLogs()
@@ -50,7 +64,7 @@ export function LogModal({ jobId, open, onOpenChange, refreshKey = 0 }: LogModal
       })
       .catch((error) => {
         if (!active) return
-        setError(getApiErrorMessage(error, '日志加载失败'))
+        setError(sanitizeHydroMetMessage(getApiErrorMessage(error, '日志加载失败'), '日志加载失败'))
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -59,7 +73,7 @@ export function LogModal({ jobId, open, onOpenChange, refreshKey = 0 }: LogModal
     return () => {
       active = false
     }
-  }, [jobId, open, refreshKey])
+  }, [jobId, open, refreshKey, strictIdentity])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

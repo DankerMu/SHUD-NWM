@@ -55,6 +55,7 @@ import {
 type LoadState =
   | { kind: 'loading' }
   | { kind: 'loaded'; result: HydroMetBootstrapResult }
+  | { kind: 'blocked'; message: string }
   | { kind: 'error'; message: string }
 
 type StationSeriesLoadState =
@@ -130,8 +131,14 @@ export function HydroMetPage() {
 
   useEffect(() => {
     let cancelled = false
+    if (state.strictIdentityError) {
+      setLoadState({ kind: 'blocked', message: state.strictIdentityError })
+      return () => {
+        cancelled = true
+      }
+    }
     setLoadState({ kind: 'loading' })
-    void loadHydroMetBootstrap({ source: state.source, cycle: state.cycle }).then(
+    void loadHydroMetBootstrap({ source: state.source, cycle: state.cycle, strictIdentity: state.strictIdentity }).then(
       (result) => {
         if (!cancelled) setLoadState({ kind: 'loaded', result })
       },
@@ -142,7 +149,7 @@ export function HydroMetPage() {
     return () => {
       cancelled = true
     }
-  }, [state.cycle, state.source])
+  }, [state.cycle, state.source, state.strictIdentity, state.strictIdentityError])
 
   const updateState = (patch: HydroMetQueryPatch) => {
     const next = mergeHydroMetQueryState(state, patch)
@@ -211,6 +218,14 @@ export function HydroMetPage() {
       ) : null}
 
       {loadState.kind === 'loading' ? <LoadingPanel /> : null}
+      {loadState.kind === 'blocked' ? (
+        <StatusPanel
+          tone="danger"
+          title="严格 handoff 无效"
+          messages={[loadState.message]}
+          testId="hydro-met-strict-handoff-invalid"
+        />
+      ) : null}
       {loadState.kind === 'error' ? <StatusPanel tone="danger" title="水文气象启动失败" messages={[loadState.message]} testId="hydro-met-load-error" /> : null}
       {loadState.kind === 'loaded' ? <HydroMetContent result={loadState.result} /> : null}
     </div>
@@ -250,6 +265,18 @@ function HydroMetContent({ result }: { result: HydroMetBootstrapResult }) {
         messages={result.latestReasons}
         product={result.product}
         testId="hydro-met-cycle-unavailable"
+      />
+    )
+  }
+
+  if (result.status === 'strict-identity-mismatch') {
+    return (
+      <StatusPanel
+        tone="danger"
+        title="严格 handoff 不匹配"
+        messages={result.latestReasons}
+        product={result.product}
+        testId="hydro-met-strict-identity-mismatch"
       />
     )
   }

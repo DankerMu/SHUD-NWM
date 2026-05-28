@@ -10,13 +10,13 @@ vi.mock('@/api/client', () => ({
   },
 }))
 
-function success(content: string) {
+function success(content: string, jobId = 'job-1') {
   return {
     data: {
       status: 'success',
       data: {
-        job_id: 'job-1',
-        log_uri: 's3://logs/job-1.log',
+        job_id: jobId,
+        log_uri: `s3://logs/${jobId}.log`,
         content,
       },
     },
@@ -60,7 +60,7 @@ describe('LogModal', () => {
   })
 
   it('renders empty logs explicitly', async () => {
-    vi.mocked(client.GET).mockResolvedValue(success('') as never)
+    vi.mocked(client.GET).mockResolvedValue(success('', 'job-empty') as never)
 
     render(<LogModal jobId="job-empty" open onOpenChange={vi.fn()} />)
 
@@ -73,6 +73,49 @@ describe('LogModal', () => {
     render(<LogModal jobId="job-missing" open onOpenChange={vi.fn()} />)
 
     expect(await screen.findByText('加载失败: Job log file was not found.')).toBeInTheDocument()
+  })
+
+  it('passes strict identity to the backend log request', async () => {
+    vi.mocked(client.GET).mockResolvedValue(success('strict log', 'job-strict') as never)
+
+    render(
+      <LogModal
+        jobId="job-strict"
+        open
+        onOpenChange={vi.fn()}
+        strictIdentity={{
+          source: 'GFS',
+          cycleTime: '2026-05-09T00:00:00.000Z',
+          runId: 'run-strict',
+          modelId: 'model-strict',
+        }}
+      />,
+    )
+
+    expect(await screen.findByText('strict log')).toBeInTheDocument()
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/jobs/{job_id}/logs', {
+      params: {
+        path: { job_id: 'job-strict' },
+        query: {
+          source: 'GFS',
+          cycle_time: '2026-05-09T00:00:00.000Z',
+          run_id: 'run-strict',
+          model_id: 'model-strict',
+        },
+      },
+    })
+  })
+
+  it('sanitizes backend log errors before rendering them to browser users', async () => {
+    vi.mocked(client.GET).mockResolvedValue(failure('Open file:///scratch/node22/.nhms-runs/run/job.log or /scratch/node22/private/job.log') as never)
+
+    render(<LogModal jobId="job-private-path" open onOpenChange={vi.fn()} />)
+
+    const error = await screen.findByText(/加载失败:/)
+    expect(error).toHaveTextContent('受限文件 URI')
+    expect(error).toHaveTextContent('本地路径已隐藏')
+    expect(error).not.toHaveTextContent('file:///scratch')
+    expect(error).not.toHaveTextContent('/scratch/node22')
   })
 
   it('renders thrown backend failures as unavailable log content', async () => {
@@ -98,8 +141,8 @@ describe('LogModal', () => {
     expect(screen.getByText('加载中...')).toBeInTheDocument()
     expect(screen.queryByText('old log content')).not.toBeInTheDocument()
 
-    oldLog.resolve(success('old log content'))
-    newLog.resolve(success('new log content'))
+    oldLog.resolve(success('old log content', 'job-old'))
+    newLog.resolve(success('new log content', 'job-new'))
 
     expect(await screen.findByText('new log content')).toBeInTheDocument()
     expect(screen.queryByText('old log content')).not.toBeInTheDocument()

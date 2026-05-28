@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { JobsTable } from '@/components/monitoring/JobsTable'
+import { JobsTable, buildDiagnosticPayload } from '@/components/monitoring/JobsTable'
 import { useToast } from '@/hooks/useToast'
 import type { AuthRole } from '@/stores/auth'
 import { type PipelineJob, useMonitoringStore } from '@/stores/monitoring'
@@ -408,6 +408,91 @@ describe('JobsTable RBAC action boundary', () => {
     expect(screen.getAllByText('available')).toHaveLength(2)
     expect(screen.queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('copies only safe diagnostic fields and keeps notified state local', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    useMonitoringStore.setState({
+      source: 'GFS',
+      cycleTime: '2026-05-09T00:00:00Z',
+      jobs: [failedJob],
+      jobTotal: 1,
+    })
+
+    render(
+      <JobsTable
+        autoFetch={false}
+        diagnosticsEnabled
+        retryControlsEnabled={false}
+        cancelControlsEnabled={false}
+        strictIdentity={{
+          source: 'GFS',
+          cycleTime: '2026-05-09T00:00:00.000Z',
+          runId: 'run-failed',
+          modelId: 'model-b',
+        }}
+      />,
+    )
+
+    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
+    await userEvent.click(screen.getByRole('button', { name: /复制诊断/ }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    const payload = JSON.parse(writeText.mock.calls[0][0])
+    expect(payload).toEqual({
+      source_id: 'GFS',
+      cycle_time: '2026-05-09T00:00:00.000Z',
+      run_id: 'run-failed',
+      model_id: 'model-b',
+      stage: 'forecast',
+      job_id: 'job-failed',
+      slurm_job_id: '1001',
+      status: 'failed',
+      error_code: 'E_MODEL',
+      error_message: 'model failed',
+      log_uri: 's3://logs/job-failed.log',
+    })
+    expect(Object.keys(payload)).toEqual([
+      'source_id',
+      'cycle_time',
+      'run_id',
+      'model_id',
+      'stage',
+      'job_id',
+      'slurm_job_id',
+      'status',
+      'error_code',
+      'error_message',
+      'log_uri',
+    ])
+
+    await userEvent.click(screen.getByRole('button', { name: /标记已通知/ }))
+    expect(screen.getByRole('button', { name: /已通知/ })).toBeDisabled()
+    expect(mocks.postMock).not.toHaveBeenCalled()
+    expect(mocks.getMock).not.toHaveBeenCalled()
+  })
+
+  it('omits absent diagnostic fields instead of fabricating unavailable values', () => {
+    expect(buildDiagnosticPayload(makeJob({
+      run_id: null,
+      model_id: null,
+      slurm_job_id: null,
+      error_code: null,
+      error_message: null,
+      log_uri: null,
+    }), {
+      sourceId: 'GFS',
+      cycleTime: '2026-05-09T00:00:00Z',
+      runId: null,
+      modelId: null,
+    })).toEqual({
+      source_id: 'GFS',
+      cycle_time: '2026-05-09T00:00:00Z',
+      stage: 'forecast',
+      job_id: 'job-failed',
+      status: 'failed',
+    })
   })
 
   it('shows explicit unavailable state instead of stale rows when jobs fail to load', () => {
