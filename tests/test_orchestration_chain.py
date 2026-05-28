@@ -2925,6 +2925,44 @@ def test_direct_cycle_immediate_terminal_publish_failure_persists_terminal_state
     assert not (tmp_path / "object-store" / "runs").exists()
 
 
+def test_direct_cycle_immediate_terminal_symlink_publish_root_is_not_followed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_target = tmp_path / "workspace" / ".nhms-runs" / "published-target"
+    private_target.mkdir(parents=True)
+    published_link = tmp_path / "published-link"
+    published_link.symlink_to(private_target, target_is_directory=True)
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(published_link))
+    repository = FakeCycleRepository()
+    client = ImmediateTerminalSlurmClient()
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    orchestrator = _orchestrator(tmp_path, repository, client, object_store=object_store)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    expected = (
+        "published://logs/gfs/2026050100/"
+        "cycle_gfs_2026050100/"
+        "job_cycle_gfs_2026050100_download.out"
+    )
+    job = repository.jobs["job_cycle_gfs_2026050100_download"]
+    assert exc_info.value.error_code == "PUBLISHED_LOG_WRITE_FAILED"
+    assert exc_info.value.details == {"log_uri": expected}
+    assert job["status"] == "succeeded"
+    assert job["exit_code"] == 0
+    assert job["error_code"] is None
+    assert job["log_uri"] is None
+    assert repository.cycle_statuses[-1] == "raw_complete"
+    assert all(event["details"].get("slurm", {}).get("log_uri") != expected for event in repository.events)
+    assert expected not in str({"jobs": repository.jobs, "events": repository.events})
+    assert client.fetch_log_calls == ["2001"]
+    assert client.poll_counts["2001"] == 0
+    assert not (tmp_path / "object-store" / "runs").exists()
+    assert not (private_target / "logs").exists()
+
+
 def test_direct_cycle_immediate_terminal_legacy_log_write_failure_persists_terminal_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

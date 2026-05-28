@@ -24,7 +24,7 @@ from packages.common.safe_fs import (
 )
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
-from services.artifacts import published_log_uri
+from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.slurm_gateway.config import SlurmGatewaySettings
@@ -3440,9 +3440,12 @@ class ForecastOrchestrator:
     def _persist_gateway_logs(self, slurm_job_id: str, log_uri: str) -> None:
         logs = _coerce_mapping(self.slurm_client.fetch_logs(slurm_job_id))
         content = str(logs.get("logs", ""))
-        published_path = self._published_log_path(log_uri)
-        if published_path is not None:
-            published_root = Path(os.environ["NHMS_PUBLISHED_ARTIFACT_ROOT"]).expanduser().resolve()
+        try:
+            published_path = self._published_log_path(log_uri)
+            if published_path is None:
+                self.object_store.write_bytes_atomic(log_uri, content.encode("utf-8"))
+                return
+            published_root = _absolute_configured_path(Path(os.environ["NHMS_PUBLISHED_ARTIFACT_ROOT"]))
             try:
                 ensure_directory_no_follow(published_root)
                 atomic_write_bytes_no_follow(
@@ -3457,8 +3460,12 @@ class ForecastOrchestrator:
                     "Failed to publish gateway logs.",
                     {"log_uri": log_uri},
                 ) from exc
-            return
-        self.object_store.write_bytes_atomic(log_uri, content.encode("utf-8"))
+        except ArtifactLogError as exc:
+            raise OrchestratorError(
+                "PUBLISHED_LOG_WRITE_FAILED",
+                "Failed to publish gateway logs.",
+                {"log_uri": log_uri},
+            ) from exc
 
     def _log_uri_for_stage(
         self,
@@ -3486,8 +3493,9 @@ class ForecastOrchestrator:
         prefix = os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://").strip() or "published://"
         if not log_uri.startswith(prefix):
             return None
-        relative = log_uri.removeprefix(prefix).lstrip("/")
-        return Path(published_root).expanduser().resolve() / relative
+        relative = published_log_relative_path(log_uri, uri_prefix=prefix)
+        root = _absolute_configured_path(Path(published_root))
+        return root / relative
 
     def _build_run_context(
         self,
@@ -6067,6 +6075,11 @@ def _pipeline_job_id(run_id: str, stage: str) -> str:
 
 def _published_artifact_root_configured() -> bool:
     return bool(os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", "").strip())
+
+
+def _absolute_configured_path(path: Path) -> Path:
+    expanded = Path(path).expanduser()
+    return expanded if expanded.is_absolute() else Path.cwd() / expanded
 
 
 def _log_stream_for_stage(stage: str) -> str:

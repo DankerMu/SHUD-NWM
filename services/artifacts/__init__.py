@@ -5,6 +5,7 @@ from services.artifacts.reader import (
     ArtifactReaderConfig,
     ObjectReader,
     default_artifact_reader_config,
+    published_log_relative_path,
     published_log_uri,
     safe_public_log_uri,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "ArtifactReaderConfig",
     "ObjectReader",
     "default_artifact_reader_config",
+    "published_log_relative_path",
     "published_log_uri",
     "safe_public_log_uri",
 ]

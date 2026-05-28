@@ -410,6 +410,22 @@ def safe_public_log_uri(value: str | None, *, max_length: int = PUBLIC_LOG_URI_M
     return f"{redacted[: max_length - 14]}...[truncated]"
 
 
+def published_log_relative_path(uri: str, *, uri_prefix: str | None = None) -> Path:
+    prefix = (uri_prefix or DEFAULT_PUBLISHED_URI_PREFIX).strip() or DEFAULT_PUBLISHED_URI_PREFIX
+    raw_uri = str(uri).strip()
+    safe_uri = safe_public_log_uri(raw_uri) or _PUBLISHED_REDACTED_URI
+    _reject_credential_bearing_uri(raw_uri, safe_uri=safe_uri)
+    if not raw_uri.startswith(prefix):
+        raise ArtifactLogError(
+            LOG_ERROR_URI_UNSUPPORTED,
+            "Published job log URI prefix is unsupported.",
+            status_code=400,
+            safe_uri=safe_uri,
+            reason="published_prefix_mismatch",
+        )
+    return _relative_path_from_published_uri(raw_uri, prefix, safe_uri=safe_uri)
+
+
 def _strip_unsafe_uri_parts(value: str) -> str:
     try:
         parsed = urlsplit(value)
