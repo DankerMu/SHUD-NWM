@@ -143,6 +143,12 @@ class ReadonlyDbProbeAdapter(Protocol):
     def schema_privileges(self, schema: str) -> dict[str, bool]:
         ...
 
+    def database_privileges(self) -> dict[str, Any]:
+        ...
+
+    def audited_schema_sequence_privileges(self, schemas: tuple[str, ...]) -> list[dict[str, Any]]:
+        ...
+
     def reachable_role_privileges(
         self,
         targets: tuple[ProbeTarget, ...],
@@ -518,6 +524,16 @@ class PsycopgReadonlyDbProbeAdapter:
                 )
                 return {key: bool(value) for key, value in dict(cursor.fetchone()).items()}
 
+    def database_privileges(self) -> dict[str, Any]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                return self._database_privileges_for_current_user(cursor)
+
+    def audited_schema_sequence_privileges(self, schemas: tuple[str, ...]) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                return self._audited_schema_sequence_privileges_for_current_user(cursor, schemas)
+
     def reachable_role_privileges(
         self,
         targets: tuple[ProbeTarget, ...],
@@ -646,6 +662,18 @@ class PsycopgReadonlyDbProbeAdapter:
                     reason_prefix="reachable_role_has",
                 )
             )
+        database_finding = _database_create_catalog_finding(
+            self._database_privileges_for_role(cursor, role_name),
+            reason_prefix="reachable_role_has",
+        )
+        if database_finding is not None:
+            mutating_findings.append(database_finding)
+        mutating_findings.extend(
+            _schema_sequence_catalog_findings(
+                self._audited_schema_sequence_privileges_for_role(cursor, role_name, schemas),
+                reason_prefix="reachable_role_has",
+            )
+        )
         for schema in schemas:
             if not self._schema_exists_for_cursor(cursor, schema):
                 continue
@@ -812,6 +840,86 @@ class PsycopgReadonlyDbProbeAdapter:
         )
         return {key: bool(value) for key, value in dict(cursor.fetchone()).items()}
 
+    def _database_privileges_for_current_user(self, cursor: Any) -> dict[str, Any]:
+        cursor.execute(
+            """
+            SELECT
+                current_database() AS database_name,
+                has_database_privilege(current_user, current_database(), 'CREATE') AS create
+            """
+        )
+        row = dict(cursor.fetchone())
+        return {
+            "database_name": str(row.get("database_name") or "current_database"),
+            "create": bool(row.get("create")),
+        }
+
+    def _database_privileges_for_role(self, cursor: Any, role_name: str) -> dict[str, Any]:
+        cursor.execute(
+            """
+            SELECT
+                current_database() AS database_name,
+                has_database_privilege(%s, current_database(), 'CREATE') AS create
+            """,
+            (role_name,),
+        )
+        row = dict(cursor.fetchone())
+        return {
+            "database_name": str(row.get("database_name") or "current_database"),
+            "create": bool(row.get("create")),
+        }
+
+    def _audited_schema_sequence_privileges_for_current_user(
+        self,
+        cursor: Any,
+        schemas: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        if not schemas:
+            return []
+        cursor.execute(
+            """
+            SELECT
+                seq_ns.nspname AS sequence_schema,
+                seq.relname AS sequence_name,
+                seq_ns.nspname || '.' || seq.relname AS qualified_name,
+                has_sequence_privilege(current_user, seq.oid, 'USAGE') AS usage,
+                has_sequence_privilege(current_user, seq.oid, 'UPDATE') AS update
+            FROM pg_class seq
+            JOIN pg_namespace seq_ns ON seq_ns.oid = seq.relnamespace
+            WHERE seq.relkind = 'S'
+              AND seq_ns.nspname = ANY(%s)
+            ORDER BY seq_ns.nspname, seq.relname
+            """,
+            (list(schemas),),
+        )
+        return _sequence_privilege_rows(cursor.fetchall())
+
+    def _audited_schema_sequence_privileges_for_role(
+        self,
+        cursor: Any,
+        role_name: str,
+        schemas: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        if not schemas:
+            return []
+        cursor.execute(
+            """
+            SELECT
+                seq_ns.nspname AS sequence_schema,
+                seq.relname AS sequence_name,
+                seq_ns.nspname || '.' || seq.relname AS qualified_name,
+                has_sequence_privilege(%s, seq.oid, 'USAGE') AS usage,
+                has_sequence_privilege(%s, seq.oid, 'UPDATE') AS update
+            FROM pg_class seq
+            JOIN pg_namespace seq_ns ON seq_ns.oid = seq.relnamespace
+            WHERE seq.relkind = 'S'
+              AND seq_ns.nspname = ANY(%s)
+            ORDER BY seq_ns.nspname, seq.relname
+            """,
+            (role_name, role_name, list(schemas)),
+        )
+        return _sequence_privilege_rows(cursor.fetchall())
+
     def _optional_maintain_privilege_for_current_user(
         self,
         cursor: Any,
@@ -926,7 +1034,45 @@ def validate_readonly_db_boundary(
     )
     writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=config.force)
     writer.prepare()
+    writer.write_json(
+        config.lane_dir / "summary.json",
+        _blocked_summary(
+            config,
+            code="READONLY_DB_VALIDATION_IN_PROGRESS",
+            message="Readonly DB validation started; final summary has not been written yet.",
+            provenance=provenance,
+        ),
+    )
 
+    try:
+        return _validate_readonly_db_boundary_prepared(
+            config,
+            writer=writer,
+            provenance=provenance,
+            adapter=adapter,
+            route_requester=route_requester,
+            manual_action_probe_runner=manual_action_probe_runner,
+        )
+    except Exception as error:
+        if (
+            isinstance(error, ReadonlyDbValidationError)
+            and error.error_code.startswith("READONLY_DB_EVIDENCE_")
+        ):
+            raise
+        summary = _unexpected_validation_error_summary(config, error=error, provenance=provenance)
+        writer.write_json(config.lane_dir / "summary.json", summary)
+        return redact_payload(summary)
+
+
+def _validate_readonly_db_boundary_prepared(
+    config: ReadonlyDbValidationConfig,
+    *,
+    writer: EvidenceWriter,
+    provenance: Mapping[str, Any],
+    adapter: ReadonlyDbProbeAdapter | None,
+    route_requester: RouteRequester | None,
+    manual_action_probe_runner: Callable[[str], list[dict[str, Any]]] | None,
+) -> dict[str, Any]:
     if not config.database_url:
         summary = _blocked_summary(
             config,
@@ -1028,6 +1174,8 @@ def run_permission_probe_matrix(
     catalog_has_mutating_privilege = _catalog_has_mutating_privilege(catalog)
     sequence_has_mutating_privilege = _catalog_has_sequence_mutating_privilege(catalog)
     results = [
+        _database_probe_result(catalog["database_privileges"]),
+        _audited_schema_sequence_probe_result(catalog["audited_schema_sequence_privileges"]),
         _role_membership_probe_result(catalog["reachable_role_privileges"]),
         *[
             _table_probe_result(
@@ -1146,6 +1294,8 @@ def _collect_permission_catalog(adapter: ReadonlyDbProbeAdapter) -> dict[str, An
             "schema_privileges": adapter.schema_privileges(schema) if exists else {},
         }
     return {
+        "database_privileges": adapter.database_privileges(),
+        "audited_schema_sequence_privileges": adapter.audited_schema_sequence_privileges(schemas),
         "targets": target_catalog,
         "schemas": schema_catalog,
         "schema_order": schemas,
@@ -1160,6 +1310,10 @@ def _permission_probe_schemas() -> tuple[str, ...]:
 def _catalog_has_mutating_privilege(catalog: Mapping[str, Any]) -> bool:
     if catalog.get("reachable_role_privileges"):
         return True
+    if catalog.get("database_privileges", {}).get("create"):
+        return True
+    if _sequence_mutating_privilege(list(catalog.get("audited_schema_sequence_privileges", [])))["allowed"]:
+        return True
     for target_catalog in catalog.get("targets", {}).values():
         if not target_catalog.get("exists"):
             continue
@@ -1173,7 +1327,7 @@ def _catalog_has_mutating_privilege(catalog: Mapping[str, Any]) -> bool:
 
 
 def _catalog_has_sequence_mutating_privilege(catalog: Mapping[str, Any]) -> bool:
-    return any(
+    return _sequence_mutating_privilege(list(catalog.get("audited_schema_sequence_privileges", [])))["allowed"] or any(
         _sequence_mutating_privilege(target_catalog.get("sequence_privileges", []))["allowed"]
         for target_catalog in catalog.get("targets", {}).values()
         if target_catalog.get("exists")
@@ -1229,6 +1383,108 @@ def _target_catalog_findings(
             }
         )
     return findings
+
+
+def _database_create_catalog_finding(
+    database_privileges: Mapping[str, Any],
+    *,
+    reason_prefix: str = "tested_credential_has",
+) -> dict[str, Any] | None:
+    if not database_privileges.get("create"):
+        return None
+    database_name = str(database_privileges.get("database_name") or "current_database")
+    return {
+        "target": database_name,
+        "operation": "DATABASE_CREATE",
+        "reason": f"{reason_prefix}_database_create_privilege",
+        "database_name": database_name,
+    }
+
+
+def _schema_sequence_catalog_findings(
+    sequence_privileges: list[dict[str, Any]],
+    *,
+    reason_prefix: str = "tested_credential_has",
+) -> list[dict[str, Any]]:
+    sequence_privilege = _sequence_mutating_privilege(sequence_privileges, reason_prefix=reason_prefix)
+    if not sequence_privilege["allowed"]:
+        return []
+    return [
+        {
+            "target": "audited_schema_sequences",
+            "operation": "AUDITED_SCHEMA_SEQUENCE_USAGE_UPDATE",
+            "reason": sequence_privilege["reason"],
+            "sequences": sequence_privilege["sequences"],
+        }
+    ]
+
+
+def _database_probe_result(database_privileges: Mapping[str, Any]) -> dict[str, Any]:
+    database_name = str(database_privileges.get("database_name") or "current_database")
+    privilege = _database_create_mutating_privilege(database_privileges)
+    spec = PermissionProbeSpec(
+        operation="DATABASE_CREATE",
+        target=None,
+        command=f"CATALOG CHECK CREATE privilege on current database {database_name}",
+    )
+    if privilege["allowed"]:
+        operation = _catalog_short_circuit_operation_result(spec, privilege=privilege)
+    else:
+        operation = {
+            "operation": spec.operation,
+            "command": spec.command,
+            "status": STATUS_PASS,
+            "privilege_allowed": False,
+            "table_privilege_allowed": False,
+            "column_privilege_allowed": False,
+            "sequence_privilege_allowed": False,
+            "schema_privilege_allowed": False,
+            "database_privilege_allowed": False,
+            "database_name": database_name,
+            "execution_outcome": "catalog_checked_no_database_create_privilege",
+            "rolled_back": False,
+            "reason": "tested_credential_lacks_database_create_privilege",
+        }
+    return {
+        "target": database_name,
+        "surface": "current_database_create_catalog",
+        "status": operation["status"],
+        "database_privileges": dict(database_privileges),
+        "operations": [operation],
+    }
+
+
+def _audited_schema_sequence_probe_result(sequence_privileges: list[dict[str, Any]]) -> dict[str, Any]:
+    privilege = _sequence_mutating_privilege(sequence_privileges)
+    spec = PermissionProbeSpec(
+        operation="AUDITED_SCHEMA_SEQUENCE_USAGE_UPDATE",
+        target=None,
+        command="CATALOG CHECK sequence USAGE/UPDATE privileges in audited schemas",
+    )
+    if privilege["allowed"]:
+        operation = _catalog_short_circuit_operation_result(spec, privilege=privilege)
+    else:
+        operation = {
+            "operation": spec.operation,
+            "command": spec.command,
+            "status": STATUS_PASS,
+            "privilege_allowed": False,
+            "table_privilege_allowed": False,
+            "column_privilege_allowed": False,
+            "sequence_privilege_allowed": False,
+            "schema_privilege_allowed": False,
+            "database_privilege_allowed": False,
+            "execution_outcome": "catalog_checked_no_audited_schema_sequence_mutating_privilege",
+            "rolled_back": False,
+            "reason": "tested_credential_lacks_audited_schema_sequence_mutating_privilege",
+        }
+    return {
+        "target": "audited_schema_sequences",
+        "surface": "audited_schema_sequence_catalog",
+        "status": operation["status"],
+        "sequence_privileges": sequence_privileges,
+        "operations": [operation],
+    }
 
 
 def _role_membership_probe_result(reachable_role_privileges: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1486,6 +1742,41 @@ def _catalog_mutating_privilege(
     }
 
 
+def _database_create_mutating_privilege(
+    database_privileges: Mapping[str, Any],
+    *,
+    reason_prefix: str = "tested_credential_has",
+) -> dict[str, Any]:
+    allowed = bool(database_privileges.get("create", False))
+    database_name = str(database_privileges.get("database_name") or "current_database")
+    return {
+        "allowed": allowed,
+        "reason": f"{reason_prefix}_database_create_privilege" if allowed else None,
+        "table_allowed": False,
+        "column_allowed": False,
+        "sequence_allowed": False,
+        "schema_allowed": False,
+        "database_allowed": allowed,
+        "database_name": database_name,
+        "columns": [],
+    }
+
+
+def _sequence_privilege_rows(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "sequence_schema": str(row["sequence_schema"]),
+            "sequence_name": str(row["sequence_name"]),
+            "qualified_name": str(row["qualified_name"]),
+            "columns": [str(column) for column in (row.get("columns") or [])],
+            "usage": bool(row["usage"]),
+            "update": bool(row["update"]),
+            "mutating_privilege_allowed": bool(row["usage"]) or bool(row["update"]),
+        }
+        for row in rows
+    ]
+
+
 def _sequence_mutating_privilege(
     sequence_privileges: list[dict[str, Any]],
     *,
@@ -1558,11 +1849,15 @@ def _catalog_short_circuit_operation_result(
         "column_privilege_allowed": bool(privilege.get("column_allowed", False)),
         "sequence_privilege_allowed": bool(privilege.get("sequence_allowed", False)),
         "schema_privilege_allowed": bool(privilege.get("schema_allowed", False)),
+        "database_privilege_allowed": bool(privilege.get("database_allowed", False)),
         "execution_outcome": "not_executed_due_to_catalog_mutating_privilege",
         "rolled_back": False,
         "catalog_short_circuited": True,
         "reason": str(privilege.get("reason") or "tested_credential_has_mutating_catalog_privilege"),
     }
+    database_name = privilege.get("database_name")
+    if database_name:
+        result["database_name"] = str(database_name)
     table_privilege = privilege.get("table_privilege")
     if table_privilege:
         result["table_privilege"] = str(table_privilege)
@@ -1956,6 +2251,8 @@ def _privilege_findings(permission_probes: list[dict[str, Any]]) -> list[dict[st
                     finding["columns"] = operation.get("column_privilege_columns")
                 if operation.get("sequence_privilege_sequences"):
                     finding["sequences"] = operation.get("sequence_privilege_sequences")
+                if operation.get("database_name"):
+                    finding["database_name"] = operation.get("database_name")
                 if operation.get("role_name"):
                     finding["role_name"] = operation.get("role_name")
                 if operation.get("reachable_via"):
@@ -2031,6 +2328,22 @@ def _blocked_summary(
             "evidence_root_approved": True,
         },
     }
+
+
+def _unexpected_validation_error_summary(
+    config: ReadonlyDbValidationConfig,
+    *,
+    error: BaseException,
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    summary = _blocked_summary(
+        config,
+        code="READONLY_DB_VALIDATION_UNEXPECTED_ERROR",
+        message=f"{error.__class__.__name__}: {_safe_db_error_message(error)}",
+        provenance=provenance,
+    )
+    summary["blockers"][0]["error_type"] = error.__class__.__name__
+    return summary
 
 
 def _safe_discover_identity(adapter: ReadonlyDbProbeAdapter) -> dict[str, Any]:

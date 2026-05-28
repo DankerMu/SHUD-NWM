@@ -23,15 +23,15 @@ The display service SHALL be validated with readonly database credentials for di
 
 #### Scenario: Write privileges denied
 - **WHEN** readonly DB validation runs against hydro, met, ops, and pipeline-critical tables
-- **THEN** catalog inventory is gathered for all probed tables, columns, owned/dependent sequences, required schemas, and reachable roles before any DML or DDL probe is executed
+- **THEN** catalog inventory is gathered for all probed tables, columns, all sequences in audited schemas, required schemas, current database `CREATE`, and reachable roles before any DML or DDL probe is executed
 - **AND** table-level `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, and supported non-read privileges such as `MAINTAIN` are treated as mutating capability
-- **AND** column-level `INSERT` and `UPDATE`, table-owned or dependent serial/BIGSERIAL/identity sequence `USAGE` or `UPDATE`, and schema `CREATE` on every probed schema are treated as mutating capability
+- **AND** column-level `INSERT` and `UPDATE`, any `USAGE` or `UPDATE` grant on sequences in `hydro`, `met`, or `ops`, schema `CREATE` on every probed schema, and current database `CREATE` are treated as mutating capability
 - **AND** reachable roles that can be inherited or set by the tested login are treated as mutating capability when they have unsafe role attributes or mutating privileges on the audited surfaces
 - **AND** controlled `INSERT`, `UPDATE`, `DELETE`, and DDL probes are rejected by DB permissions or readonly transaction semantics before commit when catalog inventory is clean
 - **AND** rollback is cleanup only, not proof of readonly behavior
 - **AND** any successful DML or DDL execution under the tested credential is recorded as `FAIL` even if the harness rolls it back
 - **AND** any catalog mutating capability under the tested credential or reachable role is recorded as `FAIL` and prevents DML or DDL probes anywhere in the matrix
-- **AND** any sequence `USAGE` or `UPDATE` privilege under the tested credential is recorded as `FAIL` without executing `nextval`, `setval`, DML, or DDL
+- **AND** any audited-schema sequence `USAGE` or `UPDATE` privilege under the tested credential or reachable role is recorded as `FAIL` without executing `nextval`, `setval`, DML, or DDL
 - **AND** a display PASS cannot be claimed by merely labeling a writer credential as readonly.
 
 ### Requirement: Docker and E2E evidence location

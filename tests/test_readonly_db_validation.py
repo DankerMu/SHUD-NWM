@@ -166,6 +166,97 @@ def test_injected_validation_cannot_emit_normal_live_pass_evidence() -> None:
     assert summary_file["schema"] == "nhms.readonly_db_boundary.evidence.simulated.v1"
 
 
+def test_forced_rerun_adapter_failure_overwrites_stale_pass_summary() -> None:
+    class FailingCatalogAdapter(_FakeReadonlyAdapter):
+        def table_privileges(self, target: ProbeTarget) -> dict[str, bool]:
+            del target
+            raise RuntimeError("catalog adapter failed with password=secret")
+
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("force-adapter-failure"),
+        database_url="postgresql://display_ro:secret@db.example/nhms",
+        force=True,
+    )
+    config.lane_dir.mkdir(parents=True, exist_ok=True)
+    (config.lane_dir / "summary.json").write_text(
+        json.dumps({"status": "PASS", "run_id": config.run_id}),
+        encoding="utf-8",
+    )
+
+    summary = validate_readonly_db_boundary(
+        config,
+        adapter=FailingCatalogAdapter(),
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+
+    on_disk = json.loads((config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "BLOCKED"
+    assert on_disk["status"] == "BLOCKED"
+    assert on_disk["status"] != "PASS"
+    assert on_disk["blockers"][0]["code"] == "READONLY_DB_VALIDATION_UNEXPECTED_ERROR"
+    assert "secret" not in json.dumps(on_disk)
+
+
+def test_forced_rerun_route_failure_overwrites_stale_pass_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing_route_smoke(*args: object, **kwargs: object) -> list[dict[str, Any]]:
+        del args, kwargs
+        raise RuntimeError("display route startup failed")
+
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("force-route-failure"),
+        database_url="postgresql://display_ro:secret@db.example/nhms",
+        force=True,
+    )
+    config.lane_dir.mkdir(parents=True, exist_ok=True)
+    (config.lane_dir / "summary.json").write_text(
+        json.dumps({"status": "PASS", "run_id": config.run_id}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(readonly_db_validation, "run_display_route_smoke", failing_route_smoke)
+
+    summary = validate_readonly_db_boundary(
+        config,
+        adapter=_FakeReadonlyAdapter(),
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+
+    on_disk = json.loads((config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "BLOCKED"
+    assert on_disk["status"] == "BLOCKED"
+    assert on_disk["status"] != "PASS"
+    assert on_disk["blockers"][0]["code"] == "READONLY_DB_VALIDATION_UNEXPECTED_ERROR"
+
+
+def test_existing_evidence_lane_without_force_preserves_no_overwrite_behavior() -> None:
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("no-force-existing"),
+        database_url="postgresql://display_ro:secret@db.example/nhms",
+        force=False,
+    )
+    config.lane_dir.mkdir(parents=True, exist_ok=True)
+    (config.lane_dir / "summary.json").write_text(
+        json.dumps({"status": "PASS", "run_id": config.run_id}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReadonlyDbValidationError) as exc_info:
+        validate_readonly_db_boundary(
+            config,
+            adapter=_FakeReadonlyAdapter(),
+            route_requester=_passing_route_requester,
+            manual_action_probe_runner=_passing_manual_actions,
+        )
+
+    assert exc_info.value.error_code == "READONLY_DB_EVIDENCE_EXISTS"
+    on_disk = json.loads((config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+    assert on_disk["status"] == "PASS"
+
+
 def test_writer_privilege_marks_validation_fail_even_when_probe_denied() -> None:
     target = "hydro.hydro_run"
     adapter = _FakeReadonlyAdapter(privileges={target: {"insert": True, "update": False, "delete": False}})
@@ -240,6 +331,66 @@ def test_psycopg_reachable_role_discovery_has_no_silent_depth_cap() -> None:
 
     assert "NOT m.roleid = ANY(reachable.path)" in cursor.executed_query
     assert "reachable.depth <" not in cursor.executed_query
+
+
+def test_psycopg_adapter_checks_current_database_create_for_current_user_and_reachable_role() -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
+            self.calls.append((query, params))
+
+        def fetchone(self) -> dict[str, Any]:
+            return {"database_name": "nhms", "create": True}
+
+    cursor = FakeCursor()
+    adapter = PsycopgReadonlyDbProbeAdapter("postgresql://readonly:secret@db.example/nhms", ddl_suffix="db-create")
+
+    current_user_result = adapter._database_privileges_for_current_user(cursor)
+    reachable_role_result = adapter._database_privileges_for_role(cursor, "readonly_parent")
+
+    current_user_query = " ".join(cursor.calls[0][0].split())
+    reachable_role_query = " ".join(cursor.calls[1][0].split())
+    assert current_user_result == {"database_name": "nhms", "create": True}
+    assert reachable_role_result == {"database_name": "nhms", "create": True}
+    assert "has_database_privilege(current_user, current_database(), 'CREATE')" in current_user_query
+    assert "has_database_privilege(%s, current_database(), 'CREATE')" in reachable_role_query
+    assert cursor.calls[1][1] == ("readonly_parent",)
+
+
+def test_psycopg_adapter_audited_schema_sequence_inventory_scans_all_sequences() -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
+            self.calls.append((query, params))
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "sequence_schema": "ops",
+                    "sequence_name": "readonly_escape_seq",
+                    "qualified_name": "ops.readonly_escape_seq",
+                    "usage": True,
+                    "update": False,
+                }
+            ]
+
+    cursor = FakeCursor()
+    adapter = PsycopgReadonlyDbProbeAdapter("postgresql://readonly:secret@db.example/nhms", ddl_suffix="seq")
+
+    result = adapter._audited_schema_sequence_privileges_for_current_user(cursor, ("hydro", "met", "ops"))
+
+    query = " ".join(cursor.calls[0][0].split())
+    assert "FROM pg_class seq" in query
+    assert "seq.relkind = 'S'" in query
+    assert "seq_ns.nspname = ANY(%s)" in query
+    assert "pg_depend" not in query
+    assert cursor.calls[0][1] == (["hydro", "met", "ops"],)
+    assert result[0]["qualified_name"] == "ops.readonly_escape_seq"
+    assert result[0]["mutating_privilege_allowed"] is True
 
 
 def test_deep_reachable_writer_role_membership_fails_without_set_role_or_probes() -> None:
@@ -415,6 +566,156 @@ def test_late_target_sequence_grant_prevents_dml_and_ddl_across_whole_matrix() -
     assert all(str(operation["execution_outcome"]).startswith("not_executed") for operation in mutating_operations)
 
 
+def test_database_create_grant_fails_without_executing_dml_or_ddl() -> None:
+    adapter = _FakeReadonlyAdapter(database_privileges={"create": True})
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("database-create"),
+        database_url="postgresql://writer:secret@db.example/nhms",
+        force=True,
+    )
+
+    summary = validate_readonly_db_boundary(
+        config,
+        adapter=adapter,
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+
+    assert summary["status"] == "FAIL"
+    assert summary["role"]["role_type"] == "writer_or_mutating"
+    db_probe = next(
+        item for item in summary["permission_probes"] if item["surface"] == "current_database_create_catalog"
+    )
+    operation = db_probe["operations"][0]
+    assert operation["operation"] == "DATABASE_CREATE"
+    assert operation["status"] == "FAIL"
+    assert operation["database_privilege_allowed"] is True
+    assert operation["reason"] == "tested_credential_has_database_create_privilege"
+    assert operation["execution_outcome"] == "not_executed_due_to_catalog_mutating_privilege"
+    mutating_operations = [
+        probe_operation
+        for item in summary["permission_probes"]
+        for probe_operation in item["operations"]
+        if probe_operation["operation"] in {"INSERT", "UPDATE", "DELETE", "DDL_CREATE_TABLE"}
+    ]
+    assert mutating_operations
+    assert all(
+        str(probe_operation["execution_outcome"]).startswith("not_executed")
+        for probe_operation in mutating_operations
+    )
+    assert adapter.executed_specs == []
+
+
+def test_reachable_role_database_create_grant_fails_without_executing_dml_or_ddl() -> None:
+    adapter = _FakeReadonlyAdapter(
+        reachable_role_findings=[
+            {
+                "role_name": "readonly_parent",
+                "reachable_via": ["inherit"],
+                "membership_depth": 1,
+                "unsafe_role_attributes": {},
+                "mutating_privilege_findings": [
+                    {
+                        "target": "nhms",
+                        "operation": "DATABASE_CREATE",
+                        "reason": "reachable_role_has_database_create_privilege",
+                        "database_name": "nhms",
+                    }
+                ],
+                "reason": "reachable_role_has_mutating_capability",
+            }
+        ]
+    )
+
+    probes = run_permission_probe_matrix(adapter, ddl_suffix="reachable-db-create")
+
+    role_probe = next(item for item in probes if item["target"] == "reachable_roles")
+    assert role_probe["status"] == "FAIL"
+    assert role_probe["operations"][0]["mutating_privilege_findings"][0]["operation"] == "DATABASE_CREATE"
+    assert adapter.executed_specs == []
+
+
+def test_standalone_audited_schema_sequence_grant_fails_without_executing_probes() -> None:
+    adapter = _FakeReadonlyAdapter(
+        audited_schema_sequence_privileges=[
+            {
+                "sequence_schema": "ops",
+                "sequence_name": "readonly_escape_seq",
+                "qualified_name": "ops.readonly_escape_seq",
+                "usage": True,
+                "update": False,
+            }
+        ]
+    )
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("standalone-sequence"),
+        database_url="postgresql://writer:secret@db.example/nhms",
+        force=True,
+    )
+
+    summary = validate_readonly_db_boundary(
+        config,
+        adapter=adapter,
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+
+    assert summary["status"] == "FAIL"
+    assert summary["role"]["role_type"] == "writer_or_mutating"
+    sequence_probe = next(item for item in summary["permission_probes"] if item["target"] == "audited_schema_sequences")
+    operation = sequence_probe["operations"][0]
+    assert operation["operation"] == "AUDITED_SCHEMA_SEQUENCE_USAGE_UPDATE"
+    assert operation["status"] == "FAIL"
+    assert operation["sequence_privilege_allowed"] is True
+    assert operation["sequence_privilege_sequences"][0]["qualified_name"] == "ops.readonly_escape_seq"
+    assert operation["reason"] == "tested_credential_has_mutating_sequence_privilege"
+    ddl_probe = next(item for item in summary["permission_probes"] if item["target"] == "ops.*")
+    assert ddl_probe["operations"][0]["execution_outcome"] == "not_executed_due_to_sequence_mutating_privilege"
+    assert adapter.executed_specs == []
+
+
+def test_reachable_role_standalone_sequence_grant_fails_without_executing_dml_or_ddl() -> None:
+    adapter = _FakeReadonlyAdapter(
+        reachable_role_findings=[
+            {
+                "role_name": "readonly_parent",
+                "reachable_via": ["set_role"],
+                "membership_depth": 1,
+                "unsafe_role_attributes": {},
+                "mutating_privilege_findings": [
+                    {
+                        "target": "audited_schema_sequences",
+                        "operation": "AUDITED_SCHEMA_SEQUENCE_USAGE_UPDATE",
+                        "reason": "reachable_role_has_mutating_sequence_privilege",
+                        "sequences": [
+                            {
+                                "sequence_schema": "met",
+                                "sequence_name": "sibling_escape_seq",
+                                "qualified_name": "met.sibling_escape_seq",
+                                "columns": [],
+                                "usage": False,
+                                "update": True,
+                            }
+                        ],
+                    }
+                ],
+                "reason": "reachable_role_has_mutating_capability",
+            }
+        ]
+    )
+
+    probes = run_permission_probe_matrix(adapter, ddl_suffix="reachable-sequence")
+
+    role_probe = next(item for item in probes if item["target"] == "reachable_roles")
+    assert role_probe["status"] == "FAIL"
+    finding = role_probe["operations"][0]["mutating_privilege_findings"][0]
+    assert finding["operation"] == "AUDITED_SCHEMA_SEQUENCE_USAGE_UPDATE"
+    assert finding["sequences"][0]["qualified_name"] == "met.sibling_escape_seq"
+    assert adapter.executed_specs == []
+
+
 @pytest.mark.parametrize("schema", ["hydro", "met", "ops"])
 def test_schema_create_grant_fails_without_executing_dml_or_ddl(schema: str) -> None:
     adapter = _FakeReadonlyAdapter(schema_privileges_by_schema={schema: {"create": True}})
@@ -439,7 +740,13 @@ def test_denied_dml_and_ddl_without_mutating_grants_pass_permission_probes() -> 
     operations = [operation for item in probes for operation in item["operations"]]
     assert operations
     assert all(operation["status"] == "PASS" for operation in operations)
-    assert all(operation["reason"].endswith("_denied_before_commit") for operation in operations)
+    denial_operations = [
+        operation
+        for operation in operations
+        if operation["operation"] in {"INSERT", "UPDATE", "DELETE", "DDL_CREATE_TABLE"}
+    ]
+    assert denial_operations
+    assert all(operation["reason"].endswith("_denied_before_commit") for operation in denial_operations)
 
 
 def test_successful_ddl_execution_despite_no_catalog_grant_fails_with_rollback_cleanup_only() -> None:
@@ -724,7 +1031,9 @@ class _FakeReadonlyAdapter:
         privileges: dict[str, dict[str, bool]] | None = None,
         column_privileges: dict[str, dict[str, list[str]]] | None = None,
         sequence_privileges: dict[str, list[dict[str, Any]]] | None = None,
+        audited_schema_sequence_privileges: list[dict[str, Any]] | None = None,
         schema_privileges_by_schema: dict[str, dict[str, bool]] | None = None,
+        database_privileges: dict[str, Any] | None = None,
         absent_tables: set[str] | None = None,
         successful_operations: set[tuple[str, str]] | None = None,
         role_overrides: dict[str, Any] | None = None,
@@ -734,7 +1043,9 @@ class _FakeReadonlyAdapter:
         self.privileges = privileges or {}
         self.column_privilege_overrides = column_privileges or {}
         self.sequence_privilege_overrides = sequence_privileges or {}
+        self.audited_schema_sequence_privilege_overrides = audited_schema_sequence_privileges or []
         self.schema_privilege_overrides = schema_privileges_by_schema or {}
+        self.database_privilege_overrides = database_privileges or {}
         self.absent_tables = absent_tables or set()
         self.successful_operations = successful_operations or set()
         self.role_overrides = role_overrides or {}
@@ -807,6 +1118,26 @@ class _FakeReadonlyAdapter:
 
     def schema_privileges(self, schema: str) -> dict[str, bool]:
         return {"create": False, **self.schema_privilege_overrides.get(schema, {})}
+
+    def database_privileges(self) -> dict[str, Any]:
+        return {"database_name": "nhms", "create": False, **self.database_privilege_overrides}
+
+    def audited_schema_sequence_privileges(self, schemas: tuple[str, ...]) -> list[dict[str, Any]]:
+        audited_schemas = set(schemas)
+        return [
+            {
+                "sequence_schema": str(sequence.get("sequence_schema") or "ops"),
+                "sequence_name": str(sequence.get("sequence_name") or "validation_probe_seq"),
+                "qualified_name": str(sequence.get("qualified_name") or "ops.validation_probe_seq"),
+                "columns": [str(column) for column in sequence.get("columns", [])],
+                "usage": bool(sequence.get("usage", False)),
+                "update": bool(sequence.get("update", False)),
+                "mutating_privilege_allowed": bool(sequence.get("usage", False))
+                or bool(sequence.get("update", False)),
+            }
+            for sequence in self.audited_schema_sequence_privilege_overrides
+            if str(sequence.get("sequence_schema") or "ops") in audited_schemas
+        ]
 
     def reachable_role_privileges(
         self,
