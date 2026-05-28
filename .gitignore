@@ -12,12 +12,13 @@ build/
 .venv/
 venv/
 ENV/
-!infra/env/
-!infra/env/*.example
-!infra/env/README.md
 
 # Environment
 .env
+infra/env/*
+!infra/env/
+!infra/env/*.example
+!infra/env/README.md
 
 # IDE
 .idea/

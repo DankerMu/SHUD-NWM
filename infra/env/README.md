@@ -52,7 +52,14 @@ docker compose --env-file infra/env/compute.example -f infra/compose.compute.yml
 docker compose --env-file infra/env/display.example -f infra/compose.display.yml config
 ```
 
+When `TMPDIR` is unset, preflight uses `artifacts/tmp` in this repository.
+If `TMPDIR` is set explicitly, it must point under this repository's
+`artifacts/` tree or under `/scratch/frd_muziyao` outside this checkout.
+
 All generated validation evidence must stay under `artifacts/` in this
-repository or under `/scratch/frd_muziyao`. `infra/docker-compose.dev.yml`
+repository or under `/scratch/frd_muziyao` outside this checkout. Do not write
+reports or evidence into `infra/env/`; real local env files such as
+`compute.env`, `display.env`, and `local.env` are intentionally ignored while
+`*.example` and this README remain trackable. `infra/docker-compose.dev.yml`
 remains a local development dependency stack and must not be used as either
 production two-node compose file.
