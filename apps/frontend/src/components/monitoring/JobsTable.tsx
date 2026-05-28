@@ -58,6 +58,7 @@ interface JobsTableProps {
   autoFetch?: boolean
   cancelControlsEnabled?: boolean
   clearOnFailure?: boolean
+  diagnosticsDisplayReadonly?: boolean
   diagnosticsEnabled?: boolean
   displayEnabled?: boolean
   fetchEnabled?: boolean
@@ -72,6 +73,7 @@ export function JobsTable({
   autoFetch = true,
   cancelControlsEnabled,
   clearOnFailure = false,
+  diagnosticsDisplayReadonly = false,
   diagnosticsEnabled = false,
   displayEnabled,
   fetchEnabled = true,
@@ -105,6 +107,9 @@ export function JobsTable({
   const retryActionsEnabled = retryControlsEnabled ?? actionsEnabled
   const cancelActionsEnabled = cancelControlsEnabled ?? actionsEnabled
   const controlsVisible = logControlsEnabled || retryActionsEnabled || cancelActionsEnabled || diagnosticsEnabled
+  const manualRecoveryGuidance = diagnosticsDisplayReadonly
+    ? '失败诊断用于交给 22 compute-control 节点处理；在 27 display_readonly 页面只做只读查看和本地通知标记，不写入数据库或审计 API。'
+    : '失败诊断用于交给 22 compute-control 节点处理；当前运维页面复制诊断和本地通知标记不写入数据库或审计 API。'
   const canDisplayRows = displayEnabled ?? fetchEnabled
   const visibleJobs = canDisplayRows ? jobs : []
   const visibleJobTotal = canDisplayRows ? jobTotal : 0
@@ -219,7 +224,7 @@ export function JobsTable({
       <CardContent className="space-y-3">
         {diagnosticsEnabled ? (
           <div className="rounded-md border border-border bg-background p-3 text-xs text-muted" data-testid="ops-manual-recovery-guidance">
-            失败诊断用于交给 22 compute-control 节点处理；在 27 display_readonly 页面只做只读查看和本地通知标记，不写入数据库或审计 API。
+            {manualRecoveryGuidance}
           </div>
         ) : null}
         <Table>

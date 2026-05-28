@@ -297,6 +297,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
             runId: visibleStrictIdentity?.runId ?? null,
             modelId: visibleStrictIdentity?.modelId ?? null,
           }}
+          diagnosticsDisplayReadonly={isDisplayReadonly}
           diagnosticsEnabled={isOpsMode}
           stages={visibleStages}
           unavailableReason={stageListUnavailableReason}
@@ -306,6 +307,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
           autoFetch={isOperationalDataReady}
           cancelControlsEnabled={!isOpsMode && controlMutationsEnabled && isOperationalDataReady}
           clearOnFailure={isOpsMode}
+          diagnosticsDisplayReadonly={isDisplayReadonly}
           diagnosticsEnabled={isOpsMode}
           displayEnabled={isOperationalDataReady && hasVisibleJobsPayload}
           fetchEnabled={isOperationalDataReady}

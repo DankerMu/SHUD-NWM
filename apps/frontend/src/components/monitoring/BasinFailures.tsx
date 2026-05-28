@@ -11,18 +11,27 @@ import type { PipelineStage } from '@/stores/monitoring'
 
 interface BasinFailuresProps {
   diagnosticContext?: DiagnosticContext | null
+  diagnosticsDisplayReadonly?: boolean
   diagnosticsEnabled?: boolean
   stage: PipelineStage
 }
 
 const failedStatuses = new Set(['failed', 'submission_failed', 'permanently_failed', 'cancelled', 'partially_failed'])
 
-export function BasinFailures({ diagnosticContext = null, diagnosticsEnabled = false, stage }: BasinFailuresProps) {
+export function BasinFailures({
+  diagnosticContext = null,
+  diagnosticsDisplayReadonly = false,
+  diagnosticsEnabled = false,
+  stage,
+}: BasinFailuresProps) {
   const { toast } = useToast()
   const failures = (stage.basin_results ?? []).filter(
     (item) => failedStatuses.has(item.status) || Boolean(item.error_code),
   )
   const canCopyDiagnostics = diagnosticsEnabled && Boolean(diagnosticContext)
+  const manualRecoveryGuidance = diagnosticsDisplayReadonly
+    ? '阶段失败诊断用于交给 22 compute-control 节点处理；27 display_readonly 页面只复制只读证据，不写入数据库或审计 API。'
+    : '阶段失败诊断用于交给 22 compute-control 节点处理；当前运维页面复制诊断不写入数据库或审计 API。'
 
   const copyStageDiagnostic = async () => {
     if (!diagnosticContext) return
@@ -41,7 +50,7 @@ export function BasinFailures({ diagnosticContext = null, diagnosticsEnabled = f
       className="rounded-md border border-border bg-background p-3 text-xs text-muted"
       data-testid="ops-stage-manual-recovery-guidance"
     >
-      阶段失败诊断用于交给 22 compute-control 节点处理；27 display_readonly 页面只复制只读证据，不写入数据库或审计 API。
+      {manualRecoveryGuidance}
     </div>
   ) : null
 

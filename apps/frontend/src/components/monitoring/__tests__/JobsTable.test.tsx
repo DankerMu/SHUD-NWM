@@ -410,6 +410,32 @@ describe('JobsTable RBAC action boundary', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it('keeps diagnostics guidance role-neutral unless display_readonly is explicit', () => {
+    const { rerender } = render(
+      <JobsTable
+        autoFetch={false}
+        diagnosticsEnabled
+        retryControlsEnabled={false}
+        cancelControlsEnabled={false}
+      />,
+    )
+
+    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
+    expect(screen.getByTestId('ops-manual-recovery-guidance')).not.toHaveTextContent(/display_readonly|27/)
+
+    rerender(
+      <JobsTable
+        autoFetch={false}
+        diagnosticsDisplayReadonly
+        diagnosticsEnabled
+        retryControlsEnabled={false}
+        cancelControlsEnabled={false}
+      />,
+    )
+
+    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('27 display_readonly')
+  })
+
   it('copies only safe diagnostic fields and keeps notified state local', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
@@ -436,6 +462,7 @@ describe('JobsTable RBAC action boundary', () => {
     )
 
     expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
+    expect(screen.getByTestId('ops-manual-recovery-guidance')).not.toHaveTextContent(/display_readonly|27/)
     await userEvent.click(screen.getByRole('button', { name: /复制诊断/ }))
 
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))

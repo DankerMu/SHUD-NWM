@@ -6053,6 +6053,8 @@ describe('App route state', () => {
       expect(screen.queryByText('权限不足')).not.toBeInTheDocument()
       expect(screen.getByRole('link', { name: /系统运维/ })).toHaveClass('border-accent')
       expect(screen.getByRole('link', { name: /产品监控/ })).toHaveAttribute('href', '/monitoring')
+      expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
+      expect(screen.getByTestId('ops-manual-recovery-guidance')).not.toHaveTextContent(/display_readonly|27/)
       const failedRow = screen.getByRole('row', { name: /job-ops.*run-ops.*forecast.*model-ops.*failed.*2001.*2m.*2.*available/ })
       expect(failedRow).toBeInTheDocument()
       expect(within(failedRow).getByRole('button', { name: /查看日志/ })).toBeVisible()
@@ -6137,6 +6139,7 @@ describe('App route state', () => {
       expect(screen.getAllByText(/display_readonly/).some((node) =>
         node.textContent?.includes('重试、取消和 Slurm 控制请求已禁用'),
       )).toBe(true)
+      expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('27 display_readonly')
       expect(screen.getByRole('heading', { name: '队列深度不可用' })).toBeInTheDocument()
       expect(screen.getByText(/display_readonly 只读展示节点不读取 Slurm 队列深度/)).toBeInTheDocument()
       expect(screen.getByRole('row', { name: /run-display.*model-display.*failed/ })).toBeInTheDocument()
@@ -6341,6 +6344,7 @@ describe('App route state', () => {
     expect(screen.queryByRole('row', { name: /stage-only-job/ })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /预报.*forecast.*failed/ }))
     expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
+    expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).toHaveTextContent('27 display_readonly')
     await user.click(screen.getByRole('button', { name: /复制流域诊断/ }))
 
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))

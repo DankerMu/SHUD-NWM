@@ -11,6 +11,7 @@ import type { PipelineStage } from '@/stores/monitoring'
 
 interface StageListProps {
   diagnosticContext?: DiagnosticContext | null
+  diagnosticsDisplayReadonly?: boolean
   diagnosticsEnabled?: boolean
   stages: PipelineStage[]
   unavailableReason?: string | null
@@ -36,6 +37,7 @@ function pendingStage(stage: string): PipelineStage {
 
 export function StageList({
   diagnosticContext = null,
+  diagnosticsDisplayReadonly = false,
   diagnosticsEnabled = false,
   stages,
   unavailableReason,
@@ -107,6 +109,7 @@ export function StageList({
                 {canExpand && expanded ? (
                   <BasinFailures
                     diagnosticContext={diagnosticContext}
+                    diagnosticsDisplayReadonly={diagnosticsDisplayReadonly}
                     diagnosticsEnabled={diagnosticsEnabled}
                     stage={stage}
                   />
