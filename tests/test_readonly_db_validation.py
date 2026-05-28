@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -192,6 +193,80 @@ def test_writer_privilege_marks_validation_fail_even_when_probe_denied() -> None
     assert not any(spec.target and spec.target.qualified_name == target for spec in adapter.executed_specs)
 
 
+@pytest.mark.parametrize(
+    ("operation", "privilege", "ddl_suffix"),
+    [
+        ("TRUNCATE", "truncate", "truncate-grant"),
+        ("REFERENCES", "references", "references-grant"),
+        ("TRIGGER", "trigger", "trigger-grant"),
+        ("MAINTAIN", "maintain", "maintain-grant"),
+    ],
+)
+def test_table_catalog_only_privilege_marks_validation_fail_without_executing_any_probe(
+    operation: str,
+    privilege: str,
+    ddl_suffix: str,
+) -> None:
+    target = "hydro.hydro_run"
+    adapter = _FakeReadonlyAdapter(privileges={target: {privilege: True}})
+
+    probes = run_permission_probe_matrix(adapter, ddl_suffix=ddl_suffix)
+
+    target_result = next(item for item in probes if item["target"] == target)
+    operation_probe = next(item for item in target_result["operations"] if item["operation"] == operation)
+    assert target_result["status"] == "FAIL"
+    assert operation_probe["status"] == "FAIL"
+    assert operation_probe["table_privilege_allowed"] is True
+    assert operation_probe["table_privilege"] == privilege
+    assert operation_probe["reason"] == "tested_credential_has_mutating_table_privilege"
+    assert operation_probe["execution_outcome"] == "not_executed_due_to_catalog_mutating_privilege"
+    assert adapter.executed_specs == []
+
+
+def test_reachable_writer_role_membership_fails_without_set_role_or_probes() -> None:
+    adapter = _FakeReadonlyAdapter(
+        reachable_role_findings=[
+            {
+                "role_name": "nhms_writer",
+                "reachable_via": ["set_role"],
+                "membership_depth": 1,
+                "unsafe_role_attributes": {},
+                "mutating_privilege_findings": [
+                    {
+                        "target": "ops.pipeline_job",
+                        "operation": "UPDATE",
+                        "reason": "reachable_role_has_mutating_table_privilege",
+                    }
+                ],
+                "reason": "reachable_role_has_mutating_capability",
+            }
+        ]
+    )
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("reachable-role"),
+        database_url="postgresql://display_ro:secret@db.example/nhms",
+        force=True,
+    )
+
+    summary = validate_readonly_db_boundary(
+        config,
+        adapter=adapter,
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+
+    assert summary["status"] == "FAIL"
+    assert summary["role"]["role_type"] == "writer_or_mutating"
+    assert summary["role"]["reachable_role_findings"][0]["role_name"] == "nhms_writer"
+    role_probe = next(item for item in summary["permission_probes"] if item["target"] == "reachable_roles")
+    assert role_probe["status"] == "FAIL"
+    operation = role_probe["operations"][0]
+    assert operation["operation"] == "REACHABLE_ROLE_MEMBERSHIP"
+    assert operation["execution_outcome"] == "not_executed_role_membership_catalog_only"
+    assert adapter.executed_specs == []
+
+
 def test_mutating_probe_success_is_fail_and_rollback_is_cleanup_only() -> None:
     target = "ops.pipeline_event"
     adapter = _FakeReadonlyAdapter(successful_operations={(target, "DELETE")})
@@ -288,22 +363,51 @@ def test_sequence_mutating_grant_fails_without_executing_probes(grant: dict[str,
     ddl_operation = ddl_probe["operations"][0]
     assert ddl_operation["operation"] == "DDL_CREATE_TABLE"
     assert ddl_operation["execution_outcome"] == "not_executed_due_to_sequence_mutating_privilege"
-    assert not any(spec.target and spec.target.qualified_name == target for spec in adapter.executed_specs)
-    assert not any(spec.operation == "DDL_CREATE_TABLE" for spec in adapter.executed_specs)
+    assert adapter.executed_specs == []
 
 
-def test_schema_create_grant_fails_without_executing_ddl() -> None:
-    adapter = _FakeReadonlyAdapter(schema_privileges_by_schema={"ops": {"create": True}})
+def test_late_target_sequence_grant_prevents_dml_and_ddl_across_whole_matrix() -> None:
+    adapter = _FakeReadonlyAdapter(
+        sequence_privileges={
+            "ops.pipeline_event": [
+                {
+                    "sequence_schema": "ops",
+                    "sequence_name": "pipeline_event_event_id_seq",
+                    "qualified_name": "ops.pipeline_event_event_id_seq",
+                    "columns": ["event_id"],
+                    "usage": True,
+                    "update": False,
+                }
+            ]
+        }
+    )
+
+    probes = run_permission_probe_matrix(adapter, ddl_suffix="late-sequence")
+
+    assert adapter.executed_specs == []
+    mutating_operations = [
+        operation
+        for item in probes
+        for operation in item["operations"]
+        if operation["operation"] in {"INSERT", "UPDATE", "DELETE", "DDL_CREATE_TABLE"}
+    ]
+    assert mutating_operations
+    assert all(str(operation["execution_outcome"]).startswith("not_executed") for operation in mutating_operations)
+
+
+@pytest.mark.parametrize("schema", ["hydro", "met", "ops"])
+def test_schema_create_grant_fails_without_executing_dml_or_ddl(schema: str) -> None:
+    adapter = _FakeReadonlyAdapter(schema_privileges_by_schema={schema: {"create": True}})
 
     probes = run_permission_probe_matrix(adapter, ddl_suffix="schema-grant")
 
-    ddl = next(item for item in probes if item["target"] == "ops.*")
+    ddl = next(item for item in probes if item["target"] == f"{schema}.*")
     operation = ddl["operations"][0]
     assert ddl["status"] == "FAIL"
     assert operation["status"] == "FAIL"
     assert operation["reason"] == "tested_credential_has_schema_create_privilege"
     assert operation["execution_outcome"] == "not_executed_due_to_catalog_mutating_privilege"
-    assert not any(spec.operation == "DDL_CREATE_TABLE" for spec in adapter.executed_specs)
+    assert adapter.executed_specs == []
 
 
 def test_denied_dml_and_ddl_without_mutating_grants_pass_permission_probes() -> None:
@@ -399,6 +503,78 @@ def test_bare_missing_route_404_is_fail_but_allowlisted_fixture_error_is_blocked
     assert latest["http_status"] == 404
     assert logs["status"] == "BLOCKED"
     assert logs["error_code"] == "JOB_LOG_NOT_PUBLISHED"
+
+
+def test_display_route_smoke_constructs_strict_identity_paths() -> None:
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("route-strict"),
+        database_url="postgresql://readonly:secret@db.example/nhms",
+    )
+    identity = {
+        "source": "GFS",
+        "cycle_time": "2026-05-03T00:00:00+00:00",
+        "run_id": "run_routes",
+        "model_id": "model_routes",
+        "job_id": "job_routes",
+    }
+    observed_paths: dict[str, str] = {}
+
+    def strict_route_requester(method: str, path: str) -> RouteHttpResponse:
+        del method
+        name = _route_name_for_path(path)
+        if name:
+            observed_paths[name] = path
+        return RouteHttpResponse(status_code=200, body={"status": "ok", "data": {}})
+
+    results = run_display_route_smoke(config, identity, route_requester=strict_route_requester)
+
+    assert all(item["status"] == "PASS" for item in results)
+    for name in ("latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"):
+        assert name in observed_paths
+        query = parse_qs(urlsplit(observed_paths[name]).query)
+        assert query["source"] == ["GFS"]
+        assert query["cycle_time"] == ["2026-05-03T00:00:00+00:00"]
+        assert query["run_id"] == ["run_routes"]
+        assert query["model_id"] == ["model_routes"]
+    assert urlsplit(observed_paths["jobs"]).path == "/api/v1/jobs"
+    assert parse_qs(urlsplit(observed_paths["jobs"]).query)["limit"] == ["1"]
+    assert urlsplit(observed_paths["job_logs"]).path == "/api/v1/jobs/job_routes/logs"
+
+
+def test_display_route_smoke_blocks_identity_bound_routes_when_strict_identity_missing() -> None:
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("route-missing-strict"),
+        database_url="postgresql://readonly:secret@db.example/nhms",
+    )
+    observed_paths: list[str] = []
+
+    def route_requester(method: str, path: str) -> RouteHttpResponse:
+        del method
+        observed_paths.append(path)
+        return RouteHttpResponse(status_code=200, body={"status": "ok", "data": {}})
+
+    results = run_display_route_smoke(
+        config,
+        {
+            "source": "GFS",
+            "cycle_time": "2026-05-03T00:00:00+00:00",
+            "run_id": "run_routes",
+        },
+        route_requester=route_requester,
+    )
+
+    blocked_by_name = {
+        item["name"]: item
+        for item in results
+        if item["name"] in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}
+    }
+    assert set(blocked_by_name) == {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}
+    assert all(item["status"] == "BLOCKED" for item in blocked_by_name.values())
+    assert blocked_by_name["jobs"]["missing_identity_fields"] == ["model_id"]
+    assert blocked_by_name["job_logs"]["missing_identity_fields"] == ["model_id", "job_id"]
+    assert "/api/v1/jobs?limit=1" not in observed_paths
 
 
 def test_display_route_smoke_forces_safe_env_and_bounded_database_url(
@@ -532,6 +708,7 @@ class _FakeReadonlyAdapter:
         absent_tables: set[str] | None = None,
         successful_operations: set[tuple[str, str]] | None = None,
         role_overrides: dict[str, Any] | None = None,
+        reachable_role_findings: list[dict[str, Any]] | None = None,
         no_probe_column_targets: set[str] | None = None,
     ) -> None:
         self.privileges = privileges or {}
@@ -541,6 +718,7 @@ class _FakeReadonlyAdapter:
         self.absent_tables = absent_tables or set()
         self.successful_operations = successful_operations or set()
         self.role_overrides = role_overrides or {}
+        self.reachable_role_findings = reachable_role_findings or []
         self.no_probe_column_targets = no_probe_column_targets or set()
         self.executed_specs: list[Any] = []
         self.persisted_mutations = 0
@@ -575,7 +753,17 @@ class _FakeReadonlyAdapter:
         return target.qualified_name not in self.absent_tables
 
     def table_privileges(self, target: ProbeTarget) -> dict[str, bool]:
-        return {"insert": False, "update": False, "delete": False, **self.privileges.get(target.qualified_name, {})}
+        return {
+            "insert": False,
+            "update": False,
+            "delete": False,
+            "truncate": False,
+            "references": False,
+            "trigger": False,
+            "maintain": False,
+            "maintain_supported": True,
+            **self.privileges.get(target.qualified_name, {}),
+        }
 
     def column_privileges(self, target: ProbeTarget) -> dict[str, list[str]]:
         return {"insert": [], "update": [], **self.column_privilege_overrides.get(target.qualified_name, {})}
@@ -599,6 +787,14 @@ class _FakeReadonlyAdapter:
 
     def schema_privileges(self, schema: str) -> dict[str, bool]:
         return {"create": False, **self.schema_privilege_overrides.get(schema, {})}
+
+    def reachable_role_privileges(
+        self,
+        targets: tuple[ProbeTarget, ...],
+        schemas: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        del targets, schemas
+        return self.reachable_role_findings
 
     def first_updatable_column(self, target: ProbeTarget) -> str | None:
         if target.qualified_name in self.no_probe_column_targets:
@@ -629,6 +825,21 @@ def _passing_route_requester(method: str, path: str) -> RouteHttpResponse:
     return RouteHttpResponse(status_code=200, body={"status": "ok", "data": {}})
 
 
+def _route_name_for_path(path: str) -> str | None:
+    parsed = urlsplit(path)
+    if parsed.path == "/api/v1/mvp/qhh/latest-product":
+        return "latest_product"
+    if parsed.path == "/api/v1/pipeline/status":
+        return "pipeline_status"
+    if parsed.path == "/api/v1/pipeline/stages":
+        return "pipeline_stages"
+    if parsed.path == "/api/v1/jobs":
+        return "jobs"
+    if parsed.path.endswith("/logs"):
+        return "job_logs"
+    return None
+
+
 def _mixed_route_requester(method: str, path: str) -> RouteHttpResponse:
     del method
     if path.startswith("/api/v1/mvp/qhh/latest-product"):
@@ -648,7 +859,8 @@ def _bare_404_route_requester(method: str, path: str) -> RouteHttpResponse:
     del method
     if path.startswith("/api/v1/mvp/qhh/latest-product"):
         return RouteHttpResponse(status_code=404, body={"detail": "Not Found"})
-    if path.startswith("/api/v1/jobs/") and path.endswith("/logs"):
+    parsed_path = urlsplit(path).path
+    if parsed_path.startswith("/api/v1/jobs/") and parsed_path.endswith("/logs"):
         return RouteHttpResponse(
             status_code=404,
             body={"error": {"code": "JOB_LOG_NOT_PUBLISHED", "message": "published log fixture unavailable"}},

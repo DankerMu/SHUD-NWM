@@ -382,8 +382,10 @@ uv run python scripts/validate_readonly_db_boundary.py \
 验证内容：
 
 - 记录脱敏 DB URL、`current_user`、role type、route smoke、permission probe 和 retry/cancel 结果。
-- `/health`、runtime config、models、stations、latest-product、pipeline status/stages、jobs、job logs 只在真实只读 DB 请求成功时记为 `PASS`；fixture 缺失必须记为 `BLOCKED`。
-- `hydro.hydro_run`、`hydro.river_timeseries`、`met.forecast_cycle`、`met.forcing_station_timeseries`、`ops.pipeline_job`、`ops.pipeline_event` 和 `ops` schema DDL probe 的 `INSERT`、`UPDATE`、`DELETE`、DDL 必须在提交前被拒绝；这些表拥有或依赖的 serial/BIGSERIAL/identity sequence 不得授予 `USAGE` 或 `UPDATE`。任何 DML/DDL 成功执行，或任何相关 sequence 可变权限，都记为 `FAIL`；发现 sequence 可变权限时不得执行 `nextval`、`setval`、DML 或 DDL。
+- `/health`、runtime config、models、stations、latest-product、pipeline status/stages、jobs、job logs 只在真实只读 DB 请求成功时记为 `PASS`；fixture 缺失必须记为 `BLOCKED`。latest-product、pipeline status/stages、jobs 和 job logs 必须绑定同一组 `source`、`cycle_time`、`run_id`、`model_id`，job logs 还必须绑定 `job_id`；缺少强身份字段时对应 route 记为 `BLOCKED`，不能用 latest、宽泛 jobs 或未限定 job logs 代替。
+- `hydro.hydro_run`、`hydro.river_timeseries`、`met.forecast_cycle`、`met.forcing_station_timeseries`、`ops.pipeline_job`、`ops.pipeline_event` 和 `hydro`、`met`、`ops` schema DDL probe 的 `INSERT`、`UPDATE`、`DELETE`、DDL 必须在提交前被拒绝。
+- 在执行任何 DML/DDL probe 前，必须先完成全矩阵 catalog 盘点：表级 `INSERT`、`UPDATE`、`DELETE`、`TRUNCATE`、`REFERENCES`、`TRIGGER`，PostgreSQL 支持时的 `MAINTAIN`，列级 `INSERT`/`UPDATE`，表拥有或依赖的 serial/BIGSERIAL/identity sequence `USAGE`/`UPDATE`，每个目标 schema 的 `CREATE`，以及当前登录可继承或可 `SET ROLE` 到的 reachable role 的危险 role attribute 和上述对象权限。
+- 任何 catalog 可变权限、reachable writer role、DML/DDL 成功执行，或相关 sequence 可变权限都记为 `FAIL`。一旦 catalog 盘点发现任一可变能力，整个矩阵不得执行任何 DML/DDL probe，只能写入未执行的 catalog evidence；发现 sequence 可变权限时也不得执行 `nextval`、`setval`、DML 或 DDL。
 - retry/cancel 必须返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，且不构造 DB write 或 Gateway 依赖。
 - evidence 只允许写入仓库 `artifacts/` 或 `/scratch/frd_muziyao` 下，输出中不得包含明文 DSN 密码、token 或 signature。
 

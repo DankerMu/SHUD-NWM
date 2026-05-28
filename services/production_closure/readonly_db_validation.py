@@ -50,6 +50,16 @@ ROLE_ATTRIBUTE_WRITE_FLAGS = (
     "rolreplication",
     "rolbypassrls",
 )
+TABLE_CATALOG_MUTATING_OPERATIONS = (
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+    "MAINTAIN",
+)
+TABLE_CATALOG_ONLY_MUTATING_OPERATIONS = ("TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN")
 ROUTE_FIXTURE_BLOCKER_ERROR_CODES = frozenset(
     {
         "QHH_LATEST_PRODUCT_UNAVAILABLE",
@@ -131,6 +141,13 @@ class ReadonlyDbProbeAdapter(Protocol):
         ...
 
     def schema_privileges(self, schema: str) -> dict[str, bool]:
+        ...
+
+    def reachable_role_privileges(
+        self,
+        targets: tuple[ProbeTarget, ...],
+        schemas: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
         ...
 
     def first_updatable_column(self, target: ProbeTarget) -> str | None:
@@ -395,11 +412,23 @@ class PsycopgReadonlyDbProbeAdapter:
                     SELECT
                         has_table_privilege(current_user, %s, 'INSERT') AS insert,
                         has_table_privilege(current_user, %s, 'UPDATE') AS update,
-                        has_table_privilege(current_user, %s, 'DELETE') AS delete
+                        has_table_privilege(current_user, %s, 'DELETE') AS delete,
+                        has_table_privilege(current_user, %s, 'TRUNCATE') AS truncate,
+                        has_table_privilege(current_user, %s, 'REFERENCES') AS references,
+                        has_table_privilege(current_user, %s, 'TRIGGER') AS trigger
                     """,
-                    (target.qualified_name, target.qualified_name, target.qualified_name),
+                    (
+                        target.qualified_name,
+                        target.qualified_name,
+                        target.qualified_name,
+                        target.qualified_name,
+                        target.qualified_name,
+                        target.qualified_name,
+                    ),
                 )
-                return {key: bool(value) for key, value in dict(cursor.fetchone()).items()}
+                privileges = {key: bool(value) for key, value in dict(cursor.fetchone()).items()}
+                privileges.update(self._optional_maintain_privilege_for_current_user(cursor, target))
+                return privileges
 
     def column_privileges(self, target: ProbeTarget) -> dict[str, list[str]]:
         with self._connection() as connection:
@@ -489,6 +518,22 @@ class PsycopgReadonlyDbProbeAdapter:
                 )
                 return {key: bool(value) for key, value in dict(cursor.fetchone()).items()}
 
+    def reachable_role_privileges(
+        self,
+        targets: tuple[ProbeTarget, ...],
+        schemas: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            with connection.cursor() as cursor:
+                membership_columns = self._pg_auth_members_columns(cursor)
+                roles = self._reachable_roles(cursor, membership_columns=membership_columns)
+                findings = []
+                for role in roles:
+                    role_finding = self._reachable_role_finding(cursor, role, targets=targets, schemas=schemas)
+                    if role_finding is not None:
+                        findings.append(role_finding)
+        return findings
+
     def first_updatable_column(self, target: ProbeTarget) -> str | None:
         with self._connection() as connection:
             with connection.cursor() as cursor:
@@ -507,6 +552,297 @@ class PsycopgReadonlyDbProbeAdapter:
                 )
                 row = cursor.fetchone()
         return str(row["column_name"]) if row else None
+
+    def _pg_auth_members_columns(self, cursor: Any) -> set[str]:
+        cursor.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'pg_catalog'
+              AND table_name = 'pg_auth_members'
+            """
+        )
+        return {str(row["column_name"]) for row in cursor.fetchall()}
+
+    def _reachable_roles(self, cursor: Any, *, membership_columns: set[str]) -> list[dict[str, Any]]:
+        set_option = "COALESCE(m.set_option, true)" if "set_option" in membership_columns else "true"
+        inherit_option = (
+            "COALESCE(m.inherit_option, true)" if "inherit_option" in membership_columns else "true"
+        )
+        cursor.execute(
+            f"""
+            WITH RECURSIVE reachable(roleid, depth, path, can_set, can_inherit) AS (
+                SELECT
+                    m.roleid,
+                    1 AS depth,
+                    ARRAY[m.roleid] AS path,
+                    {set_option} AS can_set,
+                    {inherit_option} AS can_inherit
+                FROM pg_auth_members m
+                JOIN pg_roles current_role ON current_role.oid = m.member
+                WHERE current_role.rolname = current_user
+
+                UNION ALL
+
+                SELECT
+                    m.roleid,
+                    reachable.depth + 1 AS depth,
+                    reachable.path || m.roleid AS path,
+                    reachable.can_set AND {set_option} AS can_set,
+                    reachable.can_inherit AND {inherit_option} AS can_inherit
+                FROM pg_auth_members m
+                JOIN reachable ON reachable.roleid = m.member
+                WHERE NOT m.roleid = ANY(reachable.path)
+                  AND reachable.depth < 8
+            )
+            SELECT DISTINCT ON (reachable.roleid)
+                reachable.roleid,
+                pg_roles.rolname,
+                pg_roles.rolsuper,
+                pg_roles.rolcreatedb,
+                pg_roles.rolcreaterole,
+                pg_roles.rolcanlogin,
+                pg_roles.rolreplication,
+                pg_roles.rolbypassrls,
+                reachable.depth,
+                reachable.can_set,
+                reachable.can_inherit
+            FROM reachable
+            JOIN pg_roles ON pg_roles.oid = reachable.roleid
+            WHERE reachable.can_set OR reachable.can_inherit
+            ORDER BY reachable.roleid, reachable.can_set DESC, reachable.can_inherit DESC, reachable.depth ASC
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def _reachable_role_finding(
+        self,
+        cursor: Any,
+        role: Mapping[str, Any],
+        *,
+        targets: tuple[ProbeTarget, ...],
+        schemas: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        role_name = str(role.get("rolname") or "")
+        if not role_name:
+            return None
+        unsafe_attributes = {
+            flag: bool(role.get(flag))
+            for flag in ROLE_ATTRIBUTE_WRITE_FLAGS
+            if bool(role.get(flag))
+        }
+        mutating_findings: list[dict[str, Any]] = []
+        for target in targets:
+            if not self._table_exists_for_cursor(cursor, target):
+                continue
+            table_privileges = self._table_privileges_for_role(cursor, role_name, target)
+            column_privileges = self._column_privileges_for_role(cursor, role_name, target)
+            sequence_privileges = self._sequence_privileges_for_role(cursor, role_name, target)
+            mutating_findings.extend(
+                _target_catalog_findings(
+                    target,
+                    table_privileges=table_privileges,
+                    column_privileges=column_privileges,
+                    sequence_privileges=sequence_privileges,
+                    reason_prefix="reachable_role_has",
+                )
+            )
+        for schema in schemas:
+            if not self._schema_exists_for_cursor(cursor, schema):
+                continue
+            schema_privileges = self._schema_privileges_for_role(cursor, role_name, schema)
+            if schema_privileges.get("create"):
+                mutating_findings.append(
+                    {
+                        "target": f"{schema}.*",
+                        "operation": "DDL_CREATE_TABLE",
+                        "reason": "reachable_role_has_schema_create_privilege",
+                    }
+                )
+        if not unsafe_attributes and not mutating_findings:
+            return None
+        reachable_via = []
+        if role.get("can_set"):
+            reachable_via.append("set_role")
+        if role.get("can_inherit"):
+            reachable_via.append("inherit")
+        return {
+            "role_name": redact_text(role_name),
+            "reachable_via": reachable_via,
+            "membership_depth": int(role.get("depth") or 0),
+            "unsafe_role_attributes": unsafe_attributes,
+            "mutating_privilege_findings": mutating_findings,
+            "reason": "reachable_role_has_mutating_capability",
+        }
+
+    def _table_exists_for_cursor(self, cursor: Any, target: ProbeTarget) -> bool:
+        cursor.execute("SELECT to_regclass(%s) IS NOT NULL AS exists", (target.qualified_name,))
+        return bool(cursor.fetchone()["exists"])
+
+    def _schema_exists_for_cursor(self, cursor: Any, schema: str) -> bool:
+        cursor.execute("SELECT to_regnamespace(%s) IS NOT NULL AS exists", (schema,))
+        return bool(cursor.fetchone()["exists"])
+
+    def _table_privileges_for_role(
+        self,
+        cursor: Any,
+        role_name: str,
+        target: ProbeTarget,
+    ) -> dict[str, bool]:
+        cursor.execute(
+            """
+            SELECT
+                has_table_privilege(%s, %s, 'INSERT') AS insert,
+                has_table_privilege(%s, %s, 'UPDATE') AS update,
+                has_table_privilege(%s, %s, 'DELETE') AS delete,
+                has_table_privilege(%s, %s, 'TRUNCATE') AS truncate,
+                has_table_privilege(%s, %s, 'REFERENCES') AS references,
+                has_table_privilege(%s, %s, 'TRIGGER') AS trigger
+            """,
+            (
+                role_name,
+                target.qualified_name,
+                role_name,
+                target.qualified_name,
+                role_name,
+                target.qualified_name,
+                role_name,
+                target.qualified_name,
+                role_name,
+                target.qualified_name,
+                role_name,
+                target.qualified_name,
+            ),
+        )
+        privileges = {key: bool(value) for key, value in dict(cursor.fetchone()).items()}
+        privileges.update(self._optional_maintain_privilege_for_role(cursor, role_name, target))
+        return privileges
+
+    def _column_privileges_for_role(
+        self,
+        cursor: Any,
+        role_name: str,
+        target: ProbeTarget,
+    ) -> dict[str, list[str]]:
+        cursor.execute(
+            """
+            SELECT
+                a.attname AS column_name,
+                has_column_privilege(%s, c.oid, a.attname, 'INSERT') AS insert,
+                has_column_privilege(%s, c.oid, a.attname, 'UPDATE') AS update
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_attribute a ON a.attrelid = c.oid
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND c.relkind IN ('r', 'p')
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+              AND a.attgenerated = ''
+            ORDER BY a.attnum
+            """,
+            (role_name, role_name, target.schema, target.table),
+        )
+        privileges = {"insert": [], "update": []}
+        for row in cursor.fetchall():
+            column_name = str(row["column_name"])
+            if row.get("insert"):
+                privileges["insert"].append(column_name)
+            if row.get("update"):
+                privileges["update"].append(column_name)
+        return privileges
+
+    def _sequence_privileges_for_role(
+        self,
+        cursor: Any,
+        role_name: str,
+        target: ProbeTarget,
+    ) -> list[dict[str, Any]]:
+        cursor.execute(
+            """
+            SELECT
+                seq_ns.nspname AS sequence_schema,
+                seq.relname AS sequence_name,
+                seq_ns.nspname || '.' || seq.relname AS qualified_name,
+                array_remove(array_agg(DISTINCT a.attname ORDER BY a.attname), NULL) AS columns,
+                has_sequence_privilege(%s, seq.oid, 'USAGE') AS usage,
+                has_sequence_privilege(%s, seq.oid, 'UPDATE') AS update
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_depend d ON d.refobjid = c.oid
+            JOIN pg_class seq ON seq.oid = d.objid
+            JOIN pg_namespace seq_ns ON seq_ns.oid = seq.relnamespace
+            LEFT JOIN pg_attribute a
+                ON a.attrelid = c.oid
+               AND a.attnum = d.refobjsubid
+               AND NOT a.attisdropped
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND c.relkind IN ('r', 'p')
+              AND seq.relkind = 'S'
+              AND d.classid = 'pg_class'::regclass
+              AND d.refclassid = 'pg_class'::regclass
+              AND d.deptype IN ('a', 'i')
+            GROUP BY seq_ns.nspname, seq.relname, seq.oid
+            ORDER BY seq_ns.nspname, seq.relname
+            """,
+            (role_name, role_name, target.schema, target.table),
+        )
+        return [
+            {
+                "sequence_schema": str(row["sequence_schema"]),
+                "sequence_name": str(row["sequence_name"]),
+                "qualified_name": str(row["qualified_name"]),
+                "columns": [str(column) for column in (row.get("columns") or [])],
+                "usage": bool(row["usage"]),
+                "update": bool(row["update"]),
+                "mutating_privilege_allowed": bool(row["usage"]) or bool(row["update"]),
+            }
+            for row in cursor.fetchall()
+        ]
+
+    def _schema_privileges_for_role(
+        self,
+        cursor: Any,
+        role_name: str,
+        schema: str,
+    ) -> dict[str, bool]:
+        cursor.execute(
+            "SELECT has_schema_privilege(%s, %s, 'CREATE') AS create",
+            (role_name, schema),
+        )
+        return {key: bool(value) for key, value in dict(cursor.fetchone()).items()}
+
+    def _optional_maintain_privilege_for_current_user(
+        self,
+        cursor: Any,
+        target: ProbeTarget,
+    ) -> dict[str, bool]:
+        try:
+            cursor.execute(
+                "SELECT has_table_privilege(current_user, %s, 'MAINTAIN') AS maintain",
+                (target.qualified_name,),
+            )
+        except psycopg2.Error:
+            cursor.connection.rollback()
+            return {"maintain": False, "maintain_supported": False}
+        return {"maintain": bool(cursor.fetchone()["maintain"]), "maintain_supported": True}
+
+    def _optional_maintain_privilege_for_role(
+        self,
+        cursor: Any,
+        role_name: str,
+        target: ProbeTarget,
+    ) -> dict[str, bool]:
+        try:
+            cursor.execute(
+                "SELECT has_table_privilege(%s, %s, 'MAINTAIN') AS maintain",
+                (role_name, target.qualified_name),
+            )
+        except psycopg2.Error:
+            cursor.connection.rollback()
+            return {"maintain": False, "maintain_supported": False}
+        return {"maintain": bool(cursor.fetchone()["maintain"]), "maintain_supported": True}
 
     def execute_probe(self, spec: PermissionProbeSpec) -> ProbeExecution:
         connection = psycopg2.connect(self.database_url, **_validation_connect_kwargs())
@@ -689,13 +1025,31 @@ def run_permission_probe_matrix(
     *,
     ddl_suffix: str,
 ) -> list[dict[str, Any]]:
-    results = [_table_probe_result(adapter, target) for target in PERMISSION_PROBE_TARGETS]
-    results.append(
-        _ddl_probe_result(
+    catalog = _collect_permission_catalog(adapter)
+    catalog_has_mutating_privilege = _catalog_has_mutating_privilege(catalog)
+    sequence_has_mutating_privilege = _catalog_has_sequence_mutating_privilege(catalog)
+    results = [
+        _role_membership_probe_result(catalog["reachable_role_privileges"]),
+        *[
+            _table_probe_result(
+                adapter,
+                target,
+                catalog["targets"][target.qualified_name],
+                skip_due_to_catalog_mutating_privilege=catalog_has_mutating_privilege,
+            )
+            for target in PERMISSION_PROBE_TARGETS
+        ],
+    ]
+    results.extend(
+        _schema_probe_result(
             adapter,
+            schema,
+            catalog["schemas"][schema],
             ddl_suffix=ddl_suffix,
-            skip_due_to_sequence_mutating_privilege=_has_sequence_mutating_privilege(results),
+            skip_due_to_catalog_mutating_privilege=catalog_has_mutating_privilege,
+            skip_due_to_sequence_mutating_privilege=sequence_has_mutating_privilege,
         )
+        for schema in catalog["schema_order"]
     )
     return results
 
@@ -768,8 +1122,160 @@ def run_display_manual_action_probes(run_id: str, *, database_url: str | None = 
     return results
 
 
-def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) -> dict[str, Any]:
-    if not adapter.table_exists(target):
+def _collect_permission_catalog(adapter: ReadonlyDbProbeAdapter) -> dict[str, Any]:
+    schemas = _permission_probe_schemas()
+    target_catalog: dict[str, dict[str, Any]] = {}
+    for target in PERMISSION_PROBE_TARGETS:
+        exists = adapter.table_exists(target)
+        if not exists:
+            target_catalog[target.qualified_name] = {"target": target, "exists": False}
+            continue
+        target_catalog[target.qualified_name] = {
+            "target": target,
+            "exists": True,
+            "table_privileges": adapter.table_privileges(target),
+            "column_privileges": adapter.column_privileges(target),
+            "sequence_privileges": adapter.sequence_privileges(target),
+            "probe_column": adapter.first_updatable_column(target),
+        }
+    schema_catalog: dict[str, dict[str, Any]] = {}
+    for schema in schemas:
+        exists = adapter.schema_exists(schema)
+        schema_catalog[schema] = {
+            "schema": schema,
+            "exists": exists,
+            "schema_privileges": adapter.schema_privileges(schema) if exists else {},
+        }
+    return {
+        "targets": target_catalog,
+        "schemas": schema_catalog,
+        "schema_order": schemas,
+        "reachable_role_privileges": adapter.reachable_role_privileges(PERMISSION_PROBE_TARGETS, schemas),
+    }
+
+
+def _permission_probe_schemas() -> tuple[str, ...]:
+    return tuple(sorted({target.schema for target in PERMISSION_PROBE_TARGETS}))
+
+
+def _catalog_has_mutating_privilege(catalog: Mapping[str, Any]) -> bool:
+    if catalog.get("reachable_role_privileges"):
+        return True
+    for target_catalog in catalog.get("targets", {}).values():
+        if not target_catalog.get("exists"):
+            continue
+        if _target_has_catalog_mutating_privilege(target_catalog):
+            return True
+    for schema_catalog in catalog.get("schemas", {}).values():
+        privileges = schema_catalog.get("schema_privileges", {})
+        if schema_catalog.get("exists") and privileges.get("create"):
+            return True
+    return False
+
+
+def _catalog_has_sequence_mutating_privilege(catalog: Mapping[str, Any]) -> bool:
+    return any(
+        _sequence_mutating_privilege(target_catalog.get("sequence_privileges", []))["allowed"]
+        for target_catalog in catalog.get("targets", {}).values()
+        if target_catalog.get("exists")
+    )
+
+
+def _target_has_catalog_mutating_privilege(target_catalog: Mapping[str, Any]) -> bool:
+    target = target_catalog["target"]
+    return bool(
+        _target_catalog_findings(
+            target,
+            table_privileges=target_catalog.get("table_privileges", {}),
+            column_privileges=target_catalog.get("column_privileges", {}),
+            sequence_privileges=target_catalog.get("sequence_privileges", []),
+        )
+    )
+
+
+def _target_catalog_findings(
+    target: ProbeTarget,
+    *,
+    table_privileges: Mapping[str, bool],
+    column_privileges: Mapping[str, list[str]],
+    sequence_privileges: list[dict[str, Any]],
+    reason_prefix: str = "tested_credential_has",
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for operation in TABLE_CATALOG_MUTATING_OPERATIONS:
+        privilege = _catalog_mutating_privilege(
+            table_privileges,
+            column_privileges,
+            operation=operation,
+            reason_prefix=reason_prefix,
+        )
+        if not privilege["allowed"]:
+            continue
+        finding = {
+            "target": target.qualified_name,
+            "operation": operation,
+            "reason": privilege["reason"],
+        }
+        if privilege.get("columns"):
+            finding["columns"] = privilege["columns"]
+        findings.append(finding)
+    sequence_privilege = _sequence_mutating_privilege(sequence_privileges, reason_prefix=reason_prefix)
+    if sequence_privilege["allowed"]:
+        findings.append(
+            {
+                "target": target.qualified_name,
+                "operation": "SEQUENCE_USAGE_UPDATE",
+                "reason": sequence_privilege["reason"],
+                "sequences": sequence_privilege["sequences"],
+            }
+        )
+    return findings
+
+
+def _role_membership_probe_result(reachable_role_privileges: list[dict[str, Any]]) -> dict[str, Any]:
+    operations = [
+        _reachable_role_operation_result(role_finding)
+        for role_finding in reachable_role_privileges
+    ]
+    return {
+        "target": "reachable_roles",
+        "surface": "reachable_role_membership",
+        "status": _status_from_children(operations) if operations else STATUS_PASS,
+        "reachable_role_findings": reachable_role_privileges,
+        "operations": operations,
+    }
+
+
+def _reachable_role_operation_result(role_finding: Mapping[str, Any]) -> dict[str, Any]:
+    role_name = str(role_finding.get("role_name") or "")
+    return {
+        "operation": "REACHABLE_ROLE_MEMBERSHIP",
+        "command": f"CATALOG CHECK reachable role membership for {role_name}",
+        "status": STATUS_FAIL,
+        "privilege_allowed": True,
+        "table_privilege_allowed": False,
+        "column_privilege_allowed": False,
+        "sequence_privilege_allowed": False,
+        "schema_privilege_allowed": False,
+        "execution_outcome": "not_executed_role_membership_catalog_only",
+        "rolled_back": False,
+        "catalog_short_circuited": True,
+        "reason": str(role_finding.get("reason") or "reachable_role_has_mutating_capability"),
+        "role_name": role_name,
+        "reachable_via": list(role_finding.get("reachable_via", [])),
+        "unsafe_role_attributes": dict(role_finding.get("unsafe_role_attributes", {})),
+        "mutating_privilege_findings": list(role_finding.get("mutating_privilege_findings", [])),
+    }
+
+
+def _table_probe_result(
+    adapter: ReadonlyDbProbeAdapter,
+    target: ProbeTarget,
+    catalog: Mapping[str, Any],
+    *,
+    skip_due_to_catalog_mutating_privilege: bool,
+) -> dict[str, Any]:
+    if not catalog.get("exists"):
         return {
             "target": target.qualified_name,
             "surface": target.surface,
@@ -777,10 +1283,10 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
             "reason": "required_table_absent_in_fixture",
             "operations": [],
         }
-    privileges = adapter.table_privileges(target)
-    column_privileges = adapter.column_privileges(target)
-    sequence_privileges = adapter.sequence_privileges(target)
-    probe_column = adapter.first_updatable_column(target)
+    privileges = dict(catalog.get("table_privileges", {}))
+    column_privileges = dict(catalog.get("column_privileges", {}))
+    sequence_privileges = list(catalog.get("sequence_privileges", []))
+    probe_column = catalog.get("probe_column")
     insert_privilege = _catalog_mutating_privilege(
         privileges,
         column_privileges,
@@ -796,14 +1302,27 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
         column_privileges,
         operation="DELETE",
     )
+    catalog_only_privileges = {
+        operation: _catalog_mutating_privilege(privileges, column_privileges, operation=operation)
+        for operation in TABLE_CATALOG_ONLY_MUTATING_OPERATIONS
+    }
     sequence_privilege = _sequence_mutating_privilege(sequence_privileges)
     target_has_catalog_mutating_privilege = any(
         privilege["allowed"]
-        for privilege in (insert_privilege, update_privilege, delete_privilege, sequence_privilege)
+        for privilege in (
+            insert_privilege,
+            update_privilege,
+            delete_privilege,
+            sequence_privilege,
+            *catalog_only_privileges.values(),
+        )
     )
     operations = []
     if sequence_privilege["allowed"]:
         operations.append(_sequence_short_circuit_operation_result(target, sequence_privilege))
+    for operation, privilege in catalog_only_privileges.items():
+        if privilege["allowed"]:
+            operations.append(_table_catalog_short_circuit_operation_result(target, operation, privilege))
     operations.append(
         _dml_probe_or_blocked(
             adapter,
@@ -818,6 +1337,7 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
             probe_column=probe_column,
             privilege=insert_privilege,
             skip_due_to_target_catalog_privilege=target_has_catalog_mutating_privilege,
+            skip_due_to_catalog_mutating_privilege=skip_due_to_catalog_mutating_privilege,
         )
     )
     operations.append(
@@ -833,6 +1353,7 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
             probe_column=probe_column,
             privilege=update_privilege,
             skip_due_to_target_catalog_privilege=target_has_catalog_mutating_privilege,
+            skip_due_to_catalog_mutating_privilege=skip_due_to_catalog_mutating_privilege,
         )
     )
     operations.append(
@@ -844,6 +1365,7 @@ def _table_probe_result(adapter: ReadonlyDbProbeAdapter, target: ProbeTarget) ->
             probe_column=None,
             privilege=delete_privilege,
             skip_due_to_target_catalog_privilege=target_has_catalog_mutating_privilege,
+            skip_due_to_catalog_mutating_privilege=skip_due_to_catalog_mutating_privilege,
             requires_probe_column=False,
         )
     )
@@ -867,6 +1389,7 @@ def _dml_probe_or_blocked(
     probe_column: str | None,
     privilege: dict[str, Any],
     skip_due_to_target_catalog_privilege: bool,
+    skip_due_to_catalog_mutating_privilege: bool,
     requires_probe_column: bool = True,
 ) -> dict[str, Any]:
     spec = PermissionProbeSpec(
@@ -879,6 +1402,8 @@ def _dml_probe_or_blocked(
         return _dml_operation_result(adapter, spec, privilege=privilege)
     if skip_due_to_target_catalog_privilege:
         return _catalog_target_skip_operation_result(spec)
+    if skip_due_to_catalog_mutating_privilege:
+        return _catalog_matrix_skip_operation_result(spec)
     if requires_probe_column and probe_column is None:
         return {
             "operation": operation,
@@ -889,6 +1414,7 @@ def _dml_probe_or_blocked(
             "table_privilege_allowed": False,
             "column_privilege_allowed": False,
             "sequence_privilege_allowed": False,
+            "schema_privilege_allowed": False,
             "execution_outcome": "not_executed",
             "rolled_back": False,
         }
@@ -914,6 +1440,7 @@ def _dml_operation_result(
         "table_privilege_allowed": False,
         "column_privilege_allowed": False,
         "sequence_privilege_allowed": False,
+        "schema_privilege_allowed": False,
         "execution_outcome": execution.outcome,
         "sqlstate": execution.sqlstate,
         "rolled_back": execution.rolled_back,
@@ -936,15 +1463,16 @@ def _catalog_mutating_privilege(
     column_privileges: Mapping[str, list[str]],
     *,
     operation: str,
+    reason_prefix: str = "tested_credential_has",
 ) -> dict[str, Any]:
     key = operation.lower()
     table_allowed = bool(table_privileges.get(key, False))
     columns = list(column_privileges.get(key, [])) if key in {"insert", "update"} else []
     column_allowed = bool(columns)
     if table_allowed:
-        reason = "tested_credential_has_mutating_table_privilege"
+        reason = f"{reason_prefix}_mutating_table_privilege"
     elif column_allowed:
-        reason = "tested_credential_has_mutating_column_privilege"
+        reason = f"{reason_prefix}_mutating_column_privilege"
     else:
         reason = None
     return {
@@ -952,11 +1480,18 @@ def _catalog_mutating_privilege(
         "reason": reason,
         "table_allowed": table_allowed,
         "column_allowed": column_allowed,
+        "sequence_allowed": False,
+        "schema_allowed": False,
+        "table_privilege": key if table_allowed else None,
         "columns": columns,
     }
 
 
-def _sequence_mutating_privilege(sequence_privileges: list[dict[str, Any]]) -> dict[str, Any]:
+def _sequence_mutating_privilege(
+    sequence_privileges: list[dict[str, Any]],
+    *,
+    reason_prefix: str = "tested_credential_has",
+) -> dict[str, Any]:
     mutating_sequences = [
         {
             "sequence_schema": str(sequence.get("sequence_schema") or ""),
@@ -974,11 +1509,12 @@ def _sequence_mutating_privilege(sequence_privileges: list[dict[str, Any]]) -> d
     return {
         "allowed": bool(mutating_sequences),
         "reason": (
-            "tested_credential_has_mutating_sequence_privilege" if mutating_sequences else None
+            f"{reason_prefix}_mutating_sequence_privilege" if mutating_sequences else None
         ),
         "table_allowed": False,
         "column_allowed": False,
         "sequence_allowed": bool(mutating_sequences),
+        "schema_allowed": False,
         "columns": [],
         "sequences": mutating_sequences,
     }
@@ -996,6 +1532,19 @@ def _sequence_short_circuit_operation_result(
     return _catalog_short_circuit_operation_result(spec, privilege=privilege)
 
 
+def _table_catalog_short_circuit_operation_result(
+    target: ProbeTarget,
+    operation: str,
+    privilege: Mapping[str, Any],
+) -> dict[str, Any]:
+    spec = PermissionProbeSpec(
+        operation=operation,
+        target=target,
+        command=f"CATALOG CHECK table {operation} privilege for {target.qualified_name}",
+    )
+    return _catalog_short_circuit_operation_result(spec, privilege=privilege)
+
+
 def _catalog_short_circuit_operation_result(
     spec: PermissionProbeSpec,
     *,
@@ -1009,11 +1558,15 @@ def _catalog_short_circuit_operation_result(
         "table_privilege_allowed": bool(privilege.get("table_allowed", False)),
         "column_privilege_allowed": bool(privilege.get("column_allowed", False)),
         "sequence_privilege_allowed": bool(privilege.get("sequence_allowed", False)),
+        "schema_privilege_allowed": bool(privilege.get("schema_allowed", False)),
         "execution_outcome": "not_executed_due_to_catalog_mutating_privilege",
         "rolled_back": False,
         "catalog_short_circuited": True,
         "reason": str(privilege.get("reason") or "tested_credential_has_mutating_catalog_privilege"),
     }
+    table_privilege = privilege.get("table_privilege")
+    if table_privilege:
+        result["table_privilege"] = str(table_privilege)
     columns = [str(column) for column in privilege.get("columns", [])]
     if columns:
         result["column_privilege_columns"] = columns
@@ -1032,6 +1585,7 @@ def _catalog_target_skip_operation_result(spec: PermissionProbeSpec) -> dict[str
         "table_privilege_allowed": False,
         "column_privilege_allowed": False,
         "sequence_privilege_allowed": False,
+        "schema_privilege_allowed": False,
         "execution_outcome": "not_executed_due_to_target_catalog_mutating_privilege",
         "rolled_back": False,
         "catalog_short_circuited": True,
@@ -1039,46 +1593,35 @@ def _catalog_target_skip_operation_result(spec: PermissionProbeSpec) -> dict[str
     }
 
 
-def _has_sequence_mutating_privilege(permission_probes: list[dict[str, Any]]) -> bool:
-    return any(
-        operation.get("sequence_privilege_allowed") is True
-        for target in permission_probes
-        for operation in target.get("operations", [])
-    )
+def _catalog_matrix_skip_operation_result(spec: PermissionProbeSpec) -> dict[str, Any]:
+    return {
+        "operation": spec.operation,
+        "command": spec.command,
+        "status": STATUS_FAIL,
+        "privilege_allowed": False,
+        "table_privilege_allowed": False,
+        "column_privilege_allowed": False,
+        "sequence_privilege_allowed": False,
+        "schema_privilege_allowed": False,
+        "execution_outcome": "not_executed_due_to_catalog_mutating_privilege",
+        "rolled_back": False,
+        "catalog_short_circuited": True,
+        "reason": "catalog_mutating_privilege_detected_probe_skipped",
+    }
 
 
-def _ddl_probe_result(
+def _schema_probe_result(
     adapter: ReadonlyDbProbeAdapter,
+    schema_name: str,
+    catalog: Mapping[str, Any],
     *,
     ddl_suffix: str,
+    skip_due_to_catalog_mutating_privilege: bool,
     skip_due_to_sequence_mutating_privilege: bool = False,
 ) -> dict[str, Any]:
-    schema_name = "ops"
     probe_table = f"__nhms_readonly_validation_probe_{ddl_suffix}"
     command = f"CREATE TABLE {schema_name}.{probe_table} (id integer)"
-    if skip_due_to_sequence_mutating_privilege:
-        return {
-            "target": f"{schema_name}.*",
-            "surface": "schema_table_ddl",
-            "status": STATUS_FAIL,
-            "reason": "sequence_mutating_privilege_detected_ddl_probe_skipped",
-            "operations": [
-                {
-                    "operation": "DDL_CREATE_TABLE",
-                    "command": command,
-                    "status": STATUS_FAIL,
-                    "privilege_allowed": False,
-                    "table_privilege_allowed": False,
-                    "column_privilege_allowed": False,
-                    "sequence_privilege_allowed": True,
-                    "execution_outcome": "not_executed_due_to_sequence_mutating_privilege",
-                    "rolled_back": False,
-                    "catalog_short_circuited": True,
-                    "reason": "sequence_mutating_privilege_detected_ddl_probe_skipped",
-                }
-            ],
-        }
-    if not adapter.schema_exists(schema_name):
+    if not catalog.get("exists"):
         return {
             "target": f"{schema_name}.*",
             "surface": "schema_table_ddl",
@@ -1086,7 +1629,7 @@ def _ddl_probe_result(
             "reason": "required_schema_absent_in_fixture",
             "operations": [],
         }
-    privileges = adapter.schema_privileges(schema_name)
+    privileges = dict(catalog.get("schema_privileges", {}))
     privilege_allowed = privileges.get("create", False)
     spec = PermissionProbeSpec(
         operation="DDL_CREATE_TABLE",
@@ -1103,9 +1646,28 @@ def _ddl_probe_result(
                 "reason": "tested_credential_has_schema_create_privilege",
                 "table_allowed": False,
                 "column_allowed": False,
+                "sequence_allowed": False,
+                "schema_allowed": True,
                 "columns": [],
             },
         )
+    elif skip_due_to_sequence_mutating_privilege:
+        operation = {
+            "operation": "DDL_CREATE_TABLE",
+            "command": command,
+            "status": STATUS_FAIL,
+            "privilege_allowed": False,
+            "table_privilege_allowed": False,
+            "column_privilege_allowed": False,
+            "sequence_privilege_allowed": True,
+            "schema_privilege_allowed": False,
+            "execution_outcome": "not_executed_due_to_sequence_mutating_privilege",
+            "rolled_back": False,
+            "catalog_short_circuited": True,
+            "reason": "sequence_mutating_privilege_detected_ddl_probe_skipped",
+        }
+    elif skip_due_to_catalog_mutating_privilege:
+        operation = _catalog_matrix_skip_operation_result(spec)
     else:
         execution = adapter.execute_probe(spec)
         operation = {
@@ -1116,6 +1678,7 @@ def _ddl_probe_result(
             "table_privilege_allowed": False,
             "column_privilege_allowed": False,
             "sequence_privilege_allowed": False,
+            "schema_privilege_allowed": False,
             "execution_outcome": execution.outcome,
             "sqlstate": execution.sqlstate,
             "rolled_back": execution.rolled_back,
@@ -1147,17 +1710,86 @@ def _operation_status(execution: ProbeExecution, *, privilege_allowed: bool) -> 
 
 
 def _display_read_routes(identity: Mapping[str, Any]) -> list[dict[str, Any]]:
-    source = _identity_text(identity, "source") or "GFS"
-    cycle_time = _identity_text(identity, "cycle_time")
-    run_id = _identity_text(identity, "run_id")
     model_id = _identity_text(identity, "model_id") or "basins_qhh_shud"
     job_id = _identity_text(identity, "job_id")
-    latest_path = f"/api/v1/mvp/qhh/latest-product?source={_url_value(source)}"
-    if run_id and cycle_time and model_id:
-        latest_path = (
-            f"/api/v1/mvp/qhh/latest-product?source={_url_value(source)}"
-            f"&cycle_time={_url_value(cycle_time)}&run_id={_url_value(run_id)}&model_id={_url_value(model_id)}"
+    strict_identity, missing_strict_identity = _strict_route_identity(identity)
+    latest_route = (
+        {
+            "name": "latest_product",
+            "method": "GET",
+            "path": _query_path("/api/v1/mvp/qhh/latest-product", strict_identity),
+            "fixture_blocker_allowed": True,
+            "strict_identity": strict_identity,
+        }
+        if strict_identity is not None
+        else _strict_identity_blocked_route(
+            "latest_product",
+            "source_cycle_run_model_required_for_latest_product_smoke",
+            missing_strict_identity,
         )
+    )
+    pipeline_status_route = (
+        {
+            "name": "pipeline_status",
+            "method": "GET",
+            "path": _query_path("/api/v1/pipeline/status", strict_identity),
+            "fixture_blocker_allowed": True,
+            "strict_identity": strict_identity,
+        }
+        if strict_identity is not None
+        else _strict_identity_blocked_route(
+            "pipeline_status",
+            "source_cycle_run_model_required_for_pipeline_status_smoke",
+            missing_strict_identity,
+        )
+    )
+    pipeline_stages_route = (
+        {
+            "name": "pipeline_stages",
+            "method": "GET",
+            "path": _query_path("/api/v1/pipeline/stages", strict_identity),
+            "fixture_blocker_allowed": True,
+            "strict_identity": strict_identity,
+        }
+        if strict_identity is not None
+        else _strict_identity_blocked_route(
+            "pipeline_stages",
+            "source_cycle_run_model_required_for_pipeline_stages_smoke",
+            missing_strict_identity,
+        )
+    )
+    jobs_route = (
+        {
+            "name": "jobs",
+            "method": "GET",
+            "path": _query_path("/api/v1/jobs", {**strict_identity, "limit": "1"}),
+            "fixture_blocker_allowed": True,
+            "strict_identity": strict_identity,
+        }
+        if strict_identity is not None
+        else _strict_identity_blocked_route(
+            "jobs",
+            "source_cycle_run_model_required_for_jobs_smoke",
+            missing_strict_identity,
+        )
+    )
+    job_log_identity, missing_job_log_identity = _strict_route_identity(identity, require_job_id=True)
+    job_logs_route = (
+        {
+            "name": "job_logs",
+            "method": "GET",
+            "path": _query_path(f"/api/v1/jobs/{_url_value(job_id or '')}/logs", job_log_identity),
+            "fixture_blocker_allowed": True,
+            "strict_identity": job_log_identity,
+        }
+        if job_log_identity is not None and job_id is not None
+        else _strict_identity_blocked_route(
+            "job_logs",
+            "source_cycle_run_model_job_required_for_job_log_smoke",
+            missing_job_log_identity,
+            required_fields=["source", "cycle_time", "run_id", "model_id", "job_id"],
+        )
+    )
     routes = [
         {"name": "health", "method": "GET", "path": "/health"},
         {"name": "runtime_config", "method": "GET", "path": "/api/v1/runtime/config"},
@@ -1167,65 +1799,51 @@ def _display_read_routes(identity: Mapping[str, Any]) -> list[dict[str, Any]]:
             "method": "GET",
             "path": f"/api/v1/met/stations?model_id={_url_value(model_id)}&limit=1",
         },
-        {"name": "latest_product", "method": "GET", "path": latest_path, "fixture_blocker_allowed": True},
-        {"name": "jobs", "method": "GET", "path": "/api/v1/jobs?limit=1"},
+        latest_route,
+        jobs_route,
+        pipeline_status_route,
+        pipeline_stages_route,
+        job_logs_route,
     ]
-    if source and cycle_time:
-        routes.extend(
-            [
-                {
-                    "name": "pipeline_status",
-                    "method": "GET",
-                    "path": f"/api/v1/pipeline/status?source={_url_value(source)}&cycle_time={_url_value(cycle_time)}",
-                    "fixture_blocker_allowed": True,
-                },
-                {
-                    "name": "pipeline_stages",
-                    "method": "GET",
-                    "path": f"/api/v1/pipeline/stages?source={_url_value(source)}&cycle_time={_url_value(cycle_time)}",
-                    "fixture_blocker_allowed": True,
-                },
-            ]
-        )
-    else:
-        routes.extend(
-            [
-                {
-                    "name": "pipeline_status",
-                    "method": "GET",
-                    "path": None,
-                    "status": STATUS_BLOCKED,
-                    "reason": "source_and_cycle_time_required_for_pipeline_status_smoke",
-                },
-                {
-                    "name": "pipeline_stages",
-                    "method": "GET",
-                    "path": None,
-                    "status": STATUS_BLOCKED,
-                    "reason": "source_and_cycle_time_required_for_pipeline_stages_smoke",
-                },
-            ]
-        )
-    if job_id:
-        routes.append(
-            {
-                "name": "job_logs",
-                "method": "GET",
-                "path": f"/api/v1/jobs/{_url_value(job_id)}/logs",
-                "fixture_blocker_allowed": True,
-            }
-        )
-    else:
-        routes.append(
-            {
-                "name": "job_logs",
-                "method": "GET",
-                "path": None,
-                "status": STATUS_BLOCKED,
-                "reason": "job_id_with_published_log_required_for_job_log_smoke",
-            }
-        )
     return routes
+
+
+def _strict_route_identity(
+    identity: Mapping[str, Any],
+    *,
+    require_job_id: bool = False,
+) -> tuple[dict[str, str] | None, list[str]]:
+    required_fields = ["source", "cycle_time", "run_id", "model_id"]
+    if require_job_id:
+        required_fields.append("job_id")
+    values = {field: _identity_text(identity, field) for field in required_fields}
+    missing = [field for field, value in values.items() if not value]
+    if missing:
+        return None, missing
+    return {field: str(value) for field, value in values.items() if field != "job_id"}, []
+
+
+def _strict_identity_blocked_route(
+    name: str,
+    reason: str,
+    missing_fields: list[str],
+    *,
+    required_fields: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "method": "GET",
+        "path": None,
+        "status": STATUS_BLOCKED,
+        "reason": reason,
+        "strict_identity_required": True,
+        "required_identity_fields": required_fields or ["source", "cycle_time", "run_id", "model_id"],
+        "missing_identity_fields": missing_fields,
+    }
+
+
+def _query_path(path: str, params: Mapping[str, str]) -> str:
+    return f"{path}?{urlencode(params)}"
 
 
 def _route_result(spec: Mapping[str, Any], *, route_requester: RouteRequester) -> dict[str, Any]:
@@ -1311,7 +1929,8 @@ def _response_body(response: Any) -> Any:
 def _role_evidence(role: Mapping[str, Any], permission_probes: list[dict[str, Any]]) -> dict[str, Any]:
     unsafe_attributes = {flag: bool(role.get(flag)) for flag in ROLE_ATTRIBUTE_WRITE_FLAGS if bool(role.get(flag))}
     privilege_findings = _privilege_findings(permission_probes)
-    writer_like = bool(unsafe_attributes or privilege_findings)
+    reachable_role_findings = _reachable_role_findings(permission_probes)
+    writer_like = bool(unsafe_attributes or privilege_findings or reachable_role_findings)
     return {
         "current_user": role.get("current_user"),
         "session_user": role.get("session_user"),
@@ -1319,6 +1938,7 @@ def _role_evidence(role: Mapping[str, Any], permission_probes: list[dict[str, An
         "role_type": "writer_or_mutating" if writer_like else "readonly_candidate",
         "transaction_read_only": role.get("transaction_read_only"),
         "unsafe_role_attributes": unsafe_attributes,
+        "reachable_role_findings": reachable_role_findings,
         "mutating_privilege_findings": privilege_findings,
     }
 
@@ -1337,8 +1957,23 @@ def _privilege_findings(permission_probes: list[dict[str, Any]]) -> list[dict[st
                     finding["columns"] = operation.get("column_privilege_columns")
                 if operation.get("sequence_privilege_sequences"):
                     finding["sequences"] = operation.get("sequence_privilege_sequences")
+                if operation.get("role_name"):
+                    finding["role_name"] = operation.get("role_name")
+                if operation.get("reachable_via"):
+                    finding["reachable_via"] = operation.get("reachable_via")
+                if operation.get("unsafe_role_attributes"):
+                    finding["unsafe_role_attributes"] = operation.get("unsafe_role_attributes")
+                if operation.get("mutating_privilege_findings"):
+                    finding["mutating_privilege_findings"] = operation.get("mutating_privilege_findings")
                 findings.append(finding)
     return findings
+
+
+def _reachable_role_findings(permission_probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for target in permission_probes:
+        if target.get("surface") == "reachable_role_membership":
+            return list(target.get("reachable_role_findings", []))
+    return []
 
 
 def _overall_status(

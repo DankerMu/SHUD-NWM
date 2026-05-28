@@ -654,7 +654,7 @@ Project profile: other
 Change surface:
 
 - A readonly DB validation entrypoint, tests, or runbook command that can exercise the display API with readonly credentials and write structured evidence under `artifacts/` or `/scratch/frd_muziyao`.
-- Database permission probes for hydro, met, ops, and pipeline-critical tables, including `INSERT`, `UPDATE`, `DELETE`, DDL attempts, and table-owned/dependent serial/BIGSERIAL/identity sequence `USAGE`/`UPDATE` catalog checks. A related sequence mutating grant fails validation without executing `nextval`, `setval`, DML, or DDL.
+- Database permission probes for hydro, met, ops, and pipeline-critical tables, including catalog-first inventory of table, column, sequence, schema, and reachable-role mutating capabilities before any DML/DDL execution. Table-level mutating capabilities include `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, fail-closed `REFERENCES`/`TRIGGER`, and supported non-read privileges such as `MAINTAIN`; required schemas include every schema represented by the probe targets. Any catalog mutating grant fails validation without executing `nextval`, `setval`, DML, or DDL anywhere in the matrix.
 - Display-mode retry/cancel validation proving `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` is returned before any write attempt when readonly credentials are used.
 - Tests and evidence helpers for secret redaction, `current_user`, DB role type, redacted DSN, command list, pass/fail/blocker status, and fixture skip/block behavior when a real DB is unavailable.
 
@@ -668,8 +668,8 @@ Must preserve:
 Must add/change:
 
 - Add a focused readonly DB validation command or pytest entrypoint that records a structured evidence object with `current_user`, DB role type, redacted DB URL, command/probe results, route smoke results, and final `PASS` / `FAIL` / `BLOCKED`.
-- Route smoke must cover display-safe reads for health, runtime config, models, stations or station-equivalent read APIs, latest-product, pipeline status, stages, jobs, job logs, and any required setup preconditions.
-- Permission probes must prove controlled writes and DDL are rejected before commit for representative hydro, met, ops, and pipeline-critical surfaces, and must prove related serial/BIGSERIAL/identity sequences do not grant `USAGE` or `UPDATE`. Rollback is cleanup only; any DML/DDL probe that executes successfully, or any related sequence mutating grant under the tested credential, is `FAIL`.
+- Route smoke must cover display-safe reads for health, runtime config, models, stations or station-equivalent read APIs, latest-product, pipeline status, stages, jobs, job logs, and any required setup preconditions. Latest-product, pipeline status/stages, jobs, and job logs must use the same strict `source`/`cycle_time`/`run_id`/`model_id`; job logs must also use `job_id`. Missing strict identity fields are `BLOCKED`, not broad latest/jobs/log PASS evidence.
+- Permission probes must first inventory table, column, sequence, schema, and reachable-role mutating capabilities for representative hydro, met, ops, and pipeline-critical surfaces. If the catalog is clean, controlled writes and DDL must be rejected before commit. Rollback is cleanup only; any DML/DDL probe that executes successfully, or any catalog mutating grant under the tested credential or a reachable role, is `FAIL`.
 - Retry/cancel probes must run with `NHMS_SERVICE_ROLE=display_readonly` and prove manual-action `409` is returned before any DB write is attempted.
 - Evidence must redact secrets from DSNs, connection strings, errors, and command output; project-created evidence and temporary files must stay under the repository `artifacts/` tree or `/scratch/frd_muziyao`.
 - When no real readonly DB URL is configured, the validation command must produce an explicit `BLOCKED` / skipped result rather than a false pass.
@@ -692,7 +692,7 @@ Selected risk packs:
 
 Invariant Matrix:
 
-- Governing invariant: A display readonly DB validation pass means the API can read required display surfaces with readonly credentials, cannot write hydro/met/ops/pipeline-critical state through table, column, sequence, or schema privileges, and retry/cancel fail closed before any DB mutation; writer credentials or missing evidence must not be mislabeled as readonly PASS.
+- Governing invariant: A display readonly DB validation pass means the API can read required display surfaces with readonly credentials and one strict source/cycle/run/model/job evidence identity, cannot write hydro/met/ops/pipeline-critical state through table, column, sequence, schema, or reachable-role privileges, and retry/cancel fail closed before any DB mutation; writer credentials, broad/stale route evidence, or missing evidence must not be mislabeled as readonly PASS.
 - Source-of-truth identity/contract: readonly DB connection env, `current_user`, DB role attributes/privileges, `NHMS_SERVICE_ROLE=display_readonly`, and the structured validation evidence schema.
 - Producers: validation command/test harness, DB role introspection queries, route smoke responses, permission probe results, and retry/cancel manual-action responses.
 - Validators/preflight: env/config validation, DSN redaction, approved evidence-root selection, display runtime config check, DB role/user query, permission-denied classifier, transaction rollback handling.
@@ -704,9 +704,11 @@ Invariant Matrix:
 - Regression rows:
   - readonly DB env absent -> validation reports `BLOCKED` or pytest skip, not `PASS`.
   - readonly credential with display role -> display read routes succeed or report explicit fixture blockers without DB writes.
-  - writer credential labeled readonly -> write/DDL probes succeed or related sequence `USAGE`/`UPDATE` grants exist, and validation returns `FAIL`, never `PASS`.
+  - writer credential labeled readonly -> catalog inventory finds table `TRUNCATE`/DML, column, sequence, schema `CREATE`, reachable writer-role membership, or write/DDL probes succeed, and validation returns `FAIL`, never `PASS`.
   - readonly credential write/DDL probes -> permission-denied or readonly-transaction errors recorded for hydro/met/ops/pipeline-critical surfaces before commit.
   - any tested credential can execute DML/DDL successfully -> validation returns `FAIL`, even when the harness rolls back for cleanup.
+  - any catalog mutating capability exists anywhere in the matrix -> validation returns `FAIL` from catalog evidence and executes no DML/DDL probe anywhere in the matrix.
+  - strict route identity missing for latest-product, pipeline status/stages, jobs, or job logs -> affected route evidence is `BLOCKED`, not `PASS`.
   - display retry/cancel with readonly credentials -> `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` before write/gateway side effects.
   - evidence containing DSN/password/token-like values -> secrets redacted before file write and assertion output.
   - normal local unit test run without readonly DB env -> existing backend tests remain runnable without external DB.
@@ -716,7 +718,7 @@ Boundary-surface checklist:
 - Shared helper roots: DB engine/session setup, validation evidence writer/redactor, permission probe helpers, display route smoke helpers.
 - Public entrypoints: validation CLI/pytest entrypoint and display API routes exercised by the smoke.
 - Read surfaces: health/runtime config, model/station/latest-product/pipeline/job/log read APIs.
-- Write/delete/overwrite surfaces: controlled DB `INSERT`, `UPDATE`, `DELETE`, DDL probes inside rollback-safe transactions, where successful execution is a failure and rollback is only cleanup.
+- Write/delete/overwrite surfaces: catalog checks for table `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`/`REFERENCES`/`TRIGGER`/supported `MAINTAIN`, column `INSERT`/`UPDATE`, sequence `USAGE`/`UPDATE`, schema `CREATE`, reachable-role grants, plus controlled DB `INSERT`, `UPDATE`, `DELETE`, and per-schema DDL probes inside rollback-safe transactions when catalog inventory is clean.
 - Staging/publish/rollback surfaces: evidence file creation and DB transaction rollback for probes.
 - Producer/consumer evidence boundaries: redacted evidence schema, local artifact path, CI/log output, future Docker/E2E consumers.
 - Stale-state/idempotency boundaries: repeated validation runs must not accumulate writes, reuse stale PASS evidence, or depend on dirty DB state without reporting blockers.
@@ -725,7 +727,7 @@ Boundary-surface checklist:
 Required evidence:
 
 - Focused readonly DB validation command or pytest target added by this issue: readonly env -> route smoke and permission probe matrix with redacted evidence.
-- Minimum permission probe matrix: `hydro.hydro_run`, `hydro.river_timeseries`, `met.forecast_cycle`, `met.forcing_station_timeseries` or the available station-equivalent table, `ops.pipeline_job`, `ops.pipeline_event`, related table-owned/dependent serial/BIGSERIAL/identity sequence `USAGE`/`UPDATE` catalog checks, plus at least one schema-level or table-level DDL probe. If a table is absent in a reduced fixture, evidence must mark that row `BLOCKED` or out-of-scope with a concrete reason rather than silently skipping it.
+- Minimum permission probe matrix: `hydro.hydro_run`, `hydro.river_timeseries`, `met.forecast_cycle`, `met.forcing_station_timeseries` or the available station-equivalent table, `ops.pipeline_job`, `ops.pipeline_event`, table-level `TRUNCATE`/fail-closed non-read privilege catalog checks, related table-owned/dependent serial/BIGSERIAL/identity sequence `USAGE`/`UPDATE` catalog checks, reachable-role catalog checks, and schema-level DDL evidence for `hydro`, `met`, and `ops`. If a table is absent in a reduced fixture, evidence must mark that row `BLOCKED` or out-of-scope with a concrete reason rather than silently skipping it.
 - `uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py tests/test_forecast_api.py`: display fail-closed, logs, latest-product, and monitoring compatibility.
 - `uv run pytest -q <new readonly validation tests>`: evidence schema, redaction, blocked/skip behavior, writer-credential FAIL simulation, permission-denied classification, rollback/idempotency.
 - `uv run ruff check tests services apps/api`: style/static verification for touched validation code.

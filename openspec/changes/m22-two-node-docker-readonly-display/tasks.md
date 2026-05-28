@@ -65,14 +65,14 @@ Issue ownership note:
 
 ## 5. Readonly DB Boundary
 
-- [ ] 5.1 Add readonly DB validation tests or runbook commands proving display APIs work with readonly credentials for health, models, stations, latest-product, pipeline status, stages, jobs, logs, and runtime config.
-- [ ] 5.2 Add readonly DB permission-denied probes that record `current_user` and prove controlled `INSERT`, `UPDATE`, `DELETE`, and DDL attempts are rejected before commit for hydro, met, ops, and pipeline-critical tables; table-owned/dependent serial/BIGSERIAL/identity sequences must have no `USAGE` or `UPDATE` privilege; successful DML/DDL execution or related sequence mutating privilege is `FAIL`, and sequence privilege detection must not execute `nextval`, `setval`, DML, or DDL.
+- [ ] 5.1 Add readonly DB validation tests or runbook commands proving display APIs work with readonly credentials for health, models, stations, latest-product, pipeline status, stages, jobs, logs, and runtime config; identity-bound route PASS evidence must use one strict `source`/`cycle_time`/`run_id`/`model_id` identity and logs must also bind `job_id`.
+- [ ] 5.2 Add readonly DB catalog-first permission inventory and permission-denied probes that record `current_user` and prove controlled `INSERT`, `UPDATE`, `DELETE`, and DDL attempts are rejected before commit for hydro, met, ops, and pipeline-critical tables when catalog inventory is clean; table `TRUNCATE`, fail-closed non-read table privileges, column mutating grants, table-owned/dependent serial/BIGSERIAL/identity sequence `USAGE`/`UPDATE`, schema `CREATE` across all probed schemas, and reachable writer-role membership are `FAIL`. Any catalog mutating capability must prevent `nextval`, `setval`, DML, or DDL execution anywhere in the matrix.
 - [ ] 5.3 Ensure display retry/cancel returns manual action before any write attempt when using readonly DB credentials.
 - [ ] 5.4 Record readonly DB validation evidence with redacted DSN, DB role type, commands, pass/fail/blocker status, and secret redaction.
 - [ ] 5.5 Add a focused validation entrypoint that reports `BLOCKED` or pytest skip when a real readonly DB URL is absent; it must not claim PASS from mock-only or writer credentials.
 - [ ] 5.6 Add tests for evidence redaction, approved evidence roots, rollback/idempotency of permission probes, writer-credential FAIL detection, and display retry/cancel no-write ordering.
 - [ ] 5.7 Verify normal local test runs remain independent of external PostgreSQL unless the readonly validation env is explicitly enabled.
-- [ ] 5.8 Cover at minimum `hydro.hydro_run`, `hydro.river_timeseries`, `met.forecast_cycle`, `met.forcing_station_timeseries` or station-equivalent, `ops.pipeline_job`, `ops.pipeline_event`, and one schema/table DDL probe; absent reduced-fixture tables must be reported as `BLOCKED` or explicitly out of scope.
+- [ ] 5.8 Cover at minimum `hydro.hydro_run`, `hydro.river_timeseries`, `met.forecast_cycle`, `met.forcing_station_timeseries` or station-equivalent, `ops.pipeline_job`, `ops.pipeline_event`, reachable-role inventory, and schema/table DDL evidence for `hydro`, `met`, and `ops`; absent reduced-fixture tables must be reported as `BLOCKED` or explicitly out of scope.
 
 ## 6. Display Readonly Ops UI
 
