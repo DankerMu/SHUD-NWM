@@ -15,7 +15,12 @@ from apps.api.routes import pipeline as pipeline_routes
 from apps.api.routes.data_sources import get_data_source_store
 from apps.api.routes.forecast import get_forecast_store
 from apps.api.routes.models import get_model_registry_store
-from packages.common.forecast_store import QHH_LATEST_CONTEXT_LIMIT, QHH_LATEST_SEARCH_LIMIT, ForecastStoreError
+from packages.common.forecast_store import (
+    QHH_LATEST_CONTEXT_LIMIT,
+    QHH_LATEST_REFLECTED_VALUE_LIMIT,
+    QHH_LATEST_SEARCH_LIMIT,
+    ForecastStoreError,
+)
 from tests.test_monitoring_api import (
     _client,
     _create_job,
@@ -28,6 +33,7 @@ from tests.test_monitoring_api import (
 from workers.data_adapters.base import cycle_id_for
 
 PIPELINE_JOB_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "pipeline_job.schema.json"
+QHH_LATEST_REFLECTED_PREFIX_LIMIT = QHH_LATEST_REFLECTED_VALUE_LIMIT - 3
 PIPELINE_JOB_KEYS = {
     "job_id",
     "run_id",
@@ -160,6 +166,176 @@ def test_qhh_latest_product_contract_uses_success_envelope_and_bootstrap_identit
     assert unavailable_body["status"] == "error"
     assert unavailable_body["error"]["code"] == "QHH_LATEST_PRODUCT_UNAVAILABLE"
     assert unavailable_body["error"]["details"]["unavailable_reasons"][0]["code"] == "NO_CANDIDATES"
+
+
+def test_qhh_latest_product_strict_identity_contract_and_partial_validation() -> None:
+    store = _RunStore()
+    app.dependency_overrides[get_forecast_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            strict_success = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": "qhh_gfs_2026050700",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "model_id": "basins_qhh_shud",
+                },
+            )
+            strict_unavailable = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": "wrong_run",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "model_id": "basins_qhh_shud",
+                },
+            )
+            partial = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={"source": "GFS", "run_id": "qhh_gfs_2026050700"},
+            )
+            blank_run_id = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": " " * 200,
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "model_id": "basins_qhh_shud",
+                },
+            )
+            date_only_cycle = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": "qhh_gfs_2026050700",
+                    "cycle_time": "2026-05-07",
+                    "model_id": "basins_qhh_shud",
+                },
+            )
+            malformed_cycle = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": "qhh_gfs_2026050700",
+                    "cycle_time": "not-a-time",
+                    "model_id": "basins_qhh_shud",
+                },
+            )
+            whitespace_run_id = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": " qhh_gfs_2026050700 ",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "model_id": "basins_qhh_shud",
+                },
+            )
+            whitespace_model_id = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": "qhh_gfs_2026050700",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "model_id": " basins_qhh_shud ",
+                },
+            )
+            blank_source = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": " " * 200,
+                    "run_id": "qhh_gfs_2026050700",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "model_id": "basins_qhh_shud",
+                },
+            )
+            run_id = "run-" + ("r" * 200)
+            model_id = "model-" + ("m" * 200)
+            bounded_unavailable = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": run_id,
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "model_id": model_id,
+                },
+            )
+    finally:
+        app.dependency_overrides.pop(get_forecast_store, None)
+
+    assert strict_success.status_code == 200
+    assert _assert_success_envelope(strict_success.json())["run_id"] == "qhh_gfs_2026050700"
+
+    assert strict_unavailable.status_code == 404
+    unavailable_error = strict_unavailable.json()["error"]
+    assert unavailable_error["code"] == "QHH_LATEST_PRODUCT_UNAVAILABLE"
+    assert unavailable_error["details"]["strict_identity"] is True
+    assert unavailable_error["details"]["requested_identity"] == {
+        "source": "GFS",
+        "source_id": "GFS",
+        "run_id": "wrong_run",
+        "cycle_time": "2026-05-07T00:00:00Z",
+        "model_id": "basins_qhh_shud",
+    }
+
+    assert partial.status_code == 422
+    partial_error = partial.json()["error"]
+    assert partial_error["code"] == "VALIDATION_ERROR"
+    assert partial_error["details"] == {
+        "missing_fields": ["cycle_time", "model_id"],
+        "provided_fields": ["source", "run_id"],
+        "required_fields": ["source", "run_id", "cycle_time", "model_id"],
+        "strict_identity_required": True,
+    }
+
+    assert blank_run_id.status_code == 422
+    assert blank_run_id.json()["error"]["details"]["rejected_values"]["run_id"] == f"{' ' * 61}..."
+    assert date_only_cycle.status_code == 422
+    assert date_only_cycle.json()["error"]["details"] == {
+        "field": "cycle_time",
+        "rejected_value": "2026-05-07",
+    }
+    assert malformed_cycle.status_code == 422
+    assert malformed_cycle.json()["error"]["details"] == {
+        "field": "cycle_time",
+        "rejected_value": "not-a-time",
+    }
+    assert whitespace_run_id.status_code == 422
+    assert whitespace_run_id.json()["error"]["details"]["field"] == "run_id"
+    assert whitespace_model_id.status_code == 422
+    assert whitespace_model_id.json()["error"]["details"]["field"] == "model_id"
+    assert blank_source.status_code == 422
+    assert blank_source.json()["error"]["details"]["rejected_values"]["source"] == f"{' ' * 61}..."
+
+    assert bounded_unavailable.status_code == 404
+    bounded_details = bounded_unavailable.json()["error"]["details"]
+    expected_run_id = f"{run_id[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+    expected_model_id = f"{model_id[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+    assert bounded_details["requested_identity"]["run_id"] == expected_run_id
+    assert bounded_details["requested_identity"]["model_id"] == expected_model_id
+    assert bounded_details["unavailable_reasons"][0]["requested_identity"]["run_id"] == expected_run_id
+    assert run_id not in bounded_unavailable.text
+    assert model_id not in bounded_unavailable.text
+    assert store.latest_qhh_calls == [
+        {
+            "source": "GFS",
+            "run_id": "qhh_gfs_2026050700",
+            "cycle_time": "2026-05-07T00:00:00Z",
+            "model_id": "basins_qhh_shud",
+        },
+        {
+            "source": "GFS",
+            "run_id": "wrong_run",
+            "cycle_time": "2026-05-07T00:00:00Z",
+            "model_id": "basins_qhh_shud",
+        },
+        {
+            "source": "GFS",
+            "run_id": run_id,
+            "cycle_time": "2026-05-07T00:00:00Z",
+            "model_id": model_id,
+        },
+    ]
 
 
 def test_jobs_contract_uses_success_envelope_and_paginated_pipeline_jobs() -> None:
@@ -912,9 +1088,13 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
 
     assert operation["operationId"] == "getQhhLatestProduct"
-    assert set(parameters) == {"source"}
+    assert set(parameters) == {"source", "run_id", "cycle_time", "model_id"}
     assert parameters["source"]["required"] is True
     assert parameters["source"]["schema"] == {"type": "string", "enum": ["GFS", "IFS"]}
+    for parameter_name in ("run_id", "cycle_time", "model_id"):
+        assert parameters[parameter_name]["required"] is False
+        assert parameters[parameter_name]["schema"]["type"] == "string"
+    assert parameters["cycle_time"]["schema"]["format"] == "date-time"
     response_data = operation["responses"]["200"]["content"]["application/json"]["schema"]["allOf"][1]["properties"][
         "data"
     ]
@@ -974,6 +1154,9 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     operation_end = generated_types.index("listRuns:")
     operation_types = generated_types[operation_start:operation_end]
     assert 'source: "GFS" | "IFS";' in operation_types
+    assert "run_id?: string;" in operation_types
+    assert "cycle_time?: string;" in operation_types
+    assert "model_id?: string;" in operation_types
     assert 'data: components["schemas"]["QhhLatestProduct"];' in operation_types
     assert "QhhLatestProduct:" in generated_types
     assert 'status: "ready" | "unavailable";' in generated_types
@@ -1175,6 +1358,13 @@ def _assert_success_envelope(body: dict[str, Any]) -> Any:
     return body["data"]
 
 
+def _bounded_qhh_latest_reflected_value(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= QHH_LATEST_REFLECTED_VALUE_LIMIT:
+        return text
+    return f"{text[:QHH_LATEST_REFLECTED_PREFIX_LIMIT]}..."
+
+
 def _persisted_pipeline_job_statuses() -> list[str]:
     schema = json.loads(PIPELINE_JOB_SCHEMA_PATH.read_text(encoding="utf-8"))
     return list(schema["properties"]["status"]["enum"])
@@ -1193,7 +1383,63 @@ class _RetryGateway(_MockGateway):
 
 
 class _RunStore:
-    def latest_qhh_display_product(self, source: str) -> dict[str, Any]:
+    def __init__(self) -> None:
+        self.latest_qhh_calls: list[dict[str, Any]] = []
+
+    def latest_qhh_display_product(
+        self,
+        source: str,
+        *,
+        run_id: str | None = None,
+        cycle_time: datetime | str | None = None,
+        model_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.latest_qhh_calls.append(
+            {"source": source, "run_id": run_id, "cycle_time": cycle_time, "model_id": model_id}
+        )
+        if run_id or cycle_time or model_id:
+            requested_cycle_time = (
+                cycle_time.isoformat().replace("+00:00", "Z") if isinstance(cycle_time, datetime) else cycle_time
+            )
+            requested_run_id = _bounded_qhh_latest_reflected_value(run_id) if run_id is not None else None
+            requested_model_id = _bounded_qhh_latest_reflected_value(model_id) if model_id is not None else None
+            if (
+                source.upper(),
+                run_id,
+                requested_cycle_time,
+                model_id,
+            ) != ("GFS", "qhh_gfs_2026050700", "2026-05-07T00:00:00Z", "basins_qhh_shud"):
+                raise ForecastStoreError(
+                    status_code=404,
+                    code="QHH_LATEST_PRODUCT_UNAVAILABLE",
+                    message="No usable latest QHH display product is available for source GFS.",
+                    details={
+                        "source_id": source.upper(),
+                        "basin_id": "basins_qhh",
+                        "status": "unavailable",
+                        "strict_identity": True,
+                        "requested_identity": {
+                            "source": source.upper(),
+                            "source_id": source.upper(),
+                            "run_id": requested_run_id,
+                            "cycle_time": requested_cycle_time,
+                            "model_id": requested_model_id,
+                        },
+                        "unavailable_reasons": [
+                            {
+                                "code": "STRICT_IDENTITY_NOT_FOUND",
+                                "message": "No candidates.",
+                                "requested_identity": {
+                                    "source": source.upper(),
+                                    "source_id": source.upper(),
+                                    "run_id": requested_run_id,
+                                    "cycle_time": requested_cycle_time,
+                                    "model_id": requested_model_id,
+                                },
+                            }
+                        ],
+                    },
+                )
         if source.upper() != "GFS":
             raise ForecastStoreError(
                 status_code=404,

@@ -550,7 +550,37 @@ def _patch_qhh_latest_product_openapi(schema: dict) -> None:
             "required": True,
             "schema": {"type": "string", "enum": ["GFS", "IFS"]},
             "description": "MVP forecast source. Accepted case-insensitively and normalized to GFS or IFS.",
-        }
+        },
+        {
+            "name": "run_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+            "description": (
+                "Strict QHH run identity. If supplied, source, cycle_time, and model_id must also be supplied; "
+                "the API will not fall back to source-only latest selection."
+            ),
+        },
+        {
+            "name": "cycle_time",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "format": "date-time"},
+            "description": (
+                "Strict QHH cycle time. If supplied, source, run_id, and model_id must also be supplied; "
+                "the API will not fall back to source-only latest selection."
+            ),
+        },
+        {
+            "name": "model_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+            "description": (
+                "Strict QHH model identity. If supplied, source, run_id, and cycle_time must also be supplied; "
+                "the API will not fall back to source-only latest selection."
+            ),
+        },
     ]
     operation["responses"] = {
         "200": {

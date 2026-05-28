@@ -41,9 +41,16 @@
 - [ ] 4.1 Extend `GET /api/v1/mvp/qhh/latest-product` query parameters and OpenAPI schema to accept optional `run_id`, `cycle_time`, and `model_id` alongside `source`; if any strict identity field is present, all four strict fields are required for cross-plane proof.
 - [ ] 4.2 Extend `packages/common/forecast_store.py` latest-product selection so strict filters must match exactly and never fall back to historical latest data.
 - [ ] 4.3 Ensure ready and unavailable responses include safe identity details for `run_id`, `source_id`, `cycle_time`, `model_id`, basin identity, forcing version, basin version, and river network version where applicable.
-- [ ] 4.4 Update frontend generated API types and `/hydro-met` bootstrap to pass strict identity filters from URL query parameters `source`, `cycle_time`, `run_id`, and `model_id` or from the E2E identity handoff file.
-- [ ] 4.5 Extend pipeline status/stages/jobs APIs or response metadata so `/ops` can filter or validate the same `run_id/source/cycle_time/model_id` identity and reject same-source/cycle mismatches.
-- [ ] 4.6 Add tests for source-only compatibility, strict match success, strict mismatch unavailable, partial strict identity rejection, duplicate same-source/cycle run mismatch, model/source/cycle normalization, no historical fallback, frontend bootstrap strict query, ops strict identity, and cross-plane E2E evidence expectations.
+- [ ] 4.4 Reject partial strict identity at the backend with `422 VALIDATION_ERROR`, safe missing/provided/required field details, and no source-only store lookup.
+- [ ] 4.5 Update generated frontend API types plus API contract and OpenAPI drift tests for the backend query contract.
+- [ ] 4.6 Add backend tests for source-only compatibility, strict match success, strict mismatch unavailable, partial strict identity rejection, duplicate same-source/cycle run/model mismatch, model/source/cycle normalization, no historical fallback, and strict SQL predicates.
+
+Issue ownership note:
+
+- #232 owns the backend latest-product API/store contract, OpenAPI schema, generated frontend type surface, and backend tests for source-only compatibility, strict success/mismatch, partial strict identity rejection, normalization, and no historical fallback.
+- #233 owns `/ops` pipeline status/stages/jobs strict identity filtering.
+- #235 owns `/hydro-met` frontend bootstrap, frontend strict query behavior, and browser/UI tests.
+- #239 owns final cross-plane E2E evidence and pass/fail/partial reporting.
 
 ## 5. Readonly DB Boundary
 

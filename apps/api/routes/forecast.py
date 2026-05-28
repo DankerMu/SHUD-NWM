@@ -7,7 +7,11 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Query, Request
 
 from apps.api.errors import ApiError
-from packages.common.forecast_store import ForecastStoreError, PsycopgForecastStore
+from packages.common.forecast_store import (
+    QHH_LATEST_REFLECTED_VALUE_LIMIT,
+    ForecastStoreError,
+    PsycopgForecastStore,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["forecast"])
 
@@ -110,11 +114,41 @@ def list_runs(
 @router.get("/mvp/qhh/latest-product", operation_id="getQhhLatestProduct")
 def get_qhh_latest_product(
     request: Request,
-    source: str = Query(..., min_length=1, description="MVP forecast source. Accepted values: GFS or IFS."),
+    source: str | None = Query(
+        default=None,
+        description="MVP forecast source. Accepted values: GFS or IFS.",
+    ),
+    run_id: str | None = Query(
+        default=None,
+        description="Strict QHH run identity. Requires source, cycle_time, and model_id when supplied.",
+    ),
+    cycle_time: str | None = Query(
+        default=None,
+        description="Strict QHH cycle time. Requires source, run_id, and model_id when supplied.",
+    ),
+    model_id: str | None = Query(
+        default=None,
+        description="Strict QHH model identity. Requires source, run_id, and cycle_time when supplied.",
+    ),
     store: PsycopgForecastStore = Depends(get_forecast_store),
 ) -> dict[str, Any]:
+    _validate_qhh_latest_identity_query(
+        source=source,
+        run_id=run_id,
+        cycle_time=cycle_time,
+        model_id=model_id,
+        raw_fields=set(request.query_params),
+    )
     try:
-        return _ok(request, store.latest_qhh_display_product(source))
+        return _ok(
+            request,
+            store.latest_qhh_display_product(
+                str(source),
+                run_id=run_id,
+                cycle_time=cycle_time,
+                model_id=model_id,
+            ),
+        )
     except ForecastStoreError as error:
         raise _api_error(error) from error
 
@@ -147,6 +181,118 @@ def _paginated_payload(page: dict[str, Any]) -> dict[str, Any]:
         "total": total,
         "total_count": total,
     }
+
+
+def _validate_qhh_latest_identity_query(
+    *,
+    source: str | None,
+    run_id: str | None,
+    cycle_time: str | None,
+    model_id: str | None,
+    raw_fields: set[str],
+) -> None:
+    fields = {
+        "source": source,
+        "run_id": run_id,
+        "cycle_time": cycle_time,
+        "model_id": model_id,
+    }
+    strict_fields = {"run_id", "cycle_time", "model_id"}
+    strict_requested = any(field in raw_fields for field in strict_fields)
+    if not strict_requested and source is not None and str(source).strip():
+        return
+    if not strict_requested:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Request validation failed.",
+            details=[
+                {
+                    "field": "query.source",
+                    "rejected_value": None if source is None else _bounded_qhh_latest_reflected_value(source),
+                    "reason": "source is required.",
+                }
+            ],
+        )
+    missing_fields = [
+        field
+        for field, value in fields.items()
+        if field not in raw_fields or value is None or str(value).strip() == ""
+    ]
+    if not missing_fields:
+        _validate_qhh_latest_exact_text_field("run_id", run_id)
+        _validate_qhh_latest_exact_text_field("model_id", model_id)
+        _validate_qhh_latest_cycle_time(cycle_time)
+        return
+    provided_fields = [
+        field
+        for field, value in fields.items()
+        if field in raw_fields and value is not None and str(value).strip() != ""
+    ]
+    details: dict[str, Any] = {
+        "missing_fields": missing_fields,
+        "provided_fields": provided_fields,
+        "required_fields": ["source", "run_id", "cycle_time", "model_id"],
+        "strict_identity_required": True,
+    }
+    rejected_values = {
+        field: _bounded_qhh_latest_reflected_value(value)
+        for field, value in fields.items()
+        if field in missing_fields and field in raw_fields and value is not None
+    }
+    if rejected_values:
+        details["rejected_values"] = rejected_values
+    raise ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="source, run_id, cycle_time, and model_id are required when using strict latest-product identity.",
+        details=details,
+    )
+
+
+def _validate_qhh_latest_exact_text_field(field: str, value: str | None) -> None:
+    text = str(value or "")
+    if text == text.strip():
+        return
+    raise ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message=f"{field} must not include leading or trailing whitespace.",
+        details={
+            "field": field,
+            "rejected_value": _bounded_qhh_latest_reflected_value(text),
+            "reason": f"{field} must not include leading or trailing whitespace.",
+        },
+    )
+
+
+def _validate_qhh_latest_cycle_time(value: str | None) -> None:
+    text = str(value or "").strip()
+    if "T" not in text and "t" not in text:
+        raise _qhh_latest_cycle_time_api_error(text)
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise _qhh_latest_cycle_time_api_error(text) from error
+
+
+def _qhh_latest_cycle_time_api_error(value: str) -> ApiError:
+    return ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="cycle_time must be an ISO 8601 timestamp.",
+        details={
+            "field": "cycle_time",
+            "rejected_value": _bounded_qhh_latest_reflected_value(value),
+        },
+    )
+
+
+def _bounded_qhh_latest_reflected_value(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= QHH_LATEST_REFLECTED_VALUE_LIMIT:
+        return text
+    return f"{text[: QHH_LATEST_REFLECTED_VALUE_LIMIT - 3]}..."
 
 
 def _require_hindcast_access_role(request: Request) -> None:

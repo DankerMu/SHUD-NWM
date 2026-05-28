@@ -448,3 +448,95 @@ Rollback is staged: each PR is additive or role-gated. If Docker deployment bloc
 ## Open Questions
 
 - Whether the independent Slurm Gateway ASGI app should be added in this phase or documented as a follow-up after the 22 host systemd service path is proven. Until that decision is implemented, the `slurm_gateway` role is a reserved/host-service role and must not start the full business API by accident.
+
+## Issue #232 Fixture: Latest-Product Strict Run Identity Contract
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: other
+
+Change surface:
+
+- `GET /api/v1/mvp/qhh/latest-product` query contract in `apps/api/routes/forecast.py`.
+- Latest-product selection and unavailable diagnostics in `packages/common/forecast_store.py`.
+- Static OpenAPI and generated frontend type surfaces touched by the added query parameters and response/error details.
+- Backend tests for source-only compatibility, strict identity success, strict mismatch unavailable, partial strict identity rejection, normalization, no historical fallback, and contract drift.
+
+Must preserve:
+
+- Existing source-only latest-product browsing remains backward compatible and can still select the newest ready QHH product for a source.
+- Existing ready product response fields remain available: `run_id`, `source_id`, `cycle_time`, `model_id`, `basin_id`, `basin_version_id`, `river_network_version_id`, `forcing_version_id`, counts, quality, and availability.
+- Existing unsupported source validation and bounded reflected error details remain stable.
+- Existing latest-product readiness checks for station/river coverage, identity alignment, and query-index diagnostics remain unchanged.
+
+Must add/change:
+
+- Add optional query parameters `run_id`, `cycle_time`, and `model_id` alongside required `source`.
+- If any strict identity field is present, require all four fields: `source`, `run_id`, `cycle_time`, and `model_id`.
+- Strict identity lookup must match all four fields exactly after existing source/cycle normalization and must never fall back to another run, older historical latest, or same-source/cycle sibling model.
+- Partial strict identity requests return HTTP `422` with the standard validation error envelope, code `VALIDATION_ERROR`, safe details containing `missing_fields`, `required_fields`, `provided_fields`, and `strict_identity_required=true`, and no source-only store lookup.
+- Strict mismatch must return `QHH_LATEST_PRODUCT_UNAVAILABLE` with safe requested identity details and unavailable reasons; it must not return a ready product for a different identity.
+- Ready and unavailable responses must include enough requested/actual identity detail for later cross-plane E2E to prove the 27 display consumed the 22 run identity.
+- Update OpenAPI, generated frontend types, API contract tests, and OpenAPI drift tests.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - extends public latest-product query contract and error behavior.
+- Config / project setup: not selected - no new runtime env, deployment, or role config.
+- File IO / path safety / overwrite: not selected - no filesystem or object-store reads/writes.
+- Schema / columns / units / field names: selected - query params, response identity fields, OpenAPI/static types, and error details change.
+- Geospatial / CRS / shapefile sidecars: not selected - no geospatial file handling.
+- Time series / forcing / temporal boundaries: selected - strict `cycle_time` parsing/normalization and no historical fallback are central.
+- Numerical stability / conservation / NaN: not selected - no numerical calculation changes.
+- Solver runtime / performance / threading: not selected - no solver runtime behavior.
+- Resource limits / large input / discovery: selected - latest candidate query must remain bounded and strict lookup must not perform unbounded scans.
+- Legacy compatibility / examples: selected - source-only latest-product behavior and existing consumers must stay compatible.
+- Error handling / rollback / partial outputs: selected - strict mismatch and partial identity must return stable typed errors without ambiguous success.
+- Release / packaging / dependency compatibility: selected - cross-plane E2E and frontend generated types depend on the contract.
+- Documentation / migration notes: not selected - frontend/runbook consumption is owned by later issues.
+
+Invariant Matrix:
+
+- Governing invariant: A strict latest-product request either returns the ready QHH product whose `source/run_id/cycle_time/model_id` exactly match the requested identity, or returns a typed unavailable/validation error; it must never silently substitute historical latest data.
+- Source-of-truth identity/contract: request query parameters `source`, `run_id`, `cycle_time`, and `model_id`, normalized to the store's `source_id` and timestamp representation before SQL selection.
+- Producers: 22 run evidence and hydro run rows that carry `run_id`, `source_id`, `cycle_time`, `model_id`, forcing/model/basin identity.
+- Validators/preflight: FastAPI query validation, partial strict identity guard, source normalization, cycle-time parsing, strict SQL predicates, unavailable reason construction.
+- Storage/cache/query: latest-product candidate query over hydro/model/forcing/station/river rows, bounded candidate/context limits, and no source-only fallback in strict mode.
+- Public routes/entrypoints: `GET /api/v1/mvp/qhh/latest-product`.
+- Frontend/downstream consumers: generated API types and future `/hydro-met` strict bootstrap / cross-plane E2E consumers.
+- Failure paths/rollback/stale state: partial strict identity, unsupported source, malformed cycle time, no exact match, not-ready exact match, and same-source/cycle sibling mismatch all return stable errors.
+- Evidence/audit/readiness: focused forecast API/store tests, API contract/OpenAPI drift tests, generated frontend type diff, and SQL capture proving strict predicates.
+- Regression rows:
+  - source-only request for `GFS` -> existing latest selection can skip newer unusable candidates and return newest ready source product.
+  - strict request with matching `source/run_id/cycle_time/model_id` -> returns ready product whose identity fields match all four values.
+  - strict request for an older ready run while a newer ready run exists -> returns the requested older run, not the historical latest.
+  - strict request with wrong `run_id`, `cycle_time`, `source`, or `model_id` -> returns `QHH_LATEST_PRODUCT_UNAVAILABLE` with requested identity and no fallback product.
+  - partial strict identity -> returns `422 VALIDATION_ERROR` before store lookup with `missing_fields`, `required_fields`, `provided_fields`, `strict_identity_required=true`, and does not call source-only latest selection.
+  - same source/cycle with sibling model or run -> strict query cannot return the sibling.
+  - unsupported or overlong source -> existing validation behavior and redaction remain stable.
+  - OpenAPI/generated types expose `run_id`, `cycle_time`, and `model_id` query params while source-only remains valid.
+
+Boundary-surface checklist:
+
+- Shared helper roots: latest-product source/cycle normalization and candidate response/unavailable helpers in `packages/common/forecast_store.py`.
+- Public entrypoints: `apps/api/routes/forecast.py::get_qhh_latest_product`.
+- Read surfaces: hydro run/product candidate SQL and related model/forcing/station/river joins.
+- Write/delete/overwrite surfaces: none.
+- Staging/publish/rollback surfaces: none.
+- Producer/consumer evidence boundaries: request identity, ready product identity, unavailable requested identity details, OpenAPI/generated types, future cross-plane E2E evidence.
+- Stale-state/idempotency boundaries: strict lookup must not reuse stale source-only latest or cached historical latest results.
+- Unchanged downstream consumers: existing source-only API tests, API contract tests, and generated type consumers.
+
+Required evidence:
+
+- `uv run pytest -q tests/test_forecast_api.py tests/test_api_contract.py tests/test_openapi_drift.py`: source-only compatibility, strict identity success/mismatch/partial rejection, no fallback, OpenAPI/contract drift.
+- `uv run ruff check apps/api packages/common tests/test_forecast_api.py tests/test_api_contract.py`: style/static verification for touched backend paths.
+- Frontend API type generation/check command used by the repo after expected OpenAPI/generated type changes are made; commit those schema/type updates, then verify there is no additional uncommitted drift with `git diff --quiet -- openapi/nhms.v1.yaml apps/frontend/src/api/types.ts`.
+- SQL capture tests must prove strict predicates include all four identity fields and remain bounded.
+
+Non-goals:
+
+- Do not implement `/hydro-met` frontend bootstrap or E2E identity-file consumption; that is #235.
+- Do not implement `/ops` stages/jobs/logs strict identity filtering; that is #233.
+- Do not implement readonly DB validation, Docker compose/image/systemd, or final cross-plane E2E evidence; those are later issues.
+- Do not change QHH readiness math, station/river aggregation semantics, or historical source-only browsing semantics except to share safe helper code.
