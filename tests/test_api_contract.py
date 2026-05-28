@@ -162,6 +162,61 @@ def test_qhh_latest_product_contract_uses_success_envelope_and_bootstrap_identit
     assert unavailable_body["error"]["details"]["unavailable_reasons"][0]["code"] == "NO_CANDIDATES"
 
 
+def test_qhh_latest_product_strict_identity_contract_and_partial_validation() -> None:
+    app.dependency_overrides[get_forecast_store] = lambda: _RunStore()
+    try:
+        with TestClient(app) as client:
+            strict_success = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": "qhh_gfs_2026050700",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "model_id": "basins_qhh_shud",
+                },
+            )
+            strict_unavailable = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={
+                    "source": "GFS",
+                    "run_id": "wrong_run",
+                    "cycle_time": "2026-05-07T00:00:00Z",
+                    "model_id": "basins_qhh_shud",
+                },
+            )
+            partial = client.get(
+                "/api/v1/mvp/qhh/latest-product",
+                params={"source": "GFS", "run_id": "qhh_gfs_2026050700"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_forecast_store, None)
+
+    assert strict_success.status_code == 200
+    assert _assert_success_envelope(strict_success.json())["run_id"] == "qhh_gfs_2026050700"
+
+    assert strict_unavailable.status_code == 404
+    unavailable_error = strict_unavailable.json()["error"]
+    assert unavailable_error["code"] == "QHH_LATEST_PRODUCT_UNAVAILABLE"
+    assert unavailable_error["details"]["strict_identity"] is True
+    assert unavailable_error["details"]["requested_identity"] == {
+        "source": "GFS",
+        "source_id": "GFS",
+        "run_id": "wrong_run",
+        "cycle_time": "2026-05-07T00:00:00Z",
+        "model_id": "basins_qhh_shud",
+    }
+
+    assert partial.status_code == 422
+    partial_error = partial.json()["error"]
+    assert partial_error["code"] == "VALIDATION_ERROR"
+    assert partial_error["details"] == {
+        "missing_fields": ["cycle_time", "model_id"],
+        "provided_fields": ["source", "run_id"],
+        "required_fields": ["source", "run_id", "cycle_time", "model_id"],
+        "strict_identity_required": True,
+    }
+
+
 def test_jobs_contract_uses_success_envelope_and_paginated_pipeline_jobs() -> None:
     with _store() as store:
         cycle_time = _cycle_time()
@@ -912,9 +967,13 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
 
     assert operation["operationId"] == "getQhhLatestProduct"
-    assert set(parameters) == {"source"}
+    assert set(parameters) == {"source", "run_id", "cycle_time", "model_id"}
     assert parameters["source"]["required"] is True
     assert parameters["source"]["schema"] == {"type": "string", "enum": ["GFS", "IFS"]}
+    for parameter_name in ("run_id", "cycle_time", "model_id"):
+        assert parameters[parameter_name]["required"] is False
+        assert parameters[parameter_name]["schema"]["type"] == "string"
+    assert parameters["cycle_time"]["schema"]["format"] == "date-time"
     response_data = operation["responses"]["200"]["content"]["application/json"]["schema"]["allOf"][1]["properties"][
         "data"
     ]
@@ -974,6 +1033,9 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     operation_end = generated_types.index("listRuns:")
     operation_types = generated_types[operation_start:operation_end]
     assert 'source: "GFS" | "IFS";' in operation_types
+    assert "run_id?: string;" in operation_types
+    assert "cycle_time?: string;" in operation_types
+    assert "model_id?: string;" in operation_types
     assert 'data: components["schemas"]["QhhLatestProduct"];' in operation_types
     assert "QhhLatestProduct:" in generated_types
     assert 'status: "ready" | "unavailable";' in generated_types
@@ -1193,7 +1255,43 @@ class _RetryGateway(_MockGateway):
 
 
 class _RunStore:
-    def latest_qhh_display_product(self, source: str) -> dict[str, Any]:
+    def latest_qhh_display_product(
+        self,
+        source: str,
+        *,
+        run_id: str | None = None,
+        cycle_time: datetime | str | None = None,
+        model_id: str | None = None,
+    ) -> dict[str, Any]:
+        if run_id or cycle_time or model_id:
+            requested_cycle_time = (
+                cycle_time.isoformat().replace("+00:00", "Z") if isinstance(cycle_time, datetime) else cycle_time
+            )
+            if (
+                source.upper(),
+                run_id,
+                requested_cycle_time,
+                model_id,
+            ) != ("GFS", "qhh_gfs_2026050700", "2026-05-07T00:00:00Z", "basins_qhh_shud"):
+                raise ForecastStoreError(
+                    status_code=404,
+                    code="QHH_LATEST_PRODUCT_UNAVAILABLE",
+                    message="No usable latest QHH display product is available for source GFS.",
+                    details={
+                        "source_id": source.upper(),
+                        "basin_id": "basins_qhh",
+                        "status": "unavailable",
+                        "strict_identity": True,
+                        "requested_identity": {
+                            "source": source.upper(),
+                            "source_id": source.upper(),
+                            "run_id": run_id,
+                            "cycle_time": requested_cycle_time,
+                            "model_id": model_id,
+                        },
+                        "unavailable_reasons": [{"code": "STRICT_IDENTITY_NOT_FOUND", "message": "No candidates."}],
+                    },
+                )
         if source.upper() != "GFS":
             raise ForecastStoreError(
                 status_code=404,

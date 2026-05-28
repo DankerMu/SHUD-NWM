@@ -2339,6 +2339,12 @@ export interface operations {
             query: {
                 /** @description MVP forecast source. Accepted case-insensitively and normalized to GFS or IFS. */
                 source: "GFS" | "IFS";
+                /** @description Strict QHH run identity. If supplied, source, cycle_time, and model_id must also be supplied; the API will not fall back to source-only latest selection. */
+                run_id?: string;
+                /** @description Strict QHH cycle time. If supplied, source, run_id, and model_id must also be supplied; the API will not fall back to source-only latest selection. */
+                cycle_time?: string;
+                /** @description Strict QHH model identity. If supplied, source, run_id, and cycle_time must also be supplied; the API will not fall back to source-only latest selection. */
+                model_id?: string;
             };
             header?: never;
             path?: never;
