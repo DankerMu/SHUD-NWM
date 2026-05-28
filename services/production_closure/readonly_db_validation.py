@@ -18,7 +18,12 @@ from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
 from packages.common.redaction import redact_payload, redact_text
-from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    unlink_no_follow,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_EVIDENCE_ROOT = REPO_ROOT / "artifacts" / "two-node-e2e"
@@ -31,6 +36,12 @@ STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 LIVE_EVIDENCE_SCHEMA = "nhms.readonly_db_boundary.evidence.v1"
 SIMULATED_EVIDENCE_SCHEMA = "nhms.readonly_db_boundary.evidence.simulated.v1"
+AUTHORITATIVE_EVIDENCE_FILENAMES = (
+    "summary.json",
+    "role.json",
+    "route_smoke.json",
+    "permission_probes.json",
+)
 
 READONLY_DB_URL_ENVS = (
     "NHMS_DISPLAY_READONLY_DATABASE_URL",
@@ -288,6 +299,19 @@ class EvidenceWriter:
                 else "READONLY_DB_EVIDENCE_PATH_UNSAFE"
             )
             raise ReadonlyDbValidationError(error_code, f"Failed to write evidence file: {error}") from error
+
+    def remove_json(self, path: Path) -> None:
+        safe_path = self._safe_file_path(path)
+        try:
+            unlink_no_follow(safe_path, containment_root=self.lane_dir, missing_ok=True)
+            self._created_paths.discard(safe_path)
+        except SafeFilesystemError as error:
+            error_code = (
+                "READONLY_DB_EVIDENCE_WRITE_FAILED"
+                if error.kind == "io"
+                else "READONLY_DB_EVIDENCE_PATH_UNSAFE"
+            )
+            raise ReadonlyDbValidationError(error_code, f"Failed to remove stale evidence file: {error}") from error
 
     def _safe_file_path(self, path: Path) -> Path:
         if path.is_symlink():
@@ -1034,6 +1058,9 @@ def validate_readonly_db_boundary(
     )
     writer = EvidenceWriter(config.evidence_root, config.lane_dir, force=config.force)
     writer.prepare()
+    if config.force:
+        for filename in AUTHORITATIVE_EVIDENCE_FILENAMES:
+            writer.remove_json(config.lane_dir / filename)
     writer.write_json(
         config.lane_dir / "summary.json",
         _blocked_summary(

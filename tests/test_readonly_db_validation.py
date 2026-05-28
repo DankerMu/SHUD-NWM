@@ -75,6 +75,27 @@ def test_cli_missing_readonly_database_url_exits_blocked_without_pass(
     assert summary["blockers"][0]["code"] == "READONLY_DB_URL_MISSING"
 
 
+def test_forced_rerun_missing_db_removes_stale_authoritative_sibling_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NHMS_DISPLAY_READONLY_DATABASE_URL", raising=False)
+    monkeypatch.delenv("NHMS_READONLY_DB_VALIDATION_DATABASE_URL", raising=False)
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("force-missing-db"),
+        force=True,
+    )
+    _seed_stale_pass_evidence(config)
+
+    summary = validate_readonly_db_boundary(config)
+
+    on_disk = json.loads((config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "BLOCKED"
+    assert on_disk["status"] == "BLOCKED"
+    assert on_disk["blockers"][0]["code"] == "READONLY_DB_URL_MISSING"
+    _assert_no_stale_authoritative_sibling_evidence(config)
+
+
 def test_unapproved_evidence_root_is_rejected() -> None:
     with pytest.raises(ReadonlyDbValidationError) as exc_info:
         ReadonlyDbValidationConfig.from_env(
@@ -166,7 +187,7 @@ def test_injected_validation_cannot_emit_normal_live_pass_evidence() -> None:
     assert summary_file["schema"] == "nhms.readonly_db_boundary.evidence.simulated.v1"
 
 
-def test_forced_rerun_adapter_failure_overwrites_stale_pass_summary() -> None:
+def test_forced_rerun_adapter_failure_removes_stale_authoritative_sibling_evidence() -> None:
     class FailingCatalogAdapter(_FakeReadonlyAdapter):
         def table_privileges(self, target: ProbeTarget) -> dict[str, bool]:
             del target
@@ -178,11 +199,7 @@ def test_forced_rerun_adapter_failure_overwrites_stale_pass_summary() -> None:
         database_url="postgresql://display_ro:secret@db.example/nhms",
         force=True,
     )
-    config.lane_dir.mkdir(parents=True, exist_ok=True)
-    (config.lane_dir / "summary.json").write_text(
-        json.dumps({"status": "PASS", "run_id": config.run_id}),
-        encoding="utf-8",
-    )
+    _seed_stale_pass_evidence(config)
 
     summary = validate_readonly_db_boundary(
         config,
@@ -197,9 +214,12 @@ def test_forced_rerun_adapter_failure_overwrites_stale_pass_summary() -> None:
     assert on_disk["status"] != "PASS"
     assert on_disk["blockers"][0]["code"] == "READONLY_DB_VALIDATION_UNEXPECTED_ERROR"
     assert "secret" not in json.dumps(on_disk)
+    _assert_no_stale_authoritative_sibling_evidence(config)
 
 
-def test_forced_rerun_route_failure_overwrites_stale_pass_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_forced_rerun_route_failure_removes_stale_authoritative_sibling_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def failing_route_smoke(*args: object, **kwargs: object) -> list[dict[str, Any]]:
         del args, kwargs
         raise RuntimeError("display route startup failed")
@@ -210,11 +230,7 @@ def test_forced_rerun_route_failure_overwrites_stale_pass_summary(monkeypatch: p
         database_url="postgresql://display_ro:secret@db.example/nhms",
         force=True,
     )
-    config.lane_dir.mkdir(parents=True, exist_ok=True)
-    (config.lane_dir / "summary.json").write_text(
-        json.dumps({"status": "PASS", "run_id": config.run_id}),
-        encoding="utf-8",
-    )
+    _seed_stale_pass_evidence(config)
     monkeypatch.setattr(readonly_db_validation, "run_display_route_smoke", failing_route_smoke)
 
     summary = validate_readonly_db_boundary(
@@ -229,6 +245,34 @@ def test_forced_rerun_route_failure_overwrites_stale_pass_summary(monkeypatch: p
     assert on_disk["status"] == "BLOCKED"
     assert on_disk["status"] != "PASS"
     assert on_disk["blockers"][0]["code"] == "READONLY_DB_VALIDATION_UNEXPECTED_ERROR"
+    _assert_no_stale_authoritative_sibling_evidence(config)
+
+
+def test_forced_rerun_manual_action_failure_removes_stale_authoritative_sibling_evidence() -> None:
+    def failing_manual_actions(run_id: str) -> list[dict[str, Any]]:
+        del run_id
+        raise RuntimeError("manual action validation failed")
+
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("force-manual-action-failure"),
+        database_url="postgresql://display_ro:secret@db.example/nhms",
+        force=True,
+    )
+    _seed_stale_pass_evidence(config)
+
+    summary = validate_readonly_db_boundary(
+        config,
+        adapter=_FakeReadonlyAdapter(),
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=failing_manual_actions,
+    )
+
+    on_disk = json.loads((config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "BLOCKED"
+    assert on_disk["status"] == "BLOCKED"
+    assert on_disk["blockers"][0]["code"] == "READONLY_DB_VALIDATION_UNEXPECTED_ERROR"
+    _assert_no_stale_authoritative_sibling_evidence(config)
 
 
 def test_existing_evidence_lane_without_force_preserves_no_overwrite_behavior() -> None:
@@ -238,11 +282,7 @@ def test_existing_evidence_lane_without_force_preserves_no_overwrite_behavior() 
         database_url="postgresql://display_ro:secret@db.example/nhms",
         force=False,
     )
-    config.lane_dir.mkdir(parents=True, exist_ok=True)
-    (config.lane_dir / "summary.json").write_text(
-        json.dumps({"status": "PASS", "run_id": config.run_id}),
-        encoding="utf-8",
-    )
+    _seed_stale_pass_evidence(config)
 
     with pytest.raises(ReadonlyDbValidationError) as exc_info:
         validate_readonly_db_boundary(
@@ -255,6 +295,27 @@ def test_existing_evidence_lane_without_force_preserves_no_overwrite_behavior() 
     assert exc_info.value.error_code == "READONLY_DB_EVIDENCE_EXISTS"
     on_disk = json.loads((config.lane_dir / "summary.json").read_text(encoding="utf-8"))
     assert on_disk["status"] == "PASS"
+    _assert_stale_authoritative_evidence_preserved(config)
+
+
+def test_forced_rerun_stale_sibling_path_error_raises_without_blocked_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NHMS_DISPLAY_READONLY_DATABASE_URL", raising=False)
+    monkeypatch.delenv("NHMS_READONLY_DB_VALIDATION_DATABASE_URL", raising=False)
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("force-symlink-sibling"),
+        force=True,
+    )
+    config.lane_dir.mkdir(parents=True, exist_ok=True)
+    (config.lane_dir / "role.json").symlink_to("stale-role.json")
+
+    with pytest.raises(ReadonlyDbValidationError) as exc_info:
+        validate_readonly_db_boundary(config)
+
+    assert exc_info.value.error_code == "READONLY_DB_EVIDENCE_PATH_UNSAFE"
+    assert not (config.lane_dir / "summary.json").exists()
 
 
 def test_writer_privilege_marks_validation_fail_even_when_probe_denied() -> None:
@@ -1232,6 +1293,64 @@ def _passing_manual_actions(run_id: str) -> list[dict[str, Any]]:
         }
         for action in ("retry", "cancel")
     ]
+
+
+def _seed_stale_pass_evidence(config: ReadonlyDbValidationConfig) -> None:
+    config.lane_dir.mkdir(parents=True, exist_ok=True)
+    stale_files: dict[str, Any] = {
+        "summary.json": {
+            "status": "PASS",
+            "run_id": config.run_id,
+            "stale_marker": "stale_prior_summary_pass",
+        },
+        "role.json": {
+            "current_user": "stale_display_ro",
+            "role_name": "stale_display_ro",
+            "role_type": "readonly_candidate",
+            "stale_marker": "stale_prior_role_pass",
+        },
+        "route_smoke.json": [
+            {
+                "name": "stale_prior_latest_product_route",
+                "status": "PASS",
+                "http_status": 200,
+                "stale_marker": "stale_prior_route_pass",
+            }
+        ],
+        "permission_probes.json": [
+            {
+                "target": "hydro.hydro_run",
+                "surface": "hydro_run_terminal_state",
+                "status": "PASS",
+                "operations": [
+                    {
+                        "operation": "INSERT",
+                        "status": "PASS",
+                        "reason": "stale_prior_insert_denied_before_commit",
+                    }
+                ],
+                "stale_marker": "stale_prior_permission_pass",
+            }
+        ],
+    }
+    for filename, payload in stale_files.items():
+        (config.lane_dir / filename).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _assert_no_stale_authoritative_sibling_evidence(config: ReadonlyDbValidationConfig) -> None:
+    for filename in ("role.json", "route_smoke.json", "permission_probes.json"):
+        path = config.lane_dir / filename
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert "stale_prior_" not in text
+        assert "stale_display_ro" not in text
+
+
+def _assert_stale_authoritative_evidence_preserved(config: ReadonlyDbValidationConfig) -> None:
+    for filename in ("summary.json", "role.json", "route_smoke.json", "permission_probes.json"):
+        text = (config.lane_dir / filename).read_text(encoding="utf-8")
+        assert "stale_prior_" in text
 
 
 def _evidence_root() -> Path:
