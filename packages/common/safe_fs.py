@@ -25,12 +25,21 @@ _READ_FLAGS = (
 )
 
 
+def verify_directory_no_follow(path: Path) -> Path:
+    """Verify an existing directory by walking every component without following symlinks."""
+
+    target = _expand_path(path)
+    fd = _open_directory_no_follow(target)
+    os.close(fd)
+    return target
+
+
 def ensure_directory_no_follow(path: Path, *, containment_root: Path | None = None) -> Path:
     """Create a directory via no-follow directory descriptors and return its configured path."""
 
     target = _expand_path(path)
     root, parts = _anchor_for(target, containment_root=containment_root)
-    root_fd = _open_verified_dir(root)
+    root_fd = _open_directory_no_follow(root)
     try:
         fd = root_fd
         for part in parts:
@@ -256,7 +265,7 @@ def list_directory_no_follow(path: Path, *, containment_root: Path | None = None
 
     target = _expand_path(path)
     root, parts = _anchor_for(target, containment_root=containment_root)
-    root_fd = _open_verified_dir(root)
+    root_fd = _open_directory_no_follow(root)
     fd = root_fd
     try:
         for part in parts:
@@ -371,7 +380,7 @@ def _open_parent_dir(
     if create:
         ensure_directory_no_follow(parent, containment_root=containment_root)
     root, parts = _anchor_for(parent, containment_root=containment_root)
-    root_fd = _open_verified_dir(root)
+    root_fd = _open_directory_no_follow(root)
     fd = root_fd
     try:
         for part in parts:
@@ -415,6 +424,28 @@ def _open_verified_dir(path: Path) -> int:
     except Exception:
         os.close(fd)
         raise
+
+
+def _open_directory_no_follow(path: Path) -> int:
+    target = _expand_path(path)
+    root, parts = _anchor_for(target, containment_root=None)
+    root_fd = _open_verified_dir(root)
+    fd = root_fd
+    try:
+        for part in parts:
+            next_fd = _open_child_dir(fd, part, target)
+            if fd != root_fd:
+                os.close(fd)
+            fd = next_fd
+        if fd == root_fd:
+            return os.dup(root_fd)
+        directory_fd = fd
+        fd = -1
+        return directory_fd
+    finally:
+        if fd != -1 and fd != root_fd:
+            os.close(fd)
+        os.close(root_fd)
 
 
 def _lstat_dir(path: Path) -> os.stat_result:

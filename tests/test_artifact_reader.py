@@ -87,6 +87,24 @@ def test_published_uri_reads_bounded_tail(tmp_path: Path) -> None:
     assert result.truncated is True
 
 
+def test_published_uri_rejects_symlinked_configured_root_parent_without_leak(tmp_path: Path) -> None:
+    root = _symlinked_parent_publish_root(tmp_path)
+    private_log = root / "logs" / "GFS" / "2026050100" / "run_1" / "job_1.out"
+    private_log.parent.mkdir(parents=True)
+    private_log.write_text("private workspace content", encoding="utf-8")
+    reader = ArtifactReader(_config(root))
+
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail("published://logs/GFS/2026050100/run_1/job_1.out")
+
+    body = _error_body(error.value)
+    assert error.value.code == "JOB_LOG_ACCESS_DENIED"
+    assert error.value.reason == "unsafe_local_path"
+    assert "private workspace content" not in body
+    assert str(tmp_path) not in body
+    assert ".nhms-runs" not in body
+
+
 def test_allowed_file_uri_reads_under_published_root(tmp_path: Path) -> None:
     root = tmp_path / "published"
     log_path = root / "logs" / "GFS" / "2026050100" / "run_1" / "job_1.out"
@@ -98,6 +116,24 @@ def test_allowed_file_uri_reads_under_published_root(tmp_path: Path) -> None:
 
     assert result.content == "published log"
     assert str(root) not in result.log_uri
+
+
+def test_allowed_file_uri_rejects_symlinked_publish_root_parent_without_leak(tmp_path: Path) -> None:
+    root = _symlinked_parent_publish_root(tmp_path)
+    private_log = root / "logs" / "GFS" / "2026050100" / "run_1" / "job_1.out"
+    private_log.parent.mkdir(parents=True)
+    private_log.write_text("private file uri content", encoding="utf-8")
+    reader = ArtifactReader(_config(root))
+
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail(private_log.as_uri())
+
+    body = _error_body(error.value)
+    assert error.value.code == "JOB_LOG_ACCESS_DENIED"
+    assert error.value.reason == "unsafe_local_path"
+    assert "private file uri content" not in body
+    assert str(tmp_path) not in body
+    assert ".nhms-runs" not in body
 
 
 def test_file_uri_under_published_root_requires_logs_namespace(tmp_path: Path) -> None:
@@ -270,6 +306,30 @@ def test_legacy_file_uri_under_log_root_remains_available_when_allowed(tmp_path:
 
     assert result.content == "file dev log"
     assert str(log_root) not in result.log_uri
+
+
+def test_legacy_file_uri_rejects_symlinked_log_root_parent_without_leak(tmp_path: Path) -> None:
+    log_root = _symlinked_parent_publish_root(tmp_path)
+    private_log = log_root / "job.log"
+    private_log.parent.mkdir(parents=True, exist_ok=True)
+    private_log.write_text("private legacy content", encoding="utf-8")
+    reader = ArtifactReader(
+        ArtifactReaderConfig(
+            published_root=None,
+            legacy_log_root=log_root,
+            allow_legacy_local_file_logs=True,
+        )
+    )
+
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail(private_log.as_uri())
+
+    body = _error_body(error.value)
+    assert error.value.code == "JOB_LOG_ACCESS_DENIED"
+    assert error.value.reason == "unsafe_local_path"
+    assert "private legacy content" not in body
+    assert str(tmp_path) not in body
+    assert ".nhms-runs" not in body
 
 
 def test_legacy_file_uri_outside_log_root_is_denied_and_redacted(tmp_path: Path) -> None:
@@ -728,3 +788,23 @@ class _Boto3Client:
 
 def _config(root: Path, *, tail: int = 1024 * 1024) -> ArtifactReaderConfig:
     return ArtifactReaderConfig(published_root=root, tail_max_bytes=tail, legacy_log_root=root)
+
+
+def _symlinked_parent_publish_root(tmp_path: Path) -> Path:
+    private_workspace = tmp_path / "private" / ".nhms-runs"
+    private_workspace.mkdir(parents=True)
+    parent_link = tmp_path / "published_parent_link"
+    parent_link.symlink_to(private_workspace, target_is_directory=True)
+    return parent_link / "published"
+
+
+def _error_body(error: ArtifactLogError) -> str:
+    return json.dumps(
+        {
+            "code": error.code,
+            "safe_uri": error.safe_uri,
+            "reason": error.reason,
+            "message": error.message,
+        },
+        sort_keys=True,
+    )

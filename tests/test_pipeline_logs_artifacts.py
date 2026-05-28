@@ -187,6 +187,34 @@ def test_job_logs_api_env_reader_honors_tail_max_bytes(tmp_path: Path, monkeypat
     }
 
 
+def test_job_logs_api_env_reader_rejects_symlinked_publish_root_parent_without_leak(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    private_workspace = tmp_path / "private" / ".nhms-runs"
+    private_workspace.mkdir(parents=True)
+    parent_link = tmp_path / "published_parent_link"
+    parent_link.symlink_to(private_workspace, target_is_directory=True)
+    published_root = parent_link / "published"
+    log_path = published_root / "logs" / "GFS" / "2026050100" / "run_1" / "job_1.out"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("private api content", encoding="utf-8")
+    _set_display_artifact_env(monkeypatch, published_root=published_root, allow_legacy_local=False)
+
+    with _store() as store:
+        _create_job(store, job_id="job_symlinked_root", log_uri="published://logs/GFS/2026050100/run_1/job_1.out")
+        with _env_client(store) as client:
+            response = client.get("/api/v1/jobs/job_symlinked_root/logs")
+
+    body = json.dumps(response.json(), sort_keys=True)
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "JOB_LOG_ACCESS_DENIED"
+    assert response.json()["error"]["details"]["reason"] == "unsafe_local_path"
+    assert "private api content" not in body
+    assert str(tmp_path) not in body
+    assert ".nhms-runs" not in body
+
+
 def test_job_logs_api_env_reader_denies_private_legacy_when_disabled(
     tmp_path: Path,
     monkeypatch: Any,

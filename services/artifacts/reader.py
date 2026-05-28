@@ -9,7 +9,7 @@ from typing import Protocol
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload
-from packages.common.safe_fs import SafeFilesystemError, read_tail_bytes_limited_no_follow
+from packages.common.safe_fs import SafeFilesystemError, read_tail_bytes_limited_no_follow, verify_directory_no_follow
 from workers.data_adapters.base import format_cycle_time
 
 DEFAULT_PUBLISHED_URI_PREFIX = "published://"
@@ -328,19 +328,29 @@ class ArtifactReader:
                 safe_uri=_unsafe_log_uri_summary(safe_uri),
                 reason="path_outside_root",
             ) from error
-        if not root_path.exists():
+        try:
+            verified_root = verify_directory_no_follow(root_path)
+        except FileNotFoundError as error:
             raise ArtifactLogError(
                 LOG_ERROR_NOT_FOUND,
                 "Published job log was not found.",
                 status_code=404,
                 safe_uri=safe_uri,
                 reason="local_not_found",
-            )
+            ) from error
+        except (OSError, SafeFilesystemError) as error:
+            raise ArtifactLogError(
+                LOG_ERROR_ACCESS_DENIED,
+                "Published job log access was denied.",
+                status_code=403,
+                safe_uri=safe_uri,
+                reason="unsafe_local_path",
+            ) from error
         try:
             data = read_tail_bytes_limited_no_follow(
                 target,
                 max_bytes=self.config.tail_max_bytes,
-                containment_root=root_path,
+                containment_root=verified_root,
             )
         except FileNotFoundError as error:
             raise ArtifactLogError(

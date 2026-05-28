@@ -167,6 +167,40 @@ def test_log_path_rejects_symlink(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert error.value.code == "JOB_LOG_ACCESS_DENIED"
 
 
+def test_log_path_rejects_symlinked_log_root_parent_without_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    private_workspace = tmp_path / "private" / ".nhms-runs"
+    private_workspace.mkdir(parents=True)
+    parent_link = tmp_path / "log_parent_link"
+    parent_link.symlink_to(private_workspace, target_is_directory=True)
+    log_root = parent_link / "logs"
+    log_path = log_root / "job.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("private legacy log", encoding="utf-8")
+    monkeypatch.setenv("LOG_ROOT", str(log_root))
+    reader = _legacy_log_reader(log_root)
+
+    with pytest.raises(ArtifactLogError) as error:
+        reader.read_text_tail("job.log")
+
+    body = str(
+        {
+            "code": error.value.code,
+            "safe_uri": error.value.safe_uri,
+            "reason": error.value.reason,
+            "message": error.value.message,
+        }
+    )
+    assert error.value.status_code == 403
+    assert error.value.code == "JOB_LOG_ACCESS_DENIED"
+    assert error.value.reason == "unsafe_local_path"
+    assert "private legacy log" not in body
+    assert str(tmp_path) not in body
+    assert ".nhms-runs" not in body
+
+
 def test_log_path_rejects_traversal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("LOG_ROOT", str(tmp_path))
     reader = _legacy_log_reader(tmp_path)
