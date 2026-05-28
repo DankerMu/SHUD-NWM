@@ -223,13 +223,32 @@ def test_table_catalog_only_privilege_marks_validation_fail_without_executing_an
     assert adapter.executed_specs == []
 
 
-def test_reachable_writer_role_membership_fails_without_set_role_or_probes() -> None:
+def test_psycopg_reachable_role_discovery_has_no_silent_depth_cap() -> None:
+    class FakeCursor:
+        executed_query = ""
+
+        def execute(self, query: str) -> None:
+            self.executed_query = query
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return []
+
+    cursor = FakeCursor()
+    adapter = PsycopgReadonlyDbProbeAdapter("postgresql://readonly:secret@db.example/nhms", ddl_suffix="roles")
+
+    assert adapter._reachable_roles(cursor, membership_columns={"set_option", "inherit_option"}) == []
+
+    assert "NOT m.roleid = ANY(reachable.path)" in cursor.executed_query
+    assert "reachable.depth <" not in cursor.executed_query
+
+
+def test_deep_reachable_writer_role_membership_fails_without_set_role_or_probes() -> None:
     adapter = _FakeReadonlyAdapter(
         reachable_role_findings=[
             {
                 "role_name": "nhms_writer",
                 "reachable_via": ["set_role"],
-                "membership_depth": 1,
+                "membership_depth": 9,
                 "unsafe_role_attributes": {},
                 "mutating_privilege_findings": [
                     {
@@ -259,6 +278,7 @@ def test_reachable_writer_role_membership_fails_without_set_role_or_probes() -> 
     assert summary["status"] == "FAIL"
     assert summary["role"]["role_type"] == "writer_or_mutating"
     assert summary["role"]["reachable_role_findings"][0]["role_name"] == "nhms_writer"
+    assert summary["role"]["reachable_role_findings"][0]["membership_depth"] > 8
     role_probe = next(item for item in summary["permission_probes"] if item["target"] == "reachable_roles")
     assert role_probe["status"] == "FAIL"
     operation = role_probe["operations"][0]

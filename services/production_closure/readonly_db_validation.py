@@ -593,7 +593,6 @@ class PsycopgReadonlyDbProbeAdapter:
                 FROM pg_auth_members m
                 JOIN reachable ON reachable.roleid = m.member
                 WHERE NOT m.roleid = ANY(reachable.path)
-                  AND reachable.depth < 8
             )
             SELECT DISTINCT ON (reachable.roleid)
                 reachable.roleid,
