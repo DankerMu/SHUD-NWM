@@ -15,6 +15,10 @@ ENV/
 
 # Environment
 .env
+infra/env/*
+!infra/env/
+!infra/env/*.example
+!infra/env/README.md
 
 # IDE
 .idea/

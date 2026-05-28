@@ -1,0 +1,54 @@
+name: nhms-display
+
+services:
+  display-api:
+    image: ${NHMS_APP_IMAGE:-nhms-app}:${NHMS_IMAGE_TAG:-m22-placeholder}
+    user: "${NHMS_CONTAINER_UID:-1000}:${NHMS_CONTAINER_GID:-1000}"
+    working_dir: /app
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /run:size=64m,mode=755
+    environment:
+      NHMS_SERVICE_ROLE: display_readonly
+      NHMS_REQUIRE_SERVICE_ROLE: "true"
+      NHMS_AUTH_MODE: ${NHMS_AUTH_MODE:-production}
+      NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS: "true"
+      NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS: "false"
+      DATABASE_URL: ${DATABASE_URL:?set readonly display database url}
+      NHMS_PUBLISHED_ARTIFACT_ROOT: ${NHMS_PUBLISHED_ARTIFACT_ROOT:?set container published artifact root}
+      NHMS_PUBLISHED_ARTIFACT_URI_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_URI_PREFIX:-published://}
+      NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
+      NHMS_PUBLISHED_ARTIFACT_S3_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_S3_PREFIX:-}
+      NHMS_LOG_TAIL_MAX_BYTES: ${NHMS_LOG_TAIL_MAX_BYTES:-1048576}
+      NHMS_ARTIFACT_BACKEND: ${NHMS_ARTIFACT_BACKEND:-local}
+      OBJECT_STORE_PREFIX: ${OBJECT_STORE_PREFIX:-}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+    volumes:
+      - type: bind
+        source: ${NHMS_PUBLISHED_ARTIFACT_HOST_ROOT:?set host published artifact root}
+        target: ${NHMS_PUBLISHED_ARTIFACT_ROOT:?set container published artifact root}
+        read_only: true
+    ports:
+      - "127.0.0.1:${NHMS_DISPLAY_API_PORT:-8000}:8000"
+    command:
+      - uv
+      - run
+      - python
+      - -m
+      - uvicorn
+      - apps.api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    restart: unless-stopped

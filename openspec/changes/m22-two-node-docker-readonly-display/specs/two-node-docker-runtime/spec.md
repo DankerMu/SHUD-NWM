@@ -28,10 +28,34 @@ The compute compose file SHALL express the 22 node's compute-control capability 
 - **THEN** compute services can mount Basins/model assets read-only, workspace read-write, and published artifact root read-write
 - **AND** they use `NHMS_SERVICE_ROLE=compute_control`.
 
+#### Scenario: Compute compose uses canonical publish-root names
+- **WHEN** `infra/compose.compute.yml` is rendered or validated
+- **THEN** host publish-root source configuration uses `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT` when it differs from the in-container root
+- **AND** the container runtime target is `NHMS_PUBLISHED_ARTIFACT_ROOT`.
+
 #### Scenario: Compute compose network exposure
 - **WHEN** compute API or gateway ports are configured
 - **THEN** they bind to localhost or an explicit internal control network by default
 - **AND** the compose docs warn against exposing control endpoints publicly.
+
+### Requirement: Role-specific env examples and Docker preflight
+
+The Docker runtime SHALL provide role-specific env examples and preflight checks before large Docker work.
+
+#### Scenario: Role-specific env examples
+- **WHEN** `infra/env/compute.example`, `infra/env/display.example`, and shared env documentation are checked
+- **THEN** they use canonical `NHMS_PUBLISHED_ARTIFACT_ROOT`, `NHMS_PUBLISHED_ARTIFACT_URI_PREFIX`, `NHMS_PUBLISHED_ARTIFACT_S3_BUCKET`, `NHMS_PUBLISHED_ARTIFACT_S3_PREFIX`, and optional `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`
+- **AND** they document required and forbidden variables for compute and display roles.
+
+#### Scenario: Docker disk preflight
+- **WHEN** Docker preflight runs before build or smoke work
+- **THEN** it records `docker version`, `docker compose version`, DockerRootDir, `docker system df`, `df -h`, `TMPDIR`, and the evidence root
+- **AND** low space is reported as `BLOCKED` before build or smoke work continues.
+
+#### Scenario: Dev compose is not production two-node compose
+- **WHEN** production two-node static checks are run
+- **THEN** `infra/docker-compose.dev.yml` is rejected as a production compute/display compose input
+- **AND** the dev compose file remains available only for local development dependencies.
 
 ### Requirement: Display compose has no physical control capability
 

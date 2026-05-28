@@ -1,0 +1,35 @@
+# 27-side readonly display example for infra/compose.display.yml.
+# Use with:
+#   docker compose --env-file infra/env/display.example -f infra/compose.display.yml config
+
+NHMS_APP_IMAGE=nhms-app
+NHMS_IMAGE_TAG=m22-placeholder
+NHMS_CONTAINER_UID=1000
+NHMS_CONTAINER_GID=1000
+NHMS_DISPLAY_API_PORT=8000
+
+NHMS_SERVICE_ROLE=display_readonly
+NHMS_REQUIRE_SERVICE_ROLE=true
+NHMS_AUTH_MODE=production
+NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
+NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
+
+# Use a real readonly database role. The username here is intentionally ro-suffixed.
+DATABASE_URL=postgresql://nhms_display_ro:change-me@db.internal.example:5432/nhms
+
+# Host source is compose-only. The container receives NHMS_PUBLISHED_ARTIFACT_ROOT.
+NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/mnt/nhms-published
+NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
+NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
+NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
+NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
+NHMS_LOG_TAIL_MAX_BYTES=1048576
+
+NHMS_ARTIFACT_BACKEND=local
+OBJECT_STORE_PREFIX=s3://nhms-prod
+S3_ENDPOINT_URL=https://object-store.internal.example
+S3_BUCKET_NAME=nhms-prod
+AWS_ACCESS_KEY_ID=readonly-key-placeholder
+AWS_SECRET_ACCESS_KEY=readonly-secret-placeholder
+
+CORS_ALLOWED_ORIGINS=https://display.internal.example
