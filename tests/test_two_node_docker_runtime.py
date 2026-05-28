@@ -1590,6 +1590,79 @@ def test_static_checker_accepts_full_tree_same_key_alternate_when_it_matches_env
     assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "expected_rendered"),
+    [
+        ("image", "evil/${NHMS_APP_IMAGE}:${NHMS_IMAGE_TAG}", "evil/nhms-app:m22-placeholder"),
+        ("user", "prefix-${NHMS_CONTAINER_UID}:${NHMS_CONTAINER_GID}", "prefix-1000:1000"),
+        ("ports", "127.0.0.1:1${NHMS_DISPLAY_API_PORT}:8000", "127.0.0.1:18000:8000"),
+        ("command", "echo prefix-${NHMS_APP_IMAGE}", "echo prefix-nhms-app"),
+        ("entrypoint", "echo prefix-${NHMS_APP_IMAGE}", "echo prefix-nhms-app"),
+    ],
+)
+def test_static_checker_rejects_display_field_render_drift(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    expected_rendered: str,
+) -> None:
+    compose = _safe_display_compose()
+    service = compose["services"]["display-api"]
+    if field == "ports":
+        service[field] = [value]
+    elif field in {"command", "entrypoint"}:
+        service[field] = ["sh", "-lc", value]
+    else:
+        service[field] = value
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    field_findings = [
+        finding
+        for finding in result.findings
+        if finding.code == "DISPLAY_INTERPOLATION_FIELD_RENDER_DRIFT" and finding.details["field"] == field
+    ]
+    assert field_findings
+    assert expected_rendered in json.dumps(field_findings[0].details["actual_rendered"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_rendered"),
+    [
+        ("image", "evil/${NHMS_APP_IMAGE}:${NHMS_IMAGE_TAG}", "evil/nhms-app:m22-placeholder"),
+        ("user", "prefix-${NHMS_CONTAINER_UID}:${NHMS_CONTAINER_GID}", "prefix-1000:1000"),
+        ("command", "echo prefix-${NHMS_APP_IMAGE}", "echo prefix-nhms-app"),
+        ("entrypoint", "echo prefix-${NHMS_APP_IMAGE}", "echo prefix-nhms-app"),
+    ],
+)
+def test_static_checker_rejects_compute_field_render_drift(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    expected_rendered: str,
+) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        if field in {"command", "entrypoint"}:
+            service[field] = ["sh", "-lc", value]
+        else:
+            service[field] = value
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    field_findings = [
+        finding
+        for finding in result.findings
+        if finding.code == "COMPUTE_INTERPOLATION_FIELD_RENDER_DRIFT" and finding.details["field"] == field
+    ]
+    assert field_findings
+    assert expected_rendered in json.dumps(field_findings[0].details["actual_rendered"])
+
+
 def test_compose_dollar_escape_parser_keeps_escaped_braced_interpolation_literal() -> None:
     env = {"NHMS_APP_IMAGE": "nhms-app"}
 
@@ -1598,6 +1671,36 @@ def test_compose_dollar_escape_parser_keeps_escaped_braced_interpolation_literal
     assert docker_runtime._compose_interpolation_occurrences_from_text(escaped) == []
     assert docker_runtime._compose_interpolation_keys_from_text(escaped) == set()
     assert docker_runtime._resolve_compose_value(escaped, env) == "${NHMS_APP_IMAGE:+wrong}"
+
+
+def test_compose_interpolation_accepts_bounded_nested_payloads() -> None:
+    nested = "${A:-${B:-fallback}}"
+
+    assert docker_runtime._compose_interpolation_keys_from_text(nested) == {"A", "B"}
+    assert docker_runtime._resolve_compose_value(nested, {}) == "fallback"
+
+
+def test_compose_interpolation_rejects_over_limit_nesting_without_recursion_error() -> None:
+    levels = docker_runtime.MAX_COMPOSE_INTERPOLATION_DEPTH + 2
+    over_limit = "${A:-" * levels + "fallback" + "}" * levels
+
+    with pytest.raises(docker_runtime.ComposeInterpolationLimitError):
+        docker_runtime._compose_interpolation_keys_from_text(over_limit)
+    with pytest.raises(docker_runtime.ComposeInterpolationLimitError):
+        docker_runtime._resolve_compose_value(over_limit, {})
+
+
+def test_static_checker_reports_over_limit_interpolation_as_finding(tmp_path: Path) -> None:
+    levels = docker_runtime.MAX_COMPOSE_INTERPOLATION_DEPTH + 2
+    over_limit = "${NHMS_APP_IMAGE:-" * levels + "nhms-app" + "}" * levels
+    compose = _safe_display_compose()
+    compose["services"]["display-api"]["image"] = f"{over_limit}:${{NHMS_IMAGE_TAG}}"
+    display_compose = _write_display_compose(tmp_path, compose)
+
+    result = _run_display_static_check(display_compose)
+
+    assert result.status == "FAIL"
+    assert "COMPOSE_INTERPOLATION_COMPLEXITY_LIMIT_EXCEEDED" in _codes(result)
 
 
 @pytest.mark.parametrize(
@@ -1913,6 +2016,65 @@ def test_static_checker_rejects_compute_environment_list_dynamic_audited_overwri
 
     assert result.status == "FAIL"
     assert _codes(result) >= expected_codes
+
+
+@pytest.mark.parametrize(
+    ("role", "entry", "fake_secret", "expected_code"),
+    [
+        (
+            "display",
+            "AWS_SECRET_ACCESS_KEY=<fake-display-secret>",
+            "<fake-display-secret>",
+            "DISPLAY_RUNTIME_ENV_LITERAL_DRIFT",
+        ),
+        (
+            "compute",
+            "DATABASE_URL=<fake-compute-dsn>",
+            "<fake-compute-dsn>",
+            "COMPUTE_RUNTIME_ENV_LITERAL_DRIFT",
+        ),
+        (
+            "display",
+            "${DISPLAY_SECRET_ENTRY:-AWS_SECRET_ACCESS_KEY=<fake-display-payload>}",
+            "<fake-display-payload>",
+            "DISPLAY_RUNTIME_ENV_LITERAL_DRIFT",
+        ),
+        (
+            "compute",
+            "${COMPUTE_SECRET_ENTRY:-DATABASE_URL=<fake-compute-payload>}",
+            "<fake-compute-payload>",
+            "COMPUTE_RUNTIME_ENV_LITERAL_DRIFT",
+        ),
+    ],
+)
+def test_static_result_serialization_redacts_secret_list_entries_and_payloads(
+    tmp_path: Path,
+    role: str,
+    entry: str,
+    fake_secret: str,
+    expected_code: str,
+) -> None:
+    if role == "display":
+        compose = _safe_display_compose()
+        service = compose["services"]["display-api"]
+        service["environment"] = _environment_dict_to_list(service["environment"])
+        service["environment"].append(entry)
+        result = _run_display_static_check(_write_display_compose(tmp_path, compose))
+    elif role == "compute":
+        compose = _safe_compute_compose()
+        for service in compose["services"].values():
+            service["environment"] = _environment_dict_to_list(service["environment"])
+            service["environment"].append(entry)
+        result = _run_compute_static_check(_write_compute_compose(tmp_path, compose))
+    else:
+        raise AssertionError(f"unhandled role: {role}")
+
+    serialized = json.dumps(result.to_dict(), sort_keys=True)
+
+    assert result.status == "FAIL"
+    assert expected_code in _codes(result)
+    assert fake_secret not in serialized
+    assert "<redacted>" in serialized
 
 
 def test_static_checker_rejects_compute_workspace_volume_mount_type(tmp_path: Path) -> None:

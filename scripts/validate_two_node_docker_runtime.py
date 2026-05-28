@@ -284,6 +284,57 @@ DISPLAY_AUDITED_RUNTIME_ENV = (
     DISPLAY_REQUIRED_RUNTIME_ENV | DISPLAY_OPTIONAL_RUNTIME_ENV | frozenset(DISPLAY_REQUIRED_ENV)
 )
 SECRET_ENV_KEYS = frozenset({"DATABASE_URL", "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID"})
+MAX_COMPOSE_INTERPOLATION_TEXT_CHARS = 65_536
+MAX_COMPOSE_INTERPOLATION_DEPTH = 64
+MAX_COMPOSE_INTERPOLATION_OCCURRENCES = 4_096
+API_SERVICE_COMMAND = (
+    "uv",
+    "run",
+    "python",
+    "-m",
+    "uvicorn",
+    "apps.api.main:app",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "8000",
+)
+COMPUTE_SCHEDULER_COMMAND = ("uv", "run", "nhms-pipeline", "plan-production", "--plan")
+_NO_FIELD_CONTRACT = object()
+_FIELD_MUST_BE_ABSENT = object()
+
+
+class ComposeInterpolationLimitError(ValueError):
+    def __init__(self, message: str, *, metric: str, limit: int) -> None:
+        super().__init__(message)
+        self.metric = metric
+        self.limit = limit
+
+
+_SECRET_ENV_KEY_ALTERNATION = "|".join(re.escape(key) for key in sorted(SECRET_ENV_KEYS, key=len, reverse=True))
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    rf"(?<![A-Za-z0-9_])(?P<key>{_SECRET_ENV_KEY_ALTERNATION})\s*=\s*(?P<value>[^\s,;}}\]]+)"
+)
+_SECRET_INTERPOLATION_PATTERN = re.compile(rf"\$(?:\{{)?(?P<key>{_SECRET_ENV_KEY_ALTERNATION})(?=\b|[:+\-?}}])")
+_SECRET_URL_PATTERN = re.compile(r"\b(?:postgres|postgresql|mysql|mariadb|mongodb|redis)://[^\s,;}\]]+")
+_SECRET_DETAIL_VALUE_FIELDS = frozenset(
+    {
+        "entry",
+        "candidate_value",
+        "expression",
+        "env_file_value",
+        "literal_value",
+        "rendered_value",
+        "process_value",
+        "actual",
+        "actual_rendered",
+        "expected",
+        "expected_rendered",
+        "value",
+        "raw_value",
+        "error",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -306,7 +357,7 @@ class Finding:
         if self.service is not None:
             payload["service"] = self.service
         if self.details:
-            payload["details"] = self.details
+            payload["details"] = _redact_finding_details(self.details)
         return payload
 
 
@@ -419,21 +470,24 @@ def run_static_check(
     findings.extend(_dev_compose_findings(compute_compose, repo_root, role="compute"))
     findings.extend(_dev_compose_findings(display_compose, repo_root, role="display"))
 
-    compute_env_map = parse_env_file(compute_env)
-    display_env_map = parse_env_file(display_env)
-    compute_yaml = load_compose(compute_compose)
-    display_yaml = load_compose(display_compose)
+    try:
+        compute_env_map = parse_env_file(compute_env)
+        display_env_map = parse_env_file(display_env)
+        compute_yaml = load_compose(compute_compose)
+        display_yaml = load_compose(display_compose)
 
-    findings.extend(
-        _compose_interpolation_contract_findings(compute_compose, compute_yaml, compute_env_map, role="compute")
-    )
-    findings.extend(
-        _compose_interpolation_contract_findings(display_compose, display_yaml, display_env_map, role="display")
-    )
-    findings.extend(_validate_env_file(compute_env, compute_env_map, role="compute"))
-    findings.extend(_validate_env_file(display_env, display_env_map, role="display"))
-    findings.extend(_validate_compute_compose(compute_compose, compute_yaml, compute_env_map))
-    findings.extend(_validate_display_compose(display_compose, display_yaml, display_env_map, compute_env_map))
+        findings.extend(
+            _compose_interpolation_contract_findings(compute_compose, compute_yaml, compute_env_map, role="compute")
+        )
+        findings.extend(
+            _compose_interpolation_contract_findings(display_compose, display_yaml, display_env_map, role="display")
+        )
+        findings.extend(_validate_env_file(compute_env, compute_env_map, role="compute"))
+        findings.extend(_validate_env_file(display_env, display_env_map, role="display"))
+        findings.extend(_validate_compute_compose(compute_compose, compute_yaml, compute_env_map))
+        findings.extend(_validate_display_compose(display_compose, display_yaml, display_env_map, compute_env_map))
+    except ComposeInterpolationLimitError as error:
+        findings.append(_compose_interpolation_limit_finding(error))
 
     status = "PASS" if not findings else "FAIL"
     return StaticCheckResult(status=status, findings=tuple(findings))
@@ -2049,6 +2103,7 @@ def _compose_interpolation_contract_findings(
             approved_keys=approved_keys,
         )
     )
+    findings.extend(_compose_field_render_drift_findings(path=path, compose=compose, env=env, role=role))
     for key in sorted(used_keys & approved_keys):
         if key not in env:
             continue
@@ -2107,6 +2162,93 @@ def _compose_interpolation_value_drift_findings(
                 )
             )
     return findings
+
+
+def _compose_field_render_drift_findings(
+    *,
+    path: Path,
+    compose: Mapping[str, Any],
+    env: Mapping[str, str],
+    role: str,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    for service_name, service in _services(compose).items():
+        contract = _canonical_service_field_render_contract(role=role, service_name=service_name, env=env)
+        for field_name in ("image", "user", "ports", "command", "entrypoint"):
+            expected = contract.get(field_name, _NO_FIELD_CONTRACT)
+            if expected is _NO_FIELD_CONTRACT:
+                continue
+            raw_value = service.get(field_name)
+            if expected is _FIELD_MUST_BE_ABSENT:
+                if not _has_compose_value(service, field_name):
+                    continue
+                expected_detail: Any = "<absent>"
+            else:
+                expected_detail = expected
+            actual = _render_deployment_field(field_name, raw_value, env)
+            if expected is not _FIELD_MUST_BE_ABSENT and actual == expected:
+                continue
+            variables = sorted(_compose_interpolation_keys(raw_value))
+            findings.append(
+                Finding(
+                    f"{role.upper()}_INTERPOLATION_FIELD_RENDER_DRIFT",
+                    f"{role} service {field_name} must render to the approved deployment contract.",
+                    path=str(path),
+                    service=service_name,
+                    details={
+                        "field": field_name,
+                        "compose_path": f"$.services.{_compose_path_segment(service_name)}.{field_name}",
+                        "variables": variables,
+                        "expected_rendered": expected_detail,
+                        "actual_rendered": actual,
+                    },
+                )
+            )
+    return findings
+
+
+def _canonical_service_field_render_contract(
+    *,
+    role: str,
+    service_name: str,
+    env: Mapping[str, str],
+) -> dict[str, Any]:
+    contract: dict[str, Any] = {
+        "image": f"{env.get('NHMS_APP_IMAGE', '')}:{env.get('NHMS_IMAGE_TAG', '')}",
+        "user": f"{env.get('NHMS_CONTAINER_UID', '')}:{env.get('NHMS_CONTAINER_GID', '')}",
+        "entrypoint": _FIELD_MUST_BE_ABSENT,
+    }
+    if role == "display":
+        contract["ports"] = [f"127.0.0.1:{env.get('NHMS_DISPLAY_API_PORT', '')}:8000"]
+        contract["command"] = list(API_SERVICE_COMMAND)
+        return contract
+    contract["ports"] = _FIELD_MUST_BE_ABSENT
+    contract["command"] = (
+        list(COMPUTE_SCHEDULER_COMMAND)
+        if service_name == "scheduler-once"
+        else list(API_SERVICE_COMMAND)
+    )
+    return contract
+
+
+def _render_deployment_field(field_name: str, value: Any, env: Mapping[str, str]) -> Any:
+    if field_name in {"command", "entrypoint"}:
+        if value is None:
+            return []
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            return [_resolved_compose_text(item, env) for item in value]
+        return _resolved_compose_text(value, env)
+    if field_name == "ports":
+        return [_render_compose_value(port, env) for port in _compose_entry_list(value)]
+    return _resolved_compose_text(value, env)
+
+
+def _render_compose_value(value: Any, env: Mapping[str, str]) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _render_compose_value(item, env) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_render_compose_value(item, env) for item in value]
+    return _resolved_compose_text(value, env)
 
 
 def _display_environment_list_findings(
@@ -2472,14 +2614,30 @@ def _compose_interpolation_keys_from_text(value: str) -> set[str]:
     return {occurrence.key for occurrence in _compose_interpolation_occurrences_from_text(value)}
 
 
-def _compose_interpolation_occurrences_from_text(value: str) -> list[ComposeInterpolationOccurrence]:
+def _compose_interpolation_occurrences_from_text(
+    value: str,
+    *,
+    _depth: int = 0,
+) -> list[ComposeInterpolationOccurrence]:
+    _check_compose_interpolation_bounds(value, depth=_depth)
     occurrences: list[ComposeInterpolationOccurrence] = []
     for token in _compose_dollar_run_tokens(value):
         if token.occurrence is None:
             continue
         occurrences.append(token.occurrence)
+        if len(occurrences) > MAX_COMPOSE_INTERPOLATION_OCCURRENCES:
+            raise ComposeInterpolationLimitError(
+                "Compose interpolation occurrence count exceeds the static validation limit.",
+                metric="occurrences",
+                limit=MAX_COMPOSE_INTERPOLATION_OCCURRENCES,
+            )
         if token.occurrence.operator is not None and token.occurrence.payload:
-            occurrences.extend(_compose_interpolation_occurrences_from_text(token.occurrence.payload))
+            occurrences.extend(
+                _compose_interpolation_occurrences_from_text(
+                    token.occurrence.payload,
+                    _depth=_depth + 1,
+                )
+            )
     return occurrences
 
 
@@ -2574,6 +2732,12 @@ def _find_matching_interpolation_brace(value: str, open_index: int) -> int | Non
     while index < len(value):
         if value[index] == "{" and index > 0 and value[index - 1] == "$":
             depth += 1
+            if depth > MAX_COMPOSE_INTERPOLATION_DEPTH:
+                raise ComposeInterpolationLimitError(
+                    "Compose interpolation nesting exceeds the static validation limit.",
+                    metric="depth",
+                    limit=MAX_COMPOSE_INTERPOLATION_DEPTH,
+                )
         elif value[index] == "}":
             depth -= 1
             if depth == 0:
@@ -2648,6 +2812,82 @@ def _is_local_bind_volume(volume_definition: Mapping[str, Any]) -> bool:
     return "bind" in option_text or "type none" in option_text or str(driver_opts.get("type", "")).lower() == "none"
 
 
+def _compose_interpolation_limit_finding(error: ComposeInterpolationLimitError) -> Finding:
+    return Finding(
+        "COMPOSE_INTERPOLATION_COMPLEXITY_LIMIT_EXCEEDED",
+        "Compose interpolation input exceeds the static validator bounds.",
+        details={"metric": error.metric, "limit": error.limit, "error": str(error)},
+    )
+
+
+def _check_compose_interpolation_bounds(value: str, *, depth: int) -> None:
+    if len(value) > MAX_COMPOSE_INTERPOLATION_TEXT_CHARS:
+        raise ComposeInterpolationLimitError(
+            "Compose interpolation text exceeds the static validation limit.",
+            metric="text_chars",
+            limit=MAX_COMPOSE_INTERPOLATION_TEXT_CHARS,
+        )
+    if depth > MAX_COMPOSE_INTERPOLATION_DEPTH:
+        raise ComposeInterpolationLimitError(
+            "Compose interpolation nesting exceeds the static validation limit.",
+            metric="depth",
+            limit=MAX_COMPOSE_INTERPOLATION_DEPTH,
+        )
+
+
+def _redact_finding_details(details: Mapping[str, Any]) -> dict[str, Any]:
+    redacted = _redact_detail_value(details, secret_context=False, field_name=None)
+    return redacted if isinstance(redacted, dict) else {}
+
+
+def _redact_detail_value(value: Any, *, secret_context: bool, field_name: str | None) -> Any:
+    if isinstance(value, Mapping):
+        mapping_secret_context = secret_context or _mapping_has_secret_key_context(value)
+        return {
+            str(key): _redact_detail_value(
+                item,
+                secret_context=mapping_secret_context or str(key) in SECRET_ENV_KEYS,
+                field_name=str(key),
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        sequence_secret_context = secret_context or any(
+            isinstance(item, str) and item in SECRET_ENV_KEYS for item in value
+        )
+        return [
+            _redact_detail_value(item, secret_context=sequence_secret_context, field_name=field_name)
+            for item in value
+        ]
+    if isinstance(value, str):
+        return _redact_detail_text(value, secret_context=secret_context, field_name=field_name)
+    return value
+
+
+def _mapping_has_secret_key_context(value: Mapping[str, Any]) -> bool:
+    for context_field in ("key", "candidate_key", "source_key", "target_key"):
+        candidate = value.get(context_field)
+        if isinstance(candidate, str) and candidate in SECRET_ENV_KEYS:
+            return True
+    variables = value.get("variables")
+    return isinstance(variables, Sequence) and not isinstance(variables, (str, bytes)) and any(
+        isinstance(item, str) and item in SECRET_ENV_KEYS for item in variables
+    )
+
+
+def _redact_detail_text(value: str, *, secret_context: bool, field_name: str | None) -> str:
+    if not value:
+        return value
+    text = _SECRET_ASSIGNMENT_PATTERN.sub(lambda match: f"{match.group('key')}=<redacted>", value)
+    if _SECRET_INTERPOLATION_PATTERN.search(text) or _SECRET_URL_PATTERN.search(text):
+        return "<redacted>"
+    if secret_context and field_name in _SECRET_DETAIL_VALUE_FIELDS:
+        if field_name == "entry" and text in SECRET_ENV_KEYS:
+            return text
+        return text if text != value else "<redacted>"
+    return text
+
+
 def _redact_env_value(key: str, value: str) -> str:
     if key in SECRET_ENV_KEYS:
         return "<redacted>" if value else ""
@@ -2657,7 +2897,7 @@ def _redact_env_value(key: str, value: str) -> str:
 def _redact_interpolation_expression(key: str, expression: str) -> str:
     if key in SECRET_ENV_KEYS:
         return "<redacted>"
-    return expression
+    return _redact_detail_text(expression, secret_context=False, field_name="expression")
 
 
 def _is_namespace_sharing_mode(value: str) -> bool:
@@ -2747,29 +2987,36 @@ def _normalize_posix_path(value: str) -> str:
 
 
 def _resolve_compose_value(value: str, env: Mapping[str, str]) -> str:
-    return _resolve_compose_value_once(value, env)
+    return _resolve_compose_value_once(value, env, depth=0)
 
 
-def _resolve_compose_value_once(value: str, env: Mapping[str, str]) -> str:
+def _resolve_compose_value_once(value: str, env: Mapping[str, str], *, depth: int) -> str:
+    _check_compose_interpolation_bounds(value, depth=depth)
     parts: list[str] = []
     cursor = 0
     for token in _compose_dollar_run_tokens(value):
         parts.append(value[cursor : token.start])
         parts.append(token.literal_dollars)
         if token.occurrence is not None:
-            parts.append(_resolve_compose_occurrence(token.occurrence, env))
+            parts.append(_resolve_compose_occurrence(token.occurrence, env, depth=depth))
         cursor = token.end
     parts.append(value[cursor:])
     return "".join(parts)
 
 
-def _resolve_compose_occurrence(occurrence: ComposeInterpolationOccurrence, env: Mapping[str, str]) -> str:
+def _resolve_compose_occurrence(
+    occurrence: ComposeInterpolationOccurrence,
+    env: Mapping[str, str],
+    *,
+    depth: int,
+) -> str:
     if occurrence.expression.startswith("${"):
-        return _resolve_braced_compose_expression(occurrence.expression, env)
+        return _resolve_braced_compose_expression(occurrence.expression, env, depth=depth)
     return env.get(occurrence.key, occurrence.expression)
 
 
-def _resolve_braced_compose_expression(expression: str, env: Mapping[str, str]) -> str:
+def _resolve_braced_compose_expression(expression: str, env: Mapping[str, str], *, depth: int) -> str:
+    _check_compose_interpolation_bounds(expression, depth=depth)
     payload = expression[2:-1]
     parsed = _parse_compose_interpolation_payload(payload)
     if parsed is None:
@@ -2783,13 +3030,13 @@ def _resolve_braced_compose_expression(expression: str, env: Mapping[str, str]) 
     if operator is None:
         return expression
     if operator == ":-":
-        return current if is_nonempty else _resolve_compose_value(fallback, env)
+        return current if is_nonempty else _resolve_compose_value_once(fallback, env, depth=depth + 1)
     if operator == "-":
-        return current if is_set else _resolve_compose_value(fallback, env)
+        return current if is_set else _resolve_compose_value_once(fallback, env, depth=depth + 1)
     if operator == ":+":
-        return _resolve_compose_value(fallback, env) if is_nonempty else ""
+        return _resolve_compose_value_once(fallback, env, depth=depth + 1) if is_nonempty else ""
     if operator == "+":
-        return _resolve_compose_value(fallback, env) if is_set else ""
+        return _resolve_compose_value_once(fallback, env, depth=depth + 1) if is_set else ""
     if operator == ":?":
         return current if is_nonempty else expression
     if operator == "?":
