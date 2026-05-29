@@ -329,9 +329,16 @@ curl -i http://127.0.0.1:8000/api/v1/runtime/config
 curl -i http://127.0.0.1:8000/api/v1/slurm/health
 curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
 curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
-export OPERATOR_AUTH_HEADER='Authorization: Bearer <real-production-operator-token>'
-curl -i -H "$OPERATOR_AUTH_HEADER" -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
-curl -i -H "$OPERATOR_AUTH_HEADER" -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
+
+# 任选一种 secret-free 方式加载真实 operator token；env 文件必须未跟踪且权限为 0600。
+set -a
+. infra/env/operator-auth.env
+set +a
+# 或交互式静默输入：
+# read -r -s -p "Operator auth token: " OPERATOR_AUTH_TOKEN; printf '\n'
+
+curl -i -H "Authorization: Bearer ${OPERATOR_AUTH_TOKEN}" -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
+curl -i -H "Authorization: Bearer ${OPERATOR_AUTH_TOKEN}" -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
 ```
 
 通过条件：
@@ -343,6 +350,8 @@ curl -i -H "$OPERATOR_AUTH_HEADER" -X POST http://127.0.0.1:8000/api/v1/runs/<ru
 - 只有真实生产运维 auth token/header 可走授权 manual-action lane；如果部署拿不到这条授权路径，本 lane 记为 `BLOCKED`，不能 `PASS`。
 - 授权请求应返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` 或等价稳定错误，且不构造 DB write 或 Gateway 依赖。
 - evidence 显示 27 没有 Gateway 调用、没有业务终态写入、published artifact mount 是 readonly。
+- `command_index.md` 和复制到 review / incident handoff 的 evidence 只能记录未展开变量的命令文本；
+  不得包含原始 DSN、token、signature 或完整 auth header。
 
 ## 12. Evidence Paths
 

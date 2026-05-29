@@ -151,7 +151,7 @@ E2E 拆成三段：
 compute_control_plane: PASS | PARTIAL | FAIL | BLOCKED
 display_service_plane: PASS | PARTIAL | FAIL | BLOCKED
 cross_plane_e2e: PASS | PARTIAL | FAIL | BLOCKED
-manual_ops_boundary: PASS | FAIL
+manual_ops_boundary: PASS | PARTIAL | FAIL | BLOCKED
 ```
 
 ## 5. 证据目录
@@ -183,6 +183,9 @@ mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,b
 - `docker-security/summary.md`：27 无 Slurm/Munge/Docker socket、HostConfig/mount/env 检查。
 - `summary.md`：最终 PASS/PARTIAL/FAIL/BLOCKED 汇总。
 - `bugs.md` 或链接到 `docs/bugs.md`：失败项、根因、复测条件。
+
+`command_index.md` 和复制到 review / incident handoff 的 evidence 只能记录脱敏命令文本；
+不得包含原始 DSN、token、signature 或完整 auth header。
 
 ## 6. 22 计算控制面 E2E
 
@@ -380,24 +383,39 @@ curl -i 'http://127.0.0.1:8000/api/v1/slurm/health'
 在 27 节点用真实只读账号执行 readonly DB 验证。缺少真实只读 DB URL 时，本 lane 必须输出 `BLOCKED`，不能记为 `PASS`。
 
 ```bash
+: "${RUN_ID:?export shared E2E RUN_ID first}"
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
 export NHMS_SERVICE_ROLE=display_readonly
 export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
-export NHMS_DISPLAY_READONLY_DATABASE_URL='postgresql://<readonly-user>:<secret>@<db-host>:5432/<db-name>'
+
+# 任选一种 secret-free 方式加载真实 readonly DSN；env 文件必须未跟踪且权限为 0600。
+set -a
+. infra/env/display-readonly-secrets.env
+set +a
+# 或从站点 secret manager 读取：
+# export NHMS_DISPLAY_READONLY_DATABASE_URL="$(secret-manager read nhms/display/readonly-db-url)"
+
 export NHMS_READONLY_DB_VALIDATION_SOURCE=GFS
 export NHMS_READONLY_DB_VALIDATION_CYCLE_TIME='<cycle_time>'
 export NHMS_READONLY_DB_VALIDATION_RUN_ID='<run_id>'
 export NHMS_READONLY_DB_VALIDATION_MODEL_ID=basins_qhh_shud
 export NHMS_READONLY_DB_VALIDATION_JOB_ID='<job_id-with-published-log>'
-export EVIDENCE_RUN_ID="readonly-db-$(date -u +%Y%m%dT%H%M%SZ)"
 
 uv run python scripts/validate_readonly_db_boundary.py \
   --evidence-root "artifacts/two-node-e2e" \
-  --run-id "$EVIDENCE_RUN_ID" \
+  --run-id "$RUN_ID" \
   --force
 ```
 
-其中 `--run-id` 是 evidence bundle ID；`NHMS_READONLY_DB_VALIDATION_RUN_ID` 是被验证的业务 `hydro.hydro_run.run_id`。如需只通过环境变量指定 evidence bundle ID，使用 `NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID`。
+其中 `--run-id "$RUN_ID"` 是当前 E2E evidence bundle ID，默认写入
+`$EVIDENCE_ROOT/db/readonly-db-boundary/`；`NHMS_READONLY_DB_VALIDATION_RUN_ID` 仍是被验证的业务
+`hydro.hydro_run.run_id`。如需只通过环境变量指定 evidence bundle ID，使用
+`NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID="$RUN_ID"`。`command_index.md` 只记录脱敏形式，例如：
+
+```text
+NHMS_DISPLAY_READONLY_DATABASE_URL=<redacted> uv run python scripts/validate_readonly_db_boundary.py --evidence-root "artifacts/two-node-e2e" --run-id "$RUN_ID" --force
+```
 
 验证内容：
 
