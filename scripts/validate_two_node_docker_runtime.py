@@ -349,7 +349,17 @@ except urllib.error.HTTPError as error:
     raise
 raise SystemExit("display_readonly unexpectedly served /api/v1/slurm/health")
 """
-APP_IMAGE_FORBIDDEN_BINARIES = ("sbatch", "scancel", "squeue", "srun", "sacct", "sinfo", "munge", "unmunge")
+APP_IMAGE_FORBIDDEN_BINARIES = (
+    "sbatch",
+    "scancel",
+    "squeue",
+    "srun",
+    "sacct",
+    "sinfo",
+    "scontrol",
+    "munge",
+    "unmunge",
+)
 APP_IMAGE_FORBIDDEN_PATHS = ("/etc/slurm", "/run/munge", "/etc/munge", "/var/run/munge")
 REQUIRED_DOCKERIGNORE_PATTERNS = frozenset(
     {
@@ -361,6 +371,10 @@ REQUIRED_DOCKERIGNORE_PATTERNS = frozenset(
         "AutoSHUD",
         ".env",
         ".env.*",
+        "id_rsa",
+        "id_rsa*",
+        "id_ed25519",
+        "id_ed25519*",
         "*.pem",
         "*.key",
         ".aws",
@@ -368,6 +382,10 @@ REQUIRED_DOCKERIGNORE_PATTERNS = frozenset(
         "secrets",
         "**/.env",
         "**/.env.*",
+        "**/id_rsa",
+        "**/id_rsa*",
+        "**/id_ed25519",
+        "**/id_ed25519*",
         "**/*.pem",
         "**/*.key",
         "**/.aws",

@@ -2855,7 +2855,23 @@ ENTRYPOINT ["infra/docker/entrypoint.sh"]
 
 def test_app_dockerignore_static_contract_requires_secret_patterns(tmp_path: Path) -> None:
     dockerignore = tmp_path / ".dockerignore"
-    required_secret_patterns = {"**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/.aws", "**/.ssh", "**/secrets"}
+    required_secret_patterns = {
+        "id_rsa",
+        "id_rsa*",
+        "id_ed25519",
+        "id_ed25519*",
+        "**/.env",
+        "**/.env.*",
+        "**/id_rsa",
+        "**/id_rsa*",
+        "**/id_ed25519",
+        "**/id_ed25519*",
+        "**/*.pem",
+        "**/*.key",
+        "**/.aws",
+        "**/.ssh",
+        "**/secrets",
+    }
     dockerignore.write_text(
         "\n".join(sorted(docker_runtime.REQUIRED_DOCKERIGNORE_PATTERNS - required_secret_patterns))
         + "\n",
@@ -2976,6 +2992,7 @@ def test_entrypoint_rejects_display_forbidden_env_even_when_value_is_empty() -> 
         ["uv", "run", "nhms-pipeline", "plan-production", "--source", "gfs"],
         ["sbatch", "--version"],
         ["/usr/bin/squeue"],
+        ["scontrol", "show", "config"],
     ],
 )
 def test_entrypoint_rejects_display_compute_commands(command: list[str]) -> None:
@@ -3214,6 +3231,23 @@ def test_docker_smoke_required_probe_missing_never_passes() -> None:
     blocker_codes = {blocker["code"] for blocker in blockers}
     assert "COMPUTE_SCHEDULER_HELP_FAILED_MISSING" in blocker_codes
     assert "DISPLAY_STARTUP_CLEANUP_MISSING" in blocker_codes
+
+
+def test_image_absence_probe_rejects_scontrol_only_slurm_cli(tmp_path: Path) -> None:
+    scontrol = tmp_path / "scontrol"
+    scontrol.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    scontrol.chmod(0o755)
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", docker_runtime._image_absence_probe_script()],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": str(tmp_path)},
+    )
+
+    assert completed.returncode == 1
+    assert completed.stderr == "forbidden binary present: scontrol\n"
 
 
 def test_command_result_bounds_stdout_and_stderr_in_evidence_payload() -> None:

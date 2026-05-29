@@ -1,6 +1,10 @@
 .git
 .env
 .env.*
+id_rsa
+id_rsa*
+id_ed25519
+id_ed25519*
 *.pem
 *.key
 .aws
@@ -8,6 +12,10 @@
 secrets
 **/.env
 **/.env.*
+**/id_rsa
+**/id_rsa*
+**/id_ed25519
+**/id_ed25519*
 **/*.pem
 **/*.key
 **/.aws

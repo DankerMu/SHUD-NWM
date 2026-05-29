@@ -28,6 +28,7 @@ readonly DISPLAY_FORBIDDEN_COMMANDS=(
   srun
   sacct
   sinfo
+  scontrol
   munge
   unmunge
   nhms-gfs
