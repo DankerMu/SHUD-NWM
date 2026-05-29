@@ -3,6 +3,8 @@ set -euo pipefail
 
 readonly API_COMMAND=(uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000)
 readonly SCHEDULER_ONCE_COMMAND=(uv run nhms-pipeline plan-production --plan)
+readonly ORCHESTRATOR_MODULE_PLAN_COMMAND=(uv run python -m services.orchestrator.cli plan-production --plan)
+readonly DISPLAY_SAFE_PROBE_COMMAND=(true)
 readonly DISPLAY_FORBIDDEN_PRESENT_ENVS=(
   SLURM_GATEWAY_URL
   SLURM_GATEWAY_BACKEND
@@ -28,7 +30,19 @@ readonly DISPLAY_FORBIDDEN_COMMANDS=(
   sinfo
   munge
   unmunge
+  nhms-gfs
+  nhms-era5
+  nhms-ifs
+  nhms-forcing
+  nhms-shud-runtime
+  nhms-production
+  nhms-state
+  nhms-flood
+  nhms-model
+  nhms-canonical
+  nhms-parse
   nhms-pipeline
+  services.orchestrator.cli
 )
 
 main() {
@@ -132,17 +146,28 @@ validate_command_boundary() {
     return 0
   fi
 
-  if command_matches "$@" -- "${SCHEDULER_ONCE_COMMAND[@]}"; then
-    fail "DISPLAY_COMMAND_FORBIDDEN" "display_readonly cannot run the compute scheduler command."
+  if [ "$#" -eq 0 ]; then
+    return 0
   fi
 
-  local token
+  if command_matches "$@" -- "${API_COMMAND[@]}"; then
+    return 0
+  fi
+
+  if command_matches "$@" -- "${DISPLAY_SAFE_PROBE_COMMAND[@]}"; then
+    return 0
+  fi
+
+  # Static contract tokens: uv run nhms-pipeline plan-production --plan; uv run python -m services.orchestrator.cli plan-production --plan.
   local forbidden_command
-  for token in "$@"; do
-    if forbidden_command="$(matched_forbidden_command_token "$token")"; then
-      fail "DISPLAY_COMMAND_FORBIDDEN" "display_readonly cannot run compute-control command $forbidden_command."
-    fi
-  done
+  if forbidden_command="$(matched_forbidden_command_from_argv "$@")"; then
+    fail "DISPLAY_COMMAND_FORBIDDEN" "display_readonly cannot run compute-control command $forbidden_command."
+  fi
+  if forbidden_command="$(matched_forbidden_command_from_env)"; then
+    fail "DISPLAY_COMMAND_FORBIDDEN" "display_readonly cannot run env-indirected compute-control command $forbidden_command."
+  fi
+
+  fail "DISPLAY_COMMAND_FORBIDDEN" "display_readonly can only run the default API command or an audited safe probe."
 }
 
 command_matches() {
@@ -182,17 +207,56 @@ contains_word() {
   return 1
 }
 
+matched_forbidden_command_from_argv() {
+  local token
+
+  if command_matches "$@" -- "${SCHEDULER_ONCE_COMMAND[@]}"; then
+    printf '%s\n' "nhms-pipeline"
+    return 0
+  fi
+  if command_matches "$@" -- "${ORCHESTRATOR_MODULE_PLAN_COMMAND[@]}"; then
+    printf '%s\n' "services.orchestrator.cli"
+    return 0
+  fi
+
+  for token in "$@"; do
+    if matched_forbidden_command_token "$token"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+matched_forbidden_command_from_env() {
+  local env_name
+  local env_value
+
+  while IFS='=' read -r env_name env_value; do
+    case "$env_name" in
+      NHMS_* | SLURM_* | WORKSPACE_ROOT | RUN_WORKSPACE_ROOT | SHARED_LOG_ROOT | OBJECT_STORE_ROOT | MUNGE_* | SHUD_EXECUTABLE | DOCKER_HOST)
+        if matched_forbidden_command_token "$env_value"; then
+          return 0
+        fi
+        ;;
+    esac
+  done < <(env)
+  return 1
+}
+
 matched_forbidden_command_token() {
-  local text="$1"
+  local text
   local token=""
   local char
   local index
-  local length="${#text}"
+  local length
+
+  text="$(normalize_command_scan_text "$1")"
+  length="${#text}"
 
   for ((index = 0; index < length; index += 1)); do
     char="${text:index:1}"
     case "$char" in
-      [[:alnum:]_./=-])
+      [[:alnum:]_./=:-])
         token+="$char"
         ;;
       *)
@@ -205,6 +269,14 @@ matched_forbidden_command_token() {
   done
 
   print_forbidden_command_match "$token"
+}
+
+normalize_command_scan_text() {
+  local text="$1"
+  text="${text//\'/}"
+  text="${text//\"/}"
+  text="${text//\\/}"
+  printf '%s' "$text"
 }
 
 print_forbidden_command_match() {

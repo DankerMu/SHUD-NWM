@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,7 @@ DEFAULT_APP_ENTRYPOINT = Path("infra/docker/entrypoint.sh")
 DEFAULT_DOCKERIGNORE = Path(".dockerignore")
 DEFAULT_SMOKE_IMAGE = "nhms-app:m22-09-smoke"
 DEFAULT_MIN_FREE_GB = 5.0
+MAX_COMMAND_OUTPUT_BYTES = 16_384
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _VAR_PATTERN = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])([^}]*))?\}")
@@ -306,8 +308,66 @@ API_SERVICE_COMMAND = (
     "8000",
 )
 COMPUTE_SCHEDULER_COMMAND = ("uv", "run", "nhms-pipeline", "plan-production", "--plan")
+COMPUTE_SCHEDULER_HELP_COMMAND = ("uv", "run", "nhms-pipeline", "plan-production", "--help")
+DISPLAY_LOCALHOST_PROBE_SCRIPT = r"""
+import json
+import time
+import urllib.error
+import urllib.request
+
+def wait_health() -> None:
+    last_error = None
+    for _ in range(40):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=1) as response:
+                if response.status == 200:
+                    return
+                last_error = f"unexpected health status {response.status}"
+        except Exception as error:
+            last_error = str(error)
+        time.sleep(0.25)
+    raise SystemExit(f"display API health check did not become ready: {last_error}")
+
+wait_health()
+with urllib.request.urlopen("http://127.0.0.1:8000/", timeout=2) as response:
+    if response.status != 200:
+        raise SystemExit(f"frontend fallback returned unexpected status {response.status}")
+with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/runtime/config", timeout=2) as response:
+    payload = json.load(response)
+data = payload.get("data", {})
+if data.get("service_role") != "display_readonly":
+    raise SystemExit("runtime config did not report display_readonly")
+if data.get("display_readonly") is not True:
+    raise SystemExit("runtime config display_readonly flag was not true")
+if data.get("slurm_routes_enabled") is not False:
+    raise SystemExit("runtime config slurm_routes_enabled was not false")
+try:
+    urllib.request.urlopen("http://127.0.0.1:8000/api/v1/slurm/health", timeout=2)
+except urllib.error.HTTPError as error:
+    if error.code == 404:
+        raise SystemExit(0)
+    raise
+raise SystemExit("display_readonly unexpectedly served /api/v1/slurm/health")
+"""
 APP_IMAGE_FORBIDDEN_BINARIES = ("sbatch", "scancel", "squeue", "srun", "sacct", "sinfo", "munge", "unmunge")
 APP_IMAGE_FORBIDDEN_PATHS = ("/etc/slurm", "/run/munge", "/etc/munge", "/var/run/munge")
+REQUIRED_DOCKERIGNORE_PATTERNS = frozenset(
+    {
+        ".venv",
+        "apps/frontend/node_modules",
+        "artifacts",
+        "SHUD",
+        "rSHUD",
+        "AutoSHUD",
+        ".env",
+        ".env.*",
+        "*.pem",
+        "*.key",
+        ".aws",
+        ".ssh",
+        "secrets",
+    }
+)
 _NO_FIELD_CONTRACT = object()
 _FIELD_MUST_BE_ABSENT = object()
 
@@ -425,12 +485,45 @@ class CommandResult:
     stderr: str
 
     def to_dict(self) -> dict[str, Any]:
+        stdout = _bounded_command_output(self.stdout)
+        stderr = _bounded_command_output(self.stderr)
         return {
             "args": list(self.args),
             "returncode": self.returncode,
-            "stdout": self.stdout,
-            "stderr": self.stderr,
+            "stdout": stdout["text"],
+            "stderr": stderr["text"],
+            "output_truncation": {
+                "max_bytes_per_stream": MAX_COMMAND_OUTPUT_BYTES,
+                "stdout": {
+                    "original_bytes": stdout["original_bytes"],
+                    "stored_bytes": stdout["stored_bytes"],
+                    "truncated": stdout["truncated"],
+                },
+                "stderr": {
+                    "original_bytes": stderr["original_bytes"],
+                    "stored_bytes": stderr["stored_bytes"],
+                    "truncated": stderr["truncated"],
+                },
+            },
         }
+
+
+def _bounded_command_output(value: str) -> dict[str, Any]:
+    raw = value.encode("utf-8", errors="replace")
+    if len(raw) <= MAX_COMMAND_OUTPUT_BYTES:
+        return {
+            "text": value,
+            "original_bytes": len(raw),
+            "stored_bytes": len(raw),
+            "truncated": False,
+        }
+    bounded = raw[:MAX_COMMAND_OUTPUT_BYTES].decode("utf-8", errors="ignore")
+    return {
+        "text": bounded,
+        "original_bytes": len(raw),
+        "stored_bytes": len(bounded.encode("utf-8", errors="replace")),
+        "truncated": True,
+    }
 
 
 @dataclass(frozen=True)
@@ -746,7 +839,7 @@ def run_docker_smoke(
         "-e",
         "NHMS_SERVICE_ROLE=compute_control",
         image_tag,
-        *COMPUTE_SCHEDULER_COMMAND,
+        *COMPUTE_SCHEDULER_HELP_COMMAND,
     )
     display_scheduler_reject_command = (
         "docker",
@@ -777,6 +870,7 @@ def run_docker_smoke(
             commands["slurm_gateway_reject"] = runner(slurm_gateway_reject_command)
             commands["compute_scheduler_command"] = runner(compute_scheduler_command)
             commands["display_scheduler_reject"] = runner(display_scheduler_reject_command)
+            commands.update(_run_display_startup_probe(runner, image_tag=image_tag))
             blockers.extend(_docker_smoke_command_blockers(commands))
 
     status = _docker_smoke_status(blockers)
@@ -792,6 +886,53 @@ def run_docker_smoke(
     )
     _write_json_atomic_replace(evidence_path, payload)
     return DockerSmokeResult(status=status, evidence_path=evidence_path, blockers=tuple(blockers))
+
+
+def _run_display_startup_probe(
+    runner: Callable[[Sequence[str]], CommandResult],
+    *,
+    image_tag: str,
+) -> dict[str, CommandResult]:
+    container_name = f"nhms-display-smoke-{uuid.uuid4().hex[:12]}"
+    commands: dict[str, CommandResult] = {}
+    start_command = (
+        "docker",
+        "run",
+        "--rm",
+        "-d",
+        "--name",
+        container_name,
+        "-e",
+        "NHMS_REQUIRE_SERVICE_ROLE=true",
+        "-e",
+        "NHMS_SERVICE_ROLE=display_readonly",
+        "-e",
+        "NHMS_AUTH_MODE=production",
+        "-e",
+        "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true",
+        "-e",
+        "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false",
+        image_tag,
+    )
+    probe_command = (
+        "docker",
+        "exec",
+        container_name,
+        "uv",
+        "run",
+        "python",
+        "-c",
+        DISPLAY_LOCALHOST_PROBE_SCRIPT,
+    )
+    logs_command = ("docker", "logs", container_name)
+    cleanup_command = ("docker", "rm", "-f", container_name)
+
+    commands["display_startup_start"] = runner(start_command)
+    if commands["display_startup_start"].returncode == 0:
+        commands["display_startup_probe"] = runner(probe_command)
+        commands["display_startup_logs"] = runner(logs_command)
+    commands["display_startup_cleanup"] = runner(cleanup_command)
+    return commands
 
 
 def _write_json_atomic_replace(path: Path, payload: Mapping[str, Any]) -> None:
@@ -987,7 +1128,7 @@ def _validate_app_docker_assets(
         )
     else:
         dockerignore_lines = _dockerignore_patterns(dockerignore_path)
-        for required_pattern in (".venv", "apps/frontend/node_modules", "artifacts", "SHUD", "rSHUD", "AutoSHUD"):
+        for required_pattern in sorted(REQUIRED_DOCKERIGNORE_PATTERNS):
             if required_pattern not in dockerignore_lines:
                 findings.append(
                     Finding(
@@ -2384,10 +2525,21 @@ def _docker_smoke_command_blockers(commands: Mapping[str, CommandResult]) -> lis
     blockers: list[dict[str, Any]] = []
     zero_exit_checks = {
         "image_absence_probe": "APP_IMAGE_FORBIDDEN_CAPABILITY_PRESENT",
+        "compute_scheduler_command": "COMPUTE_SCHEDULER_HELP_FAILED",
+        "display_startup_start": "DISPLAY_STARTUP_FAILED",
+        "display_startup_probe": "DISPLAY_STARTUP_PROBE_FAILED",
     }
     for name, code in zero_exit_checks.items():
         result = commands.get(name)
-        if result is not None and result.returncode != 0:
+        if result is None:
+            blockers.append(
+                {
+                    "code": f"{code}_MISSING",
+                    "probe": name,
+                }
+            )
+            continue
+        if result.returncode != 0:
             blockers.append(
                 {
                     "code": code,
@@ -2403,6 +2555,13 @@ def _docker_smoke_command_blockers(commands: Mapping[str, CommandResult]) -> lis
     for name, expected_code in expected_rejections.items():
         result = commands.get(name)
         if result is None:
+            blockers.append(
+                {
+                    "code": f"{expected_code}_PROBE_MISSING",
+                    "probe": name,
+                    "expected_stderr_code": expected_code,
+                }
+            )
             continue
         combined = result.stdout + result.stderr
         if result.returncode == 0 or expected_code not in combined:
@@ -2414,15 +2573,6 @@ def _docker_smoke_command_blockers(commands: Mapping[str, CommandResult]) -> lis
                     "expected_stderr_code": expected_code,
                 }
             )
-    compute_scheduler = commands.get("compute_scheduler_command")
-    if compute_scheduler is not None and "nhms-entrypoint[" in (compute_scheduler.stdout + compute_scheduler.stderr):
-        blockers.append(
-            {
-                "code": "COMPUTE_SCHEDULER_COMMAND_ENTRYPOINT_BLOCKED",
-                "command": list(compute_scheduler.args),
-                "returncode": compute_scheduler.returncode,
-            }
-        )
     return blockers
 
 

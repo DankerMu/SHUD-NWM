@@ -176,7 +176,7 @@ def display_boundary_blockers(env: Mapping[str, str]) -> tuple[DisplayBoundaryBl
             )
         )
     for env_var in _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS:
-        if env.get(env_var, "").strip():
+        if env_var in env:
             blockers.append(
                 DisplayBoundaryBlocker(
                     code="DISPLAY_COMPUTE_PATH_FORBIDDEN",
