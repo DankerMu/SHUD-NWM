@@ -1,0 +1,32 @@
+# Example systemd unit for node 27 readonly display Docker Compose.
+#
+# Operator edits required before install:
+# - Replace /opt/SHUD-NWM with the absolute repository checkout path on node 27.
+# - Create infra/env/display.env from infra/env/display.example with real
+#   readonly DB credentials, readonly published artifact path/credentials, and
+#   image tag.
+# - Ensure the docker compose plugin is installed at /usr/bin/docker or update
+#   ExecStart/ExecStop/ExecReload to the local docker binary path.
+# - Before enable/start/reload/restart, run
+#   scripts/validate_two_node_docker_source_trust.py --role display from the
+#   checkout root and record its docker-security evidence. It must pass before
+#   systemd consumes WorkingDirectory, compose, env, or unit sources. Docker
+#   access is root-equivalent.
+
+[Unit]
+Description=NHMS node 27 readonly display compose
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/SHUD-NWM/infra
+ExecStart=/usr/bin/docker compose --env-file env/display.env -f compose.display.yml up -d
+ExecStop=/usr/bin/docker compose --env-file env/display.env -f compose.display.yml down
+ExecReload=/usr/bin/docker compose --env-file env/display.env -f compose.display.yml up -d
+RemainAfterExit=yes
+TimeoutStartSec=0
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

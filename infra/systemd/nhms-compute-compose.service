@@ -1,0 +1,31 @@
+# Example systemd unit for node 22 compute/control Docker Compose.
+#
+# Operator edits required before install:
+# - Replace /opt/SHUD-NWM with the absolute repository checkout path on node 22.
+# - Create infra/env/compute.env from infra/env/compute.example with real
+#   writer DB credentials, workspace paths, Basins/model paths, and image tag.
+# - Ensure the docker compose plugin is installed at /usr/bin/docker or update
+#   ExecStart/ExecStop/ExecReload to the local docker binary path.
+# - Before enable/start/reload/restart, run
+#   scripts/validate_two_node_docker_source_trust.py --role compute from the
+#   checkout root and record its docker-security evidence. It must pass before
+#   systemd consumes WorkingDirectory, compose, env, or unit sources. Docker
+#   access is root-equivalent.
+
+[Unit]
+Description=NHMS node 22 compute/control compose
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/SHUD-NWM/infra
+ExecStart=/usr/bin/docker compose --env-file env/compute.env -f compose.compute.yml up -d
+ExecStop=/usr/bin/docker compose --env-file env/compute.env -f compose.compute.yml down
+ExecReload=/usr/bin/docker compose --env-file env/compute.env -f compose.compute.yml up -d
+RemainAfterExit=yes
+TimeoutStartSec=0
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -1022,8 +1024,281 @@ def test_display_route_smoke_forces_safe_env_and_bounded_database_url(
 def test_runbook_command_uses_evidence_root_without_double_nested_run_id() -> None:
     runbook = (REPO_ROOT / "docs" / "runbooks" / "two-node-production-e2e-plan.md").read_text(encoding="utf-8")
 
-    assert '--evidence-root "artifacts/two-node-e2e"' in runbook
+    assert 'EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"' in runbook
+    assert 'EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"' in runbook
+    assert '--evidence-root "$EVIDENCE_PARENT"' in runbook
+    assert '--run-id "$EVIDENCE_RUN_ID"' in runbook
     assert '--evidence-root "artifacts/two-node-e2e/$EVIDENCE_RUN_ID"' not in runbook
+
+    create_command = 'install -m 0600 /dev/null "$READONLY_SECRET_SOURCE"'
+    mode_check = 'if [ "$readonly_secret_mode" != "600" ]; then'
+    source_command = '. "$READONLY_SECRET_SOURCE"'
+    validator_command = "uv run python scripts/validate_readonly_db_boundary.py"
+    assert "READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env" in runbook
+    assert "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" in runbook
+    assert create_command in runbook
+    assert mode_check in runbook
+    assert runbook.index(create_command) < runbook.index(source_command)
+    assert runbook.index(mode_check) < runbook.index(source_command)
+    assert runbook.index(source_command) < runbook.index(validator_command)
+
+
+def test_readonly_secret_source_guard_blocks_readable_file_before_source_or_validator(tmp_path: Path) -> None:
+    secret_source = tmp_path / "display-readonly-secrets.env"
+    secret_source.write_text("touch sourced-sentinel\n", encoding="utf-8")
+    secret_source.chmod(0o644)
+    tmp_path_q = shlex.quote(str(tmp_path))
+    secret_source_q = shlex.quote(str(secret_source))
+
+    script = f"""
+set -u
+cd {tmp_path_q}
+READONLY_SECRET_SOURCE={secret_source_q}
+if [ ! -e "$READONLY_SECRET_SOURCE" ]; then
+  install -m 0600 /dev/null "$READONLY_SECRET_SOURCE"
+elif [ ! -f "$READONLY_SECRET_SOURCE" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be a regular 0600 file before sourcing" >&2
+  exit 1
+fi
+readonly_secret_mode="$(stat -c '%a' "$READONLY_SECRET_SOURCE")" || {{
+  echo "BLOCKED: cannot stat $READONLY_SECRET_SOURCE before sourcing" >&2
+  exit 1
+}}
+if [ "$readonly_secret_mode" != "600" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" >&2
+  exit 1
+fi
+set -a
+. "$READONLY_SECRET_SOURCE"
+set +a
+touch validator-sentinel
+"""
+
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 1
+    assert "BLOCKED:" in result.stderr
+    assert not (tmp_path / "sourced-sentinel").exists()
+    assert not (tmp_path / "validator-sentinel").exists()
+
+
+def test_readonly_secret_source_guard_preserves_existing_secret_file(tmp_path: Path) -> None:
+    secret_source = tmp_path / "display-readonly-secrets.env"
+    secret_content = "NHMS_DISPLAY_READONLY_DATABASE_URL=postgresql://readonly:secret@db.example/nhms\n"
+    secret_source.write_text(secret_content, encoding="utf-8")
+    secret_source.chmod(0o600)
+    secret_source_q = shlex.quote(str(secret_source))
+
+    script = f"""
+set -u
+READONLY_SECRET_SOURCE={secret_source_q}
+if [ ! -e "$READONLY_SECRET_SOURCE" ]; then
+  install -m 0600 /dev/null "$READONLY_SECRET_SOURCE"
+elif [ ! -f "$READONLY_SECRET_SOURCE" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be a regular 0600 file before sourcing" >&2
+  exit 1
+fi
+readonly_secret_mode="$(stat -c '%a' "$READONLY_SECRET_SOURCE")" || {{
+  echo "BLOCKED: cannot stat $READONLY_SECRET_SOURCE before sourcing" >&2
+  exit 1
+}}
+if [ "$readonly_secret_mode" != "600" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" >&2
+  exit 1
+fi
+"""
+
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0
+    assert secret_source.read_text(encoding="utf-8") == secret_content
+
+
+def test_operator_auth_source_guard_blocks_readable_file_before_source_or_header(tmp_path: Path) -> None:
+    env_dir = tmp_path / "infra" / "env"
+    env_dir.mkdir(parents=True)
+    operator_auth = env_dir / "operator-auth.env"
+    operator_auth.write_text("touch sourced-auth-sentinel\nOPERATOR_AUTH_TOKEN=secret\n", encoding="utf-8")
+    operator_auth.chmod(0o644)
+    secret_dir = tmp_path / "operator-secret"
+    tmp_path_q = shlex.quote(str(tmp_path))
+    secret_dir_q = shlex.quote(str(secret_dir))
+
+    script = f"""
+set -u
+cd {tmp_path_q}
+OPERATOR_SECRET_DIR={secret_dir_q}
+block_operator_auth_source() {{
+  echo "BLOCKED: $*" >&2
+  exit 1
+}}
+
+if [ -f infra/env/operator-auth.env ]; then
+  operator_auth_mode="$(stat -c '%a' infra/env/operator-auth.env)" || \\
+    block_operator_auth_source "cannot stat infra/env/operator-auth.env before sourcing"
+  if [ "$operator_auth_mode" != "600" ]; then
+    block_operator_auth_source "infra/env/operator-auth.env must be mode 0600 before sourcing"
+  fi
+  . infra/env/operator-auth.env
+else
+  OPERATOR_AUTH_TOKEN=interactive-token
+fi
+: "${{OPERATOR_AUTH_TOKEN:?operator auth token required}}"
+
+mkdir -p "$OPERATOR_SECRET_DIR"
+OPERATOR_CURL_HEADER="$(mktemp "$OPERATOR_SECRET_DIR/operator-auth-header.XXXXXX")"
+touch header-sentinel
+"""
+
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 1
+    assert "BLOCKED:" in result.stderr
+    assert not (tmp_path / "sourced-auth-sentinel").exists()
+    assert not secret_dir.exists()
+    assert not (tmp_path / "header-sentinel").exists()
+
+
+def test_docs_secret_source_snippets_use_fail_closed_guards() -> None:
+    runbook = (REPO_ROOT / "docs" / "runbooks" / "two-node-production-e2e-plan.md").read_text(encoding="utf-8")
+    docker_readme = (REPO_ROOT / "infra" / "README.two-node-docker.md").read_text(encoding="utf-8")
+    env_readme = (REPO_ROOT / "infra" / "env" / "README.md").read_text(encoding="utf-8")
+
+    assert "READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env" in runbook
+    assert 'readonly_secret_mode="$(stat -c \'%a\' "$READONLY_SECRET_SOURCE")" || {' in runbook
+    assert 'if [ "$readonly_secret_mode" != "600" ]; then' in runbook
+    assert "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" in runbook
+    assert "test -f infra/env/display-readonly-secrets.env || install -m 0600" not in runbook
+    assert 'test "$(stat -c \'%a\' infra/env/display-readonly-secrets.env)" = "600"' not in runbook
+
+    assert "READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env" in docker_readme
+    assert "block_operator_auth_source()" in docker_readme
+    assert 'operator_auth_mode="$(stat -c \'%a\' infra/env/operator-auth.env)" || \\' in docker_readme
+    assert 'if [ "$operator_auth_mode" != "600" ]; then' in docker_readme
+    assert 'block_operator_auth_source "infra/env/operator-auth.env must be mode 0600 before sourcing"' in docker_readme
+    assert 'test "$(stat -c \'%a\' infra/env/operator-auth.env)" = "600"' not in docker_readme
+    assert docker_readme.index("block_operator_auth_source()") < docker_readme.index(". infra/env/operator-auth.env")
+    assert docker_readme.index(". infra/env/operator-auth.env") < docker_readme.index("OPERATOR_CURL_HEADER")
+
+    assert "use a fail-closed guard" in env_readme
+    assert "prints `BLOCKED:`" in env_readme
+    assert "exits before `source`" in env_readme
+
+
+def test_systemd_source_trust_preflight_is_checked_in_and_authoritative() -> None:
+    docker_readme = (REPO_ROOT / "infra" / "README.two-node-docker.md").read_text(encoding="utf-8")
+
+    assert "scripts/validate_two_node_docker_source_trust.py" in docker_readme
+    assert "--trusted-owner root --trusted-owner nhms-deploy" in docker_readme
+    assert "--role compute" in docker_readme
+    assert "--role display" in docker_readme
+    assert "$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service" in docker_readme
+    assert "$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service" in docker_readme
+    assert "sudo install -m 0644 \"$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service\"" in docker_readme
+    assert "sudo install -m 0644 \"$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service\"" in docker_readme
+    assert "source-trust preflight 是 authoritative gate" in docker_readme
+    assert "namei -l \"$CHECKOUT_ROOT/infra\" | tee \"$NAMEI_EVIDENCE\"" not in docker_readme
+    assert "block_systemd_preflight()" not in docker_readme
+    assert "check_systemd_source_path \"$path\"" not in docker_readme
+    assert "test -z \"$(find" not in docker_readme
+    assert "sudo install -m 0644 infra/systemd/" not in docker_readme
+
+
+def test_systemd_namei_awk_rejects_untrusted_owner_and_group_writable_components(tmp_path: Path) -> None:
+    awk_script = r'''
+BEGIN {
+  split(trusted, trusted_users, /[[:space:]]+/)
+  for (i in trusted_users) {
+    if (trusted_users[i] != "") {
+      allowed[trusted_users[i]] = 1
+    }
+  }
+}
+$1 ~ /^[bcdlps-]/ {
+  owner = $2
+  if (substr($1, 1, 1) == "l") {
+    printf "BLOCKED: symlink path component rejected: %s\n", $0 > "/dev/stderr"
+    bad = 1
+  }
+  if (!(owner in allowed)) {
+    printf "BLOCKED: untrusted owner on path component: %s\n", $0 > "/dev/stderr"
+    bad = 1
+  }
+  if (substr($1, 6, 1) == "w" || substr($1, 9, 1) == "w") {
+    printf "BLOCKED: group/world-writable path component: %s\n", $0 > "/dev/stderr"
+    bad = 1
+  }
+}
+END { exit bad }
+'''
+    namei_evidence = tmp_path / "systemd-checkout-namei.txt"
+    namei_evidence.write_text(
+        "\n".join(
+            [
+                "f: /opt/SHUD-NWM/infra",
+                "drwxr-xr-x root root /",
+                "drwxr-xr-x alice staff opt",
+                "drwxrwxr-x root root SHUD-NWM",
+                "drwxr-xr-x nhms-deploy docker infra",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["awk", "-v", "trusted=root nhms-deploy", awk_script, str(namei_evidence)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "BLOCKED: untrusted owner on path component" in result.stderr
+    assert "alice" in result.stderr
+    assert "BLOCKED: group/world-writable path component" in result.stderr
+
+
+def test_systemd_source_path_guard_rejects_group_world_writable_sources(tmp_path: Path) -> None:
+    unit_source = tmp_path / "infra" / "systemd" / "nhms-display-compose.service"
+    unit_source.parent.mkdir(parents=True)
+    unit_source.write_text("[Service]\n", encoding="utf-8")
+    unit_source.chmod(0o664)
+    unit_source_q = shlex.quote(str(unit_source))
+    sentinel_q = shlex.quote(str(tmp_path / "systemctl-sentinel"))
+
+    script = f"""
+set -euo pipefail
+TRUSTED_DOCKER_OPERATORS="$(id -un)"
+block_systemd_preflight() {{
+  echo "BLOCKED: $*" >&2
+  exit 1
+}}
+is_trusted_docker_operator() {{
+  case " $TRUSTED_DOCKER_OPERATORS " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}}
+check_systemd_source_path() {{
+  path="$1"
+  owner="$(stat -c '%U' "$path")" || block_systemd_preflight "cannot stat owner for $path"
+  perms="$(stat -c '%A' "$path")" || block_systemd_preflight "cannot stat permissions for $path"
+  if ! is_trusted_docker_operator "$owner"; then
+    block_systemd_preflight "untrusted owner $owner on systemd source $path"
+  fi
+  if [ "${{perms:5:1}}" = "w" ] || [ "${{perms:8:1}}" = "w" ]; then
+    block_systemd_preflight "group/world-writable systemd source $path has permissions $perms"
+  fi
+}}
+check_systemd_source_path {unit_source_q}
+touch {sentinel_q}
+"""
+
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 1
+    assert "BLOCKED: group/world-writable systemd source" in result.stderr
+    assert not (tmp_path / "systemctl-sentinel").exists()
 
 
 def test_psycopg_adapter_uses_bounded_validation_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:

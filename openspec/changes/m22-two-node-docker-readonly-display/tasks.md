@@ -109,10 +109,10 @@ Required evidence for #236:
 
 ## 9. Systemd and Two-Node Docker E2E Docs
 
-- [ ] 9.1 Add `infra/systemd/nhms-compute-compose.service` and `infra/systemd/nhms-display-compose.service` examples that run compose from the repository `infra` directory.
-- [ ] 9.2 Add or document a 22 host Slurm Gateway systemd unit as the MVP-recommended first phase when gateway containerization is not yet proven, without claiming the APIRouter module is directly runnable unless a dedicated app exists.
-- [ ] 9.3 Add `infra/README.two-node-docker.md` covering topology, deployment order, canonical env names, Docker disk preflight, env files, compose commands, systemd install, security probes, evidence paths, rollback, and the dev-compose non-goal.
-- [ ] 9.4 Update the two-node E2E runbook or link it from Docker docs so Docker validation records compute, display, cross-plane, manual ops boundary, DB, API, browser, Slurm, logs, and Docker security evidence separately.
+- [x] 9.1 Add `infra/systemd/nhms-compute-compose.service` and `infra/systemd/nhms-display-compose.service` examples that run compose from the repository `infra` directory.
+- [x] 9.2 Add or document a 22 host Slurm Gateway systemd unit as the MVP-recommended first phase when gateway containerization is not yet proven, without claiming the APIRouter module is directly runnable unless a dedicated app exists.
+- [x] 9.3 Add `infra/README.two-node-docker.md` covering topology, deployment order, canonical env names, Docker disk preflight, env files, compose commands, systemd install, security probes, evidence paths, rollback, and the dev-compose non-goal.
+- [x] 9.4 Update the two-node E2E runbook or link it from Docker docs so Docker validation records compute, display, cross-plane, manual ops boundary, DB, API, browser, Slurm, logs, and Docker security evidence separately.
 
 ## 10. Docker E2E Verification
 

@@ -1048,3 +1048,101 @@ Non-goals:
 - Do not perform final cross-plane Docker E2E, readonly DB validation, or full display HostConfig runtime probe; that is #239.
 - Do not add Slurm Gateway containerization or install Slurm/Munge in the default app image.
 - Do not change backend/frontend runtime behavior beyond packaging/entrypoint integration needed to start existing roles.
+
+## Issue #238 Fixture: Systemd Units and Two-Node Docker Runbook
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: other
+
+Change surface:
+
+- `infra/systemd/nhms-compute-compose.service` and `infra/systemd/nhms-display-compose.service` examples for starting the compute/display compose files from a checked-out repository.
+- Optional host-service Slurm Gateway systemd example or an explicit runbook section that documents the host-service limitation without claiming a dedicated gateway container/app exists.
+- `infra/README.two-node-docker.md` operator runbook covering topology, env boundaries, disk preflight, compose commands, systemd install, security probes, rollback, evidence paths, and the dev-compose non-goal.
+- Cross-link from the existing two-node E2E runbook so Docker validation evidence is recorded separately for compute, display, cross-plane, manual ops boundary, DB, API, browser, Slurm, logs, and Docker security.
+
+Mandatory expanded triggers:
+
+- Production-facing systemd and Docker runbook instructions can cause unsafe deployment if env files, working directories, restart policies, or role boundaries are wrong.
+- The docs must preserve the physical separation established by #236/#237 and must not accidentally promote `infra/docker-compose.dev.yml` or a non-existent Slurm Gateway container as production-ready.
+- Evidence path and disk-preflight instructions affect constrained system disks and must keep project-created temp/evidence under `artifacts/` or `/scratch/frd_muziyao`.
+
+Must preserve:
+
+- Compute node 22 remains the only control/write plane: writable workspace/published artifacts, scheduler-once/manual timer path, and optional host Slurm Gateway service.
+- Display node 27 remains read-only: `display_readonly`, readonly DB, readonly published artifacts, no Slurm/Munge/workspace/Docker socket, and no control commands.
+- The shared app image and #236 compose files remain the source of Docker runtime truth; systemd units should call those compose files rather than redefining service topology.
+- Final readonly DB/live E2E evidence remains #239; #238 must document commands and evidence layout without claiming final PASS.
+
+Must add/change:
+
+- Add compute and display compose systemd examples with explicit repository working directory, `docker compose --env-file ... -f ... up` / stop semantics, restart behavior, and comments for operator-owned path substitution.
+- Add or document a 22 host Slurm Gateway systemd first-phase path honestly; do not claim `services.slurm_gateway.router` or the reserved `slurm_gateway` role is directly runnable as a full API.
+- Add the Docker operator README with exact start/stop/status/log commands, env file setup, Docker disk preflight, compose config/build smoke, display security probes, evidence roots, rollback, and dev-compose exclusion.
+- Link/update the two-node E2E runbook so evidence categories are separated instead of collapsing Docker, DB, browser, Slurm, logs, API, and manual ops evidence into one ambiguous PASS.
+- Document operator shell snippets as fail-closed procedures backed by the checked-in
+  `scripts/validate_two_node_docker_source_trust.py` preflight: failed secret-file mode checks, untrusted checkout path components, group/world-writable compose/env/unit sources, Docker/preflight blockers, and missing live evidence must stop before sourcing secrets, running direct `docker compose`, running `systemctl`, or claiming PASS.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - systemd units and documented commands are operator entrypoints.
+- Config / project setup: selected - units, env files, compose invocations, paths, restart behavior, and install commands are deployment configuration.
+- File IO / path safety / overwrite: selected - evidence/TMPDIR paths, bind mounts, and rollback instructions must not point at unsafe or system-disk-heavy locations.
+- Schema / columns / units / field names: selected - canonical env names and service names must stay aligned with #236/#237.
+- Geospatial / CRS / shapefile sidecars: not selected - no geospatial data handling.
+- Time series / forcing / temporal boundaries: not selected - no forcing/time-series logic changes.
+- Numerical stability / conservation / NaN: not selected - no solver/numerical behavior changes.
+- Solver runtime / performance / threading: not selected - no scheduler daemon or solver loop is added.
+- Resource limits / large input / discovery: selected - Docker build cache, TMPDIR, and evidence collection are resource-sensitive.
+- Legacy compatibility / examples: selected - existing dev compose and local commands must remain clearly separate and unaffected.
+- Error handling / rollback / partial outputs: selected - runbook must describe BLOCKED/FAIL/PASS evidence handling and rollback.
+- Release / packaging / dependency compatibility: selected - deployment instructions depend on image/compose/env contracts.
+- Documentation / migration notes: selected - this issue is the operator documentation and migration/runbook slice.
+
+Invariant Matrix:
+
+- Governing invariant: The operator-facing systemd units and runbook must start only the previously validated two-node Docker roles, and every operator preflight that protects secrets, trusted source identity, or evidence readiness must fail closed before sourcing secrets, running root-equivalent systemd/Docker commands, or claiming PASS.
+- Source-of-truth identity/contract: #236 compose/env files, #237 Dockerfile/entrypoint, `NHMS_SERVICE_ROLE`, `NHMS_REQUIRE_SERVICE_ROLE`, canonical `NHMS_PUBLISHED_ARTIFACT_*` env names, and approved evidence roots.
+- Producers: systemd unit files, Docker README, E2E runbook links.
+- Validators/preflight: fail-closed secret-source guards, checked-in source-trust preflight
+  `scripts/validate_two_node_docker_source_trust.py` for both direct Docker Compose and systemd, `docker compose config`, `validate_two_node_docker_runtime.py static/preflight/smoke`, `openspec validate`, Markdown/static docs checks, and `git diff --check`.
+- Storage/cache/query: DockerRootDir, Docker cache, repo `artifacts/`, `/scratch/frd_muziyao`, systemd journal, and published artifact mount paths.
+- Public routes/entrypoints: `systemctl` units, documented compose commands, Docker validation commands, security probe commands.
+- Frontend/downstream consumers: operators following the README, #239 final E2E harness, and existing two-node production E2E runbook readers.
+- Failure paths/rollback/stale state: failed secret-source mode checks, untrusted checkout/path/unit/compose/env ownership, group/world-writable sources, unit stop/restart, compose down, rollback to previous image/branch/env, BLOCKED evidence for Docker unavailable/low space, and no stale PASS reuse.
+- Evidence/audit/readiness: README command matrix, runbook evidence category table, systemd unit comments, local validation results.
+- Regression rows:
+  - compute unit instructions -> use compute env/compose from repo, explicit `compute_control`, scheduler-once/timer-compatible command path, and writable compute mounts only.
+  - display unit instructions -> use display env/compose from repo, explicit `display_readonly`, readonly DB/published artifact posture, and no Slurm/Munge/workspace/Docker socket.
+  - local secret-source file with mode other than `0600` -> documented procedure exits before `source`, curl header creation, validator execution, or PASS evidence.
+  - direct Docker Compose or systemd checkout with untrusted owner on any checked path component, unit source, compose file, env directory, or role env file -> checked-in source-trust preflight exits before `docker compose config/up/run/logs/down` or `systemctl enable/start/reload/restart`.
+  - Slurm Gateway section -> documents host-service MVP limitation and does not claim a reserved role or APIRouter module is directly runnable as the full API.
+  - Docker preflight/smoke commands -> write evidence under repo `artifacts/` or `/scratch/frd_muziyao` and report BLOCKED instead of PASS when Docker/space prerequisites fail.
+  - runbook links -> separate compute, display, cross-plane, manual ops, DB, API, browser, Slurm, logs, and Docker security evidence categories for #239.
+
+Boundary-surface checklist:
+
+- Shared helper roots: existing Docker validation script and compose/env files referenced by docs.
+- Public entrypoints: systemd units, `docker compose` commands, `systemctl` commands, validation commands.
+- Read surfaces: env example files, README/runbook text, systemd unit variables/comments.
+- Write/delete/overwrite surfaces: systemd install targets, Docker cache/temp/evidence paths, rollback/cleanup commands.
+- Staging/publish/rollback surfaces: published artifacts mount, compose down/up, image rebuild/pull rollback, evidence replacement.
+- Producer/consumer evidence boundaries: #238 docs consumed by #239 E2E evidence harness and operators.
+- Stale-state/idempotency boundaries: repeated validation must not reuse stale PASS evidence; systemd restarts must use current env/compose files.
+- Unchanged downstream consumers: #236/#237 compose/image validation, dev compose, backend/frontend runtime behavior.
+
+Required evidence:
+
+- `openspec validate m22-two-node-docker-readonly-display --strict --no-interactive`.
+- Markdown/static docs check available in the repo, or an explicit no-op rationale if no docs linter exists.
+- `git diff --check`.
+- `docker compose --env-file infra/env/compute.example -f infra/compose.compute.yml config` and `docker compose --env-file infra/env/display.example -f infra/compose.display.yml config` remain green.
+- `uv run python scripts/validate_two_node_docker_runtime.py static` remains PASS after docs/unit additions.
+- Read-only review confirms docs do not claim final #239 E2E PASS or Slurm Gateway containerization.
+
+Non-goals:
+
+- Do not change runtime code, Dockerfile, entrypoint, compose semantics, or frontend/backend behavior in this issue.
+- Do not run or claim final two-node Docker E2E, readonly DB validation, or browser evidence PASS; that is #239.
+- Do not add a scheduler daemon loop or Slurm Gateway container unless a real dedicated implementation already exists and is independently tested.
