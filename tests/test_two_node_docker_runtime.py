@@ -2855,10 +2855,9 @@ ENTRYPOINT ["infra/docker/entrypoint.sh"]
 
 def test_app_dockerignore_static_contract_requires_secret_patterns(tmp_path: Path) -> None:
     dockerignore = tmp_path / ".dockerignore"
+    required_secret_patterns = {"**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/.aws", "**/.ssh", "**/secrets"}
     dockerignore.write_text(
-        "\n".join(
-            sorted(docker_runtime.REQUIRED_DOCKERIGNORE_PATTERNS - {".env", ".env.*", "*.pem", "*.key", ".aws"})
-        )
+        "\n".join(sorted(docker_runtime.REQUIRED_DOCKERIGNORE_PATTERNS - required_secret_patterns))
         + "\n",
         encoding="utf-8",
     )
@@ -2875,7 +2874,7 @@ def test_app_dockerignore_static_contract_requires_secret_patterns(tmp_path: Pat
         for finding in findings
         if finding.code == "APP_DOCKERIGNORE_PATTERN_MISSING"
     }
-    assert {".env", ".env.*", "*.pem", "*.key", ".aws"} <= missing
+    assert required_secret_patterns <= missing
 
 
 def test_entrypoint_requires_service_role_under_require_flag() -> None:
@@ -2883,6 +2882,20 @@ def test_entrypoint_requires_service_role_under_require_flag() -> None:
 
     assert completed.returncode != 0
     assert "SERVICE_ROLE_REQUIRED" in completed.stderr
+
+
+def test_entrypoint_rejects_invalid_require_service_role_flag() -> None:
+    completed = _run_entrypoint(["true"], {"NHMS_REQUIRE_SERVICE_ROLE": "ture"})
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_REQUIRE_FLAG_INVALID" in completed.stderr
+
+
+def test_entrypoint_rejects_unsupported_service_role() -> None:
+    completed = _run_entrypoint(["true"], {"NHMS_SERVICE_ROLE": "control"})
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_UNSUPPORTED" in completed.stderr
 
 
 def test_entrypoint_rejects_reserved_slurm_gateway_role() -> None:
@@ -3163,6 +3176,23 @@ def test_docker_smoke_required_probe_failure_never_passes(
     assert expected_code in {blocker["code"] for blocker in payload["blockers"]}
 
 
+def test_docker_smoke_display_startup_cleanup_failure_never_passes(tmp_path: Path) -> None:
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=tmp_path / "artifacts" / "docker-smoke",
+        repo_root=tmp_path,
+        min_free_bytes=100,
+        command_runner=_docker_smoke_cleanup_failure_runner,
+        disk_usage_provider=_high_space,
+    )
+
+    assert result.status == "FAIL"
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert payload["commands"]["display_startup_start"]["returncode"] == 0
+    assert payload["commands"]["display_startup_probe"]["returncode"] == 0
+    assert "DISPLAY_STARTUP_CLEANUP_FAILED" in {blocker["code"] for blocker in payload["blockers"]}
+
+
 def test_docker_smoke_required_probe_missing_never_passes() -> None:
     commands = {
         "image_absence_probe": docker_runtime.CommandResult(("probe",), 0, "", ""),
@@ -3181,7 +3211,9 @@ def test_docker_smoke_required_probe_missing_never_passes() -> None:
 
     blockers = docker_runtime._docker_smoke_command_blockers(commands)
 
-    assert "COMPUTE_SCHEDULER_HELP_FAILED_MISSING" in {blocker["code"] for blocker in blockers}
+    blocker_codes = {blocker["code"] for blocker in blockers}
+    assert "COMPUTE_SCHEDULER_HELP_FAILED_MISSING" in blocker_codes
+    assert "DISPLAY_STARTUP_CLEANUP_MISSING" in blocker_codes
 
 
 def test_command_result_bounds_stdout_and_stderr_in_evidence_payload() -> None:
@@ -3338,6 +3370,13 @@ def _docker_smoke_probe_failure_runner(
         return _docker_smoke_success_runner(args)
 
     return runner
+
+
+def _docker_smoke_cleanup_failure_runner(args: list[str] | tuple[str, ...]) -> docker_runtime.CommandResult:
+    command = tuple(args)
+    if command[:3] == ("docker", "rm", "-f"):
+        return docker_runtime.CommandResult(command, 1, "", "cleanup failed\n")
+    return _docker_smoke_success_runner(args)
 
 
 def _run_entrypoint(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:

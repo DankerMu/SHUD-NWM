@@ -366,6 +366,13 @@ REQUIRED_DOCKERIGNORE_PATTERNS = frozenset(
         ".aws",
         ".ssh",
         "secrets",
+        "**/.env",
+        "**/.env.*",
+        "**/*.pem",
+        "**/*.key",
+        "**/.aws",
+        "**/.ssh",
+        "**/secrets",
     }
 )
 _NO_FIELD_CONTRACT = object()
@@ -2545,6 +2552,24 @@ def _docker_smoke_command_blockers(commands: Mapping[str, CommandResult]) -> lis
                     "code": code,
                     "command": list(result.args),
                     "returncode": result.returncode,
+                }
+            )
+    display_startup_start = commands.get("display_startup_start")
+    if display_startup_start is not None and display_startup_start.returncode == 0:
+        display_startup_cleanup = commands.get("display_startup_cleanup")
+        if display_startup_cleanup is None:
+            blockers.append(
+                {
+                    "code": "DISPLAY_STARTUP_CLEANUP_MISSING",
+                    "probe": "display_startup_cleanup",
+                }
+            )
+        elif display_startup_cleanup.returncode != 0:
+            blockers.append(
+                {
+                    "code": "DISPLAY_STARTUP_CLEANUP_FAILED",
+                    "command": list(display_startup_cleanup.args),
+                    "returncode": display_startup_cleanup.returncode,
                 }
             )
     expected_rejections = {

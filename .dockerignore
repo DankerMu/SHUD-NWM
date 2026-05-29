@@ -6,6 +6,13 @@
 .aws
 .ssh
 secrets
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/.aws
+**/.ssh
+**/secrets
 .venv
 venv
 ENV
