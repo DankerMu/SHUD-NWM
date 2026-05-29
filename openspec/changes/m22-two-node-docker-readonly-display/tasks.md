@@ -28,7 +28,8 @@
 
 ## 3. Published Artifact Log Reader
 
-- [ ] 3.1 Add `services/artifacts` config, URI parsing, redaction, and reader support for `published://`, allowed publish-root `file://`, and allowlisted `s3://` log URIs using canonical env names `NHMS_PUBLISHED_ARTIFACT_ROOT`, `NHMS_PUBLISHED_ARTIFACT_URI_PREFIX`, `NHMS_PUBLISHED_ARTIFACT_S3_BUCKET`, and `NHMS_PUBLISHED_ARTIFACT_S3_PREFIX`.
+- [ ] 3.1 Add `services/artifacts` config, URI parsing, redaction, and reader support for `published://`, allowed publish-root `file://`, and allowlisted `s3://` log URIs using canonical env names
+  `NHMS_PUBLISHED_ARTIFACT_ROOT`, `NHMS_PUBLISHED_ARTIFACT_URI_PREFIX`, `NHMS_PUBLISHED_ARTIFACT_S3_BUCKET`, and `NHMS_PUBLISHED_ARTIFACT_S3_PREFIX`.
 - [ ] 3.2 Enforce publish-root containment, S3 bucket/prefix allowlist, symlink rejection, path traversal and encoded separator rejection, credential-bearing URI rejection, and `NHMS_LOG_TAIL_MAX_BYTES` tail limits.
 - [ ] 3.3 Add compute-side log publication or URI normalization so newly recorded `ops.pipeline_job.log_uri` values use supported published artifact URIs, with canonical `published://logs/<source>/<cycle_time>/<run_id>/<job_id>.out|err` where practical.
 - [ ] 3.4 Migrate `/api/v1/jobs/{job_id}/logs` to use ArtifactReader and return exact stable errors: `JOB_LOG_NOT_PUBLISHED`, `JOB_LOG_URI_UNSUPPORTED`, `JOB_LOG_ACCESS_DENIED`, and `JOB_LOG_NOT_FOUND`.
@@ -65,14 +66,19 @@ Issue ownership note:
 
 ## 5. Readonly DB Boundary
 
-- [ ] 5.1 Add readonly DB validation tests or runbook commands proving display APIs work with readonly credentials for health, models, stations, latest-product, pipeline status, stages, jobs, logs, and runtime config; identity-bound route PASS evidence must use one strict `source`/`cycle_time`/`run_id`/`model_id` identity and logs must also bind `job_id`.
-- [ ] 5.2 Add readonly DB catalog-first permission inventory and permission-denied probes that record `current_user` and prove controlled `INSERT`, `UPDATE`, `DELETE`, and DDL attempts are rejected before commit for hydro, met, ops, and pipeline-critical tables when catalog inventory is clean; table `TRUNCATE`, fail-closed non-read table privileges, column mutating grants, any `hydro`/`met`/`ops` sequence `USAGE`/`UPDATE`, schema `CREATE` across all probed schemas, current database `CREATE`, and reachable writer-role membership are `FAIL`. Any catalog mutating capability must prevent `nextval`, `setval`, DML, or DDL execution anywhere in the matrix.
+- [ ] 5.1 Add readonly DB validation tests or runbook commands proving display APIs work with readonly credentials for health, models, stations, latest-product, pipeline status, stages, jobs, logs, and runtime config;
+  identity-bound route PASS evidence must use one strict `source`/`cycle_time`/`run_id`/`model_id` identity and logs must also bind `job_id`.
+- [ ] 5.2 Add readonly DB catalog-first permission inventory and permission-denied probes that record `current_user` and prove controlled `INSERT`, `UPDATE`, `DELETE`, and DDL attempts are rejected before commit
+  for hydro, met, ops, and pipeline-critical tables when catalog inventory is clean; table `TRUNCATE`, fail-closed non-read table privileges, column mutating grants, any `hydro`/`met`/`ops` sequence
+  `USAGE`/`UPDATE`, schema `CREATE` across all probed schemas, current database `CREATE`, and reachable writer-role membership are `FAIL`. Any catalog mutating capability must prevent `nextval`, `setval`,
+  DML, or DDL execution anywhere in the matrix.
 - [ ] 5.3 Ensure display retry/cancel returns manual action before any write attempt when using readonly DB credentials.
 - [ ] 5.4 Record readonly DB validation evidence with redacted DSN, DB role type, commands, pass/fail/blocker status, and secret redaction.
 - [ ] 5.5 Add a focused validation entrypoint that reports `BLOCKED` or pytest skip when a real readonly DB URL is absent; it must not claim PASS from mock-only or writer credentials.
 - [ ] 5.6 Add tests for evidence redaction, approved evidence roots, rollback/idempotency of permission probes, writer-credential FAIL detection, and display retry/cancel no-write ordering.
 - [ ] 5.7 Verify normal local test runs remain independent of external PostgreSQL unless the readonly validation env is explicitly enabled.
-- [ ] 5.8 Cover at minimum `hydro.hydro_run`, `hydro.river_timeseries`, `met.forecast_cycle`, `met.forcing_station_timeseries` or station-equivalent, `ops.pipeline_job`, `ops.pipeline_event`, reachable-role inventory, and schema/table DDL evidence for `hydro`, `met`, and `ops`; absent reduced-fixture tables must be reported as `BLOCKED` or explicitly out of scope.
+- [ ] 5.8 Cover at minimum `hydro.hydro_run`, `hydro.river_timeseries`, `met.forecast_cycle`, `met.forcing_station_timeseries` or station-equivalent, `ops.pipeline_job`, `ops.pipeline_event`,
+  reachable-role inventory, and schema/table DDL evidence for `hydro`, `met`, and `ops`; absent reduced-fixture tables must be reported as `BLOCKED` or explicitly out of scope.
 
 ## 6. Display Readonly Ops UI
 
@@ -82,8 +88,10 @@ Issue ownership note:
 - [ ] 6.4 Add strict identity context to `/ops` so stages, jobs, diagnostics, and log requests use or validate `source`, `cycle_time`, `run_id`, and `model_id`.
 - [ ] 6.5 Add diagnostic copy behavior for failed jobs/stages with available `source_id`, `cycle_time`, `run_id`, `model_id`, `stage`, `job_id`, `slurm_job_id`, `status`, `error_code`, `error_message`, and `log_uri`.
 - [ ] 6.6 Add manual 22 recovery guidance and local-only notified/acknowledged UI state without DB writes.
-- [ ] 6.7 Add `/hydro-met` strict latest-product bootstrap from complete URL `source`, `cycle_time`, `run_id`, and `model_id`; partial strict identity is invalid and must not issue source-only fallback, while non-strict source-only browsing remains compatible. Direct local E2E handoff-file parsing is #239 harness scope.
-- [ ] 6.8 Add frontend tests for runtime config role source, display-mode hidden controls, no control POSTs, optional queue-depth unavailable state, strict ops identity, strict hydro-met handoff/non-strict compatibility, diagnostic payload content, published-log success/error display, local-only notified state, compute/dev controls still available, and role/query-state regressions.
+- [ ] 6.7 Add `/hydro-met` strict latest-product bootstrap from complete URL `source`, `cycle_time`, `run_id`, and `model_id`; partial strict identity is invalid and must not issue source-only fallback,
+  while non-strict source-only browsing remains compatible. Direct local E2E handoff-file parsing is #239 harness scope.
+- [ ] 6.8 Add frontend tests for runtime config role source, display-mode hidden controls, no control POSTs, optional queue-depth unavailable state, strict ops identity, strict hydro-met handoff/non-strict compatibility,
+  diagnostic payload content, published-log success/error display, local-only notified state, compute/dev controls still available, and role/query-state regressions.
 
 ## 7. Docker Env and Compose Skeleton
 
@@ -116,8 +124,8 @@ Required evidence for #236:
 
 ## 10. Docker E2E Verification
 
-- [ ] 10.1 Add Docker display security checks proving no Slurm CLI/config/socket, no Docker socket, no forbidden mounts/env or HostConfig hazards, `/api/v1/slurm/*` unavailable, published artifacts are readonly, and runtime config reports `display_readonly`.
-- [ ] 10.2 Add cross-plane E2E checks that require strict `run_id/source/cycle_time/model_id` latest-product matching before `/hydro-met` and `/ops` browser evidence can pass.
-- [ ] 10.3 Add GFS/IFS source-scope reporting: if the run includes both sources, both must pass strict latest/series/ops/logs/browser checks for cross-plane `PASS`; single-source or missing-source runs are reduced scope or `PARTIAL`.
-- [ ] 10.4 Add manual ops boundary checks proving 27 only displays retry/cancel outcomes produced by 22 and never creates control-plane receipts itself.
-- [ ] 10.5 Record focused verification commands for backend tests, frontend tests/build, Docker preflight/compose config/build smoke, readonly DB smoke, OpenSpec validation, and two-node E2E evidence paths.
+- [x] 10.1 Add Docker display security checks proving no Slurm CLI/config/socket, no Docker socket, no forbidden mounts/env or HostConfig hazards, `/api/v1/slurm/*` unavailable, published artifacts are readonly, and runtime config reports `display_readonly`.
+- [x] 10.2 Add cross-plane E2E checks that require strict `run_id/source/cycle_time/model_id` latest-product matching before `/hydro-met` and `/ops` browser evidence can pass.
+- [x] 10.3 Add GFS/IFS source-scope reporting: if the run includes both sources, both must pass strict latest/series/ops/logs/browser checks for cross-plane `PASS`; single-source or missing-source runs are reduced scope or `PARTIAL`.
+- [x] 10.4 Add manual ops boundary checks proving 27 only displays retry/cancel outcomes produced by 22 and never creates control-plane receipts itself.
+- [x] 10.5 Record focused verification commands for backend tests, frontend tests/build, Docker preflight/compose config/build smoke, readonly DB smoke, OpenSpec validation, and two-node E2E evidence paths.

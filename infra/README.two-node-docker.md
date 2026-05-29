@@ -569,7 +569,7 @@ operator_auth_curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
 ```bash
 export RUN_ID="two-node-e2e-$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="artifacts/two-node-e2e/$RUN_ID"
-mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,browser,slurm,logs,docker-security,docker-preflight}
+mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,browser,slurm,logs,docker-security,docker-preflight,final-e2e-evidence}
 ```
 
 允许的 project-created 输出路径只有：
@@ -596,6 +596,27 @@ artifacts/
 | `manual-ops/` | 27 fail-closed retry/cancel、22 实际处理 receipt、27 只读展示结果 | 27 不能产生控制面 receipt |
 | `docker-security/` | source-trust preflight、static validator、Docker smoke/image absence evidence、no Slurm/Munge/Docker socket、HostConfig/mount/env 检查；inline probe 仅为补充 | 任一 27 控制能力为 FAIL |
 | `cross-plane/` | 同一 `run_id/source/cycle_time/model_id` 从 22 到 27 | historical latest/mock 数据不能 PASS |
+| `final-e2e-evidence/` | `scripts/validate_two_node_e2e_evidence.py` 聚合后的 lane/source/blocker/finding 汇总 | 只有全 lane、全 declared source、live readonly/display/strict identity 证据都通过才 PASS |
+
+最终聚合命令：
+
+```bash
+set -euo pipefail
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"
+EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
+uv run python scripts/validate_two_node_e2e_evidence.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID" \
+  --source GFS \
+  --source IFS \
+  --force
+```
+
+单 source 或明确缩减范围的演练使用 `--reduced-scope`，最终只能是 `PARTIAL` 或更低状态，不能作为完整跨面 PASS。
+聚合器会拒绝非 `artifacts/` 或 `/scratch/frd_muziyao/...` evidence root，并把 stale bundle ID、缺 live Docker/container、
+缺真实 readonly DB、缺 browser/API/log strict identity、缺生产 operator auth、mock/historical latest、writer DB 和 27 控制面 receipt
+纳入最终 blocker/finding。
 
 ## 14. Rollback
 
