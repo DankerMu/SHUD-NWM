@@ -20,8 +20,17 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off"})
 _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS = (
     "WORKSPACE_ROOT",
+    "RUN_WORKSPACE_ROOT",
+    "SHARED_LOG_ROOT",
+    "OBJECT_STORE_ROOT",
     "NHMS_BASINS_ROOT",
+    "NHMS_MODEL_ASSET_ROOT",
+    "SLURM_GATEWAY_TEMPLATE_DIR",
+    "SLURM_GATEWAY_WORKSPACE_DIR",
+    "MUNGE_SOCKET",
+    "MUNGE_KEY",
     "SHUD_EXECUTABLE",
+    "DOCKER_HOST",
 )
 
 
@@ -150,7 +159,7 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
 
 def display_boundary_blockers(env: Mapping[str, str]) -> tuple[DisplayBoundaryBlocker, ...]:
     blockers: list[DisplayBoundaryBlocker] = []
-    if env.get("SLURM_GATEWAY_URL", "").strip():
+    if "SLURM_GATEWAY_URL" in env:
         blockers.append(
             DisplayBoundaryBlocker(
                 code="DISPLAY_SLURM_GATEWAY_URL_FORBIDDEN",
@@ -158,12 +167,12 @@ def display_boundary_blockers(env: Mapping[str, str]) -> tuple[DisplayBoundaryBl
                 message="display_readonly must not configure a Slurm gateway URL.",
             )
         )
-    if env.get("SLURM_GATEWAY_BACKEND", "").strip().lower() == "slurm":
+    if "SLURM_GATEWAY_BACKEND" in env:
         blockers.append(
             DisplayBoundaryBlocker(
                 code="DISPLAY_SLURM_BACKEND_FORBIDDEN",
                 env_var="SLURM_GATEWAY_BACKEND",
-                message="display_readonly must not configure the real Slurm backend.",
+                message="display_readonly must not configure a Slurm gateway backend.",
             )
         )
     for env_var in _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS:

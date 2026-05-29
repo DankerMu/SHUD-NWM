@@ -944,3 +944,107 @@ Non-goals:
 - Do not add systemd units or the full two-node Docker runbook; that is #238.
 - Do not run final display container E2E, readonly DB target validation, Slurm capability probes, or cross-plane PASS evidence; those are #239.
 - Do not modify backend/frontend runtime behavior in this issue.
+
+## Issue #237 Fixture: Docker Image and Role-Aware Entrypoint
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: other
+
+Change surface:
+
+- `infra/docker/Dockerfile.app` for the single default NHMS app image.
+- `infra/docker/entrypoint.sh` for role validation and role-aware startup dispatch.
+- Docker image/build/runtime smoke helper or tests added for this issue, with evidence under `artifacts/` or `/scratch/frd_muziyao`.
+- Existing compose skeleton command compatibility from #236; compose files may only be touched if required to call the new entrypoint without changing #236 capability boundaries.
+
+Mandatory expanded triggers:
+
+- Production image and container entrypoint are deployment-facing public script surfaces.
+- Role/env validation gates physical capability separation between 22 compute and 27 display.
+- Packaging must include backend runtime dependencies and frontend static assets without accidentally adding Slurm/Munge capability.
+- Docker build/cache/smoke work can consume limited disk and must respect approved temp/evidence roots.
+
+Must preserve:
+
+- One default app image is shared by compute and display; separate role behavior comes from explicit env/command dispatch, not divergent source trees.
+- `infra/compose.compute.yml` scheduler-once continues to use the existing tested `nhms-pipeline plan-production --plan` command path.
+- `infra/compose.display.yml` keeps read-only physical posture, forbidden env/mount exclusions, and explicit `display_readonly` role from #236.
+- Local Python/frontend tests remain independent of Docker unless a Docker smoke command is explicitly invoked or skipped/BLOCKED.
+- Reserved `NHMS_SERVICE_ROLE=slurm_gateway` must not start the full FastAPI business app.
+
+Must add/change:
+
+- Add a Dockerfile that installs backend runtime dependencies using repository lock/project metadata and builds or copies frontend static assets into the path served by `apps/api/main.py`.
+- Add a single entrypoint that requires explicit `NHMS_SERVICE_ROLE` when `NHMS_REQUIRE_SERVICE_ROLE=true`, accepts only supported roles, and dispatches default startup by role.
+- Display default startup runs the API/frontend path and fails before serving if compute-only env or compute-only command intent is present; the entrypoint rejection set must stay aligned with #236 display-forbidden envs, including `SLURM_GATEWAY_URL`, `SLURM_GATEWAY_BACKEND=slurm`, `WORKSPACE_ROOT`, `RUN_WORKSPACE_ROOT`, `SHARED_LOG_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_BASINS_ROOT`, `NHMS_MODEL_ASSET_ROOT`, `SLURM_GATEWAY_TEMPLATE_DIR`, `SLURM_GATEWAY_WORKSPACE_DIR`, `MUNGE_SOCKET`, `MUNGE_KEY`, `SHUD_EXECUTABLE`, and `DOCKER_HOST`.
+- Compute default startup runs the API path unless the container command explicitly requests an existing tested compute command such as `nhms-pipeline plan-production --plan`.
+- Entrypoint allows explicit safe command overrides but still applies role validation and blocks reserved/unsafe role-command combinations.
+- Default app image excludes Slurm client and Munge packages/binaries/config by default; any future Slurm Gateway image remains optional and 22-only.
+- Docker build/runtime smoke records build logs, Docker root/cache context, image inspection, no-Slurm/Munge checks, display env rejection, reserved-role rejection, and command-dispatch evidence under approved roots.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - adds container entrypoint semantics and role-specific command dispatch.
+- Config / project setup: selected - Docker build, role env, default commands, and compose compatibility are deployment configuration.
+- File IO / path safety / overwrite: selected - build context, frontend static copy, temp/evidence roots, and container mounts must stay bounded.
+- Schema / columns / units / field names: selected - env names, image labels if added, and evidence JSON/log fields are deployment-facing contracts.
+- Geospatial / CRS / shapefile sidecars: not selected - no GIS geometry or CRS behavior changes.
+- Time series / forcing / temporal boundaries: not selected - no source/cycle/run selection behavior changes.
+- Numerical stability / conservation / NaN: not selected - no solver or numerical computation changes.
+- Solver runtime / performance / threading: not selected - no solver runtime behavior is changed; scheduler-once only references an existing tested command.
+- Resource limits / large input / discovery: selected - Docker build cache, npm/pnpm/uv install, logs, and smoke output must be bounded and routed away from the system disk where project-controlled.
+- Legacy compatibility / examples: selected - existing compose skeletons, dev monolith behavior, and local non-Docker commands must remain compatible.
+- Error handling / rollback / partial outputs: selected - invalid roles, unsafe display env, reserved gateway role, and Docker unavailable/low-space conditions need stable failure/BLOCKED evidence.
+- Release / packaging / dependency compatibility: selected - image build must package backend/frontend runtime assets reproducibly without untracked host dependencies.
+- Documentation / migration notes: not selected - operator docs/systemd/runbook are #238, except concise inline comments or test evidence required for #237.
+
+Invariant Matrix:
+
+- Governing invariant: The default Docker app image may contain shared application code, but a running container can only start the command surface allowed by its explicit service role and the image must not carry default Slurm/Munge capability.
+- Source-of-truth identity/contract: `NHMS_SERVICE_ROLE`, `NHMS_REQUIRE_SERVICE_ROLE`, entrypoint command arguments, `infra/docker/Dockerfile.app`, and #236 compose role/env contracts.
+- Producers: Dockerfile build stages, frontend build artifact copy, entrypoint dispatch, compose command arrays, smoke/evidence writer.
+- Validators/preflight: entrypoint env/role checks, display unsafe-env checks, reserved-role check, Docker preflight from #236, image/runtime smoke assertions.
+- Storage/cache/query: Docker build cache/root inspection, project-approved `TMPDIR`, frontend `dist`, installed Python environment, runtime filesystem layout.
+- Public routes/entrypoints: container process entrypoint, default API/frontend start, explicit scheduler-once command override, image labels/inspection if present.
+- Frontend/downstream consumers: #236 compose files, #238 systemd/docs, #239 Docker display security and cross-plane E2E.
+- Failure paths/rollback/stale state: missing role with require flag, unsupported role, display compute-only env/command, reserved `slurm_gateway`, missing frontend static assets, Docker unavailable/low-space.
+- Evidence/audit/readiness: focused pytest/static tests, Docker build/runtime smoke evidence, no-Slurm/Munge image checks, OpenSpec validation.
+- Regression rows:
+  - image build with Docker available and approved TMPDIR/evidence root -> succeeds or records BLOCKED preflight without writing project artifacts outside approved roots.
+  - image inspection -> backend runtime deps and frontend static assets are present, while representative Slurm/Munge packages, binaries, configs, and sockets such as `sbatch`, `scancel`, `squeue`, `srun`, `sacct`, `sinfo`, `munge`, `unmunge`, `/etc/slurm`, and `/run/munge` are absent by default.
+  - `NHMS_REQUIRE_SERVICE_ROLE=true` with missing or unsupported `NHMS_SERVICE_ROLE` -> entrypoint exits non-zero with stable role error before starting API or scheduler.
+  - `NHMS_SERVICE_ROLE=display_readonly` with safe display env and default command -> starts the API/frontend path and exposes no Slurm route through existing app role gating.
+  - `display_readonly` with any #236 display-forbidden env, including `SLURM_GATEWAY_URL`, `SLURM_GATEWAY_BACKEND=slurm`, `WORKSPACE_ROOT`, `RUN_WORKSPACE_ROOT`, `SHARED_LOG_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_BASINS_ROOT`, `NHMS_MODEL_ASSET_ROOT`, `SLURM_GATEWAY_TEMPLATE_DIR`, `SLURM_GATEWAY_WORKSPACE_DIR`, `MUNGE_SOCKET`, `MUNGE_KEY`, `SHUD_EXECUTABLE`, or `DOCKER_HOST`, or with a compute scheduler command -> entrypoint/runtime exits non-zero before serving.
+  - `NHMS_SERVICE_ROLE=compute_control` with explicit scheduler-once command -> dispatches the existing `nhms-pipeline plan-production --plan` command path without introducing a new daemon loop.
+  - `NHMS_SERVICE_ROLE=slurm_gateway` -> exits non-zero and never starts the full business API.
+  - existing local/dev non-Docker commands -> continue to use `uv run` and frontend commands without requiring Docker role env.
+
+Boundary-surface checklist:
+
+- Shared helper roots: entrypoint role/command dispatch logic and any Docker smoke helper code.
+- Public entrypoints: Docker image entrypoint, default API start command, explicit scheduler-once command, image build command.
+- Read surfaces: environment variables, command arguments, compose command arrays, Docker image filesystem, frontend `dist`.
+- Write/delete/overwrite surfaces: Docker build cache, frontend build output, smoke logs/evidence, project temp directories.
+- Staging/publish/rollback surfaces: none - this issue does not publish production artifacts or deploy services.
+- Producer/consumer evidence boundaries: Docker smoke evidence consumed by #238/#239 and review/CI evidence comments.
+- Stale-state/idempotency boundaries: repeated smoke runs must use unique or overwritten approved evidence paths and must not reuse stale PASS when build/runtime commands fail.
+- Unchanged downstream consumers: #236 compose static checks, runtime role tests, frontend build, local pytest/ruff gates.
+
+Required evidence:
+
+- `openspec validate m22-two-node-docker-readonly-display --strict --no-interactive`.
+- Focused tests for entrypoint/static Docker contracts: missing/unsupported role, display unsafe env, display compute command rejection, compute scheduler-once command allowance, reserved `slurm_gateway`, and no stale PASS evidence.
+- Docker preflight from #236 before build smoke, with evidence under `artifacts/stage-change/m22-two-node-docker-readonly-display/` or `/scratch/frd_muziyao`.
+- Docker build smoke for `infra/docker/Dockerfile.app`, using approved `TMPDIR`/evidence root; Docker unavailable or low space must be `BLOCKED`, not PASS.
+- Runtime smoke/image checks prove no `sbatch`/`scancel`/`squeue`/`srun`/`sacct`/`sinfo`, no `munge`/`unmunge`, no Slurm config/socket, role validation failures, and display-safe startup or documented dependency blocker.
+- `docker compose --env-file infra/env/compute.example -f infra/compose.compute.yml config` and `docker compose --env-file infra/env/display.example -f infra/compose.display.yml config` remain green with the new image/entrypoint assumptions.
+- `uv run pytest -q tests/test_two_node_docker_runtime.py <new Dockerfile/entrypoint test target>` and `uv run ruff check <new Python script/test paths if Python is added>`.
+- If frontend assets are built in the Docker image, run or cite the Docker build stage evidence; local `cd apps/frontend && corepack pnpm build` is required only if implementation changes frontend packaging outside Docker.
+
+Non-goals:
+
+- Do not add systemd units or two-node Docker operator runbook; that is #238.
+- Do not perform final cross-plane Docker E2E, readonly DB validation, or full display HostConfig runtime probe; that is #239.
+- Do not add Slurm Gateway containerization or install Slurm/Munge in the default app image.
+- Do not change backend/frontend runtime behavior beyond packaging/entrypoint integration needed to start existing roles.

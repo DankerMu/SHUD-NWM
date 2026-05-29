@@ -102,10 +102,10 @@ Required evidence for #236:
 
 ## 8. Docker Image and Entrypoint
 
-- [ ] 8.1 Add `infra/docker/Dockerfile.app` for one default app image with backend dependencies and frontend static assets as needed for MVP.
-- [ ] 8.2 Add `infra/docker/entrypoint.sh` that validates `NHMS_REQUIRE_SERVICE_ROLE`, `NHMS_SERVICE_ROLE`, starts role-specific commands, rejects display startup with compute-only env, and does not start full business API for reserved `slurm_gateway`.
-- [ ] 8.3 Ensure the default app image does not install Slurm client or Munge; any Slurm Gateway container image remains optional and 22-only.
-- [ ] 8.4 Add Docker build smoke tests and image/runtime checks, with logs and temporary files under `artifacts/` or `/scratch/frd_muziyao`.
+- [x] 8.1 Add `infra/docker/Dockerfile.app` for one default app image with backend dependencies and frontend static assets as needed for MVP.
+- [x] 8.2 Add `infra/docker/entrypoint.sh` that validates `NHMS_REQUIRE_SERVICE_ROLE`, `NHMS_SERVICE_ROLE`, starts role-specific commands, rejects display startup with compute-only env, and does not start full business API for reserved `slurm_gateway`.
+- [x] 8.3 Ensure the default app image does not install Slurm client or Munge; any Slurm Gateway container image remains optional and 22-only.
+- [x] 8.4 Add Docker build smoke tests and image/runtime checks, with logs and temporary files under `artifacts/` or `/scratch/frd_muziyao`.
 
 ## 9. Systemd and Two-Node Docker E2E Docs
 
