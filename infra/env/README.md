@@ -10,8 +10,10 @@ Create them with owner-only permissions, for example
 `install -m 0600 infra/env/compute.example infra/env/compute.env` or
 `install -m 0600 /dev/null infra/env/display-readonly-secrets.env`, or under
 `umask 077`, and keep them untracked. Before sourcing any local secret-source
-file, verify `test "$(stat -c '%a' <file>)" = "600"`; a failed mode check
-blocks validation rather than producing evidence from a readable secret file.
+file, use a fail-closed guard that checks the file exists, verifies `stat -c
+'%a' <file>` is `600`, prints `BLOCKED:`, and exits before `source` if the
+check fails. A failed mode check blocks validation rather than producing
+evidence from a readable secret file.
 
 Required canonical published artifact variables:
 

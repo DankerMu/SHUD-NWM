@@ -1081,6 +1081,7 @@ Must add/change:
 - Add or document a 22 host Slurm Gateway systemd first-phase path honestly; do not claim `services.slurm_gateway.router` or the reserved `slurm_gateway` role is directly runnable as a full API.
 - Add the Docker operator README with exact start/stop/status/log commands, env file setup, Docker disk preflight, compose config/build smoke, display security probes, evidence roots, rollback, and dev-compose exclusion.
 - Link/update the two-node E2E runbook so evidence categories are separated instead of collapsing Docker, DB, browser, Slurm, logs, API, and manual ops evidence into one ambiguous PASS.
+- Document operator shell snippets as fail-closed procedures: failed secret-file mode checks, untrusted systemd checkout path components, group/world-writable compose/env/unit sources, Docker/preflight blockers, and missing live evidence must stop before sourcing secrets, running `systemctl`, or claiming PASS.
 
 Selected risk packs:
 
@@ -1100,18 +1101,20 @@ Selected risk packs:
 
 Invariant Matrix:
 
-- Governing invariant: The operator-facing systemd units and runbook must start only the previously validated two-node Docker roles and must not document any path that gives node 27 compute/write/Slurm capability or claims final E2E readiness without #239 evidence.
+- Governing invariant: The operator-facing systemd units and runbook must start only the previously validated two-node Docker roles, and every operator preflight that protects secrets, trusted source identity, or evidence readiness must fail closed before sourcing secrets, running root-equivalent systemd/Docker commands, or claiming PASS.
 - Source-of-truth identity/contract: #236 compose/env files, #237 Dockerfile/entrypoint, `NHMS_SERVICE_ROLE`, `NHMS_REQUIRE_SERVICE_ROLE`, canonical `NHMS_PUBLISHED_ARTIFACT_*` env names, and approved evidence roots.
 - Producers: systemd unit files, Docker README, E2E runbook links.
-- Validators/preflight: `docker compose config`, `validate_two_node_docker_runtime.py static/preflight/smoke`, `openspec validate`, Markdown/static docs checks, and `git diff --check`.
+- Validators/preflight: fail-closed secret-source and systemd trusted-source shell guards, `docker compose config`, `validate_two_node_docker_runtime.py static/preflight/smoke`, `openspec validate`, Markdown/static docs checks, and `git diff --check`.
 - Storage/cache/query: DockerRootDir, Docker cache, repo `artifacts/`, `/scratch/frd_muziyao`, systemd journal, and published artifact mount paths.
 - Public routes/entrypoints: `systemctl` units, documented compose commands, Docker validation commands, security probe commands.
 - Frontend/downstream consumers: operators following the README, #239 final E2E harness, and existing two-node production E2E runbook readers.
-- Failure paths/rollback/stale state: unit stop/restart, compose down, rollback to previous image/branch/env, BLOCKED evidence for Docker unavailable/low space, and no stale PASS reuse.
+- Failure paths/rollback/stale state: failed secret-source mode checks, untrusted checkout/path/unit/compose/env ownership, group/world-writable sources, unit stop/restart, compose down, rollback to previous image/branch/env, BLOCKED evidence for Docker unavailable/low space, and no stale PASS reuse.
 - Evidence/audit/readiness: README command matrix, runbook evidence category table, systemd unit comments, local validation results.
 - Regression rows:
   - compute unit instructions -> use compute env/compose from repo, explicit `compute_control`, scheduler-once/timer-compatible command path, and writable compute mounts only.
   - display unit instructions -> use display env/compose from repo, explicit `display_readonly`, readonly DB/published artifact posture, and no Slurm/Munge/workspace/Docker socket.
+  - local secret-source file with mode other than `0600` -> documented procedure exits before `source`, curl header creation, validator execution, or PASS evidence.
+  - systemd checkout with untrusted owner on any `WorkingDirectory` path component, unit source, compose file, env directory, or role env file -> documented preflight exits before `systemctl enable/start/reload/restart`.
   - Slurm Gateway section -> documents host-service MVP limitation and does not claim a reserved role or APIRouter module is directly runnable as the full API.
   - Docker preflight/smoke commands -> write evidence under repo `artifacts/` or `/scratch/frd_muziyao` and report BLOCKED instead of PASS when Docker/space prerequisites fail.
   - runbook links -> separate compute, display, cross-plane, manual ops, DB, API, browser, Slurm, logs, and Docker security evidence categories for #239.

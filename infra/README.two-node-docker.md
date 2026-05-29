@@ -168,14 +168,28 @@ test "$(stat -c '%a' infra/env/display.env)" = "600"
 只读 DB 验证如果使用本地 secret-source 文件：
 
 ```bash
-test -f infra/env/display-readonly-secrets.env || install -m 0600 /dev/null infra/env/display-readonly-secrets.env
-$EDITOR infra/env/display-readonly-secrets.env
-test "$(stat -c '%a' infra/env/display-readonly-secrets.env)" = "600"
+READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env
+if [ ! -e "$READONLY_SECRET_SOURCE" ]; then
+  install -m 0600 /dev/null "$READONLY_SECRET_SOURCE"
+elif [ ! -f "$READONLY_SECRET_SOURCE" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be a regular 0600 file before sourcing" >&2
+  exit 1
+fi
+$EDITOR "$READONLY_SECRET_SOURCE"
+readonly_secret_mode="$(stat -c '%a' "$READONLY_SECRET_SOURCE")" || {
+  echo "BLOCKED: cannot stat $READONLY_SECRET_SOURCE before sourcing" >&2
+  exit 1
+}
+if [ "$readonly_secret_mode" != "600" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" >&2
+  exit 1
+fi
 ```
 
 必须替换示例中的密码、host、路径、image tag 和域名。`compute.env`、`display.env` 和
-`display-readonly-secrets.env` 都包含生产 secret-bearing 值，必须保持 owner-only `0600`；默认 umask
-不可信时，先执行 `umask 077` 或重新用 `install -m 0600` 生成。示例里的 `change-me`、
+`display-readonly-secrets.env` 都包含生产 secret-bearing 值，必须保持 owner-only `0600`；任何 source
+前都要用上面的 `BLOCKED` 守卫失败即退出。默认 umask 不可信时，先执行 `umask 077` 或重新用
+`install -m 0600` 生成。示例里的 `change-me`、
 `*.internal.example`、`m22-placeholder` 只能用于 render/config 检查，不能作为 live 部署证据。
 
 ## 8. Compose Commands
@@ -227,57 +241,146 @@ checkout/env 只能由该可信用户或 root 写入。不要从 untrusted user 
 运行 systemd-managed Docker Compose。
 
 通用 checkout trust preflight，在 22/27 各自节点执行，并把输出保存到本次 `docker-security/` evidence。
-把 `TRUSTED_DOCKER_OPERATORS` 调整为本站点允许写 checkout/env 且可访问 Docker 的 root-equivalent 用户列表：
+把 `TRUSTED_DOCKER_OPERATORS` 调整为本站点允许写 checkout/env 且可访问 Docker 的 root-equivalent 用户列表。
+GNU `namei -l` 的权限行里 owner 是第 2 列；下面的 preflight 会检查每个 `WorkingDirectory`
+路径组件。为避免 symlink 在检查后改向其他 source，示例直接拒绝路径组件中的 symlink：
 
 ```bash
+set -euo pipefail
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
 CHECKOUT_ROOT=/opt/SHUD-NWM
 TRUSTED_DOCKER_OPERATORS="root nhms-deploy"
 mkdir -p "$EVIDENCE_ROOT/docker-security"
-namei -l "$CHECKOUT_ROOT/infra" | tee "$EVIDENCE_ROOT/docker-security/systemd-checkout-namei.txt"
-namei -l "$CHECKOUT_ROOT/infra" | awk '$1 ~ /^[bcdlps-]/ && (substr($1,6,1) == "w" || substr($1,9,1) == "w") { print; bad=1 } END { exit bad }'
+
+block_systemd_preflight() {
+  echo "BLOCKED: $*" >&2
+  exit 1
+}
+
+is_trusted_docker_operator() {
+  case " $TRUSTED_DOCKER_OPERATORS " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+check_systemd_source_path() {
+  path="$1"
+  owner="$(stat -c '%U' "$path")" || block_systemd_preflight "cannot stat owner for $path"
+  perms="$(stat -c '%A' "$path")" || block_systemd_preflight "cannot stat permissions for $path"
+  if ! is_trusted_docker_operator "$owner"; then
+    block_systemd_preflight "untrusted owner $owner on systemd source $path"
+  fi
+  if [ "${perms:5:1}" = "w" ] || [ "${perms:8:1}" = "w" ]; then
+    block_systemd_preflight "group/world-writable systemd source $path has permissions $perms"
+  fi
+}
+
+NAMEI_EVIDENCE="$EVIDENCE_ROOT/docker-security/systemd-checkout-namei.txt"
+namei -l "$CHECKOUT_ROOT/infra" | tee "$NAMEI_EVIDENCE"
+awk -v trusted="$TRUSTED_DOCKER_OPERATORS" '
+  BEGIN {
+    split(trusted, trusted_users, /[[:space:]]+/)
+    for (i in trusted_users) {
+      if (trusted_users[i] != "") {
+        allowed[trusted_users[i]] = 1
+      }
+    }
+  }
+  $1 ~ /^[bcdlps-]/ {
+    owner = $2
+    if (substr($1, 1, 1) == "l") {
+      printf "BLOCKED: symlink path component rejected: %s\n", $0 > "/dev/stderr"
+      bad = 1
+    }
+    if (!(owner in allowed)) {
+      printf "BLOCKED: untrusted owner on path component: %s\n", $0 > "/dev/stderr"
+      bad = 1
+    }
+    if (substr($1, 6, 1) == "w" || substr($1, 9, 1) == "w") {
+      printf "BLOCKED: group/world-writable path component: %s\n", $0 > "/dev/stderr"
+      bad = 1
+    }
+  }
+  END { exit bad }
+' "$NAMEI_EVIDENCE"
+
+COMMON_SYSTEMD_SOURCES=(
+  "$CHECKOUT_ROOT"
+  "$CHECKOUT_ROOT/infra"
+  "$CHECKOUT_ROOT/infra/compose.compute.yml"
+  "$CHECKOUT_ROOT/infra/compose.display.yml"
+  "$CHECKOUT_ROOT/infra/env"
+  "$CHECKOUT_ROOT/infra/systemd"
+  "$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service"
+  "$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service"
+)
 stat -c '%U:%G %a %n' \
-  "$CHECKOUT_ROOT" \
-  "$CHECKOUT_ROOT/infra" \
-  "$CHECKOUT_ROOT/infra/compose.compute.yml" \
-  "$CHECKOUT_ROOT/infra/compose.display.yml" \
-  "$CHECKOUT_ROOT/infra/env" \
-  "$CHECKOUT_ROOT/infra/systemd" | tee "$EVIDENCE_ROOT/docker-security/systemd-checkout-stat.txt"
-for path in \
-  "$CHECKOUT_ROOT" \
-  "$CHECKOUT_ROOT/infra" \
-  "$CHECKOUT_ROOT/infra/compose.compute.yml" \
-  "$CHECKOUT_ROOT/infra/compose.display.yml" \
-  "$CHECKOUT_ROOT/infra/env" \
-  "$CHECKOUT_ROOT/infra/systemd"; do
-  owner="$(stat -c '%U' "$path")"
-  case " $TRUSTED_DOCKER_OPERATORS " in *" $owner "*) ;; *) echo "untrusted owner: $owner $path"; exit 1 ;; esac
+  "${COMMON_SYSTEMD_SOURCES[@]}" | tee "$EVIDENCE_ROOT/docker-security/systemd-checkout-stat.txt"
+for path in "${COMMON_SYSTEMD_SOURCES[@]}"; do
+  check_systemd_source_path "$path"
 done
-test -z "$(find "$CHECKOUT_ROOT" -path "$CHECKOUT_ROOT/.git" -prune -o -perm /022 -print -quit)"
+find "$CHECKOUT_ROOT" -path "$CHECKOUT_ROOT/.git" -prune -o -perm /022 -print \
+  >"$EVIDENCE_ROOT/docker-security/systemd-checkout-writable-paths.txt"
+if [ -s "$EVIDENCE_ROOT/docker-security/systemd-checkout-writable-paths.txt" ]; then
+  sed 's/^/BLOCKED: group or world writable checkout path: /' \
+    "$EVIDENCE_ROOT/docker-security/systemd-checkout-writable-paths.txt" >&2
+  exit 1
+fi
 ```
 
 22 compute systemd preflight 还必须确认 env mode：
 
 ```bash
+set -euo pipefail
 : "${CHECKOUT_ROOT:?run common checkout trust preflight first}"
 : "${TRUSTED_DOCKER_OPERATORS:?set trusted Docker operators first}"
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
-test "$(stat -c '%a' "$CHECKOUT_ROOT/infra/env/compute.env")" = "600"
-stat -c '%U:%G %a %n' "$CHECKOUT_ROOT/infra/env/compute.env" | tee "$EVIDENCE_ROOT/docker-security/systemd-compute-env-stat.txt"
-owner="$(stat -c '%U' "$CHECKOUT_ROOT/infra/env/compute.env")"
-case " $TRUSTED_DOCKER_OPERATORS " in *" $owner "*) ;; *) echo "untrusted owner: $owner compute.env"; exit 1 ;; esac
+COMPUTE_ENV="$CHECKOUT_ROOT/infra/env/compute.env"
+compute_env_mode="$(stat -c '%a' "$COMPUTE_ENV")" || {
+  echo "BLOCKED: cannot stat mode for $COMPUTE_ENV" >&2
+  exit 1
+}
+if [ "$compute_env_mode" != "600" ]; then
+  echo "BLOCKED: $COMPUTE_ENV must be mode 0600 before systemd start/restart" >&2
+  exit 1
+fi
+stat -c '%U:%G %A %a %n' "$COMPUTE_ENV" | tee "$EVIDENCE_ROOT/docker-security/systemd-compute-env-stat.txt"
+compute_env_owner="$(stat -c '%U' "$COMPUTE_ENV")" || {
+  echo "BLOCKED: cannot stat owner for $COMPUTE_ENV" >&2
+  exit 1
+}
+case " $TRUSTED_DOCKER_OPERATORS " in
+  *" $compute_env_owner "*) ;;
+  *) echo "BLOCKED: untrusted owner $compute_env_owner on $COMPUTE_ENV" >&2; exit 1 ;;
+esac
 ```
 
 27 display systemd preflight 还必须确认 env mode：
 
 ```bash
+set -euo pipefail
 : "${CHECKOUT_ROOT:?run common checkout trust preflight first}"
 : "${TRUSTED_DOCKER_OPERATORS:?set trusted Docker operators first}"
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
-test "$(stat -c '%a' "$CHECKOUT_ROOT/infra/env/display.env")" = "600"
-stat -c '%U:%G %a %n' "$CHECKOUT_ROOT/infra/env/display.env" | tee "$EVIDENCE_ROOT/docker-security/systemd-display-env-stat.txt"
-owner="$(stat -c '%U' "$CHECKOUT_ROOT/infra/env/display.env")"
-case " $TRUSTED_DOCKER_OPERATORS " in *" $owner "*) ;; *) echo "untrusted owner: $owner display.env"; exit 1 ;; esac
+DISPLAY_ENV="$CHECKOUT_ROOT/infra/env/display.env"
+display_env_mode="$(stat -c '%a' "$DISPLAY_ENV")" || {
+  echo "BLOCKED: cannot stat mode for $DISPLAY_ENV" >&2
+  exit 1
+}
+if [ "$display_env_mode" != "600" ]; then
+  echo "BLOCKED: $DISPLAY_ENV must be mode 0600 before systemd start/restart" >&2
+  exit 1
+fi
+stat -c '%U:%G %A %a %n' "$DISPLAY_ENV" | tee "$EVIDENCE_ROOT/docker-security/systemd-display-env-stat.txt"
+display_env_owner="$(stat -c '%U' "$DISPLAY_ENV")" || {
+  echo "BLOCKED: cannot stat owner for $DISPLAY_ENV" >&2
+  exit 1
+}
+case " $TRUSTED_DOCKER_OPERATORS " in
+  *" $display_env_owner "*) ;;
+  *) echo "BLOCKED: untrusted owner $display_env_owner on $DISPLAY_ENV" >&2; exit 1 ;;
+esac
 ```
 
 如果 `namei`、`stat` 或 `find` 任一检查失败，停止 systemd 安装/启动/restart，本 lane 记为 `BLOCKED`。不得让
@@ -422,6 +525,25 @@ curl -i http://127.0.0.1:8000/api/v1/slurm/health
 curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
 curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
 
+# 优先从未跟踪 0600 env 文件读取；不存在时交互式静默输入。
+block_operator_auth_source() {
+  echo "BLOCKED: $*" >&2
+  exit 1
+}
+
+if [ -f infra/env/operator-auth.env ]; then
+  operator_auth_mode="$(stat -c '%a' infra/env/operator-auth.env)" || \
+    block_operator_auth_source "cannot stat infra/env/operator-auth.env before sourcing"
+  if [ "$operator_auth_mode" != "600" ]; then
+    block_operator_auth_source "infra/env/operator-auth.env must be mode 0600 before sourcing"
+  fi
+  . infra/env/operator-auth.env
+else
+  read -r -s -p "Operator auth token: " OPERATOR_AUTH_TOKEN
+  printf '\n'
+fi
+: "${OPERATOR_AUTH_TOKEN:?operator auth token required}"
+
 OPERATOR_SECRET_DIR="${OPERATOR_SECRET_DIR:-/scratch/frd_muziyao/nwm-secret-tmp}"
 mkdir -p "$OPERATOR_SECRET_DIR"
 chmod 700 "$OPERATOR_SECRET_DIR"
@@ -429,15 +551,6 @@ OPERATOR_CURL_HEADER="$(mktemp "$OPERATOR_SECRET_DIR/operator-auth-header.XXXXXX
 chmod 600 "$OPERATOR_CURL_HEADER"
 trap 'rm -f "$OPERATOR_CURL_HEADER"' EXIT
 
-# 优先从未跟踪 0600 env 文件读取；不存在时交互式静默输入。
-if [ -f infra/env/operator-auth.env ]; then
-  test "$(stat -c '%a' infra/env/operator-auth.env)" = "600"
-  . infra/env/operator-auth.env
-else
-  read -r -s -p "Operator auth token: " OPERATOR_AUTH_TOKEN
-  printf '\n'
-fi
-: "${OPERATOR_AUTH_TOKEN:?operator auth token required}"
 {
   printf '%s' 'Authorization: '
   printf '%s' 'Bearer '
@@ -522,7 +635,8 @@ docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml dow
 ```bash
 $EDITOR infra/env/compute.env
 $EDITOR infra/env/display.env
-# 重新执行第 9 节 checkout trust preflight 和 env mode check 后再 restart。
+# 重新执行第 9 节完整 checkout trust preflight
+#（namei 每个路径组件、unit/compose/env source allowlist）和 env mode/owner check 后再 restart。
 sudo systemctl restart nhms-compute-compose.service
 sudo systemctl restart nhms-display-compose.service
 ```
@@ -534,8 +648,8 @@ sudo systemctl restart nhms-display-compose.service
 - Artifact/log 读取失败时，允许显示 `log_uri` 和人工提示，不要把 22 私有 workspace 挂给 27。
 - latest-product strict identity 缺失时，cross-plane 记 `BLOCKED`，不能用 historical latest 代替。
 - readonly DB 权限缺失时，修正 SELECT grants；不要用 writer credential 冒充生产只读验证。
-- systemd restart/reload 会重新执行 checkout 中的 compose/env；每次回滚或重启前都要重新记录可信
-  checkout、compose/env ownership/mode 证据。
+- systemd restart/reload 会重新执行 checkout 中的 compose/env；每次回滚或重启前都要重新记录第 9 节完整
+  checkout trust preflight、unit/compose/env ownership/mode 证据。
 
 ## 15. Operator Checklist
 

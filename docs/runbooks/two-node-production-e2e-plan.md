@@ -393,11 +393,24 @@ export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 
 # 任选一种 secret-safe 方式加载真实 readonly DSN；env 文件必须未跟踪且权限为 0600。
 # 首次创建本地 secret-source 文件；已有文件不要重新 install，否则会截断。
-test -f infra/env/display-readonly-secrets.env || install -m 0600 /dev/null infra/env/display-readonly-secrets.env
-$EDITOR infra/env/display-readonly-secrets.env
-test "$(stat -c '%a' infra/env/display-readonly-secrets.env)" = "600"
+READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env
+if [ ! -e "$READONLY_SECRET_SOURCE" ]; then
+  install -m 0600 /dev/null "$READONLY_SECRET_SOURCE"
+elif [ ! -f "$READONLY_SECRET_SOURCE" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be a regular 0600 file before sourcing" >&2
+  exit 1
+fi
+$EDITOR "$READONLY_SECRET_SOURCE"
+readonly_secret_mode="$(stat -c '%a' "$READONLY_SECRET_SOURCE")" || {
+  echo "BLOCKED: cannot stat $READONLY_SECRET_SOURCE before sourcing" >&2
+  exit 1
+}
+if [ "$readonly_secret_mode" != "600" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" >&2
+  exit 1
+fi
 set -a
-. infra/env/display-readonly-secrets.env
+. "$READONLY_SECRET_SOURCE"
 set +a
 # 或从站点 secret manager 读取：
 # export NHMS_DISPLAY_READONLY_DATABASE_URL="$(secret-manager read nhms/display/readonly-db-url)"
