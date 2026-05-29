@@ -898,12 +898,14 @@ def run_docker_smoke(
                 }
             )
         else:
-            commands["image_absence_probe"] = runner(run_checks_command)
-            commands["display_compute_env_reject"] = runner(display_reject_command)
-            commands["slurm_gateway_reject"] = runner(slurm_gateway_reject_command)
-            commands["compute_scheduler_command"] = runner(compute_scheduler_command)
-            commands["display_scheduler_reject"] = runner(display_scheduler_reject_command)
-            commands.update(_run_display_startup_probe(runner, image_tag=image_tag))
+            commands["image_inspect"] = runner(("docker", "image", "inspect", image_tag))
+            if commands["image_inspect"].returncode == 0:
+                commands["image_absence_probe"] = runner(run_checks_command)
+                commands["display_compute_env_reject"] = runner(display_reject_command)
+                commands["slurm_gateway_reject"] = runner(slurm_gateway_reject_command)
+                commands["compute_scheduler_command"] = runner(compute_scheduler_command)
+                commands["display_scheduler_reject"] = runner(display_scheduler_reject_command)
+                commands.update(_run_display_startup_probe(runner, image_tag=image_tag))
             blockers.extend(_docker_smoke_command_blockers(commands))
 
     status = _docker_smoke_status(blockers)
@@ -2556,6 +2558,25 @@ def _docker_smoke_payload(
 
 def _docker_smoke_command_blockers(commands: Mapping[str, CommandResult]) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
+    image_inspect = commands.get("image_inspect")
+    if image_inspect is None:
+        blockers.append(
+            {
+                "code": "IMAGE_INSPECT_MISSING",
+                "probe": "image_inspect",
+            }
+        )
+        return blockers
+    if image_inspect.returncode != 0:
+        blockers.append(
+            {
+                "code": "IMAGE_INSPECT_FAILED",
+                "command": list(image_inspect.args),
+                "returncode": image_inspect.returncode,
+            }
+        )
+        return blockers
+
     zero_exit_checks = {
         "image_absence_probe": "APP_IMAGE_FORBIDDEN_CAPABILITY_PRESENT",
         "compute_scheduler_command": "COMPUTE_SCHEDULER_HELP_FAILED",

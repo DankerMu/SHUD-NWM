@@ -2908,6 +2908,28 @@ def test_entrypoint_requires_service_role_under_require_flag() -> None:
     assert "SERVICE_ROLE_REQUIRED" in completed.stderr
 
 
+def test_entrypoint_allows_unset_require_service_role_for_local_default() -> None:
+    completed = _run_entrypoint(["true"], {})
+
+    assert completed.returncode == 0
+    assert "nhms-entrypoint[" not in completed.stderr
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_entrypoint_rejects_explicit_empty_require_service_role_flag(value: str) -> None:
+    completed = _run_entrypoint(["true"], {"NHMS_REQUIRE_SERVICE_ROLE": value})
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_REQUIRE_FLAG_INVALID" in completed.stderr
+
+
+def test_entrypoint_allows_whitespace_padded_false_require_service_role_flag() -> None:
+    completed = _run_entrypoint(["true"], {"NHMS_REQUIRE_SERVICE_ROLE": " false "})
+
+    assert completed.returncode == 0
+    assert "nhms-entrypoint[" not in completed.stderr
+
+
 @pytest.mark.parametrize(
     "env",
     [
@@ -3191,6 +3213,7 @@ def test_docker_smoke_passes_with_expected_role_boundary_probe_results(tmp_path:
     assert payload["status"] == "PASS"
     assert set(payload["commands"]) >= {
         "docker_build",
+        "image_inspect",
         "image_absence_probe",
         "display_compute_env_reject",
         "slurm_gateway_reject",
@@ -3201,6 +3224,7 @@ def test_docker_smoke_passes_with_expected_role_boundary_probe_results(tmp_path:
         "display_startup_logs",
         "display_startup_cleanup",
     }
+    assert payload["commands"]["image_inspect"]["returncode"] == 0
     assert payload["blockers"] == []
 
 
@@ -3232,6 +3256,23 @@ def test_docker_smoke_required_probe_failure_never_passes(
     assert expected_code in {blocker["code"] for blocker in payload["blockers"]}
 
 
+def test_docker_smoke_image_inspect_failure_never_passes(tmp_path: Path) -> None:
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=tmp_path / "artifacts" / "docker-smoke",
+        repo_root=tmp_path,
+        min_free_bytes=100,
+        command_runner=_docker_image_inspect_failure_runner,
+        disk_usage_provider=_high_space,
+    )
+
+    assert result.status == "FAIL"
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert payload["commands"]["docker_build"]["returncode"] == 0
+    assert payload["commands"]["image_inspect"]["returncode"] != 0
+    assert {blocker["code"] for blocker in payload["blockers"]} == {"IMAGE_INSPECT_FAILED"}
+
+
 def test_docker_smoke_display_startup_cleanup_failure_never_passes(tmp_path: Path) -> None:
     result = docker_runtime.run_docker_smoke(
         evidence_root=tmp_path / "artifacts" / "docker-smoke",
@@ -3251,6 +3292,7 @@ def test_docker_smoke_display_startup_cleanup_failure_never_passes(tmp_path: Pat
 
 def test_docker_smoke_required_probe_missing_never_passes() -> None:
     commands = {
+        "image_inspect": docker_runtime.CommandResult(("inspect",), 0, "", ""),
         "image_absence_probe": docker_runtime.CommandResult(("probe",), 0, "", ""),
         "display_startup_start": docker_runtime.CommandResult(("start",), 0, "", ""),
         "display_startup_probe": docker_runtime.CommandResult(("display",), 0, "", ""),
@@ -3270,6 +3312,13 @@ def test_docker_smoke_required_probe_missing_never_passes() -> None:
     blocker_codes = {blocker["code"] for blocker in blockers}
     assert "COMPUTE_SCHEDULER_HELP_FAILED_MISSING" in blocker_codes
     assert "DISPLAY_STARTUP_CLEANUP_MISSING" in blocker_codes
+
+
+def test_docker_smoke_image_inspect_missing_never_passes() -> None:
+    blockers = docker_runtime._docker_smoke_command_blockers({})
+
+    assert {blocker["code"] for blocker in blockers} == {"IMAGE_INSPECT_MISSING"}
+    assert docker_runtime._docker_smoke_status(blockers) == "FAIL"
 
 
 def test_image_absence_probe_rejects_scontrol_only_slurm_cli(tmp_path: Path) -> None:
@@ -3449,6 +3498,13 @@ def _docker_smoke_cleanup_failure_runner(args: list[str] | tuple[str, ...]) -> d
     command = tuple(args)
     if command[:3] == ("docker", "rm", "-f"):
         return docker_runtime.CommandResult(command, 1, "", "cleanup failed\n")
+    return _docker_smoke_success_runner(args)
+
+
+def _docker_image_inspect_failure_runner(args: list[str] | tuple[str, ...]) -> docker_runtime.CommandResult:
+    command = tuple(args)
+    if command[:3] == ("docker", "image", "inspect"):
+        return docker_runtime.CommandResult(command, 1, "", "No such image\n")
     return _docker_smoke_success_runner(args)
 
 

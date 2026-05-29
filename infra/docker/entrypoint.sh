@@ -49,7 +49,13 @@ readonly DISPLAY_FORBIDDEN_COMMANDS=(
 main() {
   local require_service_role
   local service_role
-  require_service_role="$(normalize_bool_env "${NHMS_REQUIRE_SERVICE_ROLE:-}" "NHMS_REQUIRE_SERVICE_ROLE")"
+
+  if env_is_set "NHMS_REQUIRE_SERVICE_ROLE"; then
+    require_service_role="$(normalize_bool_env "$NHMS_REQUIRE_SERVICE_ROLE" "NHMS_REQUIRE_SERVICE_ROLE")"
+  else
+    require_service_role="false"
+  fi
+
   service_role="$(normalize_service_role "${NHMS_SERVICE_ROLE:-}" "$require_service_role")"
 
   validate_role_boundary "$service_role"
@@ -68,7 +74,7 @@ normalize_bool_env() {
   local value
   value="$(normalize_role_gate_env_value "$raw")"
   case "$value" in
-    "" | 0 | false | no | off)
+    0 | false | no | off)
       printf 'false'
       ;;
     1 | true | yes | on)
