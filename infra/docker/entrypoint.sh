@@ -66,7 +66,7 @@ normalize_bool_env() {
   local raw="$1"
   local env_name="$2"
   local value
-  value="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  value="$(normalize_role_gate_env_value "$raw")"
   case "$value" in
     "" | 0 | false | no | off)
       printf 'false'
@@ -84,7 +84,7 @@ normalize_service_role() {
   local raw="$1"
   local require_service_role="$2"
   local role
-  role="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  role="$(normalize_role_gate_env_value "$raw")"
 
   if [ -z "$role" ]; then
     if [ "$require_service_role" = "true" ] || production_like_env; then
@@ -104,17 +104,24 @@ normalize_service_role() {
 }
 
 production_like_env() {
-  case "$(printf '%s' "${NHMS_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+  case "$(normalize_role_gate_env_value "${NHMS_AUTH_MODE:-}")" in
     production | live | live_idp)
       return 0
       ;;
   esac
-  case "$(printf '%s' "${AUTH_BACKEND:-}" | tr '[:upper:]' '[:lower:]')" in
+  case "$(normalize_role_gate_env_value "${AUTH_BACKEND:-}")" in
     live | live_idp | oidc | saml)
       return 0
       ;;
   esac
   return 1
+}
+
+normalize_role_gate_env_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value,,}"
 }
 
 validate_role_boundary() {

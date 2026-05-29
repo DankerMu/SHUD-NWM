@@ -2853,15 +2853,23 @@ ENTRYPOINT ["infra/docker/entrypoint.sh"]
     assert "APP_DOCKERFILE_FORBIDDEN_SLURM_MUNGE_INSTALL" in {finding.code for finding in findings}
 
 
-def test_app_dockerignore_static_contract_requires_secret_patterns(tmp_path: Path) -> None:
+def test_app_dockerignore_static_contract_requires_credential_patterns(tmp_path: Path) -> None:
     dockerignore = tmp_path / ".dockerignore"
-    required_secret_patterns = {
+    required_credential_patterns = {
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        "pip.conf",
         "id_rsa",
         "id_rsa*",
         "id_ed25519",
         "id_ed25519*",
         "**/.env",
         "**/.env.*",
+        "**/.npmrc",
+        "**/.pypirc",
+        "**/.netrc",
+        "**/pip.conf",
         "**/id_rsa",
         "**/id_rsa*",
         "**/id_ed25519",
@@ -2873,7 +2881,7 @@ def test_app_dockerignore_static_contract_requires_secret_patterns(tmp_path: Pat
         "**/secrets",
     }
     dockerignore.write_text(
-        "\n".join(sorted(docker_runtime.REQUIRED_DOCKERIGNORE_PATTERNS - required_secret_patterns))
+        "\n".join(sorted(docker_runtime.REQUIRED_DOCKERIGNORE_PATTERNS - required_credential_patterns))
         + "\n",
         encoding="utf-8",
     )
@@ -2890,11 +2898,28 @@ def test_app_dockerignore_static_contract_requires_secret_patterns(tmp_path: Pat
         for finding in findings
         if finding.code == "APP_DOCKERIGNORE_PATTERN_MISSING"
     }
-    assert required_secret_patterns <= missing
+    assert required_credential_patterns <= missing
 
 
 def test_entrypoint_requires_service_role_under_require_flag() -> None:
     completed = _run_entrypoint(["true"], {"NHMS_REQUIRE_SERVICE_ROLE": "true"})
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_REQUIRED" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"NHMS_AUTH_MODE": "production "},
+        {"AUTH_BACKEND": "oidc "},
+        {"NHMS_REQUIRE_SERVICE_ROLE": " true "},
+    ],
+)
+def test_entrypoint_trims_production_like_role_gate_env_before_requiring_role(
+    env: dict[str, str],
+) -> None:
+    completed = _run_entrypoint(["true"], env)
 
     assert completed.returncode != 0
     assert "SERVICE_ROLE_REQUIRED" in completed.stderr
@@ -2951,6 +2976,20 @@ def test_entrypoint_rejects_display_forbidden_env_contract(env_key: str, value: 
             "NHMS_REQUIRE_SERVICE_ROLE": "true",
             "NHMS_SERVICE_ROLE": "display_readonly",
             env_key: value,
+        },
+    )
+
+    assert completed.returncode != 0
+    assert "DISPLAY_BOUNDARY_CONFIG_UNSAFE" in completed.stderr
+
+
+def test_entrypoint_trims_display_readonly_role_before_boundary_validation() -> None:
+    completed = _run_entrypoint(
+        ["true"],
+        {
+            "NHMS_REQUIRE_SERVICE_ROLE": " true ",
+            "NHMS_SERVICE_ROLE": " display_readonly ",
+            "WORKSPACE_ROOT": "/workspace",
         },
     )
 

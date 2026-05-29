@@ -1,6 +1,10 @@
 .git
 .env
 .env.*
+.npmrc
+.pypirc
+.netrc
+pip.conf
 id_rsa
 id_rsa*
 id_ed25519
@@ -12,6 +16,10 @@ id_ed25519*
 secrets
 **/.env
 **/.env.*
+**/.npmrc
+**/.pypirc
+**/.netrc
+**/pip.conf
 **/id_rsa
 **/id_rsa*
 **/id_ed25519
