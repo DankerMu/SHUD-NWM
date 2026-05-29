@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +22,13 @@ import yaml
 CHANGE_ID = "m22-two-node-docker-readonly-display"
 DEFAULT_STATIC_REPORT = Path("artifacts/stage-change") / CHANGE_ID / "static-compose-env-check.json"
 DEFAULT_PREFLIGHT_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-preflight"
+DEFAULT_DOCKER_SMOKE_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-smoke"
+DEFAULT_APP_DOCKERFILE = Path("infra/docker/Dockerfile.app")
+DEFAULT_APP_ENTRYPOINT = Path("infra/docker/entrypoint.sh")
+DEFAULT_DOCKERIGNORE = Path(".dockerignore")
+DEFAULT_SMOKE_IMAGE = "nhms-app:m22-09-smoke"
 DEFAULT_MIN_FREE_GB = 5.0
+MAX_COMMAND_OUTPUT_BYTES = 16_384
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _VAR_PATTERN = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])([^}]*))?\}")
@@ -301,6 +308,99 @@ API_SERVICE_COMMAND = (
     "8000",
 )
 COMPUTE_SCHEDULER_COMMAND = ("uv", "run", "nhms-pipeline", "plan-production", "--plan")
+COMPUTE_SCHEDULER_HELP_COMMAND = ("uv", "run", "nhms-pipeline", "plan-production", "--help")
+DISPLAY_LOCALHOST_PROBE_SCRIPT = r"""
+import json
+import time
+import urllib.error
+import urllib.request
+
+def wait_health() -> None:
+    last_error = None
+    for _ in range(40):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=1) as response:
+                if response.status == 200:
+                    return
+                last_error = f"unexpected health status {response.status}"
+        except Exception as error:
+            last_error = str(error)
+        time.sleep(0.25)
+    raise SystemExit(f"display API health check did not become ready: {last_error}")
+
+wait_health()
+with urllib.request.urlopen("http://127.0.0.1:8000/", timeout=2) as response:
+    if response.status != 200:
+        raise SystemExit(f"frontend fallback returned unexpected status {response.status}")
+with urllib.request.urlopen("http://127.0.0.1:8000/api/v1/runtime/config", timeout=2) as response:
+    payload = json.load(response)
+data = payload.get("data", {})
+if data.get("service_role") != "display_readonly":
+    raise SystemExit("runtime config did not report display_readonly")
+if data.get("display_readonly") is not True:
+    raise SystemExit("runtime config display_readonly flag was not true")
+if data.get("slurm_routes_enabled") is not False:
+    raise SystemExit("runtime config slurm_routes_enabled was not false")
+try:
+    urllib.request.urlopen("http://127.0.0.1:8000/api/v1/slurm/health", timeout=2)
+except urllib.error.HTTPError as error:
+    if error.code == 404:
+        raise SystemExit(0)
+    raise
+raise SystemExit("display_readonly unexpectedly served /api/v1/slurm/health")
+"""
+APP_IMAGE_FORBIDDEN_BINARIES = (
+    "sbatch",
+    "scancel",
+    "squeue",
+    "srun",
+    "sacct",
+    "sinfo",
+    "scontrol",
+    "munge",
+    "unmunge",
+)
+APP_IMAGE_FORBIDDEN_PATHS = ("/etc/slurm", "/run/munge", "/etc/munge", "/var/run/munge")
+REQUIRED_DOCKERIGNORE_PATTERNS = frozenset(
+    {
+        ".venv",
+        "apps/frontend/node_modules",
+        "artifacts",
+        "SHUD",
+        "rSHUD",
+        "AutoSHUD",
+        ".env",
+        ".env.*",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        "pip.conf",
+        "id_rsa",
+        "id_rsa*",
+        "id_ed25519",
+        "id_ed25519*",
+        "*.pem",
+        "*.key",
+        ".aws",
+        ".ssh",
+        "secrets",
+        "**/.env",
+        "**/.env.*",
+        "**/.npmrc",
+        "**/.pypirc",
+        "**/.netrc",
+        "**/pip.conf",
+        "**/id_rsa",
+        "**/id_rsa*",
+        "**/id_ed25519",
+        "**/id_ed25519*",
+        "**/*.pem",
+        "**/*.key",
+        "**/.aws",
+        "**/.ssh",
+        "**/secrets",
+    }
+)
 _NO_FIELD_CONTRACT = object()
 _FIELD_MUST_BE_ABSENT = object()
 
@@ -418,12 +518,45 @@ class CommandResult:
     stderr: str
 
     def to_dict(self) -> dict[str, Any]:
+        stdout = _bounded_command_output(self.stdout)
+        stderr = _bounded_command_output(self.stderr)
         return {
             "args": list(self.args),
             "returncode": self.returncode,
-            "stdout": self.stdout,
-            "stderr": self.stderr,
+            "stdout": stdout["text"],
+            "stderr": stderr["text"],
+            "output_truncation": {
+                "max_bytes_per_stream": MAX_COMMAND_OUTPUT_BYTES,
+                "stdout": {
+                    "original_bytes": stdout["original_bytes"],
+                    "stored_bytes": stdout["stored_bytes"],
+                    "truncated": stdout["truncated"],
+                },
+                "stderr": {
+                    "original_bytes": stderr["original_bytes"],
+                    "stored_bytes": stderr["stored_bytes"],
+                    "truncated": stderr["truncated"],
+                },
+            },
         }
+
+
+def _bounded_command_output(value: str) -> dict[str, Any]:
+    raw = value.encode("utf-8", errors="replace")
+    if len(raw) <= MAX_COMMAND_OUTPUT_BYTES:
+        return {
+            "text": value,
+            "original_bytes": len(raw),
+            "stored_bytes": len(raw),
+            "truncated": False,
+        }
+    bounded = raw[:MAX_COMMAND_OUTPUT_BYTES].decode("utf-8", errors="ignore")
+    return {
+        "text": bounded,
+        "original_bytes": len(raw),
+        "stored_bytes": len(bounded.encode("utf-8", errors="replace")),
+        "truncated": True,
+    }
 
 
 @dataclass(frozen=True)
@@ -438,6 +571,13 @@ class DiskSpace:
 
 @dataclass(frozen=True)
 class PreflightResult:
+    status: str
+    evidence_path: Path
+    blockers: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class DockerSmokeResult:
     status: str
     evidence_path: Path
     blockers: tuple[dict[str, Any], ...]
@@ -478,6 +618,9 @@ def run_static_check(
     compute_env: Path,
     display_env: Path,
     repo_root: Path,
+    app_dockerfile: Path = DEFAULT_APP_DOCKERFILE,
+    app_entrypoint: Path = DEFAULT_APP_ENTRYPOINT,
+    dockerignore: Path = DEFAULT_DOCKERIGNORE,
 ) -> StaticCheckResult:
     repo_root = repo_root.resolve()
     compute_compose = _resolve_path(compute_compose, repo_root)
@@ -488,6 +631,14 @@ def run_static_check(
     findings: list[Finding] = []
     findings.extend(_dev_compose_findings(compute_compose, repo_root, role="compute"))
     findings.extend(_dev_compose_findings(display_compose, repo_root, role="display"))
+    findings.extend(
+        _validate_app_docker_assets(
+            repo_root=repo_root,
+            dockerfile=app_dockerfile,
+            entrypoint=app_entrypoint,
+            dockerignore=dockerignore,
+        )
+    )
 
     try:
         compute_env_map = parse_env_file(compute_env)
@@ -628,6 +779,197 @@ def write_static_report(result: StaticCheckResult, report_path: Path, repo_root:
     return report_path
 
 
+def run_docker_smoke(
+    *,
+    evidence_root: Path,
+    repo_root: Path,
+    image_tag: str = DEFAULT_SMOKE_IMAGE,
+    dockerfile: Path = DEFAULT_APP_DOCKERFILE,
+    min_free_bytes: int = int(DEFAULT_MIN_FREE_GB * 1024**3),
+    command_runner: Callable[[Sequence[str]], CommandResult] | None = None,
+    disk_usage_provider: Callable[[Path], DiskSpace] | None = None,
+) -> DockerSmokeResult:
+    repo_root = repo_root.resolve()
+    evidence_root = ensure_approved_evidence_root(evidence_root, repo_root)
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    evidence_path = evidence_root / "docker-smoke.json"
+    preflight_runner = command_runner or _run_command
+    runner = command_runner or _run_docker_smoke_command
+    blockers: list[dict[str, Any]] = []
+    commands: dict[str, CommandResult] = {}
+
+    preflight_root = evidence_root / "preflight"
+    preflight = run_preflight(
+        evidence_root=preflight_root,
+        repo_root=repo_root,
+        min_free_bytes=min_free_bytes,
+        command_runner=preflight_runner,
+        disk_usage_provider=disk_usage_provider,
+    )
+    if preflight.status != "PASS":
+        blockers.append(
+            {
+                "code": "DOCKER_PREFLIGHT_BLOCKED",
+                "preflight_evidence_path": str(preflight.evidence_path),
+                "blockers": list(preflight.blockers),
+            }
+        )
+        payload = _docker_smoke_payload(
+            status="BLOCKED",
+            evidence_root=evidence_root,
+            repo_root=repo_root,
+            image_tag=image_tag,
+            dockerfile=dockerfile,
+            commands=commands,
+            blockers=blockers,
+            preflight=preflight,
+        )
+        _write_json_atomic_replace(evidence_path, payload)
+        return DockerSmokeResult(status="BLOCKED", evidence_path=evidence_path, blockers=tuple(blockers))
+
+    dockerfile_path = _resolve_path(dockerfile, repo_root)
+    build_command = ("docker", "build", "-f", str(dockerfile_path), "-t", image_tag, str(repo_root))
+    run_checks_command = (
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "/bin/sh",
+        image_tag,
+        "-c",
+        _image_absence_probe_script(),
+    )
+    display_reject_command = (
+        "docker",
+        "run",
+        "--rm",
+        "-e",
+        "NHMS_REQUIRE_SERVICE_ROLE=true",
+        "-e",
+        "NHMS_SERVICE_ROLE=display_readonly",
+        "-e",
+        "WORKSPACE_ROOT=/workspace",
+        image_tag,
+        "true",
+    )
+    slurm_gateway_reject_command = (
+        "docker",
+        "run",
+        "--rm",
+        "-e",
+        "NHMS_REQUIRE_SERVICE_ROLE=true",
+        "-e",
+        "NHMS_SERVICE_ROLE=slurm_gateway",
+        image_tag,
+        "true",
+    )
+    compute_scheduler_command = (
+        "docker",
+        "run",
+        "--rm",
+        "-e",
+        "NHMS_REQUIRE_SERVICE_ROLE=true",
+        "-e",
+        "NHMS_SERVICE_ROLE=compute_control",
+        image_tag,
+        *COMPUTE_SCHEDULER_HELP_COMMAND,
+    )
+    display_scheduler_reject_command = (
+        "docker",
+        "run",
+        "--rm",
+        "-e",
+        "NHMS_REQUIRE_SERVICE_ROLE=true",
+        "-e",
+        "NHMS_SERVICE_ROLE=display_readonly",
+        image_tag,
+        *COMPUTE_SCHEDULER_COMMAND,
+    )
+
+    preflight_payload = json.loads(preflight.evidence_path.read_text(encoding="utf-8"))
+    with _temporary_tmpdir_env(Path(preflight_payload["tmpdir"])):
+        commands["docker_build"] = runner(build_command)
+        if commands["docker_build"].returncode != 0:
+            blockers.append(
+                {
+                    "code": _docker_build_failure_code(commands["docker_build"]),
+                    "command": list(build_command),
+                    "returncode": commands["docker_build"].returncode,
+                }
+            )
+        else:
+            commands["image_inspect"] = runner(("docker", "image", "inspect", image_tag))
+            if commands["image_inspect"].returncode == 0:
+                commands["image_absence_probe"] = runner(run_checks_command)
+                commands["display_compute_env_reject"] = runner(display_reject_command)
+                commands["slurm_gateway_reject"] = runner(slurm_gateway_reject_command)
+                commands["compute_scheduler_command"] = runner(compute_scheduler_command)
+                commands["display_scheduler_reject"] = runner(display_scheduler_reject_command)
+                commands.update(_run_display_startup_probe(runner, image_tag=image_tag))
+            blockers.extend(_docker_smoke_command_blockers(commands))
+
+    status = _docker_smoke_status(blockers)
+    payload = _docker_smoke_payload(
+        status=status,
+        evidence_root=evidence_root,
+        repo_root=repo_root,
+        image_tag=image_tag,
+        dockerfile=dockerfile,
+        commands=commands,
+        blockers=blockers,
+        preflight=preflight,
+    )
+    _write_json_atomic_replace(evidence_path, payload)
+    return DockerSmokeResult(status=status, evidence_path=evidence_path, blockers=tuple(blockers))
+
+
+def _run_display_startup_probe(
+    runner: Callable[[Sequence[str]], CommandResult],
+    *,
+    image_tag: str,
+) -> dict[str, CommandResult]:
+    container_name = f"nhms-display-smoke-{uuid.uuid4().hex[:12]}"
+    commands: dict[str, CommandResult] = {}
+    start_command = (
+        "docker",
+        "run",
+        "--rm",
+        "-d",
+        "--name",
+        container_name,
+        "-e",
+        "NHMS_REQUIRE_SERVICE_ROLE=true",
+        "-e",
+        "NHMS_SERVICE_ROLE=display_readonly",
+        "-e",
+        "NHMS_AUTH_MODE=production",
+        "-e",
+        "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true",
+        "-e",
+        "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false",
+        image_tag,
+    )
+    probe_command = (
+        "docker",
+        "exec",
+        container_name,
+        "uv",
+        "run",
+        "python",
+        "-c",
+        DISPLAY_LOCALHOST_PROBE_SCRIPT,
+    )
+    logs_command = ("docker", "logs", container_name)
+    cleanup_command = ("docker", "rm", "-f", container_name)
+
+    commands["display_startup_start"] = runner(start_command)
+    if commands["display_startup_start"].returncode == 0:
+        commands["display_startup_probe"] = runner(probe_command)
+        commands["display_startup_logs"] = runner(logs_command)
+    commands["display_startup_cleanup"] = runner(cleanup_command)
+    return commands
+
+
 def _write_json_atomic_replace(path: Path, payload: Mapping[str, Any]) -> None:
     temp_path: Path | None = None
     try:
@@ -731,6 +1073,169 @@ def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list
                     )
                 )
     return findings
+
+
+def _validate_app_docker_assets(
+    *,
+    repo_root: Path,
+    dockerfile: Path,
+    entrypoint: Path,
+    dockerignore: Path,
+) -> list[Finding]:
+    dockerfile_path = _resolve_path(dockerfile, repo_root)
+    entrypoint_path = _resolve_path(entrypoint, repo_root)
+    dockerignore_path = _resolve_path(dockerignore, repo_root)
+    findings: list[Finding] = []
+
+    if not dockerfile_path.is_file():
+        findings.append(
+            Finding(
+                "APP_DOCKERFILE_MISSING",
+                "default app image Dockerfile must exist.",
+                path=str(dockerfile_path),
+            )
+        )
+        return findings
+
+    if not entrypoint_path.is_file():
+        findings.append(
+            Finding(
+                "APP_ENTRYPOINT_MISSING",
+                "role-aware app entrypoint must exist.",
+                path=str(entrypoint_path),
+            )
+        )
+    elif not os.access(entrypoint_path, os.X_OK):
+        findings.append(
+            Finding(
+                "APP_ENTRYPOINT_NOT_EXECUTABLE",
+                "role-aware app entrypoint must be executable.",
+                path=str(entrypoint_path),
+            )
+        )
+
+    dockerfile_text = dockerfile_path.read_text(encoding="utf-8")
+    if "infra/docker/entrypoint.sh" not in dockerfile_text or "ENTRYPOINT" not in dockerfile_text:
+        findings.append(
+            Finding(
+                "APP_DOCKERFILE_ENTRYPOINT_MISSING",
+                "Dockerfile.app must install infra/docker/entrypoint.sh as the image entrypoint.",
+                path=str(dockerfile_path),
+            )
+        )
+    if "apps/frontend/dist" not in dockerfile_text:
+        findings.append(
+            Finding(
+                "APP_DOCKERFILE_FRONTEND_DIST_MISSING",
+                "Dockerfile.app must build and copy frontend static assets to apps/frontend/dist.",
+                path=str(dockerfile_path),
+            )
+        )
+    for required_lock in ("uv.lock", "pyproject.toml", "pnpm-lock.yaml", "package.json"):
+        if required_lock not in dockerfile_text:
+            findings.append(
+                Finding(
+                    "APP_DOCKERFILE_LOCK_METADATA_MISSING",
+                    "Dockerfile.app must use repository lock/project metadata.",
+                    path=str(dockerfile_path),
+                    details={"required": required_lock},
+                )
+            )
+    if re.search(r"\b(?:slurm(?:-[A-Za-z0-9_.+-]+)?|munge)\b", dockerfile_text, flags=re.IGNORECASE):
+        findings.append(
+            Finding(
+                "APP_DOCKERFILE_FORBIDDEN_SLURM_MUNGE_INSTALL",
+                "default app image must not install Slurm client or Munge.",
+                path=str(dockerfile_path),
+            )
+        )
+
+    if entrypoint_path.is_file():
+        findings.extend(_validate_app_entrypoint(entrypoint_path))
+
+    if not dockerignore_path.is_file():
+        findings.append(
+            Finding(
+                "APP_DOCKERIGNORE_MISSING",
+                ".dockerignore must bound Docker build context and local artifacts for the default app image.",
+                path=str(dockerignore_path),
+            )
+        )
+    else:
+        dockerignore_lines = _dockerignore_patterns(dockerignore_path)
+        for required_pattern in sorted(REQUIRED_DOCKERIGNORE_PATTERNS):
+            if required_pattern not in dockerignore_lines:
+                findings.append(
+                    Finding(
+                        "APP_DOCKERIGNORE_PATTERN_MISSING",
+                        ".dockerignore is missing a required context-bounding pattern.",
+                        path=str(dockerignore_path),
+                        details={"required": required_pattern},
+                    )
+                )
+    return findings
+
+
+def _validate_app_entrypoint(path: Path) -> list[Finding]:
+    text = path.read_text(encoding="utf-8")
+    findings: list[Finding] = []
+    required_tokens = (
+        "NHMS_REQUIRE_SERVICE_ROLE",
+        "NHMS_SERVICE_ROLE",
+        "display_readonly",
+        "compute_control",
+        "dev_monolith",
+        "slurm_gateway",
+        "SERVICE_ROLE_RESERVED",
+        "DISPLAY_BOUNDARY_CONFIG_UNSAFE",
+        "DISPLAY_COMMAND_FORBIDDEN",
+        "uv run nhms-pipeline plan-production --plan",
+        "apps.api.main:app",
+    )
+    for token in required_tokens:
+        if token not in text:
+            findings.append(
+                Finding(
+                    "APP_ENTRYPOINT_ROLE_CONTRACT_MISSING",
+                    "entrypoint.sh is missing required role-aware startup contract text.",
+                    path=str(path),
+                    details={"required": token},
+                )
+            )
+    for key in sorted(DISPLAY_FORBIDDEN_ENV_KEYS):
+        if key == "SLURM_GATEWAY_BACKEND":
+            expected = "SLURM_GATEWAY_BACKEND"
+        else:
+            expected = key
+        if expected not in text:
+            findings.append(
+                Finding(
+                    "APP_ENTRYPOINT_DISPLAY_FORBIDDEN_ENV_MISSING",
+                    "entrypoint.sh must reject display startup with every display-forbidden env key.",
+                    path=str(path),
+                    details={"key": key},
+                )
+            )
+    for binary in APP_IMAGE_FORBIDDEN_BINARIES:
+        if binary not in text:
+            findings.append(
+                Finding(
+                    "APP_ENTRYPOINT_DISPLAY_FORBIDDEN_COMMAND_MISSING",
+                    "entrypoint.sh must reject display compute-control command overrides.",
+                    path=str(path),
+                    details={"command": binary},
+                )
+            )
+    return findings
+
+
+def _dockerignore_patterns(path: Path) -> set[str]:
+    patterns: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line and not line.startswith("#"):
+            patterns.add(line.rstrip("/"))
+    return patterns
 
 
 def _validate_compute_compose(path: Path, compose: Mapping[str, Any], env: Mapping[str, str]) -> list[Finding]:
@@ -2023,6 +2528,178 @@ def _docker_command_blockers(commands: Mapping[str, CommandResult], *, docker_ro
     return blockers
 
 
+def _docker_smoke_payload(
+    *,
+    status: str,
+    evidence_root: Path,
+    repo_root: Path,
+    image_tag: str,
+    dockerfile: Path,
+    commands: Mapping[str, CommandResult],
+    blockers: Sequence[Mapping[str, Any]],
+    preflight: PreflightResult,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "nhms.two_node_docker.app_smoke.v1",
+        "change_id": CHANGE_ID,
+        "status": status,
+        "checked_at": _now_iso(),
+        "evidence_root": str(evidence_root),
+        "repo_root": str(repo_root),
+        "image_tag": image_tag,
+        "dockerfile": str(_resolve_path(dockerfile, repo_root)),
+        "preflight_evidence_path": str(preflight.evidence_path),
+        "commands": {name: result.to_dict() for name, result in commands.items()},
+        "expected_absent_binaries": list(APP_IMAGE_FORBIDDEN_BINARIES),
+        "expected_absent_paths": list(APP_IMAGE_FORBIDDEN_PATHS),
+        "blockers": list(blockers),
+    }
+
+
+def _docker_smoke_command_blockers(commands: Mapping[str, CommandResult]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    image_inspect = commands.get("image_inspect")
+    if image_inspect is None:
+        blockers.append(
+            {
+                "code": "IMAGE_INSPECT_MISSING",
+                "probe": "image_inspect",
+            }
+        )
+        return blockers
+    if image_inspect.returncode != 0:
+        blockers.append(
+            {
+                "code": "IMAGE_INSPECT_FAILED",
+                "command": list(image_inspect.args),
+                "returncode": image_inspect.returncode,
+            }
+        )
+        return blockers
+
+    zero_exit_checks = {
+        "image_absence_probe": "APP_IMAGE_FORBIDDEN_CAPABILITY_PRESENT",
+        "compute_scheduler_command": "COMPUTE_SCHEDULER_HELP_FAILED",
+        "display_startup_start": "DISPLAY_STARTUP_FAILED",
+        "display_startup_probe": "DISPLAY_STARTUP_PROBE_FAILED",
+    }
+    for name, code in zero_exit_checks.items():
+        result = commands.get(name)
+        if result is None:
+            blockers.append(
+                {
+                    "code": f"{code}_MISSING",
+                    "probe": name,
+                }
+            )
+            continue
+        if result.returncode != 0:
+            blockers.append(
+                {
+                    "code": code,
+                    "command": list(result.args),
+                    "returncode": result.returncode,
+                }
+            )
+    display_startup_start = commands.get("display_startup_start")
+    if display_startup_start is not None and display_startup_start.returncode == 0:
+        display_startup_cleanup = commands.get("display_startup_cleanup")
+        if display_startup_cleanup is None:
+            blockers.append(
+                {
+                    "code": "DISPLAY_STARTUP_CLEANUP_MISSING",
+                    "probe": "display_startup_cleanup",
+                }
+            )
+        elif display_startup_cleanup.returncode != 0:
+            blockers.append(
+                {
+                    "code": "DISPLAY_STARTUP_CLEANUP_FAILED",
+                    "command": list(display_startup_cleanup.args),
+                    "returncode": display_startup_cleanup.returncode,
+                }
+            )
+    expected_rejections = {
+        "display_compute_env_reject": "DISPLAY_BOUNDARY_CONFIG_UNSAFE",
+        "slurm_gateway_reject": "SERVICE_ROLE_RESERVED",
+        "display_scheduler_reject": "DISPLAY_COMMAND_FORBIDDEN",
+    }
+    for name, expected_code in expected_rejections.items():
+        result = commands.get(name)
+        if result is None:
+            blockers.append(
+                {
+                    "code": f"{expected_code}_PROBE_MISSING",
+                    "probe": name,
+                    "expected_stderr_code": expected_code,
+                }
+            )
+            continue
+        combined = result.stdout + result.stderr
+        if result.returncode == 0 or expected_code not in combined:
+            blockers.append(
+                {
+                    "code": f"{expected_code}_NOT_ENFORCED",
+                    "command": list(result.args),
+                    "returncode": result.returncode,
+                    "expected_stderr_code": expected_code,
+                }
+            )
+    return blockers
+
+
+def _docker_build_failure_code(result: CommandResult) -> str:
+    combined = f"{result.stdout}\n{result.stderr}".lower()
+    blocked_markers = (
+        "client.timeout",
+        "request canceled",
+        "connection timed out",
+        "temporary failure in name resolution",
+        "no route to host",
+        "network is unreachable",
+        "tls handshake timeout",
+        "proxyconnect",
+        "registry-1.docker.io",
+        "failed to resolve source metadata",
+        "error getting credentials",
+    )
+    if any(marker in combined for marker in blocked_markers):
+        return "DOCKER_BUILD_BLOCKED"
+    return "DOCKER_BUILD_FAILED"
+
+
+def _docker_smoke_status(blockers: Sequence[Mapping[str, Any]]) -> str:
+    if not blockers:
+        return "PASS"
+    blocked_codes = {"DOCKER_PREFLIGHT_BLOCKED", "DOCKER_BUILD_BLOCKED"}
+    codes = {str(blocker.get("code", "")) for blocker in blockers}
+    if codes and codes <= blocked_codes:
+        return "BLOCKED"
+    return "FAIL"
+
+
+def _image_absence_probe_script() -> str:
+    binaries = " ".join(APP_IMAGE_FORBIDDEN_BINARIES)
+    paths = " ".join(APP_IMAGE_FORBIDDEN_PATHS)
+    return "\n".join(
+        [
+            "set -eu",
+            f"for binary in {binaries}; do",
+            "  if command -v \"$binary\" >/dev/null 2>&1; then",
+            "    echo \"forbidden binary present: $binary\" >&2",
+            "    exit 1",
+            "  fi",
+            "done",
+            f"for path in {paths}; do",
+            "  if [ -e \"$path\" ]; then",
+            "    echo \"forbidden path present: $path\" >&2",
+            "    exit 1",
+            "  fi",
+            "done",
+        ]
+    )
+
+
 def _dev_compose_findings(path: Path, repo_root: Path, *, role: str) -> list[Finding]:
     dev_compose = (repo_root / "infra" / "docker-compose.dev.yml").resolve()
     if path.resolve() != dev_compose:
@@ -3155,8 +3832,18 @@ def _port_is_loopback(port: Any) -> bool:
 
 
 def _run_command(args: Sequence[str]) -> CommandResult:
+    return _run_command_with_timeout(args, timeout_seconds=60)
+
+
+def _run_docker_smoke_command(args: Sequence[str]) -> CommandResult:
+    command = tuple(args)
+    timeout_seconds = 1800 if command[:2] == ("docker", "build") else 120
+    return _run_command_with_timeout(args, timeout_seconds=timeout_seconds)
+
+
+def _run_command_with_timeout(args: Sequence[str], *, timeout_seconds: int) -> CommandResult:
     try:
-        completed = subprocess.run(args, capture_output=True, text=True, timeout=60, check=False)
+        completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout_seconds, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         return CommandResult(tuple(args), 127, "", str(error))
     return CommandResult(tuple(args), completed.returncode, completed.stdout, completed.stderr)
@@ -3257,6 +3944,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     preflight_parser = subparsers.add_parser("preflight", help="Record Docker disk/cache preflight evidence.")
     preflight_parser.add_argument("--evidence-root", type=Path, default=DEFAULT_PREFLIGHT_ROOT)
     preflight_parser.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
+
+    smoke_parser = subparsers.add_parser("smoke", help="Build and smoke-test the default app Docker image.")
+    smoke_parser.add_argument("--evidence-root", type=Path, default=DEFAULT_DOCKER_SMOKE_ROOT)
+    smoke_parser.add_argument("--image-tag", default=DEFAULT_SMOKE_IMAGE)
+    smoke_parser.add_argument("--dockerfile", type=Path, default=DEFAULT_APP_DOCKERFILE)
+    smoke_parser.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
     return parser.parse_args(argv)
 
 
@@ -3322,6 +4015,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps({"status": result.status, "evidence_path": str(result.evidence_path)}, sort_keys=True))
             return 0 if result.status == "PASS" else 3
+        if args.command == "smoke":
+            result = run_docker_smoke(
+                evidence_root=args.evidence_root,
+                repo_root=repo_root,
+                image_tag=args.image_tag,
+                dockerfile=args.dockerfile,
+                min_free_bytes=int(args.min_free_gb * 1024**3),
+            )
+            print(json.dumps({"status": result.status, "evidence_path": str(result.evidence_path)}, sort_keys=True))
+            if result.status == "PASS":
+                return 0
+            if result.status == "BLOCKED":
+                return 3
+            return 1
     except ValueError as error:
         print(
             json.dumps({"status": "FAIL", "error": _redact_static_output_text(str(error))}, sort_keys=True),

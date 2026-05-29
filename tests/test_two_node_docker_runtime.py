@@ -2818,6 +2818,544 @@ def test_preflight_replaces_output_symlink_without_writing_target(
     assert json.loads(evidence_path.read_text(encoding="utf-8"))["status"] == "PASS"
 
 
+def test_app_docker_assets_static_contract_accepts_default_files() -> None:
+    findings = docker_runtime._validate_app_docker_assets(
+        repo_root=REPO_ROOT,
+        dockerfile=Path("infra/docker/Dockerfile.app"),
+        entrypoint=Path("infra/docker/entrypoint.sh"),
+        dockerignore=Path(".dockerignore"),
+    )
+
+    assert findings == []
+
+
+def test_app_dockerfile_static_contract_rejects_slurm_or_munge_install(tmp_path: Path) -> None:
+    dockerfile = tmp_path / "Dockerfile.app"
+    dockerfile.write_text(
+        """
+FROM python:3.12-slim-bookworm
+COPY pyproject.toml uv.lock apps/frontend/package.json apps/frontend/pnpm-lock.yaml ./
+RUN apt-get update && apt-get install -y slurm-client munge
+COPY apps/frontend/dist apps/frontend/dist
+COPY infra/docker/entrypoint.sh infra/docker/entrypoint.sh
+ENTRYPOINT ["infra/docker/entrypoint.sh"]
+""",
+        encoding="utf-8",
+    )
+
+    findings = docker_runtime._validate_app_docker_assets(
+        repo_root=REPO_ROOT,
+        dockerfile=dockerfile,
+        entrypoint=Path("infra/docker/entrypoint.sh"),
+        dockerignore=Path(".dockerignore"),
+    )
+
+    assert "APP_DOCKERFILE_FORBIDDEN_SLURM_MUNGE_INSTALL" in {finding.code for finding in findings}
+
+
+def test_app_dockerignore_static_contract_requires_credential_patterns(tmp_path: Path) -> None:
+    dockerignore = tmp_path / ".dockerignore"
+    required_credential_patterns = {
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        "pip.conf",
+        "id_rsa",
+        "id_rsa*",
+        "id_ed25519",
+        "id_ed25519*",
+        "**/.env",
+        "**/.env.*",
+        "**/.npmrc",
+        "**/.pypirc",
+        "**/.netrc",
+        "**/pip.conf",
+        "**/id_rsa",
+        "**/id_rsa*",
+        "**/id_ed25519",
+        "**/id_ed25519*",
+        "**/*.pem",
+        "**/*.key",
+        "**/.aws",
+        "**/.ssh",
+        "**/secrets",
+    }
+    dockerignore.write_text(
+        "\n".join(sorted(docker_runtime.REQUIRED_DOCKERIGNORE_PATTERNS - required_credential_patterns))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    findings = docker_runtime._validate_app_docker_assets(
+        repo_root=REPO_ROOT,
+        dockerfile=Path("infra/docker/Dockerfile.app"),
+        entrypoint=Path("infra/docker/entrypoint.sh"),
+        dockerignore=dockerignore,
+    )
+
+    missing = {
+        finding.details["required"]
+        for finding in findings
+        if finding.code == "APP_DOCKERIGNORE_PATTERN_MISSING"
+    }
+    assert required_credential_patterns <= missing
+
+
+def test_entrypoint_requires_service_role_under_require_flag() -> None:
+    completed = _run_entrypoint(["true"], {"NHMS_REQUIRE_SERVICE_ROLE": "true"})
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_REQUIRED" in completed.stderr
+
+
+def test_entrypoint_allows_unset_require_service_role_for_local_default() -> None:
+    completed = _run_entrypoint(["true"], {})
+
+    assert completed.returncode == 0
+    assert "nhms-entrypoint[" not in completed.stderr
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_entrypoint_rejects_explicit_empty_require_service_role_flag(value: str) -> None:
+    completed = _run_entrypoint(["true"], {"NHMS_REQUIRE_SERVICE_ROLE": value})
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_REQUIRE_FLAG_INVALID" in completed.stderr
+
+
+def test_entrypoint_allows_whitespace_padded_false_require_service_role_flag() -> None:
+    completed = _run_entrypoint(["true"], {"NHMS_REQUIRE_SERVICE_ROLE": " false "})
+
+    assert completed.returncode == 0
+    assert "nhms-entrypoint[" not in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"NHMS_AUTH_MODE": "production "},
+        {"AUTH_BACKEND": "oidc "},
+        {"NHMS_REQUIRE_SERVICE_ROLE": " true "},
+    ],
+)
+def test_entrypoint_trims_production_like_role_gate_env_before_requiring_role(
+    env: dict[str, str],
+) -> None:
+    completed = _run_entrypoint(["true"], env)
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_REQUIRED" in completed.stderr
+
+
+def test_entrypoint_rejects_invalid_require_service_role_flag() -> None:
+    completed = _run_entrypoint(["true"], {"NHMS_REQUIRE_SERVICE_ROLE": "ture"})
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_REQUIRE_FLAG_INVALID" in completed.stderr
+
+
+def test_entrypoint_rejects_unsupported_service_role() -> None:
+    completed = _run_entrypoint(["true"], {"NHMS_SERVICE_ROLE": "control"})
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_UNSUPPORTED" in completed.stderr
+
+
+def test_entrypoint_rejects_reserved_slurm_gateway_role() -> None:
+    completed = _run_entrypoint(
+        ["true"],
+        {"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": "slurm_gateway"},
+    )
+
+    assert completed.returncode != 0
+    assert "SERVICE_ROLE_RESERVED" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    ("env_key", "value"),
+    [
+        ("SLURM_GATEWAY_URL", "http://node22.internal:8081"),
+        ("SLURM_GATEWAY_BACKEND", "slurm"),
+        ("SLURM_GATEWAY_BACKEND", "mock"),
+        ("WORKSPACE_ROOT", "/workspace"),
+        ("RUN_WORKSPACE_ROOT", "/workspace/runs"),
+        ("SHARED_LOG_ROOT", "/workspace/logs"),
+        ("OBJECT_STORE_ROOT", "/object-store"),
+        ("NHMS_BASINS_ROOT", "/data/Basins"),
+        ("NHMS_MODEL_ASSET_ROOT", "/data/model-assets"),
+        ("SLURM_GATEWAY_TEMPLATE_DIR", "/app/infra/sbatch"),
+        ("SLURM_GATEWAY_WORKSPACE_DIR", "/workspace/slurm"),
+        ("MUNGE_SOCKET", "/run/munge/munge.socket.2"),
+        ("MUNGE_KEY", "/etc/munge/munge.key"),
+        ("SHUD_EXECUTABLE", "/opt/shud/bin/shud"),
+        ("DOCKER_HOST", "unix:///var/run/docker.sock"),
+    ],
+)
+def test_entrypoint_rejects_display_forbidden_env_contract(env_key: str, value: str) -> None:
+    completed = _run_entrypoint(
+        ["true"],
+        {
+            "NHMS_REQUIRE_SERVICE_ROLE": "true",
+            "NHMS_SERVICE_ROLE": "display_readonly",
+            env_key: value,
+        },
+    )
+
+    assert completed.returncode != 0
+    assert "DISPLAY_BOUNDARY_CONFIG_UNSAFE" in completed.stderr
+
+
+def test_entrypoint_trims_display_readonly_role_before_boundary_validation() -> None:
+    completed = _run_entrypoint(
+        ["true"],
+        {
+            "NHMS_REQUIRE_SERVICE_ROLE": " true ",
+            "NHMS_SERVICE_ROLE": " display_readonly ",
+            "WORKSPACE_ROOT": "/workspace",
+        },
+    )
+
+    assert completed.returncode != 0
+    assert "DISPLAY_BOUNDARY_CONFIG_UNSAFE" in completed.stderr
+
+
+def test_entrypoint_rejects_display_forbidden_env_even_when_value_is_empty() -> None:
+    for env_key in ("SLURM_GATEWAY_URL", "SLURM_GATEWAY_BACKEND", "WORKSPACE_ROOT"):
+        completed = _run_entrypoint(
+            ["true"],
+            {
+                "NHMS_REQUIRE_SERVICE_ROLE": "true",
+                "NHMS_SERVICE_ROLE": "display_readonly",
+                env_key: "",
+            },
+        )
+
+        assert completed.returncode != 0
+        assert "DISPLAY_BOUNDARY_CONFIG_UNSAFE" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["uv", "run", "nhms-pipeline", "plan-production", "--plan"],
+        ["uv", "run", "python", "-m", "services.orchestrator.cli", "plan-production", "--plan"],
+        ["uv", "run", "nhms-gfs", "--help"],
+        ["uv", "run", "nhms-era5", "--help"],
+        ["uv", "run", "nhms-ifs", "--help"],
+        ["uv", "run", "nhms-forcing", "--help"],
+        ["uv", "run", "nhms-shud-runtime", "--help"],
+        ["uv", "run", "nhms-production", "--help"],
+        ["uv", "run", "nhms-state", "--help"],
+        ["uv", "run", "nhms-flood", "--help"],
+        ["uv", "run", "nhms-model", "--help"],
+        ["uv", "run", "nhms-canonical", "--help"],
+        ["uv", "run", "nhms-parse", "--help"],
+        ["uv", "run", "nhms-pipeline", "plan-production", "--source", "gfs"],
+        ["sbatch", "--version"],
+        ["/usr/bin/squeue"],
+        ["scontrol", "show", "config"],
+    ],
+)
+def test_entrypoint_rejects_display_compute_commands(command: list[str]) -> None:
+    completed = _run_entrypoint(
+        command,
+        {"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": "display_readonly"},
+    )
+
+    assert completed.returncode != 0
+    assert "DISPLAY_COMMAND_FORBIDDEN" in completed.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["sh", "-c", "uv run nhms-pipeline plan-production --plan"],
+        ["bash", "-lc", "sbatch --version"],
+        ["bash", "-lc", "uv run nhms'-'pipeline plan-production --plan"],
+    ],
+)
+def test_entrypoint_rejects_display_shell_wrapped_compute_commands(command: list[str]) -> None:
+    completed = _run_entrypoint(
+        command,
+        {"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": "display_readonly"},
+    )
+
+    assert completed.returncode != 0
+    assert "DISPLAY_COMMAND_FORBIDDEN" in completed.stderr
+
+
+def test_entrypoint_rejects_display_env_indirected_compute_command() -> None:
+    completed = _run_entrypoint(
+        ["bash", "-lc", "$NHMS_CMD"],
+        {
+            "NHMS_REQUIRE_SERVICE_ROLE": "true",
+            "NHMS_SERVICE_ROLE": "display_readonly",
+            "NHMS_CMD": "uv run nhms-pipeline plan-production --plan",
+        },
+    )
+
+    assert completed.returncode != 0
+    assert "DISPLAY_COMMAND_FORBIDDEN" in completed.stderr
+
+
+def test_entrypoint_rejects_arbitrary_display_command_override() -> None:
+    completed = _run_entrypoint(
+        ["echo", "unsafe"],
+        {"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": "display_readonly"},
+    )
+
+    assert completed.returncode != 0
+    assert "DISPLAY_COMMAND_FORBIDDEN" in completed.stderr
+
+
+def test_entrypoint_allows_safe_explicit_display_command() -> None:
+    completed = _run_entrypoint(
+        ["true"],
+        {"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": "display_readonly"},
+    )
+
+    assert completed.returncode == 0
+    assert "nhms-entrypoint[" not in completed.stderr
+
+
+def test_docker_smoke_records_blocked_and_replaces_stale_pass_when_preflight_blocks(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "artifacts" / "docker-smoke"
+    evidence_root.mkdir(parents=True)
+    evidence_path = evidence_root / "docker-smoke.json"
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "nhms.two_node_docker.app_smoke.v1",
+                "change_id": docker_runtime.CHANGE_ID,
+                "checked_at": "2000-01-01T00:00:00Z",
+                "status": "PASS",
+                "blockers": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=evidence_root,
+        repo_root=tmp_path,
+        min_free_bytes=1024,
+        command_runner=_docker_unavailable_runner,
+        disk_usage_provider=_high_space,
+    )
+
+    assert result.status == "BLOCKED"
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "BLOCKED"
+    assert payload["checked_at"] != "2000-01-01T00:00:00Z"
+    assert {blocker["code"] for blocker in payload["blockers"]} == {"DOCKER_PREFLIGHT_BLOCKED"}
+
+
+def test_docker_smoke_records_fail_and_replaces_stale_pass_when_build_fails(tmp_path: Path) -> None:
+    evidence_root = tmp_path / "artifacts" / "docker-smoke"
+    evidence_root.mkdir(parents=True)
+    evidence_path = evidence_root / "docker-smoke.json"
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "nhms.two_node_docker.app_smoke.v1",
+                "change_id": docker_runtime.CHANGE_ID,
+                "checked_at": "2000-01-01T00:00:00Z",
+                "status": "PASS",
+                "blockers": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=evidence_root,
+        repo_root=tmp_path,
+        min_free_bytes=100,
+        command_runner=_docker_build_fails_runner,
+        disk_usage_provider=_high_space,
+    )
+
+    assert result.status == "FAIL"
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert payload["checked_at"] != "2000-01-01T00:00:00Z"
+    assert {blocker["code"] for blocker in payload["blockers"]} == {"DOCKER_BUILD_FAILED"}
+
+
+def test_docker_smoke_records_blocked_when_build_is_network_blocked(tmp_path: Path) -> None:
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=tmp_path / "artifacts" / "docker-smoke",
+        repo_root=tmp_path,
+        min_free_bytes=100,
+        command_runner=_docker_build_network_blocked_runner,
+        disk_usage_provider=_high_space,
+    )
+
+    assert result.status == "BLOCKED"
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "BLOCKED"
+    assert {blocker["code"] for blocker in payload["blockers"]} == {"DOCKER_BUILD_BLOCKED"}
+
+
+def test_docker_smoke_passes_with_expected_role_boundary_probe_results(tmp_path: Path) -> None:
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=tmp_path / "artifacts" / "docker-smoke",
+        repo_root=tmp_path,
+        min_free_bytes=100,
+        command_runner=_docker_smoke_success_runner,
+        disk_usage_provider=_high_space,
+    )
+
+    assert result.status == "PASS"
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "PASS"
+    assert set(payload["commands"]) >= {
+        "docker_build",
+        "image_inspect",
+        "image_absence_probe",
+        "display_compute_env_reject",
+        "slurm_gateway_reject",
+        "compute_scheduler_command",
+        "display_scheduler_reject",
+        "display_startup_start",
+        "display_startup_probe",
+        "display_startup_logs",
+        "display_startup_cleanup",
+    }
+    assert payload["commands"]["image_inspect"]["returncode"] == 0
+    assert payload["blockers"] == []
+
+
+@pytest.mark.parametrize(
+    ("probe_name", "expected_code"),
+    [
+        ("image_absence_probe", "APP_IMAGE_FORBIDDEN_CAPABILITY_PRESENT"),
+        ("compute_scheduler_command", "COMPUTE_SCHEDULER_HELP_FAILED"),
+        ("display_startup_start", "DISPLAY_STARTUP_FAILED"),
+        ("display_startup_probe", "DISPLAY_STARTUP_PROBE_FAILED"),
+    ],
+)
+def test_docker_smoke_required_probe_failure_never_passes(
+    tmp_path: Path,
+    probe_name: str,
+    expected_code: str,
+) -> None:
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=tmp_path / "artifacts" / "docker-smoke",
+        repo_root=tmp_path,
+        min_free_bytes=100,
+        command_runner=_docker_smoke_probe_failure_runner(probe_name),
+        disk_usage_provider=_high_space,
+    )
+
+    assert result.status == "FAIL"
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert expected_code in {blocker["code"] for blocker in payload["blockers"]}
+
+
+def test_docker_smoke_image_inspect_failure_never_passes(tmp_path: Path) -> None:
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=tmp_path / "artifacts" / "docker-smoke",
+        repo_root=tmp_path,
+        min_free_bytes=100,
+        command_runner=_docker_image_inspect_failure_runner,
+        disk_usage_provider=_high_space,
+    )
+
+    assert result.status == "FAIL"
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert payload["commands"]["docker_build"]["returncode"] == 0
+    assert payload["commands"]["image_inspect"]["returncode"] != 0
+    assert {blocker["code"] for blocker in payload["blockers"]} == {"IMAGE_INSPECT_FAILED"}
+
+
+def test_docker_smoke_display_startup_cleanup_failure_never_passes(tmp_path: Path) -> None:
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=tmp_path / "artifacts" / "docker-smoke",
+        repo_root=tmp_path,
+        min_free_bytes=100,
+        command_runner=_docker_smoke_cleanup_failure_runner,
+        disk_usage_provider=_high_space,
+    )
+
+    assert result.status == "FAIL"
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert payload["commands"]["display_startup_start"]["returncode"] == 0
+    assert payload["commands"]["display_startup_probe"]["returncode"] == 0
+    assert "DISPLAY_STARTUP_CLEANUP_FAILED" in {blocker["code"] for blocker in payload["blockers"]}
+
+
+def test_docker_smoke_required_probe_missing_never_passes() -> None:
+    commands = {
+        "image_inspect": docker_runtime.CommandResult(("inspect",), 0, "", ""),
+        "image_absence_probe": docker_runtime.CommandResult(("probe",), 0, "", ""),
+        "display_startup_start": docker_runtime.CommandResult(("start",), 0, "", ""),
+        "display_startup_probe": docker_runtime.CommandResult(("display",), 0, "", ""),
+        "display_compute_env_reject": docker_runtime.CommandResult(
+            ("display-env",), 64, "", "nhms-entrypoint[DISPLAY_BOUNDARY_CONFIG_UNSAFE]"
+        ),
+        "slurm_gateway_reject": docker_runtime.CommandResult(
+            ("gateway",), 64, "", "nhms-entrypoint[SERVICE_ROLE_RESERVED]"
+        ),
+        "display_scheduler_reject": docker_runtime.CommandResult(
+            ("scheduler",), 64, "", "nhms-entrypoint[DISPLAY_COMMAND_FORBIDDEN]"
+        ),
+    }
+
+    blockers = docker_runtime._docker_smoke_command_blockers(commands)
+
+    blocker_codes = {blocker["code"] for blocker in blockers}
+    assert "COMPUTE_SCHEDULER_HELP_FAILED_MISSING" in blocker_codes
+    assert "DISPLAY_STARTUP_CLEANUP_MISSING" in blocker_codes
+
+
+def test_docker_smoke_image_inspect_missing_never_passes() -> None:
+    blockers = docker_runtime._docker_smoke_command_blockers({})
+
+    assert {blocker["code"] for blocker in blockers} == {"IMAGE_INSPECT_MISSING"}
+    assert docker_runtime._docker_smoke_status(blockers) == "FAIL"
+
+
+def test_image_absence_probe_rejects_scontrol_only_slurm_cli(tmp_path: Path) -> None:
+    scontrol = tmp_path / "scontrol"
+    scontrol.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    scontrol.chmod(0o755)
+
+    completed = subprocess.run(
+        ["/bin/sh", "-c", docker_runtime._image_absence_probe_script()],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": str(tmp_path)},
+    )
+
+    assert completed.returncode == 1
+    assert completed.stderr == "forbidden binary present: scontrol\n"
+
+
+def test_command_result_bounds_stdout_and_stderr_in_evidence_payload() -> None:
+    result = docker_runtime.CommandResult(
+        ("docker", "logs", "container"),
+        1,
+        "o" * (docker_runtime.MAX_COMMAND_OUTPUT_BYTES + 100),
+        "e" * (docker_runtime.MAX_COMMAND_OUTPUT_BYTES + 200),
+    )
+
+    payload = result.to_dict()
+
+    assert len(payload["stdout"].encode()) <= docker_runtime.MAX_COMMAND_OUTPUT_BYTES
+    assert len(payload["stderr"].encode()) <= docker_runtime.MAX_COMMAND_OUTPUT_BYTES
+    assert payload["output_truncation"]["stdout"]["truncated"] is True
+    assert payload["output_truncation"]["stdout"]["original_bytes"] == docker_runtime.MAX_COMMAND_OUTPUT_BYTES + 100
+    assert payload["output_truncation"]["stderr"]["truncated"] is True
+    assert payload["output_truncation"]["stderr"]["original_bytes"] == docker_runtime.MAX_COMMAND_OUTPUT_BYTES + 200
+
+
 def _safe_display_compose() -> dict[str, Any]:
     return docker_runtime.load_compose(REPO_ROOT / "infra/compose.display.yml")
 
@@ -2894,6 +3432,113 @@ def _docker_available_runner(args: list[str] | tuple[str, ...]) -> docker_runtim
     if command[0] == "df":
         return docker_runtime.CommandResult(command, 0, "Filesystem Size Used Avail Use% Mounted on\n", "")
     return docker_runtime.CommandResult(command, 0, "ok\n", "")
+
+
+def _docker_build_fails_runner(args: list[str] | tuple[str, ...]) -> docker_runtime.CommandResult:
+    command = tuple(args)
+    if command[:3] == ("docker", "build", "-f"):
+        return docker_runtime.CommandResult(command, 1, "", "build failed")
+    return _docker_available_runner(args)
+
+
+def _docker_build_network_blocked_runner(args: list[str] | tuple[str, ...]) -> docker_runtime.CommandResult:
+    command = tuple(args)
+    if command[:3] == ("docker", "build", "-f"):
+        return docker_runtime.CommandResult(
+            command,
+            1,
+            "",
+            "Get \"https://registry-1.docker.io/v2/\": net/http: request canceled while waiting for connection "
+            "(Client.Timeout exceeded while awaiting headers)",
+        )
+    return _docker_available_runner(args)
+
+
+def _docker_smoke_success_runner(args: list[str] | tuple[str, ...]) -> docker_runtime.CommandResult:
+    command = tuple(args)
+    if command[:3] == ("docker", "run", "--rm"):
+        if "NHMS_SERVICE_ROLE=display_readonly" in command and "WORKSPACE_ROOT=/workspace" in command:
+            return docker_runtime.CommandResult(command, 64, "", "nhms-entrypoint[DISPLAY_BOUNDARY_CONFIG_UNSAFE]\n")
+        if "NHMS_SERVICE_ROLE=slurm_gateway" in command:
+            return docker_runtime.CommandResult(command, 64, "", "nhms-entrypoint[SERVICE_ROLE_RESERVED]\n")
+        if "NHMS_SERVICE_ROLE=display_readonly" in command and list(command[-5:]) == [
+            "uv",
+            "run",
+            "nhms-pipeline",
+            "plan-production",
+            "--plan",
+        ]:
+            return docker_runtime.CommandResult(command, 64, "", "nhms-entrypoint[DISPLAY_COMMAND_FORBIDDEN]\n")
+    if command[:2] == ("docker", "exec"):
+        return docker_runtime.CommandResult(command, 0, "display startup probe ok\n", "")
+    return _docker_available_runner(args)
+
+
+def _docker_smoke_probe_failure_runner(
+    probe_name: str,
+) -> Any:
+    def runner(args: list[str] | tuple[str, ...]) -> docker_runtime.CommandResult:
+        command = tuple(args)
+        if probe_name == "image_absence_probe" and command[:4] == ("docker", "run", "--rm", "--entrypoint"):
+            return docker_runtime.CommandResult(command, 1, "", "forbidden binary present: sbatch\n")
+        if probe_name == "compute_scheduler_command" and command[:3] == ("docker", "run", "--rm") and list(
+            command[-5:]
+        ) == ["uv", "run", "nhms-pipeline", "plan-production", "--help"]:
+            return docker_runtime.CommandResult(command, 1, "", "help failed\n")
+        if probe_name == "display_startup_start" and command[:4] == ("docker", "run", "--rm", "-d"):
+            return docker_runtime.CommandResult(command, 1, "", "container did not start\n")
+        if probe_name == "display_startup_probe" and command[:2] == ("docker", "exec"):
+            return docker_runtime.CommandResult(command, 1, "", "runtime config did not report display_readonly\n")
+        return _docker_smoke_success_runner(args)
+
+    return runner
+
+
+def _docker_smoke_cleanup_failure_runner(args: list[str] | tuple[str, ...]) -> docker_runtime.CommandResult:
+    command = tuple(args)
+    if command[:3] == ("docker", "rm", "-f"):
+        return docker_runtime.CommandResult(command, 1, "", "cleanup failed\n")
+    return _docker_smoke_success_runner(args)
+
+
+def _docker_image_inspect_failure_runner(args: list[str] | tuple[str, ...]) -> docker_runtime.CommandResult:
+    command = tuple(args)
+    if command[:3] == ("docker", "image", "inspect"):
+        return docker_runtime.CommandResult(command, 1, "", "No such image\n")
+    return _docker_smoke_success_runner(args)
+
+
+def _run_entrypoint(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    clean_env = {
+        key: value
+        for key, value in os.environ.items()
+        if not (
+            key.startswith("NHMS_")
+            or key
+            in {
+                "AUTH_BACKEND",
+                "SLURM_GATEWAY_URL",
+                "SLURM_GATEWAY_BACKEND",
+                "WORKSPACE_ROOT",
+                "RUN_WORKSPACE_ROOT",
+                "SHARED_LOG_ROOT",
+                "OBJECT_STORE_ROOT",
+                "MUNGE_SOCKET",
+                "MUNGE_KEY",
+                "SHUD_EXECUTABLE",
+                "DOCKER_HOST",
+            }
+        )
+    }
+    clean_env.update(env)
+    return subprocess.run(
+        [str(REPO_ROOT / "infra/docker/entrypoint.sh"), *command],
+        cwd=REPO_ROOT,
+        env=clean_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _high_space(path: Path) -> docker_runtime.DiskSpace:

@@ -17,8 +17,17 @@ _ROLE_ENV_KEYS = (
     "SLURM_GATEWAY_URL",
     "SLURM_GATEWAY_BACKEND",
     "WORKSPACE_ROOT",
+    "RUN_WORKSPACE_ROOT",
+    "SHARED_LOG_ROOT",
+    "OBJECT_STORE_ROOT",
     "NHMS_BASINS_ROOT",
+    "NHMS_MODEL_ASSET_ROOT",
+    "SLURM_GATEWAY_TEMPLATE_DIR",
+    "SLURM_GATEWAY_WORKSPACE_DIR",
+    "MUNGE_SOCKET",
+    "MUNGE_KEY",
     "SHUD_EXECUTABLE",
+    "DOCKER_HOST",
     "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS",
 )
 
@@ -130,6 +139,24 @@ def test_dev_and_compute_roles_keep_slurm_routes_and_runtime_config(role: str) -
     assert "/api/v1/slurm/health" in openapi["paths"]
 
 
+@pytest.mark.parametrize("role", ["dev_monolith", "compute_control"])
+@pytest.mark.parametrize("backend", ["slurm", "mock", ""])
+def test_dev_and_compute_roles_allow_slurm_gateway_backend_env(role: str, backend: str) -> None:
+    config = load_runtime_config(_clean_env({"NHMS_SERVICE_ROLE": role, "SLURM_GATEWAY_BACKEND": backend}))
+
+    assert config.service_role == ServiceRole(role)
+    assert config.slurm_routes_enabled is True
+
+
+@pytest.mark.parametrize("role", ["dev_monolith", "compute_control"])
+@pytest.mark.parametrize("url", ["http://node22.internal:8000", ""])
+def test_dev_and_compute_roles_allow_slurm_gateway_url_env(role: str, url: str) -> None:
+    config = load_runtime_config(_clean_env({"NHMS_SERVICE_ROLE": role, "SLURM_GATEWAY_URL": url}))
+
+    assert config.service_role == ServiceRole(role)
+    assert config.slurm_routes_enabled is True
+
+
 def test_display_route_inventory_preserves_non_slurm_business_routes() -> None:
     display_app = create_app(_display_env())
     compute_app = create_app(_clean_env({"NHMS_SERVICE_ROLE": "compute_control"}))
@@ -158,10 +185,34 @@ def test_display_route_inventory_preserves_non_slurm_business_routes() -> None:
     ("env_var", "value", "expected_code"),
     [
         ("SLURM_GATEWAY_URL", "http://node22.internal:8000", "DISPLAY_SLURM_GATEWAY_URL_FORBIDDEN"),
+        ("SLURM_GATEWAY_URL", "", "DISPLAY_SLURM_GATEWAY_URL_FORBIDDEN"),
         ("SLURM_GATEWAY_BACKEND", "slurm", "DISPLAY_SLURM_BACKEND_FORBIDDEN"),
+        ("SLURM_GATEWAY_BACKEND", "mock", "DISPLAY_SLURM_BACKEND_FORBIDDEN"),
+        ("SLURM_GATEWAY_BACKEND", "", "DISPLAY_SLURM_BACKEND_FORBIDDEN"),
         ("WORKSPACE_ROOT", "/work/nhms", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("WORKSPACE_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("RUN_WORKSPACE_ROOT", "/work/nhms/runs", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("RUN_WORKSPACE_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("SHARED_LOG_ROOT", "/work/nhms/logs", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("SHARED_LOG_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("OBJECT_STORE_ROOT", "/object-store", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("OBJECT_STORE_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
         ("NHMS_BASINS_ROOT", "/data/Basins", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("NHMS_BASINS_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("NHMS_MODEL_ASSET_ROOT", "/data/model-assets", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("NHMS_MODEL_ASSET_ROOT", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("SLURM_GATEWAY_TEMPLATE_DIR", "/app/infra/sbatch", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("SLURM_GATEWAY_TEMPLATE_DIR", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("SLURM_GATEWAY_WORKSPACE_DIR", "/work/nhms/slurm", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("SLURM_GATEWAY_WORKSPACE_DIR", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("MUNGE_SOCKET", "/run/munge/munge.socket.2", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("MUNGE_SOCKET", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("MUNGE_KEY", "/etc/munge/munge.key", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("MUNGE_KEY", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
         ("SHUD_EXECUTABLE", "/opt/shud/bin/shud", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("SHUD_EXECUTABLE", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("DOCKER_HOST", "unix:///var/run/docker.sock", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
+        ("DOCKER_HOST", "", "DISPLAY_COMPUTE_PATH_FORBIDDEN"),
         ("NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS", "false", "DISPLAY_CONTROL_MUTATIONS_FORBIDDEN"),
     ],
 )
