@@ -2,7 +2,9 @@
 
 最后更新：2026-05-27  
 适用范围：22 节点计算控制面 + 27 节点展示服务面  
-推荐证据目录：`artifacts/two-node-e2e/<run_id>/`
+推荐证据目录：`artifacts/two-node-e2e/<run_id>/` 或显式配置的 `/scratch/frd_muziyao/<project-specific-dir>/`
+
+Docker/systemd 操作细节见 `infra/README.two-node-docker.md`。本文只定义 E2E 证据边界；Docker 验证不能把 compose 启动、DB、API、浏览器、Slurm、日志和只读安全检查合并成一个模糊 PASS。
 
 ## 1. 文档目的
 
@@ -151,8 +153,10 @@ manual_ops_boundary: PASS | FAIL
 ```bash
 export RUN_ID="two-node-e2e-$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="artifacts/two-node-e2e/$RUN_ID"
-mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,db,api,browser,slurm,logs}
+mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,browser,slurm,logs,docker-preflight,docker-security}
 ```
+
+项目创建的临时文件、Docker smoke 输出、review 输出和 E2E evidence 只能写到仓库 `artifacts/` 或 `/scratch/frd_muziyao`。如果 Docker daemon cache 无法由项目控制，必须在 `docker-preflight/` 记录 DockerRootDir、`docker system df` 和相关 `df -h`，空间不足时 Docker lane 记为 `BLOCKED`。
 
 最低交付物：
 
@@ -161,6 +165,14 @@ mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,db,api,browser,slur
 - `22-compute/summary.md`：计算控制面结论。
 - `27-display/summary.md`：展示服务面结论。
 - `cross-plane/summary.md`：跨面联调结论。
+- `manual-ops/summary.md`：27 fail-closed 与 22 人工处理 receipt 边界。
+- `db/summary.md`：readonly DB role、权限矩阵、脱敏 DSN 和 blocker。
+- `api/summary.md`：health、runtime config、models、stations、latest-product、pipeline/jobs/logs。
+- `browser/summary.md`：无 mock 的 `/hydro-met` 和 `/ops` 浏览器证据。
+- `slurm/summary.md`：22 Gateway health、minimal submit probe、Slurm receipt。
+- `logs/summary.md`：published log URI、读取结果和缺失原因。
+- `docker-preflight/summary.md`：DockerRootDir、cache/space、TMPDIR 和 evidence root。
+- `docker-security/summary.md`：27 无 Slurm/Munge/Docker socket、HostConfig/mount/env 检查。
 - `summary.md`：最终 PASS/PARTIAL/FAIL/BLOCKED 汇总。
 - `bugs.md` 或链接到 `docs/bugs.md`：失败项、根因、复测条件。
 
