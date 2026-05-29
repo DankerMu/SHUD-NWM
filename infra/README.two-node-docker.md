@@ -1,6 +1,6 @@
 # Two-Node Docker Runbook
 
-最后更新：2026-05-29  
+最后更新：2026-05-29
 适用范围：M22 两节点 Docker skeleton，22 `compute_control` + 27 `display_readonly`
 
 ## 1. 结论
@@ -75,18 +75,39 @@ NHMS_AUTH_MODE=production
 NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 DATABASE_URL=postgresql://<readonly-user>:<secret>@<db-host>:5432/<db-name>
+NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/mnt/nhms-published
+NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
+NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
+NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
+NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
+NHMS_LOG_TAIL_MAX_BYTES=1048576
+NHMS_ARTIFACT_BACKEND=local
+OBJECT_STORE_PREFIX=s3://nhms-prod
+S3_ENDPOINT_URL=https://object-store.internal.example
+S3_BUCKET_NAME=nhms-prod
+AWS_ACCESS_KEY_ID=<readonly-key-placeholder>
+AWS_SECRET_ACCESS_KEY=<readonly-secret-placeholder>
+CORS_ALLOWED_ORIGINS=https://display.internal.example
 ```
 
-27 禁止设置或挂载：
+27 禁止设置或挂载，且要与 `infra/docker/entrypoint.sh` 和
+`scripts/validate_two_node_docker_runtime.py` 的 display forbidden set 保持一致：
 
 ```text
 SLURM_GATEWAY_URL
 SLURM_GATEWAY_BACKEND
 WORKSPACE_ROOT
+RUN_WORKSPACE_ROOT
+SHARED_LOG_ROOT
 OBJECT_STORE_ROOT
 NHMS_BASINS_ROOT
 NHMS_MODEL_ASSET_ROOT
+SLURM_GATEWAY_TEMPLATE_DIR
+SLURM_GATEWAY_WORKSPACE_DIR
+MUNGE_SOCKET
+MUNGE_KEY
 SHUD_EXECUTABLE
+DOCKER_HOST
 /etc/slurm
 /run/munge
 /var/run/munge
@@ -112,9 +133,12 @@ SHUD_EXECUTABLE
 任何 build、smoke 或长时间 compose 验证前先执行：
 
 ```bash
+export RUN_ID="two-node-e2e-$(date -u +%Y%m%dT%H%M%SZ)"
+export EVIDENCE_ROOT="artifacts/two-node-e2e/$RUN_ID"
+mkdir -p "$EVIDENCE_ROOT/docker-preflight"
 export TMPDIR="$PWD/artifacts/tmp"
 mkdir -p "$TMPDIR"
-uv run python scripts/validate_two_node_docker_runtime.py preflight
+uv run python scripts/validate_two_node_docker_runtime.py preflight --evidence-root "$EVIDENCE_ROOT/docker-preflight"
 ```
 
 该命令记录 Docker version、compose version、DockerRootDir、`docker system df`、`df -h`、`TMPDIR` 和 evidence root。Docker 不可用或空间不足时，本 lane 记为 `BLOCKED`，不能继续并声明 `PASS`。Docker daemon 自身 cache 位置由 DockerRootDir 决定，必须在 evidence 中单独记录。
@@ -142,7 +166,7 @@ $EDITOR infra/env/display.env
 22 compute：
 
 ```bash
-docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml config
+docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml config --quiet
 docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml up -d
 docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml ps
 docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml logs --tail=200 compute-api
@@ -158,12 +182,14 @@ docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml run
 27 display：
 
 ```bash
-docker compose --env-file infra/env/display.env -f infra/compose.display.yml config
+docker compose --env-file infra/env/display.env -f infra/compose.display.yml config --quiet
 docker compose --env-file infra/env/display.env -f infra/compose.display.yml up -d
 docker compose --env-file infra/env/display.env -f infra/compose.display.yml ps
 docker compose --env-file infra/env/display.env -f infra/compose.display.yml logs --tail=200 display-api
 docker compose --env-file infra/env/display.env -f infra/compose.display.yml down
 ```
+
+如果需要完整渲染结果，只能临时查看 `docker compose ... config`，因为它会展开包含 `DATABASE_URL` 和 AWS 凭据的 secret-bearing 值；原始输出不得直接存成 evidence，必须先脱敏。
 
 静态验证：
 
@@ -237,7 +263,61 @@ docker compose --env-file infra/env/display.env -f infra/compose.display.yml exe
   test ! -e /etc/slurm/slurm.conf
   test ! -S /run/munge/munge.socket.2
   test ! -S /var/run/docker.sock
-  env | sort
+  for key in \
+    NHMS_SERVICE_ROLE \
+    NHMS_REQUIRE_SERVICE_ROLE \
+    NHMS_AUTH_MODE \
+    NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS \
+    NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS \
+    NHMS_PUBLISHED_ARTIFACT_ROOT \
+    NHMS_PUBLISHED_ARTIFACT_URI_PREFIX \
+    NHMS_PUBLISHED_ARTIFACT_S3_BUCKET \
+    NHMS_PUBLISHED_ARTIFACT_S3_PREFIX \
+    NHMS_LOG_TAIL_MAX_BYTES \
+    NHMS_ARTIFACT_BACKEND \
+    OBJECT_STORE_PREFIX \
+    S3_ENDPOINT_URL \
+    S3_BUCKET_NAME \
+    CORS_ALLOWED_ORIGINS
+  do
+    value="$(printenv "$key" 2>/dev/null || true)"
+    printf "%s=%s\n" "$key" "${value:-<unset>}"
+  done
+  for key in DATABASE_URL AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+  do
+    value="$(printenv "$key" 2>/dev/null || true)"
+    if [ -n "$value" ]; then
+      printf "%s=<redacted>\n" "$key"
+    else
+      printf "%s=<unset>\n" "$key"
+    fi
+  done
+  forbidden_found=0
+  for key in \
+    SLURM_GATEWAY_URL \
+    SLURM_GATEWAY_BACKEND \
+    WORKSPACE_ROOT \
+    RUN_WORKSPACE_ROOT \
+    SHARED_LOG_ROOT \
+    OBJECT_STORE_ROOT \
+    NHMS_BASINS_ROOT \
+    NHMS_MODEL_ASSET_ROOT \
+    SLURM_GATEWAY_TEMPLATE_DIR \
+    SLURM_GATEWAY_WORKSPACE_DIR \
+    MUNGE_SOCKET \
+    MUNGE_KEY \
+    SHUD_EXECUTABLE \
+    DOCKER_HOST
+  do
+    value="$(printenv "$key" 2>/dev/null || true)"
+    if [ -n "$value" ]; then
+      printf "%s=<present>\n" "$key"
+      forbidden_found=1
+    else
+      printf "%s=<absent>\n" "$key"
+    fi
+  done
+  test "$forbidden_found" -eq 0
 '
 ```
 
@@ -249,13 +329,19 @@ curl -i http://127.0.0.1:8000/api/v1/runtime/config
 curl -i http://127.0.0.1:8000/api/v1/slurm/health
 curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
 curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
+export OPERATOR_AUTH_HEADER='Authorization: Bearer <real-production-operator-token>'
+curl -i -H "$OPERATOR_AUTH_HEADER" -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
+curl -i -H "$OPERATOR_AUTH_HEADER" -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
 ```
 
 通过条件：
 
 - runtime config 报告 `display_readonly`。
 - `/api/v1/slurm/*` 不可用。
-- retry/cancel 返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` 或等价稳定错误。
+- 无授权请求应返回 401/403 或 `AUTH_REQUIRED` / `NOT_AUTHORIZED` 等稳定拒绝错误。
+- 如果部署还提供 viewer-only 或非运维 token/header，要把它作为单独的 unauthorized lane 记录，和无授权请求分开。
+- 只有真实生产运维 auth token/header 可走授权 manual-action lane；如果部署拿不到这条授权路径，本 lane 记为 `BLOCKED`，不能 `PASS`。
+- 授权请求应返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` 或等价稳定错误，且不构造 DB write 或 Gateway 依赖。
 - evidence 显示 27 没有 Gateway 调用、没有业务终态写入、published artifact mount 是 readonly。
 
 ## 12. Evidence Paths
