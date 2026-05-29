@@ -1022,8 +1022,22 @@ def test_display_route_smoke_forces_safe_env_and_bounded_database_url(
 def test_runbook_command_uses_evidence_root_without_double_nested_run_id() -> None:
     runbook = (REPO_ROOT / "docs" / "runbooks" / "two-node-production-e2e-plan.md").read_text(encoding="utf-8")
 
-    assert '--evidence-root "artifacts/two-node-e2e"' in runbook
+    assert 'EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"' in runbook
+    assert 'EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"' in runbook
+    assert '--evidence-root "$EVIDENCE_PARENT"' in runbook
+    assert '--run-id "$EVIDENCE_RUN_ID"' in runbook
     assert '--evidence-root "artifacts/two-node-e2e/$EVIDENCE_RUN_ID"' not in runbook
+
+    create_command = (
+        "test -f infra/env/display-readonly-secrets.env || "
+        "install -m 0600 /dev/null infra/env/display-readonly-secrets.env"
+    )
+    mode_check = 'test "$(stat -c \'%a\' infra/env/display-readonly-secrets.env)" = "600"'
+    source_command = ". infra/env/display-readonly-secrets.env"
+    assert create_command in runbook
+    assert mode_check in runbook
+    assert runbook.index(create_command) < runbook.index(source_command)
+    assert runbook.index(mode_check) < runbook.index(source_command)
 
 
 def test_psycopg_adapter_uses_bounded_validation_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:

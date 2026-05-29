@@ -37,9 +37,13 @@ infra/systemd/nhms-display-compose.service
 ```text
 infra/env/compute.env
 infra/env/display.env
+infra/env/display-readonly-secrets.env
 ```
 
-`compute.env` 和 `display.env` 应从 `*.example` 复制后以 `0600` 权限编辑，不能提交。项目创建的临时 secret material 必须放在非 evidence 目录，例如 `/scratch/frd_muziyao/nwm-secret-tmp/`；Docker smoke 证据、review 输出和 E2E evidence 必须写入仓库 `artifacts/` 或 `/scratch/frd_muziyao`，不要写到系统盘任意目录。
+`compute.env`、`display.env` 和 readonly DB 验证用的 `display-readonly-secrets.env`
+都必须以 `0600` 权限编辑，不能提交。项目创建的临时 secret material 必须放在非 evidence 目录，例如
+`/scratch/frd_muziyao/nwm-secret-tmp/`；Docker smoke 证据、review 输出和 E2E evidence 必须写入仓库
+`artifacts/` 或 `/scratch/frd_muziyao`，不要写到系统盘任意目录。
 
 ## 4. Canonical Env
 
@@ -161,7 +165,18 @@ $EDITOR infra/env/display.env
 test "$(stat -c '%a' infra/env/display.env)" = "600"
 ```
 
-必须替换示例中的密码、host、路径、image tag 和域名。`compute.env` 与 `display.env` 都包含生产 secret-bearing 值，必须保持 owner-only `0600`；默认 umask 不可信时，先执行 `umask 077` 或重新用 `install -m 0600` 生成。示例里的 `change-me`、`*.internal.example`、`m22-placeholder` 只能用于 render/config 检查，不能作为 live 部署证据。
+只读 DB 验证如果使用本地 secret-source 文件：
+
+```bash
+test -f infra/env/display-readonly-secrets.env || install -m 0600 /dev/null infra/env/display-readonly-secrets.env
+$EDITOR infra/env/display-readonly-secrets.env
+test "$(stat -c '%a' infra/env/display-readonly-secrets.env)" = "600"
+```
+
+必须替换示例中的密码、host、路径、image tag 和域名。`compute.env`、`display.env` 和
+`display-readonly-secrets.env` 都包含生产 secret-bearing 值，必须保持 owner-only `0600`；默认 umask
+不可信时，先执行 `umask 077` 或重新用 `install -m 0600` 生成。示例里的 `change-me`、
+`*.internal.example`、`m22-placeholder` 只能用于 render/config 检查，不能作为 live 部署证据。
 
 ## 8. Compose Commands
 
@@ -201,7 +216,73 @@ uv run python scripts/validate_two_node_docker_runtime.py static
 
 ## 9. Systemd Install
 
-示例 units 使用 `/opt/SHUD-NWM/infra` 作为 `WorkingDirectory`。安装前必须把 unit 文件里的 `/opt/SHUD-NWM` 替换为实际 checkout 绝对路径，并确认 docker binary 路径是 `/usr/bin/docker`。systemd 启动前还必须确认对应 `infra/env/*.env` 是 owner-only `0600`，且归属运行该 compose 的操作系统用户或 root；不得让 group/world 读取生产 DB URL、object-store credential 或 auth 配置。
+示例 units 使用 `/opt/SHUD-NWM/infra` 作为 `WorkingDirectory`，且未设置 `User=`，因此默认以 systemd
+system service 的 root 权限执行 Docker Compose。Docker 访问本身是 root-equivalent；只有 root 或站点指定的可信
+Docker 部署用户可以写 checkout、compose、env 和 unit 源文件。安装前必须把 unit 文件里的 `/opt/SHUD-NWM`
+替换为实际 checkout 绝对路径，并确认 docker binary 路径是 `/usr/bin/docker`。systemd 启动、reload、restart
+都会重新读取可变的 compose/env 内容；在 `systemctl enable/start/restart` 前必须先记录可信 checkout preflight。
+
+如果站点要增加 `User=nhms-deploy` / `Group=docker`，该用户和 Docker group 必须按 root-equivalent 管理，且
+checkout/env 只能由该可信用户或 root 写入。不要从 untrusted user 可写、group/world-writable 的 checkout path
+运行 systemd-managed Docker Compose。
+
+通用 checkout trust preflight，在 22/27 各自节点执行，并把输出保存到本次 `docker-security/` evidence。
+把 `TRUSTED_DOCKER_OPERATORS` 调整为本站点允许写 checkout/env 且可访问 Docker 的 root-equivalent 用户列表：
+
+```bash
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+CHECKOUT_ROOT=/opt/SHUD-NWM
+TRUSTED_DOCKER_OPERATORS="root nhms-deploy"
+mkdir -p "$EVIDENCE_ROOT/docker-security"
+namei -l "$CHECKOUT_ROOT/infra" | tee "$EVIDENCE_ROOT/docker-security/systemd-checkout-namei.txt"
+namei -l "$CHECKOUT_ROOT/infra" | awk '$1 ~ /^[bcdlps-]/ && (substr($1,6,1) == "w" || substr($1,9,1) == "w") { print; bad=1 } END { exit bad }'
+stat -c '%U:%G %a %n' \
+  "$CHECKOUT_ROOT" \
+  "$CHECKOUT_ROOT/infra" \
+  "$CHECKOUT_ROOT/infra/compose.compute.yml" \
+  "$CHECKOUT_ROOT/infra/compose.display.yml" \
+  "$CHECKOUT_ROOT/infra/env" \
+  "$CHECKOUT_ROOT/infra/systemd" | tee "$EVIDENCE_ROOT/docker-security/systemd-checkout-stat.txt"
+for path in \
+  "$CHECKOUT_ROOT" \
+  "$CHECKOUT_ROOT/infra" \
+  "$CHECKOUT_ROOT/infra/compose.compute.yml" \
+  "$CHECKOUT_ROOT/infra/compose.display.yml" \
+  "$CHECKOUT_ROOT/infra/env" \
+  "$CHECKOUT_ROOT/infra/systemd"; do
+  owner="$(stat -c '%U' "$path")"
+  case " $TRUSTED_DOCKER_OPERATORS " in *" $owner "*) ;; *) echo "untrusted owner: $owner $path"; exit 1 ;; esac
+done
+test -z "$(find "$CHECKOUT_ROOT" -path "$CHECKOUT_ROOT/.git" -prune -o -perm /022 -print -quit)"
+```
+
+22 compute systemd preflight 还必须确认 env mode：
+
+```bash
+: "${CHECKOUT_ROOT:?run common checkout trust preflight first}"
+: "${TRUSTED_DOCKER_OPERATORS:?set trusted Docker operators first}"
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+test "$(stat -c '%a' "$CHECKOUT_ROOT/infra/env/compute.env")" = "600"
+stat -c '%U:%G %a %n' "$CHECKOUT_ROOT/infra/env/compute.env" | tee "$EVIDENCE_ROOT/docker-security/systemd-compute-env-stat.txt"
+owner="$(stat -c '%U' "$CHECKOUT_ROOT/infra/env/compute.env")"
+case " $TRUSTED_DOCKER_OPERATORS " in *" $owner "*) ;; *) echo "untrusted owner: $owner compute.env"; exit 1 ;; esac
+```
+
+27 display systemd preflight 还必须确认 env mode：
+
+```bash
+: "${CHECKOUT_ROOT:?run common checkout trust preflight first}"
+: "${TRUSTED_DOCKER_OPERATORS:?set trusted Docker operators first}"
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+test "$(stat -c '%a' "$CHECKOUT_ROOT/infra/env/display.env")" = "600"
+stat -c '%U:%G %a %n' "$CHECKOUT_ROOT/infra/env/display.env" | tee "$EVIDENCE_ROOT/docker-security/systemd-display-env-stat.txt"
+owner="$(stat -c '%U' "$CHECKOUT_ROOT/infra/env/display.env")"
+case " $TRUSTED_DOCKER_OPERATORS " in *" $owner "*) ;; *) echo "untrusted owner: $owner display.env"; exit 1 ;; esac
+```
+
+如果 `namei`、`stat` 或 `find` 任一检查失败，停止 systemd 安装/启动/restart，本 lane 记为 `BLOCKED`。不得让
+group/world 读取生产 DB URL、object-store credential 或 auth 配置，也不得让 untrusted user 在 validation
+之后修改 compose/env 等待 root service 重启执行。
 
 22：
 
@@ -441,6 +522,7 @@ docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml dow
 ```bash
 $EDITOR infra/env/compute.env
 $EDITOR infra/env/display.env
+# 重新执行第 9 节 checkout trust preflight 和 env mode check 后再 restart。
 sudo systemctl restart nhms-compute-compose.service
 sudo systemctl restart nhms-display-compose.service
 ```
@@ -452,6 +534,8 @@ sudo systemctl restart nhms-display-compose.service
 - Artifact/log 读取失败时，允许显示 `log_uri` 和人工提示，不要把 22 私有 workspace 挂给 27。
 - latest-product strict identity 缺失时，cross-plane 记 `BLOCKED`，不能用 historical latest 代替。
 - readonly DB 权限缺失时，修正 SELECT grants；不要用 writer credential 冒充生产只读验证。
+- systemd restart/reload 会重新执行 checkout 中的 compose/env；每次回滚或重启前都要重新记录可信
+  checkout、compose/env ownership/mode 证据。
 
 ## 15. Operator Checklist
 

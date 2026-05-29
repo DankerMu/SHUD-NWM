@@ -6,6 +6,10 @@
 #   writer DB credentials, workspace paths, Basins/model paths, and image tag.
 # - Ensure the docker compose plugin is installed at /usr/bin/docker or update
 #   ExecStart/ExecStop/ExecReload to the local docker binary path.
+# - Before enable/start/reload/restart, record the checkout trust preflight from
+#   infra/README.two-node-docker.md: every WorkingDirectory path component and
+#   compose/env source must be owned by root or a trusted Docker operator and
+#   must not be group/world-writable. Docker access is root-equivalent.
 
 [Unit]
 Description=NHMS node 22 compute/control compose

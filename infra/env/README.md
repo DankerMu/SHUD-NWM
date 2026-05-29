@@ -4,10 +4,14 @@ These files are examples for the M22 two-node Docker skeleton. They are safe
 enough to render with `docker compose config`, but they are not final production
 credentials.
 
-Real local `compute.env` and `display.env` files contain production
-secret-bearing values. Create them with owner-only permissions, for example
-`install -m 0600 infra/env/compute.example infra/env/compute.env` or under
-`umask 077`, and keep them untracked.
+Real local `compute.env`, `display.env`, and readonly validation
+`display-readonly-secrets.env` files contain production secret-bearing values.
+Create them with owner-only permissions, for example
+`install -m 0600 infra/env/compute.example infra/env/compute.env` or
+`install -m 0600 /dev/null infra/env/display-readonly-secrets.env`, or under
+`umask 077`, and keep them untracked. Before sourcing any local secret-source
+file, verify `test "$(stat -c '%a' <file>)" = "600"`; a failed mode check
+blocks validation rather than producing evidence from a readable secret file.
 
 Required canonical published artifact variables:
 
@@ -89,7 +93,7 @@ If `TMPDIR` is set explicitly, it must point under this repository's
 All generated validation evidence must stay under `artifacts/` in this
 repository or under `/scratch/frd_muziyao` outside this checkout. Do not write
 reports or evidence into `infra/env/`; real local env files such as
-`compute.env`, `display.env`, and `local.env` are intentionally ignored while
-`*.example` and this README remain trackable. `infra/docker-compose.dev.yml`
-remains a local development dependency stack and must not be used as either
-production two-node compose file.
+`compute.env`, `display.env`, `display-readonly-secrets.env`, and `local.env`
+are intentionally ignored while `*.example` and this README remain trackable.
+`infra/docker-compose.dev.yml` remains a local development dependency stack and
+must not be used as either production two-node compose file.

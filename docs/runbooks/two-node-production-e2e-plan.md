@@ -391,7 +391,11 @@ export NHMS_SERVICE_ROLE=display_readonly
 export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 
-# 任选一种 secret-free 方式加载真实 readonly DSN；env 文件必须未跟踪且权限为 0600。
+# 任选一种 secret-safe 方式加载真实 readonly DSN；env 文件必须未跟踪且权限为 0600。
+# 首次创建本地 secret-source 文件；已有文件不要重新 install，否则会截断。
+test -f infra/env/display-readonly-secrets.env || install -m 0600 /dev/null infra/env/display-readonly-secrets.env
+$EDITOR infra/env/display-readonly-secrets.env
+test "$(stat -c '%a' infra/env/display-readonly-secrets.env)" = "600"
 set -a
 . infra/env/display-readonly-secrets.env
 set +a
@@ -419,6 +423,10 @@ per-run lane：`$EVIDENCE_ROOT/db/readonly-db-boundary/`。`NHMS_READONLY_DB_VAL
 ```text
 NHMS_DISPLAY_READONLY_DATABASE_URL=<redacted> uv run python scripts/validate_readonly_db_boundary.py --evidence-root "$EVIDENCE_PARENT" --run-id "$EVIDENCE_RUN_ID" --force
 ```
+
+如果使用 `infra/env/display-readonly-secrets.env`，`command_index.md` 和 evidence 只记录已使用
+owner-only `0600` secret source，不记录原始 DSN、文件内容或 `source` 后的环境展开值。`stat` 检查失败时，
+本 lane 记为 `BLOCKED`，不得继续 sourcing 后再声明 readonly DB evidence 有效。
 
 验证内容：
 
