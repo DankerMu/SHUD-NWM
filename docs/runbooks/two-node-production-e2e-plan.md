@@ -385,6 +385,8 @@ curl -i 'http://127.0.0.1:8000/api/v1/slurm/health'
 ```bash
 : "${RUN_ID:?export shared E2E RUN_ID first}"
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"
+EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
 export NHMS_SERVICE_ROLE=display_readonly
 export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
@@ -403,18 +405,19 @@ export NHMS_READONLY_DB_VALIDATION_MODEL_ID=basins_qhh_shud
 export NHMS_READONLY_DB_VALIDATION_JOB_ID='<job_id-with-published-log>'
 
 uv run python scripts/validate_readonly_db_boundary.py \
-  --evidence-root "artifacts/two-node-e2e" \
-  --run-id "$RUN_ID" \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID" \
   --force
 ```
 
-其中 `--run-id "$RUN_ID"` 是当前 E2E evidence bundle ID，默认写入
-`$EVIDENCE_ROOT/db/readonly-db-boundary/`；`NHMS_READONLY_DB_VALIDATION_RUN_ID` 仍是被验证的业务
+其中 `EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"` 和 `EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"`
+会把默认 `artifacts/two-node-e2e/$RUN_ID` 以及 `/scratch/frd_muziyao/.../$RUN_ID` 都写回当前 active
+per-run lane：`$EVIDENCE_ROOT/db/readonly-db-boundary/`。`NHMS_READONLY_DB_VALIDATION_RUN_ID` 仍是被验证的业务
 `hydro.hydro_run.run_id`。如需只通过环境变量指定 evidence bundle ID，使用
-`NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID="$RUN_ID"`。`command_index.md` 只记录脱敏形式，例如：
+`NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID="$EVIDENCE_RUN_ID"`。`command_index.md` 只记录脱敏形式，例如：
 
 ```text
-NHMS_DISPLAY_READONLY_DATABASE_URL=<redacted> uv run python scripts/validate_readonly_db_boundary.py --evidence-root "artifacts/two-node-e2e" --run-id "$RUN_ID" --force
+NHMS_DISPLAY_READONLY_DATABASE_URL=<redacted> uv run python scripts/validate_readonly_db_boundary.py --evidence-root "$EVIDENCE_PARENT" --run-id "$EVIDENCE_RUN_ID" --force
 ```
 
 验证内容：
@@ -436,6 +439,10 @@ NHMS_DISPLAY_READONLY_DATABASE_URL=<redacted> uv run python scripts/validate_rea
 - retry/cancel 的拒绝证据必须先分出无授权 / 非运维授权的 auth rejection lane；只有拿到真实 production auth
   token/header 时，授权 manual-action lane 才能继续验证 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。如果拿不到
   真实 auth 路径，本 lane 记为 `BLOCKED`，且仍然不能构造 DB write 或 Gateway 依赖。
+- `scripts/validate_readonly_db_boundary.py` 内部的 retry/cancel manual-action check 使用 in-process/dev-header
+  方式验证后端 no-write/readonly fail-closed 行为；这只属于 readonly DB safety evidence，不能计入 #239
+  production-auth manual-action `PASS`，也不能替代真实 operator token/header lane。真实 production auth
+  证据必须在独立 manual-ops/API lane 记录；没有真实 auth 路径时，该 production-auth lane 保持 `BLOCKED`。
 - evidence 只允许写入仓库 `artifacts/` 或 `/scratch/frd_muziyao` 下，输出中不得包含明文 DSN 密码、token 或 signature。
 
 ### 7.3 展示产品 API 检查

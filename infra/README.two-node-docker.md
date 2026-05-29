@@ -39,7 +39,7 @@ infra/env/compute.env
 infra/env/display.env
 ```
 
-`compute.env` 和 `display.env` 应从 `*.example` 复制后编辑，不能提交。项目创建的临时文件、Docker smoke 证据、review 输出和 E2E evidence 必须写入仓库 `artifacts/` 或 `/scratch/frd_muziyao`，不要写到系统盘任意目录。
+`compute.env` 和 `display.env` 应从 `*.example` 复制后以 `0600` 权限编辑，不能提交。项目创建的临时 secret material 必须放在非 evidence 目录，例如 `/scratch/frd_muziyao/nwm-secret-tmp/`；Docker smoke 证据、review 输出和 E2E evidence 必须写入仓库 `artifacts/` 或 `/scratch/frd_muziyao`，不要写到系统盘任意目录。
 
 ## 4. Canonical Env
 
@@ -148,18 +148,20 @@ uv run python scripts/validate_two_node_docker_runtime.py preflight --evidence-r
 在 22：
 
 ```bash
-cp infra/env/compute.example infra/env/compute.env
+install -m 0600 infra/env/compute.example infra/env/compute.env
 $EDITOR infra/env/compute.env
+test "$(stat -c '%a' infra/env/compute.env)" = "600"
 ```
 
 在 27：
 
 ```bash
-cp infra/env/display.example infra/env/display.env
+install -m 0600 infra/env/display.example infra/env/display.env
 $EDITOR infra/env/display.env
+test "$(stat -c '%a' infra/env/display.env)" = "600"
 ```
 
-必须替换示例中的密码、host、路径、image tag 和域名。示例里的 `change-me`、`*.internal.example`、`m22-placeholder` 只能用于 render/config 检查，不能作为 live 部署证据。
+必须替换示例中的密码、host、路径、image tag 和域名。`compute.env` 与 `display.env` 都包含生产 secret-bearing 值，必须保持 owner-only `0600`；默认 umask 不可信时，先执行 `umask 077` 或重新用 `install -m 0600` 生成。示例里的 `change-me`、`*.internal.example`、`m22-placeholder` 只能用于 render/config 检查，不能作为 live 部署证据。
 
 ## 8. Compose Commands
 
@@ -199,7 +201,7 @@ uv run python scripts/validate_two_node_docker_runtime.py static
 
 ## 9. Systemd Install
 
-示例 units 使用 `/opt/SHUD-NWM/infra` 作为 `WorkingDirectory`。安装前必须把 unit 文件里的 `/opt/SHUD-NWM` 替换为实际 checkout 绝对路径，并确认 docker binary 路径是 `/usr/bin/docker`。
+示例 units 使用 `/opt/SHUD-NWM/infra` 作为 `WorkingDirectory`。安装前必须把 unit 文件里的 `/opt/SHUD-NWM` 替换为实际 checkout 绝对路径，并确认 docker binary 路径是 `/usr/bin/docker`。systemd 启动前还必须确认对应 `infra/env/*.env` 是 owner-only `0600`，且归属运行该 compose 的操作系统用户或 root；不得让 group/world 读取生产 DB URL、object-store credential 或 auth 配置。
 
 22：
 
@@ -253,16 +255,26 @@ minimal submit probe evidence
 
 ## 11. Security Probes
 
-27 容器安全检查：
+27 容器安全检查必须以 `scripts/validate_two_node_docker_runtime.py static` 和 Docker smoke/image absence evidence 作为 `docker-security/` 的权威边界。下面的容器内探针只是补充性快速检查，但覆盖同一组代表性 Slurm/Munge/Docker socket binary/path：
 
 ```bash
 docker compose --env-file infra/env/display.env -f infra/compose.display.yml exec display-api sh -lc '
   set -eu
-  ! command -v sbatch
-  ! command -v scancel
-  test ! -e /etc/slurm/slurm.conf
-  test ! -S /run/munge/munge.socket.2
-  test ! -S /var/run/docker.sock
+  forbidden_found=0
+  for bin in sbatch scancel squeue srun sacct sinfo scontrol munge unmunge
+  do
+    if command -v "$bin" >/dev/null 2>&1; then
+      printf "forbidden binary present: %s\n" "$bin"
+      forbidden_found=1
+    fi
+  done
+  for path in /etc/slurm /run/munge /etc/munge /var/run/munge /run/docker.sock /var/run/docker.sock
+  do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      printf "forbidden path present: %s\n" "$path"
+      forbidden_found=1
+    fi
+  done
   for key in \
     NHMS_SERVICE_ROLE \
     NHMS_REQUIRE_SERVICE_ROLE \
@@ -292,7 +304,6 @@ docker compose --env-file infra/env/display.env -f infra/compose.display.yml exe
       printf "%s=<unset>\n" "$key"
     fi
   done
-  forbidden_found=0
   for key in \
     SLURM_GATEWAY_URL \
     SLURM_GATEWAY_BACKEND \
@@ -330,15 +341,35 @@ curl -i http://127.0.0.1:8000/api/v1/slurm/health
 curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
 curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
 
-# 任选一种 secret-free 方式加载真实 operator token；env 文件必须未跟踪且权限为 0600。
-set -a
-. infra/env/operator-auth.env
-set +a
-# 或交互式静默输入：
-# read -r -s -p "Operator auth token: " OPERATOR_AUTH_TOKEN; printf '\n'
+OPERATOR_SECRET_DIR="${OPERATOR_SECRET_DIR:-/scratch/frd_muziyao/nwm-secret-tmp}"
+mkdir -p "$OPERATOR_SECRET_DIR"
+chmod 700 "$OPERATOR_SECRET_DIR"
+OPERATOR_CURL_HEADER="$(mktemp "$OPERATOR_SECRET_DIR/operator-auth-header.XXXXXX")"
+chmod 600 "$OPERATOR_CURL_HEADER"
+trap 'rm -f "$OPERATOR_CURL_HEADER"' EXIT
 
-curl -i -H "Authorization: Bearer ${OPERATOR_AUTH_TOKEN}" -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
-curl -i -H "Authorization: Bearer ${OPERATOR_AUTH_TOKEN}" -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
+# 优先从未跟踪 0600 env 文件读取；不存在时交互式静默输入。
+if [ -f infra/env/operator-auth.env ]; then
+  test "$(stat -c '%a' infra/env/operator-auth.env)" = "600"
+  . infra/env/operator-auth.env
+else
+  read -r -s -p "Operator auth token: " OPERATOR_AUTH_TOKEN
+  printf '\n'
+fi
+: "${OPERATOR_AUTH_TOKEN:?operator auth token required}"
+{
+  printf '%s' 'Authorization: '
+  printf '%s' 'Bearer '
+  printf '%s\n' "$OPERATOR_AUTH_TOKEN"
+} >"$OPERATOR_CURL_HEADER"
+unset OPERATOR_AUTH_TOKEN
+
+operator_auth_curl() {
+  curl --header "@$OPERATOR_CURL_HEADER" "$@"
+}
+
+operator_auth_curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/retry
+operator_auth_curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
 ```
 
 通过条件：
@@ -350,8 +381,9 @@ curl -i -H "Authorization: Bearer ${OPERATOR_AUTH_TOKEN}" -X POST http://127.0.0
 - 只有真实生产运维 auth token/header 可走授权 manual-action lane；如果部署拿不到这条授权路径，本 lane 记为 `BLOCKED`，不能 `PASS`。
 - 授权请求应返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` 或等价稳定错误，且不构造 DB write 或 Gateway 依赖。
 - evidence 显示 27 没有 Gateway 调用、没有业务终态写入、published artifact mount 是 readonly。
-- `command_index.md` 和复制到 review / incident handoff 的 evidence 只能记录未展开变量的命令文本；
-  不得包含原始 DSN、token、signature 或完整 auth header。
+- `command_index.md` 和复制到 review / incident handoff 的 evidence 只能记录未展开变量或 redacted/helper
+  调用；operator auth setup 可记录为 `prepare 0600 curl header under /scratch/frd_muziyao/nwm-secret-tmp/<redacted>`，
+  授权请求只记录 `operator_auth_curl ...`。不得包含原始 DSN、token、signature 或完整 auth header。
 
 ## 12. Evidence Paths
 
@@ -385,7 +417,7 @@ artifacts/
 | `slurm/` | 22 Gateway health、minimal submit probe、Slurm receipt | 27 不需要也不应具备 Slurm CLI |
 | `logs/` | published log URI、read result、缺失原因 | 不能读取 22 private workspace |
 | `manual-ops/` | 27 fail-closed retry/cancel、22 实际处理 receipt、27 只读展示结果 | 27 不能产生控制面 receipt |
-| `docker-security/` | no Slurm/Munge/Docker socket、HostConfig/mount/env 检查 | 任一 27 控制能力为 FAIL |
+| `docker-security/` | static validator、Docker smoke/image absence evidence、no Slurm/Munge/Docker socket、HostConfig/mount/env 检查；inline probe 仅为补充 | 任一 27 控制能力为 FAIL |
 | `cross-plane/` | 同一 `run_id/source/cycle_time/model_id` 从 22 到 27 | historical latest/mock 数据不能 PASS |
 
 ## 14. Rollback
