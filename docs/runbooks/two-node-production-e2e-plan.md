@@ -4,7 +4,10 @@
 适用范围：22 节点计算控制面 + 27 节点展示服务面
 推荐证据目录：`artifacts/two-node-e2e/<run_id>/` 或显式配置的 `/scratch/frd_muziyao/<project-specific-dir>/`
 
-Docker/systemd 操作细节见 `infra/README.two-node-docker.md`。本文只定义 E2E 证据边界；Docker 验证不能把 compose 启动、DB、API、浏览器、Slurm、日志和只读安全检查合并成一个模糊 PASS。
+Docker/systemd 操作细节见 `infra/README.two-node-docker.md`。所有直接 Docker Compose 和 systemd
+install/start/restart lane 都必须先运行 `scripts/validate_two_node_docker_source_trust.py`，把 source-trust
+JSON/text 报告写入 `docker-security/` evidence；该脚本失败时对应 lane 只能记为 `BLOCKED`。本文只定义 E2E
+证据边界；Docker 验证不能把 compose 启动、DB、API、浏览器、Slurm、日志和只读安全检查合并成一个模糊 PASS。
 
 ## 1. 文档目的
 
@@ -180,7 +183,7 @@ mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,b
 - `slurm/summary.md`：22 Gateway health、minimal submit probe、Slurm receipt。
 - `logs/summary.md`：published log URI、读取结果和缺失原因。
 - `docker-preflight/summary.md`：DockerRootDir、cache/space、TMPDIR 和 evidence root。
-- `docker-security/summary.md`：27 无 Slurm/Munge/Docker socket、HostConfig/mount/env 检查。
+- `docker-security/summary.md`：source-trust preflight、27 无 Slurm/Munge/Docker socket、HostConfig/mount/env 检查。
 - `summary.md`：最终 PASS/PARTIAL/FAIL/BLOCKED 汇总。
 - `bugs.md` 或链接到 `docs/bugs.md`：失败项、根因、复测条件。
 

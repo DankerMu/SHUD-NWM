@@ -13,7 +13,12 @@ Create them with owner-only permissions, for example
 file, use a fail-closed guard that checks the file exists, verifies `stat -c
 '%a' <file>` is `600`, prints `BLOCKED:`, and exits before `source` if the
 check fails. A failed mode check blocks validation rather than producing
-evidence from a readable secret file.
+evidence from a readable secret file. Before any direct Docker Compose command
+with `compute.env`/`display.env`, or before systemd install/start/restart, run
+the checked-in source-trust preflight
+`scripts/validate_two_node_docker_source_trust.py`; it checks checkout path
+components, compose/unit/env sources, trusted owners, symlinks, group/world
+writes, and role env mode `0600` before Docker can consume those files.
 
 Required canonical published artifact variables:
 
@@ -82,6 +87,12 @@ Display role, node 27:
 Validation commands:
 
 ```bash
+uv run python scripts/validate_two_node_docker_source_trust.py \
+  --checkout-root "$PWD" \
+  --trust-root "$(dirname "$PWD")" \
+  --evidence-root artifacts/two-node-e2e/source-trust \
+  --trusted-owner "$(id -un)" \
+  --role compute --role display
 uv run python scripts/validate_two_node_docker_runtime.py static
 uv run python scripts/validate_two_node_docker_runtime.py preflight
 docker compose --env-file infra/env/compute.example -f infra/compose.compute.yml config

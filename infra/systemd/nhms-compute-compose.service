@@ -6,10 +6,11 @@
 #   writer DB credentials, workspace paths, Basins/model paths, and image tag.
 # - Ensure the docker compose plugin is installed at /usr/bin/docker or update
 #   ExecStart/ExecStop/ExecReload to the local docker binary path.
-# - Before enable/start/reload/restart, record the checkout trust preflight from
-#   infra/README.two-node-docker.md: every WorkingDirectory path component and
-#   unit/compose/env source must be owned by root or a trusted Docker operator
-#   and must not be group/world-writable. Docker access is root-equivalent.
+# - Before enable/start/reload/restart, run
+#   scripts/validate_two_node_docker_source_trust.py --role compute from the
+#   checkout root and record its docker-security evidence. It must pass before
+#   systemd consumes WorkingDirectory, compose, env, or unit sources. Docker
+#   access is root-equivalent.
 
 [Unit]
 Description=NHMS node 22 compute/control compose

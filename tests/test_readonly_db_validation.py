@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -1046,11 +1047,13 @@ def test_readonly_secret_source_guard_blocks_readable_file_before_source_or_vali
     secret_source = tmp_path / "display-readonly-secrets.env"
     secret_source.write_text("touch sourced-sentinel\n", encoding="utf-8")
     secret_source.chmod(0o644)
+    tmp_path_q = shlex.quote(str(tmp_path))
+    secret_source_q = shlex.quote(str(secret_source))
 
     script = f"""
 set -u
-cd {tmp_path}
-READONLY_SECRET_SOURCE={secret_source}
+cd {tmp_path_q}
+READONLY_SECRET_SOURCE={secret_source_q}
 if [ ! -e "$READONLY_SECRET_SOURCE" ]; then
   install -m 0600 /dev/null "$READONLY_SECRET_SOURCE"
 elif [ ! -f "$READONLY_SECRET_SOURCE" ]; then
@@ -1084,10 +1087,11 @@ def test_readonly_secret_source_guard_preserves_existing_secret_file(tmp_path: P
     secret_content = "NHMS_DISPLAY_READONLY_DATABASE_URL=postgresql://readonly:secret@db.example/nhms\n"
     secret_source.write_text(secret_content, encoding="utf-8")
     secret_source.chmod(0o600)
+    secret_source_q = shlex.quote(str(secret_source))
 
     script = f"""
 set -u
-READONLY_SECRET_SOURCE={secret_source}
+READONLY_SECRET_SOURCE={secret_source_q}
 if [ ! -e "$READONLY_SECRET_SOURCE" ]; then
   install -m 0600 /dev/null "$READONLY_SECRET_SOURCE"
 elif [ ! -f "$READONLY_SECRET_SOURCE" ]; then
@@ -1117,11 +1121,13 @@ def test_operator_auth_source_guard_blocks_readable_file_before_source_or_header
     operator_auth.write_text("touch sourced-auth-sentinel\nOPERATOR_AUTH_TOKEN=secret\n", encoding="utf-8")
     operator_auth.chmod(0o644)
     secret_dir = tmp_path / "operator-secret"
+    tmp_path_q = shlex.quote(str(tmp_path))
+    secret_dir_q = shlex.quote(str(secret_dir))
 
     script = f"""
 set -u
-cd {tmp_path}
-OPERATOR_SECRET_DIR={secret_dir}
+cd {tmp_path_q}
+OPERATOR_SECRET_DIR={secret_dir_q}
 block_operator_auth_source() {{
   echo "BLOCKED: $*" >&2
   exit 1
@@ -1179,30 +1185,23 @@ def test_docs_secret_source_snippets_use_fail_closed_guards() -> None:
     assert "exits before `source`" in env_readme
 
 
-def test_systemd_trusted_source_preflight_is_fail_closed_and_complete() -> None:
+def test_systemd_source_trust_preflight_is_checked_in_and_authoritative() -> None:
     docker_readme = (REPO_ROOT / "infra" / "README.two-node-docker.md").read_text(encoding="utf-8")
 
-    assert "set -euo pipefail" in docker_readme
-    assert "block_systemd_preflight()" in docker_readme
-    assert "namei -l \"$CHECKOUT_ROOT/infra\" | tee \"$NAMEI_EVIDENCE\"" in docker_readme
-    assert "owner = $2" in docker_readme
-    assert "symlink path component rejected" in docker_readme
-    assert "untrusted owner on path component" in docker_readme
-    assert "group/world-writable path component" in docker_readme
-    assert "substr($1, 6, 1) == \"w\"" in docker_readme
-    assert "substr($1, 9, 1) == \"w\"" in docker_readme
+    assert "scripts/validate_two_node_docker_source_trust.py" in docker_readme
+    assert "--trusted-owner root --trusted-owner nhms-deploy" in docker_readme
+    assert "--role compute" in docker_readme
+    assert "--role display" in docker_readme
     assert "$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service" in docker_readme
     assert "$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service" in docker_readme
-    assert "check_systemd_source_path \"$path\"" in docker_readme
-    assert "find \"$CHECKOUT_ROOT\" -path \"$CHECKOUT_ROOT/.git\" -prune -o -perm /022 -print \\" in docker_readme
+    assert "sudo install -m 0644 \"$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service\"" in docker_readme
+    assert "sudo install -m 0644 \"$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service\"" in docker_readme
+    assert "source-trust preflight 是 authoritative gate" in docker_readme
+    assert "namei -l \"$CHECKOUT_ROOT/infra\" | tee \"$NAMEI_EVIDENCE\"" not in docker_readme
+    assert "block_systemd_preflight()" not in docker_readme
+    assert "check_systemd_source_path \"$path\"" not in docker_readme
     assert "test -z \"$(find" not in docker_readme
-    assert "sudo install -m 0644 infra/systemd/nhms-compute-compose.service" in docker_readme
-    assert docker_readme.index("$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service") < docker_readme.index(
-        "sudo install -m 0644 infra/systemd/nhms-compute-compose.service"
-    )
-    assert docker_readme.index("$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service") < docker_readme.index(
-        "sudo install -m 0644 infra/systemd/nhms-display-compose.service"
-    )
+    assert "sudo install -m 0644 infra/systemd/" not in docker_readme
 
 
 def test_systemd_namei_awk_rejects_untrusted_owner_and_group_writable_components(tmp_path: Path) -> None:
@@ -1264,6 +1263,8 @@ def test_systemd_source_path_guard_rejects_group_world_writable_sources(tmp_path
     unit_source.parent.mkdir(parents=True)
     unit_source.write_text("[Service]\n", encoding="utf-8")
     unit_source.chmod(0o664)
+    unit_source_q = shlex.quote(str(unit_source))
+    sentinel_q = shlex.quote(str(tmp_path / "systemctl-sentinel"))
 
     script = f"""
 set -euo pipefail
@@ -1289,8 +1290,8 @@ check_systemd_source_path() {{
     block_systemd_preflight "group/world-writable systemd source $path has permissions $perms"
   fi
 }}
-check_systemd_source_path {unit_source}
-touch {tmp_path / "systemctl-sentinel"}
+check_systemd_source_path {unit_source_q}
+touch {sentinel_q}
 """
 
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)

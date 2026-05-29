@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import json
+import os
+import pwd
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = REPO_ROOT / "scripts" / "validate_two_node_docker_source_trust.py"
+
+
+def test_source_trust_preflight_passes_for_trusted_owner_and_0600_role_envs(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    evidence_root = tmp_path / "evidence"
+
+    result = _run_preflight(
+        checkout_root=checkout,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=[f"{_current_owner()},root-equivalent-example"],
+        roles=["compute,display"],
+    )
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    summary = json.loads((evidence_root / "two-node-docker-source-trust.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "PASS"
+    assert summary["roles"] == ["compute", "display"]
+    assert summary["blockers"] == []
+    checked_labels = {item["label"] for item in summary["checked_paths"]}
+    assert {
+        "compute role env",
+        "display role env",
+        "compute compose source",
+        "display compose source",
+    } <= checked_labels
+    evidence_text = (evidence_root / "two-node-docker-source-trust.txt").read_text(encoding="utf-8")
+    assert "status: PASS" in evidence_text
+    assert "writer-secret" not in json.dumps(summary)
+    assert "readonly-secret" not in evidence_text
+
+
+def test_source_trust_blocks_0644_role_env_before_direct_compose_sentinel(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    display_env = checkout / "infra" / "env" / "display.env"
+    display_env.chmod(0o644)
+    evidence_root = tmp_path / "evidence with spaces"
+    sentinel = tmp_path / "compose-sentinel"
+
+    command = _shell_command(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--checkout-root",
+            str(checkout),
+            "--evidence-root",
+            str(evidence_root),
+            "--trust-root",
+            str(tmp_path),
+            "--trusted-owner",
+            _current_owner(),
+            "--role",
+            "display",
+        ]
+    )
+    script = f"{command} && touch {shlex.quote(str(sentinel))}"
+
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 2
+    assert "BLOCKED:" in result.stderr
+    assert "display role env must be mode 0600" in result.stderr
+    assert not sentinel.exists()
+    summary = json.loads((evidence_root / "two-node-docker-source-trust.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "BLOCKED"
+
+
+def test_source_trust_untrusted_owner_allowlist_covers_role_env_and_sources(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    evidence_root = tmp_path / "evidence"
+
+    result = _run_preflight(
+        checkout_root=checkout,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=["definitely-not-the-current-owner"],
+        roles=["compute", "display"],
+    )
+
+    assert result.returncode == 2
+    assert "BLOCKED:" in result.stderr
+    summary = json.loads((evidence_root / "two-node-docker-source-trust.json").read_text(encoding="utf-8"))
+    blocker_text = json.dumps(summary["blockers"])
+    assert "compute role env has untrusted owner" in blocker_text
+    assert "display role env has untrusted owner" in blocker_text
+    assert any(
+        phrase in blocker_text
+        for phrase in (
+            "compute compose source has untrusted owner",
+            "display compose source has untrusted owner",
+            "systemd source directory has untrusted owner",
+            "env source directory has untrusted owner",
+        )
+    )
+
+
+def test_source_trust_rejects_symlink_source(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    compose = checkout / "infra" / "compose.display.yml"
+    target = tmp_path / "display-compose-target.yml"
+    target.write_text("services: {}\n", encoding="utf-8")
+    compose.unlink()
+    compose.symlink_to(target)
+    evidence_root = tmp_path / "evidence"
+
+    result = _run_preflight(
+        checkout_root=checkout,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=[_current_owner()],
+        roles=["display"],
+    )
+
+    assert result.returncode == 2
+    assert "display compose source must not be a symlink" in result.stderr
+    summary = json.loads((evidence_root / "two-node-docker-source-trust.json").read_text(encoding="utf-8"))
+    assert any(item["label"] == "display compose source" and item["is_symlink"] for item in summary["checked_paths"])
+
+
+def test_source_trust_rejects_symlink_checkout_path_component(tmp_path: Path) -> None:
+    real_checkout = _make_checkout(tmp_path / "real-checkout")
+    checkout_link = tmp_path / "checkout-link"
+    checkout_link.symlink_to(real_checkout, target_is_directory=True)
+    evidence_root = tmp_path / "evidence"
+
+    result = _run_preflight(
+        checkout_root=checkout_link,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=[_current_owner()],
+        roles=["compute"],
+    )
+
+    assert result.returncode == 2
+    assert "trust path component must not be a symlink" in result.stderr
+    summary = json.loads((evidence_root / "two-node-docker-source-trust.json").read_text(encoding="utf-8"))
+    assert any(item["label"] == "trust path component" and item["is_symlink"] for item in summary["checked_paths"])
+
+
+def test_docker_readme_requires_source_trust_before_direct_compose_and_absolute_unit_install() -> None:
+    readme = (REPO_ROOT / "infra" / "README.two-node-docker.md").read_text(encoding="utf-8")
+    bash_blocks = re.findall(r"```bash\n(.*?)\n```", readme, flags=re.DOTALL)
+    compose_blocks = [block for block in bash_blocks if re.search(r"(?m)^docker compose --env-file ", block)]
+
+    assert compose_blocks
+    for block in compose_blocks:
+        first_compose = block.index("docker compose --env-file")
+        assert "scripts/validate_two_node_docker_source_trust.py" in block[:first_compose]
+
+    install_blocks = [block for block in bash_blocks if "sudo install -m 0644" in block]
+    assert install_blocks
+    for block in install_blocks:
+        first_install = block.index("sudo install -m 0644")
+        assert "scripts/validate_two_node_docker_source_trust.py" in block[:first_install]
+
+    assert 'sudo install -m 0644 "$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service"' in readme
+    assert 'sudo install -m 0644 "$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service"' in readme
+    assert "sudo install -m 0644 infra/systemd/" not in readme
+    assert 'test "$(stat -c \'%a\' infra/env/compute.env)" = "600"' not in readme
+    assert 'test "$(stat -c \'%a\' infra/env/display.env)" = "600"' not in readme
+
+
+def _run_preflight(
+    *,
+    checkout_root: Path,
+    evidence_root: Path,
+    trust_root: Path,
+    trusted_owners: list[str],
+    roles: list[str],
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--checkout-root",
+        str(checkout_root),
+        "--evidence-root",
+        str(evidence_root),
+        "--trust-root",
+        str(trust_root),
+    ]
+    for owner in trusted_owners:
+        command.extend(["--trusted-owner", owner])
+    for role in roles:
+        command.extend(["--role", role])
+    return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+def _make_checkout(path: Path) -> Path:
+    infra = path / "infra"
+    env = infra / "env"
+    systemd = infra / "systemd"
+    env.mkdir(parents=True)
+    systemd.mkdir()
+    (infra / "compose.compute.yml").write_text("services: {}\n", encoding="utf-8")
+    (infra / "compose.display.yml").write_text("services: {}\n", encoding="utf-8")
+    (systemd / "nhms-compute-compose.service").write_text("[Service]\n", encoding="utf-8")
+    (systemd / "nhms-display-compose.service").write_text("[Service]\n", encoding="utf-8")
+    (env / "compute.env").write_text("DATABASE_URL=postgresql://writer:writer-secret@db/nhms\n", encoding="utf-8")
+    (env / "display.env").write_text(
+        "DATABASE_URL=postgresql://readonly:readonly-secret@db/nhms\n",
+        encoding="utf-8",
+    )
+    for directory in (path, infra, env, systemd):
+        directory.chmod(0o755)
+    for source in (
+        infra / "compose.compute.yml",
+        infra / "compose.display.yml",
+        systemd / "nhms-compute-compose.service",
+        systemd / "nhms-display-compose.service",
+    ):
+        source.chmod(0o644)
+    (env / "compute.env").chmod(0o600)
+    (env / "display.env").chmod(0o600)
+    return path
+
+
+def _current_owner() -> str:
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return str(os.getuid())
+
+
+def _shell_command(parts: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in parts)
