@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from services.production_closure.readonly_db_validation import merge_readonly_db_source_evidence
 from services.production_closure.two_node_e2e_evidence import (
     READONLY_DB_LIVE_SCHEMA,
     STATUS_BLOCKED,
@@ -556,6 +557,41 @@ def test_readonly_db_final_pass_requires_merged_source_flag() -> None:
     assert "TWO_NODE_E2E_READONLY_DB_MERGED_SOURCE_EVIDENCE_MISSING" in _codes(readonly_lane["blockers"])
 
 
+def test_readonly_db_source_artifact_coverage_is_payload_proven() -> None:
+    run_id = _run_id("db-source-payload-mismatch")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    source_artifacts = db_summary["validation_provenance"]["source_artifacts"]
+    gfs_record = next(artifact for artifact in source_artifacts if artifact["sources"] == ["GFS"])
+    ifs_record = next(artifact for artifact in source_artifacts if artifact["sources"] == ["IFS"])
+    gfs_dir = Path(gfs_record["source_dir"])
+    ifs_dir = Path(ifs_record["source_dir"])
+    gfs_summary = _read(gfs_dir / "summary.json")
+    ifs_summary = _read(ifs_dir / "summary.json")
+
+    ifs_summary["display_identity"] = copy.deepcopy(gfs_summary["display_identity"])
+    ifs_summary["route_smoke"] = copy.deepcopy(gfs_summary["route_smoke"])
+    _write(ifs_dir / "summary.json", ifs_summary)
+    _write(ifs_dir / "route_smoke.json", ifs_summary["route_smoke"])
+    for filename in ("summary.json", "route_smoke.json"):
+        ifs_record["artifacts"][filename] = _readonly_source_artifact(
+            ifs_dir / filename,
+            ifs_summary["run_id"],
+        )
+    _write(lane / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert _codes(readonly_lane["blockers"]) & {
+        "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SOURCE_MISMATCH",
+        "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_DUPLICATE_SOURCE",
+    }
+
+
 @pytest.mark.parametrize("producer_status", [STATUS_PARTIAL, STATUS_BLOCKED])
 @pytest.mark.parametrize(
     "operation_patch",
@@ -677,6 +713,42 @@ def test_readonly_db_manual_action_no_write_fields_are_independent(mutation: dic
         "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_WRITE_PROOF_FAILED" in _codes(readonly_lane["blockers"])
         or "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_NO_WRITE_PROOF_MISSING" in _codes(readonly_lane["blockers"])
     )
+
+
+def test_readonly_db_final_accepts_live_producer_manual_action_shape() -> None:
+    run_id = _run_id("db-manual-producer-shape")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    source_dirs = [
+        Path(source_artifact["source_dir"])
+        for source_artifact in db_summary["validation_provenance"]["source_artifacts"]
+    ]
+    for source_artifact in db_summary["validation_provenance"]["source_artifacts"]:
+        source_dir = Path(source_artifact["source_dir"])
+        source_summary = _read(source_dir / "summary.json")
+        action_run_id = str(source_summary["display_identity"]["run_id"])
+        source_summary["manual_action_probes"] = _readonly_manual_actions(
+            include_action=False,
+            run_id=action_run_id,
+        )
+        source_summary["route_smoke"] = [
+            _route_without_embedded_identity(route) for route in source_summary["route_smoke"]
+        ]
+        _write(source_dir / "summary.json", source_summary)
+        _write(source_dir / "route_smoke.json", source_summary["route_smoke"])
+
+    merge_readonly_db_source_evidence(
+        evidence_root=config.evidence_root,
+        run_id=run_id,
+        source_dirs=source_dirs,
+        force=True,
+    )
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_PASS
 
 
 def test_readonly_db_missing_table_update_or_delete_blocks() -> None:
@@ -1097,6 +1169,9 @@ def test_manual_ops_response_evidence_valid_fixture_passes() -> None:
         ("wrong_action", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISMATCH"),
         ("wrong_source", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISMATCH"),
         ("wrong_run_id", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_RUN_ID_MISMATCH"),
+        ("missing_run_id", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_RUN_ID_MISSING"),
+        ("missing_action", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISSING"),
+        ("missing_source", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISSING"),
     ],
 )
 def test_manual_ops_response_evidence_must_be_structured_producer_evidence(
@@ -1128,6 +1203,12 @@ def test_manual_ops_response_evidence_must_be_structured_producer_evidence(
         action["response_evidence"]["source"] = "IFS"
     elif mutator == "wrong_run_id":
         action["response_evidence"]["evidence_run_id"] = "older-bundle"
+    elif mutator == "missing_run_id":
+        action["response_evidence"].pop("evidence_run_id", None)
+    elif mutator == "missing_action":
+        action["response_evidence"].pop("action", None)
+    elif mutator == "missing_source":
+        action["response_evidence"].pop("source", None)
     _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
 
     summary = validate_two_node_e2e_evidence(config)
@@ -1404,6 +1485,7 @@ def _seed_pass_bundle(
                 {
                     "node": "27",
                     "action": "retry",
+                    "source": "GFS",
                     "outcome": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
                     "write_executed": False,
                     "gateway_called": False,
@@ -1412,11 +1494,15 @@ def _seed_pass_bundle(
                         "http_status": 409,
                         "error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
                         "body_redacted": True,
+                        "evidence_run_id": run_id,
+                        "action": "retry",
+                        "source": "GFS",
                     },
                 },
                 {
                     "node": "27",
                     "action": "cancel",
+                    "source": "GFS",
                     "outcome": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
                     "write_executed": False,
                     "gateway_called": False,
@@ -1425,6 +1511,9 @@ def _seed_pass_bundle(
                         "http_status": 409,
                         "error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
                         "body_redacted": True,
+                        "evidence_run_id": run_id,
+                        "action": "cancel",
+                        "source": "GFS",
                     },
                 }
             ],
@@ -1700,13 +1789,20 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
     )
 
 
-def _readonly_manual_actions() -> list[dict[str, Any]]:
-    return [
+def _readonly_manual_actions(
+    *,
+    include_action: bool = True,
+    run_id: str = "read-only-fixture",
+) -> list[dict[str, Any]]:
+    actions = [
         {
             "name": "display_retry_manual_action",
             "action": "retry",
+            "method": "POST",
+            "path": f"/api/v1/runs/{run_id}/retry",
             "status": STATUS_PASS,
             "http_status": 409,
+            "expected_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
             "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
             "write_dependency_constructed": False,
             "write_executed": False,
@@ -1714,13 +1810,27 @@ def _readonly_manual_actions() -> list[dict[str, Any]]:
         {
             "name": "display_cancel_manual_action",
             "action": "cancel",
+            "method": "POST",
+            "path": f"/api/v1/runs/{run_id}/cancel",
             "status": STATUS_PASS,
             "http_status": 409,
+            "expected_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
             "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
             "write_dependency_constructed": False,
             "write_executed": False,
         },
     ]
+    if not include_action:
+        for action in actions:
+            action.pop("action", None)
+    return actions
+
+
+def _route_without_embedded_identity(route: dict[str, Any]) -> dict[str, Any]:
+    producer_route = dict(route)
+    producer_route.pop("strict_identity", None)
+    producer_route.pop("identity", None)
+    return producer_route
 
 
 def _readonly_source_artifact(path: Path, source_run_id: str) -> dict[str, Any]:

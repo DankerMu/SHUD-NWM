@@ -3352,7 +3352,7 @@ def _readonly_db_source_artifact_issues(
                 )
             )
             continue
-        record_blockers, record_findings, record_sources = _readonly_db_single_source_artifact_issues(
+        record_blockers, record_findings, payload_sources = _readonly_db_single_source_artifact_issues(
             record,
             source_index=index,
             lane_dir=lane_dir,
@@ -3360,7 +3360,7 @@ def _readonly_db_source_artifact_issues(
         )
         blockers.extend(record_blockers)
         findings.extend(record_findings)
-        duplicate_sources = sorted(source for source in record_sources if source in observed_sources)
+        duplicate_sources = sorted(source for source in payload_sources if source in observed_sources)
         if duplicate_sources:
             blockers.append(
                 _blocker(
@@ -3370,7 +3370,7 @@ def _readonly_db_source_artifact_issues(
                     duplicate_sources=duplicate_sources,
                 )
             )
-        observed_sources.update(record_sources)
+        observed_sources.update(payload_sources)
         source_dir = str(record.get("source_dir") or "")
         if source_dir in seen_dirs:
             blockers.append(
@@ -3405,7 +3405,16 @@ def _readonly_db_single_source_artifact_issues(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
     blockers: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
-    observed_sources = set(_sources_from_value(record.get("sources")))
+    claimed_sources = set(_sources_from_value(record.get("sources")))
+    payload_sources: set[str] = set()
+    if not claimed_sources:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SOURCE_CLAIM_MISSING",
+                "Readonly DB source artifact record must claim non-empty source coverage.",
+                source_index=source_index,
+            )
+        )
     source_dir = _readonly_db_source_artifact_dir(record, source_index=source_index, lane_dir=lane_dir)
     if source_dir is None:
         blockers.append(
@@ -3416,7 +3425,7 @@ def _readonly_db_single_source_artifact_issues(
                 source_dir=record.get("source_dir"),
             )
         )
-        return blockers, findings, observed_sources
+        return blockers, findings, payload_sources
     if _path_is_relative_to(lane_dir, source_dir) or source_dir == lane_dir.resolve(strict=False):
         blockers.append(
             _blocker(
@@ -3462,7 +3471,7 @@ def _readonly_db_single_source_artifact_issues(
                 source_index=source_index,
             )
         )
-        return blockers, findings, observed_sources
+        return blockers, findings, payload_sources
     missing_filenames = [filename for filename in READONLY_DB_SOURCE_ARTIFACT_FILENAMES if filename not in artifacts]
     if missing_filenames:
         blockers.append(
@@ -3498,8 +3507,17 @@ def _readonly_db_single_source_artifact_issues(
     )
     blockers.extend(sibling_blockers)
     findings.extend(sibling_findings)
-    observed_sources.update(payload_sources)
-    return blockers, findings, observed_sources
+    if claimed_sources != payload_sources:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SOURCE_MISMATCH",
+                "Readonly DB source artifact claimed sources must match payload-proven sources.",
+                source_index=source_index,
+                claimed_sources=sorted(claimed_sources),
+                payload_sources=sorted(payload_sources),
+            )
+        )
+    return blockers, findings, payload_sources
 
 
 def _readonly_db_source_artifact_dir(
@@ -3800,7 +3818,7 @@ def _readonly_db_source_artifact_payload_issues(
                 filename="permission_probes.json",
             )
         )
-    sources.update(_readonly_db_evidence_sources(summary))
+    sources.update(_readonly_db_payload_proven_sources(summary))
     return blockers, findings, sources
 
 
@@ -3997,6 +4015,9 @@ def _readonly_db_evidence_sources(payload: Mapping[str, Any]) -> set[str]:
     sources: set[str] = set()
     display_identity = payload.get("display_identity")
     if isinstance(display_identity, Mapping):
+        flat_source = _source_name(display_identity.get("source") or display_identity.get("source_id"))
+        if flat_source:
+            sources.add(flat_source)
         for key, value in display_identity.items():
             key_source = _source_name(key)
             if key_source and isinstance(value, Mapping):
@@ -4017,6 +4038,24 @@ def _readonly_db_evidence_sources(payload: Mapping[str, Any]) -> set[str]:
     identity_source = _source_name(payload.get("source") or payload.get("source_id"))
     if identity_source:
         sources.add(identity_source)
+    return sources
+
+
+def _readonly_db_payload_proven_sources(payload: Mapping[str, Any]) -> set[str]:
+    sources = _readonly_db_evidence_sources(payload)
+    route_smoke = payload.get("route_smoke")
+    if isinstance(route_smoke, list):
+        for route in route_smoke:
+            if not isinstance(route, Mapping):
+                continue
+            route_source = _source_name(route.get("source") or route.get("source_id"))
+            if route_source:
+                sources.add(route_source)
+            route_identity = route.get("strict_identity") or route.get("identity")
+            if isinstance(route_identity, Mapping):
+                identity_source = _source_name(route_identity.get("source") or route_identity.get("source_id"))
+                if identity_source:
+                    sources.add(identity_source)
     return sources
 
 
@@ -4897,7 +4936,15 @@ def _manual_ops_single_response_evidence_blockers(
             )
         )
     response_action = response_evidence.get("action")
-    if response_action is not None and _manual_action_name({"action": response_action}) != action_name:
+    if response_action is None:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISSING",
+                "Manual ops response_evidence must include action binding.",
+                action=action_name,
+            )
+        )
+    elif _manual_action_name({"action": response_action}) != action_name:
         blockers.append(
             _blocker(
                 "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISMATCH",
@@ -4909,8 +4956,17 @@ def _manual_ops_single_response_evidence_blockers(
     response_source = (
         response_evidence.get("source") if "source" in response_evidence else response_evidence.get("source_id")
     )
-    if response_source is not None:
-        action_source = _source_name(action.get("source") or action.get("source_id"))
+    action_source = _source_name(action.get("source") or action.get("source_id"))
+    if action_source is not None and response_source is None:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISSING",
+                "Manual ops response_evidence must include source binding for source-scoped display actions.",
+                action=action_name,
+                expected_source=action_source,
+            )
+        )
+    elif response_source is not None:
         bound_source = _source_name(response_source)
         if action_source is None or bound_source != action_source:
             blockers.append(
@@ -4922,10 +4978,21 @@ def _manual_ops_single_response_evidence_blockers(
                     expected_source=action_source,
                 )
             )
-    for key in CURRENT_EVIDENCE_RUN_ID_KEYS:
-        if key not in response_evidence:
-            continue
-        value = response_evidence.get(key)
+    run_bindings = [
+        (key, response_evidence.get(key))
+        for key in CURRENT_EVIDENCE_RUN_ID_KEYS
+        if key in response_evidence
+    ]
+    if not run_bindings:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_RUN_ID_MISSING",
+                "Manual ops response_evidence must include current evidence run binding.",
+                action=action_name,
+                accepted_fields=list(CURRENT_EVIDENCE_RUN_ID_KEYS),
+            )
+        )
+    for key, value in run_bindings:
         if str(value or "").strip() != evidence_run_id:
             blockers.append(
                 _blocker(

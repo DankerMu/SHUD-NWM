@@ -1816,6 +1816,7 @@ def run_display_manual_action_probes(run_id: str, *, database_url: str | None = 
                             "expected_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
                             "observed_error_code": error.get("code"),
                             "write_dependency_constructed": False,
+                            "write_executed": False,
                             "database_url_configured": bool(database_url),
                         }
                     )

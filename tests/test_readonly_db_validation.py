@@ -1575,6 +1575,7 @@ def test_display_retry_cancel_manual_action_ordering_does_not_construct_write_de
     assert all(item["http_status"] == 409 for item in results)
     assert all(item["observed_error_code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED" for item in results)
     assert all(item["write_dependency_constructed"] is False for item in results)
+    assert all(item["write_executed"] is False for item in results)
 
 
 class _FakeReadonlyAdapter:
@@ -1782,6 +1783,7 @@ def _passing_manual_actions(run_id: str) -> list[dict[str, Any]]:
             "http_status": 409,
             "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
             "write_dependency_constructed": False,
+            "write_executed": False,
         }
         for action in ("retry", "cancel")
     ]
