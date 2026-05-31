@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
@@ -43,6 +43,7 @@ RUN_METADATA_SCHEMAS = frozenset(
 READONLY_DB_LIVE_SCHEMA = "nhms.readonly_db_boundary.evidence.v1"
 
 FINAL_REQUIRED_LANES = (
+    "metadata",
     "docker_preflight",
     "docker_security",
     "readonly_db",
@@ -117,6 +118,129 @@ CURRENT_EVIDENCE_RUN_ID_KEYS = (
     "evidence_bundle_id",
     "validation_run_id",
 )
+DOCKER_PREFLIGHT_SCHEMA = "nhms.two_node_docker.preflight.v1"
+DOCKER_PREFLIGHT_REQUIRED_COMMANDS = (
+    "docker_version",
+    "docker_compose_version",
+    "docker_info_docker_root",
+    "docker_system_df",
+)
+DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS = ("evidence_root", "tmpdir", "docker_root")
+DOCKER_REQUIRED_FALSE_PROOFS: Mapping[str, tuple[str, ...]] = {
+    "slurm_routes_enabled": ("slurm_routes_enabled",),
+    "slurm_route_available": ("slurm_route_available",),
+    "slurm_cli_present": ("slurm_cli_present",),
+    "slurm_config_present": ("slurm_config_present",),
+    "slurm_socket_present": ("slurm_socket_present",),
+    "munge_path_present": ("munge_path_present", "munge_socket_present"),
+    "docker_socket_present": ("docker_socket_present", "docker_socket_mount_present"),
+    "privileged": ("privileged", "hostconfig_privileged", "display_privileged"),
+    "host_network": ("host_network", "host_network_mode", "network_mode_host"),
+    "host_pid": ("host_pid", "host_pid_mode", "pid_mode_host"),
+    "host_ipc": ("host_ipc", "host_ipc_mode", "ipc_mode_host"),
+    "cap_add_present": ("cap_add_present", "capabilities_added", "linux_capabilities_added"),
+    "forbidden_hostconfig_hazard": ("forbidden_hostconfig_hazard",),
+    "forbidden_mount_hazard": ("forbidden_mount_hazard", "forbidden_mount_present"),
+    "forbidden_env_hazard": ("forbidden_env_hazard", "forbidden_env_present"),
+    "broad_host_bind_present": ("broad_host_bind_present", "broad_bind_present"),
+    "private_workspace_bind_present": ("private_workspace_bind_present", "private_workspace_mount_present"),
+    "workspace_mount_present": ("workspace_mount_present", "workspace_bind_present"),
+    "writable_published_artifact_mount": (
+        "writable_published_artifact_mount",
+        "published_artifact_mount_writable",
+    ),
+    "display_write_capability_present": ("display_write_capability_present", "control_mutations_enabled"),
+}
+DOCKER_REQUIRED_TRUE_PROOFS: Mapping[str, tuple[str, ...]] = {
+    "published_artifacts_readonly": ("published_artifacts_readonly", "published_artifact_mount_readonly"),
+    "root_filesystem_readonly": ("root_filesystem_readonly", "readonly_root_filesystem", "read_only_root_filesystem"),
+    "cap_drop_all": ("cap_drop_all", "all_capabilities_dropped"),
+}
+DOCKER_DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
+    {
+        "SLURM_GATEWAY_URL",
+        "SLURM_GATEWAY_BACKEND",
+        "SLURM_GATEWAY_TEMPLATE_DIR",
+        "SLURM_GATEWAY_WORKSPACE_DIR",
+        "WORKSPACE_ROOT",
+        "RUN_WORKSPACE_ROOT",
+        "SHARED_LOG_ROOT",
+        "OBJECT_STORE_ROOT",
+        "NHMS_BASINS_ROOT",
+        "NHMS_MODEL_ASSET_ROOT",
+        "SHUD_EXECUTABLE",
+        "MUNGE_SOCKET",
+        "MUNGE_KEY",
+        "DOCKER_HOST",
+    }
+)
+DOCKER_FORBIDDEN_MOUNT_TOKENS = (
+    "/etc/slurm",
+    "/etc/munge",
+    "/run/munge",
+    "/var/run/munge",
+    "munge.key",
+    ".nhms-runs",
+    "WORKSPACE_ROOT",
+    "NHMS_BASINS_ROOT",
+    "NHMS_MODEL_ASSET_ROOT",
+    "MUNGE_SOCKET",
+    "MUNGE_KEY",
+)
+DOCKER_BROAD_HOST_ROOTS = frozenset({"/", "/root", "/home", "/etc", "/run", "/var", "/scratch"})
+MANUAL_OPS_REQUIRED_DISPLAY_ACTIONS = frozenset({"retry", "cancel"})
+MANUAL_OPS_SIDE_EFFECT_CATEGORIES: Mapping[str, tuple[str, ...]] = {
+    "write": (
+        "write_executed",
+        "db_write_executed",
+        "control_executed",
+        "state_mutation_executed",
+        "write_dependency_constructed",
+    ),
+    "gateway": ("gateway_called", "slurm_gateway_called", "gateway_dependency_constructed"),
+    "receipt": ("receipt_created", "control_receipt_created"),
+}
+READONLY_DB_REQUIRED_ROUTE_NAMES = frozenset(
+    {
+        "health",
+        "runtime_config",
+        "models",
+        "stations",
+        "latest_product",
+        "pipeline_status",
+        "pipeline_stages",
+        "jobs",
+        "job_logs",
+    }
+)
+READONLY_DB_STRICT_ROUTE_FIELDS: Mapping[str, tuple[str, ...]] = {
+    "latest_product": STRICT_IDENTITY_FIELDS,
+    "pipeline_status": STRICT_IDENTITY_FIELDS,
+    "pipeline_stages": STRICT_IDENTITY_FIELDS,
+    "jobs": STRICT_IDENTITY_FIELDS,
+    "job_logs": STRICT_LOG_IDENTITY_FIELDS,
+}
+READONLY_DB_REQUIRED_MANUAL_ACTIONS = frozenset({"retry", "cancel"})
+READONLY_DB_REQUIRED_PERMISSION_TARGETS = frozenset(
+    {
+        "hydro.hydro_run",
+        "hydro.river_timeseries",
+        "met.forecast_cycle",
+        "met.forcing_station_timeseries",
+        "ops.pipeline_job",
+        "ops.pipeline_event",
+        "reachable_roles",
+        "audited_schema_sequences",
+        "current_database",
+        "hydro.*",
+        "met.*",
+        "ops.*",
+    }
+)
+MAX_BOUNDED_EVIDENCE_DEPTH = 5
+MAX_BOUNDED_EVIDENCE_DICT_KEYS = 32
+MAX_BOUNDED_EVIDENCE_LIST_ITEMS = 12
+MAX_BOUNDED_EVIDENCE_STRING_CHARS = 512
 
 
 class TwoNodeE2EEvidenceError(RuntimeError):
@@ -311,12 +435,22 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
     )
     metadata = metadata_doc.payload if metadata_doc is not None else {}
     scope = _resolve_scope(config, metadata)
-    strict_identities = _resolve_strict_identities(metadata, declared_sources=scope["declared_sources"])
+    metadata_lane = _evaluate_metadata(
+        metadata_doc,
+        metadata,
+        evidence_run_id=config.run_id,
+        declared_sources=scope["declared_sources"],
+    )
+    strict_identities = _resolve_strict_identities(
+        metadata if metadata_lane.status == STATUS_PASS else {},
+        declared_sources=scope["declared_sources"],
+    )
 
     lane_docs = _load_lane_documents(config.run_dir)
     lanes = {
+        "metadata": metadata_lane,
         "docker_preflight": _evaluate_docker_preflight(
-            lane_docs["docker_preflight"], evidence_run_id=config.run_id
+            lane_docs["docker_preflight"], evidence_run_id=config.run_id, run_dir=config.run_dir
         ),
         "docker_security": _evaluate_docker_security(
             lane_docs["docker_security"], evidence_run_id=config.run_id
@@ -400,7 +534,7 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
         "evidence_root": _public_path(config.evidence_root),
         "run_dir": _public_path(config.run_dir),
         "evidence_dir": _public_path(config.lane_dir),
-        "metadata": _metadata_summary(metadata_doc, metadata),
+        "metadata": _metadata_summary(metadata_doc, metadata, metadata_lane),
         "strict_identity": {
             "declared_sources": list(scope["declared_sources"]),
             "reduced_scope": scope["reduced_scope"],
@@ -474,7 +608,12 @@ def _load_lane_documents(run_dir: Path) -> dict[str, EvidenceDocument | None]:
     }
 
 
-def _evaluate_docker_preflight(doc: EvidenceDocument | None, *, evidence_run_id: str) -> LaneEvaluation:
+def _evaluate_docker_preflight(
+    doc: EvidenceDocument | None,
+    *,
+    evidence_run_id: str,
+    run_dir: Path,
+) -> LaneEvaluation:
     if doc is None:
         return _missing_lane("docker_preflight", "TWO_NODE_E2E_DOCKER_PREFLIGHT_MISSING")
     payload = doc.payload
@@ -482,7 +621,17 @@ def _evaluate_docker_preflight(doc: EvidenceDocument | None, *, evidence_run_id:
     blockers = list(_stale_lane_blockers(payload))
     summary_status = str(payload.get("status", "unknown"))
     if status == STATUS_PASS:
-        blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name="docker_preflight"))
+        preflight_contract_blockers = _docker_preflight_contract_blockers(payload)
+        blockers.extend(preflight_contract_blockers)
+        blockers.extend(
+            _docker_preflight_current_run_blockers(
+                doc,
+                payload,
+                evidence_run_id=evidence_run_id,
+                run_dir=run_dir,
+                contract_complete=not preflight_contract_blockers,
+            )
+        )
         commands = payload.get("commands")
         if not isinstance(commands, Mapping):
             blockers.append(
@@ -492,12 +641,7 @@ def _evaluate_docker_preflight(doc: EvidenceDocument | None, *, evidence_run_id:
                 )
             )
         else:
-            for command_name in (
-                "docker_version",
-                "docker_compose_version",
-                "docker_info_docker_root",
-                "docker_system_df",
-            ):
+            for command_name in DOCKER_PREFLIGHT_REQUIRED_COMMANDS:
                 command = commands.get(command_name)
                 if not isinstance(command, Mapping) or command.get("returncode") != 0:
                     blockers.append(
@@ -531,6 +675,7 @@ def _evaluate_docker_security(doc: EvidenceDocument | None, *, evidence_run_id: 
     blockers = list(_stale_lane_blockers(payload))
     findings: list[dict[str, Any]] = []
     summary_status = str(payload.get("status", "unknown"))
+    docker_proofs = _docker_display_security_proofs(payload)
     if status == STATUS_PASS:
         blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name="docker_security"))
         if not _has_live_docker_evidence(payload):
@@ -540,6 +685,7 @@ def _evaluate_docker_security(doc: EvidenceDocument | None, *, evidence_run_id: 
                     "Docker display security PASS requires live Docker/container evidence.",
                 )
             )
+        blockers.extend(_docker_missing_required_proof_blockers(docker_proofs))
     runtime = _runtime_config(payload)
     if runtime:
         if runtime.get("service_role") != "display_readonly" or runtime.get("display_readonly") is not True:
@@ -581,6 +727,7 @@ def _evaluate_docker_security(doc: EvidenceDocument | None, *, evidence_run_id: 
                 "Display Docker evidence does not prove readonly published artifacts.",
             )
         )
+    findings.extend(_docker_proof_findings(docker_proofs))
     for key in DOCKER_FORBIDDEN_BOOL_KEYS:
         value = _bool_lookup(payload, key)
         if value is True:
@@ -710,8 +857,25 @@ def _evaluate_readonly_db(doc: EvidenceDocument | None, *, evidence_run_id: str)
                     reason=operation.get("reason"),
                 )
             )
-    sibling_blockers = _readonly_db_sibling_blockers(doc.path, evidence_run_id=evidence_run_id)
+    child_blockers, child_findings = _readonly_db_child_evidence_issues(payload)
+    blockers.extend(child_blockers)
+    findings.extend(child_findings)
+    sibling_blockers, sibling_findings = _readonly_db_sibling_issues(
+        doc.path,
+        payload,
+        evidence_run_id=evidence_run_id,
+    )
     blockers.extend(sibling_blockers)
+    findings.extend(sibling_findings)
+    recomputed_status = _readonly_db_recomputed_status(payload)
+    if status == STATUS_PASS and recomputed_status != STATUS_PASS:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_RECOMPUTED_STATUS_NOT_PASS",
+                "Readonly DB summary PASS contradicts recomputed child evidence status.",
+                recomputed_status=recomputed_status,
+            )
+        )
     status = _combined_status([status], findings=findings, blockers=blockers)
     return _lane_from_status(
         "readonly_db",
@@ -951,26 +1115,41 @@ def _evaluate_manual_ops(
     blockers = list(_stale_lane_blockers(payload))
     findings: list[dict[str, Any]] = []
     display_actions = _first_mapping_value(payload, ("display_actions", "display_action_probes", "readonly_actions"))
+    stable_27_actions: set[str] = set()
+    observed_27_actions: set[str] = set()
     if isinstance(display_actions, list):
         for action in display_actions:
             if not isinstance(action, Mapping):
                 continue
-            if _node_number(action) == "27" and _action_wrote_or_executed(action):
-                findings.append(
-                    _finding(
-                        "TWO_NODE_E2E_MANUAL_OPS_27_MUTATION",
-                        "27 display retry/cancel evidence executed or wrote a control action.",
+            if _node_number(action) != "27":
+                continue
+            action_name = _manual_action_name(action)
+            if action_name in MANUAL_OPS_REQUIRED_DISPLAY_ACTIONS:
+                observed_27_actions.add(action_name)
+            side_effect_findings, side_effect_blockers = _manual_action_side_effect_issues(action)
+            findings.extend(side_effect_findings)
+            blockers.extend(side_effect_blockers)
+            outcome_status = _manual_action_outcome_status(action)
+            if outcome_status == STATUS_PASS and action_name in MANUAL_OPS_REQUIRED_DISPLAY_ACTIONS:
+                stable_27_actions.add(action_name)
+            elif outcome_status == STATUS_BLOCKED:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_MANUAL_OPS_27_AUTH_ONLY_OR_UNSTABLE",
+                        "27 display retry/cancel evidence must include stable manual-action outcome, "
+                        "not only auth rejection.",
                         action=action.get("action") or action.get("name"),
+                        outcome=_manual_action_outcome_text(action),
+                        http_status=action.get("http_status") or action.get("status_code"),
                     )
                 )
-            outcome = str(action.get("outcome") or action.get("result") or action.get("error_code") or "")
-            if _node_number(action) == "27" and not _is_manual_action_outcome(outcome):
+            else:
                 findings.append(
                     _finding(
                         "TWO_NODE_E2E_MANUAL_OPS_27_NOT_FAIL_CLOSED",
                         "27 display retry/cancel evidence did not fail closed as manual action.",
                         action=action.get("action") or action.get("name"),
-                        outcome=outcome,
+                        outcome=_manual_action_outcome_text(action),
                     )
                 )
     receipts = _first_mapping_value(payload, ("control_receipts", "retry_cancel_receipts", "receipts"))
@@ -991,8 +1170,28 @@ def _evaluate_manual_ops(
                 )
             elif _is_actual_control_receipt(receipt) and producer == "22":
                 actual_22_receipt_count += 1
-            source = _source_name(receipt.get("source") or receipt.get("source_id"))
-            if source and source in strict_identities:
+            if _is_actual_control_receipt(receipt) and producer == "22":
+                receipt_identity = _record_identity(receipt)
+                source = _source_name(receipt_identity.get("source") or receipt_identity.get("source_id"))
+                if not source:
+                    blockers.append(
+                        _blocker(
+                            "TWO_NODE_E2E_MANUAL_OPS_22_RECEIPT_IDENTITY_MISSING",
+                            "Actual node 22 retry/cancel receipt must include strict source identity.",
+                            action=receipt.get("action"),
+                        )
+                    )
+                    continue
+                if source not in strict_identities:
+                    blockers.append(
+                        _blocker(
+                            "TWO_NODE_E2E_MANUAL_OPS_22_RECEIPT_SOURCE_UNDECLARED",
+                            "Actual node 22 retry/cancel receipt source is not in strict identity scope.",
+                            source=source,
+                            action=receipt.get("action"),
+                        )
+                    )
+                    continue
                 _, identity_findings, identity_blockers = _identity_match_status(
                     source,
                     receipt,
@@ -1015,6 +1214,16 @@ def _evaluate_manual_ops(
                 _blocker(
                     "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_ACTIONS_MISSING",
                     "Manual ops evidence must include 27 display retry/cancel fail-closed probes.",
+                )
+            )
+        missing_display_actions = sorted(MANUAL_OPS_REQUIRED_DISPLAY_ACTIONS - stable_27_actions)
+        if missing_display_actions:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_MANUAL_OPS_27_RETRY_CANCEL_MISSING",
+                    "Manual ops PASS requires stable 27 retry and cancel manual-action probes.",
+                    missing_actions=missing_display_actions,
+                    observed_27_actions=sorted(observed_27_actions),
                 )
             )
         if isinstance(receipts, list):
@@ -1308,21 +1517,255 @@ def _resolve_strict_identities(
     return identities
 
 
-def _metadata_summary(doc: EvidenceDocument | None, metadata: Mapping[str, Any]) -> dict[str, Any]:
+def _evaluate_metadata(
+    doc: EvidenceDocument | None,
+    metadata: Mapping[str, Any],
+    *,
+    evidence_run_id: str,
+    declared_sources: tuple[str, ...],
+) -> LaneEvaluation:
+    if doc is None:
+        return _missing_lane("metadata", "TWO_NODE_E2E_METADATA_MISSING")
+    schema = metadata.get("schema")
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    summary_status = str(metadata.get("status", STATUS_PASS))
+    if schema not in RUN_METADATA_SCHEMAS:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_METADATA_SCHEMA_UNSUPPORTED",
+                "Run metadata must use a recognized two-node E2E schema.",
+                schema=schema,
+                recognized_schemas=sorted(RUN_METADATA_SCHEMAS),
+            )
+        )
+    metadata_declared_sources = _sources_from_value(
+        metadata.get("declared_sources")
+        or metadata.get("sources")
+        or metadata.get("source_scope")
+    )
+    if not metadata_declared_sources:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_METADATA_DECLARED_SOURCES_MISSING",
+                "Run metadata must declare source scope.",
+            )
+        )
+    elif set(metadata_declared_sources) != set(declared_sources):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_METADATA_DECLARED_SOURCES_MISMATCH",
+                "Run metadata declared source scope must match the final configured scope.",
+                metadata_declared_sources=list(metadata_declared_sources),
+                configured_declared_sources=list(declared_sources),
+            )
+        )
+    explicit_ids = _explicit_bundle_run_ids(metadata)
+    if not explicit_ids:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_METADATA_CURRENT_BUNDLE_ID_MISSING",
+                "Run metadata must declare the current evidence bundle id.",
+                expected_evidence_run_id=evidence_run_id,
+            )
+        )
+    else:
+        for key, value in explicit_ids:
+            if str(value) != evidence_run_id:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_METADATA_STALE_BUNDLE_ID",
+                        "Run metadata belongs to a different evidence bundle.",
+                        key=key,
+                        evidence_run_id=value,
+                        expected_evidence_run_id=evidence_run_id,
+                    )
+                )
+    if not declared_sources:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DECLARED_SOURCES_MISSING",
+                "Final evidence requires declared source scope.",
+            )
+        )
+    identity_blockers, identity_findings = _strict_identity_metadata_issues(
+        metadata,
+        declared_sources=declared_sources,
+    )
+    blockers.extend(identity_blockers)
+    findings.extend(identity_findings)
+    status = _combined_status(
+        [_normalized_status(metadata.get("status", STATUS_PASS), pass_aliases=(STATUS_PASS, "ready", "current"))],
+        findings=findings,
+        blockers=blockers,
+    )
+    return _lane_from_status(
+        "metadata",
+        doc,
+        status=status,
+        summary_status=summary_status,
+        blockers=blockers,
+        findings=findings,
+    )
+
+
+def _strict_identity_metadata_issues(
+    metadata: Mapping[str, Any],
+    *,
+    declared_sources: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    entries: list[tuple[str, dict[str, Any]]] = []
+    raw = (
+        metadata.get("strict_identities")
+        or metadata.get("source_identities")
+        or _nested_get(metadata, ("strict_identity", "sources"))
+    )
+    if raw is None:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_METADATA_STRICT_IDENTITIES_MISSING",
+                "Run metadata must include strict identities for declared sources.",
+            )
+        )
+        return blockers, findings
+    if isinstance(raw, Mapping):
+        for source_key, value in raw.items():
+            if not isinstance(value, Mapping):
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_INVALID",
+                        "Strict identity entry must be an object.",
+                        source_key=source_key,
+                    )
+                )
+                continue
+            entries.append((str(source_key), dict(value)))
+    elif isinstance(raw, list):
+        for index, value in enumerate(raw):
+            if not isinstance(value, Mapping):
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_INVALID",
+                        "Strict identity list entry must be an object.",
+                        entry_index=index,
+                    )
+                )
+                continue
+            key = value.get("source") or value.get("source_id") or f"entry[{index}]"
+            entries.append((str(key), dict(value)))
+    else:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_METADATA_STRICT_IDENTITIES_INVALID",
+                "Run metadata strict identities must be a mapping or list.",
+            )
+        )
+        return blockers, findings
+    declared_set = set(declared_sources)
+    seen_embedded_sources: dict[str, str] = {}
+    seen_keys: set[str] = set()
+    for raw_key, identity in entries:
+        source_from_key = _source_name(raw_key)
+        source_from_identity = _source_name(identity.get("source") or identity.get("source_id"))
+        if not source_from_key:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_SOURCE_KEY_MISSING",
+                    "Strict identity entry key must identify a source.",
+                    source_key=raw_key,
+                )
+            )
+            continue
+        if source_from_key in seen_keys:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_METADATA_DUPLICATE_SOURCE_KEY",
+                    "Strict identity contains duplicate source keys.",
+                    source=source_from_key,
+                )
+            )
+        seen_keys.add(source_from_key)
+        if source_from_identity is None:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_SOURCE_MISSING",
+                    "Strict identity entry must declare its embedded source.",
+                    source_key=source_from_key,
+                )
+            )
+        elif source_from_identity != source_from_key:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_METADATA_SOURCE_KEY_MISMATCH",
+                    "Strict identity source key must match its embedded source.",
+                    source_key=source_from_key,
+                    embedded_source=source_from_identity,
+                )
+            )
+        if source_from_key not in declared_set:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_METADATA_UNDECLARED_STRICT_IDENTITY_SOURCE",
+                    "Strict identity source is not declared in source scope.",
+                    source=source_from_key,
+                    declared_sources=list(declared_sources),
+                )
+            )
+        if source_from_identity:
+            previous_key = seen_embedded_sources.get(source_from_identity)
+            if previous_key and previous_key != source_from_key:
+                findings.append(
+                    _finding(
+                        "TWO_NODE_E2E_METADATA_DUPLICATE_EMBEDDED_SOURCE",
+                        "Strict identity embeds the same source under multiple keys.",
+                        embedded_source=source_from_identity,
+                        source_keys=[previous_key, source_from_key],
+                    )
+                )
+            seen_embedded_sources.setdefault(source_from_identity, source_from_key)
+        missing_fields = [field for field in STRICT_LOG_IDENTITY_FIELDS if not _identity_value(identity, field)]
+        if missing_fields:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_METADATA_STRICT_IDENTITY_INCOMPLETE",
+                    "Strict identity entry is incomplete.",
+                    source=source_from_key,
+                    missing_fields=missing_fields,
+                )
+            )
+    for source in declared_sources:
+        if source not in seen_keys:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_METADATA_DECLARED_SOURCE_IDENTITY_MISSING",
+                    "Run metadata is missing strict identity for a declared source.",
+                    source=source,
+                )
+            )
+    return blockers, findings
+
+
+def _metadata_summary(
+    doc: EvidenceDocument | None,
+    metadata: Mapping[str, Any],
+    metadata_lane: LaneEvaluation,
+) -> dict[str, Any]:
     if doc is None:
         return {
-            "status": STATUS_BLOCKED,
+            "status": metadata_lane.status,
             "evidence_path": None,
             "schema": None,
             "reason": "No run metadata/identity file was found.",
         }
-    schema = metadata.get("schema")
-    status = STATUS_PASS if schema in RUN_METADATA_SCHEMAS or schema is None else STATUS_BLOCKED
     return {
-        "status": status,
+        "status": metadata_lane.status,
         "evidence_path": _public_path(doc.path),
         "evidence_sha256": doc.sha256,
-        "schema": schema,
+        "schema": metadata.get("schema"),
+        "blockers": list(metadata_lane.blockers),
+        "findings": list(metadata_lane.findings),
     }
 
 
@@ -1587,9 +2030,500 @@ def _permission_operations(payload: Mapping[str, Any]) -> list[Mapping[str, Any]
     return operations
 
 
-def _readonly_db_sibling_blockers(summary_path: Path, *, evidence_run_id: str) -> list[dict[str, Any]]:
+def _docker_preflight_contract_blockers(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
+    if payload.get("schema_version") != DOCKER_PREFLIGHT_SCHEMA and payload.get("schema") != DOCKER_PREFLIGHT_SCHEMA:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_PREFLIGHT_SCHEMA_UNRECOGNIZED",
+                "Docker preflight PASS must use the known preflight producer schema.",
+                schema=payload.get("schema") or payload.get("schema_version"),
+                expected_schema=DOCKER_PREFLIGHT_SCHEMA,
+            )
+        )
+    for key in ("evidence_root", "tmpdir", "docker_root_dir", "min_free_bytes"):
+        value = payload.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_DOCKER_PREFLIGHT_RESOURCE_EVIDENCE_MISSING",
+                    "Docker preflight PASS must record DockerRootDir, TMPDIR, evidence root, and min-free evidence.",
+                    evidence_key=key,
+                )
+            )
+    disk = payload.get("disk")
+    if not isinstance(disk, Mapping):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_MISSING",
+                "Docker preflight PASS must include disk evidence.",
+            )
+        )
+    else:
+        for label in DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS:
+            snapshot = disk.get(label)
+            if not isinstance(snapshot, Mapping) or snapshot.get("free_bytes") is None:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_MISSING",
+                        "Docker preflight PASS must include free-space evidence for required disk labels.",
+                        label=label,
+                    )
+                )
+    commands = payload.get("commands")
+    if not isinstance(commands, Mapping):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_PREFLIGHT_COMMANDS_MISSING",
+                "Docker preflight PASS must include command evidence.",
+            )
+        )
+    else:
+        for command_name in DOCKER_PREFLIGHT_REQUIRED_COMMANDS:
+            if command_name not in commands:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_DOCKER_PREFLIGHT_COMMAND_EVIDENCE_MISSING",
+                        "Docker preflight PASS is missing required command evidence.",
+                        command=command_name,
+                    )
+                )
+    return blockers
+
+
+def _docker_preflight_current_run_blockers(
+    doc: EvidenceDocument,
+    payload: Mapping[str, Any],
+    *,
+    evidence_run_id: str,
+    run_dir: Path,
+    contract_complete: bool,
+) -> list[dict[str, Any]]:
+    explicit_ids = _explicit_bundle_run_ids(payload)
+    if explicit_ids:
+        return _current_run_blockers(payload, evidence_run_id, lane_name="docker_preflight")
+    if (
+        contract_complete
+        and (
+            payload.get("schema_version") == DOCKER_PREFLIGHT_SCHEMA
+            or payload.get("schema") == DOCKER_PREFLIGHT_SCHEMA
+        )
+        and _path_is_relative_to(doc.path, run_dir)
+    ):
+        return []
+    return _current_run_blockers(payload, evidence_run_id, lane_name="docker_preflight")
+
+
+def _docker_display_security_proofs(payload: Mapping[str, Any]) -> dict[str, bool | None]:
+    proofs: dict[str, bool | None] = {}
+    for proof_name, aliases in DOCKER_REQUIRED_FALSE_PROOFS.items():
+        proofs[proof_name] = _bool_lookup_any(payload, aliases)
+    for proof_name, aliases in DOCKER_REQUIRED_TRUE_PROOFS.items():
+        proofs[proof_name] = _bool_lookup_any(payload, aliases)
+    slurm_unavailable = _bool_lookup_any(payload, ("slurm_routes_unavailable",))
+    if slurm_unavailable is not None:
+        proofs["slurm_route_available"] = not slurm_unavailable
+    raw = _raw_docker_security_analysis(payload)
+    for proof_name, value in raw.items():
+        if value is not None:
+            proofs[proof_name] = value
+    return proofs
+
+
+def _docker_missing_required_proof_blockers(proofs: Mapping[str, bool | None]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for proof_name in (*DOCKER_REQUIRED_FALSE_PROOFS.keys(), *DOCKER_REQUIRED_TRUE_PROOFS.keys()):
+        if proofs.get(proof_name) is None:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_DOCKER_DISPLAY_PROOF_MISSING",
+                    "Docker security PASS requires explicit no-capability/read-only proof for every governed "
+                    "display surface.",
+                    proof=proof_name,
+                )
+            )
+    return blockers
+
+
+def _docker_proof_findings(proofs: Mapping[str, bool | None]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for proof_name in DOCKER_REQUIRED_FALSE_PROOFS:
+        if proofs.get(proof_name) is True:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_DOCKER_DISPLAY_FORBIDDEN_CAPABILITY",
+                    "Display Docker evidence exposes a forbidden capability.",
+                    capability=proof_name,
+                )
+            )
+    for proof_name in DOCKER_REQUIRED_TRUE_PROOFS:
+        if proofs.get(proof_name) is False:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_DOCKER_DISPLAY_REQUIRED_READONLY_PROOF_FALSE",
+                    "Display Docker evidence contradicts required readonly/no-capability proof.",
+                    proof=proof_name,
+                )
+            )
+    return findings
+
+
+def _raw_docker_security_analysis(payload: Mapping[str, Any]) -> dict[str, bool | None]:
+    raw_proofs: dict[str, bool | None] = {}
+    mount_hazards = _empty_raw_mount_hazards()
+    env_hazard = False
+    published_readonly_seen = False
+    for inspect_object in _docker_inspect_objects(payload):
+        host_config = _first_raw_mapping(inspect_object, ("HostConfig", "host_config"))
+        if host_config:
+            _merge_raw_proof(raw_proofs, "privileged", _raw_bool(host_config.get("Privileged")))
+            _merge_raw_proof(raw_proofs, "host_network", _mode_is_host_or_shared(host_config.get("NetworkMode")))
+            _merge_raw_proof(raw_proofs, "host_pid", _mode_is_host_or_shared(host_config.get("PidMode")))
+            _merge_raw_proof(raw_proofs, "host_ipc", _mode_is_host_or_shared(host_config.get("IpcMode")))
+            _merge_raw_proof(raw_proofs, "cap_add_present", _sequence_has_values(host_config.get("CapAdd")))
+            _merge_raw_proof(raw_proofs, "cap_drop_all", _cap_drop_all(host_config.get("CapDrop")))
+            _merge_raw_proof(raw_proofs, "root_filesystem_readonly", _raw_bool(host_config.get("ReadonlyRootfs")))
+            _merge_raw_proof(raw_proofs, "forbidden_hostconfig_hazard", _hostconfig_hazard(host_config))
+            _merge_mount_hazards(mount_hazards, _raw_bind_mounts(host_config.get("Binds")))
+        config = _first_raw_mapping(inspect_object, ("Config", "config"))
+        if config:
+            env_hazard = env_hazard or _env_has_forbidden_keys(config.get("Env") or config.get("env"))
+        _merge_mount_hazards(
+            mount_hazards,
+            _raw_structured_mounts(inspect_object.get("Mounts") or inspect_object.get("mounts")),
+        )
+    for compose_service in _docker_compose_service_objects(payload):
+        _merge_raw_proof(raw_proofs, "privileged", _raw_bool(compose_service.get("privileged")))
+        _merge_raw_proof(raw_proofs, "host_network", _mode_is_host_or_shared(compose_service.get("network_mode")))
+        _merge_raw_proof(raw_proofs, "host_pid", _mode_is_host_or_shared(compose_service.get("pid")))
+        _merge_raw_proof(raw_proofs, "host_ipc", _mode_is_host_or_shared(compose_service.get("ipc")))
+        _merge_raw_proof(raw_proofs, "cap_add_present", _sequence_has_values(compose_service.get("cap_add")))
+        _merge_raw_proof(raw_proofs, "cap_drop_all", _cap_drop_all(compose_service.get("cap_drop")))
+        _merge_raw_proof(raw_proofs, "root_filesystem_readonly", _raw_bool(compose_service.get("read_only")))
+        _merge_mount_hazards(mount_hazards, _compose_mount_hazards(compose_service.get("volumes")))
+        env_hazard = env_hazard or _env_has_forbidden_keys(compose_service.get("environment"))
+    if mount_hazards["docker_socket"]:
+        raw_proofs["docker_socket_present"] = True
+    elif mount_hazards["mount_evidence"]:
+        raw_proofs.setdefault("docker_socket_present", False)
+    if mount_hazards["forbidden_mount"]:
+        raw_proofs["forbidden_mount_hazard"] = True
+    elif mount_hazards["mount_evidence"]:
+        raw_proofs.setdefault("forbidden_mount_hazard", False)
+    if mount_hazards["broad_host_bind"]:
+        raw_proofs["broad_host_bind_present"] = True
+    elif mount_hazards["mount_evidence"]:
+        raw_proofs.setdefault("broad_host_bind_present", False)
+    if mount_hazards["private_workspace_bind"]:
+        raw_proofs["private_workspace_bind_present"] = True
+        raw_proofs["workspace_mount_present"] = True
+    elif mount_hazards["mount_evidence"]:
+        raw_proofs.setdefault("private_workspace_bind_present", False)
+        raw_proofs.setdefault("workspace_mount_present", False)
+    if mount_hazards["writable_published"]:
+        raw_proofs["writable_published_artifact_mount"] = True
+        raw_proofs["published_artifacts_readonly"] = False
+    elif mount_hazards["published_mount_seen"]:
+        raw_proofs.setdefault("writable_published_artifact_mount", False)
+        published_readonly_seen = True
+    if env_hazard:
+        raw_proofs["forbidden_env_hazard"] = True
+    elif _raw_env_evidence_present(payload):
+        raw_proofs.setdefault("forbidden_env_hazard", False)
+    if published_readonly_seen:
+        raw_proofs.setdefault("published_artifacts_readonly", True)
+    return raw_proofs
+
+
+def _docker_inspect_objects(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    objects: list[Mapping[str, Any]] = []
+    for key in (
+        "docker_inspect",
+        "container_inspect",
+        "display_container_inspect",
+        "inspect",
+        "inspect_data",
+        "container",
+    ):
+        objects.extend(_mapping_objects(payload.get(key)))
+    if "HostConfig" in payload or "Config" in payload or "Mounts" in payload:
+        objects.append(payload)
+    return objects
+
+
+def _docker_compose_service_objects(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    services: list[Mapping[str, Any]] = []
+    for key in ("compose_service", "display_service", "service"):
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            services.append(value)
+    for key in ("compose", "compose_config", "docker_compose_config"):
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            raw_services = value.get("services")
+            if isinstance(raw_services, Mapping):
+                services.extend(item for item in raw_services.values() if isinstance(item, Mapping))
+    raw_services = payload.get("services")
+    if isinstance(raw_services, Mapping):
+        services.extend(item for item in raw_services.values() if isinstance(item, Mapping))
+    if any(key in payload for key in ("privileged", "network_mode", "cap_add", "volumes", "read_only")):
+        services.append(payload)
+    return services
+
+
+def _mapping_objects(value: Any) -> list[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, Mapping)]
+    return []
+
+
+def _first_raw_mapping(payload: Mapping[str, Any], keys: Sequence[str]) -> Mapping[str, Any]:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            return value
+    return {}
+
+
+def _merge_raw_proof(proofs: dict[str, bool | None], key: str, value: bool | None) -> None:
+    if value is None:
+        return
+    if value is True:
+        proofs[key] = True
+    else:
+        proofs.setdefault(key, False)
+
+
+def _empty_raw_mount_hazards() -> dict[str, bool]:
+    return {
+        "mount_evidence": False,
+        "published_mount_seen": False,
+        "docker_socket": False,
+        "forbidden_mount": False,
+        "broad_host_bind": False,
+        "private_workspace_bind": False,
+        "writable_published": False,
+    }
+
+
+def _merge_mount_hazards(target: dict[str, bool], source: Mapping[str, bool]) -> None:
+    for key, value in source.items():
+        target[key] = target.get(key, False) or bool(value)
+
+
+def _raw_bind_mounts(value: Any) -> dict[str, bool]:
+    hazards = _empty_raw_mount_hazards()
+    if not isinstance(value, list):
+        return hazards
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        parts = item.split(":")
+        source = parts[0] if parts else ""
+        target = parts[1] if len(parts) > 1 else ""
+        mode = ":".join(parts[2:]) if len(parts) > 2 else ""
+        read_only = "ro" in {part.strip().lower() for part in mode.split(",")}
+        _record_mount_hazard(hazards, source=source, target=target, read_only=read_only)
+    return hazards
+
+
+def _raw_structured_mounts(value: Any) -> dict[str, bool]:
+    hazards = _empty_raw_mount_hazards()
+    if not isinstance(value, list):
+        return hazards
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        source = str(item.get("Source") or item.get("source") or "")
+        target = str(item.get("Destination") or item.get("Target") or item.get("target") or "")
+        read_only = _mount_read_only(item)
+        _record_mount_hazard(hazards, source=source, target=target, read_only=read_only)
+    return hazards
+
+
+def _compose_mount_hazards(value: Any) -> dict[str, bool]:
+    hazards = _empty_raw_mount_hazards()
+    if not isinstance(value, list):
+        return hazards
+    for item in value:
+        if isinstance(item, str):
+            parts = item.split(":")
+            source = parts[0] if parts else ""
+            target = parts[1] if len(parts) > 1 else ""
+            mode = ":".join(parts[2:]) if len(parts) > 2 else ""
+            read_only = "ro" in {part.strip().lower() for part in mode.split(",")}
+            _record_mount_hazard(hazards, source=source, target=target, read_only=read_only)
+        elif isinstance(item, Mapping):
+            source = str(item.get("source") or item.get("src") or "")
+            target = str(item.get("target") or item.get("dst") or item.get("destination") or "")
+            read_only = _mount_read_only(item)
+            _record_mount_hazard(hazards, source=source, target=target, read_only=read_only)
+    return hazards
+
+
+def _record_mount_hazard(
+    hazards: dict[str, bool],
+    *,
+    source: str,
+    target: str,
+    read_only: bool | None,
+) -> None:
+    if not source and not target:
+        return
+    hazards["mount_evidence"] = True
+    if _is_docker_socket_path(source) or _is_docker_socket_path(target):
+        hazards["docker_socket"] = True
+    if _is_forbidden_mount_path(source) or _is_forbidden_mount_path(target):
+        hazards["forbidden_mount"] = True
+    if _is_broad_host_bind_source(source):
+        hazards["broad_host_bind"] = True
+    if _is_private_workspace_path(source) or _is_private_workspace_path(target):
+        hazards["private_workspace_bind"] = True
+    if _is_published_artifact_path(source) or _is_published_artifact_path(target):
+        hazards["published_mount_seen"] = True
+        if read_only is False:
+            hazards["writable_published"] = True
+
+
+def _mount_read_only(mount: Mapping[str, Any]) -> bool | None:
+    if "RW" in mount:
+        raw = _raw_bool(mount.get("RW"))
+        return None if raw is None else not raw
+    if "read_only" in mount:
+        return _raw_bool(mount.get("read_only"))
+    if "readonly" in mount:
+        return _raw_bool(mount.get("readonly"))
+    mode = str(mount.get("Mode") or mount.get("mode") or "")
+    if mode:
+        return "ro" in {part.strip().lower() for part in mode.split(",")}
+    return None
+
+
+def _raw_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _mode_is_host_or_shared(value: Any) -> bool | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return False
+    return text == "host" or text.startswith("container:") or text.startswith("service:")
+
+
+def _sequence_has_values(value: Any) -> bool | None:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        return bool(value)
+    return None
+
+
+def _cap_drop_all(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip().upper() == "ALL"
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        return any(str(item).strip().upper() == "ALL" for item in value)
+    return None
+
+
+def _hostconfig_hazard(host_config: Mapping[str, Any]) -> bool:
+    return any(
+        value is True
+        for value in (
+            _raw_bool(host_config.get("Privileged")),
+            _mode_is_host_or_shared(host_config.get("NetworkMode")),
+            _mode_is_host_or_shared(host_config.get("PidMode")),
+            _mode_is_host_or_shared(host_config.get("IpcMode")),
+            _sequence_has_values(host_config.get("CapAdd")),
+        )
+    )
+
+
+def _env_has_forbidden_keys(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(str(key) in DOCKER_DISPLAY_FORBIDDEN_ENV_KEYS for key in value.keys())
+    if isinstance(value, list):
+        for item in value:
+            key = str(item).split("=", 1)[0].strip()
+            if key in DOCKER_DISPLAY_FORBIDDEN_ENV_KEYS:
+                return True
+    return False
+
+
+def _raw_env_evidence_present(payload: Mapping[str, Any]) -> bool:
+    for inspect_object in _docker_inspect_objects(payload):
+        config = _first_raw_mapping(inspect_object, ("Config", "config"))
+        if config and ("Env" in config or "env" in config):
+            return True
+    return any("environment" in service for service in _docker_compose_service_objects(payload))
+
+
+def _is_docker_socket_path(value: str) -> bool:
+    normalized = _normalize_posix_path(value)
+    return normalized in {"/var/run/docker.sock", "/run/docker.sock"} or (
+        normalized.startswith("/") and normalized.endswith("/docker.sock")
+    )
+
+
+def _is_forbidden_mount_path(value: str) -> bool:
+    normalized = _normalize_posix_path(value)
+    lowered = normalized.lower()
+    return any(token.lower() in lowered for token in DOCKER_FORBIDDEN_MOUNT_TOKENS) or _is_munge_path(normalized)
+
+
+def _is_munge_path(value: str) -> bool:
+    normalized = _normalize_posix_path(value)
+    return (
+        normalized in {"/run/munge", "/var/run/munge", "/etc/munge"}
+        or normalized.startswith("/run/munge/")
+        or normalized.startswith("/var/run/munge/")
+        or normalized.startswith("/etc/munge/")
+        or normalized.endswith("/munge.key")
+        or normalized.endswith("/munge.socket")
+    )
+
+
+def _is_broad_host_bind_source(value: str) -> bool:
+    normalized = _normalize_posix_path(value)
+    return normalized in DOCKER_BROAD_HOST_ROOTS
+
+
+def _is_private_workspace_path(value: str) -> bool:
+    normalized = _normalize_posix_path(value).lower()
+    return any(token in normalized for token in ("workspace", ".nhms-runs", "/basins", "/shud", "model_asset"))
+
+
+def _is_published_artifact_path(value: str) -> bool:
+    normalized = _normalize_posix_path(value).lower()
+    return "published" in normalized and ("artifact" in normalized or "nhms" in normalized or "/var/lib" in normalized)
+
+
+def _readonly_db_sibling_issues(
+    summary_path: Path,
+    summary_payload: Mapping[str, Any],
+    *,
+    evidence_run_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
     lane_dir = summary_path.parent
+    sibling_payloads: dict[str, Any] = {}
     for filename in ("role.json", "route_smoke.json", "permission_probes.json"):
         path = lane_dir / filename
         try:
@@ -1618,20 +2552,315 @@ def _readonly_db_sibling_blockers(summary_path: Path, *, evidence_run_id: str) -
             )
             continue
         sibling_payload = _read_json_value(path, containment_root=lane_dir)
-        if isinstance(sibling_payload, Mapping):
-            for key, value in _explicit_bundle_run_ids(sibling_payload):
-                if str(value) != evidence_run_id:
+        sibling_payloads[filename] = sibling_payload
+        for key, value in _explicit_bundle_run_ids_from_value(sibling_payload):
+            if str(value) != evidence_run_id:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_READONLY_DB_AUTHORITATIVE_FILE_STALE",
+                        "Readonly DB authoritative sibling evidence belongs to an older evidence run.",
+                        filename=filename,
+                        key=key,
+                        evidence_run_id=value,
+                        expected_evidence_run_id=evidence_run_id,
+                    )
+                )
+    role_payload = sibling_payloads.get("role.json")
+    if role_payload is not None:
+        if role_payload != summary_payload.get("role"):
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_AUTHORITATIVE_FILE_MISMATCH",
+                    "Readonly DB role.json must match the role object embedded in summary.json.",
+                    filename="role.json",
+                )
+            )
+        if isinstance(role_payload, Mapping) and role_payload.get("role_type") != "readonly_candidate":
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_READONLY_DB_WRITER_ROLE",
+                    "Readonly DB role.json identifies a writer or mutating role.",
+                    role_type=role_payload.get("role_type"),
+                )
+            )
+    route_payload = sibling_payloads.get("route_smoke.json")
+    if route_payload is not None:
+        if route_payload != summary_payload.get("route_smoke"):
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_AUTHORITATIVE_FILE_MISMATCH",
+                    "Readonly DB route_smoke.json must match the route_smoke list embedded in summary.json.",
+                    filename="route_smoke.json",
+                )
+            )
+    permission_payload = sibling_payloads.get("permission_probes.json")
+    if permission_payload is not None:
+        if permission_payload != summary_payload.get("permission_probes"):
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_AUTHORITATIVE_FILE_MISMATCH",
+                    "Readonly DB permission_probes.json must match the permission_probes list embedded in "
+                    "summary.json.",
+                    filename="permission_probes.json",
+                )
+            )
+        if isinstance(permission_payload, list):
+            for operation in _permission_operations_from_targets(permission_payload):
+                findings.extend(_readonly_db_operation_findings(operation))
+    return blockers, findings
+
+
+def _readonly_db_child_evidence_issues(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    route_smoke = payload.get("route_smoke")
+    if isinstance(route_smoke, list):
+        blockers.extend(_readonly_db_route_issues(route_smoke, payload.get("display_identity")))
+    manual_actions = payload.get("manual_action_probes")
+    if isinstance(manual_actions, list):
+        blockers.extend(_readonly_db_manual_action_issues(manual_actions))
+    permission_probes = payload.get("permission_probes")
+    if isinstance(permission_probes, list):
+        permission_blockers, permission_findings = _readonly_db_permission_issues(permission_probes)
+        blockers.extend(permission_blockers)
+        findings.extend(permission_findings)
+    return blockers, findings
+
+
+def _readonly_db_route_issues(
+    route_smoke: list[Any],
+    display_identity: Any,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    routes = [item for item in route_smoke if isinstance(item, Mapping)]
+    route_names = {str(item.get("name") or "") for item in routes}
+    missing_routes = sorted(READONLY_DB_REQUIRED_ROUTE_NAMES - route_names)
+    if missing_routes:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_ROUTE_COVERAGE_MISSING",
+                "Readonly DB route smoke must cover all required display read routes.",
+                missing_routes=missing_routes,
+            )
+        )
+    expected_identity = display_identity if isinstance(display_identity, Mapping) else {}
+    for route in routes:
+        name = str(route.get("name") or "")
+        route_status = _normalized_status(route.get("status"))
+        if route_status != STATUS_PASS:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_ROUTE_CHILD_NOT_PASS",
+                    "Readonly DB route smoke child must be PASS before the DB lane can PASS.",
+                    route=name,
+                    child_status=route_status,
+                )
+            )
+        required_fields = READONLY_DB_STRICT_ROUTE_FIELDS.get(name)
+        if required_fields is None:
+            continue
+        identity = _readonly_route_identity(route, required_fields=required_fields)
+        missing_identity = [field for field in required_fields if not _identity_value(identity, field)]
+        if missing_identity:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_ROUTE_STRICT_IDENTITY_INCOMPLETE",
+                    "Readonly DB identity-bound route smoke child is missing strict identity.",
+                    route=name,
+                    missing_fields=missing_identity,
+                )
+            )
+            continue
+        for identity_field in required_fields:
+            expected = _identity_value(expected_identity, identity_field)
+            observed = _identity_value(identity, identity_field)
+            if expected and observed and str(expected) != str(observed):
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_READONLY_DB_ROUTE_STRICT_IDENTITY_MISMATCH",
+                        "Readonly DB route smoke strict identity must match display_identity.",
+                        route=name,
+                        field=identity_field,
+                        expected=expected,
+                        observed=observed,
+                    )
+                )
+    return blockers
+
+
+def _readonly_route_identity(route: Mapping[str, Any], *, required_fields: tuple[str, ...]) -> dict[str, Any]:
+    raw = route.get("strict_identity") or route.get("identity") or {}
+    identity = dict(raw) if isinstance(raw, Mapping) else {}
+    path = str(route.get("path") or "")
+    if path:
+        parsed = urlsplit(path)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        for field in required_fields:
+            if field not in identity and query.get(field):
+                identity[field] = query[field][0]
+        if "source" not in identity and query.get("source_id"):
+            identity["source"] = query["source_id"][0]
+        if "job_id" in required_fields and "job_id" not in identity:
+            parts = [unquote(part) for part in parsed.path.split("/") if part]
+            if len(parts) >= 4 and parts[-1] == "logs":
+                identity["job_id"] = parts[-2]
+    return identity
+
+
+def _readonly_db_manual_action_issues(actions: list[Any]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    records = [item for item in actions if isinstance(item, Mapping)]
+    observed_actions = {_manual_action_name(item) for item in records}
+    missing_actions = sorted(READONLY_DB_REQUIRED_MANUAL_ACTIONS - observed_actions)
+    if missing_actions:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_COVERAGE_MISSING",
+                "Readonly DB manual action probes must cover retry and cancel.",
+                missing_actions=missing_actions,
+            )
+        )
+    for action in records:
+        action_name = _manual_action_name(action)
+        action_status = _normalized_status(action.get("status"))
+        if action_status != STATUS_PASS:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_CHILD_NOT_PASS",
+                    "Readonly DB manual action child must be PASS before the DB lane can PASS.",
+                    action=action_name,
+                    child_status=action_status,
+                )
+            )
+        if _manual_action_outcome_status(action) != STATUS_PASS:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_OUTCOME_INVALID",
+                    "Readonly DB manual action child must prove display retry/cancel returns manual action.",
+                    action=action_name,
+                    http_status=action.get("http_status") or action.get("status_code"),
+                    observed_error_code=action.get("observed_error_code") or action.get("error_code"),
+                )
+            )
+        if action.get("write_dependency_constructed") is not False and action.get("write_executed") is not False:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_NO_WRITE_PROOF_MISSING",
+                    "Readonly DB manual action child must explicitly prove no write dependency was constructed.",
+                    action=action_name,
+                )
+            )
+    return blockers
+
+
+def _readonly_db_permission_issues(permission_probes: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    targets = [item for item in permission_probes if isinstance(item, Mapping)]
+    target_names = {str(item.get("target") or "") for item in targets}
+    surfaces = {str(item.get("surface") or "") for item in targets}
+    covered = set(target_names)
+    if "current_database_create_catalog" in surfaces:
+        covered.add("current_database")
+    missing_targets = sorted(READONLY_DB_REQUIRED_PERMISSION_TARGETS - covered)
+    if missing_targets:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_PERMISSION_COVERAGE_MISSING",
+                "Readonly DB permission probes must cover all required database mutation surfaces.",
+                missing_targets=missing_targets,
+            )
+        )
+    for target in targets:
+        target_status = _normalized_status(target.get("status"))
+        target_name = str(target.get("target") or "")
+        operations = target.get("operations")
+        if not isinstance(operations, list) or not operations:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_PERMISSION_OPERATIONS_MISSING",
+                    "Readonly DB permission target must include operation-level evidence.",
+                    target=target_name,
+                )
+            )
+        if target_status == STATUS_FAIL:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_PERMISSION_CHILD_FAILED",
+                    "Readonly DB permission child failed and must not be summarized as PASS.",
+                    target=target_name,
+                )
+            )
+        elif target_status == STATUS_BLOCKED:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_PERMISSION_CHILD_BLOCKED",
+                    "Readonly DB permission child is blocked.",
+                    target=target_name,
+                )
+            )
+        if isinstance(operations, list):
+            for operation in operations:
+                if not isinstance(operation, Mapping):
+                    continue
+                findings.extend(_readonly_db_operation_findings(operation))
+                operation_status = _normalized_status(operation.get("status"))
+                if operation_status == STATUS_BLOCKED:
                     blockers.append(
                         _blocker(
-                            "TWO_NODE_E2E_READONLY_DB_AUTHORITATIVE_FILE_STALE",
-                            "Readonly DB authoritative sibling evidence belongs to an older evidence run.",
-                            filename=filename,
-                            key=key,
-                            evidence_run_id=value,
-                            expected_evidence_run_id=evidence_run_id,
+                            "TWO_NODE_E2E_READONLY_DB_PERMISSION_OPERATION_BLOCKED",
+                            "Readonly DB permission operation is blocked.",
+                            target=target_name,
+                            operation=operation.get("operation"),
                         )
                     )
-    return blockers
+    return blockers, findings
+
+
+def _readonly_db_operation_findings(operation: Mapping[str, Any]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    if operation.get("privilege_allowed") is True:
+        findings.append(
+            _finding(
+                "TWO_NODE_E2E_READONLY_DB_MUTATING_PRIVILEGE",
+                "Readonly DB permission evidence contains a mutating privilege.",
+                operation=operation.get("operation"),
+                reason=operation.get("reason"),
+            )
+        )
+    if operation.get("execution_outcome") == "succeeded":
+        findings.append(
+            _finding(
+                "TWO_NODE_E2E_READONLY_DB_SUCCESSFUL_MUTATION_PROBE",
+                "Readonly DB permission evidence contains a successful DML/DDL probe.",
+                operation=operation.get("operation"),
+                reason=operation.get("reason"),
+            )
+        )
+    return findings
+
+
+def _readonly_db_recomputed_status(payload: Mapping[str, Any]) -> str:
+    findings: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    role = payload.get("role")
+    if isinstance(role, Mapping) and role.get("role_type") != "readonly_candidate":
+        findings.append({"code": "writer_role"})
+    child_blockers, child_findings = _readonly_db_child_evidence_issues(payload)
+    blockers.extend(child_blockers)
+    findings.extend(child_findings)
+    return _combined_status([STATUS_PASS], findings=findings, blockers=blockers)
+
+
+def _permission_operations_from_targets(targets: list[Any]) -> list[Mapping[str, Any]]:
+    operations: list[Mapping[str, Any]] = []
+    for target in targets:
+        if not isinstance(target, Mapping):
+            continue
+        raw_operations = target.get("operations", [])
+        if isinstance(raw_operations, list):
+            operations.extend(item for item in raw_operations if isinstance(item, Mapping))
+    return operations
 
 
 def _has_live_docker_evidence(payload: Mapping[str, Any]) -> bool:
@@ -1739,6 +2968,18 @@ def _explicit_bundle_run_ids(payload: Mapping[str, Any]) -> list[tuple[str, Any]
     return result
 
 
+def _explicit_bundle_run_ids_from_value(value: Any) -> list[tuple[str, Any]]:
+    result: list[tuple[str, Any]] = []
+    if isinstance(value, Mapping):
+        result.extend(_explicit_bundle_run_ids(value))
+        for nested in value.values():
+            result.extend(_explicit_bundle_run_ids_from_value(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            result.extend(_explicit_bundle_run_ids_from_value(nested))
+    return result
+
+
 def _database_url_is_redacted(value: str) -> bool:
     try:
         parsed = urlsplit(value)
@@ -1802,6 +3043,33 @@ def _bool_lookup(payload: Mapping[str, Any], key: str) -> bool | None:
             value = nested.get(key)
             if isinstance(value, bool):
                 return value
+    return None
+
+
+def _bool_lookup_any(payload: Mapping[str, Any], keys: Sequence[str]) -> bool | None:
+    for key in keys:
+        value = _bool_lookup(payload, key)
+        if value is not None:
+            return value
+    return _deep_bool_lookup(payload, frozenset(keys))
+
+
+def _deep_bool_lookup(value: Any, keys: frozenset[str]) -> bool | None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if str(key) in keys:
+                parsed = _raw_bool(nested)
+                if parsed is not None:
+                    return parsed
+        for nested in value.values():
+            found = _deep_bool_lookup(nested, keys)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _deep_bool_lookup(nested, keys)
+            if found is not None:
+                return found
     return None
 
 
@@ -1909,6 +3177,72 @@ def _action_wrote_or_executed(action: Mapping[str, Any]) -> bool:
     )
 
 
+def _manual_action_name(action: Mapping[str, Any]) -> str:
+    raw = str(action.get("action") or action.get("name") or action.get("path") or "").lower()
+    if "retry" in raw:
+        return "retry"
+    if "cancel" in raw:
+        return "cancel"
+    return raw.strip()
+
+
+def _manual_action_side_effect_issues(
+    action: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    findings: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    action_name = _manual_action_name(action)
+    for category, keys in MANUAL_OPS_SIDE_EFFECT_CATEGORIES.items():
+        observed = [(key, action.get(key)) for key in keys if isinstance(action.get(key), bool)]
+        if not observed:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_MANUAL_OPS_27_SIDE_EFFECT_PROOF_MISSING",
+                    "27 display retry/cancel probe must explicitly prove no write/gateway/receipt side effects.",
+                    action=action_name,
+                    side_effect=category,
+                    accepted_fields=list(keys),
+                )
+            )
+            continue
+        true_fields = [key for key, value in observed if value is True]
+        if true_fields:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_MANUAL_OPS_27_MUTATION",
+                    "27 display retry/cancel evidence executed or wrote a control action.",
+                    action=action_name,
+                    side_effect=category,
+                    fields=true_fields,
+                )
+            )
+    return findings, blockers
+
+
+def _manual_action_outcome_status(action: Mapping[str, Any]) -> str:
+    outcome_text = _manual_action_outcome_text(action)
+    http_status = str(action.get("http_status") or action.get("status_code") or "")
+    if _is_manual_action_outcome(outcome_text) and (not http_status or http_status == "409"):
+        return STATUS_PASS
+    lowered = outcome_text.lower()
+    if http_status in {"401", "403"} or any(
+        marker in lowered
+        for marker in ("auth_required", "not_authorized", "unauthorized", "forbidden", "401", "403")
+    ):
+        return STATUS_BLOCKED
+    return STATUS_FAIL
+
+
+def _manual_action_outcome_text(action: Mapping[str, Any]) -> str:
+    return str(
+        action.get("observed_error_code")
+        or action.get("error_code")
+        or action.get("outcome")
+        or action.get("result")
+        or ""
+    )
+
+
 def _is_manual_action_outcome(outcome: str) -> bool:
     lowered = outcome.lower()
     return any(
@@ -1916,11 +3250,6 @@ def _is_manual_action_outcome(outcome: str) -> bool:
         for marker in (
             "manual_action",
             "control_plane_manual_action_required",
-            "auth_required",
-            "not_authorized",
-            "forbidden",
-            "401",
-            "403",
             "409",
         )
     )
@@ -1971,7 +3300,54 @@ def _with_context(item: Mapping[str, Any], **context: Any) -> dict[str, Any]:
 
 
 def _bounded_evidence_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    return payload
+    bounded, truncated = _bounded_value(payload, depth=0)
+    if isinstance(bounded, Mapping):
+        result = dict(bounded)
+    else:
+        result = {"value": bounded}
+    result["_bounded_evidence"] = {
+        "max_depth": MAX_BOUNDED_EVIDENCE_DEPTH,
+        "max_dict_keys": MAX_BOUNDED_EVIDENCE_DICT_KEYS,
+        "max_list_items": MAX_BOUNDED_EVIDENCE_LIST_ITEMS,
+        "max_string_chars": MAX_BOUNDED_EVIDENCE_STRING_CHARS,
+        "truncated": truncated,
+    }
+    return result
+
+
+def _bounded_value(value: Any, *, depth: int) -> tuple[Any, bool]:
+    if depth >= MAX_BOUNDED_EVIDENCE_DEPTH:
+        return "[truncated:max-depth]", True
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        truncated = False
+        items = list(value.items())
+        for key, nested in items[:MAX_BOUNDED_EVIDENCE_DICT_KEYS]:
+            bounded, nested_truncated = _bounded_value(nested, depth=depth + 1)
+            result[str(key)] = bounded
+            truncated = truncated or nested_truncated
+        if len(items) > MAX_BOUNDED_EVIDENCE_DICT_KEYS:
+            result["_omitted_keys"] = len(items) - MAX_BOUNDED_EVIDENCE_DICT_KEYS
+            truncated = True
+        return result, truncated
+    if isinstance(value, list):
+        result = []
+        truncated = False
+        for nested in value[:MAX_BOUNDED_EVIDENCE_LIST_ITEMS]:
+            bounded, nested_truncated = _bounded_value(nested, depth=depth + 1)
+            result.append(bounded)
+            truncated = truncated or nested_truncated
+        if len(value) > MAX_BOUNDED_EVIDENCE_LIST_ITEMS:
+            result.append({"_omitted_items": len(value) - MAX_BOUNDED_EVIDENCE_LIST_ITEMS})
+            truncated = True
+        return result, truncated
+    if isinstance(value, str):
+        raw = value.encode("utf-8", errors="replace")
+        if len(raw) <= MAX_BOUNDED_EVIDENCE_STRING_CHARS:
+            return value, False
+        bounded = raw[:MAX_BOUNDED_EVIDENCE_STRING_CHARS].decode("utf-8", errors="ignore")
+        return f"{bounded}[truncated:{len(raw)}B]", True
+    return value, False
 
 
 def _safe_resolved_evidence_root(path: Path) -> Path:
@@ -1987,6 +3363,26 @@ def _safe_resolved_evidence_root(path: Path) -> Path:
         "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
         "Two-node E2E evidence root must be under repository artifacts/ or /scratch/frd_muziyao.",
     )
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _normalize_posix_path(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/")
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    if len(normalized) > 1 and normalized.endswith("/"):
+        normalized = normalized.rstrip("/")
+    return normalized
 
 
 def _refuse_symlink_components(path: Path) -> None:

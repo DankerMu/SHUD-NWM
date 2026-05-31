@@ -43,6 +43,22 @@ def test_complete_synthetic_real_evidence_bundle_passes_with_redaction() -> None
     assert "[redacted]" in evidence_text
 
 
+def test_large_lane_payload_is_bounded_in_final_summary() -> None:
+    run_id = _run_id("large-lane")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    api_summary["oversized_lane_payload"] = "x" * 900_000
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    evidence_text = (config.lane_dir / "summary.json").read_text(encoding="utf-8")
+    assert len(evidence_text.encode("utf-8")) < 300_000
+    assert "x" * 10_000 not in evidence_text
+    assert summary["lane_summaries"]["api"]["redacted_evidence"]["_bounded_evidence"]["truncated"] is True
+
+
 def test_missing_live_docker_db_and_browser_evidence_blocks_not_passes() -> None:
     run_id = _run_id("missing-live")
     config = _seed_pass_bundle(run_id)
@@ -74,6 +90,92 @@ def test_docker_display_capability_leak_fails_even_when_summary_was_partial() ->
     docker_lane = summary["lane_summaries"]["docker_security"]
     assert docker_lane["status"] == STATUS_FAIL
     assert _codes(docker_lane["findings"]) >= {"TWO_NODE_E2E_DOCKER_DISPLAY_FORBIDDEN_CAPABILITY"}
+
+
+def test_known_producer_like_docker_preflight_without_embedded_bundle_id_or_df_h_is_accepted() -> None:
+    run_id = _run_id("preflight-no-id")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight.pop("evidence_run_id")
+    preflight["commands"].pop("df_h")
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["docker_preflight"]["status"] == STATUS_PASS
+
+
+@pytest.mark.parametrize("missing_key", ["evidence_root", "tmpdir", "docker_root_dir", "min_free_bytes", "disk"])
+def test_docker_preflight_pass_missing_resource_evidence_blocks(missing_key: str) -> None:
+    run_id = _run_id(f"preflight-missing-{missing_key.replace('_', '-')}")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight.pop(missing_key)
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    assert summary["lane_summaries"]["docker_preflight"]["status"] == STATUS_BLOCKED
+
+
+def test_docker_preflight_pass_missing_command_evidence_blocks() -> None:
+    run_id = _run_id("preflight-missing-command")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight["commands"].pop("docker_system_df")
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_COMMAND_EVIDENCE_MISSING" in _codes(
+        summary["lane_summaries"]["docker_preflight"]["blockers"]
+    )
+
+
+def test_docker_security_pass_missing_required_proof_blocks() -> None:
+    run_id = _run_id("docker-proof-missing")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    docker_security.pop("root_filesystem_readonly")
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert docker_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_DISPLAY_PROOF_MISSING" in _codes(docker_lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    "raw_evidence",
+    [
+        {"HostConfig": {"Privileged": True}},
+        {"HostConfig": {"NetworkMode": "host"}},
+        {"HostConfig": {"PidMode": "host"}},
+        {"HostConfig": {"IpcMode": "host"}},
+        {"HostConfig": {"CapAdd": ["SYS_ADMIN"]}},
+        {"Mounts": [{"Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": False}]},
+        {"Mounts": [{"Source": "/scratch/private/workspace", "Destination": "/workspace", "RW": False}]},
+        {"Mounts": [{"Source": "/", "Destination": "/host", "RW": False}]},
+        {"Config": {"Env": ["WORKSPACE_ROOT=/workspace"]}},
+        {"Mounts": [{"Source": "/srv/nhms/published", "Destination": "/var/lib/nhms/published", "RW": True}]},
+    ],
+)
+def test_docker_security_raw_inspect_hazards_fail(raw_evidence: dict[str, Any]) -> None:
+    run_id = _run_id("docker-raw-hazard")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    docker_security["docker_inspect"] = [raw_evidence]
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_FAIL
+    assert summary["lane_summaries"]["docker_security"]["status"] == STATUS_FAIL
 
 
 @pytest.mark.parametrize(
@@ -126,6 +228,68 @@ def test_readonly_db_mutating_evidence_fails_even_when_producer_did_not_pass(
 
 
 @pytest.mark.parametrize(
+    "mutator",
+    ["sibling_role_writer", "sibling_permission_mutation", "sibling_payload_mismatch"],
+)
+def test_readonly_db_authoritative_sibling_evidence_is_recomputed(mutator: str) -> None:
+    run_id = _run_id(f"db-sibling-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    if mutator == "sibling_role_writer":
+        role = _read(lane / "role.json")
+        role["role_type"] = "writer_or_mutating"
+        _write(lane / "role.json", role)
+    elif mutator == "sibling_permission_mutation":
+        probes = json.loads((lane / "permission_probes.json").read_text(encoding="utf-8"))
+        probes[0]["operations"][0]["privilege_allowed"] = True
+        _write(lane / "permission_probes.json", probes)
+    else:
+        routes = json.loads((lane / "route_smoke.json").read_text(encoding="utf-8"))
+        routes.pop()
+        _write(lane / "route_smoke.json", routes)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    if mutator == "sibling_payload_mismatch":
+        assert summary["status"] == STATUS_BLOCKED
+        assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_BLOCKED
+    else:
+        assert summary["status"] == STATUS_FAIL
+        assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_FAIL
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    ["route_child_failed", "route_identity_incomplete", "manual_child_failed", "permission_coverage_missing"],
+)
+def test_readonly_db_child_failure_or_coverage_gap_blocks(mutator: str) -> None:
+    run_id = _run_id(f"db-child-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    if mutator == "route_child_failed":
+        db_summary["route_smoke"][0]["status"] = STATUS_FAIL
+    elif mutator == "route_identity_incomplete":
+        latest = next(route for route in db_summary["route_smoke"] if route["name"] == "latest_product")
+        latest["strict_identity"].pop("model_id")
+        latest["path"] = latest["path"].replace("&model_id=basins_qhh_shud", "")
+    elif mutator == "manual_child_failed":
+        db_summary["manual_action_probes"][0]["status"] = STATUS_FAIL
+    else:
+        db_summary["permission_probes"] = [
+            probe for probe in db_summary["permission_probes"] if probe["target"] != "ops.pipeline_event"
+        ]
+    _write(lane / "summary.json", db_summary)
+    _write(lane / "route_smoke.json", db_summary["route_smoke"])
+    _write(lane / "permission_probes.json", db_summary["permission_probes"])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_BLOCKED
+
+
+@pytest.mark.parametrize(
     ("mutator", "expected_status"),
     [
         ("wrong_identity", STATUS_FAIL),
@@ -159,6 +323,70 @@ def test_strict_identity_historical_latest_and_mock_evidence_do_not_pass(
 
     assert summary["status"] == expected_status
     assert summary["status"] != STATUS_PASS
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_status"),
+    [
+        ("missing_metadata", STATUS_BLOCKED),
+        ("unsupported_schema", STATUS_BLOCKED),
+        ("stale_bundle", STATUS_BLOCKED),
+        ("missing_declared_sources", STATUS_BLOCKED),
+        ("incomplete_identity", STATUS_BLOCKED),
+        ("key_source_mismatch", STATUS_FAIL),
+        ("duplicate_embedded_source", STATUS_FAIL),
+    ],
+)
+def test_metadata_identity_contract_blocks_or_fails_before_seeding_lanes(
+    mutator: str,
+    expected_status: str,
+) -> None:
+    run_id = _run_id(f"metadata-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    run_path = config.run_dir / "run.json"
+    metadata = _read(run_path)
+    if mutator == "missing_metadata":
+        run_path.unlink()
+    elif mutator == "unsupported_schema":
+        metadata["schema"] = "nhms.two_node_e2e.run.unknown"
+        _write(run_path, metadata)
+    elif mutator == "stale_bundle":
+        metadata["evidence_run_id"] = "older-bundle"
+        _write(run_path, metadata)
+    elif mutator == "missing_declared_sources":
+        metadata.pop("declared_sources")
+        _write(run_path, metadata)
+    elif mutator == "incomplete_identity":
+        metadata["strict_identities"]["GFS"].pop("model_id")
+        _write(run_path, metadata)
+    elif mutator == "key_source_mismatch":
+        metadata["strict_identities"]["GFS"]["source"] = "IFS"
+        _write(run_path, metadata)
+    else:
+        metadata["strict_identities"] = [
+            metadata["strict_identities"]["GFS"],
+            {**metadata["strict_identities"]["IFS"], "source": "GFS"},
+        ]
+        _write(run_path, metadata)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == expected_status
+    assert summary["lane_summaries"]["metadata"]["status"] == expected_status
+
+
+def test_source_lane_key_source_mismatch_does_not_collapse_siblings() -> None:
+    run_id = _run_id("source-key-collapse")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    api_summary["sources"]["GFS"]["identity"]["source"] = "IFS"
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_FAIL
+    assert summary["lane_summaries"]["api"]["status"] == STATUS_FAIL
+    assert "TWO_NODE_E2E_STRICT_IDENTITY_MISMATCH" in _codes(summary["lane_summaries"]["api"]["findings"])
 
 
 def test_both_sources_declared_with_one_missing_or_failing_never_full_passes() -> None:
@@ -219,6 +447,56 @@ def test_manual_ops_auth_and_receipt_boundaries() -> None:
 
     assert receipt_summary["status"] == STATUS_FAIL
     assert receipt_summary["lane_summaries"]["manual_ops"]["status"] == STATUS_FAIL
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_status"),
+    [
+        ("node22_only", STATUS_BLOCKED),
+        ("missing_cancel", STATUS_BLOCKED),
+        ("auth_only", STATUS_BLOCKED),
+        ("side_effect_true", STATUS_FAIL),
+        ("receipt_missing_identity", STATUS_BLOCKED),
+        ("receipt_mismatched_identity", STATUS_FAIL),
+    ],
+)
+def test_manual_ops_display_boundary_matrix(mutator: str, expected_status: str) -> None:
+    run_id = _run_id(f"manual-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    manual_ops = _read(config.run_dir / "manual-ops" / "summary.json")
+    if mutator == "node22_only":
+        for action in manual_ops["display_actions"]:
+            action["node"] = "22"
+    elif mutator == "missing_cancel":
+        manual_ops["display_actions"] = [
+            action for action in manual_ops["display_actions"] if action["action"] != "cancel"
+        ]
+    elif mutator == "auth_only":
+        manual_ops["display_actions"] = [
+            {
+                "node": "27",
+                "action": action,
+                "outcome": "403 FORBIDDEN",
+                "http_status": 403,
+                "write_executed": False,
+                "gateway_called": False,
+                "receipt_created": False,
+            }
+            for action in ("retry", "cancel")
+        ]
+    elif mutator == "side_effect_true":
+        manual_ops["display_actions"][0]["gateway_called"] = True
+    elif mutator == "receipt_missing_identity":
+        for field in ("source", "cycle_time", "run_id", "model_id"):
+            manual_ops["control_receipts"][0].pop(field, None)
+    else:
+        manual_ops["control_receipts"][0]["model_id"] = "wrong-model"
+    _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == expected_status
+    assert summary["lane_summaries"]["manual_ops"]["status"] == expected_status
 
 
 def test_path_safety_rejects_unapproved_roots_and_symlink_run_dirs() -> None:
@@ -296,14 +574,24 @@ def _seed_pass_bundle(
     _write(
         config.run_dir / "docker-preflight" / "summary.json",
         {
+            "schema_version": "nhms.two_node_docker.preflight.v1",
             "status": STATUS_PASS,
             "evidence_run_id": run_id,
+            "evidence_root": str(config.run_dir / "docker-preflight"),
+            "tmpdir": str(REPO_ROOT / "artifacts" / "tmp"),
             "docker_root_dir": "/var/lib/docker",
+            "min_free_bytes": 1024,
             "commands": {
                 "docker_version": {"returncode": 0},
                 "docker_compose_version": {"returncode": 0},
                 "docker_info_docker_root": {"returncode": 0},
                 "docker_system_df": {"returncode": 0},
+                "df_h": {"returncode": 0},
+            },
+            "disk": {
+                "evidence_root": {"path": str(config.run_dir / "docker-preflight"), "free_bytes": 4096},
+                "tmpdir": {"path": str(REPO_ROOT / "artifacts" / "tmp"), "free_bytes": 4096},
+                "docker_root": {"path": "/var/lib/docker", "free_bytes": 4096},
             },
         },
     )
@@ -319,12 +607,28 @@ def _seed_pass_bundle(
                 "slurm_routes_enabled": False,
             },
             "slurm_routes_unavailable": True,
+            "slurm_route_available": False,
             "published_artifacts_readonly": True,
+            "root_filesystem_readonly": True,
+            "cap_drop_all": True,
             "docker_socket_present": False,
             "slurm_cli_present": False,
             "slurm_config_present": False,
+            "slurm_socket_present": False,
             "munge_path_present": False,
+            "privileged": False,
+            "host_network": False,
+            "host_pid": False,
+            "host_ipc": False,
+            "cap_add_present": False,
+            "forbidden_hostconfig_hazard": False,
+            "forbidden_mount_hazard": False,
+            "forbidden_env_hazard": False,
+            "broad_host_bind_present": False,
+            "private_workspace_bind_present": False,
+            "workspace_mount_present": False,
             "writable_published_artifact_mount": False,
+            "display_write_capability_present": False,
         },
     )
     _write_readonly_db_lane(config, identities)
@@ -373,6 +677,14 @@ def _seed_pass_bundle(
                     "write_executed": False,
                     "gateway_called": False,
                     "receipt_created": False,
+                },
+                {
+                    "node": "27",
+                    "action": "cancel",
+                    "outcome": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+                    "write_executed": False,
+                    "gateway_called": False,
+                    "receipt_created": False,
                 }
             ],
             "control_receipts": [
@@ -411,20 +723,80 @@ def _seed_pass_bundle(
 
 def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[str, dict[str, str]]) -> None:
     first_identity = copy.deepcopy(next(iter(identities.values())))
+    permission_targets = (
+        ("hydro.hydro_run", "hydro_run_terminal_state"),
+        ("hydro.river_timeseries", "hydro_display_timeseries"),
+        ("met.forecast_cycle", "met_cycle_state"),
+        ("met.forcing_station_timeseries", "met_station_timeseries"),
+        ("ops.pipeline_job", "pipeline_job_state"),
+        ("ops.pipeline_event", "pipeline_event_audit"),
+        ("reachable_roles", "reachable_role_membership"),
+        ("audited_schema_sequences", "audited_schema_sequence_catalog"),
+        ("nhms", "current_database_create_catalog"),
+        ("hydro.*", "schema_table_ddl"),
+        ("met.*", "schema_table_ddl"),
+        ("ops.*", "schema_table_ddl"),
+    )
     permission_probes = [
         {
-            "target": "hydro.hydro_run",
+            "target": target,
+            "surface": surface,
+            "status": STATUS_PASS,
             "operations": [
                 {
-                    "operation": "INSERT",
+                    "operation": "INSERT" if "." in target and "*" not in target else "DDL_CREATE_TABLE",
                     "status": STATUS_PASS,
                     "privilege_allowed": False,
                     "execution_outcome": "permission_denied",
                 }
             ],
         }
+        for target, surface in permission_targets
     ]
-    route_smoke = [{"name": "latest_product", "status": STATUS_PASS, "identity": first_identity}]
+    strict_query = (
+        f"source={first_identity['source']}&cycle_time={first_identity['cycle_time']}"
+        f"&run_id={first_identity['run_id']}&model_id={first_identity['model_id']}"
+    )
+    route_smoke = [
+        {"name": "health", "status": STATUS_PASS, "path": "/health"},
+        {"name": "runtime_config", "status": STATUS_PASS, "path": "/api/v1/runtime/config"},
+        {"name": "models", "status": STATUS_PASS, "path": "/api/v1/models?active=all&limit=1"},
+        {
+            "name": "stations",
+            "status": STATUS_PASS,
+            "path": f"/api/v1/met/stations?model_id={first_identity['model_id']}&limit=1",
+        },
+        {
+            "name": "latest_product",
+            "status": STATUS_PASS,
+            "path": f"/api/v1/mvp/qhh/latest-product?{strict_query}",
+            "strict_identity": first_identity,
+        },
+        {
+            "name": "pipeline_status",
+            "status": STATUS_PASS,
+            "path": f"/api/v1/pipeline/status?{strict_query}",
+            "strict_identity": first_identity,
+        },
+        {
+            "name": "pipeline_stages",
+            "status": STATUS_PASS,
+            "path": f"/api/v1/pipeline/stages?{strict_query}",
+            "strict_identity": first_identity,
+        },
+        {
+            "name": "jobs",
+            "status": STATUS_PASS,
+            "path": f"/api/v1/jobs?{strict_query}&limit=1",
+            "strict_identity": first_identity,
+        },
+        {
+            "name": "job_logs",
+            "status": STATUS_PASS,
+            "path": f"/api/v1/jobs/{first_identity['job_id']}/logs?{strict_query}&job_id={first_identity['job_id']}",
+            "strict_identity": first_identity,
+        },
+    ]
     role = {
         "evidence_run_id": config.run_id,
         "current_user": "display_ro",
@@ -445,7 +817,24 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
             "role": role,
             "display_identity": first_identity,
             "route_smoke": route_smoke,
-            "manual_action_probes": [{"action": "retry", "status": STATUS_PASS}],
+            "manual_action_probes": [
+                {
+                    "name": "display_retry_manual_action",
+                    "action": "retry",
+                    "status": STATUS_PASS,
+                    "http_status": 409,
+                    "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+                    "write_dependency_constructed": False,
+                },
+                {
+                    "name": "display_cancel_manual_action",
+                    "action": "cancel",
+                    "status": STATUS_PASS,
+                    "http_status": 409,
+                    "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+                    "write_dependency_constructed": False,
+                },
+            ],
             "permission_probes": permission_probes,
         },
     )
