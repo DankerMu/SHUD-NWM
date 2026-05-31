@@ -179,6 +179,41 @@ def test_docker_security_raw_inspect_hazards_fail(raw_evidence: dict[str, Any]) 
 
 
 @pytest.mark.parametrize(
+    "proof_patch",
+    [
+        {"docker_socket_present": False, "security": {"docker_socket_present": True}},
+        {
+            "docker_socket_present": False,
+            "docker_inspect": [
+                {"Mounts": [{"Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": False}]}
+            ],
+        },
+        {
+            "published_artifacts_readonly": True,
+            "docker_inspect": [
+                {
+                    "Mounts": [
+                        {"Source": "/srv/nhms/published", "Destination": "/var/lib/nhms/published", "RW": True}
+                    ]
+                }
+            ],
+        },
+    ],
+)
+def test_docker_security_nested_unsafe_proofs_override_top_level_safe(proof_patch: dict[str, Any]) -> None:
+    run_id = _run_id("docker-nested-unsafe")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    _deep_update(docker_security, proof_patch)
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_FAIL
+    assert summary["lane_summaries"]["docker_security"]["status"] == STATUS_FAIL
+
+
+@pytest.mark.parametrize(
     "operation_patch",
     [
         {"role": {"role_type": "writer_or_mutating"}},
@@ -287,6 +322,50 @@ def test_readonly_db_child_failure_or_coverage_gap_blocks(mutator: str) -> None:
 
     assert summary["status"] == STATUS_BLOCKED
     assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_BLOCKED
+
+
+def test_readonly_db_full_source_bundle_with_only_gfs_route_evidence_blocks() -> None:
+    run_id = _run_id("db-route-missing-source")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    db_summary["route_smoke"] = [
+        route
+        for route in db_summary["route_smoke"]
+        if route.get("name") not in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}
+        or route.get("source") == "GFS"
+    ]
+    _write(lane / "summary.json", db_summary)
+    _write(lane / "route_smoke.json", db_summary["route_smoke"])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_READONLY_DB_ROUTE_SOURCE_COVERAGE_MISSING" in _codes(readonly_lane["blockers"])
+
+
+def test_readonly_db_ifs_route_identity_mismatch_fails() -> None:
+    run_id = _run_id("db-ifs-route-mismatch")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    ifs_latest = next(
+        route
+        for route in db_summary["route_smoke"]
+        if route.get("name") == "latest_product" and route.get("source") == "IFS"
+    )
+    ifs_latest["strict_identity"]["model_id"] = "wrong-model"
+    _write(lane / "summary.json", db_summary)
+    _write(lane / "route_smoke.json", db_summary["route_smoke"])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_FAIL
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert readonly_lane["status"] == STATUS_FAIL
+    assert "TWO_NODE_E2E_STRICT_IDENTITY_MISMATCH" in _codes(readonly_lane["findings"])
 
 
 @pytest.mark.parametrize(
@@ -499,6 +578,39 @@ def test_manual_ops_display_boundary_matrix(mutator: str, expected_status: str) 
     assert summary["lane_summaries"]["manual_ops"]["status"] == expected_status
 
 
+def test_manual_ops_full_source_bundle_with_only_gfs_receipt_blocks() -> None:
+    run_id = _run_id("manual-missing-source-receipt")
+    config = _seed_pass_bundle(run_id)
+    manual_ops = _read(config.run_dir / "manual-ops" / "summary.json")
+    manual_ops["control_receipts"] = [
+        receipt for receipt in manual_ops["control_receipts"] if receipt.get("source") == "GFS"
+    ]
+    _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    manual_lane = summary["lane_summaries"]["manual_ops"]
+    assert manual_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_MANUAL_OPS_22_RECEIPT_SOURCE_COVERAGE_MISSING" in _codes(manual_lane["blockers"])
+
+
+def test_manual_ops_ifs_receipt_identity_mismatch_fails() -> None:
+    run_id = _run_id("manual-ifs-receipt-mismatch")
+    config = _seed_pass_bundle(run_id)
+    manual_ops = _read(config.run_dir / "manual-ops" / "summary.json")
+    ifs_receipt = next(receipt for receipt in manual_ops["control_receipts"] if receipt.get("source") == "IFS")
+    ifs_receipt["model_id"] = "wrong-model"
+    _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_FAIL
+    manual_lane = summary["lane_summaries"]["manual_ops"]
+    assert manual_lane["status"] == STATUS_FAIL
+    assert "TWO_NODE_E2E_STRICT_IDENTITY_MISMATCH" in _codes(manual_lane["findings"])
+
+
 def test_path_safety_rejects_unapproved_roots_and_symlink_run_dirs() -> None:
     with pytest.raises(TwoNodeE2EEvidenceError) as unapproved:
         TwoNodeE2EEvidenceConfig.from_env(
@@ -693,8 +805,9 @@ def _seed_pass_bundle(
                     "producer_role": "compute_control",
                     "action": "retry",
                     "actual": True,
-                    **copy.deepcopy(next(iter(identities.values()))),
+                    **copy.deepcopy(identity),
                 }
+                for identity in identities.values()
             ],
         },
     )
@@ -722,7 +835,6 @@ def _seed_pass_bundle(
 
 
 def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[str, dict[str, str]]) -> None:
-    first_identity = copy.deepcopy(next(iter(identities.values())))
     permission_targets = (
         ("hydro.hydro_run", "hydro_run_terminal_state"),
         ("hydro.river_timeseries", "hydro_display_timeseries"),
@@ -753,50 +865,65 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
         }
         for target, surface in permission_targets
     ]
-    strict_query = (
-        f"source={first_identity['source']}&cycle_time={first_identity['cycle_time']}"
-        f"&run_id={first_identity['run_id']}&model_id={first_identity['model_id']}"
-    )
     route_smoke = [
         {"name": "health", "status": STATUS_PASS, "path": "/health"},
         {"name": "runtime_config", "status": STATUS_PASS, "path": "/api/v1/runtime/config"},
         {"name": "models", "status": STATUS_PASS, "path": "/api/v1/models?active=all&limit=1"},
-        {
-            "name": "stations",
-            "status": STATUS_PASS,
-            "path": f"/api/v1/met/stations?model_id={first_identity['model_id']}&limit=1",
-        },
-        {
-            "name": "latest_product",
-            "status": STATUS_PASS,
-            "path": f"/api/v1/mvp/qhh/latest-product?{strict_query}",
-            "strict_identity": first_identity,
-        },
-        {
-            "name": "pipeline_status",
-            "status": STATUS_PASS,
-            "path": f"/api/v1/pipeline/status?{strict_query}",
-            "strict_identity": first_identity,
-        },
-        {
-            "name": "pipeline_stages",
-            "status": STATUS_PASS,
-            "path": f"/api/v1/pipeline/stages?{strict_query}",
-            "strict_identity": first_identity,
-        },
-        {
-            "name": "jobs",
-            "status": STATUS_PASS,
-            "path": f"/api/v1/jobs?{strict_query}&limit=1",
-            "strict_identity": first_identity,
-        },
-        {
-            "name": "job_logs",
-            "status": STATUS_PASS,
-            "path": f"/api/v1/jobs/{first_identity['job_id']}/logs?{strict_query}&job_id={first_identity['job_id']}",
-            "strict_identity": first_identity,
-        },
     ]
+    for identity in identities.values():
+        strict_identity = copy.deepcopy(identity)
+        strict_query = (
+            f"source={strict_identity['source']}&cycle_time={strict_identity['cycle_time']}"
+            f"&run_id={strict_identity['run_id']}&model_id={strict_identity['model_id']}"
+        )
+        route_smoke.extend(
+            [
+                {
+                    "name": "stations",
+                    "source": strict_identity["source"],
+                    "status": STATUS_PASS,
+                    "path": f"/api/v1/met/stations?model_id={strict_identity['model_id']}&limit=1",
+                },
+                {
+                    "name": "latest_product",
+                    "source": strict_identity["source"],
+                    "status": STATUS_PASS,
+                    "path": f"/api/v1/mvp/qhh/latest-product?{strict_query}",
+                    "strict_identity": strict_identity,
+                },
+                {
+                    "name": "pipeline_status",
+                    "source": strict_identity["source"],
+                    "status": STATUS_PASS,
+                    "path": f"/api/v1/pipeline/status?{strict_query}",
+                    "strict_identity": strict_identity,
+                },
+                {
+                    "name": "pipeline_stages",
+                    "source": strict_identity["source"],
+                    "status": STATUS_PASS,
+                    "path": f"/api/v1/pipeline/stages?{strict_query}",
+                    "strict_identity": strict_identity,
+                },
+                {
+                    "name": "jobs",
+                    "source": strict_identity["source"],
+                    "status": STATUS_PASS,
+                    "path": f"/api/v1/jobs?{strict_query}&limit=1",
+                    "strict_identity": strict_identity,
+                },
+                {
+                    "name": "job_logs",
+                    "source": strict_identity["source"],
+                    "status": STATUS_PASS,
+                    "path": (
+                        f"/api/v1/jobs/{strict_identity['job_id']}/logs?{strict_query}"
+                        f"&job_id={strict_identity['job_id']}"
+                    ),
+                    "strict_identity": strict_identity,
+                },
+            ]
+        )
     role = {
         "evidence_run_id": config.run_id,
         "current_user": "display_ro",
@@ -815,7 +942,7 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
             "database_url": "postgresql://db.example:5432/nhms",
             "validation_provenance": {"mode": "live", "live_readonly_proof": True},
             "role": role,
-            "display_identity": first_identity,
+            "display_identity": copy.deepcopy(identities),
             "route_smoke": route_smoke,
             "manual_action_probes": [
                 {

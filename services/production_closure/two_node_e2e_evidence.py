@@ -455,7 +455,12 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
         "docker_security": _evaluate_docker_security(
             lane_docs["docker_security"], evidence_run_id=config.run_id
         ),
-        "readonly_db": _evaluate_readonly_db(lane_docs["readonly_db"], evidence_run_id=config.run_id),
+        "readonly_db": _evaluate_readonly_db(
+            lane_docs["readonly_db"],
+            declared_sources=scope["declared_sources"],
+            strict_identities=strict_identities,
+            evidence_run_id=config.run_id,
+        ),
         "api": _evaluate_source_lane(
             "api",
             lane_docs["api"],
@@ -492,6 +497,7 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
         ),
         "manual_ops": _evaluate_manual_ops(
             lane_docs["manual_ops"],
+            declared_sources=scope["declared_sources"],
             strict_identities=strict_identities,
             evidence_run_id=config.run_id,
         ),
@@ -771,7 +777,13 @@ def _evaluate_docker_security(doc: EvidenceDocument | None, *, evidence_run_id: 
     )
 
 
-def _evaluate_readonly_db(doc: EvidenceDocument | None, *, evidence_run_id: str) -> LaneEvaluation:
+def _evaluate_readonly_db(
+    doc: EvidenceDocument | None,
+    *,
+    declared_sources: tuple[str, ...],
+    strict_identities: Mapping[str, Mapping[str, Any]],
+    evidence_run_id: str,
+) -> LaneEvaluation:
     if doc is None:
         return _missing_lane("readonly_db", "TWO_NODE_E2E_READONLY_DB_SUMMARY_MISSING")
     payload = doc.payload
@@ -857,7 +869,11 @@ def _evaluate_readonly_db(doc: EvidenceDocument | None, *, evidence_run_id: str)
                     reason=operation.get("reason"),
                 )
             )
-    child_blockers, child_findings = _readonly_db_child_evidence_issues(payload)
+    child_blockers, child_findings = _readonly_db_child_evidence_issues(
+        payload,
+        declared_sources=declared_sources,
+        strict_identities=strict_identities,
+    )
     blockers.extend(child_blockers)
     findings.extend(child_findings)
     sibling_blockers, sibling_findings = _readonly_db_sibling_issues(
@@ -867,7 +883,11 @@ def _evaluate_readonly_db(doc: EvidenceDocument | None, *, evidence_run_id: str)
     )
     blockers.extend(sibling_blockers)
     findings.extend(sibling_findings)
-    recomputed_status = _readonly_db_recomputed_status(payload)
+    recomputed_status = _readonly_db_recomputed_status(
+        payload,
+        declared_sources=declared_sources,
+        strict_identities=strict_identities,
+    )
     if status == STATUS_PASS and recomputed_status != STATUS_PASS:
         blockers.append(
             _blocker(
@@ -1105,6 +1125,7 @@ def _evaluate_simple_live_lane(
 def _evaluate_manual_ops(
     doc: EvidenceDocument | None,
     *,
+    declared_sources: tuple[str, ...],
     strict_identities: Mapping[str, Mapping[str, Any]],
     evidence_run_id: str,
 ) -> LaneEvaluation:
@@ -1154,6 +1175,7 @@ def _evaluate_manual_ops(
                 )
     receipts = _first_mapping_value(payload, ("control_receipts", "retry_cancel_receipts", "receipts"))
     actual_22_receipt_count = 0
+    actual_22_receipt_sources: set[str] = set()
     if isinstance(receipts, list):
         for receipt in receipts:
             if not isinstance(receipt, Mapping):
@@ -1192,6 +1214,7 @@ def _evaluate_manual_ops(
                         )
                     )
                     continue
+                actual_22_receipt_sources.add(source)
                 _, identity_findings, identity_blockers = _identity_match_status(
                     source,
                     receipt,
@@ -1234,6 +1257,20 @@ def _evaluate_manual_ops(
                         "Manual ops PASS requires actual retry/cancel receipt evidence produced by node 22.",
                     )
                 )
+            else:
+                missing_receipt_sources = sorted(
+                    source for source in declared_sources if source not in actual_22_receipt_sources
+                )
+                if missing_receipt_sources:
+                    blockers.append(
+                        _blocker(
+                            "TWO_NODE_E2E_MANUAL_OPS_22_RECEIPT_SOURCE_COVERAGE_MISSING",
+                            "Manual ops PASS requires actual node 22 receipt strict identity coverage for every "
+                            "declared source.",
+                            missing_sources=missing_receipt_sources,
+                            observed_sources=sorted(actual_22_receipt_sources),
+                        )
+                    )
         elif receipts is None:
             blockers.append(
                 _blocker(
@@ -2117,17 +2154,58 @@ def _docker_preflight_current_run_blockers(
 def _docker_display_security_proofs(payload: Mapping[str, Any]) -> dict[str, bool | None]:
     proofs: dict[str, bool | None] = {}
     for proof_name, aliases in DOCKER_REQUIRED_FALSE_PROOFS.items():
-        proofs[proof_name] = _bool_lookup_any(payload, aliases)
+        proofs[proof_name] = _governed_false_proof(payload, aliases)
     for proof_name, aliases in DOCKER_REQUIRED_TRUE_PROOFS.items():
-        proofs[proof_name] = _bool_lookup_any(payload, aliases)
-    slurm_unavailable = _bool_lookup_any(payload, ("slurm_routes_unavailable",))
-    if slurm_unavailable is not None:
-        proofs["slurm_route_available"] = not slurm_unavailable
+        proofs[proof_name] = _governed_true_proof(payload, aliases)
+    slurm_unavailable = _governed_true_proof(payload, ("slurm_routes_unavailable",))
+    _merge_governed_docker_proof(
+        proofs,
+        "slurm_route_available",
+        None if slurm_unavailable is None else not slurm_unavailable,
+    )
     raw = _raw_docker_security_analysis(payload)
     for proof_name, value in raw.items():
-        if value is not None:
-            proofs[proof_name] = value
+        _merge_governed_docker_proof(proofs, proof_name, value)
     return proofs
+
+
+def _governed_false_proof(payload: Mapping[str, Any], aliases: Sequence[str]) -> bool | None:
+    values = _bool_lookup_values(payload, frozenset(aliases))
+    if any(value is True for value in values):
+        return True
+    if any(value is False for value in values):
+        return False
+    return None
+
+
+def _governed_true_proof(payload: Mapping[str, Any], aliases: Sequence[str]) -> bool | None:
+    values = _bool_lookup_values(payload, frozenset(aliases))
+    if any(value is False for value in values):
+        return False
+    if any(value is True for value in values):
+        return True
+    return None
+
+
+def _merge_governed_docker_proof(
+    proofs: dict[str, bool | None],
+    proof_name: str,
+    value: bool | None,
+) -> None:
+    if value is None:
+        return
+    if proof_name in DOCKER_REQUIRED_FALSE_PROOFS:
+        if value is True:
+            proofs[proof_name] = True
+        else:
+            proofs.setdefault(proof_name, False)
+    elif proof_name in DOCKER_REQUIRED_TRUE_PROOFS:
+        if value is False:
+            proofs[proof_name] = False
+        else:
+            proofs.setdefault(proof_name, True)
+    else:
+        proofs[proof_name] = value
 
 
 def _docker_missing_required_proof_blockers(proofs: Mapping[str, bool | None]) -> list[dict[str, Any]]:
@@ -2610,12 +2688,24 @@ def _readonly_db_sibling_issues(
     return blockers, findings
 
 
-def _readonly_db_child_evidence_issues(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _readonly_db_child_evidence_issues(
+    payload: Mapping[str, Any],
+    *,
+    declared_sources: tuple[str, ...],
+    strict_identities: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     blockers: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
     route_smoke = payload.get("route_smoke")
     if isinstance(route_smoke, list):
-        blockers.extend(_readonly_db_route_issues(route_smoke, payload.get("display_identity")))
+        route_blockers, route_findings = _readonly_db_route_issues(
+            route_smoke,
+            declared_sources=declared_sources,
+            strict_identities=strict_identities,
+            display_identity=payload.get("display_identity"),
+        )
+        blockers.extend(route_blockers)
+        findings.extend(route_findings)
     manual_actions = payload.get("manual_action_probes")
     if isinstance(manual_actions, list):
         blockers.extend(_readonly_db_manual_action_issues(manual_actions))
@@ -2629,9 +2719,13 @@ def _readonly_db_child_evidence_issues(payload: Mapping[str, Any]) -> tuple[list
 
 def _readonly_db_route_issues(
     route_smoke: list[Any],
+    *,
+    declared_sources: tuple[str, ...],
+    strict_identities: Mapping[str, Mapping[str, Any]],
     display_identity: Any,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
     routes = [item for item in route_smoke if isinstance(item, Mapping)]
     route_names = {str(item.get("name") or "") for item in routes}
     missing_routes = sorted(READONLY_DB_REQUIRED_ROUTE_NAMES - route_names)
@@ -2643,7 +2737,7 @@ def _readonly_db_route_issues(
                 missing_routes=missing_routes,
             )
         )
-    expected_identity = display_identity if isinstance(display_identity, Mapping) else {}
+    strict_route_sources: dict[str, set[str]] = {route: set() for route in READONLY_DB_STRICT_ROUTE_FIELDS}
     for route in routes:
         name = str(route.get("name") or "")
         route_status = _normalized_status(route.get("status"))
@@ -2660,6 +2754,9 @@ def _readonly_db_route_issues(
         if required_fields is None:
             continue
         identity = _readonly_route_identity(route, required_fields=required_fields)
+        route_source = _source_name(route.get("source") or route.get("source_id"))
+        identity_source = _source_name(identity.get("source") or identity.get("source_id"))
+        source = route_source or identity_source
         missing_identity = [field for field in required_fields if not _identity_value(identity, field)]
         if missing_identity:
             blockers.append(
@@ -2667,25 +2764,97 @@ def _readonly_db_route_issues(
                     "TWO_NODE_E2E_READONLY_DB_ROUTE_STRICT_IDENTITY_INCOMPLETE",
                     "Readonly DB identity-bound route smoke child is missing strict identity.",
                     route=name,
+                    source=source,
                     missing_fields=missing_identity,
                 )
             )
             continue
+        if route_source and identity_source and route_source != identity_source:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_READONLY_DB_ROUTE_SOURCE_IDENTITY_MISMATCH",
+                    "Readonly DB route source key must match its embedded strict identity source.",
+                    route=name,
+                    source=route_source,
+                    embedded_source=identity_source,
+                )
+            )
+        if source is None:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_ROUTE_SOURCE_MISSING",
+                    "Readonly DB identity-bound route smoke child must identify its declared source.",
+                    route=name,
+                )
+            )
+            continue
+        if source not in declared_sources:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_ROUTE_SOURCE_UNDECLARED",
+                    "Readonly DB identity-bound route smoke source is not declared in scope.",
+                    route=name,
+                    source=source,
+                    declared_sources=list(declared_sources),
+                )
+            )
+            continue
+        strict_route_sources[name].add(source)
+        _, identity_findings, identity_blockers = _identity_match_status(
+            source,
+            {"identity": identity},
+            strict_identities,
+            require_job_id="job_id" in required_fields,
+        )
+        findings.extend(_with_context(item, route=name, source=source) for item in identity_findings)
+        blockers.extend(_with_context(item, route=name, source=source) for item in identity_blockers)
+        expected_identity = _readonly_display_identity_for_source(display_identity, source)
         for identity_field in required_fields:
             expected = _identity_value(expected_identity, identity_field)
             observed = _identity_value(identity, identity_field)
             if expected and observed and str(expected) != str(observed):
-                blockers.append(
-                    _blocker(
-                        "TWO_NODE_E2E_READONLY_DB_ROUTE_STRICT_IDENTITY_MISMATCH",
-                        "Readonly DB route smoke strict identity must match display_identity.",
+                findings.append(
+                    _finding(
+                        "TWO_NODE_E2E_READONLY_DB_ROUTE_DISPLAY_IDENTITY_MISMATCH",
+                        "Readonly DB route smoke strict identity contradicts display_identity.",
                         route=name,
+                        source=source,
                         field=identity_field,
                         expected=expected,
                         observed=observed,
                     )
                 )
-    return blockers
+    for route_name, observed_sources in strict_route_sources.items():
+        missing_sources = sorted(source for source in declared_sources if source not in observed_sources)
+        if missing_sources:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_ROUTE_SOURCE_COVERAGE_MISSING",
+                    "Readonly DB route smoke must include identity-bound evidence for every declared source.",
+                    route=route_name,
+                    missing_sources=missing_sources,
+                    observed_sources=sorted(observed_sources),
+                )
+            )
+    return blockers, findings
+
+
+def _readonly_display_identity_for_source(display_identity: Any, source: str) -> Mapping[str, Any]:
+    if not isinstance(display_identity, Mapping):
+        return {}
+    source_key = _source_name(source)
+    source_scoped = display_identity.get(source) or display_identity.get(source_key or "")
+    if isinstance(source_scoped, Mapping):
+        return source_scoped
+    nested_sources = display_identity.get("sources") or display_identity.get("strict_identities")
+    if isinstance(nested_sources, Mapping):
+        nested = nested_sources.get(source) or nested_sources.get(source_key or "")
+        if isinstance(nested, Mapping):
+            return nested
+    identity_source = _source_name(display_identity.get("source") or display_identity.get("source_id"))
+    if identity_source == source_key:
+        return display_identity
+    return {}
 
 
 def _readonly_route_identity(route: Mapping[str, Any], *, required_fields: tuple[str, ...]) -> dict[str, Any]:
@@ -2840,13 +3009,22 @@ def _readonly_db_operation_findings(operation: Mapping[str, Any]) -> list[dict[s
     return findings
 
 
-def _readonly_db_recomputed_status(payload: Mapping[str, Any]) -> str:
+def _readonly_db_recomputed_status(
+    payload: Mapping[str, Any],
+    *,
+    declared_sources: tuple[str, ...],
+    strict_identities: Mapping[str, Mapping[str, Any]],
+) -> str:
     findings: list[dict[str, Any]] = []
     blockers: list[dict[str, Any]] = []
     role = payload.get("role")
     if isinstance(role, Mapping) and role.get("role_type") != "readonly_candidate":
         findings.append({"code": "writer_role"})
-    child_blockers, child_findings = _readonly_db_child_evidence_issues(payload)
+    child_blockers, child_findings = _readonly_db_child_evidence_issues(
+        payload,
+        declared_sources=declared_sources,
+        strict_identities=strict_identities,
+    )
     blockers.extend(child_blockers)
     findings.extend(child_findings)
     return _combined_status([STATUS_PASS], findings=findings, blockers=blockers)
@@ -3052,6 +3230,21 @@ def _bool_lookup_any(payload: Mapping[str, Any], keys: Sequence[str]) -> bool | 
         if value is not None:
             return value
     return _deep_bool_lookup(payload, frozenset(keys))
+
+
+def _bool_lookup_values(value: Any, keys: frozenset[str]) -> list[bool]:
+    values: list[bool] = []
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if str(key) in keys:
+                parsed = _raw_bool(nested)
+                if parsed is not None:
+                    values.append(parsed)
+            values.extend(_bool_lookup_values(nested, keys))
+    elif isinstance(value, list):
+        for nested in value:
+            values.extend(_bool_lookup_values(nested, keys))
+    return values
 
 
 def _deep_bool_lookup(value: Any, keys: frozenset[str]) -> bool | None:
