@@ -167,7 +167,7 @@ export EVIDENCE_ROOT="artifacts/two-node-e2e/$RUN_ID"
 mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,browser,slurm,logs,docker-preflight,docker-security,final-e2e-evidence}
 ```
 
-项目创建的临时文件、Docker smoke 输出、review 输出和 E2E evidence 只能写到仓库 `artifacts/` 或 `/scratch/frd_muziyao`。如果 Docker daemon cache 无法由项目控制，必须在 `docker-preflight/` 记录 DockerRootDir、`docker system df` 和相关 `df -h`，空间不足时 Docker lane 记为 `BLOCKED`。
+项目创建的临时文件、Docker smoke 输出、review 输出和 E2E evidence 只能写到仓库 `artifacts/` 或 `/scratch/frd_muziyao`。如果 Docker daemon cache 无法由项目控制，必须在 `docker-preflight/` 记录当前 `evidence_run_id`、DockerRootDir、`docker system df` 和相关 `df -h`；最终聚合不接受复制到当前目录但缺少当前 run 绑定的 Docker preflight PASS。空间不足时 Docker lane 记为 `BLOCKED`。
 
 最低交付物：
 
@@ -188,10 +188,12 @@ mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,b
 - `browser/summary.md`：无 mock 的 `/hydro-met` 和 `/ops` 浏览器证据。
 - `slurm/summary.md`：22 Gateway health、minimal submit probe、Slurm receipt。
 - `logs/summary.md`：published log URI、读取结果和缺失原因。
-- `docker-preflight/summary.md`：DockerRootDir、cache/space、TMPDIR 和 evidence root。
+- `docker-preflight/summary.md`：当前 `evidence_run_id`、DockerRootDir、cache/space、TMPDIR 和 evidence root。
 - `docker-security/summary.json`：必须由 `security-summary` helper 生成
   `nhms.two_node_docker.security_summary.v1`，并带 `source_trust`、`static`、`smoke`
-  child artifact 路径与 sha256；手写或缺 source artifact 的 summary 不能作为 PASS。
+  child artifact 路径与 sha256；其中 static child 必须由 `static --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"`
+  产出最终可校验的 HostConfig/mount/env/readonly proof 字段，source-trust child 必须包含完整 `checked_paths`
+  ownership/mode/type 证明；手写或缺 source artifact 的 summary 不能作为 PASS。
 - `final-e2e-evidence/summary.json`：#239 最终 JSON 汇总，聚合 Docker、DB、API、browser、cross-plane、manual ops、Slurm、logs 和 compute/display lane。
 - `summary.md`：最终 PASS/PARTIAL/FAIL/BLOCKED 汇总。
 - `bugs.md` 或链接到 `docs/bugs.md`：失败项、根因、复测条件。

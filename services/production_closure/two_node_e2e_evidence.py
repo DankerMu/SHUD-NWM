@@ -47,6 +47,23 @@ DOCKER_SECURITY_CHILD_SCHEMAS: Mapping[str, str] = {
     "static": "nhms.two_node_docker.static_check.v1",
     "smoke": "nhms.two_node_docker.app_smoke.v1",
 }
+DOCKER_SOURCE_TRUST_COMMON_REQUIRED_LABELS = frozenset(
+    {
+        "trust path component",
+        "checkout root",
+        "infra directory",
+        "compute compose source",
+        "display compose source",
+        "env source directory",
+        "systemd source directory",
+        "compute systemd unit source",
+        "display systemd unit source",
+    }
+)
+DOCKER_SOURCE_TRUST_ROLE_LABELS: Mapping[str, str] = {
+    "compute": "compute role env",
+    "display": "display role env",
+}
 MANUAL_OPS_SCHEMA = "nhms.two_node_e2e.manual_ops.v1"
 
 FINAL_REQUIRED_LANES = (
@@ -1526,7 +1543,7 @@ def _final_status(
     source_statuses = [str(result.get("status")) for result in source_scope_results.values()]
     if STATUS_FAIL in lane_statuses or STATUS_FAIL in source_statuses:
         return STATUS_FAIL
-    if STATUS_BLOCKED in lane_statuses:
+    if STATUS_BLOCKED in lane_statuses or STATUS_BLOCKED in source_statuses:
         return STATUS_BLOCKED
     if not _is_full_scope_pass(tuple(scope["declared_sources"]), source_scope_results):
         return STATUS_PARTIAL
@@ -2316,18 +2333,7 @@ def _docker_preflight_current_run_blockers(
     run_dir: Path,
     contract_complete: bool,
 ) -> list[dict[str, Any]]:
-    explicit_ids = _explicit_bundle_run_ids(payload)
-    if explicit_ids:
-        return _current_run_blockers(payload, evidence_run_id, lane_name="docker_preflight")
-    if (
-        contract_complete
-        and (
-            payload.get("schema_version") == DOCKER_PREFLIGHT_SCHEMA
-            or payload.get("schema") == DOCKER_PREFLIGHT_SCHEMA
-        )
-        and _path_is_relative_to(doc.path, run_dir)
-    ):
-        return []
+    _ = (doc, run_dir, contract_complete)
     return _current_run_blockers(payload, evidence_run_id, lane_name="docker_preflight")
 
 
@@ -2640,6 +2646,7 @@ def _docker_source_trust_child_blockers(
 ) -> list[dict[str, Any]]:
     if child_status != STATUS_PASS:
         return []
+    blockers: list[dict[str, Any]] = []
     untrusted_keys = (
         "untrusted_owner",
         "source_trust_failed",
@@ -2649,15 +2656,128 @@ def _docker_source_trust_child_blockers(
     )
     for key in untrusted_keys:
         if _bool_lookup_any(child_payload, (key,)) is True:
-            return [
+            blockers.append(
                 _blocker(
                     "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_TRUST_UNCLEAN",
                     "Docker source_trust child PASS contradicts source-trust safety fields.",
                     artifact="source_trust",
                     evidence_key=key,
                 )
-            ]
-    return []
+            )
+    checked_paths = child_payload.get("checked_paths")
+    if not isinstance(checked_paths, list) or not checked_paths:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_CHECKED_PATHS_MISSING",
+                "Docker source_trust child PASS requires non-empty checked_paths proof records.",
+                artifact="source_trust",
+            )
+        )
+        return blockers
+    records = [record for record in checked_paths if isinstance(record, Mapping)]
+    labels = {str(record.get("label") or "") for record in records}
+    required_labels = _docker_source_trust_required_labels(child_payload)
+    for label in sorted(required_labels - labels):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_REQUIRED_LABEL_MISSING",
+                "Docker source_trust child PASS is missing a required checked path label.",
+                artifact="source_trust",
+                label=label,
+            )
+        )
+    for record in records:
+        if str(record.get("label") or "") in required_labels:
+            blockers.extend(_docker_source_trust_record_blockers(record))
+    return blockers
+
+
+def _docker_source_trust_required_labels(child_payload: Mapping[str, Any]) -> set[str]:
+    required = set(DOCKER_SOURCE_TRUST_COMMON_REQUIRED_LABELS)
+    role_values = _docker_source_trust_required_roles(child_payload)
+    for role in role_values:
+        label = DOCKER_SOURCE_TRUST_ROLE_LABELS.get(role)
+        if label:
+            required.add(label)
+    return required
+
+
+def _docker_source_trust_required_roles(child_payload: Mapping[str, Any]) -> set[str]:
+    default_roles = set(DOCKER_SOURCE_TRUST_ROLE_LABELS)
+    roles = child_payload.get("roles")
+    if not isinstance(roles, list):
+        return default_roles
+    role_values = {str(role).strip() for role in roles if str(role).strip()}
+    if role_values and role_values <= set(DOCKER_SOURCE_TRUST_ROLE_LABELS):
+        return role_values
+    return default_roles
+
+
+def _docker_source_trust_record_blockers(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    label = str(record.get("label") or "")
+    expected_kind = str(record.get("expected_kind") or "")
+    if label in {
+        "checkout root",
+        "infra directory",
+        "env source directory",
+        "systemd source directory",
+        "trust path component",
+    }:
+        required_kind = "directory"
+        kind_key = "is_directory"
+    else:
+        required_kind = "file"
+        kind_key = "is_regular"
+    blockers: list[dict[str, Any]] = []
+    if expected_kind != required_kind:
+        blockers.append(_docker_source_trust_record_blocker(record, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_KIND_MISMATCH"))
+    for key, expected, code in (
+        ("exists", True, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_PATH_MISSING"),
+        ("is_symlink", False, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_SYMLINK"),
+        ("trusted_owner", True, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_OWNER_UNTRUSTED"),
+        ("group_writable", False, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_GROUP_WRITABLE"),
+        ("world_writable", False, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_WORLD_WRITABLE"),
+        (kind_key, True, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_KIND_MISMATCH"),
+    ):
+        if record.get(key) is not expected:
+            blockers.append(
+                _docker_source_trust_record_blocker(
+                    record,
+                    code,
+                    evidence_key=key,
+                    observed=record.get(key),
+                )
+            )
+    if label in set(DOCKER_SOURCE_TRUST_ROLE_LABELS.values()) and str(record.get("mode") or "") != "0600":
+        blockers.append(
+            _docker_source_trust_record_blocker(
+                record,
+                "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_ROLE_ENV_MODE_INVALID",
+                evidence_key="mode",
+                observed=record.get("mode"),
+            )
+        )
+    return blockers
+
+
+def _docker_source_trust_record_blocker(
+    record: Mapping[str, Any],
+    code: str,
+    *,
+    evidence_key: str | None = None,
+    observed: Any = None,
+) -> dict[str, Any]:
+    blocker = _blocker(
+        code,
+        "Docker source_trust child PASS contains an unsafe or incomplete checked path record.",
+        artifact="source_trust",
+        label=record.get("label"),
+        path=record.get("path"),
+    )
+    if evidence_key is not None:
+        blocker["evidence_key"] = evidence_key
+        blocker["observed"] = observed
+    return blocker
 
 
 def _docker_static_child_issues(

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from scripts import validate_two_node_docker_runtime as docker_runtime
 from services.production_closure.readonly_db_validation import merge_readonly_db_source_evidence
 from services.production_closure.two_node_e2e_evidence import (
     READONLY_DB_LIVE_SCHEMA,
@@ -94,7 +95,7 @@ def test_docker_display_capability_leak_fails_even_when_summary_was_partial() ->
     assert _codes(docker_lane["findings"]) >= {"TWO_NODE_E2E_DOCKER_DISPLAY_FORBIDDEN_CAPABILITY"}
 
 
-def test_known_producer_like_docker_preflight_without_embedded_bundle_id_is_accepted() -> None:
+def test_docker_preflight_without_embedded_bundle_id_blocks_even_under_current_run() -> None:
     run_id = _run_id("preflight-no-id")
     config = _seed_pass_bundle(run_id)
     preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
@@ -103,8 +104,38 @@ def test_known_producer_like_docker_preflight_without_embedded_bundle_id_is_acce
 
     summary = validate_two_node_e2e_evidence(config)
 
+    assert summary["status"] == STATUS_BLOCKED
+    docker_preflight = summary["lane_summaries"]["docker_preflight"]
+    assert docker_preflight["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_MISSING" in _codes(docker_preflight["blockers"])
+
+
+def test_docker_preflight_current_run_id_can_pass_lane() -> None:
+    run_id = _run_id("preflight-current-id")
+    config = _seed_pass_bundle(run_id)
+
+    summary = validate_two_node_e2e_evidence(config)
+
     assert summary["status"] == STATUS_PASS
     assert summary["lane_summaries"]["docker_preflight"]["status"] == STATUS_PASS
+
+
+def test_stale_no_id_docker_preflight_copied_under_current_run_blocks() -> None:
+    old_run_id = _run_id("old-preflight")
+    old_config = _seed_pass_bundle(old_run_id)
+    stale_preflight = _read(old_config.run_dir / "docker-preflight" / "summary.json")
+    stale_preflight.pop("evidence_run_id")
+
+    new_run_id = _run_id("new-preflight")
+    new_config = _seed_pass_bundle(new_run_id)
+    _write(new_config.run_dir / "docker-preflight" / "summary.json", stale_preflight)
+
+    summary = validate_two_node_e2e_evidence(new_config)
+
+    docker_preflight = summary["lane_summaries"]["docker_preflight"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_preflight["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_CURRENT_EVIDENCE_RUN_ID_MISSING" in _codes(docker_preflight["blockers"])
 
 
 def test_docker_security_producer_summary_with_verified_children_passes() -> None:
@@ -119,6 +150,80 @@ def test_docker_security_producer_summary_with_verified_children_passes() -> Non
     redacted = docker_lane["redacted_evidence"]
     assert redacted["schema_version"] == "nhms.two_node_docker.security_summary.v1"
     assert set(redacted["source_artifacts"]) == {"source_trust", "static", "smoke"}
+
+
+def test_real_static_helper_output_feeds_security_summary_and_final_pass() -> None:
+    run_id = _run_id("docker-real-static")
+    config = _seed_pass_bundle(run_id)
+    docker_security_dir = config.run_dir / "docker-security"
+    static_result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+    assert static_result.status == STATUS_PASS
+    static_report = docker_runtime.write_static_report(
+        static_result,
+        docker_security_dir / "static-compose-env-check.json",
+        REPO_ROOT,
+    )
+    docker_runtime.write_docker_security_summary(
+        output=docker_security_dir / "summary.json",
+        repo_root=REPO_ROOT,
+        evidence_run_id=run_id,
+        source_trust_report=docker_security_dir / "two-node-docker-source-trust.json",
+        static_report=static_report,
+        smoke_report=docker_security_dir / "docker-smoke.json",
+    )
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_PASS
+    assert docker_lane["status"] == STATUS_PASS
+
+
+@pytest.mark.parametrize("mutation", ["missing_role_env_labels", "unsafe_role_env_labels"])
+def test_docker_security_source_trust_empty_roles_without_safe_role_env_proof_blocks(mutation: str) -> None:
+    run_id = _run_id(f"docker-source-trust-empty-roles-{mutation}")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    artifact = docker_security["source_artifacts"]["source_trust"]
+    artifact_path = Path(artifact["path"])
+    payload = _read(artifact_path)
+    payload["roles"] = []
+    if mutation == "missing_role_env_labels":
+        payload["checked_paths"] = [
+            record for record in payload["checked_paths"] if not str(record["label"]).endswith("role env")
+        ]
+    else:
+        for record in payload["checked_paths"]:
+            if str(record["label"]).endswith("role env"):
+                record["mode"] = "0644"
+    _write(artifact_path, payload)
+    artifact["sha256"] = _sha256_file(artifact_path)
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_lane["status"] == STATUS_BLOCKED
+    if mutation == "missing_role_env_labels":
+        expected_code = "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_REQUIRED_LABEL_MISSING"
+    else:
+        expected_code = "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_ROLE_ENV_MODE_INVALID"
+    role_env_blockers = {
+        (blocker["code"], blocker["label"])
+        for blocker in docker_lane["blockers"]
+        if blocker.get("label") in {"compute role env", "display role env"}
+    }
+    assert role_env_blockers >= {
+        (expected_code, "compute role env"),
+        (expected_code, "display role env"),
+    }
 
 
 @pytest.mark.parametrize("missing_key", ["evidence_root", "tmpdir", "docker_root_dir", "min_free_bytes", "disk"])
@@ -226,6 +331,26 @@ def test_docker_security_pass_missing_required_proof_blocks() -> None:
     assert "TWO_NODE_E2E_DOCKER_DISPLAY_PROOF_MISSING" in _codes(docker_lane["blockers"])
 
 
+def test_docker_security_static_child_missing_final_required_proof_blocks() -> None:
+    run_id = _run_id("docker-static-proof-missing")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    artifact = docker_security["source_artifacts"]["static"]
+    artifact_path = Path(artifact["path"])
+    payload = _read(artifact_path)
+    payload.pop("docker_socket_present")
+    _write(artifact_path, payload)
+    artifact["sha256"] = _sha256_file(artifact_path)
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_STATIC_CHILD_PROOF_MISSING" in _codes(docker_lane["blockers"])
+
+
 def test_docker_security_sourceless_summary_blocks_not_passes() -> None:
     run_id = _run_id("docker-sourceless")
     config = _seed_pass_bundle(run_id)
@@ -327,6 +452,75 @@ def test_docker_security_source_trust_without_current_run_id_blocks_even_under_c
     assert "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_STALE_OR_UNSCOPED" in _codes(
         docker_lane["blockers"]
     )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "empty", "missing_label"])
+def test_docker_security_source_trust_checked_paths_contract_blocks(mutation: str) -> None:
+    run_id = _run_id(f"docker-source-trust-{mutation}")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    artifact = docker_security["source_artifacts"]["source_trust"]
+    artifact_path = Path(artifact["path"])
+    payload = _read(artifact_path)
+    if mutation == "missing":
+        payload.pop("checked_paths")
+    elif mutation == "empty":
+        payload["checked_paths"] = []
+    else:
+        payload["checked_paths"] = [
+            record for record in payload["checked_paths"] if record["label"] != "display compose source"
+        ]
+    _write(artifact_path, payload)
+    artifact["sha256"] = _sha256_file(artifact_path)
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_lane["status"] == STATUS_BLOCKED
+    assert _codes(docker_lane["blockers"]) & {
+        "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_CHECKED_PATHS_MISSING",
+        "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_REQUIRED_LABEL_MISSING",
+    }
+
+
+@pytest.mark.parametrize(
+    ("record_patch", "expected_code"),
+    [
+        ({"trusted_owner": False}, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_OWNER_UNTRUSTED"),
+        ({"is_symlink": True}, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_SYMLINK"),
+        (
+            {"expected_kind": "directory", "is_regular": False, "is_directory": True},
+            "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_KIND_MISMATCH",
+        ),
+        ({"group_writable": True}, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_GROUP_WRITABLE"),
+        ({"world_writable": True}, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_WORLD_WRITABLE"),
+        ({"mode": "0644"}, "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_ROLE_ENV_MODE_INVALID"),
+    ],
+)
+def test_docker_security_source_trust_unsafe_checked_path_record_blocks(
+    record_patch: dict[str, Any],
+    expected_code: str,
+) -> None:
+    run_id = _run_id("docker-source-trust-unsafe")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    artifact = docker_security["source_artifacts"]["source_trust"]
+    artifact_path = Path(artifact["path"])
+    payload = _read(artifact_path)
+    record = next(item for item in payload["checked_paths"] if item["label"] == "display role env")
+    record.update(record_patch)
+    _write(artifact_path, payload)
+    artifact["sha256"] = _sha256_file(artifact_path)
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(docker_lane["blockers"])
 
 
 @pytest.mark.parametrize(
@@ -1122,6 +1316,22 @@ def test_reduced_single_source_db_merge_feeds_final_partial() -> None:
     assert summary["status"] == STATUS_PARTIAL
     assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_PASS
     assert summary["lane_summaries"]["cross_plane"]["status"] == STATUS_PARTIAL
+
+
+def test_source_lane_partial_with_strict_identity_blocker_yields_final_blocked() -> None:
+    run_id = _run_id("partial-with-blocker")
+    config = _seed_pass_bundle(run_id)
+    browser_summary = _read(config.run_dir / "browser" / "summary.json")
+    browser_summary["status"] = STATUS_PARTIAL
+    browser_summary["sources"]["GFS"]["checks"]["ops_jobs"]["identity"].pop("job_id")
+    _write(config.run_dir / "browser" / "summary.json", browser_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    assert summary["lane_summaries"]["browser"]["status"] == STATUS_PARTIAL
+    assert summary["source_scope_results"]["GFS"]["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_SOURCE_BLOCKED" in _codes(summary["blockers"])
 
 
 def test_browser_evidence_missing_ops_jobs_or_logs_blocks() -> None:
@@ -2077,7 +2287,8 @@ def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: s
             "schema": "nhms.two_node_docker.source_trust.v1",
             "status": STATUS_PASS,
             "evidence_run_id": run_id,
-            "checked_paths": [],
+            "roles": ["compute", "display"],
+            "checked_paths": _source_trust_checked_paths(lane),
             "blockers": [],
         },
     )
@@ -2088,6 +2299,12 @@ def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: s
             "status": STATUS_PASS,
             "evidence_run_id": run_id,
             "findings": [],
+            "slurm_routes_enabled": False,
+            "slurm_route_available": False,
+            "slurm_cli_present": False,
+            "slurm_config_present": False,
+            "slurm_socket_present": False,
+            "munge_path_present": False,
             "privileged": False,
             "host_network": False,
             "host_pid": False,
@@ -2139,6 +2356,7 @@ def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: s
         },
         "source_statuses": {"source_trust": STATUS_PASS, "static": STATUS_PASS, "smoke": STATUS_PASS},
         "slurm_routes_unavailable": True,
+        "slurm_routes_enabled": False,
         "slurm_route_available": False,
         "published_artifacts_readonly": True,
         "root_filesystem_readonly": True,
@@ -2166,6 +2384,41 @@ def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: s
 
 def _artifact_summary(path: Path) -> dict[str, Any]:
     return {"path": str(path.resolve(strict=False)), "sha256": _sha256_file(path)}
+
+
+def _source_trust_checked_paths(root: Path) -> list[dict[str, Any]]:
+    labels = {
+        "trust path component": "directory",
+        "checkout root": "directory",
+        "infra directory": "directory",
+        "compute compose source": "file",
+        "display compose source": "file",
+        "env source directory": "directory",
+        "systemd source directory": "directory",
+        "compute systemd unit source": "file",
+        "display systemd unit source": "file",
+        "compute role env": "file",
+        "display role env": "file",
+    }
+    records = []
+    for label, expected_kind in labels.items():
+        is_directory = expected_kind == "directory"
+        records.append(
+            {
+                "label": label,
+                "path": str(root / label.replace(" ", "-")),
+                "expected_kind": expected_kind,
+                "exists": True,
+                "trusted_owner": True,
+                "is_symlink": False,
+                "is_directory": is_directory,
+                "is_regular": not is_directory,
+                "group_writable": False,
+                "world_writable": False,
+                "mode": "0600" if label.endswith("role env") else ("0755" if is_directory else "0644"),
+            }
+        )
+    return records
 
 
 def _sha256_file(path: Path) -> str:

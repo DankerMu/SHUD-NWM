@@ -142,10 +142,12 @@ export EVIDENCE_ROOT="artifacts/two-node-e2e/$RUN_ID"
 mkdir -p "$EVIDENCE_ROOT/docker-preflight"
 export TMPDIR="$PWD/artifacts/tmp"
 mkdir -p "$TMPDIR"
-uv run python scripts/validate_two_node_docker_runtime.py preflight --evidence-root "$EVIDENCE_ROOT/docker-preflight"
+uv run python scripts/validate_two_node_docker_runtime.py preflight \
+  --evidence-run-id "$RUN_ID" \
+  --evidence-root "$EVIDENCE_ROOT/docker-preflight"
 ```
 
-该命令记录 Docker version、compose version、DockerRootDir、`docker system df`、`df -h`、`TMPDIR` 和 evidence root。Docker 不可用或空间不足时，本 lane 记为 `BLOCKED`，不能继续并声明 `PASS`。Docker daemon 自身 cache 位置由 DockerRootDir 决定，必须在 evidence 中单独记录。
+该命令记录当前 `evidence_run_id`、Docker version、compose version、DockerRootDir、`docker system df`、`df -h`、`TMPDIR` 和 evidence root。最终 E2E 聚合要求 Docker preflight `PASS` payload 显式绑定当前 run；复制旧的无 ID preflight JSON 不能作为当前 run 的 PASS。Docker 不可用或空间不足时，本 lane 记为 `BLOCKED`，不能继续并声明 `PASS`。Docker daemon 自身 cache 位置由 DockerRootDir 决定，必须在 evidence 中单独记录。
 
 ## 7. Env Files
 
@@ -297,7 +299,9 @@ source-trust preflight；失败时本 lane 记为 `BLOCKED`，不得让 compose 
 静态验证：
 
 ```bash
-uv run python scripts/validate_two_node_docker_runtime.py static
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+uv run python scripts/validate_two_node_docker_runtime.py static \
+  --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"
 ```
 
 ## 9. Systemd Install

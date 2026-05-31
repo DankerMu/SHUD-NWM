@@ -33,11 +33,34 @@ def test_source_trust_preflight_passes_for_trusted_owner_and_0600_role_envs(tmp_
     assert summary["blockers"] == []
     checked_labels = {item["label"] for item in summary["checked_paths"]}
     assert {
+        "trust path component",
+        "checkout root",
+        "infra directory",
         "compute role env",
         "display role env",
         "compute compose source",
         "display compose source",
+        "env source directory",
+        "systemd source directory",
+        "compute systemd unit source",
+        "display systemd unit source",
     } <= checked_labels
+    for record in summary["checked_paths"]:
+        assert record["exists"] is True
+        assert record["trusted_owner"] is True
+        assert record["is_symlink"] is False
+        assert record["group_writable"] is False
+        assert record["world_writable"] is False
+        if record["expected_kind"] == "directory":
+            assert record["is_directory"] is True
+        else:
+            assert record["is_regular"] is True
+    role_modes = {
+        record["label"]: record["mode"]
+        for record in summary["checked_paths"]
+        if record["label"].endswith("role env")
+    }
+    assert role_modes == {"compute role env": "0600", "display role env": "0600"}
     evidence_text = (evidence_root / "two-node-docker-source-trust.txt").read_text(encoding="utf-8")
     assert "status: PASS" in evidence_text
     assert "writer-secret" not in json.dumps(summary)
