@@ -395,6 +395,26 @@ def test_readonly_db_pass_requires_live_validation_provenance_mode(mode: str | N
     assert "TWO_NODE_E2E_READONLY_DB_LIVE_MODE_MISSING" in _codes(readonly_lane["blockers"])
 
 
+@pytest.mark.parametrize("proof_state", ["false", "missing"])
+def test_readonly_db_pass_requires_live_readonly_proof(proof_state: str) -> None:
+    run_id = _run_id(f"db-live-proof-{proof_state}")
+    config = _seed_pass_bundle(run_id)
+    db_summary = _read(config.run_dir / "db" / "readonly-db-boundary" / "summary.json")
+    db_summary["validation_provenance"]["mode"] = "live"
+    if proof_state == "missing":
+        db_summary["validation_provenance"].pop("live_readonly_proof", None)
+    else:
+        db_summary["validation_provenance"]["live_readonly_proof"] = False
+    _write(config.run_dir / "db" / "readonly-db-boundary" / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_READONLY_DB_LIVE_PROOF_MISSING" in _codes(readonly_lane["blockers"])
+
+
 @pytest.mark.parametrize("producer_status", [STATUS_PARTIAL, STATUS_BLOCKED])
 @pytest.mark.parametrize(
     "operation_patch",
