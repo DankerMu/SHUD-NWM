@@ -3328,13 +3328,30 @@ def test_docker_security_summary_aggregates_source_artifacts(tmp_path: Path) -> 
     source_trust = security_root / "two-node-docker-source-trust.json"
     static_report = security_root / "static-compose-env-check.json"
     smoke_report = security_root / "docker-smoke.json"
-    _write_json(source_trust, {"schema": "nhms.two_node_docker.source_trust.v1", "status": "PASS", "blockers": []})
-    _write_json(static_report, {"schema_version": "nhms.two_node_docker.static_check.v1", "status": "PASS"})
+    child_run_id = "run-123"
+    _write_json(
+        source_trust,
+        {
+            "schema": "nhms.two_node_docker.source_trust.v1",
+            "status": "PASS",
+            "evidence_run_id": child_run_id,
+            "blockers": [],
+        },
+    )
+    _write_json(
+        static_report,
+        {
+            "schema_version": "nhms.two_node_docker.static_check.v1",
+            "status": "PASS",
+            "evidence_run_id": child_run_id,
+        },
+    )
     _write_json(
         smoke_report,
         {
             "schema_version": "nhms.two_node_docker.app_smoke.v1",
             "status": "PASS",
+            "evidence_run_id": child_run_id,
             "image_tag": "nhms-app:test",
             "dockerfile": str(repo_root / "infra/docker/Dockerfile.app"),
         },
@@ -3343,7 +3360,7 @@ def test_docker_security_summary_aggregates_source_artifacts(tmp_path: Path) -> 
     output = docker_runtime.write_docker_security_summary(
         output=security_root / "summary.json",
         repo_root=repo_root,
-        evidence_run_id="run-123",
+        evidence_run_id=child_run_id,
         source_trust_report=source_trust,
         static_report=static_report,
         smoke_report=smoke_report,
@@ -3351,7 +3368,7 @@ def test_docker_security_summary_aggregates_source_artifacts(tmp_path: Path) -> 
 
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["status"] == "PASS"
-    assert payload["evidence_run_id"] == "run-123"
+    assert payload["evidence_run_id"] == child_run_id
     assert payload["runtime_config"] == {
         "display_readonly": True,
         "service_role": "display_readonly",
@@ -3365,6 +3382,186 @@ def test_docker_security_summary_aggregates_source_artifacts(tmp_path: Path) -> 
         "static_passed": True,
     }
     assert payload["source_artifacts"]["static"]["sha256"] == sha256(static_report.read_bytes()).hexdigest()
+
+
+def test_docker_security_summary_blocks_unsafe_child_before_hash(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    security_root = repo_root / "artifacts" / "docker-security"
+    security_root.mkdir(parents=True)
+    source_trust = security_root / "two-node-docker-source-trust.json"
+    static_report = security_root / "static-compose-env-check.json"
+    smoke_report = security_root / "docker-smoke.json"
+    target = tmp_path / "outside-static.json"
+    target.write_text("{bad-json", encoding="utf-8")
+    _write_json(
+        source_trust,
+        {
+            "schema": "nhms.two_node_docker.source_trust.v1",
+            "status": "PASS",
+            "evidence_run_id": "run-123",
+            "blockers": [],
+        },
+    )
+    static_report.symlink_to(target)
+    _write_json(
+        smoke_report,
+        {
+            "schema_version": "nhms.two_node_docker.app_smoke.v1",
+            "status": "PASS",
+            "evidence_run_id": "run-123",
+        },
+    )
+
+    output = docker_runtime.write_docker_security_summary(
+        output=security_root / "summary.json",
+        repo_root=repo_root,
+        evidence_run_id="run-123",
+        source_trust_report=source_trust,
+        static_report=static_report,
+        smoke_report=smoke_report,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["status"] == "BLOCKED"
+    static_artifact = payload["source_artifacts"]["static"]
+    assert static_artifact["sha256"] is None
+    assert static_artifact["blocked"] is True
+    blockers = payload["blockers"][0]["source_blockers"]
+    assert blockers[0]["code"] == "DOCKER_SECURITY_SOURCE_SYMLINK"
+
+
+def test_docker_security_summary_blocks_child_outside_approved_roots(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    security_root = repo_root / "artifacts" / "docker-security"
+    security_root.mkdir(parents=True)
+    source_trust = security_root / "two-node-docker-source-trust.json"
+    static_report = tmp_path / "outside-static.json"
+    smoke_report = security_root / "docker-smoke.json"
+    _write_json(
+        source_trust,
+        {
+            "schema": "nhms.two_node_docker.source_trust.v1",
+            "status": "PASS",
+            "evidence_run_id": "run-123",
+            "blockers": [],
+        },
+    )
+    _write_json(
+        static_report,
+        {
+            "schema_version": "nhms.two_node_docker.static_check.v1",
+            "status": "PASS",
+            "evidence_run_id": "run-123",
+        },
+    )
+    _write_json(
+        smoke_report,
+        {
+            "schema_version": "nhms.two_node_docker.app_smoke.v1",
+            "status": "PASS",
+            "evidence_run_id": "run-123",
+        },
+    )
+
+    output = docker_runtime.write_docker_security_summary(
+        output=security_root / "summary.json",
+        repo_root=repo_root,
+        evidence_run_id="run-123",
+        source_trust_report=source_trust,
+        static_report=static_report,
+        smoke_report=smoke_report,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["status"] == "BLOCKED"
+    assert payload["source_artifacts"]["static"]["sha256"] is None
+    blockers = payload["blockers"][0]["source_blockers"]
+    assert blockers[0]["code"] == "DOCKER_SECURITY_SOURCE_OUTSIDE_APPROVED_ROOT"
+
+
+def test_docker_security_summary_blocks_oversized_child_before_digest(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    security_root = repo_root / "artifacts" / "docker-security"
+    security_root.mkdir(parents=True)
+    source_trust = security_root / "two-node-docker-source-trust.json"
+    static_report = security_root / "static-compose-env-check.json"
+    smoke_report = security_root / "docker-smoke.json"
+    _write_json(
+        source_trust,
+        {
+            "schema": "nhms.two_node_docker.source_trust.v1",
+            "status": "PASS",
+            "evidence_run_id": "run-123",
+            "blockers": [],
+        },
+    )
+    static_report.write_text("x" * (docker_runtime.MAX_SECURITY_CHILD_BYTES + 1), encoding="utf-8")
+    _write_json(
+        smoke_report,
+        {
+            "schema_version": "nhms.two_node_docker.app_smoke.v1",
+            "status": "PASS",
+            "evidence_run_id": "run-123",
+        },
+    )
+
+    output = docker_runtime.write_docker_security_summary(
+        output=security_root / "summary.json",
+        repo_root=repo_root,
+        evidence_run_id="run-123",
+        source_trust_report=source_trust,
+        static_report=static_report,
+        smoke_report=smoke_report,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["status"] == "BLOCKED"
+    assert payload["source_artifacts"]["static"]["sha256"] is None
+    blockers = payload["blockers"][0]["source_blockers"]
+    assert blockers[0]["code"] == "DOCKER_SECURITY_SOURCE_TOO_LARGE"
+
+
+def test_docker_security_summary_blocks_child_without_current_run_id(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    security_root = repo_root / "artifacts" / "docker-security"
+    security_root.mkdir(parents=True)
+    source_trust = security_root / "two-node-docker-source-trust.json"
+    static_report = security_root / "static-compose-env-check.json"
+    smoke_report = security_root / "docker-smoke.json"
+    _write_json(
+        source_trust,
+        {"schema": "nhms.two_node_docker.source_trust.v1", "status": "PASS", "blockers": []},
+    )
+    _write_json(
+        static_report,
+        {
+            "schema_version": "nhms.two_node_docker.static_check.v1",
+            "status": "PASS",
+            "evidence_run_id": "run-123",
+        },
+    )
+    _write_json(
+        smoke_report,
+        {
+            "schema_version": "nhms.two_node_docker.app_smoke.v1",
+            "status": "PASS",
+            "evidence_run_id": "run-123",
+        },
+    )
+
+    output = docker_runtime.write_docker_security_summary(
+        output=security_root / "summary.json",
+        repo_root=repo_root,
+        evidence_run_id="run-123",
+        source_trust_report=source_trust,
+        static_report=static_report,
+        smoke_report=smoke_report,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["status"] == "BLOCKED"
+    assert payload["source_statuses"]["source_trust"] == "BLOCKED"
+    assert payload["blockers"][0]["source_blockers"][0]["code"] == "DOCKER_SECURITY_SOURCE_RUN_ID_MISSING"
 
 
 def test_image_absence_probe_rejects_scontrol_only_slurm_cli(tmp_path: Path) -> None:

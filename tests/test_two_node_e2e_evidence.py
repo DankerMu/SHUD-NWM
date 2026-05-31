@@ -307,6 +307,28 @@ def test_docker_security_child_with_explicit_stale_run_id_blocks_even_under_curr
     )
 
 
+def test_docker_security_source_trust_without_current_run_id_blocks_even_under_current_run() -> None:
+    run_id = _run_id("docker-source-trust-no-id")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    artifact = docker_security["source_artifacts"]["source_trust"]
+    artifact_path = Path(artifact["path"])
+    payload = _read(artifact_path)
+    payload.pop("evidence_run_id", None)
+    _write(artifact_path, payload)
+    artifact["sha256"] = _sha256_file(artifact_path)
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_STALE_OR_UNSCOPED" in _codes(
+        docker_lane["blockers"]
+    )
+
+
 @pytest.mark.parametrize(
     ("artifact_name", "mutation", "expected_status", "expected_code"),
     [
@@ -664,7 +686,7 @@ def test_readonly_db_child_failure_or_coverage_gap_blocks(mutator: str) -> None:
         db_summary["route_smoke"][0]["status"] = STATUS_FAIL
     elif mutator == "route_identity_incomplete":
         latest = next(route for route in db_summary["route_smoke"] if route["name"] == "latest_product")
-        latest["strict_identity"].pop("model_id")
+        latest["response_identity"].pop("model_id")
         latest["path"] = latest["path"].replace("&model_id=basins_qhh_shud", "")
     elif mutator == "manual_child_failed":
         db_summary["manual_action_probes"][0]["status"] = STATUS_FAIL
@@ -883,7 +905,7 @@ def test_readonly_db_ifs_route_identity_mismatch_fails() -> None:
         for route in db_summary["route_smoke"]
         if route.get("name") == "latest_product" and route.get("source") == "IFS"
     )
-    ifs_latest["strict_identity"]["model_id"] = "wrong-model"
+    ifs_latest["response_identity"]["model_id"] = "wrong-model"
     _write(lane / "summary.json", db_summary)
     _write(lane / "route_smoke.json", db_summary["route_smoke"])
 
@@ -893,6 +915,52 @@ def test_readonly_db_ifs_route_identity_mismatch_fails() -> None:
     readonly_lane = summary["lane_summaries"]["readonly_db"]
     assert readonly_lane["status"] == STATUS_FAIL
     assert "TWO_NODE_E2E_STRICT_IDENTITY_MISMATCH" in _codes(readonly_lane["findings"])
+
+
+def test_readonly_db_route_response_identity_mismatch_blocks() -> None:
+    run_id = _run_id("db-response-identity-mismatch")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    latest = next(
+        route
+        for route in db_summary["route_smoke"]
+        if route.get("name") == "latest_product" and route.get("source") == "GFS"
+    )
+    latest["response_identity"]["model_id"] = "wrong-model"
+    _write(lane / "summary.json", db_summary)
+    _write(lane / "route_smoke.json", db_summary["route_smoke"])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_FAIL
+    assert readonly_lane["status"] == STATUS_FAIL
+    assert "TWO_NODE_E2E_STRICT_IDENTITY_MISMATCH" in _codes(readonly_lane["findings"])
+
+
+def test_readonly_db_route_request_path_without_response_identity_blocks() -> None:
+    run_id = _run_id("db-request-only-identity")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    latest = next(
+        route
+        for route in db_summary["route_smoke"]
+        if route.get("name") == "latest_product" and route.get("source") == "GFS"
+    )
+    latest.pop("response_identity", None)
+    _write(lane / "summary.json", db_summary)
+    _write(lane / "route_smoke.json", db_summary["route_smoke"])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_READONLY_DB_ROUTE_STRICT_IDENTITY_INCOMPLETE" in _codes(
+        readonly_lane["blockers"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1030,6 +1098,62 @@ def test_single_source_bundle_is_reduced_scope_partial_even_when_declared() -> N
     assert summary["strict_identity"]["reduced_scope"] is True
 
 
+def test_reduced_single_source_db_merge_feeds_final_partial() -> None:
+    run_id = _run_id("single-source-db-merge")
+    config = _seed_pass_bundle(run_id, sources=("GFS",), reduced_scope=True)
+    db_summary = _read(config.run_dir / "db" / "readonly-db-boundary" / "summary.json")
+    source_dirs = [
+        Path(source_artifact["source_dir"])
+        for source_artifact in db_summary["validation_provenance"]["source_artifacts"]
+        if source_artifact["sources"] == ["GFS"]
+    ]
+    assert len(source_dirs) == 1
+    merge_readonly_db_source_evidence(
+        evidence_root=config.evidence_root,
+        run_id=run_id,
+        source_dirs=source_dirs,
+        declared_sources=("GFS",),
+        reduced_scope=True,
+        force=True,
+    )
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PARTIAL
+    assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["cross_plane"]["status"] == STATUS_PARTIAL
+
+
+def test_browser_evidence_missing_ops_jobs_or_logs_blocks() -> None:
+    run_id = _run_id("browser-missing-ops-log")
+    config = _seed_pass_bundle(run_id)
+    browser_summary = _read(config.run_dir / "browser" / "summary.json")
+    browser_summary["sources"]["GFS"]["checks"].pop("ops_job_logs")
+    _write(config.run_dir / "browser" / "summary.json", browser_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    browser_lane = summary["lane_summaries"]["browser"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert browser_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_BROWSER_CHECK_MISSING" in _codes(browser_lane["blockers"])
+
+
+def test_browser_ops_job_logs_requires_job_id_binding() -> None:
+    run_id = _run_id("browser-log-no-job")
+    config = _seed_pass_bundle(run_id)
+    browser_summary = _read(config.run_dir / "browser" / "summary.json")
+    browser_summary["sources"]["GFS"]["checks"]["ops_job_logs"]["identity"].pop("job_id")
+    _write(config.run_dir / "browser" / "summary.json", browser_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    browser_lane = summary["lane_summaries"]["browser"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert browser_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE" in _codes(browser_lane["blockers"])
+
+
 def test_manual_ops_auth_and_receipt_boundaries() -> None:
     auth_run_id = _run_id("manual-auth")
     auth_config = _seed_pass_bundle(auth_run_id)
@@ -1146,6 +1270,42 @@ def test_manual_ops_receipt_provenance_with_valid_artifact_passes() -> None:
     assert summary["lane_summaries"]["manual_ops"]["status"] == STATUS_PASS
 
 
+@pytest.mark.parametrize(
+    ("mutator", "expected_code"),
+    [
+        ("older_run", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_RUN_ID_MISMATCH"),
+        ("wrong_source", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_SOURCE_MISMATCH"),
+        ("wrong_action", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_ACTION_MISMATCH"),
+    ],
+)
+def test_manual_ops_receipt_artifact_payload_must_match_provenance(
+    mutator: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"manual-artifact-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    manual_ops = _read(config.run_dir / "manual-ops" / "summary.json")
+    receipt = manual_ops["control_receipts"][0]
+    artifact_path = Path(receipt["provenance"]["artifact_path"])
+    artifact = _read(artifact_path)
+    if mutator == "older_run":
+        artifact["evidence_run_id"] = "older-bundle"
+    elif mutator == "wrong_source":
+        artifact["source"] = "IFS" if receipt["source"] == "GFS" else "GFS"
+    else:
+        artifact["action"] = "cancel"
+    _write(artifact_path, artifact)
+    receipt["provenance"]["sha256"] = _sha256_file(artifact_path)
+    _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    manual_lane = summary["lane_summaries"]["manual_ops"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert manual_lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(manual_lane["blockers"])
+
+
 def test_manual_ops_response_evidence_valid_fixture_passes() -> None:
     run_id = _run_id("manual-response-valid")
     config = _seed_pass_bundle(run_id)
@@ -1217,6 +1377,25 @@ def test_manual_ops_response_evidence_must_be_structured_producer_evidence(
     assert summary["status"] == STATUS_BLOCKED
     assert manual_lane["status"] == STATUS_BLOCKED
     assert expected_code in _codes(manual_lane["blockers"])
+
+
+def test_manual_ops_action_and_response_source_must_be_declared() -> None:
+    run_id = _run_id("manual-response-undeclared-source")
+    config = _seed_pass_bundle(run_id)
+    manual_ops = _read(config.run_dir / "manual-ops" / "summary.json")
+    action = manual_ops["display_actions"][0]
+    action["source"] = "NCEP"
+    action["response_evidence"]["source"] = "NCEP"
+    _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    manual_lane = summary["lane_summaries"]["manual_ops"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert manual_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_SOURCE_UNDECLARED" in _codes(
+        manual_lane["blockers"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1429,7 +1608,13 @@ def _seed_pass_bundle(
         _source_lane_payload(
             run_id,
             identities,
-            required_checks=("hydro_met", "ops", *(() if len(sources) == 1 else ("source_switch",))),
+            required_checks=(
+                "hydro_met",
+                "ops",
+                "ops_jobs",
+                "ops_job_logs",
+                *((() if len(sources) == 1 else ("source_switch",))),
+            ),
             live_flag="live_browser_evidence",
         ),
     )
@@ -1453,10 +1638,15 @@ def _seed_pass_bundle(
         receipt_artifact = manual_lane / f"receipt-{source.lower()}.json"
         receipt_payload = {
             "schema": "nhms.two_node_e2e.manual_ops.receipt.v1",
+            "status": STATUS_PASS,
             "evidence_run_id": run_id,
             "producer_node": "22",
             "producer_role": "compute_control",
             "source": source,
+            "run_id": identity["run_id"],
+            "cycle_time": identity["cycle_time"],
+            "model_id": identity["model_id"],
+            "action": "retry",
             "receipt_id": f"receipt-{source.lower()}",
             "redacted": True,
         }
@@ -1672,6 +1862,7 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
             f"source={strict_identity['source']}&cycle_time={strict_identity['cycle_time']}"
             f"&run_id={strict_identity['run_id']}&model_id={strict_identity['model_id']}"
         )
+        route_identity = {"response_identity": copy.deepcopy(strict_identity)}
         source_route_smoke = [
             {"name": "health", "status": STATUS_PASS, "path": "/health"},
             {"name": "runtime_config", "status": STATUS_PASS, "path": "/api/v1/runtime/config"},
@@ -1688,6 +1879,7 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
                 "status": STATUS_PASS,
                 "path": f"/api/v1/mvp/qhh/latest-product?{strict_query}",
                 "strict_identity": strict_identity,
+                **copy.deepcopy(route_identity),
             },
             {
                 "name": "pipeline_status",
@@ -1695,6 +1887,7 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
                 "status": STATUS_PASS,
                 "path": f"/api/v1/pipeline/status?{strict_query}",
                 "strict_identity": strict_identity,
+                **copy.deepcopy(route_identity),
             },
             {
                 "name": "pipeline_stages",
@@ -1702,6 +1895,7 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
                 "status": STATUS_PASS,
                 "path": f"/api/v1/pipeline/stages?{strict_query}",
                 "strict_identity": strict_identity,
+                **copy.deepcopy(route_identity),
             },
             {
                 "name": "jobs",
@@ -1709,6 +1903,7 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
                 "status": STATUS_PASS,
                 "path": f"/api/v1/jobs?{strict_query}&limit=1",
                 "strict_identity": strict_identity,
+                **copy.deepcopy(route_identity),
             },
             {
                 "name": "job_logs",
@@ -1719,6 +1914,7 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
                     f"&job_id={strict_identity['job_id']}"
                 ),
                 "strict_identity": strict_identity,
+                **copy.deepcopy(route_identity),
             },
         ]
         for route in source_route_smoke:

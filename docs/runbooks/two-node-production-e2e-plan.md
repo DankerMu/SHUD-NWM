@@ -443,6 +443,8 @@ done
 uv run python scripts/validate_readonly_db_boundary.py \
   --evidence-root "$EVIDENCE_PARENT" \
   --run-id "$EVIDENCE_RUN_ID" \
+  --merge-declared-source GFS \
+  --merge-declared-source IFS \
   --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-GFS/db/readonly-db-boundary" \
   --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-IFS/db/readonly-db-boundary" \
   --force
@@ -453,8 +455,9 @@ uv run python scripts/validate_readonly_db_boundary.py \
 per-run lane：`$EVIDENCE_ROOT/db/readonly-db-boundary/`。`NHMS_READONLY_DB_VALIDATION_RUN_ID` 仍是被验证的业务
 `hydro.hydro_run.run_id`。如需只通过环境变量指定 evidence bundle ID，使用
 `NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID="$EVIDENCE_RUN_ID"`。完整 GFS/IFS scope 必须先产生两个 per-source
-lane，再用 `--merge-source-dir` 写入最终 `db/readonly-db-boundary/`；单 source DB evidence 在 full-scope 最终聚合中会保持
-`BLOCKED`，不能手写补成 GFS/IFS。每个 per-source lane 必须保留 authoritative sibling：
+lane，再用 `--merge-source-dir` 和显式 `--merge-declared-source GFS/IFS` 写入最终 `db/readonly-db-boundary/`；
+单 source DB evidence 在默认 full-scope merge 中会保持 `BLOCKED`，只有同时声明 `--merge-declared-source <source>`
+和 `--reduced-scope` 的单 source merge 才能作为最终 `PARTIAL` 的 DB 输入，不能手写补成 GFS/IFS。每个 per-source lane 必须保留 authoritative sibling：
 `summary.json`、`role.json`、`route_smoke.json`、`permission_probes.json`；merge 会拒绝缺 sibling、
 sibling 与 summary 不一致、source dir 越界或 symlink、重复/缺失 source、非 live schema、非 `PASS`、
 `validation_provenance.mode != "live"`、`live_readonly_proof != true`，以及与当前 final bundle 无关的 stale
@@ -564,13 +567,14 @@ curl -i 'http://127.0.0.1:8000/api/v1/jobs/<job_id>/logs?source=GFS&cycle_time=<
 - 站点 forcing 曲线显示。
 - 河段 `q_down` 曲线显示。
 - `/ops` 能选择本轮 source/cycle/run/model。
-- `/ops` 能展示 stages、jobs、失败原因和日志，日志面板必须绑定所选 `job_id`。
+- `/ops` 能展示 stages、jobs、失败原因和日志；browser summary 必须分别记录 identity-bound `ops_jobs`
+  和 `ops_job_logs` 检查，日志面板必须绑定所选 `job_id`。
 - `/ops` 在 27 display mode 下不显示真实 retry/cancel 执行入口，只显示诊断信息复制和 22 人工处理建议。
 - viewer/operator/sys_admin 权限状态符合只读展示预期，不得通过前端触发控制动作。
 
 通过条件：
 
-- 截图、DOM snapshot、console/network 错误留证。
+- 截图、DOM snapshot、console/network 错误留证，并保留 `/ops` jobs/logs 的 strict identity 与 `job_id` payload。
 - 页面不允许靠 mock API 通过。
 - 如果 latest-product 或 strict identity / job_id 绑定不可用，浏览器 E2E 只能记为 BLOCKED/PARTIAL。
 - 如果浏览器或网络记录显示 27 调用 `/api/v1/runs/*/retry`、`/api/v1/runs/*/cancel` 或 `/api/v1/slurm/*` 执行控制动作，本段 FAIL。
@@ -700,6 +704,14 @@ uv run python scripts/validate_two_node_e2e_evidence.py \
 单 source 演练必须显式保留 reduced-scope 语义，不能写成完整 GFS/IFS PASS：
 
 ```bash
+uv run python scripts/validate_readonly_db_boundary.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID" \
+  --merge-declared-source GFS \
+  --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-GFS/db/readonly-db-boundary" \
+  --reduced-scope \
+  --force
+
 uv run python scripts/validate_two_node_e2e_evidence.py \
   --evidence-root "$EVIDENCE_PARENT" \
   --run-id "$EVIDENCE_RUN_ID" \

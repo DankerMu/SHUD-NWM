@@ -1029,6 +1029,49 @@ def test_merge_readonly_db_source_evidence_accepts_explicit_parent_bundle_bindin
     } == {"validation_provenance.parent_evidence_run_id"}
 
 
+def test_merge_readonly_db_source_evidence_accepts_declared_reduced_scope() -> None:
+    evidence_root = _evidence_root()
+    run_id = _run_id("merge-reduced-gfs")
+    gfs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-gfs",
+        source="GFS",
+    )
+
+    summary = merge_readonly_db_source_evidence(
+        evidence_root=evidence_root,
+        run_id=run_id,
+        source_dirs=(gfs_config.lane_dir,),
+        declared_sources=("GFS",),
+        reduced_scope=True,
+        force=True,
+    )
+
+    assert summary["status"] == "PASS"
+    assert summary["validation_provenance"]["declared_sources"] == ["GFS"]
+    assert summary["validation_provenance"]["reduced_scope"] is True
+
+
+def test_merge_readonly_db_source_evidence_default_full_scope_blocks_missing_ifs() -> None:
+    evidence_root = _evidence_root()
+    run_id = _run_id("merge-full-missing-ifs")
+    gfs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-gfs",
+        source="GFS",
+    )
+
+    summary = merge_readonly_db_source_evidence(
+        evidence_root=evidence_root,
+        run_id=run_id,
+        source_dirs=(gfs_config.lane_dir,),
+        force=True,
+    )
+
+    assert summary["status"] == "BLOCKED"
+    assert "READONLY_DB_MERGE_SOURCE_MISSING" in {blocker["code"] for blocker in summary["blockers"]}
+
+
 def test_successful_ddl_execution_despite_no_catalog_grant_fails_with_rollback_cleanup_only() -> None:
     adapter = _FakeReadonlyAdapter(successful_operations={("ops.*", "DDL_CREATE_TABLE")})
 
@@ -1132,7 +1175,13 @@ def test_display_route_smoke_constructs_strict_identity_paths() -> None:
         name = _route_name_for_path(path)
         if name:
             observed_paths[name] = path
-        return RouteHttpResponse(status_code=200, body={"status": "ok", "data": {}})
+        body: dict[str, Any] = {"status": "ok", "data": {}}
+        if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
+            response_identity = {key: identity[key] for key in ("source", "cycle_time", "run_id", "model_id")}
+            if name == "job_logs":
+                response_identity["job_id"] = identity["job_id"]
+            body["data"] = {"identity": response_identity}
+        return RouteHttpResponse(status_code=200, body=body)
 
     results = run_display_route_smoke(config, identity, route_requester=strict_route_requester)
 
@@ -1147,6 +1196,40 @@ def test_display_route_smoke_constructs_strict_identity_paths() -> None:
     assert urlsplit(observed_paths["jobs"]).path == "/api/v1/jobs"
     assert parse_qs(urlsplit(observed_paths["jobs"]).query)["limit"] == ["1"]
     assert urlsplit(observed_paths["job_logs"]).path == "/api/v1/jobs/job_routes/logs"
+
+
+def test_display_route_smoke_blocks_2xx_identity_mismatch() -> None:
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("route-response-mismatch"),
+        database_url="postgresql://readonly:secret@db.example/nhms",
+    )
+    identity = {
+        "source": "GFS",
+        "cycle_time": "2026-05-03T00:00:00+00:00",
+        "run_id": "run_routes",
+        "model_id": "model_routes",
+        "job_id": "job_routes",
+    }
+
+    def mismatched_route_requester(method: str, path: str) -> RouteHttpResponse:
+        del method
+        name = _route_name_for_path(path)
+        body: dict[str, Any] = {"status": "ok", "data": {}}
+        if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
+            response_identity = {key: identity[key] for key in ("source", "cycle_time", "run_id", "model_id")}
+            response_identity["model_id"] = "wrong-model"
+            if name == "job_logs":
+                response_identity["job_id"] = identity["job_id"]
+            body["data"] = {"identity": response_identity}
+        return RouteHttpResponse(status_code=200, body=body)
+
+    results = run_display_route_smoke(config, identity, route_requester=mismatched_route_requester)
+
+    latest = next(item for item in results if item["name"] == "latest_product")
+    assert latest["status"] == "BLOCKED"
+    assert latest["reason"] == "display_read_route_response_identity_invalid"
+    assert latest["identity_blockers"][0]["code"] == "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISMATCH"
 
 
 def test_display_route_smoke_blocks_identity_bound_routes_when_strict_identity_missing() -> None:
@@ -1195,7 +1278,6 @@ def test_display_route_smoke_forces_safe_env_and_bounded_database_url(
 
         @app.api_route("/{path:path}", methods=["GET"])
         def catch_all(path: str) -> dict[str, Any]:
-            del path
             observed_env.append(
                 {
                     "local_logs": os.environ.get("NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS"),
@@ -1204,7 +1286,19 @@ def test_display_route_smoke_forces_safe_env_and_bounded_database_url(
                     "service_role": os.environ.get("NHMS_SERVICE_ROLE"),
                 }
             )
-            return {"status": "ok"}
+            name = _route_name_for_path(f"/{path}")
+            body: dict[str, Any] = {"status": "ok"}
+            if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
+                identity = {
+                    "source": "GFS",
+                    "cycle_time": "2026-05-03T00:00:00+00:00",
+                    "run_id": "run_routes",
+                    "model_id": "model_routes",
+                }
+                if name == "job_logs":
+                    identity["job_id"] = "job_routes"
+                body["data"] = {"identity": identity}
+            return body
 
         return app
 
@@ -1726,8 +1820,22 @@ class _FakeReadonlyAdapter:
 
 
 def _passing_route_requester(method: str, path: str) -> RouteHttpResponse:
-    del method, path
-    return RouteHttpResponse(status_code=200, body={"status": "ok", "data": {}})
+    del method
+    name = _route_name_for_path(path)
+    body: dict[str, Any] = {"status": "ok", "data": {}}
+    if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
+        query = parse_qs(urlsplit(path).query)
+        identity = {
+            field: query[field][0]
+            for field in ("source", "cycle_time", "run_id", "model_id")
+            if query.get(field)
+        }
+        if name == "job_logs":
+            parts = [part for part in urlsplit(path).path.split("/") if part]
+            if len(parts) >= 4 and parts[-1] == "logs":
+                identity["job_id"] = parts[-2]
+        body["data"] = {"identity": identity}
+    return RouteHttpResponse(status_code=200, body=body)
 
 
 def _route_name_for_path(path: str) -> str | None:
@@ -1746,7 +1854,6 @@ def _route_name_for_path(path: str) -> str | None:
 
 
 def _mixed_route_requester(method: str, path: str) -> RouteHttpResponse:
-    del method
     if path.startswith("/api/v1/mvp/qhh/latest-product"):
         return RouteHttpResponse(
             status_code=404,
@@ -1757,11 +1864,10 @@ def _mixed_route_requester(method: str, path: str) -> RouteHttpResponse:
             status_code=500,
             body={"error": {"code": "DATABASE_WRITE_ATTEMPT", "message": "unexpected write"}},
         )
-    return RouteHttpResponse(status_code=200, body={"status": "ok", "data": {}})
+    return _passing_route_requester(method, path)
 
 
 def _bare_404_route_requester(method: str, path: str) -> RouteHttpResponse:
-    del method
     if path.startswith("/api/v1/mvp/qhh/latest-product"):
         return RouteHttpResponse(status_code=404, body={"detail": "Not Found"})
     parsed_path = urlsplit(path).path
@@ -1770,7 +1876,7 @@ def _bare_404_route_requester(method: str, path: str) -> RouteHttpResponse:
             status_code=404,
             body={"error": {"code": "JOB_LOG_NOT_PUBLISHED", "message": "published log fixture unavailable"}},
         )
-    return RouteHttpResponse(status_code=200, body={"status": "ok", "data": {}})
+    return _passing_route_requester(method, path)
 
 
 def _passing_manual_actions(run_id: str) -> list[dict[str, Any]]:

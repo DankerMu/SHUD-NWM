@@ -9,6 +9,7 @@ import os
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ DEFAULT_DOCKERIGNORE = Path(".dockerignore")
 DEFAULT_SMOKE_IMAGE = "nhms-app:m22-09-smoke"
 DEFAULT_MIN_FREE_GB = 5.0
 MAX_COMMAND_OUTPUT_BYTES = 16_384
+MAX_SECURITY_CHILD_BYTES = 1024 * 1024
 DOCKER_SECURITY_CHILD_SCHEMAS = {
     "source_trust": "nhms.two_node_docker.source_trust.v1",
     "static": "nhms.two_node_docker.static_check.v1",
@@ -798,14 +800,46 @@ def write_docker_security_summary(
 ) -> Path:
     output = _resolve_output_path(output, repo_root)
     ensure_approved_evidence_root(output.parent, repo_root)
+    summary_root = output.parent
+    approved_child_roots = _docker_security_child_roots(repo_root, summary_root)
     source_artifacts = {
-        "source_trust": _artifact_summary(source_trust_report, repo_root=repo_root),
-        "static": _artifact_summary(static_report, repo_root=repo_root),
-        "smoke": _artifact_summary(smoke_report, repo_root=repo_root),
+        "source_trust": _artifact_summary(
+            "source_trust",
+            source_trust_report,
+            repo_root=repo_root,
+            approved_roots=approved_child_roots,
+        ),
+        "static": _artifact_summary(
+            "static",
+            static_report,
+            repo_root=repo_root,
+            approved_roots=approved_child_roots,
+        ),
+        "smoke": _artifact_summary(
+            "smoke",
+            smoke_report,
+            repo_root=repo_root,
+            approved_roots=approved_child_roots,
+        ),
     }
-    source_trust_payload = _read_security_child_payload("source_trust", Path(source_artifacts["source_trust"]["path"]))
-    static_payload = _read_security_child_payload("static", Path(source_artifacts["static"]["path"]))
-    smoke_payload = _read_security_child_payload("smoke", Path(source_artifacts["smoke"]["path"]))
+    source_trust_payload = _read_security_child_payload(
+        "source_trust",
+        source_artifacts["source_trust"],
+        approved_roots=approved_child_roots,
+        evidence_run_id=evidence_run_id,
+    )
+    static_payload = _read_security_child_payload(
+        "static",
+        source_artifacts["static"],
+        approved_roots=approved_child_roots,
+        evidence_run_id=evidence_run_id,
+    )
+    smoke_payload = _read_security_child_payload(
+        "smoke",
+        source_artifacts["smoke"],
+        approved_roots=approved_child_roots,
+        evidence_run_id=evidence_run_id,
+    )
     status = _docker_security_summary_status(source_trust_payload, static_payload, smoke_payload)
     runtime_config = {
         "service_role": "display_readonly",
@@ -1090,8 +1124,80 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     return {"status": "BLOCKED", "blockers": [{"code": "ARTIFACT_JSON_NOT_OBJECT", "path": str(path)}]}
 
 
-def _read_security_child_payload(label: str, path: Path) -> dict[str, Any]:
-    payload = _read_json_file(path)
+def _read_security_child_payload(
+    label: str,
+    artifact: Mapping[str, Any],
+    *,
+    approved_roots: Sequence[Path],
+    evidence_run_id: str,
+) -> dict[str, Any]:
+    raw_path = artifact.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_PATH_MISSING",
+            "Docker security source artifact path is missing.",
+            path=None,
+        )
+    try:
+        path = _approved_security_child_path(Path(raw_path), approved_roots=approved_roots)
+        content = _read_security_child_bytes(path, approved_roots=approved_roots)
+    except FileNotFoundError:
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_MISSING",
+            "Docker security source artifact is missing.",
+            path=raw_path,
+        )
+    except ValueError as error:
+        return _blocked_security_child(
+            label,
+            str(error),
+            "Docker security source artifact path is outside the approved evidence roots.",
+            path=raw_path,
+        )
+    except OSError:
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_READ_FAILED",
+            "Docker security source artifact could not be read safely.",
+            path=raw_path,
+        )
+    except RuntimeError as error:
+        return _blocked_security_child(
+            label,
+            str(error),
+            "Docker security source artifact could not be read safely.",
+            path=raw_path,
+        )
+
+    digest = hashlib.sha256(content).hexdigest()
+    raw_sha256 = artifact.get("sha256")
+    if isinstance(raw_sha256, str) and re.fullmatch(r"[a-fA-F0-9]{64}", raw_sha256.strip()):
+        if digest != raw_sha256.lower():
+            return _blocked_security_child(
+                label,
+                "DOCKER_SECURITY_SOURCE_HASH_MISMATCH",
+                "Docker security source artifact sha256 does not match file content.",
+                path=raw_path,
+            )
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_JSON_INVALID",
+            "Docker security source artifact must be bounded valid JSON.",
+            path=raw_path,
+        )
+    if not isinstance(payload, dict):
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_JSON_NOT_OBJECT",
+            "Docker security source artifact JSON must be an object.",
+            path=raw_path,
+        )
+    _bind_security_child_to_current_run(payload, label=label, path=raw_path, evidence_run_id=evidence_run_id)
     expected_schema = DOCKER_SECURITY_CHILD_SCHEMAS[label]
     observed_schema = payload.get("schema_version") or payload.get("schema")
     if observed_schema != expected_schema:
@@ -1111,12 +1217,158 @@ def _read_security_child_payload(label: str, path: Path) -> dict[str, Any]:
     return payload
 
 
-def _artifact_summary(path: Path, *, repo_root: Path) -> dict[str, Any]:
-    resolved = _resolve_path(path, repo_root)
-    return {
-        "path": str(resolved),
-        "sha256": _file_sha256(resolved) if resolved.is_file() else None,
-    }
+def _bind_security_child_to_current_run(
+    payload: dict[str, Any],
+    *,
+    label: str,
+    path: str,
+    evidence_run_id: str,
+) -> None:
+    raw_id = payload.get("evidence_run_id") or payload.get("bundle_run_id") or payload.get("evidence_bundle_id")
+    if raw_id is not None and str(raw_id).strip() == evidence_run_id:
+        return
+    blockers = list(payload.get("blockers", [])) if isinstance(payload.get("blockers"), list) else []
+    if raw_id is None or not str(raw_id).strip():
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_RUN_ID_MISSING",
+                "source": label,
+                "path": path,
+                "expected_evidence_run_id": evidence_run_id,
+            }
+        )
+    else:
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_RUN_ID_MISMATCH",
+                "source": label,
+                "path": path,
+                "evidence_run_id": raw_id,
+                "expected_evidence_run_id": evidence_run_id,
+            }
+        )
+    payload["status"] = "BLOCKED" if payload.get("status") != "FAIL" else "FAIL"
+    payload["blockers"] = blockers
+
+
+def _blocked_security_child(label: str, code: str, message: str, *, path: str | None) -> dict[str, Any]:
+    blocker: dict[str, Any] = {"code": code, "source": label, "message": message}
+    if path is not None:
+        blocker["path"] = path
+    return {"status": "BLOCKED", "blockers": [blocker]}
+
+
+def _artifact_summary(
+    label: str,
+    path: Path,
+    *,
+    repo_root: Path,
+    approved_roots: Sequence[Path],
+) -> dict[str, Any]:
+    resolved = _resolve_child_path_no_follow(path, repo_root)
+    summary: dict[str, Any] = {"path": str(resolved)}
+    try:
+        approved_path = _approved_security_child_path(resolved, approved_roots=approved_roots)
+        content = _read_security_child_bytes(approved_path, approved_roots=approved_roots)
+    except FileNotFoundError:
+        summary["sha256"] = None
+        summary["blocked"] = True
+        summary["blocker_code"] = "DOCKER_SECURITY_SOURCE_MISSING"
+    except ValueError as error:
+        summary["sha256"] = None
+        summary["blocked"] = True
+        summary["blocker_code"] = str(error)
+    except (OSError, RuntimeError):
+        summary["sha256"] = None
+        summary["blocked"] = True
+        summary["blocker_code"] = "DOCKER_SECURITY_SOURCE_UNSAFE"
+    else:
+        summary["sha256"] = hashlib.sha256(content).hexdigest()
+    summary["source"] = label
+    return summary
+
+
+def _docker_security_child_roots(repo_root: Path, summary_root: Path) -> tuple[Path, ...]:
+    stage_change_root = (repo_root / "artifacts" / "stage-change" / CHANGE_ID).resolve(strict=False)
+    roots = [summary_root.resolve(strict=False), stage_change_root]
+    return tuple(dict.fromkeys(roots))
+
+
+def _approved_security_child_path(path: Path, *, approved_roots: Sequence[Path]) -> Path:
+    candidate = path.expanduser()
+    _reject_symlink_components(candidate.parent)
+    resolved = candidate.parent.resolve(strict=False) / candidate.name
+    if not any(_is_relative_to(resolved, root.resolve(strict=False)) for root in approved_roots):
+        raise ValueError("DOCKER_SECURITY_SOURCE_OUTSIDE_APPROVED_ROOT")
+    _reject_symlink_components(resolved.parent)
+    return resolved
+
+
+def _read_security_child_bytes(path: Path, *, approved_roots: Sequence[Path]) -> bytes:
+    root = _security_child_containment_root(path, approved_roots=approved_roots)
+    relative = path.relative_to(root)
+    parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = parent_fd
+        for part in relative.parts[:-1]:
+            if part in {"", ".", ".."}:
+                raise RuntimeError("DOCKER_SECURITY_SOURCE_UNSAFE_PATH")
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+            if fd != parent_fd:
+                os.close(fd)
+            fd = next_fd
+        target = relative.name
+        if target in {"", ".", ".."}:
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_UNSAFE_PATH")
+        st = os.stat(target, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode):
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_SYMLINK")
+        if not stat.S_ISREG(st.st_mode):
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_NOT_FILE")
+        if st.st_size > MAX_SECURITY_CHILD_BYTES:
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_TOO_LARGE")
+        read_fd = os.open(
+            target,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=fd,
+        )
+        try:
+            opened = os.fstat(read_fd)
+            if opened.st_dev != st.st_dev or opened.st_ino != st.st_ino:
+                raise RuntimeError("DOCKER_SECURITY_SOURCE_CHANGED")
+            content = os.read(read_fd, MAX_SECURITY_CHILD_BYTES + 1)
+        finally:
+            os.close(read_fd)
+        if len(content) > MAX_SECURITY_CHILD_BYTES:
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_TOO_LARGE")
+        return content
+    finally:
+        if "fd" in locals() and fd != parent_fd:
+            os.close(fd)
+        os.close(parent_fd)
+
+
+def _security_child_containment_root(path: Path, *, approved_roots: Sequence[Path]) -> Path:
+    resolved = path.parent.resolve(strict=False) / path.name
+    for root in approved_roots:
+        resolved_root = root.resolve(strict=False)
+        if _is_relative_to(resolved, resolved_root):
+            return resolved_root
+    raise ValueError("DOCKER_SECURITY_SOURCE_OUTSIDE_APPROVED_ROOT")
+
+
+def _reject_symlink_components(path: Path) -> None:
+    current = path.expanduser()
+    for component in [current, *current.parents]:
+        if component.exists() and component.is_symlink():
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_SYMLINK")
+
+
+def _resolve_child_path_no_follow(path: Path, repo_root: Path) -> Path:
+    candidate = path if path.is_absolute() else repo_root / path
+    candidate = candidate.expanduser()
+    _reject_symlink_components(candidate.parent)
+    return candidate.parent.resolve(strict=False) / candidate.name
 
 
 def _file_sha256(path: Path) -> str:

@@ -635,7 +635,7 @@ artifacts/
 | `27-display/` | display compose config/up/ps/logs、runtime config、readonly mount | 只证明 27 display lane |
 | `db/` | readonly DB role、`current_user`、permission probes、redacted DSN | 真实 readonly DB 缺失时 BLOCKED |
 | `api/` | health、runtime config、models、stations、latest-product、ops/jobs/logs | strict identity 缺失时不得 PASS |
-| `browser/` | `/hydro-met`、`/ops` screenshots、DOM/network/console | mock API 不能算 production-like PASS |
+| `browser/` | `/hydro-met`、`/ops` screenshots、DOM/network/console、identity-bound `ops_jobs` 和 `ops_job_logs`（含 `job_id`） | mock API 或缺 `/ops` jobs/logs payload 不能算 production-like PASS |
 | `slurm/` | 22 Gateway health、minimal submit probe、Slurm receipt | 27 不需要也不应具备 Slurm CLI |
 | `logs/` | published log URI、read result、缺失原因 | 不能读取 22 private workspace |
 | `manual-ops/` | `nhms.two_node_e2e.manual_ops.v1`，含当前 `evidence_run_id`、脱敏 operator auth metadata、27 response evidence、27 no-side-effect proof、22 receipt provenance；每个实际 22 receipt provenance 必须绑定 producer、source、当前 bundle、redaction 和可选 artifact hash | 布尔断言、空 provenance 或 27 receipt 不能 PASS |
@@ -677,6 +677,8 @@ uv run python scripts/validate_readonly_db_boundary.py \
 uv run python scripts/validate_readonly_db_boundary.py \
   --evidence-root "$EVIDENCE_PARENT" \
   --run-id "$EVIDENCE_RUN_ID" \
+  --merge-declared-source GFS \
+  --merge-declared-source IFS \
   --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-GFS/db/readonly-db-boundary" \
   --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-IFS/db/readonly-db-boundary" \
   --force
@@ -697,7 +699,9 @@ uv run python scripts/validate_two_node_e2e_evidence.py \
   --force
 ```
 
-单 source 或明确缩减范围的演练使用 `--reduced-scope`，最终只能是 `PARTIAL` 或更低状态，不能作为完整跨面 PASS。
+单 source 或明确缩减范围的演练必须在 DB merge 和 final 聚合两处使用 `--reduced-scope`，并用
+`--merge-declared-source <source>` 声明实际 source scope；最终只能是 `PARTIAL` 或更低状态，不能作为完整跨面 PASS。
+默认 full-scope merge 仍要求 GFS 和 IFS 两个 source dir。
 聚合器会拒绝非 `artifacts/` 或 `/scratch/frd_muziyao/...` evidence root，并把 stale bundle ID、缺 live Docker/container、
 缺真实 readonly DB、缺 browser/API/log strict identity、缺生产 operator auth、mock/historical latest、writer DB 和 27 控制面 receipt
 纳入最终 blocker/finding。

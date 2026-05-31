@@ -245,6 +245,7 @@ def validate_source_trust(
     return {
         "schema": "nhms.two_node_docker.source_trust.v1",
         "status": status,
+        "evidence_run_id": _evidence_run_id_from_root(evidence_root),
         "checkout_root": str(checkout_root),
         "trust_root": str(trust_root),
         "evidence_root": str(evidence_root),
@@ -253,6 +254,17 @@ def validate_source_trust(
         "checked_paths": checked_paths,
         "blockers": blockers,
     }
+
+
+def _evidence_run_id_from_root(path: Path) -> str | None:
+    parts = _absolute_path(path).parts
+    for marker in ("two-node-e2e", "test-two-node-e2e-evidence"):
+        if marker not in parts:
+            continue
+        index = parts.index(marker)
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    return None
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:

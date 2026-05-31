@@ -41,6 +41,7 @@ STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 LIVE_EVIDENCE_SCHEMA = "nhms.readonly_db_boundary.evidence.v1"
 SIMULATED_EVIDENCE_SCHEMA = "nhms.readonly_db_boundary.evidence.simulated.v1"
+FULL_PASS_SOURCES = frozenset({"GFS", "IFS"})
 AUTHORITATIVE_EVIDENCE_FILENAMES = (
     "summary.json",
     "role.json",
@@ -1114,6 +1115,8 @@ def merge_readonly_db_source_evidence(
     evidence_root: Path,
     run_id: str,
     source_dirs: Sequence[Path],
+    declared_sources: Sequence[str] | None = None,
+    reduced_scope: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
     config = ReadonlyDbValidationConfig.from_env(
@@ -1128,7 +1131,12 @@ def merge_readonly_db_source_evidence(
         for filename in AUTHORITATIVE_EVIDENCE_FILENAMES:
             writer.remove_json(config.lane_dir / filename)
     source_evidence = [_read_source_evidence(source_dir, expected_run_id=config.run_id) for source_dir in source_dirs]
-    summary = _merged_readonly_db_summary(config, source_evidence=source_evidence)
+    summary = _merged_readonly_db_summary(
+        config,
+        source_evidence=source_evidence,
+        declared_sources=tuple(_normalize_source_name(source) for source in (declared_sources or FULL_PASS_SOURCES)),
+        reduced_scope=reduced_scope,
+    )
     writer.write_json(config.lane_dir / "role.json", summary["role"])
     writer.write_json(config.lane_dir / "route_smoke.json", summary["route_smoke"])
     writer.write_json(config.lane_dir / "permission_probes.json", summary["permission_probes"])
@@ -1238,10 +1246,13 @@ def _source_artifact_record(path: Path, payload: Any, *, sha256: str) -> dict[st
 
 
 def _artifact_run_id(payload: Any) -> str | None:
-    for _parent, _key, nested, _depth in _walk_json_values(payload):
-        if not isinstance(nested, Mapping):
-            continue
-        value = nested.get("run_id") or nested.get("evidence_run_id") or nested.get("bundle_run_id")
+    if isinstance(payload, Mapping):
+        schema = str(payload.get("schema") or payload.get("schema_version") or "")
+        if schema in {LIVE_EVIDENCE_SCHEMA, SIMULATED_EVIDENCE_SCHEMA}:
+            value = payload.get("run_id") or payload.get("evidence_run_id") or payload.get("bundle_run_id")
+            if value is not None and str(value).strip():
+                return str(value)
+        value = payload.get("evidence_run_id") or payload.get("bundle_run_id")
         if value is not None and str(value).strip():
             return str(value)
     return None
@@ -1402,6 +1413,8 @@ def _merged_readonly_db_summary(
     config: ReadonlyDbValidationConfig,
     *,
     source_evidence: Sequence[ReadonlyDbMergeSourceEvidence],
+    declared_sources: tuple[str, ...],
+    reduced_scope: bool,
 ) -> dict[str, Any]:
     blockers: list[dict[str, Any]] = []
     route_smoke: list[dict[str, Any]] = []
@@ -1494,13 +1507,24 @@ def _merged_readonly_db_summary(
     if permission_probes is None:
         permission_probes = []
         blockers.append({"code": "READONLY_DB_MERGE_PERMISSION_MATRIX_MISSING"})
-    missing_sources = sorted({"GFS", "IFS"} - seen_sources)
+    expected_sources = set(declared_sources)
+    missing_sources = sorted(expected_sources - seen_sources)
     if missing_sources:
         blockers.append(
             {
                 "code": "READONLY_DB_MERGE_SOURCE_MISSING",
                 "missing_sources": missing_sources,
                 "observed_sources": sorted(seen_sources),
+                "declared_sources": sorted(expected_sources),
+                "reduced_scope": reduced_scope,
+            }
+        )
+    if not reduced_scope and expected_sources != FULL_PASS_SOURCES:
+        blockers.append(
+            {
+                "code": "READONLY_DB_MERGE_SCOPE_INVALID",
+                "declared_sources": sorted(expected_sources),
+                "message": "Full-scope readonly DB merge must declare both GFS and IFS unless --reduced-scope is set.",
             }
         )
     status = STATUS_BLOCKED if blockers else STATUS_PASS
@@ -1516,6 +1540,8 @@ def _merged_readonly_db_summary(
             "mode": "live",
             "live_readonly_proof": not blockers,
             "merged_source_evidence": True,
+            "declared_sources": sorted(expected_sources),
+            "reduced_scope": reduced_scope,
             "source_bundle_count": len(source_evidence),
             "source_artifacts": source_artifacts,
         },
@@ -1597,6 +1623,16 @@ def _merge_payload_sources(payload: Mapping[str, Any]) -> set[str]:
             if source:
                 sources.add(source.upper())
     return sources
+
+
+def _normalize_source_name(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_DECLARED_SOURCE_INVALID",
+            "Readonly DB merge declared sources must be non-empty.",
+        )
+    return text
 
 
 def _source_from_route_path(path: str) -> str | None:
@@ -2681,7 +2717,7 @@ def _strict_route_identity(
     missing = [field for field, value in values.items() if not value]
     if missing:
         return None, missing
-    return {field: str(value) for field, value in values.items() if field != "job_id"}, []
+    return {field: str(value) for field, value in values.items()}, []
 
 
 def _strict_identity_blocked_route(
@@ -2726,9 +2762,14 @@ def _route_result(spec: Mapping[str, Any], *, route_requester: RouteRequester) -
     error = body.get("error") if isinstance(body, dict) else {}
     if not isinstance(error, dict):
         error = {}
-    if 200 <= response.status_code < 300:
+    response_identity = _route_response_identity(str(spec["name"]), body)
+    identity_blockers = _route_response_identity_blockers(spec, response_identity)
+    if 200 <= response.status_code < 300 and not identity_blockers:
         status = STATUS_PASS
         reason = "display_read_route_succeeded"
+    elif 200 <= response.status_code < 300:
+        status = STATUS_BLOCKED
+        reason = "display_read_route_response_identity_invalid"
     elif spec.get("fixture_blocker_allowed") is True and _route_fixture_blocked(response.status_code, error):
         status = STATUS_BLOCKED
         reason = "display_route_fixture_or_published_artifact_blocked"
@@ -2746,7 +2787,87 @@ def _route_result(spec: Mapping[str, Any], *, route_requester: RouteRequester) -
     if error:
         result["error_code"] = error.get("code")
         result["error_message"] = error.get("message")
+    if response_identity:
+        result["response_identity"] = response_identity
+    if identity_blockers:
+        result["identity_blockers"] = identity_blockers
     return result
+
+
+def _route_response_identity(route_name: str, body: Mapping[str, Any]) -> dict[str, str]:
+    if route_name not in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
+        return {}
+    candidates: list[Any] = [body.get("identity"), body.get("strict_identity")]
+    data = body.get("data")
+    if isinstance(data, Mapping):
+        candidates.extend((data.get("identity"), data.get("strict_identity"), data))
+        for key in ("item", "latest_product", "status", "job", "log", "metadata"):
+            nested = data.get(key)
+            if isinstance(nested, Mapping):
+                candidates.extend((nested.get("identity"), nested.get("strict_identity"), nested))
+        for key in ("items", "jobs", "stages", "logs"):
+            nested_list = data.get(key)
+            if isinstance(nested_list, list):
+                candidates.extend(item for item in nested_list if isinstance(item, Mapping))
+    elif isinstance(data, list):
+        candidates.extend(item for item in data if isinstance(item, Mapping))
+
+    fields = ("source", "source_id", "cycle_time", "run_id", "model_id", "job_id")
+    identity: dict[str, str] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        for identity_field in fields:
+            value = candidate.get(identity_field)
+            if value is not None and str(value).strip() and identity_field not in identity:
+                identity[identity_field] = str(value).strip()
+        if "source" not in identity and "source_id" in identity:
+            identity["source"] = identity["source_id"]
+    return identity
+
+
+def _route_response_identity_blockers(
+    spec: Mapping[str, Any],
+    response_identity: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    expected = spec.get("strict_identity")
+    if not isinstance(expected, Mapping):
+        return []
+    required_fields = ["source", "cycle_time", "run_id", "model_id"]
+    if spec.get("name") == "job_logs":
+        required_fields.append("job_id")
+    blockers: list[dict[str, Any]] = []
+    for identity_field in required_fields:
+        expected_value = _identity_text(expected, identity_field)
+        observed = response_identity.get(identity_field)
+        if identity_field == "job_id" and not observed:
+            parsed = urlsplit(str(spec.get("path") or ""))
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) >= 4 and parts[-1] == "logs":
+                expected_value = expected_value or parts[-2]
+        if not observed:
+            blockers.append(
+                {
+                    "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING",
+                    "field": identity_field,
+                    "expected": expected_value,
+                }
+            )
+            continue
+        if identity_field == "source":
+            matches = observed.upper() == str(expected_value or "").upper()
+        else:
+            matches = str(observed) == str(expected_value)
+        if not matches:
+            blockers.append(
+                {
+                    "code": "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISMATCH",
+                    "field": identity_field,
+                    "expected": expected_value,
+                    "observed": observed,
+                }
+            )
+    return blockers
 
 
 def _route_fixture_blocked(status_code: int, error: Mapping[str, Any]) -> bool:
@@ -3228,6 +3349,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Merge an already-produced per-source readonly DB lane into the current final DB lane. Repeat per source.",
     )
+    parser.add_argument(
+        "--merge-declared-source",
+        action="append",
+        dest="merge_declared_sources",
+        help="Declared source scope for --merge-source-dir. Repeat per source; defaults to full GFS+IFS.",
+    )
+    parser.add_argument(
+        "--reduced-scope",
+        action="store_true",
+        help="Declare an intentional reduced-scope readonly DB merge; final evidence can feed PARTIAL, not full PASS.",
+    )
     parser.add_argument("--force", action="store_true")
     return parser
 
@@ -3241,6 +3373,8 @@ def main(argv: list[str] | None = None) -> int:
                 evidence_root=args.evidence_root or DEFAULT_EVIDENCE_ROOT,
                 run_id=args.run_id or os.getenv("NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID") or _default_run_id(),
                 source_dirs=args.merge_source_dirs,
+                declared_sources=args.merge_declared_sources,
+                reduced_scope=args.reduced_scope,
                 force=args.force,
             )
         else:

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import urlsplit
 
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
@@ -761,6 +761,7 @@ def _evaluate_docker_security(doc: EvidenceDocument | None, *, evidence_run_id: 
             doc,
             payload,
             evidence_run_id=evidence_run_id,
+            summary_status=status,
         )
         blockers.extend(contract_blockers)
         findings.extend(contract_findings)
@@ -1145,7 +1146,7 @@ def _evaluate_source_lane(
                 source,
                 check_result,
                 strict_identities,
-                require_job_id=require_job_id or check == "job_logs",
+                require_job_id=require_job_id or check in {"job_logs", "ops_job_logs"},
             )
             findings.extend(
                 _with_context(item, lane=name, source=source, check=check)
@@ -1324,6 +1325,7 @@ def _evaluate_manual_ops(
                     source=source,
                     evidence_run_id=evidence_run_id,
                     run_dir=run_dir,
+                    receipt_record=receipt,
                 )
                 blockers.extend(_with_context(item, lane="manual_ops", source=source) for item in provenance_blockers)
     if status == STATUS_PASS:
@@ -1334,6 +1336,7 @@ def _evaluate_manual_ops(
                 display_actions,
                 receipts,
                 evidence_run_id=evidence_run_id,
+                declared_sources=declared_sources,
             )
         )
         blockers.extend(_manual_ops_operator_auth_blockers(payload))
@@ -2377,6 +2380,7 @@ def _docker_security_summary_contract_issues(
     payload: Mapping[str, Any],
     *,
     evidence_run_id: str,
+    summary_status: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     blockers: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
@@ -2416,6 +2420,7 @@ def _docker_security_summary_contract_issues(
             artifact,
             expected_schema=expected_schema,
             evidence_run_id=evidence_run_id,
+            summary_status=summary_status,
         )
         blockers.extend(artifact_blockers)
         findings.extend(artifact_findings)
@@ -2429,6 +2434,7 @@ def _docker_security_child_artifact_issues(
     *,
     expected_schema: str,
     evidence_run_id: str,
+    summary_status: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     blockers: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
@@ -2466,6 +2472,7 @@ def _docker_security_child_artifact_issues(
         )
         return blockers, findings
     run_dir = doc.path.parent.parent
+    containment_root = _approved_artifact_containment_root(path)
     if not _path_is_relative_to(path, run_dir):
         blockers.append(
             _blocker(
@@ -2478,12 +2485,29 @@ def _docker_security_child_artifact_issues(
         )
         return blockers, findings
     try:
-        child_doc = _read_json(path, containment_root=run_dir)
+        child_doc = _read_json(path, containment_root=containment_root)
     except FileNotFoundError:
         blockers.append(
             _blocker(
                 "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_MISSING",
                 "Docker security source artifact file is missing.",
+                artifact=artifact_name,
+                path=_public_path(path),
+            )
+        )
+        return blockers, findings
+    except TwoNodeE2EEvidenceError as error:
+        code = (
+            "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_TOO_LARGE"
+            if error.error_code == "TWO_NODE_E2E_EVIDENCE_PAYLOAD_TOO_LARGE"
+            else "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_PATH_UNSAFE"
+            if error.error_code == "TWO_NODE_E2E_EVIDENCE_PATH_UNSAFE"
+            else "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_JSON_INVALID"
+        )
+        blockers.append(
+            _blocker(
+                code,
+                "Docker security source artifact must be safely readable bounded JSON.",
                 artifact=artifact_name,
                 path=_public_path(path),
             )
@@ -2529,7 +2553,13 @@ def _docker_security_child_artifact_issues(
                 child_status=child_status,
             )
         )
-    if not _docker_security_child_current_run_compatible(path, run_dir, child_payload, evidence_run_id):
+    if not _docker_security_child_current_run_compatible(
+        path,
+        run_dir,
+        child_payload,
+        evidence_run_id,
+        summary_status=summary_status,
+    ):
         blockers.append(
             _blocker(
                 "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_STALE_OR_UNSCOPED",
@@ -2553,15 +2583,15 @@ def _docker_security_child_current_run_compatible(
     run_dir: Path,
     child_payload: Mapping[str, Any],
     evidence_run_id: str,
+    *,
+    summary_status: str,
 ) -> bool:
     explicit_ids = _explicit_bundle_run_ids_from_value(child_payload)
     if explicit_ids:
         return all(str(value) == evidence_run_id for _, value in explicit_ids)
-    try:
-        path.relative_to(run_dir.resolve(strict=False))
-        return True
-    except ValueError:
+    if _normalized_status(summary_status) == STATUS_PASS:
         return False
+    return _path_is_relative_to(path, run_dir)
 
 
 def _docker_security_child_subcontract_issues(
@@ -3330,6 +3360,16 @@ def _readonly_db_source_artifact_issues(
                 "Readonly DB final PASS requires merged_source_evidence=true.",
             )
         )
+    declared_in_provenance = _sources_from_value(provenance.get("declared_sources"))
+    if declared_in_provenance and set(declared_in_provenance) != set(declared_sources):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_DECLARED_SOURCE_SCOPE_MISMATCH",
+                "Readonly DB merge declared source scope must match final evidence scope.",
+                declared_sources=list(declared_sources),
+                db_declared_sources=sorted(declared_in_provenance),
+            )
+        )
     source_artifacts = provenance.get("source_artifacts")
     if not isinstance(source_artifacts, list) or not source_artifacts:
         blockers.append(
@@ -3904,6 +3944,17 @@ def _readonly_db_route_issues(
         required_fields = READONLY_DB_STRICT_ROUTE_FIELDS.get(name)
         if required_fields is None:
             continue
+        if route_status == STATUS_PASS:
+            response_identity_blockers = route.get("identity_blockers")
+            if isinstance(response_identity_blockers, list) and response_identity_blockers:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_READONLY_DB_ROUTE_RESPONSE_IDENTITY_INVALID",
+                        "Readonly DB route smoke PASS contains response identity blockers.",
+                        route=name,
+                        blocker_count=len(response_identity_blockers),
+                    )
+                )
         identity = _readonly_route_identity(route, required_fields=required_fields)
         route_source = _source_name(route.get("source") or route.get("source_id"))
         identity_source = _source_name(identity.get("source") or identity.get("source_id"))
@@ -4051,7 +4102,11 @@ def _readonly_db_payload_proven_sources(payload: Mapping[str, Any]) -> set[str]:
             route_source = _source_name(route.get("source") or route.get("source_id"))
             if route_source:
                 sources.add(route_source)
-            route_identity = route.get("strict_identity") or route.get("identity")
+            required_fields = READONLY_DB_STRICT_ROUTE_FIELDS.get(
+                str(route.get("name") or ""),
+                STRICT_IDENTITY_FIELDS,
+            )
+            route_identity = _readonly_route_identity(route, required_fields=required_fields)
             if isinstance(route_identity, Mapping):
                 identity_source = _source_name(route_identity.get("source") or route_identity.get("source_id"))
                 if identity_source:
@@ -4078,21 +4133,11 @@ def _readonly_display_identity_for_source(display_identity: Any, source: str) ->
 
 
 def _readonly_route_identity(route: Mapping[str, Any], *, required_fields: tuple[str, ...]) -> dict[str, Any]:
-    raw = route.get("strict_identity") or route.get("identity") or {}
+    response = route.get("response")
+    raw = route.get("response_identity") or route.get("response_strict_identity") or route.get("body_identity")
+    if raw is None and isinstance(response, Mapping):
+        raw = response.get("identity")
     identity = dict(raw) if isinstance(raw, Mapping) else {}
-    path = str(route.get("path") or "")
-    if path:
-        parsed = urlsplit(path)
-        query = parse_qs(parsed.query, keep_blank_values=True)
-        for field in required_fields:
-            if field not in identity and query.get(field):
-                identity[field] = query[field][0]
-        if "source" not in identity and query.get("source_id"):
-            identity["source"] = query["source_id"][0]
-        if "job_id" in required_fields and "job_id" not in identity:
-            parts = [unquote(part) for part in parsed.path.split("/") if part]
-            if len(parts) >= 4 and parts[-1] == "logs":
-                identity["job_id"] = parts[-2]
     return identity
 
 
@@ -4711,7 +4756,7 @@ def _identity_value(identity: Mapping[str, Any], field: str) -> str | None:
 
 
 def _browser_required_checks(declared_sources: tuple[str, ...]) -> tuple[str, ...]:
-    checks = ["hydro_met", "ops"]
+    checks = ["hydro_met", "ops", "ops_jobs", "ops_job_logs"]
     if len(declared_sources) > 1:
         checks.append("source_switch")
     return tuple(checks)
@@ -4792,6 +4837,7 @@ def _manual_ops_contract_blockers(
     receipts: Any,
     *,
     evidence_run_id: str,
+    declared_sources: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
     if payload.get("schema") != MANUAL_OPS_SCHEMA:
@@ -4822,6 +4868,7 @@ def _manual_ops_contract_blockers(
             _manual_ops_display_response_evidence_blockers(
                 display_actions,
                 evidence_run_id=evidence_run_id,
+                declared_sources=declared_sources,
             )
         )
     no_side_effect = payload.get("no_side_effect_proof")
@@ -4856,6 +4903,7 @@ def _manual_ops_display_response_evidence_blockers(
     display_actions: Sequence[Mapping[str, Any]],
     *,
     evidence_run_id: str,
+    declared_sources: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
     for action in display_actions:
@@ -4871,6 +4919,7 @@ def _manual_ops_display_response_evidence_blockers(
                 action,
                 action_name=action_name,
                 evidence_run_id=evidence_run_id,
+                declared_sources=declared_sources,
             )
         )
     return blockers
@@ -4881,6 +4930,7 @@ def _manual_ops_single_response_evidence_blockers(
     *,
     action_name: str,
     evidence_run_id: str,
+    declared_sources: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     if "response_evidence" not in action:
         return [
@@ -4957,7 +5007,26 @@ def _manual_ops_single_response_evidence_blockers(
         response_evidence.get("source") if "source" in response_evidence else response_evidence.get("source_id")
     )
     action_source = _source_name(action.get("source") or action.get("source_id"))
-    if action_source is not None and response_source is None:
+    declared_source_set = set(declared_sources)
+    if action_source is None:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISSING",
+                "Manual ops 27 retry/cancel actions must include source binding.",
+                action=action_name,
+            )
+        )
+    elif action_source not in declared_source_set:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_SOURCE_UNDECLARED",
+                "Manual ops 27 retry/cancel action source is not in strict identity scope.",
+                action=action_name,
+                source=action_source,
+                declared_sources=list(declared_sources),
+            )
+        )
+    if response_source is None:
         blockers.append(
             _blocker(
                 "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISSING",
@@ -4966,7 +5035,7 @@ def _manual_ops_single_response_evidence_blockers(
                 expected_source=action_source,
             )
         )
-    elif response_source is not None:
+    else:
         bound_source = _source_name(response_source)
         if action_source is None or bound_source != action_source:
             blockers.append(
@@ -4976,6 +5045,16 @@ def _manual_ops_single_response_evidence_blockers(
                     action=action_name,
                     source=bound_source,
                     expected_source=action_source,
+                )
+            )
+        elif bound_source not in declared_source_set:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_SOURCE_UNDECLARED",
+                    "Manual ops response_evidence source is not in strict identity scope.",
+                    action=action_name,
+                    source=bound_source,
+                    declared_sources=list(declared_sources),
                 )
             )
     run_bindings = [
@@ -5013,6 +5092,7 @@ def _manual_ops_receipt_provenance_blockers(
     source: str,
     evidence_run_id: str,
     run_dir: Path,
+    receipt_record: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     provenance = receipt.get("provenance")
     if not isinstance(provenance, Mapping) or not provenance:
@@ -5099,6 +5179,10 @@ def _manual_ops_receipt_provenance_blockers(
             provenance,
             evidence_run_id=evidence_run_id,
             run_dir=run_dir,
+            source=source,
+            action=_manual_action_name(receipt),
+            receipt_id=str(provenance.get("receipt_id") or provenance.get("command_id") or "").strip() or None,
+            receipt_record=receipt_record or receipt,
         )
     )
     return blockers
@@ -5109,6 +5193,10 @@ def _manual_ops_receipt_artifact_blockers(
     *,
     evidence_run_id: str,
     run_dir: Path,
+    source: str,
+    action: str,
+    receipt_id: str | None,
+    receipt_record: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     raw_path = provenance.get("artifact_path") or provenance.get("path")
     raw_sha256 = provenance.get("sha256") or provenance.get("artifact_sha256")
@@ -5191,6 +5279,220 @@ def _manual_ops_receipt_artifact_blockers(
             _blocker(
                 "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_HASH_MISMATCH",
                 "Manual ops receipt artifact sha256 does not match file content.",
+                path=_public_path(path),
+            )
+        )
+    try:
+        payload = json.loads(content.decode("utf-8"))
+        _ensure_bounded_evidence_value(payload, path=path)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, TwoNodeE2EEvidenceError):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_JSON_INVALID",
+                "Manual ops receipt artifact must be bounded valid JSON.",
+                path=_public_path(path),
+            )
+        )
+        return blockers
+    if not isinstance(payload, Mapping):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_JSON_INVALID",
+                "Manual ops receipt artifact JSON must be an object.",
+                path=_public_path(path),
+            )
+        )
+        return blockers
+    blockers.extend(
+        _manual_ops_receipt_artifact_payload_blockers(
+            payload,
+            provenance=provenance,
+            evidence_run_id=evidence_run_id,
+            source=source,
+            action=action,
+            receipt_id=receipt_id,
+            receipt_record=receipt_record,
+            path=path,
+        )
+    )
+    return blockers
+
+
+def _manual_ops_receipt_artifact_payload_blockers(
+    payload: Mapping[str, Any],
+    *,
+    provenance: Mapping[str, Any],
+    evidence_run_id: str,
+    source: str,
+    action: str,
+    receipt_id: str | None,
+    receipt_record: Mapping[str, Any],
+    path: Path,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    schema = payload.get("schema") or payload.get("schema_version")
+    if not isinstance(schema, str) or "manual_ops.receipt" not in schema:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_SCHEMA_INVALID",
+                "Manual ops receipt artifact must use a receipt evidence schema.",
+                path=_public_path(path),
+                schema=schema,
+            )
+        )
+    status = payload.get("status")
+    if status is not None and _normalized_status(status) != STATUS_PASS:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_STATUS_INVALID",
+                "Manual ops receipt artifact status must be PASS when present.",
+                path=_public_path(path),
+                status=status,
+            )
+        )
+    payload_source = _source_name(payload.get("source") or payload.get("source_id"))
+    if not payload_source:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_SOURCE_MISSING",
+                "Manual ops receipt artifact must include strict source.",
+                path=_public_path(path),
+            )
+        )
+    elif payload_source != source:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_SOURCE_MISMATCH",
+                "Manual ops receipt artifact source must match receipt provenance.",
+                path=_public_path(path),
+                source=payload_source,
+                expected_source=source,
+            )
+        )
+    payload_action = _manual_action_name(payload)
+    if action and payload_action and payload_action != action:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_ACTION_MISMATCH",
+                "Manual ops receipt artifact action must match receipt provenance.",
+                path=_public_path(path),
+                action=payload_action,
+                expected_action=action,
+            )
+        )
+    if action and not payload_action:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_ACTION_MISSING",
+                "Manual ops receipt artifact must include action binding.",
+                path=_public_path(path),
+                expected_action=action,
+            )
+        )
+    payload_receipt_id = str(payload.get("receipt_id") or payload.get("command_id") or "").strip()
+    if receipt_id and payload_receipt_id and payload_receipt_id != receipt_id:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_ID_MISMATCH",
+                "Manual ops receipt artifact id must match receipt provenance.",
+                path=_public_path(path),
+                receipt_id=payload_receipt_id,
+                expected_receipt_id=receipt_id,
+            )
+        )
+    if receipt_id and not payload_receipt_id:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_ID_MISSING",
+                "Manual ops receipt artifact must include receipt_id or command_id.",
+                path=_public_path(path),
+                expected_receipt_id=receipt_id,
+            )
+        )
+    producer_node = _node_number(payload)
+    if producer_node != "22":
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_PRODUCER_INVALID",
+                "Manual ops receipt artifact must identify node 22 as producer.",
+                path=_public_path(path),
+                producer_node=payload.get("producer_node") or payload.get("node"),
+            )
+        )
+    producer_role = str(payload.get("producer_role") or payload.get("service_role") or "").strip()
+    if producer_role != "compute_control":
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_PRODUCER_INVALID",
+                "Manual ops receipt artifact must identify compute_control producer role.",
+                path=_public_path(path),
+                producer_role=producer_role,
+            )
+        )
+    explicit_ids = _explicit_bundle_run_ids_from_value(payload)
+    if not explicit_ids:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_RUN_ID_MISSING",
+                "Manual ops receipt artifact must bind to the current evidence run.",
+                path=_public_path(path),
+                expected_evidence_run_id=evidence_run_id,
+            )
+        )
+    else:
+        for key, value in explicit_ids:
+            if str(value) != evidence_run_id:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_RUN_ID_MISMATCH",
+                        "Manual ops receipt artifact belongs to a different evidence run.",
+                        path=_public_path(path),
+                        key=key,
+                        evidence_run_id=value,
+                        expected_evidence_run_id=evidence_run_id,
+                    )
+                )
+    receipt_identity = _record_identity(receipt_record)
+    payload_identity = _record_identity(payload)
+    for identity_field in STRICT_IDENTITY_FIELDS:
+        receipt_value = _identity_value(receipt_identity, identity_field)
+        payload_value = _identity_value(payload_identity, identity_field)
+        if identity_field == "source":
+            if payload_source and not payload_value:
+                payload_value = payload_source
+            if source and not receipt_value:
+                receipt_value = source
+        if not receipt_value or not payload_value:
+            if identity_field in {"source", "run_id"}:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_IDENTITY_INCOMPLETE",
+                        "Manual ops receipt artifact must include current strict identity.",
+                        path=_public_path(path),
+                        field=identity_field,
+                    )
+                )
+            continue
+        if identity_field == "source":
+            if _source_name(receipt_value) == _source_name(payload_value):
+                continue
+        elif str(receipt_value) == str(payload_value):
+            continue
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_IDENTITY_MISMATCH",
+                "Manual ops receipt artifact identity must match receipt/provenance identity.",
+                path=_public_path(path),
+                field=identity_field,
+                observed=payload_value,
+                expected=receipt_value,
+            )
+        )
+    if provenance.get("redacted") is True and payload.get("redacted") is False:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_UNREDACTED",
+                "Manual ops receipt artifact must not contradict redacted provenance.",
                 path=_public_path(path),
             )
         )
