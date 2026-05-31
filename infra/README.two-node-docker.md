@@ -174,6 +174,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 ```
@@ -197,6 +198,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 ```
@@ -244,6 +246,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/compute.env" -f "$CHECKOUT_ROOT/infra/compose.compute.yml" config --quiet
@@ -265,6 +268,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/compute.env" -f "$CHECKOUT_ROOT/infra/compose.compute.yml" run --rm scheduler-once
@@ -282,6 +286,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/display.env" -f "$CHECKOUT_ROOT/infra/compose.display.yml" config --quiet
@@ -301,6 +306,7 @@ source-trust preflight；失败时本 lane 记为 `BLOCKED`，不得让 compose 
 ```bash
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
 uv run python scripts/validate_two_node_docker_runtime.py static \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"
 ```
 
@@ -341,6 +347,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 sudo install -m 0644 "$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service" /etc/systemd/system/nhms-compute-compose.service
@@ -354,6 +361,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 sudo systemctl restart nhms-compute-compose.service
@@ -371,6 +379,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 sudo install -m 0644 "$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service" /etc/systemd/system/nhms-display-compose.service
@@ -384,6 +393,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 sudo systemctl restart nhms-display-compose.service
@@ -417,16 +427,41 @@ minimal submit probe evidence
 
 27 容器安全检查必须以 `scripts/validate_two_node_docker_runtime.py static` 和 Docker smoke/image absence evidence 作为 `docker-security/` 的权威边界。下面的容器内探针只是补充性快速检查，但覆盖同一组代表性 Slurm/Munge/Docker socket binary/path：
 
-在最终 E2E 聚合前，使用下面的 checked-in helper 把 source-trust、static 和 smoke evidence 规范化成
-`$EVIDENCE_ROOT/docker-security/summary.json`；不要手写该 JSON：
+在最终 E2E 聚合前，先用 checked-in helpers 生成本 run 的 source-trust、static 和 smoke producer evidence，
+再把它们规范化成 `$EVIDENCE_ROOT/docker-security/summary.json`；不要手写该 JSON。compute/display
+source-trust 必须分别写入 role-scoped 报告，`security-summary` 通过重复 `--source-trust-report` 同时消费两份报告：
 
 ```bash
 set -euo pipefail
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
+TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
 EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
+cd "$CHECKOUT_ROOT"
+uv run python scripts/validate_two_node_docker_source_trust.py \
+  --checkout-root "$CHECKOUT_ROOT" \
+  --trust-root "$TRUST_ROOT" \
+  --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --trusted-owner root --trusted-owner nhms-deploy \
+  --role compute
+uv run python scripts/validate_two_node_docker_source_trust.py \
+  --checkout-root "$CHECKOUT_ROOT" \
+  --trust-root "$TRUST_ROOT" \
+  --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --trusted-owner root --trusted-owner nhms-deploy \
+  --role display
+uv run python scripts/validate_two_node_docker_runtime.py static \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"
+uv run python scripts/validate_two_node_docker_runtime.py smoke \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --evidence-root "$EVIDENCE_ROOT/docker-security"
 uv run python scripts/validate_two_node_docker_runtime.py security-summary \
   --evidence-run-id "$EVIDENCE_RUN_ID" \
-  --source-trust-report "$EVIDENCE_ROOT/docker-security/two-node-docker-source-trust.json" \
+  --source-trust-report "$EVIDENCE_ROOT/docker-security/two-node-docker-source-trust-compute.json" \
+  --source-trust-report "$EVIDENCE_ROOT/docker-security/two-node-docker-source-trust-display.json" \
   --static-report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json" \
   --smoke-report "$EVIDENCE_ROOT/docker-security/docker-smoke.json" \
   --output "$EVIDENCE_ROOT/docker-security/summary.json"
@@ -442,6 +477,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/display.env" -f "$CHECKOUT_ROOT/infra/compose.display.yml" exec display-api sh -lc '
@@ -724,6 +760,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 sudo systemctl stop nhms-display-compose.service
@@ -742,6 +779,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 sudo systemctl stop nhms-compute-compose.service
@@ -762,6 +800,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute --role display
 sudo systemctl restart nhms-compute-compose.service

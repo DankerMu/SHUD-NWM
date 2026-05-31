@@ -2795,7 +2795,8 @@ def _route_result(spec: Mapping[str, Any], *, route_requester: RouteRequester) -
 
 
 def _route_response_identity(route_name: str, body: Mapping[str, Any]) -> dict[str, str]:
-    if route_name not in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
+    required_fields = _route_response_identity_required_fields(route_name)
+    if not required_fields:
         return {}
     candidates: list[Any] = [body.get("identity"), body.get("strict_identity")]
     data = body.get("data")
@@ -2813,17 +2814,27 @@ def _route_response_identity(route_name: str, body: Mapping[str, Any]) -> dict[s
         candidates.extend(item for item in data if isinstance(item, Mapping))
 
     fields = ("source", "source_id", "cycle_time", "run_id", "model_id", "job_id")
-    identity: dict[str, str] = {}
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             continue
+        identity: dict[str, str] = {}
         for identity_field in fields:
             value = candidate.get(identity_field)
-            if value is not None and str(value).strip() and identity_field not in identity:
+            if value is not None and str(value).strip():
                 identity[identity_field] = str(value).strip()
         if "source" not in identity and "source_id" in identity:
             identity["source"] = identity["source_id"]
-    return identity
+        if all(identity.get(field) for field in required_fields):
+            return identity
+    return {}
+
+
+def _route_response_identity_required_fields(route_name: str) -> tuple[str, ...]:
+    if route_name == "job_logs":
+        return ("source", "cycle_time", "run_id", "model_id", "job_id")
+    if route_name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs"}:
+        return ("source", "cycle_time", "run_id", "model_id")
+    return ()
 
 
 def _route_response_identity_blockers(

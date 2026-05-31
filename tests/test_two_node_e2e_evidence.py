@@ -173,7 +173,10 @@ def test_real_static_helper_output_feeds_security_summary_and_final_pass() -> No
         output=docker_security_dir / "summary.json",
         repo_root=REPO_ROOT,
         evidence_run_id=run_id,
-        source_trust_report=docker_security_dir / "two-node-docker-source-trust.json",
+        source_trust_report=[
+            docker_security_dir / "two-node-docker-source-trust.json",
+            docker_security_dir / "two-node-docker-source-trust-display.json",
+        ],
         static_report=static_report,
         smoke_report=docker_security_dir / "docker-smoke.json",
     )
@@ -190,7 +193,7 @@ def test_docker_security_source_trust_empty_roles_without_safe_role_env_proof_bl
     run_id = _run_id(f"docker-source-trust-empty-roles-{mutation}")
     config = _seed_pass_bundle(run_id)
     docker_security = _read(config.run_dir / "docker-security" / "summary.json")
-    artifact = docker_security["source_artifacts"]["source_trust"]
+    artifact = docker_security["source_artifacts"]["source_trust"][0]
     artifact_path = Path(artifact["path"])
     payload = _read(artifact_path)
     payload["roles"] = []
@@ -220,10 +223,7 @@ def test_docker_security_source_trust_empty_roles_without_safe_role_env_proof_bl
         for blocker in docker_lane["blockers"]
         if blocker.get("label") in {"compute role env", "display role env"}
     }
-    assert role_env_blockers >= {
-        (expected_code, "compute role env"),
-        (expected_code, "display role env"),
-    }
+    assert (expected_code, "compute role env") in role_env_blockers
 
 
 @pytest.mark.parametrize("missing_key", ["evidence_root", "tmpdir", "docker_root_dir", "min_free_bytes", "disk"])
@@ -436,7 +436,7 @@ def test_docker_security_source_trust_without_current_run_id_blocks_even_under_c
     run_id = _run_id("docker-source-trust-no-id")
     config = _seed_pass_bundle(run_id)
     docker_security = _read(config.run_dir / "docker-security" / "summary.json")
-    artifact = docker_security["source_artifacts"]["source_trust"]
+    artifact = docker_security["source_artifacts"]["source_trust"][0]
     artifact_path = Path(artifact["path"])
     payload = _read(artifact_path)
     payload.pop("evidence_run_id", None)
@@ -459,7 +459,7 @@ def test_docker_security_source_trust_checked_paths_contract_blocks(mutation: st
     run_id = _run_id(f"docker-source-trust-{mutation}")
     config = _seed_pass_bundle(run_id)
     docker_security = _read(config.run_dir / "docker-security" / "summary.json")
-    artifact = docker_security["source_artifacts"]["source_trust"]
+    artifact = docker_security["source_artifacts"]["source_trust"][0]
     artifact_path = Path(artifact["path"])
     payload = _read(artifact_path)
     if mutation == "missing":
@@ -506,7 +506,7 @@ def test_docker_security_source_trust_unsafe_checked_path_record_blocks(
     run_id = _run_id("docker-source-trust-unsafe")
     config = _seed_pass_bundle(run_id)
     docker_security = _read(config.run_dir / "docker-security" / "summary.json")
-    artifact = docker_security["source_artifacts"]["source_trust"]
+    artifact = docker_security["source_artifacts"]["source_trust"][1]
     artifact_path = Path(artifact["path"])
     payload = _read(artifact_path)
     record = next(item for item in payload["checked_paths"] if item["label"] == "display role env")
@@ -562,6 +562,8 @@ def test_docker_security_child_subcontracts_reject_unsafe_pass(
     config = _seed_pass_bundle(run_id)
     docker_security = _read(config.run_dir / "docker-security" / "summary.json")
     artifact = docker_security["source_artifacts"][artifact_name]
+    if isinstance(artifact, list):
+        artifact = artifact[0]
     artifact_path = Path(artifact["path"])
     payload = _read(artifact_path)
     if "commands" in mutation and mutation["commands"] is None:
@@ -613,6 +615,80 @@ def test_docker_security_raw_inspect_hazards_fail(raw_evidence: dict[str, Any]) 
 
     assert summary["status"] == STATUS_FAIL
     assert summary["lane_summaries"]["docker_security"]["status"] == STATUS_FAIL
+
+
+def test_docker_security_published_mount_missing_readonly_proof_blocks() -> None:
+    run_id = _run_id("docker-mount-unknown")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    docker_security["published_artifacts_readonly"] = True
+    docker_security["writable_published_artifact_mount"] = False
+    docker_security["compose_service"] = {
+        "volumes": [
+            {
+                "type": "bind",
+                "source": "/srv/nhms/published",
+                "target": "/var/lib/nhms/published",
+            }
+        ]
+    }
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_lane["status"] == STATUS_BLOCKED
+    assert {
+        "TWO_NODE_E2E_DOCKER_DISPLAY_PROOF_MISSING",
+        "TWO_NODE_E2E_DOCKER_STATIC_CHILD_PROOF_MISSING",
+    } & _codes(docker_lane["blockers"])
+
+
+def test_docker_security_published_mount_explicit_readonly_passes() -> None:
+    run_id = _run_id("docker-mount-ro")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    docker_security["compose_service"] = {
+        "volumes": [
+            {
+                "type": "bind",
+                "source": "/srv/nhms/published",
+                "target": "/var/lib/nhms/published",
+                "read_only": True,
+            }
+        ]
+    }
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["docker_security"]["status"] == STATUS_PASS
+
+
+def test_docker_security_published_mount_explicit_writable_fails() -> None:
+    run_id = _run_id("docker-mount-rw")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    docker_security["compose_service"] = {
+        "volumes": [
+            {
+                "type": "bind",
+                "source": "/srv/nhms/published",
+                "target": "/var/lib/nhms/published",
+                "read_only": False,
+            }
+        ]
+    }
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_FAIL
+    assert docker_lane["status"] == STATUS_FAIL
+    assert "TWO_NODE_E2E_DOCKER_DISPLAY_FORBIDDEN_CAPABILITY" in _codes(docker_lane["findings"])
 
 
 @pytest.mark.parametrize(
@@ -1334,6 +1410,90 @@ def test_source_lane_partial_with_strict_identity_blocker_yields_final_blocked()
     assert "TWO_NODE_E2E_SOURCE_BLOCKED" in _codes(summary["blockers"])
 
 
+@pytest.mark.parametrize("producer_status", [STATUS_FAIL, STATUS_BLOCKED])
+def test_reduced_single_source_cross_plane_preserves_producer_fail_or_blocked(
+    producer_status: str,
+) -> None:
+    run_id = _run_id(f"single-source-cross-{producer_status.lower()}")
+    config = _seed_pass_bundle(run_id, sources=("GFS",), reduced_scope=True)
+    cross_plane = _read(config.run_dir / "cross-plane" / "summary.json")
+    cross_plane["status"] = producer_status
+    _write(config.run_dir / "cross-plane" / "summary.json", cross_plane)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["lane_summaries"]["cross_plane"]["status"] == producer_status
+    assert summary["status"] == producer_status
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "live_flag"),
+    [
+        ("api", "live_api_evidence"),
+        ("browser", "live_browser_evidence"),
+        ("logs", "live_log_evidence"),
+    ],
+)
+def test_source_lane_boolean_only_live_evidence_blocks(lane_dir: str, live_flag: str) -> None:
+    run_id = _run_id(f"{lane_dir}-boolean-only")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    payload.pop("commands", None)
+    payload[live_flag] = True
+    for source in payload["sources"].values():
+        for check in source["checks"].values():
+            check.pop("evidence", None)
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_dir]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert f"TWO_NODE_E2E_{lane_dir.upper()}_PRODUCER_EVIDENCE_MISSING" in _codes(lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "live_flag"),
+    [
+        ("slurm", "live_slurm_evidence"),
+        ("22-compute", "live_compute_evidence"),
+        ("27-display", "live_display_evidence"),
+    ],
+)
+def test_simple_lane_boolean_only_live_evidence_blocks(lane_dir: str, live_flag: str) -> None:
+    run_id = _run_id(f"{lane_dir.replace('/', '-')}-boolean-only")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    payload.pop("commands", None)
+    payload[live_flag] = True
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane_name = {"22-compute": "compute_summary", "27-display": "display_summary"}.get(lane_dir, lane_dir)
+    lane = summary["lane_summaries"][lane_name]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert f"TWO_NODE_E2E_{lane_name.upper()}_PRODUCER_EVIDENCE_MISSING" in _codes(lane["blockers"])
+
+
+def test_cross_plane_boolean_only_live_evidence_blocks() -> None:
+    run_id = _run_id("cross-plane-boolean-only")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / "cross-plane" / "summary.json")
+    payload.pop("commands", None)
+    payload["live_cross_plane_evidence"] = True
+    _write(config.run_dir / "cross-plane" / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"]["cross_plane"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_CROSS_PLANE_PRODUCER_EVIDENCE_MISSING" in _codes(lane["blockers"])
+
+
 def test_browser_evidence_missing_ops_jobs_or_logs_blocks() -> None:
     run_id = _run_id("browser-missing-ops-log")
     config = _seed_pass_bundle(run_id)
@@ -1854,7 +2014,12 @@ def _seed_pass_bundle(
     )
     _write(
         config.run_dir / "slurm" / "summary.json",
-        {"status": STATUS_PASS, "evidence_run_id": run_id, "live_slurm_evidence": True},
+        {
+            "status": STATUS_PASS,
+            "evidence_run_id": run_id,
+            "live_slurm_evidence": True,
+            "commands": {"squeue_probe": {"returncode": 0}},
+        },
     )
     manual_lane = config.run_dir / "manual-ops"
     receipt_artifacts: dict[str, dict[str, Any]] = {}
@@ -1956,11 +2121,21 @@ def _seed_pass_bundle(
     )
     _write(
         config.run_dir / "22-compute" / "summary.json",
-        {"status": "ready", "evidence_run_id": run_id, "live_compute_evidence": True},
+        {
+            "status": "ready",
+            "evidence_run_id": run_id,
+            "live_compute_evidence": True,
+            "commands": {"compute_summary_probe": {"returncode": 0}},
+        },
     )
     _write(
         config.run_dir / "27-display" / "summary.json",
-        {"status": "ready", "evidence_run_id": run_id, "live_display_evidence": True},
+        {
+            "status": "ready",
+            "evidence_run_id": run_id,
+            "live_display_evidence": True,
+            "commands": {"display_summary_probe": {"returncode": 0}},
+        },
     )
     _write(
         config.run_dir / "cross-plane" / "summary.json",
@@ -1968,6 +2143,7 @@ def _seed_pass_bundle(
             "status": STATUS_PASS,
             "evidence_run_id": run_id,
             "live_cross_plane_evidence": True,
+            "commands": {"cross_plane_identity_probe": {"returncode": 0}},
             "sources": {
                 source: {"status": STATUS_PASS, "identity": copy.deepcopy(identity)}
                 for source, identity in identities.items()
@@ -2287,7 +2463,23 @@ def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: s
             "schema": "nhms.two_node_docker.source_trust.v1",
             "status": STATUS_PASS,
             "evidence_run_id": run_id,
-            "roles": ["compute", "display"],
+            "roles": ["compute"],
+            "checked_paths": [
+                record
+                for record in _source_trust_checked_paths(lane)
+                if record["label"] != "display role env"
+            ],
+            "blockers": [],
+        },
+    )
+    source_trust_display = lane / "two-node-docker-source-trust-display.json"
+    _write(
+        source_trust_display,
+        {
+            "schema": "nhms.two_node_docker.source_trust.v1",
+            "status": STATUS_PASS,
+            "evidence_run_id": run_id,
+            "roles": ["display"],
             "checked_paths": _source_trust_checked_paths(lane),
             "blockers": [],
         },
@@ -2350,7 +2542,7 @@ def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: s
             "slurm_routes_enabled": False,
         },
         "source_artifacts": {
-            "source_trust": _artifact_summary(source_trust),
+            "source_trust": [_artifact_summary(source_trust), _artifact_summary(source_trust_display)],
             "static": _artifact_summary(static_report),
             "smoke": _artifact_summary(smoke_report),
         },
@@ -2441,7 +2633,17 @@ def _source_lane_payload(
                 "status": STATUS_PASS,
                 "identity": copy.deepcopy(identity),
                 "checks": {
-                    check: {"status": STATUS_PASS, "identity": copy.deepcopy(identity)}
+                    check: {
+                        "status": STATUS_PASS,
+                        "identity": copy.deepcopy(identity),
+                        "evidence": {
+                            "request": {
+                                "method": "GET",
+                                "path": f"/producer/{source.lower()}/{check}",
+                            },
+                            "response": {"status_code": 200},
+                        },
+                    }
                     for check in required_checks
                 },
             }

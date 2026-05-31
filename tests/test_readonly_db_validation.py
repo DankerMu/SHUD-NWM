@@ -1232,6 +1232,79 @@ def test_display_route_smoke_blocks_2xx_identity_mismatch() -> None:
     assert latest["identity_blockers"][0]["code"] == "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISMATCH"
 
 
+def test_display_route_smoke_blocks_fragmented_identity_across_response_objects() -> None:
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("route-fragmented-object"),
+        database_url="postgresql://readonly:secret@db.example/nhms",
+    )
+    identity = {
+        "source": "GFS",
+        "cycle_time": "2026-05-03T00:00:00+00:00",
+        "run_id": "run_routes",
+        "model_id": "model_routes",
+        "job_id": "job_routes",
+    }
+
+    def fragmented_route_requester(method: str, path: str) -> RouteHttpResponse:
+        del method
+        name = _route_name_for_path(path)
+        body: dict[str, Any] = {"status": "ok", "data": {}}
+        if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
+            body["data"] = {
+                "identity": {"source_id": identity["source"]},
+                "item": {"cycle_time": identity["cycle_time"], "run_id": identity["run_id"]},
+                "metadata": {"model_id": identity["model_id"], "job_id": identity["job_id"]},
+            }
+        return RouteHttpResponse(status_code=200, body=body)
+
+    results = run_display_route_smoke(config, identity, route_requester=fragmented_route_requester)
+
+    latest = next(item for item in results if item["name"] == "latest_product")
+    assert latest["status"] == "BLOCKED"
+    assert latest["reason"] == "display_read_route_response_identity_invalid"
+    assert "response_identity" not in latest
+    assert {blocker["code"] for blocker in latest["identity_blockers"]} == {
+        "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING"
+    }
+
+
+def test_display_route_smoke_blocks_fragmented_identity_across_list_rows() -> None:
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=_evidence_root(),
+        run_id=_run_id("route-fragmented-list"),
+        database_url="postgresql://readonly:secret@db.example/nhms",
+    )
+    identity = {
+        "source": "GFS",
+        "cycle_time": "2026-05-03T00:00:00+00:00",
+        "run_id": "run_routes",
+        "model_id": "model_routes",
+        "job_id": "job_routes",
+    }
+
+    def fragmented_list_requester(method: str, path: str) -> RouteHttpResponse:
+        del method
+        name = _route_name_for_path(path)
+        body: dict[str, Any] = {"status": "ok", "data": {}}
+        if name in {"latest_product", "pipeline_status", "pipeline_stages", "jobs", "job_logs"}:
+            body["data"] = [
+                {"source_id": identity["source"], "cycle_time": identity["cycle_time"]},
+                {"run_id": identity["run_id"], "model_id": identity["model_id"], "job_id": identity["job_id"]},
+            ]
+        return RouteHttpResponse(status_code=200, body=body)
+
+    results = run_display_route_smoke(config, identity, route_requester=fragmented_list_requester)
+
+    jobs = next(item for item in results if item["name"] == "jobs")
+    assert jobs["status"] == "BLOCKED"
+    assert jobs["reason"] == "display_read_route_response_identity_invalid"
+    assert "response_identity" not in jobs
+    assert {blocker["code"] for blocker in jobs["identity_blockers"]} == {
+        "READONLY_DB_ROUTE_RESPONSE_IDENTITY_MISSING"
+    }
+
+
 def test_display_route_smoke_blocks_identity_bound_routes_when_strict_identity_missing() -> None:
     config = ReadonlyDbValidationConfig.from_env(
         evidence_root=_evidence_root(),

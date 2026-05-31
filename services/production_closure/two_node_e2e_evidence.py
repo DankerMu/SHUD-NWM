@@ -1061,6 +1061,14 @@ def _evaluate_source_lane(
                     f"{name} PASS requires live evidence.",
                 )
             )
+        if not _has_producer_backed_lane_evidence(payload):
+            blockers.append(
+                _blocker(
+                    f"TWO_NODE_E2E_{name.upper()}_PRODUCER_EVIDENCE_MISSING",
+                    f"{name} PASS requires producer-backed command, artifact, request/response, browser, "
+                    "network, or per-check evidence.",
+                )
+            )
     records = _source_records(payload)
     missing_sources = [source for source in declared_sources if source not in records]
     for source in missing_sources:
@@ -1211,6 +1219,14 @@ def _evaluate_simple_live_lane(
                 _blocker(
                     f"TWO_NODE_E2E_{name.upper()}_LIVE_EVIDENCE_MISSING",
                     f"{name} PASS requires live evidence.",
+                )
+            )
+        if not _has_producer_backed_lane_evidence(payload):
+            blockers.append(
+                _blocker(
+                    f"TWO_NODE_E2E_{name.upper()}_PRODUCER_EVIDENCE_MISSING",
+                    f"{name} PASS requires producer-backed command, artifact, request/response, browser, "
+                    "network, or per-check evidence.",
                 )
             )
     if status == STATUS_PASS and _has_mock_or_fixture(payload):
@@ -1434,6 +1450,14 @@ def _evaluate_cross_plane(
     findings: list[dict[str, Any]] = []
     if status == STATUS_PASS:
         blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name="cross_plane"))
+        if not _has_producer_backed_lane_evidence(payload):
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_CROSS_PLANE_PRODUCER_EVIDENCE_MISSING",
+                    "Cross-plane PASS requires producer-backed command, artifact, request/response, browser, "
+                    "network, or per-check evidence.",
+                )
+            )
     if _has_mock_or_fixture(payload):
         findings.append(
             _finding(
@@ -1471,13 +1495,15 @@ def _evaluate_cross_plane(
         findings.extend(_with_context(item, lane="cross_plane", source=source) for item in identity_findings)
         blockers.extend(_with_context(item, lane="cross_plane", source=source) for item in identity_blockers)
     source_statuses = {source: result.get("status") for source, result in source_scope_results.items()}
-    if any(value == STATUS_FAIL for value in source_statuses.values()):
+    if status == STATUS_FAIL or any(value == STATUS_FAIL for value in source_statuses.values()):
         status = STATUS_FAIL
+    elif status == STATUS_BLOCKED or any(value == STATUS_BLOCKED for value in source_statuses.values()):
+        status = STATUS_BLOCKED
     if findings:
         status = STATUS_FAIL
     elif blockers:
         status = STATUS_BLOCKED
-    elif not _is_full_scope_pass(declared_sources, source_scope_results) or reduced_scope:
+    elif status == STATUS_PASS and (not _is_full_scope_pass(declared_sources, source_scope_results) or reduced_scope):
         status = STATUS_PARTIAL
     return _lane_from_status(
         "cross_plane",
@@ -2411,7 +2437,14 @@ def _docker_security_summary_contract_issues(
         return blockers, findings
     for artifact_name, expected_schema in DOCKER_SECURITY_CHILD_SCHEMAS.items():
         artifact = source_artifacts.get(artifact_name)
-        if not isinstance(artifact, Mapping):
+        artifact_records: list[Mapping[str, Any]]
+        if isinstance(artifact, Mapping):
+            artifact_records = [artifact]
+        elif artifact_name == "source_trust" and isinstance(artifact, list):
+            artifact_records = [item for item in artifact if isinstance(item, Mapping)]
+        else:
+            artifact_records = []
+        if not artifact_records:
             blockers.append(
                 _blocker(
                     "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_MISSING",
@@ -2420,7 +2453,52 @@ def _docker_security_summary_contract_issues(
                 )
             )
             continue
+        child_payloads: list[Mapping[str, Any]] = []
+        child_statuses: list[str] = []
         artifact_blockers, artifact_findings = _docker_security_child_artifact_issues(
+            doc,
+            artifact_name,
+            artifact_records,
+            expected_schema=expected_schema,
+            evidence_run_id=evidence_run_id,
+            summary_status=summary_status,
+        )
+        blockers.extend(artifact_blockers)
+        findings.extend(artifact_findings)
+        for artifact_record in artifact_records:
+            payload = _read_docker_security_child_payload_for_contract(
+                doc,
+                artifact_name,
+                artifact_record,
+                evidence_run_id=evidence_run_id,
+                summary_status=summary_status,
+            )
+            if payload is not None:
+                child_payloads.append(payload)
+                child_statuses.append(_normalized_status(payload.get("status")))
+        if artifact_name == "source_trust":
+            blockers.extend(
+                _docker_source_trust_combined_role_blockers(
+                    child_payloads,
+                    child_statuses=child_statuses,
+                )
+            )
+    return blockers, findings
+
+
+def _docker_security_child_artifact_issues(
+    doc: EvidenceDocument,
+    artifact_name: str,
+    artifacts: Sequence[Mapping[str, Any]],
+    *,
+    expected_schema: str,
+    evidence_run_id: str,
+    summary_status: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        artifact_blockers, artifact_findings = _docker_security_single_child_artifact_issues(
             doc,
             artifact_name,
             artifact,
@@ -2433,7 +2511,7 @@ def _docker_security_summary_contract_issues(
     return blockers, findings
 
 
-def _docker_security_child_artifact_issues(
+def _docker_security_single_child_artifact_issues(
     doc: EvidenceDocument,
     artifact_name: str,
     artifact: Mapping[str, Any],
@@ -2584,6 +2662,35 @@ def _docker_security_child_artifact_issues(
     return blockers, findings
 
 
+def _read_docker_security_child_payload_for_contract(
+    doc: EvidenceDocument,
+    artifact_name: str,
+    artifact: Mapping[str, Any],
+    *,
+    evidence_run_id: str,
+    summary_status: str,
+) -> Mapping[str, Any] | None:
+    blockers, findings = _docker_security_single_child_artifact_issues(
+        doc,
+        artifact_name,
+        artifact,
+        expected_schema=DOCKER_SECURITY_CHILD_SCHEMAS[artifact_name],
+        evidence_run_id=evidence_run_id,
+        summary_status=summary_status,
+    )
+    if blockers or findings:
+        return None
+    raw_path = artifact.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    try:
+        path = _approved_artifact_path(raw_path)
+        containment_root = _approved_artifact_containment_root(path)
+        return _read_json(path, containment_root=containment_root).payload
+    except (FileNotFoundError, TwoNodeE2EEvidenceError):
+        return None
+
+
 def _docker_security_child_current_run_compatible(
     path: Path,
     run_dir: Path,
@@ -2688,6 +2795,41 @@ def _docker_source_trust_child_blockers(
         )
     for record in records:
         if str(record.get("label") or "") in required_labels:
+            blockers.extend(_docker_source_trust_record_blockers(record))
+    return blockers
+
+
+def _docker_source_trust_combined_role_blockers(
+    child_payloads: Sequence[Mapping[str, Any]],
+    *,
+    child_statuses: Sequence[str],
+) -> list[dict[str, Any]]:
+    if not child_payloads:
+        return []
+    if any(status != STATUS_PASS for status in child_statuses):
+        return []
+    records: list[Mapping[str, Any]] = []
+    for payload in child_payloads:
+        checked_paths = payload.get("checked_paths")
+        if isinstance(checked_paths, list):
+            records.extend(record for record in checked_paths if isinstance(record, Mapping))
+    labels = {str(record.get("label") or "") for record in records}
+    blockers: list[dict[str, Any]] = []
+    for role, label in DOCKER_SOURCE_TRUST_ROLE_LABELS.items():
+        role_records = [record for record in records if str(record.get("label") or "") == label]
+        if not role_records:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_DOCKER_SOURCE_TRUST_ROLE_ENV_PROOF_MISSING",
+                    "Docker source_trust final PASS requires both compute and display role env proof.",
+                    artifact="source_trust",
+                    role=role,
+                    label=label,
+                    observed_labels=sorted(labels),
+                )
+            )
+            continue
+        for record in role_records:
             blockers.extend(_docker_source_trust_record_blockers(record))
     return blockers
 
@@ -2897,6 +3039,10 @@ def _merge_governed_docker_proof(
     value: bool | None,
 ) -> None:
     if value is None:
+        if proof_name in DOCKER_REQUIRED_FALSE_PROOFS and proofs.get(proof_name) is not True:
+            proofs[proof_name] = None
+        elif proof_name in DOCKER_REQUIRED_TRUE_PROOFS and proofs.get(proof_name) is not False:
+            proofs[proof_name] = None
         return
     if proof_name in DOCKER_REQUIRED_FALSE_PROOFS:
         if value is True:
@@ -3038,6 +3184,9 @@ def _raw_docker_security_analysis(payload: Mapping[str, Any]) -> dict[str, bool 
     if mount_hazards["writable_published"]:
         raw_proofs["writable_published_artifact_mount"] = True
         raw_proofs["published_artifacts_readonly"] = False
+    elif mount_hazards["published_mount_unknown"]:
+        raw_proofs.setdefault("writable_published_artifact_mount", None)
+        raw_proofs.setdefault("published_artifacts_readonly", None)
     elif mount_hazards["published_mount_seen"]:
         raw_proofs.setdefault("writable_published_artifact_mount", False)
         published_readonly_seen = True
@@ -3128,6 +3277,7 @@ def _empty_raw_mount_hazards() -> dict[str, bool]:
     return {
         "mount_evidence": False,
         "published_mount_seen": False,
+        "published_mount_unknown": False,
         "docker_socket": False,
         "forbidden_mount": False,
         "broad_host_bind": False,
@@ -3152,7 +3302,7 @@ def _raw_bind_mounts(value: Any) -> dict[str, bool]:
         source = parts[0] if parts else ""
         target = parts[1] if len(parts) > 1 else ""
         mode = ":".join(parts[2:]) if len(parts) > 2 else ""
-        read_only = "ro" in {part.strip().lower() for part in mode.split(",")}
+        read_only = _short_mount_read_only(mode)
         _record_mount_hazard(hazards, source=source, target=target, read_only=read_only)
     return hazards
 
@@ -3181,7 +3331,7 @@ def _compose_mount_hazards(value: Any) -> dict[str, bool]:
             source = parts[0] if parts else ""
             target = parts[1] if len(parts) > 1 else ""
             mode = ":".join(parts[2:]) if len(parts) > 2 else ""
-            read_only = "ro" in {part.strip().lower() for part in mode.split(",")}
+            read_only = _short_mount_read_only(mode)
             _record_mount_hazard(hazards, source=source, target=target, read_only=read_only)
         elif isinstance(item, Mapping):
             source = str(item.get("source") or item.get("src") or "")
@@ -3213,6 +3363,8 @@ def _record_mount_hazard(
         hazards["published_mount_seen"] = True
         if read_only is False:
             hazards["writable_published"] = True
+        elif read_only is None:
+            hazards["published_mount_unknown"] = True
 
 
 def _mount_read_only(mount: Mapping[str, Any]) -> bool | None:
@@ -3225,7 +3377,16 @@ def _mount_read_only(mount: Mapping[str, Any]) -> bool | None:
         return _raw_bool(mount.get("readonly"))
     mode = str(mount.get("Mode") or mount.get("mode") or "")
     if mode:
-        return "ro" in {part.strip().lower() for part in mode.split(",")}
+        return _short_mount_read_only(mode)
+    return None
+
+
+def _short_mount_read_only(mode: str) -> bool | None:
+    tokens = {part.strip().lower() for part in str(mode).split(",") if part.strip()}
+    if "ro" in tokens:
+        return True
+    if "rw" in tokens:
+        return False
     return None
 
 
@@ -4253,12 +4414,15 @@ def _readonly_display_identity_for_source(display_identity: Any, source: str) ->
 
 
 def _readonly_route_identity(route: Mapping[str, Any], *, required_fields: tuple[str, ...]) -> dict[str, Any]:
-    response = route.get("response")
     raw = route.get("response_identity") or route.get("response_strict_identity") or route.get("body_identity")
-    if raw is None and isinstance(response, Mapping):
-        raw = response.get("identity")
-    identity = dict(raw) if isinstance(raw, Mapping) else {}
-    return identity
+    if not isinstance(raw, Mapping):
+        return {}
+    identity = dict(raw)
+    if "source" not in identity and "source_id" in identity:
+        identity["source"] = identity["source_id"]
+    if all(_identity_value(identity, field) for field in required_fields):
+        return identity
+    return {}
 
 
 def _readonly_db_manual_action_issues(actions: list[Any]) -> list[dict[str, Any]]:
@@ -4629,6 +4793,103 @@ def _has_live_lane_evidence(payload: Mapping[str, Any], *, live_flag: str) -> bo
         return True
     mode = str(payload.get("execution_mode") or payload.get("mode") or "").lower()
     return mode in LIVE_EXECUTION_MODES
+
+
+def _has_producer_backed_lane_evidence(payload: Mapping[str, Any]) -> bool:
+    if _has_source_artifact_proof(payload):
+        return True
+    for key in (
+        "commands",
+        "requests",
+        "responses",
+        "browser_artifacts",
+        "screenshots",
+        "network",
+        "artifacts",
+        "evidence",
+        "proofs",
+    ):
+        if _structured_evidence_value(payload.get(key)):
+            return True
+    records = _source_records(payload)
+    for record in records.values():
+        if _has_source_artifact_proof(record):
+            return True
+        if _structured_evidence_value(record.get("evidence")) or _structured_evidence_value(record.get("proofs")):
+            return True
+        for check in _check_results(record).values():
+            if _check_has_producer_evidence(check):
+                return True
+    return False
+
+
+def _check_has_producer_evidence(check: Mapping[str, Any]) -> bool:
+    for key in (
+        "source_artifacts",
+        "commands",
+        "requests",
+        "responses",
+        "browser_artifacts",
+        "screenshots",
+        "network",
+        "artifacts",
+        "evidence",
+        "proofs",
+    ):
+        if key == "source_artifacts":
+            if _has_source_artifact_proof(check):
+                return True
+            continue
+        if _structured_evidence_value(check.get(key)):
+            return True
+    return False
+
+
+def _has_source_artifact_proof(payload: Mapping[str, Any]) -> bool:
+    return _source_artifact_records(payload.get("source_artifacts"))
+
+
+def _source_artifact_records(value: Any) -> bool:
+    records: list[Mapping[str, Any]]
+    if isinstance(value, Mapping):
+        records = [record for record in value.values() if isinstance(record, Mapping)]
+    elif isinstance(value, list):
+        records = [record for record in value if isinstance(record, Mapping)]
+    else:
+        return False
+    for record in records:
+        path = record.get("path") or record.get("artifact_path")
+        sha256 = record.get("sha256") or record.get("digest")
+        if isinstance(path, str) and path.strip() and isinstance(sha256, str) and re.fullmatch(
+            r"[a-fA-F0-9]{64}",
+            sha256.strip(),
+        ):
+            return True
+    return False
+
+
+def _structured_evidence_value(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        if _looks_like_evidence_record(value):
+            return True
+        return any(_structured_evidence_value(nested) for nested in value.values())
+    if isinstance(value, list):
+        return any(_structured_evidence_value(item) for item in value)
+    return False
+
+
+def _looks_like_evidence_record(value: Mapping[str, Any]) -> bool:
+    if _source_artifact_records([value]):
+        return True
+    if "returncode" in value:
+        return True
+    if any(key in value for key in ("method", "url", "path", "status_code", "http_status")):
+        return True
+    if any(key in value for key in ("sha256", "screenshot_path", "artifact_path", "trace_path")):
+        return True
+    if any(key in value for key in ("request", "response", "stdout", "stderr", "duration_ms")):
+        return True
+    return False
 
 
 def _runtime_config(payload: Mapping[str, Any]) -> dict[str, Any]:

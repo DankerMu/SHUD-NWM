@@ -67,6 +67,37 @@ def test_source_trust_preflight_passes_for_trusted_owner_and_0600_role_envs(tmp_
     assert "readonly-secret" not in evidence_text
 
 
+def test_source_trust_single_role_report_is_role_scoped_and_explicit_run_bound(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    evidence_root = Path("/scratch/frd_muziyao/nwm-test/source-trust-explicit/docker-security")
+
+    result = _run_preflight(
+        checkout_root=checkout,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=[_current_owner()],
+        roles=["compute"],
+        evidence_run_id="source-trust-explicit",
+    )
+
+    assert result.returncode == 0
+    summary = json.loads((evidence_root / "two-node-docker-source-trust-compute.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "PASS"
+    assert summary["evidence_run_id"] == "source-trust-explicit"
+    assert summary["roles"] == ["compute"]
+    checked_labels = {item["label"] for item in summary["checked_paths"]}
+    assert "compute role env" in checked_labels
+    assert "display role env" not in checked_labels
+    assert not (evidence_root / "two-node-docker-source-trust.json").exists()
+    for path in (
+        evidence_root / "two-node-docker-source-trust-compute.json",
+        evidence_root / "two-node-docker-source-trust-compute.txt",
+    ):
+        path.unlink()
+    evidence_root.rmdir()
+    evidence_root.parent.rmdir()
+
+
 def test_source_trust_blocks_0644_role_env_before_direct_compose_sentinel(tmp_path: Path) -> None:
     checkout = _make_checkout(tmp_path / "checkout")
     display_env = checkout / "infra" / "env" / "display.env"
@@ -98,7 +129,7 @@ def test_source_trust_blocks_0644_role_env_before_direct_compose_sentinel(tmp_pa
     assert "BLOCKED:" in result.stderr
     assert "display role env must be mode 0600" in result.stderr
     assert not sentinel.exists()
-    summary = json.loads((evidence_root / "two-node-docker-source-trust.json").read_text(encoding="utf-8"))
+    summary = json.loads((evidence_root / "two-node-docker-source-trust-display.json").read_text(encoding="utf-8"))
     assert summary["status"] == "BLOCKED"
 
 
@@ -150,7 +181,7 @@ def test_source_trust_rejects_symlink_source(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "display compose source must not be a symlink" in result.stderr
-    summary = json.loads((evidence_root / "two-node-docker-source-trust.json").read_text(encoding="utf-8"))
+    summary = json.loads((evidence_root / "two-node-docker-source-trust-display.json").read_text(encoding="utf-8"))
     assert any(item["label"] == "display compose source" and item["is_symlink"] for item in summary["checked_paths"])
 
 
@@ -170,7 +201,7 @@ def test_source_trust_rejects_symlink_checkout_path_component(tmp_path: Path) ->
 
     assert result.returncode == 2
     assert "trust path component must not be a symlink" in result.stderr
-    summary = json.loads((evidence_root / "two-node-docker-source-trust.json").read_text(encoding="utf-8"))
+    summary = json.loads((evidence_root / "two-node-docker-source-trust-compute.json").read_text(encoding="utf-8"))
     assert any(item["label"] == "trust path component" and item["is_symlink"] for item in summary["checked_paths"])
 
 
@@ -204,6 +235,7 @@ def _run_preflight(
     trust_root: Path,
     trusted_owners: list[str],
     roles: list[str],
+    evidence_run_id: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         sys.executable,
@@ -219,6 +251,8 @@ def _run_preflight(
         command.extend(["--trusted-owner", owner])
     for role in roles:
         command.extend(["--role", role])
+    if evidence_run_id is not None:
+        command.extend(["--evidence-run-id", evidence_run_id])
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
 

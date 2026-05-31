@@ -6,7 +6,8 @@
 
 Docker/systemd 操作细节见 `infra/README.two-node-docker.md`。所有直接 Docker Compose 和 systemd
 install/start/restart lane 都必须先运行 `scripts/validate_two_node_docker_source_trust.py`，把 source-trust
-JSON/text 报告写入 `docker-security/` evidence；该脚本失败时对应 lane 只能记为 `BLOCKED`。本文只定义 E2E
+JSON/text 报告写入 `docker-security/` evidence；compute/display 必须使用同一个 `--evidence-run-id`
+分别生成 role-scoped source-trust 报告，避免互相覆盖。该脚本失败时对应 lane 只能记为 `BLOCKED`。本文只定义 E2E
 证据边界；Docker 验证不能把 compose 启动、DB、API、浏览器、Slurm、日志和只读安全检查合并成一个模糊 PASS。
 
 ## 1. 文档目的
@@ -191,9 +192,13 @@ mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,b
 - `docker-preflight/summary.md`：当前 `evidence_run_id`、DockerRootDir、cache/space、TMPDIR 和 evidence root。
 - `docker-security/summary.json`：必须由 `security-summary` helper 生成
   `nhms.two_node_docker.security_summary.v1`，并带 `source_trust`、`static`、`smoke`
-  child artifact 路径与 sha256；其中 static child 必须由 `static --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"`
-  产出最终可校验的 HostConfig/mount/env/readonly proof 字段，source-trust child 必须包含完整 `checked_paths`
-  ownership/mode/type 证明；手写或缺 source artifact 的 summary 不能作为 PASS。
+  child artifact 路径与 sha256；其中 source-trust child 必须包含 compute/display 两份 role env
+  ownership/mode/type 证明，static child 必须由 `static --evidence-run-id "$EVIDENCE_RUN_ID" --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"`
+  产出最终可校验的 HostConfig/mount/env/readonly proof 字段，smoke child 必须由
+  `smoke --evidence-run-id "$EVIDENCE_RUN_ID" --evidence-root "$EVIDENCE_ROOT/docker-security"` 产出。
+  `security-summary` 必须在 smoke producer 之后执行，并通过重复 `--source-trust-report`
+  消费 `two-node-docker-source-trust-compute.json` 和 `two-node-docker-source-trust-display.json`；手写、
+  单 role source-trust、缺 source artifact 或缺当前 run 绑定的 summary 不能作为 PASS。
 - `final-e2e-evidence/summary.json`：#239 最终 JSON 汇总，聚合 Docker、DB、API、browser、cross-plane、manual ops、Slurm、logs 和 compute/display lane。
 - `summary.md`：最终 PASS/PARTIAL/FAIL/BLOCKED 汇总。
 - `bugs.md` 或链接到 `docs/bugs.md`：失败项、根因、复测条件。

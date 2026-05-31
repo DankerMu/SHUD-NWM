@@ -5,6 +5,7 @@ import grp
 import json
 import os
 import pwd
+import re
 import stat
 import sys
 import tempfile
@@ -15,6 +16,7 @@ from typing import Any, Sequence
 REPORT_JSON_NAME = "two-node-docker-source-trust.json"
 REPORT_TEXT_NAME = "two-node-docker-source-trust.txt"
 VALID_ROLES = frozenset({"compute", "display"})
+SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,7 @@ def validate_source_trust(
     trusted_owners: set[str],
     roles: Sequence[str],
     trust_root: Path | None,
+    evidence_run_id: str | None = None,
 ) -> dict[str, Any]:
     checkout_root = _absolute_path(checkout_root)
     evidence_root = _absolute_path(evidence_root)
@@ -242,10 +245,13 @@ def validate_source_trust(
         )
 
     status = "BLOCKED" if blockers else "PASS"
+    resolved_run_id = evidence_run_id or _evidence_run_id_from_root(evidence_root)
+    if resolved_run_id is not None:
+        resolved_run_id = _safe_evidence_run_id(resolved_run_id)
     return {
         "schema": "nhms.two_node_docker.source_trust.v1",
         "status": status,
-        "evidence_run_id": _evidence_run_id_from_root(evidence_root),
+        "evidence_run_id": resolved_run_id,
         "checkout_root": str(checkout_root),
         "trust_root": str(trust_root),
         "evidence_root": str(evidence_root),
@@ -265,6 +271,13 @@ def _evidence_run_id_from_root(path: Path) -> str | None:
         if index + 1 < len(parts):
             return parts[index + 1]
     return None
+
+
+def _safe_evidence_run_id(value: str) -> str:
+    text = str(value).strip()
+    if not SAFE_RUN_ID_RE.fullmatch(text) or ".." in text:
+        raise ValueError("evidence_run_id must use only alphanumerics, '.', '_' or '-' and be at most 128 chars")
+    return text
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -296,13 +309,23 @@ def _write_text_report(path: Path, payload: dict[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_evidence(evidence_root: Path, payload: dict[str, Any]) -> Path:
+def write_evidence(evidence_root: Path, payload: dict[str, Any], *, output_name: str | None = None) -> Path:
     evidence_root.mkdir(parents=True, exist_ok=True)
-    json_path = evidence_root / REPORT_JSON_NAME
-    text_path = evidence_root / REPORT_TEXT_NAME
+    json_name = output_name or _default_report_json_name(payload)
+    if not json_name.endswith(".json") or "/" in json_name or "\\" in json_name:
+        raise ValueError("source-trust output name must be a local .json filename")
+    json_path = evidence_root / json_name
+    text_path = evidence_root / f"{json_path.stem}.txt"
     _write_json_atomic(json_path, payload)
     _write_text_report(text_path, payload)
     return json_path
+
+
+def _default_report_json_name(payload: dict[str, Any]) -> str:
+    roles = payload.get("roles")
+    if isinstance(roles, list) and len(roles) == 1 and roles[0] in VALID_ROLES:
+        return f"two-node-docker-source-trust-{roles[0]}.json"
+    return REPORT_JSON_NAME
 
 
 def _split_csv(values: Sequence[str] | None) -> list[str]:
@@ -351,8 +374,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path component root to check through CHECKOUT_ROOT/infra; defaults to CHECKOUT_ROOT parent.",
     )
+    parser.add_argument(
+        "--evidence-run-id",
+        help="Current final E2E evidence run id. Defaults to path inference when omitted.",
+    )
+    parser.add_argument(
+        "--output-name",
+        help="Optional local JSON report filename. Defaults to role-scoped names for single-role reports.",
+    )
     args = parser.parse_args(argv)
     args.trusted_owners = set(_split_csv(args.trusted_owner))
+    if args.evidence_run_id is not None:
+        try:
+            args.evidence_run_id = _safe_evidence_run_id(args.evidence_run_id)
+        except ValueError as exc:
+            parser.error(str(exc))
     try:
         args.roles = _parse_roles(args.role)
     except argparse.ArgumentTypeError as exc:
@@ -368,9 +404,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         trusted_owners=args.trusted_owners,
         roles=args.roles,
         trust_root=args.trust_root,
+        evidence_run_id=args.evidence_run_id,
     )
     try:
-        evidence_path = write_evidence(_absolute_path(args.evidence_root), payload)
+        evidence_path = write_evidence(_absolute_path(args.evidence_root), payload, output_name=args.output_name)
+    except ValueError as exc:
+        print(f"BLOCKED: invalid source-trust evidence settings: {exc}", file=sys.stderr)
+        return 2
     except OSError as exc:
         print(f"BLOCKED: cannot write source-trust evidence under {args.evidence_root}: {exc}", file=sys.stderr)
         return 2

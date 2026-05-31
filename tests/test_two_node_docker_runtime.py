@@ -68,11 +68,13 @@ def test_static_report_emits_final_compatible_docker_proofs(tmp_path: Path) -> N
 def test_static_report_contradictory_child_blocks_security_summary(tmp_path: Path) -> None:
     repo_root = tmp_path
     security_root = repo_root / "artifacts" / "docker-security"
-    source_trust = security_root / "two-node-docker-source-trust.json"
+    source_trust = security_root / "two-node-docker-source-trust-compute.json"
+    source_trust_display = security_root / "two-node-docker-source-trust-display.json"
     static_report = security_root / "static-compose-env-check.json"
     smoke_report = security_root / "docker-smoke.json"
     run_id = "run-123"
-    _write_json(source_trust, _source_trust_payload(run_id, security_root))
+    _write_json(source_trust, _source_trust_payload(run_id, security_root, roles=("compute",)))
+    _write_json(source_trust_display, _source_trust_payload(run_id, security_root, roles=("display",)))
     _write_json(
         static_report,
         {
@@ -90,7 +92,7 @@ def test_static_report_contradictory_child_blocks_security_summary(tmp_path: Pat
         output=security_root / "summary.json",
         repo_root=repo_root,
         evidence_run_id=run_id,
-        source_trust_report=source_trust,
+        source_trust_report=[source_trust, source_trust_display],
         static_report=static_report,
         smoke_report=smoke_report,
     )
@@ -109,7 +111,7 @@ def test_docker_security_summary_blocks_empty_source_trust_roles_without_safe_ro
 ) -> None:
     repo_root = tmp_path
     security_root = repo_root / "artifacts" / "docker-security"
-    source_trust = security_root / "two-node-docker-source-trust.json"
+    source_trust = security_root / "two-node-docker-source-trust-combined.json"
     static_report = security_root / "static-compose-env-check.json"
     smoke_report = security_root / "docker-smoke.json"
     run_id = "run-123"
@@ -2843,6 +2845,23 @@ def test_static_report_replaces_output_symlink_without_writing_target(tmp_path: 
     assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "PASS"
 
 
+def test_static_report_explicit_evidence_run_id_overrides_scratch_path_inference(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    report_path = Path("/scratch/frd_muziyao/nwm-test/run-static-explicit/docker-security/static.json")
+    result = docker_runtime.StaticCheckResult(status="PASS", findings=())
+
+    written_path = docker_runtime.write_static_report(
+        result,
+        report_path,
+        repo_root,
+        evidence_run_id="run-static-explicit",
+    )
+
+    payload = json.loads(written_path.read_text(encoding="utf-8"))
+    assert payload["evidence_run_id"] == "run-static-explicit"
+    written_path.unlink()
+
+
 def test_preflight_defaults_tmpdir_to_repo_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = tmp_path
     evidence_root = repo_root / "artifacts" / "two-node-e2e" / "run-456" / "docker-preflight"
@@ -3377,6 +3396,26 @@ def test_docker_smoke_passes_with_expected_role_boundary_probe_results(tmp_path:
     assert payload["blockers"] == []
 
 
+def test_docker_smoke_explicit_evidence_run_id_binds_scratch_layout_and_nested_preflight(tmp_path: Path) -> None:
+    evidence_root = Path("/scratch/frd_muziyao/nwm-test/run-smoke-explicit/docker-security")
+
+    result = docker_runtime.run_docker_smoke(
+        evidence_root=evidence_root,
+        repo_root=tmp_path,
+        evidence_run_id="run-smoke-explicit",
+        min_free_bytes=100,
+        command_runner=_docker_smoke_success_runner,
+        disk_usage_provider=_high_space,
+    )
+
+    payload = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+    preflight = json.loads((evidence_root / "preflight" / "docker-preflight.json").read_text(encoding="utf-8"))
+    assert result.status == "PASS"
+    assert payload["evidence_run_id"] == "run-smoke-explicit"
+    assert preflight["evidence_run_id"] == "run-smoke-explicit"
+    shutil.rmtree(evidence_root.parent)
+
+
 @pytest.mark.parametrize(
     ("probe_name", "expected_code"),
     [
@@ -3473,13 +3512,18 @@ def test_docker_smoke_image_inspect_missing_never_passes() -> None:
 def test_docker_security_summary_aggregates_source_artifacts(tmp_path: Path) -> None:
     repo_root = tmp_path
     security_root = repo_root / "artifacts" / "docker-security"
-    source_trust = security_root / "two-node-docker-source-trust.json"
+    source_trust = security_root / "two-node-docker-source-trust-compute.json"
+    source_trust_display = security_root / "two-node-docker-source-trust-display.json"
     static_report = security_root / "static-compose-env-check.json"
     smoke_report = security_root / "docker-smoke.json"
     child_run_id = "run-123"
     _write_json(
         source_trust,
-        _source_trust_payload(child_run_id, security_root),
+        _source_trust_payload(child_run_id, security_root, roles=("compute",)),
+    )
+    _write_json(
+        source_trust_display,
+        _source_trust_payload(child_run_id, security_root, roles=("display",)),
     )
     _write_json(
         static_report,
@@ -3500,7 +3544,7 @@ def test_docker_security_summary_aggregates_source_artifacts(tmp_path: Path) -> 
         output=security_root / "summary.json",
         repo_root=repo_root,
         evidence_run_id=child_run_id,
-        source_trust_report=source_trust,
+        source_trust_report=[source_trust, source_trust_display],
         static_report=static_report,
         smoke_report=smoke_report,
     )
@@ -3518,23 +3562,68 @@ def test_docker_security_summary_aggregates_source_artifacts(tmp_path: Path) -> 
         "live_container_checked": True,
         "smoke_passed": True,
         "source_trust_passed": True,
+        "source_trust_roles": ["compute", "display"],
         "static_passed": True,
     }
     assert payload["source_artifacts"]["static"]["sha256"] == sha256(static_report.read_bytes()).hexdigest()
+    assert isinstance(payload["source_artifacts"]["source_trust"], list)
+
+
+def test_docker_security_summary_blocks_single_display_source_trust_without_compute_role(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path
+    security_root = repo_root / "artifacts" / "docker-security"
+    source_trust_display = security_root / "two-node-docker-source-trust-display.json"
+    static_report = security_root / "static-compose-env-check.json"
+    smoke_report = security_root / "docker-smoke.json"
+    run_id = "run-123"
+    _write_json(source_trust_display, _source_trust_payload(run_id, security_root, roles=("display",)))
+    _write_json(
+        static_report,
+        {
+            "schema_version": "nhms.two_node_docker.static_check.v1",
+            "status": "PASS",
+            "evidence_run_id": run_id,
+            "findings": [],
+            **_static_proof_payload(),
+        },
+    )
+    _write_json(smoke_report, _smoke_payload(run_id))
+
+    output = docker_runtime.write_docker_security_summary(
+        output=security_root / "summary.json",
+        repo_root=repo_root,
+        evidence_run_id=run_id,
+        source_trust_report=source_trust_display,
+        static_report=static_report,
+        smoke_report=smoke_report,
+    )
+
+    summary = json.loads(output.read_text(encoding="utf-8"))
+    assert summary["status"] == "BLOCKED"
+    blocker = next(item for item in summary["blockers"] if item["source"] == "source_trust")
+    assert blocker["source_blockers"][0]["code"] == "DOCKER_SECURITY_SOURCE_TRUST_ROLE_ENV_PROOF_MISSING"
+    assert blocker["source_blockers"][0]["role"] == "compute"
 
 
 def test_docker_security_summary_blocks_unsafe_child_before_hash(tmp_path: Path) -> None:
     repo_root = tmp_path
     security_root = repo_root / "artifacts" / "docker-security"
     security_root.mkdir(parents=True)
-    source_trust = security_root / "two-node-docker-source-trust.json"
+    source_trust = security_root / "two-node-docker-source-trust-compute.json"
+    source_trust_display = security_root / "two-node-docker-source-trust-display.json"
     static_report = security_root / "static-compose-env-check.json"
     smoke_report = security_root / "docker-smoke.json"
     target = tmp_path / "outside-static.json"
     target.write_text("{bad-json", encoding="utf-8")
     _write_json(
         source_trust,
-        _source_trust_payload("run-123", security_root),
+        _source_trust_payload("run-123", security_root, roles=("compute",)),
+    )
+    _write_json(
+        source_trust_display,
+        _source_trust_payload("run-123", security_root, roles=("display",)),
     )
     static_report.symlink_to(target)
     _write_json(
@@ -3546,7 +3635,7 @@ def test_docker_security_summary_blocks_unsafe_child_before_hash(tmp_path: Path)
         output=security_root / "summary.json",
         repo_root=repo_root,
         evidence_run_id="run-123",
-        source_trust_report=source_trust,
+        source_trust_report=[source_trust, source_trust_display],
         static_report=static_report,
         smoke_report=smoke_report,
     )
@@ -3564,12 +3653,17 @@ def test_docker_security_summary_blocks_child_outside_approved_roots(tmp_path: P
     repo_root = tmp_path / "repo"
     security_root = repo_root / "artifacts" / "docker-security"
     security_root.mkdir(parents=True)
-    source_trust = security_root / "two-node-docker-source-trust.json"
+    source_trust = security_root / "two-node-docker-source-trust-compute.json"
+    source_trust_display = security_root / "two-node-docker-source-trust-display.json"
     static_report = tmp_path / "outside-static.json"
     smoke_report = security_root / "docker-smoke.json"
     _write_json(
         source_trust,
-        _source_trust_payload("run-123", security_root),
+        _source_trust_payload("run-123", security_root, roles=("compute",)),
+    )
+    _write_json(
+        source_trust_display,
+        _source_trust_payload("run-123", security_root, roles=("display",)),
     )
     _write_json(
         static_report,
@@ -3587,7 +3681,7 @@ def test_docker_security_summary_blocks_child_outside_approved_roots(tmp_path: P
         output=security_root / "summary.json",
         repo_root=repo_root,
         evidence_run_id="run-123",
-        source_trust_report=source_trust,
+        source_trust_report=[source_trust, source_trust_display],
         static_report=static_report,
         smoke_report=smoke_report,
     )
@@ -3603,12 +3697,17 @@ def test_docker_security_summary_blocks_oversized_child_before_digest(tmp_path: 
     repo_root = tmp_path
     security_root = repo_root / "artifacts" / "docker-security"
     security_root.mkdir(parents=True)
-    source_trust = security_root / "two-node-docker-source-trust.json"
+    source_trust = security_root / "two-node-docker-source-trust-compute.json"
+    source_trust_display = security_root / "two-node-docker-source-trust-display.json"
     static_report = security_root / "static-compose-env-check.json"
     smoke_report = security_root / "docker-smoke.json"
     _write_json(
         source_trust,
-        _source_trust_payload("run-123", security_root),
+        _source_trust_payload("run-123", security_root, roles=("compute",)),
+    )
+    _write_json(
+        source_trust_display,
+        _source_trust_payload("run-123", security_root, roles=("display",)),
     )
     static_report.write_text("x" * (docker_runtime.MAX_SECURITY_CHILD_BYTES + 1), encoding="utf-8")
     _write_json(smoke_report, _smoke_payload("run-123"))
@@ -3617,7 +3716,7 @@ def test_docker_security_summary_blocks_oversized_child_before_digest(tmp_path: 
         output=security_root / "summary.json",
         repo_root=repo_root,
         evidence_run_id="run-123",
-        source_trust_report=source_trust,
+        source_trust_report=[source_trust, source_trust_display],
         static_report=static_report,
         smoke_report=smoke_report,
     )
@@ -3633,13 +3732,15 @@ def test_docker_security_summary_blocks_child_without_current_run_id(tmp_path: P
     repo_root = tmp_path
     security_root = repo_root / "artifacts" / "docker-security"
     security_root.mkdir(parents=True)
-    source_trust = security_root / "two-node-docker-source-trust.json"
+    source_trust = security_root / "two-node-docker-source-trust-compute.json"
+    source_trust_display = security_root / "two-node-docker-source-trust-display.json"
     static_report = security_root / "static-compose-env-check.json"
     smoke_report = security_root / "docker-smoke.json"
     _write_json(
         source_trust,
         {"schema": "nhms.two_node_docker.source_trust.v1", "status": "PASS", "blockers": []},
     )
+    _write_json(source_trust_display, _source_trust_payload("run-123", security_root, roles=("display",)))
     _write_json(
         static_report,
         {
@@ -3656,7 +3757,7 @@ def test_docker_security_summary_blocks_child_without_current_run_id(tmp_path: P
         output=security_root / "summary.json",
         repo_root=repo_root,
         evidence_run_id="run-123",
-        source_trust_report=source_trust,
+        source_trust_report=[source_trust, source_trust_display],
         static_report=static_report,
         smoke_report=smoke_report,
     )
@@ -3671,13 +3772,15 @@ def test_docker_security_summary_blocks_source_trust_without_checked_paths(tmp_p
     repo_root = tmp_path
     security_root = repo_root / "artifacts" / "docker-security"
     security_root.mkdir(parents=True)
-    source_trust = security_root / "two-node-docker-source-trust.json"
+    source_trust = security_root / "two-node-docker-source-trust-compute.json"
+    source_trust_display = security_root / "two-node-docker-source-trust-display.json"
     static_report = security_root / "static-compose-env-check.json"
     smoke_report = security_root / "docker-smoke.json"
     run_id = "run-123"
     payload = _source_trust_payload(run_id, security_root)
     payload.pop("checked_paths")
     _write_json(source_trust, payload)
+    _write_json(source_trust_display, _source_trust_payload(run_id, security_root, roles=("display",)))
     _write_json(
         static_report,
         {
@@ -3694,7 +3797,7 @@ def test_docker_security_summary_blocks_source_trust_without_checked_paths(tmp_p
         output=security_root / "summary.json",
         repo_root=repo_root,
         evidence_run_id=run_id,
-        source_trust_report=source_trust,
+        source_trust_report=[source_trust, source_trust_display],
         static_report=static_report,
         smoke_report=smoke_report,
     )
@@ -3926,7 +4029,12 @@ def _run_entrypoint(command: list[str], env: dict[str, str]) -> subprocess.Compl
     )
 
 
-def _source_trust_payload(run_id: str, root: Path) -> dict[str, Any]:
+def _source_trust_payload(
+    run_id: str,
+    root: Path,
+    *,
+    roles: tuple[str, ...] = ("compute", "display"),
+) -> dict[str, Any]:
     labels = {
         "trust path component": "directory",
         "checkout root": "directory",
@@ -3942,6 +4050,8 @@ def _source_trust_payload(run_id: str, root: Path) -> dict[str, Any]:
     }
     checked_paths = []
     for label, expected_kind in labels.items():
+        if label.endswith("role env") and label.split()[0] not in roles:
+            continue
         is_directory = expected_kind == "directory"
         checked_paths.append(
             {
@@ -3962,7 +4072,7 @@ def _source_trust_payload(run_id: str, root: Path) -> dict[str, Any]:
         "schema": "nhms.two_node_docker.source_trust.v1",
         "status": "PASS",
         "evidence_run_id": run_id,
-        "roles": ["compute", "display"],
+        "roles": list(roles),
         "checked_paths": checked_paths,
         "blockers": [],
     }

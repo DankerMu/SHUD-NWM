@@ -26,6 +26,16 @@ DEFAULT_STATIC_REPORT = Path("artifacts/stage-change") / CHANGE_ID / "static-com
 DEFAULT_PREFLIGHT_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-preflight"
 DEFAULT_DOCKER_SMOKE_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-smoke"
 DEFAULT_DOCKER_SECURITY_SUMMARY = Path("artifacts/stage-change") / CHANGE_ID / "docker-security" / "summary.json"
+DEFAULT_SOURCE_TRUST_REPORTS = (
+    Path("artifacts/stage-change")
+    / CHANGE_ID
+    / "docker-security"
+    / "two-node-docker-source-trust-compute.json",
+    Path("artifacts/stage-change")
+    / CHANGE_ID
+    / "docker-security"
+    / "two-node-docker-source-trust-display.json",
+)
 DEFAULT_APP_DOCKERFILE = Path("infra/docker/Dockerfile.app")
 DEFAULT_APP_ENTRYPOINT = Path("infra/docker/entrypoint.sh")
 DEFAULT_DOCKERIGNORE = Path(".dockerignore")
@@ -925,14 +935,23 @@ def ensure_approved_evidence_root(path: Path, repo_root: Path) -> Path:
     )
 
 
-def write_static_report(result: StaticCheckResult, report_path: Path, repo_root: Path) -> Path:
+def write_static_report(
+    result: StaticCheckResult,
+    report_path: Path,
+    repo_root: Path,
+    *,
+    evidence_run_id: str | None = None,
+) -> Path:
     report_path = _resolve_output_path(report_path, repo_root)
     ensure_approved_evidence_root(report_path.parent, repo_root)
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_run_id = evidence_run_id or _evidence_run_id_from_output(report_path)
+    if resolved_run_id is not None:
+        resolved_run_id = _safe_evidence_run_id(resolved_run_id)
     payload = {
         "schema_version": "nhms.two_node_docker.static_check.v1",
         "change_id": CHANGE_ID,
-        "evidence_run_id": _evidence_run_id_from_output(report_path),
+        "evidence_run_id": resolved_run_id,
         "checked_at": _now_iso(),
         **result.to_dict(),
         **_static_proof_payload(result),
@@ -946,21 +965,27 @@ def write_docker_security_summary(
     output: Path,
     repo_root: Path,
     evidence_run_id: str,
-    source_trust_report: Path,
+    source_trust_report: Path | Sequence[Path],
     static_report: Path,
     smoke_report: Path,
 ) -> Path:
     output = _resolve_output_path(output, repo_root)
     ensure_approved_evidence_root(output.parent, repo_root)
+    evidence_run_id = _safe_evidence_run_id(evidence_run_id)
     summary_root = output.parent
     approved_child_roots = _docker_security_child_roots(repo_root, summary_root)
-    source_artifacts = {
-        "source_trust": _artifact_summary(
+    source_trust_reports = _source_trust_report_paths(source_trust_report)
+    source_trust_artifacts = [
+        _artifact_summary(
             "source_trust",
-            source_trust_report,
+            report,
             repo_root=repo_root,
             approved_roots=approved_child_roots,
-        ),
+        )
+        for report in source_trust_reports
+    ]
+    source_artifacts = {
+        "source_trust": source_trust_artifacts[0] if len(source_trust_artifacts) == 1 else source_trust_artifacts,
         "static": _artifact_summary(
             "static",
             static_report,
@@ -974,12 +999,16 @@ def write_docker_security_summary(
             approved_roots=approved_child_roots,
         ),
     }
-    source_trust_payload = _read_security_child_payload(
-        "source_trust",
-        source_artifacts["source_trust"],
-        approved_roots=approved_child_roots,
-        evidence_run_id=evidence_run_id,
-    )
+    source_trust_payloads = [
+        _read_security_child_payload(
+            "source_trust",
+            artifact,
+            approved_roots=approved_child_roots,
+            evidence_run_id=evidence_run_id,
+        )
+        for artifact in source_trust_artifacts
+    ]
+    source_trust_payload = _combine_source_trust_payloads(source_trust_payloads)
     static_payload = _read_security_child_payload(
         "static",
         source_artifacts["static"],
@@ -1045,6 +1074,7 @@ def write_docker_security_summary(
             "static_passed": static_payload.get("status") == "PASS",
             "smoke_passed": smoke_payload.get("status") == "PASS",
             "live_container_checked": smoke_payload.get("status") == "PASS",
+            "source_trust_roles": sorted(_source_trust_proven_roles(source_trust_payload)),
         },
         "blockers": _docker_security_summary_blockers(source_trust_payload, static_payload, smoke_payload),
     }
@@ -1057,6 +1087,7 @@ def run_docker_smoke(
     *,
     evidence_root: Path,
     repo_root: Path,
+    evidence_run_id: str | None = None,
     image_tag: str = DEFAULT_SMOKE_IMAGE,
     dockerfile: Path = DEFAULT_APP_DOCKERFILE,
     min_free_bytes: int = int(DEFAULT_MIN_FREE_GB * 1024**3),
@@ -1065,6 +1096,9 @@ def run_docker_smoke(
 ) -> DockerSmokeResult:
     repo_root = repo_root.resolve()
     evidence_root = ensure_approved_evidence_root(evidence_root, repo_root)
+    resolved_run_id = evidence_run_id or _evidence_run_id_from_output(evidence_root)
+    if resolved_run_id is not None:
+        resolved_run_id = _safe_evidence_run_id(resolved_run_id)
     evidence_root.mkdir(parents=True, exist_ok=True)
     evidence_path = evidence_root / "docker-smoke.json"
     preflight_runner = command_runner or _run_command
@@ -1076,6 +1110,7 @@ def run_docker_smoke(
     preflight = run_preflight(
         evidence_root=preflight_root,
         repo_root=repo_root,
+        evidence_run_id=resolved_run_id,
         min_free_bytes=min_free_bytes,
         command_runner=preflight_runner,
         disk_usage_provider=disk_usage_provider,
@@ -1092,6 +1127,7 @@ def run_docker_smoke(
             status="BLOCKED",
             evidence_root=evidence_root,
             repo_root=repo_root,
+            evidence_run_id=resolved_run_id,
             image_tag=image_tag,
             dockerfile=dockerfile,
             commands=commands,
@@ -1187,6 +1223,7 @@ def run_docker_smoke(
         status=status,
         evidence_root=evidence_root,
         repo_root=repo_root,
+        evidence_run_id=resolved_run_id,
         image_tag=image_tag,
         dockerfile=dockerfile,
         commands=commands,
@@ -1509,6 +1546,99 @@ def _source_trust_record_blocker(
         blocker["evidence_key"] = evidence_key
         blocker["observed"] = observed
     return blocker
+
+
+def _source_trust_report_paths(value: Path | Sequence[Path]) -> list[Path]:
+    if isinstance(value, Path):
+        return [value]
+    paths = list(value)
+    if not paths:
+        raise ValueError("at least one --source-trust-report is required")
+    return paths
+
+
+def _combine_source_trust_payloads(payloads: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    if not payloads:
+        return _blocked_security_child(
+            "source_trust",
+            "DOCKER_SECURITY_SOURCE_TRUST_MISSING",
+            "Docker security summary requires source-trust evidence.",
+            path=None,
+        )
+    combined: dict[str, Any] = {
+        "schema": DOCKER_SECURITY_CHILD_SCHEMAS["source_trust"],
+        "status": "PASS",
+        "roles": [],
+        "checked_paths": [],
+        "blockers": [],
+        "findings": [],
+        "source_reports": [],
+    }
+    roles: list[str] = []
+    checked_paths: list[Any] = []
+    blockers: list[Any] = []
+    findings: list[Any] = []
+    statuses: set[Any] = set()
+    evidence_run_id: Any = None
+    for payload in payloads:
+        statuses.add(payload.get("status"))
+        if evidence_run_id is None:
+            evidence_run_id = payload.get("evidence_run_id") or payload.get("bundle_run_id")
+        raw_roles = payload.get("roles")
+        if isinstance(raw_roles, list):
+            for role in raw_roles:
+                role_text = str(role).strip()
+                if role_text and role_text not in roles:
+                    roles.append(role_text)
+        raw_checked = payload.get("checked_paths")
+        if isinstance(raw_checked, list):
+            checked_paths.extend(raw_checked)
+        blockers.extend(_child_blockers(payload))
+        findings.extend(_child_findings(payload))
+        combined["source_reports"].append(
+            {
+                "status": payload.get("status"),
+                "roles": list(raw_roles) if isinstance(raw_roles, list) else [],
+            }
+        )
+    combined["evidence_run_id"] = evidence_run_id
+    combined["roles"] = roles
+    combined["checked_paths"] = checked_paths
+    combined["blockers"] = blockers
+    combined["findings"] = findings
+    missing_roles = sorted(set(SOURCE_TRUST_ROLE_LABELS) - _source_trust_proven_roles(combined))
+    for role in missing_roles:
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_TRUST_ROLE_ENV_PROOF_MISSING",
+                "source": "source_trust",
+                "role": role,
+                "label": SOURCE_TRUST_ROLE_LABELS[role],
+                "message": "source_trust PASS requires both compute and display role env proof.",
+            }
+        )
+    if "FAIL" in statuses or findings:
+        combined["status"] = "FAIL"
+    elif statuses != {"PASS"} or blockers:
+        combined["status"] = "BLOCKED"
+    else:
+        combined["status"] = "PASS"
+    return combined
+
+
+def _source_trust_proven_roles(payload: Mapping[str, Any]) -> set[str]:
+    checked_paths = payload.get("checked_paths")
+    if not isinstance(checked_paths, list):
+        return set()
+    roles: set[str] = set()
+    for role, label in SOURCE_TRUST_ROLE_LABELS.items():
+        for record in checked_paths:
+            if not isinstance(record, Mapping) or str(record.get("label") or "") != label:
+                continue
+            if not _source_trust_record_blockers(record):
+                roles.add(role)
+                break
+    return roles
 
 
 def _static_contract_issues(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -3309,6 +3439,7 @@ def _docker_smoke_payload(
     status: str,
     evidence_root: Path,
     repo_root: Path,
+    evidence_run_id: str | None,
     image_tag: str,
     dockerfile: Path,
     commands: Mapping[str, CommandResult],
@@ -3318,7 +3449,7 @@ def _docker_smoke_payload(
     return {
         "schema_version": "nhms.two_node_docker.app_smoke.v1",
         "change_id": CHANGE_ID,
-        "evidence_run_id": _evidence_run_id_from_output(evidence_root),
+        "evidence_run_id": evidence_run_id or _evidence_run_id_from_output(evidence_root),
         "status": status,
         "checked_at": _now_iso(),
         "evidence_root": str(evidence_root),
@@ -4736,6 +4867,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     static_parser.add_argument("--compute-env", type=Path, default=Path("infra/env/compute.example"))
     static_parser.add_argument("--display-env", type=Path, default=Path("infra/env/display.example"))
     static_parser.add_argument("--report", type=Path, default=DEFAULT_STATIC_REPORT)
+    static_parser.add_argument(
+        "--evidence-run-id",
+        help="Current final E2E evidence run id. Defaults to the segment after artifacts/two-node-e2e/ when present.",
+    )
 
     preflight_parser = subparsers.add_parser("preflight", help="Record Docker disk/cache preflight evidence.")
     preflight_parser.add_argument("--evidence-root", type=Path, default=DEFAULT_PREFLIGHT_ROOT)
@@ -4747,6 +4882,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
     smoke_parser = subparsers.add_parser("smoke", help="Build and smoke-test the default app Docker image.")
     smoke_parser.add_argument("--evidence-root", type=Path, default=DEFAULT_DOCKER_SMOKE_ROOT)
+    smoke_parser.add_argument(
+        "--evidence-run-id",
+        help="Current final E2E evidence run id. Defaults to the segment after artifacts/two-node-e2e/ when present.",
+    )
     smoke_parser.add_argument("--image-tag", default=DEFAULT_SMOKE_IMAGE)
     smoke_parser.add_argument("--dockerfile", type=Path, default=DEFAULT_APP_DOCKERFILE)
     smoke_parser.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
@@ -4760,7 +4899,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     summary_parser.add_argument(
         "--source-trust-report",
         type=Path,
-        default=Path("artifacts/stage-change") / CHANGE_ID / "docker-security" / "two-node-docker-source-trust.json",
+        action="append",
+        default=None,
+        help="Source-trust report path. Repeat for role-scoped compute/display reports.",
     )
     summary_parser.add_argument("--static-report", type=Path, default=DEFAULT_STATIC_REPORT)
     summary_parser.add_argument(
@@ -4800,7 +4941,7 @@ def _run_static_command(args: argparse.Namespace, repo_root: Path) -> int:
         )
     except Exception as error:
         result = _static_setup_failure_result(error)
-        report_path = write_static_report(result, args.report, repo_root)
+        report_path = write_static_report(result, args.report, repo_root, evidence_run_id=args.evidence_run_id)
         redacted_error = _redact_static_output_text(str(error))
         print(
             json.dumps(
@@ -4814,7 +4955,7 @@ def _run_static_command(args: argparse.Namespace, repo_root: Path) -> int:
             )
         )
         return 2
-    report_path = write_static_report(result, args.report, repo_root)
+    report_path = write_static_report(result, args.report, repo_root, evidence_run_id=args.evidence_run_id)
     print(json.dumps({"status": result.status, "report": str(report_path)}, sort_keys=True))
     return 0 if result.status == "PASS" else 1
 
@@ -4838,6 +4979,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = run_docker_smoke(
                 evidence_root=args.evidence_root,
                 repo_root=repo_root,
+                evidence_run_id=args.evidence_run_id,
                 image_tag=args.image_tag,
                 dockerfile=args.dockerfile,
                 min_free_bytes=int(args.min_free_gb * 1024**3),
@@ -4853,7 +4995,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output=args.output,
                 repo_root=repo_root,
                 evidence_run_id=args.evidence_run_id,
-                source_trust_report=args.source_trust_report,
+                source_trust_report=args.source_trust_report or list(DEFAULT_SOURCE_TRUST_REPORTS),
                 static_report=args.static_report,
                 smoke_report=args.smoke_report,
             )
