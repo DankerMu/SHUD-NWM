@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -3321,6 +3322,51 @@ def test_docker_smoke_image_inspect_missing_never_passes() -> None:
     assert docker_runtime._docker_smoke_status(blockers) == "FAIL"
 
 
+def test_docker_security_summary_aggregates_source_artifacts(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    security_root = repo_root / "artifacts" / "docker-security"
+    source_trust = security_root / "two-node-docker-source-trust.json"
+    static_report = security_root / "static-compose-env-check.json"
+    smoke_report = security_root / "docker-smoke.json"
+    _write_json(source_trust, {"schema": "nhms.two_node_docker.source_trust.v1", "status": "PASS", "blockers": []})
+    _write_json(static_report, {"schema_version": "nhms.two_node_docker.static_check.v1", "status": "PASS"})
+    _write_json(
+        smoke_report,
+        {
+            "schema_version": "nhms.two_node_docker.app_smoke.v1",
+            "status": "PASS",
+            "image_tag": "nhms-app:test",
+            "dockerfile": str(repo_root / "infra/docker/Dockerfile.app"),
+        },
+    )
+
+    output = docker_runtime.write_docker_security_summary(
+        output=security_root / "summary.json",
+        repo_root=repo_root,
+        evidence_run_id="run-123",
+        source_trust_report=source_trust,
+        static_report=static_report,
+        smoke_report=smoke_report,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["status"] == "PASS"
+    assert payload["evidence_run_id"] == "run-123"
+    assert payload["runtime_config"] == {
+        "display_readonly": True,
+        "service_role": "display_readonly",
+        "slurm_routes_enabled": False,
+    }
+    assert payload["live_docker_evidence"] is True
+    assert payload["proofs"] == {
+        "live_container_checked": True,
+        "smoke_passed": True,
+        "source_trust_passed": True,
+        "static_passed": True,
+    }
+    assert payload["source_artifacts"]["static"]["sha256"] == sha256(static_report.read_bytes()).hexdigest()
+
+
 def test_image_absence_probe_rejects_scontrol_only_slurm_cli(tmp_path: Path) -> None:
     scontrol = tmp_path / "scontrol"
     scontrol.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -3539,6 +3585,11 @@ def _run_entrypoint(command: list[str], env: dict[str, str]) -> subprocess.Compl
         capture_output=True,
         text=True,
     )
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _high_space(path: Path) -> docker_runtime.DiskSpace:

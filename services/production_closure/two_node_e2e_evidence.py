@@ -124,6 +124,7 @@ DOCKER_PREFLIGHT_REQUIRED_COMMANDS = (
     "docker_compose_version",
     "docker_info_docker_root",
     "docker_system_df",
+    "df_h",
 )
 DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS = ("evidence_root", "tmpdir", "docker_root")
 DOCKER_REQUIRED_FALSE_PROOFS: Mapping[str, tuple[str, ...]] = {
@@ -237,6 +238,22 @@ READONLY_DB_REQUIRED_PERMISSION_TARGETS = frozenset(
         "ops.*",
     }
 )
+READONLY_DB_TABLE_PERMISSION_TARGETS = frozenset(
+    {
+        "hydro.hydro_run",
+        "hydro.river_timeseries",
+        "met.forecast_cycle",
+        "met.forcing_station_timeseries",
+        "ops.pipeline_job",
+        "ops.pipeline_event",
+    }
+)
+READONLY_DB_SCHEMA_PERMISSION_TARGETS = frozenset({"hydro.*", "met.*", "ops.*"})
+READONLY_DB_TABLE_REQUIRED_OPERATIONS = frozenset({"INSERT", "UPDATE", "DELETE"})
+READONLY_DB_SCHEMA_REQUIRED_OPERATIONS = frozenset({"DDL_CREATE_TABLE"})
+READONLY_DB_DATABASE_REQUIRED_OPERATIONS = frozenset({"DATABASE_CREATE"})
+READONLY_DB_SEQUENCE_REQUIRED_OPERATIONS = frozenset({"AUDITED_SCHEMA_SEQUENCE_USAGE_UPDATE"})
+READONLY_DB_TABLE_MUTATING_FIELDS = ("table_privileges", "column_privileges", "sequence_privileges")
 MAX_BOUNDED_EVIDENCE_DEPTH = 5
 MAX_BOUNDED_EVIDENCE_DICT_KEYS = 32
 MAX_BOUNDED_EVIDENCE_LIST_ITEMS = 12
@@ -2088,15 +2105,28 @@ def _docker_preflight_contract_blockers(payload: Mapping[str, Any]) -> list[dict
                     evidence_key=key,
                 )
             )
+    blockers.extend(
+        _recorded_path_approval_blockers(payload, ("evidence_root", "tmpdir"), lane_name="docker_preflight")
+    )
+    producer_blockers = payload.get("blockers")
+    if isinstance(producer_blockers, list) and producer_blockers:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_PREFLIGHT_PRODUCER_BLOCKERS_PRESENT",
+                "Docker preflight PASS cannot contain producer blockers.",
+                producer_blocker_count=len(producer_blockers),
+            )
+        )
     disk = payload.get("disk")
     if not isinstance(disk, Mapping):
         blockers.append(
             _blocker(
                 "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_MISSING",
                 "Docker preflight PASS must include disk evidence.",
+                )
             )
-        )
     else:
+        min_free_bytes = _int_value(payload.get("min_free_bytes"))
         for label in DOCKER_PREFLIGHT_REQUIRED_DISK_LABELS:
             snapshot = disk.get(label)
             if not isinstance(snapshot, Mapping) or snapshot.get("free_bytes") is None:
@@ -2105,6 +2135,26 @@ def _docker_preflight_contract_blockers(payload: Mapping[str, Any]) -> list[dict
                         "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_MISSING",
                         "Docker preflight PASS must include free-space evidence for required disk labels.",
                         label=label,
+                    )
+                )
+                continue
+            free_bytes = _int_value(snapshot.get("free_bytes"))
+            if free_bytes is None:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_DOCKER_PREFLIGHT_DISK_EVIDENCE_INVALID",
+                        "Docker preflight disk free_bytes must be numeric.",
+                        label=label,
+                    )
+                )
+            elif min_free_bytes is not None and free_bytes < min_free_bytes:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_DOCKER_PREFLIGHT_LOW_DISK_SPACE",
+                        "Docker preflight PASS contradicts required free-space minimum.",
+                        label=label,
+                        free_bytes=free_bytes,
+                        min_free_bytes=min_free_bytes,
                     )
                 )
     commands = payload.get("commands")
@@ -2149,6 +2199,32 @@ def _docker_preflight_current_run_blockers(
     ):
         return []
     return _current_run_blockers(payload, evidence_run_id, lane_name="docker_preflight")
+
+
+def _recorded_path_approval_blockers(
+    payload: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    lane_name: str,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for key in keys:
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            _safe_resolved_evidence_root(Path(value))
+        except TwoNodeE2EEvidenceError:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_RECORDED_PATH_OUTSIDE_APPROVED_ROOTS",
+                    "Recorded evidence/temp path must stay under approved roots.",
+                    lane=lane_name,
+                    evidence_key=key,
+                    path=value,
+                )
+            )
+    return blockers
 
 
 def _docker_display_security_proofs(payload: Mapping[str, Any]) -> dict[str, bool | None]:
@@ -2254,15 +2330,48 @@ def _raw_docker_security_analysis(payload: Mapping[str, Any]) -> dict[str, bool 
     for inspect_object in _docker_inspect_objects(payload):
         host_config = _first_raw_mapping(inspect_object, ("HostConfig", "host_config"))
         if host_config:
-            _merge_raw_proof(raw_proofs, "privileged", _raw_bool(host_config.get("Privileged")))
-            _merge_raw_proof(raw_proofs, "host_network", _mode_is_host_or_shared(host_config.get("NetworkMode")))
-            _merge_raw_proof(raw_proofs, "host_pid", _mode_is_host_or_shared(host_config.get("PidMode")))
-            _merge_raw_proof(raw_proofs, "host_ipc", _mode_is_host_or_shared(host_config.get("IpcMode")))
-            _merge_raw_proof(raw_proofs, "cap_add_present", _sequence_has_values(host_config.get("CapAdd")))
-            _merge_raw_proof(raw_proofs, "cap_drop_all", _cap_drop_all(host_config.get("CapDrop")))
-            _merge_raw_proof(raw_proofs, "root_filesystem_readonly", _raw_bool(host_config.get("ReadonlyRootfs")))
+            _merge_raw_proof(
+                raw_proofs,
+                "privileged",
+                _raw_bool(_first_present(host_config, ("Privileged", "privileged"))),
+            )
+            _merge_raw_proof(
+                raw_proofs,
+                "host_network",
+                _mode_is_host_or_shared(_first_present(host_config, ("NetworkMode", "network_mode"))),
+            )
+            _merge_raw_proof(
+                raw_proofs,
+                "host_pid",
+                _mode_is_host_or_shared(_first_present(host_config, ("PidMode", "pid", "pid_mode"))),
+            )
+            _merge_raw_proof(
+                raw_proofs,
+                "host_ipc",
+                _mode_is_host_or_shared(_first_present(host_config, ("IpcMode", "ipc", "ipc_mode"))),
+            )
+            _merge_raw_proof(
+                raw_proofs,
+                "cap_add_present",
+                _sequence_has_values(_first_present(host_config, ("CapAdd", "cap_add"))),
+            )
+            _merge_raw_proof(
+                raw_proofs,
+                "cap_drop_all",
+                _cap_drop_all(_first_present(host_config, ("CapDrop", "cap_drop"))),
+            )
+            _merge_raw_proof(
+                raw_proofs,
+                "root_filesystem_readonly",
+                _raw_bool(
+                    _first_present(
+                        host_config,
+                        ("ReadonlyRootfs", "ReadonlyRootFS", "read_only", "readonly_rootfs"),
+                    )
+                ),
+            )
             _merge_raw_proof(raw_proofs, "forbidden_hostconfig_hazard", _hostconfig_hazard(host_config))
-            _merge_mount_hazards(mount_hazards, _raw_bind_mounts(host_config.get("Binds")))
+            _merge_mount_hazards(mount_hazards, _raw_bind_mounts(_first_present(host_config, ("Binds", "binds"))))
         config = _first_raw_mapping(inspect_object, ("Config", "config"))
         if config:
             env_hazard = env_hazard or _env_has_forbidden_keys(config.get("Env") or config.get("env"))
@@ -2323,8 +2432,11 @@ def _docker_inspect_objects(payload: Mapping[str, Any]) -> list[Mapping[str, Any
         "inspect_data",
         "container",
     ):
-        objects.extend(_mapping_objects(payload.get(key)))
-    if "HostConfig" in payload or "Config" in payload or "Mounts" in payload:
+        for item in _mapping_objects(payload.get(key)):
+            objects.append(item)
+            if any(top_key in item for top_key in ("pid", "ipc", "cap_drop")):
+                objects.append({"host_config": item})
+    if any(key in payload for key in ("HostConfig", "host_config", "Config", "config", "Mounts", "mounts")):
         objects.append(payload)
     return objects
 
@@ -2344,7 +2456,10 @@ def _docker_compose_service_objects(payload: Mapping[str, Any]) -> list[Mapping[
     raw_services = payload.get("services")
     if isinstance(raw_services, Mapping):
         services.extend(item for item in raw_services.values() if isinstance(item, Mapping))
-    if any(key in payload for key in ("privileged", "network_mode", "cap_add", "volumes", "read_only")):
+    if any(
+        key in payload
+        for key in ("privileged", "network_mode", "pid", "ipc", "cap_add", "cap_drop", "volumes", "read_only")
+    ):
         services.append(payload)
     return services
 
@@ -2363,6 +2478,13 @@ def _first_raw_mapping(payload: Mapping[str, Any], keys: Sequence[str]) -> Mappi
         if isinstance(value, Mapping):
             return value
     return {}
+
+
+def _first_present(payload: Mapping[str, Any], keys: Sequence[str]) -> Any:
+    for key in keys:
+        if key in payload:
+            return payload[key]
+    return None
 
 
 def _merge_raw_proof(proofs: dict[str, bool | None], key: str, value: bool | None) -> None:
@@ -2491,6 +2613,21 @@ def _raw_bool(value: Any) -> bool | None:
     return None
 
 
+def _int_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def _mode_is_host_or_shared(value: Any) -> bool | None:
     if value is None:
         return None
@@ -2524,11 +2661,11 @@ def _hostconfig_hazard(host_config: Mapping[str, Any]) -> bool:
     return any(
         value is True
         for value in (
-            _raw_bool(host_config.get("Privileged")),
-            _mode_is_host_or_shared(host_config.get("NetworkMode")),
-            _mode_is_host_or_shared(host_config.get("PidMode")),
-            _mode_is_host_or_shared(host_config.get("IpcMode")),
-            _sequence_has_values(host_config.get("CapAdd")),
+            _raw_bool(_first_present(host_config, ("Privileged", "privileged"))),
+            _mode_is_host_or_shared(_first_present(host_config, ("NetworkMode", "network_mode"))),
+            _mode_is_host_or_shared(_first_present(host_config, ("PidMode", "pid", "pid_mode"))),
+            _mode_is_host_or_shared(_first_present(host_config, ("IpcMode", "ipc", "ipc_mode"))),
+            _sequence_has_values(_first_present(host_config, ("CapAdd", "cap_add"))),
         )
     )
 
@@ -2579,7 +2716,7 @@ def _is_munge_path(value: str) -> bool:
 
 def _is_broad_host_bind_source(value: str) -> bool:
     normalized = _normalize_posix_path(value)
-    return normalized in DOCKER_BROAD_HOST_ROOTS
+    return normalized in DOCKER_BROAD_HOST_ROOTS or normalized.startswith("/scratch/")
 
 
 def _is_private_workspace_path(value: str) -> bool:
@@ -2714,6 +2851,12 @@ def _readonly_db_child_evidence_issues(
         permission_blockers, permission_findings = _readonly_db_permission_issues(permission_probes)
         blockers.extend(permission_blockers)
         findings.extend(permission_findings)
+    blockers.extend(
+        _readonly_db_source_coverage_blockers(
+            payload,
+            declared_sources=declared_sources,
+        )
+    )
     return blockers, findings
 
 
@@ -2839,6 +2982,54 @@ def _readonly_db_route_issues(
     return blockers, findings
 
 
+def _readonly_db_source_coverage_blockers(
+    payload: Mapping[str, Any],
+    *,
+    declared_sources: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    if not declared_sources:
+        return []
+    observed_sources = _readonly_db_evidence_sources(payload)
+    missing_sources = sorted(source for source in declared_sources if source not in observed_sources)
+    if not missing_sources:
+        return []
+    return [
+        _blocker(
+            "TWO_NODE_E2E_READONLY_DB_SOURCE_COVERAGE_MISSING",
+            "Readonly DB evidence must include producer-complete source identities for every declared source.",
+            missing_sources=missing_sources,
+            observed_sources=sorted(observed_sources),
+        )
+    ]
+
+
+def _readonly_db_evidence_sources(payload: Mapping[str, Any]) -> set[str]:
+    sources: set[str] = set()
+    display_identity = payload.get("display_identity")
+    if isinstance(display_identity, Mapping):
+        for key, value in display_identity.items():
+            key_source = _source_name(key)
+            if key_source and isinstance(value, Mapping):
+                sources.add(key_source)
+            value_source = _source_name(value.get("source") if isinstance(value, Mapping) else None)
+            if value_source:
+                sources.add(value_source)
+        for nested_key in ("sources", "strict_identities"):
+            nested = display_identity.get(nested_key)
+            if isinstance(nested, Mapping):
+                for key, value in nested.items():
+                    key_source = _source_name(key)
+                    if key_source and isinstance(value, Mapping):
+                        sources.add(key_source)
+                    value_source = _source_name(value.get("source") if isinstance(value, Mapping) else None)
+                    if value_source:
+                        sources.add(value_source)
+    identity_source = _source_name(payload.get("source") or payload.get("source_id"))
+    if identity_source:
+        sources.add(identity_source)
+    return sources
+
+
 def _readonly_display_identity_for_source(display_identity: Any, source: str) -> Mapping[str, Any]:
     if not isinstance(display_identity, Mapping):
         return {}
@@ -2944,7 +3135,8 @@ def _readonly_db_permission_issues(permission_probes: list[Any]) -> tuple[list[d
         target_status = _normalized_status(target.get("status"))
         target_name = str(target.get("target") or "")
         operations = target.get("operations")
-        if not isinstance(operations, list) or not operations:
+        reachable_findings = target.get("reachable_role_findings")
+        if not isinstance(operations, list) or (not operations and target_name != "reachable_roles"):
             blockers.append(
                 _blocker(
                     "TWO_NODE_E2E_READONLY_DB_PERMISSION_OPERATIONS_MISSING",
@@ -2952,6 +3144,24 @@ def _readonly_db_permission_issues(permission_probes: list[Any]) -> tuple[list[d
                     target=target_name,
                 )
             )
+        if target_name == "reachable_roles":
+            if isinstance(reachable_findings, list) and reachable_findings:
+                findings.append(
+                    _finding(
+                        "TWO_NODE_E2E_READONLY_DB_REACHABLE_ROLE_FINDING",
+                        "Readonly DB reachable role inventory found a mutating reachable role.",
+                        target=target_name,
+                        reachable_role_finding_count=len(reachable_findings),
+                    )
+                )
+            elif operations not in ([], None):
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_READONLY_DB_REACHABLE_ROLE_OPERATIONS_UNEXPECTED",
+                        "Readonly DB reachable_roles may use operations=[] only when no reachable role findings exist.",
+                        target=target_name,
+                    )
+                )
         if target_status == STATUS_FAIL:
             blockers.append(
                 _blocker(
@@ -2968,6 +3178,8 @@ def _readonly_db_permission_issues(permission_probes: list[Any]) -> tuple[list[d
                     target=target_name,
                 )
             )
+        blockers.extend(_readonly_db_permission_operation_coverage_blockers(target, operations))
+        findings.extend(_readonly_db_permission_catalog_findings(target))
         if isinstance(operations, list):
             for operation in operations:
                 if not isinstance(operation, Mapping):
@@ -3007,6 +3219,135 @@ def _readonly_db_operation_findings(operation: Mapping[str, Any]) -> list[dict[s
             )
         )
     return findings
+
+
+def _readonly_db_permission_operation_coverage_blockers(
+    target: Mapping[str, Any],
+    operations: Any,
+) -> list[dict[str, Any]]:
+    target_name = _canonical_permission_target_name(target)
+    if target_name == "reachable_roles":
+        reachable_findings = target.get("reachable_role_findings")
+        if operations == [] and reachable_findings == []:
+            return []
+    required_operations = _readonly_db_required_operations_for_target(target_name)
+    if not required_operations:
+        return []
+    observed_operations = {
+        str(operation.get("operation") or "").upper()
+        for operation in operations
+        if isinstance(operation, Mapping)
+    } if isinstance(operations, list) else set()
+    missing_operations = sorted(required_operations - observed_operations)
+    if not missing_operations:
+        return []
+    return [
+        _blocker(
+            "TWO_NODE_E2E_READONLY_DB_PERMISSION_OPERATION_COVERAGE_MISSING",
+            "Readonly DB permission target is missing required operation-level evidence.",
+            target=target_name,
+            missing_operations=missing_operations,
+            observed_operations=sorted(observed_operations),
+        )
+    ]
+
+
+def _canonical_permission_target_name(target: Mapping[str, Any]) -> str:
+    target_name = str(target.get("target") or "")
+    surface = str(target.get("surface") or "")
+    if target_name in {"current_database", "nhms", ""} and surface == "current_database_create_catalog":
+        return "current_database"
+    return target_name
+
+
+def _readonly_db_required_operations_for_target(target_name: str) -> frozenset[str]:
+    if target_name in READONLY_DB_TABLE_PERMISSION_TARGETS:
+        return READONLY_DB_TABLE_REQUIRED_OPERATIONS
+    if target_name in READONLY_DB_SCHEMA_PERMISSION_TARGETS:
+        return READONLY_DB_SCHEMA_REQUIRED_OPERATIONS
+    if target_name == "current_database":
+        return READONLY_DB_DATABASE_REQUIRED_OPERATIONS
+    if target_name == "audited_schema_sequences":
+        return READONLY_DB_SEQUENCE_REQUIRED_OPERATIONS
+    return frozenset()
+
+
+def _readonly_db_permission_catalog_findings(target: Mapping[str, Any]) -> list[dict[str, Any]]:
+    target_name = _canonical_permission_target_name(target)
+    findings: list[dict[str, Any]] = []
+    if target_name in READONLY_DB_TABLE_PERMISSION_TARGETS:
+        for field in READONLY_DB_TABLE_MUTATING_FIELDS:
+            value = target.get(field)
+            if _catalog_value_has_mutating_privilege(value):
+                findings.append(
+                    _finding(
+                        "TWO_NODE_E2E_READONLY_DB_MUTATING_CATALOG_FIELD",
+                        "Readonly DB table permission evidence contains a mutating catalog field.",
+                        target=target_name,
+                        catalog_field=field,
+                    )
+                )
+    if target_name in READONLY_DB_SCHEMA_PERMISSION_TARGETS:
+        schema_privileges = target.get("schema_privileges")
+        if isinstance(schema_privileges, Mapping) and schema_privileges.get("create") is True:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_READONLY_DB_SCHEMA_CREATE_PRIVILEGE",
+                    "Readonly DB schema permission evidence contains CREATE privilege.",
+                    target=target_name,
+                )
+            )
+    if target_name == "current_database":
+        database_privileges = target.get("database_privileges")
+        if isinstance(database_privileges, Mapping) and database_privileges.get("create") is True:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_READONLY_DB_DATABASE_CREATE_PRIVILEGE",
+                    "Readonly DB current database permission evidence contains CREATE privilege.",
+                    target=target_name,
+                )
+            )
+    if target_name == "audited_schema_sequences" and _catalog_value_has_mutating_privilege(
+        target.get("sequence_privileges")
+    ):
+        findings.append(
+            _finding(
+                "TWO_NODE_E2E_READONLY_DB_AUDITED_SEQUENCE_MUTATING_PRIVILEGE",
+                "Readonly DB audited schema sequence evidence contains USAGE/UPDATE privilege.",
+                target=target_name,
+            )
+        )
+    return findings
+
+
+def _catalog_value_has_mutating_privilege(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            key_text = str(key).lower()
+            if key_text in {
+                "insert",
+                "update",
+                "delete",
+                "truncate",
+                "references",
+                "trigger",
+                "maintain",
+                "usage",
+                "create",
+                "mutating_privilege_allowed",
+            } and nested is True:
+                return True
+            if key_text in {"columns", "column_privilege_columns", "sequence_privilege_sequences"} and nested:
+                return True
+            if _catalog_value_has_mutating_privilege(nested):
+                return True
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return True
+            if _catalog_value_has_mutating_privilege(item):
+                return True
+    return False
 
 
 def _readonly_db_recomputed_status(

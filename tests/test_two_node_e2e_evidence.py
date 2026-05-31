@@ -92,12 +92,11 @@ def test_docker_display_capability_leak_fails_even_when_summary_was_partial() ->
     assert _codes(docker_lane["findings"]) >= {"TWO_NODE_E2E_DOCKER_DISPLAY_FORBIDDEN_CAPABILITY"}
 
 
-def test_known_producer_like_docker_preflight_without_embedded_bundle_id_or_df_h_is_accepted() -> None:
+def test_known_producer_like_docker_preflight_without_embedded_bundle_id_is_accepted() -> None:
     run_id = _run_id("preflight-no-id")
     config = _seed_pass_bundle(run_id)
     preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
     preflight.pop("evidence_run_id")
-    preflight["commands"].pop("df_h")
     _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
 
     summary = validate_two_node_e2e_evidence(config)
@@ -135,6 +134,67 @@ def test_docker_preflight_pass_missing_command_evidence_blocks() -> None:
     )
 
 
+def test_docker_preflight_missing_df_h_evidence_blocks() -> None:
+    run_id = _run_id("preflight-missing-df-h")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight["commands"].pop("df_h")
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_COMMAND_EVIDENCE_MISSING" in _codes(
+        summary["lane_summaries"]["docker_preflight"]["blockers"]
+    )
+
+
+def test_docker_preflight_pass_with_producer_blockers_blocks() -> None:
+    run_id = _run_id("preflight-producer-blockers")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight["blockers"] = [{"code": "LOW_DISK_SPACE"}]
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_PRODUCER_BLOCKERS_PRESENT" in _codes(
+        summary["lane_summaries"]["docker_preflight"]["blockers"]
+    )
+
+
+def test_docker_preflight_pass_with_low_free_bytes_blocks() -> None:
+    run_id = _run_id("preflight-low-free")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight["disk"]["tmpdir"]["free_bytes"] = 512
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_PREFLIGHT_LOW_DISK_SPACE" in _codes(
+        summary["lane_summaries"]["docker_preflight"]["blockers"]
+    )
+
+
+@pytest.mark.parametrize("path_key", ["tmpdir", "evidence_root"])
+def test_docker_preflight_pass_with_unsafe_recorded_path_blocks(path_key: str) -> None:
+    run_id = _run_id(f"preflight-unsafe-{path_key}")
+    config = _seed_pass_bundle(run_id)
+    preflight = _read(config.run_dir / "docker-preflight" / "summary.json")
+    preflight[path_key] = "/tmp/not-approved"
+    _write(config.run_dir / "docker-preflight" / "summary.json", preflight)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_RECORDED_PATH_OUTSIDE_APPROVED_ROOTS" in _codes(
+        summary["lane_summaries"]["docker_preflight"]["blockers"]
+    )
+
+
 def test_docker_security_pass_missing_required_proof_blocks() -> None:
     run_id = _run_id("docker-proof-missing")
     config = _seed_pass_bundle(run_id)
@@ -159,9 +219,16 @@ def test_docker_security_pass_missing_required_proof_blocks() -> None:
         {"HostConfig": {"IpcMode": "host"}},
         {"HostConfig": {"CapAdd": ["SYS_ADMIN"]}},
         {"Mounts": [{"Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": False}]},
+        {"Mounts": [{"Source": "/scratch/private-data", "Destination": "/private", "RW": False}]},
         {"Mounts": [{"Source": "/scratch/private/workspace", "Destination": "/workspace", "RW": False}]},
         {"Mounts": [{"Source": "/", "Destination": "/host", "RW": False}]},
         {"Config": {"Env": ["WORKSPACE_ROOT=/workspace"]}},
+        {"host_config": {"privileged": True}},
+        {"config": {"env": ["DOCKER_HOST=unix:///var/run/docker.sock"]}},
+        {"mounts": [{"source": "/scratch/private-data", "target": "/private", "read_only": True}]},
+        {"pid": "host"},
+        {"ipc": "host"},
+        {"cap_drop": []},
         {"Mounts": [{"Source": "/srv/nhms/published", "Destination": "/var/lib/nhms/published", "RW": True}]},
     ],
 )
@@ -324,6 +391,91 @@ def test_readonly_db_child_failure_or_coverage_gap_blocks(mutator: str) -> None:
     assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_BLOCKED
 
 
+def test_readonly_db_missing_table_update_or_delete_blocks() -> None:
+    run_id = _run_id("db-missing-table-ops")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    target = next(probe for probe in db_summary["permission_probes"] if probe["target"] == "hydro.hydro_run")
+    target["operations"] = [operation for operation in target["operations"] if operation["operation"] == "INSERT"]
+    _write(lane / "summary.json", db_summary)
+    _write(lane / "permission_probes.json", db_summary["permission_probes"])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert "TWO_NODE_E2E_READONLY_DB_PERMISSION_OPERATION_COVERAGE_MISSING" in _codes(
+        readonly_lane["blockers"]
+    )
+
+
+def test_readonly_db_missing_schema_ddl_blocks() -> None:
+    run_id = _run_id("db-missing-ddl")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    target = next(probe for probe in db_summary["permission_probes"] if probe["target"] == "ops.*")
+    target["operations"] = []
+    _write(lane / "summary.json", db_summary)
+    _write(lane / "permission_probes.json", db_summary["permission_probes"])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert "TWO_NODE_E2E_READONLY_DB_PERMISSION_OPERATIONS_MISSING" in _codes(readonly_lane["blockers"])
+    assert "TWO_NODE_E2E_READONLY_DB_PERMISSION_OPERATION_COVERAGE_MISSING" in _codes(
+        readonly_lane["blockers"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("catalog_field", "catalog_value"),
+    [
+        ("table_privileges", {"insert": True}),
+        ("column_privileges", {"update": ["status"]}),
+        (
+            "sequence_privileges",
+            [{"sequence_name": "hydro_run_id_seq", "usage": True, "mutating_privilege_allowed": True}],
+        ),
+    ],
+)
+def test_readonly_db_mutating_catalog_fields_fail(catalog_field: str, catalog_value: Any) -> None:
+    run_id = _run_id(f"db-catalog-{catalog_field}")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    target = next(probe for probe in db_summary["permission_probes"] if probe["target"] == "hydro.hydro_run")
+    target[catalog_field] = catalog_value
+    _write(lane / "summary.json", db_summary)
+    _write(lane / "permission_probes.json", db_summary["permission_probes"])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_FAIL
+    assert "TWO_NODE_E2E_READONLY_DB_MUTATING_CATALOG_FIELD" in _codes(
+        summary["lane_summaries"]["readonly_db"]["findings"]
+    )
+
+
+def test_readonly_db_clean_reachable_roles_empty_operations_pass() -> None:
+    run_id = _run_id("db-reachable-empty")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    target = next(probe for probe in db_summary["permission_probes"] if probe["target"] == "reachable_roles")
+    target["reachable_role_findings"] = []
+    target["operations"] = []
+    _write(lane / "summary.json", db_summary)
+    _write(lane / "permission_probes.json", db_summary["permission_probes"])
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_PASS
+
+
 def test_readonly_db_full_source_bundle_with_only_gfs_route_evidence_blocks() -> None:
     run_id = _run_id("db-route-missing-source")
     config = _seed_pass_bundle(run_id)
@@ -344,6 +496,21 @@ def test_readonly_db_full_source_bundle_with_only_gfs_route_evidence_blocks() ->
     readonly_lane = summary["lane_summaries"]["readonly_db"]
     assert readonly_lane["status"] == STATUS_BLOCKED
     assert "TWO_NODE_E2E_READONLY_DB_ROUTE_SOURCE_COVERAGE_MISSING" in _codes(readonly_lane["blockers"])
+
+
+def test_readonly_db_single_source_identity_blocks_full_scope_even_if_routes_are_present() -> None:
+    run_id = _run_id("db-single-source-identity")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    db_summary["display_identity"] = {"GFS": db_summary["display_identity"]["GFS"]}
+    _write(lane / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_BLOCKED
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert "TWO_NODE_E2E_READONLY_DB_SOURCE_COVERAGE_MISSING" in _codes(readonly_lane["blockers"])
 
 
 def test_readonly_db_ifs_route_identity_mismatch_fails() -> None:
@@ -844,27 +1011,88 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
         ("ops.pipeline_event", "pipeline_event_audit"),
         ("reachable_roles", "reachable_role_membership"),
         ("audited_schema_sequences", "audited_schema_sequence_catalog"),
-        ("nhms", "current_database_create_catalog"),
+        ("current_database", "current_database_create_catalog"),
         ("hydro.*", "schema_table_ddl"),
         ("met.*", "schema_table_ddl"),
         ("ops.*", "schema_table_ddl"),
     )
-    permission_probes = [
-        {
+    permission_probes = []
+    for target, surface in permission_targets:
+        operations: list[dict[str, Any]]
+        probe: dict[str, Any] = {
             "target": target,
             "surface": surface,
             "status": STATUS_PASS,
-            "operations": [
+        }
+        if target in {
+            "hydro.hydro_run",
+            "hydro.river_timeseries",
+            "met.forecast_cycle",
+            "met.forcing_station_timeseries",
+            "ops.pipeline_job",
+            "ops.pipeline_event",
+        }:
+            operations = [
                 {
-                    "operation": "INSERT" if "." in target and "*" not in target else "DDL_CREATE_TABLE",
+                    "operation": operation,
                     "status": STATUS_PASS,
                     "privilege_allowed": False,
                     "execution_outcome": "permission_denied",
                 }
-            ],
-        }
-        for target, surface in permission_targets
-    ]
+                for operation in ("INSERT", "UPDATE", "DELETE")
+            ]
+            probe.update(
+                {
+                    "table_privileges": {
+                        "insert": False,
+                        "update": False,
+                        "delete": False,
+                        "truncate": False,
+                        "references": False,
+                        "trigger": False,
+                        "maintain": False,
+                    },
+                    "column_privileges": {"insert": [], "update": []},
+                    "sequence_privileges": [],
+                }
+            )
+        elif target == "reachable_roles":
+            operations = []
+            probe["reachable_role_findings"] = []
+        elif target == "audited_schema_sequences":
+            operations = [
+                {
+                    "operation": "AUDITED_SCHEMA_SEQUENCE_USAGE_UPDATE",
+                    "status": STATUS_PASS,
+                    "privilege_allowed": False,
+                    "execution_outcome": "catalog_checked_no_audited_schema_sequence_mutating_privilege",
+                }
+            ]
+            probe["sequence_privileges"] = []
+        elif target == "current_database":
+            operations = [
+                {
+                    "operation": "DATABASE_CREATE",
+                    "status": STATUS_PASS,
+                    "privilege_allowed": False,
+                    "database_privilege_allowed": False,
+                    "execution_outcome": "catalog_checked_no_database_create_privilege",
+                }
+            ]
+            probe["database_privileges"] = {"database_name": "nhms", "create": False}
+        else:
+            operations = [
+                {
+                    "operation": "DDL_CREATE_TABLE",
+                    "status": STATUS_PASS,
+                    "privilege_allowed": False,
+                    "schema_privilege_allowed": False,
+                    "execution_outcome": "permission_denied",
+                }
+            ]
+            probe["schema_privileges"] = {"create": False}
+        probe["operations"] = operations
+        permission_probes.append(probe)
     route_smoke = [
         {"name": "health", "status": STATUS_PASS, "path": "/health"},
         {"name": "runtime_config", "status": STATUS_PASS, "path": "/api/v1/runtime/config"},

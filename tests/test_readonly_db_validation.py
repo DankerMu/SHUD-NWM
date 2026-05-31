@@ -21,6 +21,7 @@ from services.production_closure.readonly_db_validation import (
     ReadonlyDbValidationError,
     RouteHttpResponse,
     build_arg_parser,
+    merge_readonly_db_source_evidence,
     run_display_manual_action_probes,
     run_display_route_smoke,
     run_permission_probe_matrix,
@@ -812,6 +813,59 @@ def test_denied_dml_and_ddl_without_mutating_grants_pass_permission_probes() -> 
     assert all(operation["reason"].endswith("_denied_before_commit") for operation in denial_operations)
 
 
+def test_merge_readonly_db_source_evidence_writes_source_complete_final_lane() -> None:
+    evidence_root = _evidence_root()
+    run_id = _run_id("merge-sources")
+    gfs_config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-gfs",
+        database_url="postgresql://display:secret@db.example/nhms",
+        source="GFS",
+        cycle_time="2026-05-03T00:00:00+00:00",
+        strict_run_id="run-gfs",
+        model_id="model-gfs",
+        job_id="job-gfs",
+        force=True,
+    )
+    ifs_config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-ifs",
+        database_url="postgresql://display:secret@db.example/nhms",
+        source="IFS",
+        cycle_time="2026-05-04T00:00:00+00:00",
+        strict_run_id="run-ifs",
+        model_id="model-ifs",
+        job_id="job-ifs",
+        force=True,
+    )
+    gfs_summary = validate_readonly_db_boundary(
+        gfs_config,
+        adapter=_FakeReadonlyAdapter(),
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+    ifs_summary = validate_readonly_db_boundary(
+        ifs_config,
+        adapter=_FakeReadonlyAdapter(),
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+    _promote_simulated_summary_to_live(gfs_config, gfs_summary)
+    _promote_simulated_summary_to_live(ifs_config, ifs_summary)
+
+    summary = merge_readonly_db_source_evidence(
+        evidence_root=evidence_root,
+        run_id=run_id,
+        source_dirs=(gfs_config.lane_dir, ifs_config.lane_dir),
+        force=True,
+    )
+
+    assert summary["status"] == "PASS"
+    assert set(summary["display_identity"]) == {"GFS", "IFS"}
+    assert {route.get("source") for route in summary["route_smoke"] if route.get("source")} == {"GFS", "IFS"}
+    assert (evidence_root / run_id / "db" / "readonly-db-boundary" / "summary.json").is_file()
+
+
 def test_successful_ddl_execution_despite_no_catalog_grant_fails_with_rollback_cleanup_only() -> None:
     adapter = _FakeReadonlyAdapter(successful_operations={("ops.*", "DDL_CREATE_TABLE")})
 
@@ -1568,6 +1622,21 @@ def _passing_manual_actions(run_id: str) -> list[dict[str, Any]]:
         }
         for action in ("retry", "cancel")
     ]
+
+
+def _promote_simulated_summary_to_live(config: ReadonlyDbValidationConfig, summary: dict[str, Any]) -> None:
+    payload = dict(summary)
+    payload["schema"] = "nhms.readonly_db_boundary.evidence.v1"
+    payload["status"] = "PASS"
+    payload["run_id"] = config.run_id
+    payload["validation_provenance"] = {"mode": "live", "live_readonly_proof": True}
+    payload.pop("blockers", None)
+    _write_json(config.lane_dir / "summary.json", payload)
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _seed_stale_pass_evidence(config: ReadonlyDbValidationConfig) -> None:

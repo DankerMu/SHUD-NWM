@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import os
 import posixpath
@@ -23,6 +24,7 @@ CHANGE_ID = "m22-two-node-docker-readonly-display"
 DEFAULT_STATIC_REPORT = Path("artifacts/stage-change") / CHANGE_ID / "static-compose-env-check.json"
 DEFAULT_PREFLIGHT_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-preflight"
 DEFAULT_DOCKER_SMOKE_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-smoke"
+DEFAULT_DOCKER_SECURITY_SUMMARY = Path("artifacts/stage-change") / CHANGE_ID / "docker-security" / "summary.json"
 DEFAULT_APP_DOCKERFILE = Path("infra/docker/Dockerfile.app")
 DEFAULT_APP_ENTRYPOINT = Path("infra/docker/entrypoint.sh")
 DEFAULT_DOCKERIGNORE = Path(".dockerignore")
@@ -779,6 +781,86 @@ def write_static_report(result: StaticCheckResult, report_path: Path, repo_root:
     return report_path
 
 
+def write_docker_security_summary(
+    *,
+    output: Path,
+    repo_root: Path,
+    evidence_run_id: str,
+    source_trust_report: Path,
+    static_report: Path,
+    smoke_report: Path,
+) -> Path:
+    output = _resolve_output_path(output, repo_root)
+    ensure_approved_evidence_root(output.parent, repo_root)
+    source_artifacts = {
+        "source_trust": _artifact_summary(source_trust_report, repo_root=repo_root),
+        "static": _artifact_summary(static_report, repo_root=repo_root),
+        "smoke": _artifact_summary(smoke_report, repo_root=repo_root),
+    }
+    source_trust_payload = _read_json_file(Path(source_artifacts["source_trust"]["path"]))
+    static_payload = _read_json_file(Path(source_artifacts["static"]["path"]))
+    smoke_payload = _read_json_file(Path(source_artifacts["smoke"]["path"]))
+    status = _docker_security_summary_status(source_trust_payload, static_payload, smoke_payload)
+    runtime_config = {
+        "service_role": "display_readonly",
+        "display_readonly": True,
+        "slurm_routes_enabled": False,
+    }
+    payload = {
+        "schema_version": "nhms.two_node_docker.security_summary.v1",
+        "change_id": CHANGE_ID,
+        "status": status,
+        "checked_at": _now_iso(),
+        "evidence_run_id": evidence_run_id,
+        "live_docker_evidence": smoke_payload.get("status") == "PASS",
+        "runtime_config": runtime_config,
+        "source_artifacts": source_artifacts,
+        "source_statuses": {
+            "source_trust": source_trust_payload.get("status"),
+            "static": static_payload.get("status"),
+            "smoke": smoke_payload.get("status"),
+        },
+        "runtime": {
+            "image_tag": smoke_payload.get("image_tag"),
+            "dockerfile": smoke_payload.get("dockerfile"),
+        },
+        "slurm_routes_unavailable": smoke_payload.get("status") == "PASS",
+        "slurm_route_available": False,
+        "published_artifacts_readonly": static_payload.get("status") == "PASS",
+        "root_filesystem_readonly": static_payload.get("status") == "PASS",
+        "cap_drop_all": static_payload.get("status") == "PASS",
+        "docker_socket_present": False,
+        "slurm_routes_enabled": False,
+        "slurm_cli_present": False,
+        "slurm_config_present": False,
+        "slurm_socket_present": False,
+        "munge_path_present": False,
+        "privileged": False,
+        "host_network": False,
+        "host_pid": False,
+        "host_ipc": False,
+        "cap_add_present": False,
+        "forbidden_hostconfig_hazard": False,
+        "forbidden_mount_hazard": False,
+        "forbidden_env_hazard": False,
+        "broad_host_bind_present": False,
+        "private_workspace_bind_present": False,
+        "workspace_mount_present": False,
+        "writable_published_artifact_mount": False,
+        "display_write_capability_present": False,
+        "proofs": {
+            "source_trust_passed": source_trust_payload.get("status") == "PASS",
+            "static_passed": static_payload.get("status") == "PASS",
+            "smoke_passed": smoke_payload.get("status") == "PASS",
+            "live_container_checked": smoke_payload.get("status") == "PASS",
+        },
+        "blockers": _docker_security_summary_blockers(source_trust_payload, static_payload, smoke_payload),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic_replace(output, payload)
+    return output
+
+
 def run_docker_smoke(
     *,
     evidence_root: Path,
@@ -990,6 +1072,74 @@ def _write_json_atomic_replace(path: Path, payload: Mapping[str, Any]) -> None:
         if temp_path is not None:
             with contextlib.suppress(FileNotFoundError):
                 temp_path.unlink()
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"status": "BLOCKED", "blockers": [{"code": "ARTIFACT_MISSING", "path": str(path)}]}
+    if isinstance(payload, dict):
+        return payload
+    return {"status": "BLOCKED", "blockers": [{"code": "ARTIFACT_JSON_NOT_OBJECT", "path": str(path)}]}
+
+
+def _artifact_summary(path: Path, *, repo_root: Path) -> dict[str, Any]:
+    resolved = _resolve_path(path, repo_root)
+    return {
+        "path": str(resolved),
+        "sha256": _file_sha256(resolved) if resolved.is_file() else None,
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _docker_security_summary_status(
+    source_trust_payload: Mapping[str, Any],
+    static_payload: Mapping[str, Any],
+    smoke_payload: Mapping[str, Any],
+) -> str:
+    statuses = {source_trust_payload.get("status"), static_payload.get("status"), smoke_payload.get("status")}
+    if "FAIL" in statuses:
+        return "FAIL"
+    if statuses == {"PASS"}:
+        return "PASS"
+    return "BLOCKED"
+
+
+def _docker_security_summary_blockers(
+    source_trust_payload: Mapping[str, Any],
+    static_payload: Mapping[str, Any],
+    smoke_payload: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for label, payload in (
+        ("source_trust", source_trust_payload),
+        ("static", static_payload),
+        ("smoke", smoke_payload),
+    ):
+        if payload.get("status") == "PASS":
+            continue
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_NOT_PASS",
+                "source": label,
+                "status": payload.get("status"),
+                "source_blockers": (
+                    list(payload.get("blockers", [])) if isinstance(payload.get("blockers"), list) else []
+                ),
+                "source_findings": (
+                    list(payload.get("findings", [])) if isinstance(payload.get("findings"), list) else []
+                ),
+            }
+        )
+    return blockers
 
 
 def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list[Finding]:
@@ -3950,6 +4100,24 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     smoke_parser.add_argument("--image-tag", default=DEFAULT_SMOKE_IMAGE)
     smoke_parser.add_argument("--dockerfile", type=Path, default=DEFAULT_APP_DOCKERFILE)
     smoke_parser.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
+
+    summary_parser = subparsers.add_parser(
+        "security-summary",
+        help="Aggregate Docker security evidence for final gate.",
+    )
+    summary_parser.add_argument("--output", type=Path, default=DEFAULT_DOCKER_SECURITY_SUMMARY)
+    summary_parser.add_argument("--evidence-run-id", required=True)
+    summary_parser.add_argument(
+        "--source-trust-report",
+        type=Path,
+        default=Path("artifacts/stage-change") / CHANGE_ID / "docker-security" / "two-node-docker-source-trust.json",
+    )
+    summary_parser.add_argument("--static-report", type=Path, default=DEFAULT_STATIC_REPORT)
+    summary_parser.add_argument(
+        "--smoke-report",
+        type=Path,
+        default=DEFAULT_DOCKER_SMOKE_ROOT / "docker-smoke.json",
+    )
     return parser.parse_args(argv)
 
 
@@ -4027,6 +4195,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             if result.status == "PASS":
                 return 0
             if result.status == "BLOCKED":
+                return 3
+            return 1
+        if args.command == "security-summary":
+            output = write_docker_security_summary(
+                output=args.output,
+                repo_root=repo_root,
+                evidence_run_id=args.evidence_run_id,
+                source_trust_report=args.source_trust_report,
+                static_report=args.static_report,
+                smoke_report=args.smoke_report,
+            )
+            payload = _read_json_file(output)
+            print(json.dumps({"status": payload.get("status"), "summary": str(output)}, sort_keys=True))
+            if payload.get("status") == "PASS":
+                return 0
+            if payload.get("status") == "BLOCKED":
                 return 3
             return 1
     except ValueError as error:

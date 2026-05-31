@@ -413,6 +413,21 @@ minimal submit probe evidence
 
 27 容器安全检查必须以 `scripts/validate_two_node_docker_runtime.py static` 和 Docker smoke/image absence evidence 作为 `docker-security/` 的权威边界。下面的容器内探针只是补充性快速检查，但覆盖同一组代表性 Slurm/Munge/Docker socket binary/path：
 
+在最终 E2E 聚合前，使用下面的 checked-in helper 把 source-trust、static 和 smoke evidence 规范化成
+`$EVIDENCE_ROOT/docker-security/summary.json`；不要手写该 JSON：
+
+```bash
+set -euo pipefail
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
+uv run python scripts/validate_two_node_docker_runtime.py security-summary \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --source-trust-report "$EVIDENCE_ROOT/docker-security/two-node-docker-source-trust.json" \
+  --static-report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json" \
+  --smoke-report "$EVIDENCE_ROOT/docker-security/docker-smoke.json" \
+  --output "$EVIDENCE_ROOT/docker-security/summary.json"
+```
+
 ```bash
 set -euo pipefail
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
@@ -581,6 +596,36 @@ artifacts/
 
 每个 evidence bundle 必须记录 status：`PASS`、`PARTIAL`、`FAIL` 或 `BLOCKED`。缺真实 readonly DB、缺 live browser、缺 Slurm probe 或缺 cross-plane strict identity 时，只能记 `BLOCKED` 或 `PARTIAL`，不能补写 `PASS`。
 
+最终聚合前必须写 `$EVIDENCE_ROOT/run.json`，作为当前 bundle 的 metadata 和 strict identity 真相源：
+
+```json
+{
+  "schema": "nhms.two_node_e2e.run.v1",
+  "evidence_run_id": "<EVIDENCE_RUN_ID>",
+  "declared_sources": ["GFS", "IFS"],
+  "reduced_scope": false,
+  "strict_identities": {
+    "GFS": {
+      "source": "GFS",
+      "cycle_time": "<gfs-cycle-time>",
+      "run_id": "<gfs-business-run-id>",
+      "model_id": "basins_qhh_shud",
+      "job_id": "<gfs-job-id-with-published-log>"
+    },
+    "IFS": {
+      "source": "IFS",
+      "cycle_time": "<ifs-cycle-time>",
+      "run_id": "<ifs-business-run-id>",
+      "model_id": "basins_qhh_shud",
+      "job_id": "<ifs-job-id-with-published-log>"
+    }
+  }
+}
+```
+
+创建后先执行 `python -m json.tool "$EVIDENCE_ROOT/run.json" >/dev/null`。单 source 演练必须把 `declared_sources`
+缩成实际 source，并设置 `"reduced_scope": true`。
+
 ## 13. Docker Validation Matrix
 
 | Evidence | 记录内容 | PASS 边界 |
@@ -597,6 +642,38 @@ artifacts/
 | `docker-security/` | source-trust preflight、static validator、Docker smoke/image absence evidence、no Slurm/Munge/Docker socket、HostConfig/mount/env 检查；inline probe 仅为补充 | 任一 27 控制能力为 FAIL |
 | `cross-plane/` | 同一 `run_id/source/cycle_time/model_id` 从 22 到 27 | historical latest/mock 数据不能 PASS |
 | `final-e2e-evidence/` | `scripts/validate_two_node_e2e_evidence.py` 聚合后的 lane/source/blocker/finding 汇总 | 只有全 lane、全 declared source、live readonly/display/strict identity 证据都通过才 PASS |
+
+完整 GFS/IFS readonly DB evidence 不能只跑一次单 source。先分别运行 `scripts/validate_readonly_db_boundary.py`
+写入 per-source lane，再用同一脚本的 `--merge-source-dir` 合并到 `$EVIDENCE_ROOT/db/readonly-db-boundary/`：
+
+```bash
+uv run python scripts/validate_readonly_db_boundary.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID-db-GFS" \
+  --source GFS \
+  --cycle-time '<gfs-cycle-time>' \
+  --strict-run-id '<gfs-business-run-id>' \
+  --model-id basins_qhh_shud \
+  --job-id '<gfs-job-id-with-published-log>' \
+  --force
+
+uv run python scripts/validate_readonly_db_boundary.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID-db-IFS" \
+  --source IFS \
+  --cycle-time '<ifs-cycle-time>' \
+  --strict-run-id '<ifs-business-run-id>' \
+  --model-id basins_qhh_shud \
+  --job-id '<ifs-job-id-with-published-log>' \
+  --force
+
+uv run python scripts/validate_readonly_db_boundary.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID" \
+  --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-GFS/db/readonly-db-boundary" \
+  --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-IFS/db/readonly-db-boundary" \
+  --force
+```
 
 最终聚合命令：
 
