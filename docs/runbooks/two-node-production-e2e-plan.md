@@ -568,7 +568,7 @@ curl -i 'http://127.0.0.1:8000/api/v1/jobs/<job_id>/logs?source=GFS&cycle_time=<
 - 河段 `q_down` 曲线显示。
 - `/ops` 能选择本轮 source/cycle/run/model。
 - `/ops` 能展示 stages、jobs、失败原因和日志；browser summary 必须分别记录 identity-bound `ops_jobs`
-  和 `ops_job_logs` 检查，日志面板必须绑定所选 `job_id`。
+  和 `ops_job_logs` 检查，jobs 列表和日志面板都必须绑定所选 `job_id`。
 - `/ops` 在 27 display mode 下不显示真实 retry/cancel 执行入口，只显示诊断信息复制和 22 人工处理建议。
 - viewer/operator/sys_admin 权限状态符合只读展示预期，不得通过前端触发控制动作。
 
@@ -745,7 +745,7 @@ mock/historical latest、wrong run/model/source/cycle/job identity 或 27 产生
 - `NHMS_SERVICE_ROLE=display_readonly` 下 `/api/v1/slurm/*` 不可用。
 - retry/cancel 控制动作在 27 返回人工处理提示，不写 DB，不调用 Gateway。
 - latest-product 至少一个 source 返回 200。
-- latest-product 可用强身份约束锁定 22 本轮 `run_id/source/cycle/model_id`，`/ops` 的 status/stages/jobs/logs 也必须用同一 strict identity，job logs 还要绑定 `job_id`。
+- latest-product 可用强身份约束锁定 22 本轮 `run_id/source/cycle/model_id`，`/ops` 的 status/stages/jobs/logs 也必须用同一 strict identity，`ops_jobs` 和 `ops_job_logs` 还要绑定 `job_id`。
 - `/hydro-met` 和 `/ops` 无 mock 浏览器 E2E 通过；如果只拿到 source/cycle-only 证据，这些 lane 只能记为 `BLOCKED` 或 `PARTIAL`。
 - `/ops` 显示诊断信息和 22 人工处理建议，不显示真实控制按钮。
 

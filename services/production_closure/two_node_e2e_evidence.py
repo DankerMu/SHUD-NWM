@@ -1146,7 +1146,7 @@ def _evaluate_source_lane(
                 source,
                 check_result,
                 strict_identities,
-                require_job_id=require_job_id or check in {"job_logs", "ops_job_logs"},
+                require_job_id=require_job_id or check in {"job_logs", "ops_jobs", "ops_job_logs"},
             )
             findings.extend(
                 _with_context(item, lane=name, source=source, check=check)

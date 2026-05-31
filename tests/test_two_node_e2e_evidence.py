@@ -1154,6 +1154,21 @@ def test_browser_ops_job_logs_requires_job_id_binding() -> None:
     assert "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE" in _codes(browser_lane["blockers"])
 
 
+def test_browser_ops_jobs_requires_job_id_binding() -> None:
+    run_id = _run_id("browser-jobs-no-job")
+    config = _seed_pass_bundle(run_id)
+    browser_summary = _read(config.run_dir / "browser" / "summary.json")
+    browser_summary["sources"]["GFS"]["checks"]["ops_jobs"]["identity"].pop("job_id")
+    _write(config.run_dir / "browser" / "summary.json", browser_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    browser_lane = summary["lane_summaries"]["browser"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert browser_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_OBSERVED_STRICT_IDENTITY_INCOMPLETE" in _codes(browser_lane["blockers"])
+
+
 def test_manual_ops_auth_and_receipt_boundaries() -> None:
     auth_run_id = _run_id("manual-auth")
     auth_config = _seed_pass_bundle(auth_run_id)
