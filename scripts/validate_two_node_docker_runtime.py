@@ -31,6 +31,11 @@ DEFAULT_DOCKERIGNORE = Path(".dockerignore")
 DEFAULT_SMOKE_IMAGE = "nhms-app:m22-09-smoke"
 DEFAULT_MIN_FREE_GB = 5.0
 MAX_COMMAND_OUTPUT_BYTES = 16_384
+DOCKER_SECURITY_CHILD_SCHEMAS = {
+    "source_trust": "nhms.two_node_docker.source_trust.v1",
+    "static": "nhms.two_node_docker.static_check.v1",
+    "smoke": "nhms.two_node_docker.app_smoke.v1",
+}
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _VAR_PATTERN = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])([^}]*))?\}")
@@ -797,9 +802,9 @@ def write_docker_security_summary(
         "static": _artifact_summary(static_report, repo_root=repo_root),
         "smoke": _artifact_summary(smoke_report, repo_root=repo_root),
     }
-    source_trust_payload = _read_json_file(Path(source_artifacts["source_trust"]["path"]))
-    static_payload = _read_json_file(Path(source_artifacts["static"]["path"]))
-    smoke_payload = _read_json_file(Path(source_artifacts["smoke"]["path"]))
+    source_trust_payload = _read_security_child_payload("source_trust", Path(source_artifacts["source_trust"]["path"]))
+    static_payload = _read_security_child_payload("static", Path(source_artifacts["static"]["path"]))
+    smoke_payload = _read_security_child_payload("smoke", Path(source_artifacts["smoke"]["path"]))
     status = _docker_security_summary_status(source_trust_payload, static_payload, smoke_payload)
     runtime_config = {
         "service_role": "display_readonly",
@@ -1082,6 +1087,27 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     if isinstance(payload, dict):
         return payload
     return {"status": "BLOCKED", "blockers": [{"code": "ARTIFACT_JSON_NOT_OBJECT", "path": str(path)}]}
+
+
+def _read_security_child_payload(label: str, path: Path) -> dict[str, Any]:
+    payload = _read_json_file(path)
+    expected_schema = DOCKER_SECURITY_CHILD_SCHEMAS[label]
+    observed_schema = payload.get("schema_version") or payload.get("schema")
+    if observed_schema != expected_schema:
+        blockers = list(payload.get("blockers", [])) if isinstance(payload.get("blockers"), list) else []
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_SCHEMA_INVALID",
+                "source": label,
+                "expected_schema": expected_schema,
+                "schema": observed_schema,
+                "path": str(path),
+            }
+        )
+        payload = dict(payload)
+        payload["status"] = "BLOCKED" if payload.get("status") != "FAIL" else "FAIL"
+        payload["blockers"] = blockers
+    return payload
 
 
 def _artifact_summary(path: Path, *, repo_root: Path) -> dict[str, Any]:

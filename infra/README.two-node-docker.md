@@ -638,13 +638,16 @@ artifacts/
 | `browser/` | `/hydro-met`、`/ops` screenshots、DOM/network/console | mock API 不能算 production-like PASS |
 | `slurm/` | 22 Gateway health、minimal submit probe、Slurm receipt | 27 不需要也不应具备 Slurm CLI |
 | `logs/` | published log URI、read result、缺失原因 | 不能读取 22 private workspace |
-| `manual-ops/` | 27 fail-closed retry/cancel、22 实际处理 receipt、27 只读展示结果 | 27 不能产生控制面 receipt |
-| `docker-security/` | source-trust preflight、static validator、Docker smoke/image absence evidence、no Slurm/Munge/Docker socket、HostConfig/mount/env 检查；inline probe 仅为补充 | 任一 27 控制能力为 FAIL |
+| `manual-ops/` | `nhms.two_node_e2e.manual_ops.v1`，含当前 `evidence_run_id`、脱敏 operator auth metadata、27 response evidence、27 no-side-effect proof、22 receipt provenance | 布尔断言或 27 receipt 不能 PASS |
+| `docker-security/` | `security-summary` 生成的 `nhms.two_node_docker.security_summary.v1`，含 source-trust/static/smoke artifact 路径与 sha256、no Slurm/Munge/Docker socket、HostConfig/mount/env 检查 | 手写或缺 source artifact 不能 PASS；任一 27 控制能力为 FAIL |
 | `cross-plane/` | 同一 `run_id/source/cycle_time/model_id` 从 22 到 27 | historical latest/mock 数据不能 PASS |
 | `final-e2e-evidence/` | `scripts/validate_two_node_e2e_evidence.py` 聚合后的 lane/source/blocker/finding 汇总 | 只有全 lane、全 declared source、live readonly/display/strict identity 证据都通过才 PASS |
 
 完整 GFS/IFS readonly DB evidence 不能只跑一次单 source。先分别运行 `scripts/validate_readonly_db_boundary.py`
 写入 per-source lane，再用同一脚本的 `--merge-source-dir` 合并到 `$EVIDENCE_ROOT/db/readonly-db-boundary/`：
+每个 source dir 必须包含匹配的 `summary.json`、`role.json`、`route_smoke.json`、`permission_probes.json`；
+merge 会拒绝缺 sibling、sibling 与 summary 不一致、source dir 越界或 symlink、重复/缺失 source，并在 merged
+summary 记录 source artifact path/sha256/run ID。
 
 ```bash
 uv run python scripts/validate_readonly_db_boundary.py \

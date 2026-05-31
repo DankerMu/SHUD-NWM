@@ -41,6 +41,13 @@ RUN_METADATA_SCHEMAS = frozenset(
     }
 )
 READONLY_DB_LIVE_SCHEMA = "nhms.readonly_db_boundary.evidence.v1"
+DOCKER_SECURITY_SUMMARY_SCHEMA = "nhms.two_node_docker.security_summary.v1"
+DOCKER_SECURITY_CHILD_SCHEMAS: Mapping[str, str] = {
+    "source_trust": "nhms.two_node_docker.source_trust.v1",
+    "static": "nhms.two_node_docker.static_check.v1",
+    "smoke": "nhms.two_node_docker.app_smoke.v1",
+}
+MANUAL_OPS_SCHEMA = "nhms.two_node_e2e.manual_ops.v1"
 
 FINAL_REQUIRED_LANES = (
     "metadata",
@@ -701,6 +708,13 @@ def _evaluate_docker_security(doc: EvidenceDocument | None, *, evidence_run_id: 
     docker_proofs = _docker_display_security_proofs(payload)
     if status == STATUS_PASS:
         blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name="docker_security"))
+        contract_blockers, contract_findings = _docker_security_summary_contract_issues(
+            doc,
+            payload,
+            evidence_run_id=evidence_run_id,
+        )
+        blockers.extend(contract_blockers)
+        findings.extend(contract_findings)
         if not _has_live_docker_evidence(payload):
             blockers.append(
                 _blocker(
@@ -1242,13 +1256,8 @@ def _evaluate_manual_ops(
                 blockers.extend(_with_context(item, lane="manual_ops", source=source) for item in identity_blockers)
     if status == STATUS_PASS:
         blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name="manual_ops"))
-        if _bool_lookup(payload, "production_operator_auth_evidence") is not True:
-            blockers.append(
-                _blocker(
-                    "TWO_NODE_E2E_MANUAL_OPS_PRODUCTION_AUTH_MISSING",
-                    "Manual ops PASS requires real production operator auth evidence.",
-                )
-            )
+        blockers.extend(_manual_ops_contract_blockers(payload, display_actions, receipts))
+        blockers.extend(_manual_ops_operator_auth_blockers(payload))
         if not isinstance(display_actions, list) or not display_actions:
             blockers.append(
                 _blocker(
@@ -2243,6 +2252,191 @@ def _docker_display_security_proofs(payload: Mapping[str, Any]) -> dict[str, boo
     for proof_name, value in raw.items():
         _merge_governed_docker_proof(proofs, proof_name, value)
     return proofs
+
+
+def _docker_security_summary_contract_issues(
+    doc: EvidenceDocument,
+    payload: Mapping[str, Any],
+    *,
+    evidence_run_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    observed_schema = payload.get("schema_version") or payload.get("schema")
+    if observed_schema != DOCKER_SECURITY_SUMMARY_SCHEMA:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SUMMARY_SCHEMA_MISSING",
+                "Docker security PASS requires a producer security-summary schema.",
+                expected_schema=DOCKER_SECURITY_SUMMARY_SCHEMA,
+                schema=observed_schema,
+            )
+        )
+    source_artifacts = payload.get("source_artifacts")
+    if not isinstance(source_artifacts, Mapping):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACTS_MISSING",
+                "Docker security PASS requires source_trust, static, and smoke source artifacts.",
+            )
+        )
+        return blockers, findings
+    for artifact_name, expected_schema in DOCKER_SECURITY_CHILD_SCHEMAS.items():
+        artifact = source_artifacts.get(artifact_name)
+        if not isinstance(artifact, Mapping):
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_MISSING",
+                    "Docker security summary is missing a required source artifact.",
+                    artifact=artifact_name,
+                )
+            )
+            continue
+        artifact_blockers, artifact_findings = _docker_security_child_artifact_issues(
+            doc,
+            artifact_name,
+            artifact,
+            expected_schema=expected_schema,
+            evidence_run_id=evidence_run_id,
+        )
+        blockers.extend(artifact_blockers)
+        findings.extend(artifact_findings)
+    return blockers, findings
+
+
+def _docker_security_child_artifact_issues(
+    doc: EvidenceDocument,
+    artifact_name: str,
+    artifact: Mapping[str, Any],
+    *,
+    expected_schema: str,
+    evidence_run_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    raw_path = artifact.get("path")
+    raw_sha256 = artifact.get("sha256")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_PATH_MISSING",
+                "Docker security source artifact must include a path.",
+                artifact=artifact_name,
+            )
+        )
+        return blockers, findings
+    if not isinstance(raw_sha256, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", raw_sha256.strip()):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_SHA_MISSING",
+                "Docker security source artifact must include a sha256 digest.",
+                artifact=artifact_name,
+                path=raw_path,
+            )
+        )
+        return blockers, findings
+    try:
+        path = _approved_artifact_path(raw_path)
+    except TwoNodeE2EEvidenceError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_OUTSIDE_APPROVED_ROOT",
+                "Docker security source artifact path must stay under approved evidence roots.",
+                artifact=artifact_name,
+                path=raw_path,
+            )
+        )
+        return blockers, findings
+    run_dir = doc.path.parent.parent
+    if not _path_is_relative_to(path, run_dir):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_STALE_OR_UNSCOPED",
+                "Docker security source artifact must come from the current evidence run directory.",
+                artifact=artifact_name,
+                path=_public_path(path),
+                expected_run_dir=_public_path(run_dir),
+            )
+        )
+        return blockers, findings
+    try:
+        child_doc = _read_json(path, containment_root=run_dir)
+    except FileNotFoundError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_MISSING",
+                "Docker security source artifact file is missing.",
+                artifact=artifact_name,
+                path=_public_path(path),
+            )
+        )
+        return blockers, findings
+    if child_doc.sha256 != raw_sha256.lower():
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_HASH_MISMATCH",
+                "Docker security source artifact sha256 does not match file content.",
+                artifact=artifact_name,
+                path=_public_path(path),
+            )
+        )
+    child_payload = child_doc.payload
+    child_schema = child_payload.get("schema_version") or child_payload.get("schema")
+    if child_schema != expected_schema:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_SCHEMA_INVALID",
+                "Docker security source artifact has an unexpected schema.",
+                artifact=artifact_name,
+                expected_schema=expected_schema,
+                schema=child_schema,
+            )
+        )
+    child_status = _normalized_status(child_payload.get("status"))
+    if child_status == STATUS_FAIL:
+        findings.append(
+            _finding(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_FAILED",
+                "Docker security source artifact failed and must not be summarized as PASS.",
+                artifact=artifact_name,
+                child_status=child_status,
+            )
+        )
+    elif child_status != STATUS_PASS:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_NOT_PASS",
+                "Docker security source artifact must be PASS before final Docker security can PASS.",
+                artifact=artifact_name,
+                child_status=child_status,
+            )
+        )
+    if not _docker_security_child_current_run_compatible(path, run_dir, child_payload, evidence_run_id):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_STALE_OR_UNSCOPED",
+                "Docker security source artifact must be current-run-compatible.",
+                artifact=artifact_name,
+                path=_public_path(path),
+                expected_evidence_run_id=evidence_run_id,
+            )
+        )
+    return blockers, findings
+
+
+def _docker_security_child_current_run_compatible(
+    path: Path,
+    run_dir: Path,
+    child_payload: Mapping[str, Any],
+    evidence_run_id: str,
+) -> bool:
+    try:
+        path.relative_to(run_dir.resolve(strict=False))
+        return True
+    except ValueError:
+        pass
+    explicit_ids = _explicit_bundle_run_ids(child_payload)
+    return bool(explicit_ids) and all(str(value) == evidence_run_id for _, value in explicit_ids)
 
 
 def _governed_false_proof(payload: Mapping[str, Any], aliases: Sequence[str]) -> bool | None:
@@ -3753,6 +3947,111 @@ def _manual_action_side_effect_issues(
     return findings, blockers
 
 
+def _manual_ops_contract_blockers(
+    payload: Mapping[str, Any],
+    display_actions: Any,
+    receipts: Any,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    if payload.get("schema") != MANUAL_OPS_SCHEMA:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_SCHEMA_MISSING",
+                "Manual ops PASS requires the accepted manual ops evidence schema, not boolean assertions.",
+                expected_schema=MANUAL_OPS_SCHEMA,
+                schema=payload.get("schema"),
+            )
+        )
+    if not isinstance(display_actions, list):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_MISSING",
+                "Manual ops PASS requires 27 display retry/cancel response evidence.",
+            )
+        )
+    elif any(not isinstance(action, Mapping) or "response_evidence" not in action for action in display_actions):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_MISSING",
+                "Manual ops 27 actions must include metadata-only response evidence.",
+            )
+        )
+    no_side_effect = payload.get("no_side_effect_proof")
+    if not isinstance(no_side_effect, Mapping) or no_side_effect.get("node") not in {"27", 27}:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_NO_SIDE_EFFECT_PROOF_MISSING",
+                "Manual ops PASS requires node 27 no-side-effect proof.",
+            )
+        )
+    else:
+        for key in ("db_writes", "gateway_calls", "control_receipts_created"):
+            if no_side_effect.get(key) is not False:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_MANUAL_OPS_NO_SIDE_EFFECT_PROOF_MISSING",
+                        "Manual ops node 27 no-side-effect proof must explicitly record false side effects.",
+                        side_effect=key,
+                    )
+                )
+    if not isinstance(receipts, list):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_MISSING",
+                "Manual ops PASS requires node 22 receipt provenance for declared sources.",
+            )
+        )
+    elif any(
+        isinstance(receipt, Mapping)
+        and _is_actual_control_receipt(receipt)
+        and _node_number(receipt) == "22"
+        and not isinstance(receipt.get("provenance"), Mapping)
+        for receipt in receipts
+    ):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_MISSING",
+                "Actual node 22 manual ops receipts must include producer provenance.",
+            )
+        )
+    return blockers
+
+
+def _manual_ops_operator_auth_blockers(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    auth = payload.get("production_operator_auth")
+    if not isinstance(auth, Mapping):
+        return [
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_PRODUCTION_AUTH_MISSING",
+                "Manual ops PASS requires metadata-only production operator auth evidence.",
+            )
+        ]
+    blockers: list[dict[str, Any]] = []
+    if auth.get("status") != STATUS_PASS:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_PRODUCTION_AUTH_MISSING",
+                "Production operator auth evidence must be PASS.",
+                auth_status=auth.get("status"),
+            )
+        )
+    if auth.get("redacted") is not True or auth.get("secret_material_written") is not False:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_PRODUCTION_AUTH_UNREDACTED",
+                "Production operator auth evidence must be redacted metadata only.",
+            )
+        )
+    if not any(auth.get(key) for key in ("auth_source", "header_source", "token_source", "principal")):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_PRODUCTION_AUTH_MISSING",
+                "Production operator auth evidence must include redacted source metadata.",
+            )
+        )
+    return blockers
+
+
 def _manual_action_outcome_status(action: Mapping[str, Any]) -> str:
     outcome_text = _manual_action_outcome_text(action)
     http_status = str(action.get("http_status") or action.get("status_code") or "")
@@ -3897,6 +4196,19 @@ def _safe_resolved_evidence_root(path: Path) -> Path:
         "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
         "Two-node E2E evidence root must be under repository artifacts/ or /scratch/frd_muziyao.",
     )
+
+
+def _approved_artifact_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    resolved = path.resolve(strict=False)
+    approved_roots = tuple(root.expanduser().resolve(strict=False) for root in APPROVED_EVIDENCE_ROOTS)
+    if not any(_path_is_relative_to(resolved, root) for root in approved_roots):
+        raise TwoNodeE2EEvidenceError(
+            "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
+            "Evidence artifact path must be under repository artifacts/ or /scratch/frd_muziyao.",
+        )
+    _refuse_symlink_components(resolved.parent)
+    return resolved
 
 
 def _path_is_relative_to(path: Path, root: Path) -> bool:

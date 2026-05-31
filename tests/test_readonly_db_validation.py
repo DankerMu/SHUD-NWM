@@ -863,7 +863,77 @@ def test_merge_readonly_db_source_evidence_writes_source_complete_final_lane() -
     assert summary["status"] == "PASS"
     assert set(summary["display_identity"]) == {"GFS", "IFS"}
     assert {route.get("source") for route in summary["route_smoke"] if route.get("source")} == {"GFS", "IFS"}
+    assert summary["validation_provenance"]["source_artifacts"]
     assert (evidence_root / run_id / "db" / "readonly-db-boundary" / "summary.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("mutator", "error_code"),
+    [
+        ("forged_summary_no_siblings", "READONLY_DB_MERGE_SOURCE_MISSING"),
+        ("sibling_mismatch", "READONLY_DB_MERGE_SOURCE_SIBLING_MISMATCH"),
+        ("duplicate_source", "READONLY_DB_MERGE_DUPLICATE_SOURCE"),
+        ("missing_source", "READONLY_DB_MERGE_SOURCE_MISSING"),
+        ("outside_root", "READONLY_DB_EVIDENCE_ROOT_UNAPPROVED"),
+    ],
+)
+def test_merge_readonly_db_source_evidence_rejects_untrusted_sources(mutator: str, error_code: str) -> None:
+    evidence_root = _evidence_root()
+    run_id = _run_id(f"merge-{mutator}")
+    gfs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-gfs",
+        source="GFS",
+    )
+    ifs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-ifs",
+        source="IFS",
+    )
+    source_dirs = [gfs_config.lane_dir, ifs_config.lane_dir]
+    if mutator == "forged_summary_no_siblings":
+        forged = evidence_root / f"{run_id}-forged" / "db" / "readonly-db-boundary"
+        forged.mkdir(parents=True, exist_ok=True)
+        forged_summary = json.loads((gfs_config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+        _write_json(forged / "summary.json", forged_summary)
+        source_dirs[0] = forged
+    elif mutator == "sibling_mismatch":
+        role = json.loads((gfs_config.lane_dir / "role.json").read_text(encoding="utf-8"))
+        role["current_user"] = "forged_display_ro"
+        _write_json(gfs_config.lane_dir / "role.json", role)
+    elif mutator == "duplicate_source":
+        ifs_summary = json.loads((ifs_config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+        ifs_summary["display_identity"]["source"] = "GFS"
+        for route in ifs_summary["route_smoke"]:
+            if isinstance(route, dict) and route.get("source") == "IFS":
+                route["source"] = "GFS"
+                if isinstance(route.get("strict_identity"), dict):
+                    route["strict_identity"]["source"] = "GFS"
+        _write_json(ifs_config.lane_dir / "summary.json", ifs_summary)
+        _write_json(ifs_config.lane_dir / "route_smoke.json", ifs_summary["route_smoke"])
+    elif mutator == "missing_source":
+        source_dirs = [gfs_config.lane_dir]
+    else:
+        source_dirs[0] = Path("/tmp/nhms-readonly-db-forged")
+
+    if mutator in {"duplicate_source", "missing_source"}:
+        summary = merge_readonly_db_source_evidence(
+            evidence_root=evidence_root,
+            run_id=run_id,
+            source_dirs=source_dirs,
+            force=True,
+        )
+        assert summary["status"] == "BLOCKED"
+        assert {blocker["code"] for blocker in summary["blockers"]} >= {error_code}
+    else:
+        with pytest.raises(ReadonlyDbValidationError) as exc_info:
+            merge_readonly_db_source_evidence(
+                evidence_root=evidence_root,
+                run_id=run_id,
+                source_dirs=source_dirs,
+                force=True,
+            )
+        assert exc_info.value.error_code == error_code
 
 
 def test_successful_ddl_execution_despite_no_catalog_grant_fails_with_rollback_cleanup_only() -> None:
@@ -1632,6 +1702,33 @@ def _promote_simulated_summary_to_live(config: ReadonlyDbValidationConfig, summa
     payload["validation_provenance"] = {"mode": "live", "live_readonly_proof": True}
     payload.pop("blockers", None)
     _write_json(config.lane_dir / "summary.json", payload)
+
+
+def _seed_live_readonly_source(
+    *,
+    evidence_root: Path,
+    run_id: str,
+    source: str,
+) -> ReadonlyDbValidationConfig:
+    config = ReadonlyDbValidationConfig.from_env(
+        evidence_root=evidence_root,
+        run_id=run_id,
+        database_url="postgresql://display:secret@db.example/nhms",
+        source=source,
+        cycle_time="2026-05-03T00:00:00+00:00",
+        strict_run_id=f"run-{source.lower()}",
+        model_id=f"model-{source.lower()}",
+        job_id=f"job-{source.lower()}",
+        force=True,
+    )
+    summary = validate_readonly_db_boundary(
+        config,
+        adapter=_FakeReadonlyAdapter(),
+        route_requester=_passing_route_requester,
+        manual_action_probe_runner=_passing_manual_actions,
+    )
+    _promote_simulated_summary_to_live(config, summary)
+    return config
 
 
 def _write_json(path: Path, payload: Any) -> None:

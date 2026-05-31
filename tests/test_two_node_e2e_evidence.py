@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,20 @@ def test_known_producer_like_docker_preflight_without_embedded_bundle_id_is_acce
 
     assert summary["status"] == STATUS_PASS
     assert summary["lane_summaries"]["docker_preflight"]["status"] == STATUS_PASS
+
+
+def test_docker_security_producer_summary_with_verified_children_passes() -> None:
+    run_id = _run_id("docker-verified")
+    config = _seed_pass_bundle(run_id)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert docker_lane["status"] == STATUS_PASS
+    redacted = docker_lane["redacted_evidence"]
+    assert redacted["schema_version"] == "nhms.two_node_docker.security_summary.v1"
+    assert set(redacted["source_artifacts"]) == {"source_trust", "static", "smoke"}
 
 
 @pytest.mark.parametrize("missing_key", ["evidence_root", "tmpdir", "docker_root_dir", "min_free_bytes", "disk"])
@@ -208,6 +223,65 @@ def test_docker_security_pass_missing_required_proof_blocks() -> None:
     docker_lane = summary["lane_summaries"]["docker_security"]
     assert docker_lane["status"] == STATUS_BLOCKED
     assert "TWO_NODE_E2E_DOCKER_DISPLAY_PROOF_MISSING" in _codes(docker_lane["blockers"])
+
+
+def test_docker_security_sourceless_summary_blocks_not_passes() -> None:
+    run_id = _run_id("docker-sourceless")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    docker_security.pop("source_artifacts")
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACTS_MISSING" in _codes(docker_lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_status", "expected_code"),
+    [
+        ("missing_child", STATUS_BLOCKED, "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_MISSING"),
+        ("child_blocked", STATUS_BLOCKED, "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_NOT_PASS"),
+        (
+            "outside_root",
+            STATUS_BLOCKED,
+            "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_OUTSIDE_APPROVED_ROOT",
+        ),
+        ("hash_mismatch", STATUS_BLOCKED, "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_HASH_MISMATCH"),
+    ],
+)
+def test_docker_security_source_artifact_contract_blocks_false_pass(
+    mutator: str,
+    expected_status: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"docker-child-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    static_artifact = docker_security["source_artifacts"]["static"]
+    static_path = Path(static_artifact["path"])
+    if mutator == "missing_child":
+        static_path.unlink()
+    elif mutator == "child_blocked":
+        static_payload = _read(static_path)
+        static_payload["status"] = STATUS_BLOCKED
+        _write(static_path, static_payload)
+        static_artifact["sha256"] = _sha256_file(static_path)
+    elif mutator == "outside_root":
+        static_artifact["path"] = "/tmp/nhms-forged-static.json"
+    else:
+        static_artifact["sha256"] = "0" * 64
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == expected_status
+    assert docker_lane["status"] == expected_status
+    assert expected_code in _codes(docker_lane["blockers"])
 
 
 @pytest.mark.parametrize(
@@ -674,7 +748,7 @@ def test_manual_ops_auth_and_receipt_boundaries() -> None:
     auth_run_id = _run_id("manual-auth")
     auth_config = _seed_pass_bundle(auth_run_id)
     manual_ops = _read(auth_config.run_dir / "manual-ops" / "summary.json")
-    manual_ops["production_operator_auth_evidence"] = False
+    manual_ops["production_operator_auth"]["status"] = STATUS_BLOCKED
     _write(auth_config.run_dir / "manual-ops" / "summary.json", manual_ops)
 
     auth_summary = validate_two_node_e2e_evidence(auth_config)
@@ -693,6 +767,33 @@ def test_manual_ops_auth_and_receipt_boundaries() -> None:
 
     assert receipt_summary["status"] == STATUS_FAIL
     assert receipt_summary["lane_summaries"]["manual_ops"]["status"] == STATUS_FAIL
+
+
+def test_manual_ops_old_booleans_only_shape_blocks() -> None:
+    run_id = _run_id("manual-booleans")
+    config = _seed_pass_bundle(run_id)
+    manual_ops = _read(config.run_dir / "manual-ops" / "summary.json")
+    manual_ops.pop("schema", None)
+    manual_ops.pop("production_operator_auth", None)
+    manual_ops.pop("no_side_effect_proof", None)
+    for action in manual_ops["display_actions"]:
+        action.pop("response_evidence", None)
+    for receipt in manual_ops["control_receipts"]:
+        receipt.pop("provenance", None)
+    manual_ops["production_operator_auth_evidence"] = True
+    _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    manual_lane = summary["lane_summaries"]["manual_ops"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert manual_lane["status"] == STATUS_BLOCKED
+    assert _codes(manual_lane["blockers"]) >= {
+        "TWO_NODE_E2E_MANUAL_OPS_SCHEMA_MISSING",
+        "TWO_NODE_E2E_MANUAL_OPS_PRODUCTION_AUTH_MISSING",
+        "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_MISSING",
+        "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_MISSING",
+    }
 
 
 @pytest.mark.parametrize(
@@ -876,39 +977,7 @@ def _seed_pass_bundle(
     )
     _write(
         config.run_dir / "docker-security" / "summary.json",
-        {
-            "status": STATUS_PASS,
-            "evidence_run_id": run_id,
-            "live_docker_evidence": True,
-            "runtime_config": {
-                "service_role": "display_readonly",
-                "display_readonly": True,
-                "slurm_routes_enabled": False,
-            },
-            "slurm_routes_unavailable": True,
-            "slurm_route_available": False,
-            "published_artifacts_readonly": True,
-            "root_filesystem_readonly": True,
-            "cap_drop_all": True,
-            "docker_socket_present": False,
-            "slurm_cli_present": False,
-            "slurm_config_present": False,
-            "slurm_socket_present": False,
-            "munge_path_present": False,
-            "privileged": False,
-            "host_network": False,
-            "host_pid": False,
-            "host_ipc": False,
-            "cap_add_present": False,
-            "forbidden_hostconfig_hazard": False,
-            "forbidden_mount_hazard": False,
-            "forbidden_env_hazard": False,
-            "broad_host_bind_present": False,
-            "private_workspace_bind_present": False,
-            "workspace_mount_present": False,
-            "writable_published_artifact_mount": False,
-            "display_write_capability_present": False,
-        },
+        _docker_security_summary_payload(config, run_id),
     )
     _write_readonly_db_lane(config, identities)
     _write(
@@ -945,9 +1014,22 @@ def _seed_pass_bundle(
     _write(
         config.run_dir / "manual-ops" / "summary.json",
         {
+            "schema": "nhms.two_node_e2e.manual_ops.v1",
             "status": STATUS_PASS,
             "evidence_run_id": run_id,
-            "production_operator_auth_evidence": True,
+            "production_operator_auth": {
+                "status": STATUS_PASS,
+                "auth_source": "operator_auth_curl header source under /scratch/frd_muziyao/<redacted>",
+                "principal": "production-operator",
+                "redacted": True,
+                "secret_material_written": False,
+            },
+            "no_side_effect_proof": {
+                "node": "27",
+                "db_writes": False,
+                "gateway_calls": False,
+                "control_receipts_created": False,
+            },
             "display_actions": [
                 {
                     "node": "27",
@@ -956,6 +1038,11 @@ def _seed_pass_bundle(
                     "write_executed": False,
                     "gateway_called": False,
                     "receipt_created": False,
+                    "response_evidence": {
+                        "http_status": 409,
+                        "error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+                        "body_redacted": True,
+                    },
                 },
                 {
                     "node": "27",
@@ -964,6 +1051,11 @@ def _seed_pass_bundle(
                     "write_executed": False,
                     "gateway_called": False,
                     "receipt_created": False,
+                    "response_evidence": {
+                        "http_status": 409,
+                        "error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+                        "body_redacted": True,
+                    },
                 }
             ],
             "control_receipts": [
@@ -972,6 +1064,12 @@ def _seed_pass_bundle(
                     "producer_role": "compute_control",
                     "action": "retry",
                     "actual": True,
+                    "provenance": {
+                        "producer_node": "22",
+                        "producer_role": "compute_control",
+                        "receipt_id": f"receipt-{identity['source'].lower()}",
+                        "redacted": True,
+                    },
                     **copy.deepcopy(identity),
                 }
                 for identity in identities.values()
@@ -1193,6 +1291,90 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
             "permission_probes": permission_probes,
         },
     )
+
+
+def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: str) -> dict[str, Any]:
+    lane = config.run_dir / "docker-security"
+    source_trust = lane / "two-node-docker-source-trust.json"
+    static_report = lane / "static-compose-env-check.json"
+    smoke_report = lane / "docker-smoke.json"
+    _write(
+        source_trust,
+        {
+            "schema": "nhms.two_node_docker.source_trust.v1",
+            "status": STATUS_PASS,
+            "evidence_run_id": run_id,
+            "checked_paths": [],
+            "blockers": [],
+        },
+    )
+    _write(
+        static_report,
+        {
+            "schema_version": "nhms.two_node_docker.static_check.v1",
+            "status": STATUS_PASS,
+            "evidence_run_id": run_id,
+            "findings": [],
+        },
+    )
+    _write(
+        smoke_report,
+        {
+            "schema_version": "nhms.two_node_docker.app_smoke.v1",
+            "status": STATUS_PASS,
+            "evidence_run_id": run_id,
+            "image_tag": "nhms-app:test",
+            "dockerfile": "infra/docker/Dockerfile.app",
+        },
+    )
+    return {
+        "schema_version": "nhms.two_node_docker.security_summary.v1",
+        "status": STATUS_PASS,
+        "evidence_run_id": run_id,
+        "live_docker_evidence": True,
+        "runtime_config": {
+            "service_role": "display_readonly",
+            "display_readonly": True,
+            "slurm_routes_enabled": False,
+        },
+        "source_artifacts": {
+            "source_trust": _artifact_summary(source_trust),
+            "static": _artifact_summary(static_report),
+            "smoke": _artifact_summary(smoke_report),
+        },
+        "source_statuses": {"source_trust": STATUS_PASS, "static": STATUS_PASS, "smoke": STATUS_PASS},
+        "slurm_routes_unavailable": True,
+        "slurm_route_available": False,
+        "published_artifacts_readonly": True,
+        "root_filesystem_readonly": True,
+        "cap_drop_all": True,
+        "docker_socket_present": False,
+        "slurm_cli_present": False,
+        "slurm_config_present": False,
+        "slurm_socket_present": False,
+        "munge_path_present": False,
+        "privileged": False,
+        "host_network": False,
+        "host_pid": False,
+        "host_ipc": False,
+        "cap_add_present": False,
+        "forbidden_hostconfig_hazard": False,
+        "forbidden_mount_hazard": False,
+        "forbidden_env_hazard": False,
+        "broad_host_bind_present": False,
+        "private_workspace_bind_present": False,
+        "workspace_mount_present": False,
+        "writable_published_artifact_mount": False,
+        "display_write_capability_present": False,
+    }
+
+
+def _artifact_summary(path: Path) -> dict[str, Any]:
+    return {"path": str(path.resolve(strict=False)), "sha256": _sha256_file(path)}
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _source_lane_payload(

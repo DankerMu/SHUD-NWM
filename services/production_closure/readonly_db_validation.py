@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -126,6 +127,13 @@ class RouteHttpResponse:
     status_code: int
     body: Any | None = None
     text: str = ""
+
+
+@dataclass(frozen=True)
+class ReadonlyDbMergeSourceEvidence:
+    source_dir: Path
+    summary: dict[str, Any]
+    artifacts: dict[str, dict[str, Any]]
 
 
 class ReadonlyDbProbeAdapter(Protocol):
@@ -1108,8 +1116,8 @@ def merge_readonly_db_source_evidence(
     if config.force:
         for filename in AUTHORITATIVE_EVIDENCE_FILENAMES:
             writer.remove_json(config.lane_dir / filename)
-    source_payloads = [_read_source_summary(source_dir) for source_dir in source_dirs]
-    summary = _merged_readonly_db_summary(config, source_payloads=source_payloads)
+    source_evidence = [_read_source_evidence(source_dir, expected_run_id=config.run_id) for source_dir in source_dirs]
+    summary = _merged_readonly_db_summary(config, source_evidence=source_evidence)
     writer.write_json(config.lane_dir / "role.json", summary["role"])
     writer.write_json(config.lane_dir / "route_smoke.json", summary["route_smoke"])
     writer.write_json(config.lane_dir / "permission_probes.json", summary["permission_probes"])
@@ -1117,32 +1125,138 @@ def merge_readonly_db_source_evidence(
     return redact_payload(summary)
 
 
-def _read_source_summary(source_dir: Path) -> dict[str, Any]:
-    summary_path = source_dir / "summary.json"
+def _read_source_evidence(source_dir: Path, *, expected_run_id: str) -> ReadonlyDbMergeSourceEvidence:
+    resolved_dir = _safe_merge_source_dir(source_dir)
+    artifacts: dict[str, dict[str, Any]] = {}
+    payloads: dict[str, Any] = {}
+    for filename in AUTHORITATIVE_EVIDENCE_FILENAMES:
+        path = resolved_dir / filename
+        payloads[filename] = _read_source_json_file(path, source_dir=resolved_dir)
+        artifacts[filename] = _source_artifact_record(path, payloads[filename])
+    summary = payloads["summary.json"]
+    if not isinstance(summary, dict):
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_JSON_INVALID",
+            f"Readonly DB source summary must be a JSON object: {resolved_dir / 'summary.json'}",
+        )
+    _validate_source_siblings(resolved_dir, summary, payloads)
+    _validate_merge_source_run(summary, artifacts=artifacts, expected_run_id=expected_run_id)
+    return ReadonlyDbMergeSourceEvidence(source_dir=resolved_dir, summary=summary, artifacts=artifacts)
+
+
+def _safe_merge_source_dir(source_dir: Path) -> Path:
+    _refuse_symlink_components(source_dir)
+    resolved = _safe_resolved_evidence_root(source_dir)
+    _refuse_symlink_components(resolved)
+    if resolved.exists() and not resolved.is_dir():
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_INVALID",
+            f"Readonly DB merge source must be a directory: {resolved}",
+        )
+    return resolved
+
+
+def _read_source_json_file(path: Path, *, source_dir: Path) -> Any:
     try:
-        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        if path.is_symlink():
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_SYMLINK",
+                f"Readonly DB merge source file must not be a symlink: {path}",
+            )
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        if path.resolve(strict=False).parent != source_dir:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_PATH_UNSAFE",
+                f"Readonly DB merge source file must stay in source dir: {path}",
+            )
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
         raise ReadonlyDbValidationError(
             "READONLY_DB_MERGE_SOURCE_MISSING",
-            f"Readonly DB source summary is missing: {summary_path}",
+            f"Readonly DB source authoritative evidence is missing: {path}",
         ) from error
     except json.JSONDecodeError as error:
         raise ReadonlyDbValidationError(
             "READONLY_DB_MERGE_SOURCE_JSON_INVALID",
-            f"Readonly DB source summary is invalid JSON: {summary_path}",
+            f"Readonly DB source evidence is invalid JSON: {path}",
         ) from error
-    if not isinstance(payload, dict):
-        raise ReadonlyDbValidationError(
-            "READONLY_DB_MERGE_SOURCE_JSON_INVALID",
-            f"Readonly DB source summary must be a JSON object: {summary_path}",
-        )
     return payload
+
+
+def _source_artifact_record(path: Path, payload: Any) -> dict[str, Any]:
+    return {
+        "path": _public_path(path),
+        "sha256": _file_sha256(path),
+        "run_id": _artifact_run_id(payload),
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_run_id(payload: Any) -> str | None:
+    if isinstance(payload, Mapping):
+        value = payload.get("run_id") or payload.get("evidence_run_id") or payload.get("bundle_run_id")
+        if value is not None and str(value).strip():
+            return str(value)
+    if isinstance(payload, list):
+        for item in payload:
+            value = _artifact_run_id(item)
+            if value:
+                return value
+    return None
+
+
+def _validate_source_siblings(source_dir: Path, summary: Mapping[str, Any], payloads: Mapping[str, Any]) -> None:
+    expected = {
+        "role.json": summary.get("role"),
+        "route_smoke.json": summary.get("route_smoke"),
+        "permission_probes.json": summary.get("permission_probes"),
+    }
+    for filename, expected_payload in expected.items():
+        if payloads.get(filename) != expected_payload:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_SIBLING_MISMATCH",
+                f"Readonly DB merge source {filename} must match summary.json: {source_dir}",
+            )
+
+
+def _validate_merge_source_run(
+    summary: Mapping[str, Any],
+    *,
+    artifacts: Mapping[str, Mapping[str, Any]],
+    expected_run_id: str,
+) -> None:
+    run_id = summary.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_RUN_ID_MISSING",
+            "Readonly DB merge source summary must include run_id.",
+        )
+    if run_id == expected_run_id:
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_RUN_LAYOUT_INVALID",
+            "Readonly DB merge source must be a per-source lane, not the final merge lane.",
+        )
+    for filename, artifact in artifacts.items():
+        artifact_run_id = artifact.get("run_id")
+        if artifact_run_id is not None and artifact_run_id != run_id:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_RUN_ID_MISMATCH",
+                f"Readonly DB merge source artifact {filename} run_id must match summary.json.",
+            )
 
 
 def _merged_readonly_db_summary(
     config: ReadonlyDbValidationConfig,
     *,
-    source_payloads: Sequence[Mapping[str, Any]],
+    source_evidence: Sequence[ReadonlyDbMergeSourceEvidence],
 ) -> dict[str, Any]:
     blockers: list[dict[str, Any]] = []
     route_smoke: list[dict[str, Any]] = []
@@ -1150,7 +1264,10 @@ def _merged_readonly_db_summary(
     permission_probes: list[dict[str, Any]] | None = None
     role: dict[str, Any] | None = None
     database_url = "postgresql://db.example:5432/nhms"
-    for index, payload in enumerate(source_payloads):
+    source_artifacts: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for index, evidence in enumerate(source_evidence):
+        payload = evidence.summary
         if payload.get("schema") != LIVE_EVIDENCE_SCHEMA:
             blockers.append(
                 {
@@ -1168,6 +1285,28 @@ def _merged_readonly_db_summary(
                 }
             )
         database_url = str(payload.get("database_url") or database_url)
+        source_names = _merge_payload_sources(payload)
+        if not source_names:
+            blockers.append({"code": "READONLY_DB_MERGE_SOURCE_IDENTITY_MISSING", "source_index": index})
+        for source_name in source_names:
+            if source_name in seen_sources:
+                blockers.append(
+                    {
+                        "code": "READONLY_DB_MERGE_DUPLICATE_SOURCE",
+                        "source_index": index,
+                        "source": source_name,
+                    }
+                )
+            seen_sources.add(source_name)
+        source_artifacts.append(
+            {
+                "source_index": index,
+                "sources": sorted(source_names),
+                "source_dir": _public_path(evidence.source_dir),
+                "summary_run_id": payload.get("run_id"),
+                "artifacts": evidence.artifacts,
+            }
+        )
         payload_role = payload.get("role")
         if isinstance(payload_role, Mapping):
             role = dict(payload_role) if role is None else role
@@ -1208,6 +1347,15 @@ def _merged_readonly_db_summary(
     if permission_probes is None:
         permission_probes = []
         blockers.append({"code": "READONLY_DB_MERGE_PERMISSION_MATRIX_MISSING"})
+    missing_sources = sorted({"GFS", "IFS"} - seen_sources)
+    if missing_sources:
+        blockers.append(
+            {
+                "code": "READONLY_DB_MERGE_SOURCE_MISSING",
+                "missing_sources": missing_sources,
+                "observed_sources": sorted(seen_sources),
+            }
+        )
     status = STATUS_BLOCKED if blockers else STATUS_PASS
     summary = {
         "schema": LIVE_EVIDENCE_SCHEMA,
@@ -1221,7 +1369,8 @@ def _merged_readonly_db_summary(
             "mode": "live",
             "live_readonly_proof": not blockers,
             "merged_source_evidence": True,
-            "source_bundle_count": len(source_payloads),
+            "source_bundle_count": len(source_evidence),
+            "source_artifacts": source_artifacts,
         },
         "validation_timeouts": _validation_timeout_evidence(),
         "runtime": {
@@ -1231,7 +1380,7 @@ def _merged_readonly_db_summary(
         "role": role,
         "display_identity": display_identity,
         "route_smoke": route_smoke,
-        "manual_action_probes": _merged_manual_actions(source_payloads),
+        "manual_action_probes": _merged_manual_actions([evidence.summary for evidence in source_evidence]),
         "permission_probe_summary": _permission_summary(permission_probes),
         "permission_probes": permission_probes,
         "redaction": {
@@ -1251,6 +1400,34 @@ def _merged_manual_actions(source_payloads: Sequence[Mapping[str, Any]]) -> list
         if isinstance(manual_actions, list) and manual_actions:
             return [dict(item) for item in manual_actions if isinstance(item, Mapping)]
     return []
+
+
+def _merge_payload_sources(payload: Mapping[str, Any]) -> set[str]:
+    sources: set[str] = set()
+    display_identity = payload.get("display_identity")
+    if isinstance(display_identity, Mapping):
+        source_name = _identity_text(display_identity, "source")
+        if source_name:
+            sources.add(source_name.upper())
+        for key, value in display_identity.items():
+            if str(key).upper() in {"GFS", "IFS"} and isinstance(value, Mapping):
+                sources.add(str(key).upper())
+            if isinstance(value, Mapping):
+                nested_source = _identity_text(value, "source")
+                if nested_source:
+                    sources.add(nested_source.upper())
+    route_smoke = payload.get("route_smoke")
+    if isinstance(route_smoke, list):
+        for route in route_smoke:
+            if not isinstance(route, Mapping):
+                continue
+            source = _identity_text(route, "source") or _identity_text(route, "source_id")
+            identity = route.get("strict_identity") or route.get("identity")
+            if not source and isinstance(identity, Mapping):
+                source = _identity_text(identity, "source") or _identity_text(identity, "source_id")
+            if source:
+                sources.add(source.upper())
+    return sources
 
 
 def _source_from_route_path(path: str) -> str | None:

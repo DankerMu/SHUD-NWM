@@ -176,14 +176,19 @@ mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,b
 - `22-compute/summary.md`：计算控制面结论。
 - `27-display/summary.md`：展示服务面结论。
 - `cross-plane/summary.md`：跨面联调结论。
-- `manual-ops/summary.md`：27 fail-closed 与 22 人工处理 receipt 边界。
+- `manual-ops/summary.json`：必须使用 `nhms.two_node_e2e.manual_ops.v1`，包含当前
+  `evidence_run_id`、脱敏 production operator auth 元数据、27 retry/cancel response evidence、
+  27 no-side-effect proof，以及每个 declared source 的 22 receipt provenance；旧式
+  `production_operator_auth_evidence: true` 或布尔断言不能作为 PASS。
 - `db/summary.md`：readonly DB role、权限矩阵、脱敏 DSN 和 blocker。
 - `api/summary.md`：health、runtime config、models、stations、latest-product、pipeline/jobs/logs。
 - `browser/summary.md`：无 mock 的 `/hydro-met` 和 `/ops` 浏览器证据。
 - `slurm/summary.md`：22 Gateway health、minimal submit probe、Slurm receipt。
 - `logs/summary.md`：published log URI、读取结果和缺失原因。
 - `docker-preflight/summary.md`：DockerRootDir、cache/space、TMPDIR 和 evidence root。
-- `docker-security/summary.md`：source-trust preflight、27 无 Slurm/Munge/Docker socket、HostConfig/mount/env 检查。
+- `docker-security/summary.json`：必须由 `security-summary` helper 生成
+  `nhms.two_node_docker.security_summary.v1`，并带 `source_trust`、`static`、`smoke`
+  child artifact 路径与 sha256；手写或缺 source artifact 的 summary 不能作为 PASS。
 - `final-e2e-evidence/summary.json`：#239 最终 JSON 汇总，聚合 Docker、DB、API、browser、cross-plane、manual ops、Slurm、logs 和 compute/display lane。
 - `summary.md`：最终 PASS/PARTIAL/FAIL/BLOCKED 汇总。
 - `bugs.md` 或链接到 `docs/bugs.md`：失败项、根因、复测条件。
@@ -446,7 +451,10 @@ per-run lane：`$EVIDENCE_ROOT/db/readonly-db-boundary/`。`NHMS_READONLY_DB_VAL
 `hydro.hydro_run.run_id`。如需只通过环境变量指定 evidence bundle ID，使用
 `NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID="$EVIDENCE_RUN_ID"`。完整 GFS/IFS scope 必须先产生两个 per-source
 lane，再用 `--merge-source-dir` 写入最终 `db/readonly-db-boundary/`；单 source DB evidence 在 full-scope 最终聚合中会保持
-`BLOCKED`，不能手写补成 GFS/IFS。`command_index.md` 只记录脱敏形式，例如：
+`BLOCKED`，不能手写补成 GFS/IFS。每个 per-source lane 必须保留 authoritative sibling：
+`summary.json`、`role.json`、`route_smoke.json`、`permission_probes.json`；merge 会拒绝缺 sibling、
+sibling 与 summary 不一致、source dir 越界或 symlink、重复/缺失 source，并把每个 source artifact 的路径、
+sha256 和 run ID 写入 merged summary。`command_index.md` 只记录脱敏形式，例如：
 
 ```text
 NHMS_DISPLAY_READONLY_DATABASE_URL=<redacted> uv run python scripts/validate_readonly_db_boundary.py --evidence-root "$EVIDENCE_PARENT" --run-id "$EVIDENCE_RUN_ID" --force
@@ -475,6 +483,11 @@ owner-only `0600` secret source，不记录原始 DSN、文件内容或 `source`
 - retry/cancel 的拒绝证据必须先分出无授权 / 非运维授权的 auth rejection lane；只有拿到真实 production auth
   token/header 时，授权 manual-action lane 才能继续验证 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。如果拿不到
   真实 auth 路径，本 lane 记为 `BLOCKED`，且仍然不能构造 DB write 或 Gateway 依赖。
+- #239 final manual-ops lane 的 PASS 证据必须是 `nhms.two_node_e2e.manual_ops.v1` JSON，记录
+  `production_operator_auth` redacted metadata、27 retry/cancel `response_evidence`、27
+  `no_side_effect_proof` 和 22 `control_receipts[].provenance`；只写
+  `production_operator_auth_evidence: true`、`write_executed: false` 这类布尔断言会被最终聚合器判为
+  `BLOCKED`。
 - `scripts/validate_readonly_db_boundary.py` 内部的 retry/cancel manual-action check 使用 in-process/dev-header
   方式验证后端 no-write/readonly fail-closed 行为；这只属于 readonly DB safety evidence，不能计入 #239
   production-auth manual-action `PASS`，也不能替代真实 operator token/header lane。真实 production auth
