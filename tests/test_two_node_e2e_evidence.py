@@ -797,6 +797,70 @@ def test_manual_ops_old_booleans_only_shape_blocks() -> None:
 
 
 @pytest.mark.parametrize(
+    ("mutator", "expected_code"),
+    [
+        ("empty_provenance", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_MISSING"),
+        ("missing_source", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_SOURCE_MISSING"),
+        ("wrong_source", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_SOURCE_MISMATCH"),
+        ("missing_producer", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_PRODUCER_INVALID"),
+        ("missing_redaction", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_UNREDACTED"),
+        ("missing_run_binding", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_RUN_ID_MISSING"),
+        ("wrong_run_binding", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_RUN_ID_MISMATCH"),
+        ("artifact_outside_root", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_OUTSIDE_APPROVED_ROOT"),
+        ("artifact_hash_mismatch", "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_HASH_MISMATCH"),
+    ],
+)
+def test_manual_ops_receipt_provenance_must_be_producer_backed(
+    mutator: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"manual-provenance-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    manual_ops = _read(config.run_dir / "manual-ops" / "summary.json")
+    receipt = manual_ops["control_receipts"][0]
+    provenance = receipt["provenance"]
+    if mutator == "empty_provenance":
+        receipt["provenance"] = {}
+    elif mutator == "missing_source":
+        provenance.pop("source", None)
+        provenance.pop("source_id", None)
+    elif mutator == "wrong_source":
+        provenance["source"] = "IFS" if receipt["source"] == "GFS" else "GFS"
+    elif mutator == "missing_producer":
+        provenance.pop("producer_node", None)
+        provenance.pop("producer_role", None)
+    elif mutator == "missing_redaction":
+        provenance["redacted"] = False
+    elif mutator == "missing_run_binding":
+        provenance.pop("evidence_run_id", None)
+    elif mutator == "wrong_run_binding":
+        provenance["evidence_run_id"] = "older-bundle"
+    elif mutator == "artifact_outside_root":
+        provenance["artifact_path"] = "/tmp/manual-receipt.json"
+        provenance["sha256"] = "0" * 64
+    elif mutator == "artifact_hash_mismatch":
+        provenance["sha256"] = "0" * 64
+    _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    manual_lane = summary["lane_summaries"]["manual_ops"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert manual_lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(manual_lane["blockers"])
+
+
+def test_manual_ops_receipt_provenance_with_valid_artifact_passes() -> None:
+    run_id = _run_id("manual-provenance-artifact-pass")
+    config = _seed_pass_bundle(run_id)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["manual_ops"]["status"] == STATUS_PASS
+
+
+@pytest.mark.parametrize(
     ("mutator", "expected_status"),
     [
         ("node22_only", STATUS_BLOCKED),
@@ -1011,8 +1075,24 @@ def _seed_pass_bundle(
         config.run_dir / "slurm" / "summary.json",
         {"status": STATUS_PASS, "evidence_run_id": run_id, "live_slurm_evidence": True},
     )
+    manual_lane = config.run_dir / "manual-ops"
+    receipt_artifacts: dict[str, dict[str, Any]] = {}
+    for identity in identities.values():
+        source = identity["source"]
+        receipt_artifact = manual_lane / f"receipt-{source.lower()}.json"
+        receipt_payload = {
+            "schema": "nhms.two_node_e2e.manual_ops.receipt.v1",
+            "evidence_run_id": run_id,
+            "producer_node": "22",
+            "producer_role": "compute_control",
+            "source": source,
+            "receipt_id": f"receipt-{source.lower()}",
+            "redacted": True,
+        }
+        _write(receipt_artifact, receipt_payload)
+        receipt_artifacts[source] = _artifact_summary(receipt_artifact)
     _write(
-        config.run_dir / "manual-ops" / "summary.json",
+        manual_lane / "summary.json",
         {
             "schema": "nhms.two_node_e2e.manual_ops.v1",
             "status": STATUS_PASS,
@@ -1068,7 +1148,11 @@ def _seed_pass_bundle(
                         "producer_node": "22",
                         "producer_role": "compute_control",
                         "receipt_id": f"receipt-{identity['source'].lower()}",
+                        "source": identity["source"],
+                        "evidence_run_id": run_id,
                         "redacted": True,
+                        "artifact_path": receipt_artifacts[identity["source"]]["path"],
+                        "sha256": receipt_artifacts[identity["source"]]["sha256"],
                     },
                     **copy.deepcopy(identity),
                 }

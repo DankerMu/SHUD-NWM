@@ -864,6 +864,10 @@ def test_merge_readonly_db_source_evidence_writes_source_complete_final_lane() -
     assert set(summary["display_identity"]) == {"GFS", "IFS"}
     assert {route.get("source") for route in summary["route_smoke"] if route.get("source")} == {"GFS", "IFS"}
     assert summary["validation_provenance"]["source_artifacts"]
+    source_artifact = summary["validation_provenance"]["source_artifacts"][0]
+    assert source_artifact["validation_provenance"]["mode"] == "live"
+    assert source_artifact["validation_provenance"]["live_readonly_proof"] is True
+    assert source_artifact["parent_binding"] == "run_id_prefix"
     assert (evidence_root / run_id / "db" / "readonly-db-boundary" / "summary.json").is_file()
 
 
@@ -872,6 +876,11 @@ def test_merge_readonly_db_source_evidence_writes_source_complete_final_lane() -
     [
         ("forged_summary_no_siblings", "READONLY_DB_MERGE_SOURCE_MISSING"),
         ("sibling_mismatch", "READONLY_DB_MERGE_SOURCE_SIBLING_MISMATCH"),
+        ("simulated_schema", "READONLY_DB_MERGE_SOURCE_SCHEMA_INVALID"),
+        ("simulated_provenance", "READONLY_DB_MERGE_SOURCE_LIVE_PROOF_MISSING"),
+        ("false_live_proof", "READONLY_DB_MERGE_SOURCE_LIVE_PROOF_MISSING"),
+        ("missing_provenance", "READONLY_DB_MERGE_SOURCE_PROVENANCE_MISSING"),
+        ("stale_unrelated_source", "READONLY_DB_MERGE_SOURCE_PARENT_RUN_MISMATCH"),
         ("duplicate_source", "READONLY_DB_MERGE_DUPLICATE_SOURCE"),
         ("missing_source", "READONLY_DB_MERGE_SOURCE_MISSING"),
         ("outside_root", "READONLY_DB_EVIDENCE_ROOT_UNAPPROVED"),
@@ -901,6 +910,33 @@ def test_merge_readonly_db_source_evidence_rejects_untrusted_sources(mutator: st
         role = json.loads((gfs_config.lane_dir / "role.json").read_text(encoding="utf-8"))
         role["current_user"] = "forged_display_ro"
         _write_json(gfs_config.lane_dir / "role.json", role)
+    elif mutator == "simulated_schema":
+        gfs_summary = json.loads((gfs_config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+        gfs_summary["schema"] = "nhms.readonly_db_boundary.evidence.simulated.v1"
+        _write_json(gfs_config.lane_dir / "summary.json", gfs_summary)
+    elif mutator == "simulated_provenance":
+        gfs_summary = json.loads((gfs_config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+        gfs_summary["validation_provenance"] = {
+            "mode": "simulated",
+            "live_readonly_proof": False,
+            "injected_components": ["adapter"],
+        }
+        _write_json(gfs_config.lane_dir / "summary.json", gfs_summary)
+    elif mutator == "false_live_proof":
+        gfs_summary = json.loads((gfs_config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+        gfs_summary["validation_provenance"]["live_readonly_proof"] = False
+        _write_json(gfs_config.lane_dir / "summary.json", gfs_summary)
+    elif mutator == "missing_provenance":
+        gfs_summary = json.loads((gfs_config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+        gfs_summary.pop("validation_provenance", None)
+        _write_json(gfs_config.lane_dir / "summary.json", gfs_summary)
+    elif mutator == "stale_unrelated_source":
+        stale_config = _seed_live_readonly_source(
+            evidence_root=evidence_root,
+            run_id=f"{run_id}-older-gfs",
+            source="GFS",
+        )
+        source_dirs[0] = stale_config.lane_dir
     elif mutator == "duplicate_source":
         ifs_summary = json.loads((ifs_config.lane_dir / "summary.json").read_text(encoding="utf-8"))
         ifs_summary["display_identity"]["source"] = "GFS"
@@ -934,6 +970,37 @@ def test_merge_readonly_db_source_evidence_rejects_untrusted_sources(mutator: st
                 force=True,
             )
         assert exc_info.value.error_code == error_code
+
+
+def test_merge_readonly_db_source_evidence_accepts_explicit_parent_bundle_binding() -> None:
+    evidence_root = _evidence_root()
+    run_id = _run_id("merge-explicit-parent")
+    gfs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-external-gfs",
+        source="GFS",
+    )
+    ifs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-external-ifs",
+        source="IFS",
+    )
+    for config in (gfs_config, ifs_config):
+        summary = json.loads((config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+        summary["validation_provenance"]["parent_evidence_run_id"] = run_id
+        _write_json(config.lane_dir / "summary.json", summary)
+
+    summary = merge_readonly_db_source_evidence(
+        evidence_root=evidence_root,
+        run_id=run_id,
+        source_dirs=(gfs_config.lane_dir, ifs_config.lane_dir),
+        force=True,
+    )
+
+    assert summary["status"] == "PASS"
+    assert {
+        artifact["parent_binding"] for artifact in summary["validation_provenance"]["source_artifacts"]
+    } == {"validation_provenance.parent_evidence_run_id"}
 
 
 def test_successful_ddl_execution_despite_no_catalog_grant_fails_with_rollback_cleanup_only() -> None:

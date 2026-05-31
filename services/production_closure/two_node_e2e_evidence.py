@@ -1207,6 +1207,7 @@ def _evaluate_manual_ops(
     receipts = _first_mapping_value(payload, ("control_receipts", "retry_cancel_receipts", "receipts"))
     actual_22_receipt_count = 0
     actual_22_receipt_sources: set[str] = set()
+    run_dir = doc.path.parent.parent
     if isinstance(receipts, list):
         for receipt in receipts:
             if not isinstance(receipt, Mapping):
@@ -1254,6 +1255,13 @@ def _evaluate_manual_ops(
                 )
                 findings.extend(_with_context(item, lane="manual_ops", source=source) for item in identity_findings)
                 blockers.extend(_with_context(item, lane="manual_ops", source=source) for item in identity_blockers)
+                provenance_blockers = _manual_ops_receipt_provenance_blockers(
+                    receipt,
+                    source=source,
+                    evidence_run_id=evidence_run_id,
+                    run_dir=run_dir,
+                )
+                blockers.extend(_with_context(item, lane="manual_ops", source=source) for item in provenance_blockers)
     if status == STATUS_PASS:
         blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name="manual_ops"))
         blockers.extend(_manual_ops_contract_blockers(payload, display_actions, receipts))
@@ -4001,17 +4009,194 @@ def _manual_ops_contract_blockers(
                 "Manual ops PASS requires node 22 receipt provenance for declared sources.",
             )
         )
-    elif any(
-        isinstance(receipt, Mapping)
-        and _is_actual_control_receipt(receipt)
-        and _node_number(receipt) == "22"
-        and not isinstance(receipt.get("provenance"), Mapping)
-        for receipt in receipts
-    ):
-        blockers.append(
+    return blockers
+
+
+def _manual_ops_receipt_provenance_blockers(
+    receipt: Mapping[str, Any],
+    *,
+    source: str,
+    evidence_run_id: str,
+    run_dir: Path,
+) -> list[dict[str, Any]]:
+    provenance = receipt.get("provenance")
+    if not isinstance(provenance, Mapping) or not provenance:
+        return [
             _blocker(
                 "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_MISSING",
                 "Actual node 22 manual ops receipts must include producer provenance.",
+                action=receipt.get("action"),
+            )
+        ]
+    blockers: list[dict[str, Any]] = []
+    raw_node = provenance.get("producer_node") or provenance.get("node") or provenance.get("host_node")
+    if raw_node is None or _node_number(provenance) != "22":
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_PRODUCER_INVALID",
+                "Manual ops receipt provenance must identify node 22 as the producer.",
+                producer_node=raw_node,
+            )
+        )
+    producer_role = str(provenance.get("producer_role") or provenance.get("service_role") or "").strip()
+    if producer_role != "compute_control":
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_PRODUCER_INVALID",
+                "Manual ops receipt provenance must identify the compute_control producer role.",
+                producer_role=producer_role,
+            )
+        )
+    if not any(str(provenance.get(key) or "").strip() for key in ("receipt_id", "command_id")):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_ID_MISSING",
+                "Manual ops receipt provenance must include a receipt_id or command_id.",
+            )
+        )
+    provenance_source = _source_name(provenance.get("source") or provenance.get("source_id"))
+    if not provenance_source:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_SOURCE_MISSING",
+                "Manual ops receipt provenance must include the strict source.",
+            )
+        )
+    elif provenance_source != source:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_SOURCE_MISMATCH",
+                "Manual ops receipt provenance source must match the receipt strict source.",
+                source=provenance_source,
+                expected_source=source,
+            )
+        )
+    if provenance.get("redacted") is not True:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_UNREDACTED",
+                "Manual ops receipt provenance must be redacted metadata only.",
+            )
+        )
+    explicit_ids = _explicit_bundle_run_ids(provenance)
+    if not explicit_ids:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_RUN_ID_MISSING",
+                "Manual ops receipt provenance must bind to the current evidence run.",
+                expected_evidence_run_id=evidence_run_id,
+            )
+        )
+    else:
+        for key, value in explicit_ids:
+            if str(value) != evidence_run_id:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_PROVENANCE_RUN_ID_MISMATCH",
+                        "Manual ops receipt provenance belongs to a different evidence run.",
+                        key=key,
+                        evidence_run_id=value,
+                        expected_evidence_run_id=evidence_run_id,
+                    )
+                )
+    blockers.extend(
+        _manual_ops_receipt_artifact_blockers(
+            provenance,
+            evidence_run_id=evidence_run_id,
+            run_dir=run_dir,
+        )
+    )
+    return blockers
+
+
+def _manual_ops_receipt_artifact_blockers(
+    provenance: Mapping[str, Any],
+    *,
+    evidence_run_id: str,
+    run_dir: Path,
+) -> list[dict[str, Any]]:
+    raw_path = provenance.get("artifact_path") or provenance.get("path")
+    raw_sha256 = provenance.get("sha256") or provenance.get("artifact_sha256")
+    if raw_path is None and raw_sha256 is None:
+        return []
+    blockers: list[dict[str, Any]] = []
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return [
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_PATH_MISSING",
+                "Manual ops receipt artifact provenance must include a path.",
+            )
+        ]
+    if not isinstance(raw_sha256, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", raw_sha256.strip()):
+        return [
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_SHA_MISSING",
+                "Manual ops receipt artifact provenance must include a sha256 digest.",
+                path=raw_path,
+            )
+        ]
+    try:
+        path = _approved_artifact_path(raw_path)
+    except TwoNodeE2EEvidenceError:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_OUTSIDE_APPROVED_ROOT",
+                "Manual ops receipt artifact path must stay under approved evidence roots.",
+                path=raw_path,
+            )
+        ]
+    explicit_ids = _explicit_bundle_run_ids(provenance)
+    if not _path_is_relative_to(path, run_dir) and not (
+        explicit_ids and all(str(value) == evidence_run_id for _, value in explicit_ids)
+    ):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_STALE_OR_UNSCOPED",
+                "Manual ops receipt artifact must be in the current run or explicitly bind to it.",
+                path=_public_path(path),
+                expected_evidence_run_id=evidence_run_id,
+            )
+        )
+    containment_root = _approved_artifact_containment_root(path)
+    try:
+        content = read_bytes_limited_no_follow(
+            path,
+            max_bytes=MAX_EVIDENCE_PAYLOAD_BYTES,
+            containment_root=containment_root,
+        )
+    except FileNotFoundError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_MISSING",
+                "Manual ops receipt artifact file is missing.",
+                path=_public_path(path),
+            )
+        )
+        return blockers
+    except SafeFilesystemError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_PATH_UNSAFE",
+                "Manual ops receipt artifact path is unsafe.",
+                path=_public_path(path),
+            )
+        )
+        return blockers
+    if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_TOO_LARGE",
+                "Manual ops receipt artifact file is too large.",
+                path=_public_path(path),
+            )
+        )
+        return blockers
+    if hashlib.sha256(content).hexdigest() != raw_sha256.lower():
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_HASH_MISMATCH",
+                "Manual ops receipt artifact sha256 does not match file content.",
+                path=_public_path(path),
             )
         )
     return blockers
@@ -4209,6 +4394,18 @@ def _approved_artifact_path(value: str) -> Path:
         )
     _refuse_symlink_components(resolved.parent)
     return resolved
+
+
+def _approved_artifact_containment_root(path: Path) -> Path:
+    resolved = path.resolve(strict=False)
+    approved_roots = tuple(root.expanduser().resolve(strict=False) for root in APPROVED_EVIDENCE_ROOTS)
+    for root in approved_roots:
+        if _path_is_relative_to(resolved, root):
+            return root
+    raise TwoNodeE2EEvidenceError(
+        "TWO_NODE_E2E_EVIDENCE_ROOT_UNAPPROVED",
+        "Evidence artifact path must be under repository artifacts/ or /scratch/frd_muziyao.",
+    )
 
 
 def _path_is_relative_to(path: Path, root: Path) -> bool:

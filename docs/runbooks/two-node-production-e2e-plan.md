@@ -179,7 +179,10 @@ mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,b
 - `manual-ops/summary.json`：必须使用 `nhms.two_node_e2e.manual_ops.v1`，包含当前
   `evidence_run_id`、脱敏 production operator auth 元数据、27 retry/cancel response evidence、
   27 no-side-effect proof，以及每个 declared source 的 22 receipt provenance；旧式
-  `production_operator_auth_evidence: true` 或布尔断言不能作为 PASS。
+  `production_operator_auth_evidence: true` 或布尔断言不能作为 PASS。每个实际 22 receipt 的 provenance
+  必须记录 `producer_node=22`、`producer_role=compute_control`、`receipt_id` 或 `command_id`、匹配的
+  `source`/`source_id`、当前 `evidence_run_id` 和 `redacted=true`；如记录 artifact `path`/`artifact_path`
+  与 `sha256`，最终聚合会校验路径在批准 evidence root 下、文件存在且 hash 匹配。
 - `db/summary.md`：readonly DB role、权限矩阵、脱敏 DSN 和 blocker。
 - `api/summary.md`：health、runtime config、models、stations、latest-product、pipeline/jobs/logs。
 - `browser/summary.md`：无 mock 的 `/hydro-met` 和 `/ops` 浏览器证据。
@@ -453,8 +456,12 @@ per-run lane：`$EVIDENCE_ROOT/db/readonly-db-boundary/`。`NHMS_READONLY_DB_VAL
 lane，再用 `--merge-source-dir` 写入最终 `db/readonly-db-boundary/`；单 source DB evidence 在 full-scope 最终聚合中会保持
 `BLOCKED`，不能手写补成 GFS/IFS。每个 per-source lane 必须保留 authoritative sibling：
 `summary.json`、`role.json`、`route_smoke.json`、`permission_probes.json`；merge 会拒绝缺 sibling、
-sibling 与 summary 不一致、source dir 越界或 symlink、重复/缺失 source，并把每个 source artifact 的路径、
-sha256 和 run ID 写入 merged summary。`command_index.md` 只记录脱敏形式，例如：
+sibling 与 summary 不一致、source dir 越界或 symlink、重复/缺失 source、非 live schema、非 `PASS`、
+`validation_provenance.mode != "live"`、`live_readonly_proof != true`，以及与当前 final bundle 无关的 stale
+source run。合法 per-source run ID 是 `$EVIDENCE_RUN_ID-db-GFS`/`$EVIDENCE_RUN_ID-db-IFS`
+或 `$EVIDENCE_RUN_ID-gfs`/`$EVIDENCE_RUN_ID-ifs`；其他命名必须在 source summary 或
+`validation_provenance` 里显式记录 parent/current evidence bundle 等于 `$EVIDENCE_RUN_ID`。merged summary
+会记录每个 source artifact 的路径、sha256、run ID 和 source provenance。`command_index.md` 只记录脱敏形式，例如：
 
 ```text
 NHMS_DISPLAY_READONLY_DATABASE_URL=<redacted> uv run python scripts/validate_readonly_db_boundary.py --evidence-root "$EVIDENCE_PARENT" --run-id "$EVIDENCE_RUN_ID" --force
@@ -485,7 +492,8 @@ owner-only `0600` secret source，不记录原始 DSN、文件内容或 `source`
   真实 auth 路径，本 lane 记为 `BLOCKED`，且仍然不能构造 DB write 或 Gateway 依赖。
 - #239 final manual-ops lane 的 PASS 证据必须是 `nhms.two_node_e2e.manual_ops.v1` JSON，记录
   `production_operator_auth` redacted metadata、27 retry/cancel `response_evidence`、27
-  `no_side_effect_proof` 和 22 `control_receipts[].provenance`；只写
+  `no_side_effect_proof` 和 22 `control_receipts[].provenance`；22 receipt provenance 必须绑定 producer、
+  source、当前 evidence bundle、redaction 状态，并在 artifact path/sha256 存在时可由文件 hash 复验。只写
   `production_operator_auth_evidence: true`、`write_executed: false` 这类布尔断言会被最终聚合器判为
   `BLOCKED`。
 - `scripts/validate_readonly_db_boundary.py` 内部的 retry/cancel manual-action check 使用 in-process/dev-header

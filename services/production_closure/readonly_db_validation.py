@@ -23,6 +23,7 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
     unlink_no_follow,
 )
 
@@ -31,6 +32,7 @@ DEFAULT_EVIDENCE_ROOT = REPO_ROOT / "artifacts" / "two-node-e2e"
 APPROVED_EVIDENCE_ROOTS = (REPO_ROOT / "artifacts", Path("/scratch/frd_muziyao"))
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SAFE_DDL_SUFFIX_RE = re.compile(r"[^a-z0-9_]+")
+MAX_EVIDENCE_PAYLOAD_BYTES = 1024 * 1024
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -134,6 +136,7 @@ class ReadonlyDbMergeSourceEvidence:
     source_dir: Path
     summary: dict[str, Any]
     artifacts: dict[str, dict[str, Any]]
+    parent_binding_field: str
 
 
 class ReadonlyDbProbeAdapter(Protocol):
@@ -1131,8 +1134,9 @@ def _read_source_evidence(source_dir: Path, *, expected_run_id: str) -> Readonly
     payloads: dict[str, Any] = {}
     for filename in AUTHORITATIVE_EVIDENCE_FILENAMES:
         path = resolved_dir / filename
-        payloads[filename] = _read_source_json_file(path, source_dir=resolved_dir)
-        artifacts[filename] = _source_artifact_record(path, payloads[filename])
+        payload, sha256 = _read_source_json_file(path, source_dir=resolved_dir)
+        payloads[filename] = payload
+        artifacts[filename] = _source_artifact_record(path, payload, sha256=sha256)
     summary = payloads["summary.json"]
     if not isinstance(summary, dict):
         raise ReadonlyDbValidationError(
@@ -1140,8 +1144,18 @@ def _read_source_evidence(source_dir: Path, *, expected_run_id: str) -> Readonly
             f"Readonly DB source summary must be a JSON object: {resolved_dir / 'summary.json'}",
         )
     _validate_source_siblings(resolved_dir, summary, payloads)
-    _validate_merge_source_run(summary, artifacts=artifacts, expected_run_id=expected_run_id)
-    return ReadonlyDbMergeSourceEvidence(source_dir=resolved_dir, summary=summary, artifacts=artifacts)
+    parent_binding_field = _validate_merge_source_run(
+        summary,
+        artifacts=artifacts,
+        expected_run_id=expected_run_id,
+    )
+    _validate_merge_source_live_provenance(summary)
+    return ReadonlyDbMergeSourceEvidence(
+        source_dir=resolved_dir,
+        summary=summary,
+        artifacts=artifacts,
+        parent_binding_field=parent_binding_field,
+    )
 
 
 def _safe_merge_source_dir(source_dir: Path) -> Path:
@@ -1156,7 +1170,7 @@ def _safe_merge_source_dir(source_dir: Path) -> Path:
     return resolved
 
 
-def _read_source_json_file(path: Path, *, source_dir: Path) -> Any:
+def _read_source_json_file(path: Path, *, source_dir: Path) -> tuple[Any, str]:
     try:
         if path.is_symlink():
             raise ReadonlyDbValidationError(
@@ -1170,34 +1184,42 @@ def _read_source_json_file(path: Path, *, source_dir: Path) -> Any:
                 "READONLY_DB_MERGE_SOURCE_PATH_UNSAFE",
                 f"Readonly DB merge source file must stay in source dir: {path}",
             )
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        content = read_bytes_limited_no_follow(
+            path,
+            max_bytes=MAX_EVIDENCE_PAYLOAD_BYTES,
+            containment_root=source_dir,
+        )
+        if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_TOO_LARGE",
+                f"Readonly DB source evidence exceeds {MAX_EVIDENCE_PAYLOAD_BYTES} bytes: {path}",
+            )
+        payload = json.loads(content.decode("utf-8"))
+        sha256 = hashlib.sha256(content).hexdigest()
     except FileNotFoundError as error:
         raise ReadonlyDbValidationError(
             "READONLY_DB_MERGE_SOURCE_MISSING",
             f"Readonly DB source authoritative evidence is missing: {path}",
         ) from error
-    except json.JSONDecodeError as error:
+    except SafeFilesystemError as error:
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_PATH_UNSAFE",
+            f"Readonly DB source evidence path is unsafe: {path}",
+        ) from error
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ReadonlyDbValidationError(
             "READONLY_DB_MERGE_SOURCE_JSON_INVALID",
             f"Readonly DB source evidence is invalid JSON: {path}",
         ) from error
-    return payload
+    return payload, sha256
 
 
-def _source_artifact_record(path: Path, payload: Any) -> dict[str, Any]:
+def _source_artifact_record(path: Path, payload: Any, *, sha256: str) -> dict[str, Any]:
     return {
         "path": _public_path(path),
-        "sha256": _file_sha256(path),
+        "sha256": sha256,
         "run_id": _artifact_run_id(payload),
     }
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _artifact_run_id(payload: Any) -> str | None:
@@ -1232,7 +1254,7 @@ def _validate_merge_source_run(
     *,
     artifacts: Mapping[str, Mapping[str, Any]],
     expected_run_id: str,
-) -> None:
+) -> str:
     run_id = summary.get("run_id")
     if not isinstance(run_id, str) or not run_id.strip():
         raise ReadonlyDbValidationError(
@@ -1244,6 +1266,17 @@ def _validate_merge_source_run(
             "READONLY_DB_MERGE_SOURCE_RUN_LAYOUT_INVALID",
             "Readonly DB merge source must be a per-source lane, not the final merge lane.",
         )
+    parent_binding = _merge_source_parent_binding(summary)
+    if parent_binding is not None and parent_binding[1] != expected_run_id:
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_PARENT_RUN_MISMATCH",
+            "Readonly DB merge source parent/current bundle binding must match the final bundle.",
+        )
+    if parent_binding is None and not _is_expected_per_source_run_id(run_id, expected_run_id):
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_PARENT_RUN_MISMATCH",
+            "Readonly DB merge source must be a current per-source lane or explicitly bind to the final bundle.",
+        )
     for filename, artifact in artifacts.items():
         artifact_run_id = artifact.get("run_id")
         if artifact_run_id is not None and artifact_run_id != run_id:
@@ -1251,6 +1284,70 @@ def _validate_merge_source_run(
                 "READONLY_DB_MERGE_SOURCE_RUN_ID_MISMATCH",
                 f"Readonly DB merge source artifact {filename} run_id must match summary.json.",
             )
+    return parent_binding[0] if parent_binding is not None else "run_id_prefix"
+
+
+def _validate_merge_source_live_provenance(summary: Mapping[str, Any]) -> None:
+    if summary.get("schema") != LIVE_EVIDENCE_SCHEMA:
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_SCHEMA_INVALID",
+            "Readonly DB merge source must use the live evidence schema.",
+        )
+    if summary.get("status") != STATUS_PASS:
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_NOT_PASS",
+            "Readonly DB merge source must be PASS before it can be merged.",
+        )
+    provenance = summary.get("validation_provenance")
+    if not isinstance(provenance, Mapping):
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_PROVENANCE_MISSING",
+            "Readonly DB merge source must include validation_provenance.",
+        )
+    if provenance.get("mode") != "live" or provenance.get("live_readonly_proof") is not True:
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_LIVE_PROOF_MISSING",
+            "Readonly DB merge source must carry live validation provenance.",
+        )
+
+
+def _merge_source_parent_binding(summary: Mapping[str, Any]) -> tuple[str, str] | None:
+    for key in (
+        "parent_evidence_run_id",
+        "parent_bundle_run_id",
+        "parent_bundle_id",
+        "current_evidence_run_id",
+        "current_bundle_run_id",
+        "expected_evidence_run_id",
+    ):
+        value = summary.get(key)
+        if isinstance(value, str) and value.strip():
+            return key, value
+    provenance = summary.get("validation_provenance")
+    if isinstance(provenance, Mapping):
+        for key in (
+            "parent_evidence_run_id",
+            "parent_bundle_run_id",
+            "parent_bundle_id",
+            "current_evidence_run_id",
+            "current_bundle_run_id",
+            "expected_evidence_run_id",
+        ):
+            value = provenance.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"validation_provenance.{key}", value
+    return None
+
+
+def _is_expected_per_source_run_id(run_id: str, expected_run_id: str) -> bool:
+    run_id_lower = run_id.lower()
+    expected_lower = expected_run_id.lower()
+    return run_id_lower in {
+        f"{expected_lower}-gfs",
+        f"{expected_lower}-ifs",
+        f"{expected_lower}-db-gfs",
+        f"{expected_lower}-db-ifs",
+    }
 
 
 def _merged_readonly_db_summary(
@@ -1304,6 +1401,8 @@ def _merged_readonly_db_summary(
                 "sources": sorted(source_names),
                 "source_dir": _public_path(evidence.source_dir),
                 "summary_run_id": payload.get("run_id"),
+                "parent_binding": evidence.parent_binding_field,
+                "validation_provenance": _merge_source_validation_provenance(payload),
                 "artifacts": evidence.artifacts,
             }
         )
@@ -1400,6 +1499,28 @@ def _merged_manual_actions(source_payloads: Sequence[Mapping[str, Any]]) -> list
         if isinstance(manual_actions, list) and manual_actions:
             return [dict(item) for item in manual_actions if isinstance(item, Mapping)]
     return []
+
+
+def _merge_source_validation_provenance(payload: Mapping[str, Any]) -> dict[str, Any]:
+    provenance = payload.get("validation_provenance")
+    if not isinstance(provenance, Mapping):
+        return {}
+    return {
+        "mode": provenance.get("mode"),
+        "live_readonly_proof": provenance.get("live_readonly_proof"),
+        **{
+            key: provenance[key]
+            for key in (
+                "parent_evidence_run_id",
+                "parent_bundle_run_id",
+                "parent_bundle_id",
+                "current_evidence_run_id",
+                "current_bundle_run_id",
+                "expected_evidence_run_id",
+            )
+            if key in provenance
+        },
+    }
 
 
 def _merge_payload_sources(payload: Mapping[str, Any]) -> set[str]:
