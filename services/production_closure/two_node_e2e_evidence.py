@@ -197,6 +197,8 @@ DOCKER_FORBIDDEN_MOUNT_TOKENS = (
 )
 DOCKER_BROAD_HOST_ROOTS = frozenset({"/", "/root", "/home", "/etc", "/run", "/var", "/scratch"})
 MANUAL_OPS_REQUIRED_DISPLAY_ACTIONS = frozenset({"retry", "cancel"})
+MANUAL_OPS_MANUAL_ACTION_ERROR_CODE = "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+MANUAL_OPS_RESPONSE_REDACTION_KEYS = ("body_redacted", "redacted", "sensitive_values_redacted")
 MANUAL_OPS_SIDE_EFFECT_CATEGORIES: Mapping[str, tuple[str, ...]] = {
     "write": (
         "write_executed",
@@ -840,6 +842,13 @@ def _evaluate_readonly_db(
             )
         )
     provenance = payload.get("validation_provenance", {})
+    if not isinstance(provenance, Mapping) or provenance.get("mode") != "live":
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_LIVE_MODE_MISSING",
+                "Readonly DB PASS requires validation_provenance.mode=live.",
+            )
+        )
     if not isinstance(provenance, Mapping) or provenance.get("live_readonly_proof") is not True:
         blockers.append(
             _blocker(
@@ -1264,7 +1273,14 @@ def _evaluate_manual_ops(
                 blockers.extend(_with_context(item, lane="manual_ops", source=source) for item in provenance_blockers)
     if status == STATUS_PASS:
         blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name="manual_ops"))
-        blockers.extend(_manual_ops_contract_blockers(payload, display_actions, receipts))
+        blockers.extend(
+            _manual_ops_contract_blockers(
+                payload,
+                display_actions,
+                receipts,
+                evidence_run_id=evidence_run_id,
+            )
+        )
         blockers.extend(_manual_ops_operator_auth_blockers(payload))
         if not isinstance(display_actions, list) or not display_actions:
             blockers.append(
@@ -3959,6 +3975,8 @@ def _manual_ops_contract_blockers(
     payload: Mapping[str, Any],
     display_actions: Any,
     receipts: Any,
+    *,
+    evidence_run_id: str,
 ) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
     if payload.get("schema") != MANUAL_OPS_SCHEMA:
@@ -3977,11 +3995,18 @@ def _manual_ops_contract_blockers(
                 "Manual ops PASS requires 27 display retry/cancel response evidence.",
             )
         )
-    elif any(not isinstance(action, Mapping) or "response_evidence" not in action for action in display_actions):
+    elif any(not isinstance(action, Mapping) for action in display_actions):
         blockers.append(
             _blocker(
                 "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_MISSING",
                 "Manual ops 27 actions must include metadata-only response evidence.",
+            )
+        )
+    else:
+        blockers.extend(
+            _manual_ops_display_response_evidence_blockers(
+                display_actions,
+                evidence_run_id=evidence_run_id,
             )
         )
     no_side_effect = payload.get("no_side_effect_proof")
@@ -4009,6 +4034,133 @@ def _manual_ops_contract_blockers(
                 "Manual ops PASS requires node 22 receipt provenance for declared sources.",
             )
         )
+    return blockers
+
+
+def _manual_ops_display_response_evidence_blockers(
+    display_actions: Sequence[Mapping[str, Any]],
+    *,
+    evidence_run_id: str,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for action in display_actions:
+        if _node_number(action) != "27":
+            continue
+        action_name = _manual_action_name(action)
+        if action_name not in MANUAL_OPS_REQUIRED_DISPLAY_ACTIONS:
+            continue
+        if _manual_action_outcome_status(action) != STATUS_PASS:
+            continue
+        blockers.extend(
+            _manual_ops_single_response_evidence_blockers(
+                action,
+                action_name=action_name,
+                evidence_run_id=evidence_run_id,
+            )
+        )
+    return blockers
+
+
+def _manual_ops_single_response_evidence_blockers(
+    action: Mapping[str, Any],
+    *,
+    action_name: str,
+    evidence_run_id: str,
+) -> list[dict[str, Any]]:
+    if "response_evidence" not in action:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_MISSING",
+                "Manual ops 27 retry/cancel actions must include response_evidence.",
+                action=action_name,
+            )
+        ]
+
+    response_evidence = action.get("response_evidence")
+    if not isinstance(response_evidence, Mapping) or not response_evidence:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_INVALID",
+                "Manual ops response_evidence must be a non-empty metadata mapping.",
+                action=action_name,
+                observed_type=type(response_evidence).__name__,
+            )
+        ]
+
+    blockers: list[dict[str, Any]] = []
+    status_values = [
+        (key, response_evidence.get(key))
+        for key in ("http_status", "status_code")
+        if key in response_evidence
+    ]
+    if not status_values or any(str(value).strip() != "409" for _, value in status_values):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_STATUS_INVALID",
+                "Manual ops response_evidence must prove a 409 manual-action response.",
+                action=action_name,
+                http_status=response_evidence.get("http_status"),
+                status_code=response_evidence.get("status_code"),
+            )
+        )
+    if response_evidence.get("error_code") != MANUAL_OPS_MANUAL_ACTION_ERROR_CODE:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_ERROR_CODE_INVALID",
+                "Manual ops response_evidence must prove CONTROL_PLANE_MANUAL_ACTION_REQUIRED.",
+                action=action_name,
+                observed_error_code=response_evidence.get("error_code"),
+            )
+        )
+    if not any(response_evidence.get(key) is True for key in MANUAL_OPS_RESPONSE_REDACTION_KEYS):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_REDACTION_MISSING",
+                "Manual ops response_evidence must be redacted metadata only.",
+                action=action_name,
+            )
+        )
+    response_action = response_evidence.get("action")
+    if response_action is not None and _manual_action_name({"action": response_action}) != action_name:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISMATCH",
+                "Manual ops response_evidence action binding must match the display action.",
+                action=action_name,
+                response_action=response_action,
+            )
+        )
+    response_source = (
+        response_evidence.get("source") if "source" in response_evidence else response_evidence.get("source_id")
+    )
+    if response_source is not None:
+        action_source = _source_name(action.get("source") or action.get("source_id"))
+        bound_source = _source_name(response_source)
+        if action_source is None or bound_source != action_source:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISMATCH",
+                    "Manual ops response_evidence source binding must match the display action source.",
+                    action=action_name,
+                    source=bound_source,
+                    expected_source=action_source,
+                )
+            )
+    for key in CURRENT_EVIDENCE_RUN_ID_KEYS:
+        if key not in response_evidence:
+            continue
+        value = response_evidence.get(key)
+        if str(value or "").strip() != evidence_run_id:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_RUN_ID_MISMATCH",
+                    "Manual ops response_evidence belongs to a different evidence run.",
+                    action=action_name,
+                    key=key,
+                    evidence_run_id=value,
+                    expected_evidence_run_id=evidence_run_id,
+                )
+            )
     return blockers
 
 

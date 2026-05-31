@@ -375,6 +375,26 @@ def test_readonly_db_writer_or_mutating_evidence_fails(operation_patch: dict[str
     assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_FAIL
 
 
+@pytest.mark.parametrize("mode", [None, "simulated", "fixture", "production"])
+def test_readonly_db_pass_requires_live_validation_provenance_mode(mode: str | None) -> None:
+    run_id = _run_id(f"db-mode-{mode or 'missing'}")
+    config = _seed_pass_bundle(run_id)
+    db_summary = _read(config.run_dir / "db" / "readonly-db-boundary" / "summary.json")
+    if mode is None:
+        db_summary["validation_provenance"].pop("mode", None)
+    else:
+        db_summary["validation_provenance"]["mode"] = mode
+    db_summary["validation_provenance"]["live_readonly_proof"] = True
+    _write(config.run_dir / "db" / "readonly-db-boundary" / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_READONLY_DB_LIVE_MODE_MISSING" in _codes(readonly_lane["blockers"])
+
+
 @pytest.mark.parametrize("producer_status", [STATUS_PARTIAL, STATUS_BLOCKED])
 @pytest.mark.parametrize(
     "operation_patch",
@@ -858,6 +878,70 @@ def test_manual_ops_receipt_provenance_with_valid_artifact_passes() -> None:
 
     assert summary["status"] == STATUS_PASS
     assert summary["lane_summaries"]["manual_ops"]["status"] == STATUS_PASS
+
+
+def test_manual_ops_response_evidence_valid_fixture_passes() -> None:
+    run_id = _run_id("manual-response-valid")
+    config = _seed_pass_bundle(run_id)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["manual_ops"]["status"] == STATUS_PASS
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_code"),
+    [
+        ("missing", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_MISSING"),
+        ("boolean", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_INVALID"),
+        ("string", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_INVALID"),
+        ("empty", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_EVIDENCE_INVALID"),
+        ("wrong_status", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_STATUS_INVALID"),
+        ("wrong_error_code", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_ERROR_CODE_INVALID"),
+        ("missing_redaction", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_REDACTION_MISSING"),
+        ("wrong_action", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISMATCH"),
+        ("wrong_source", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_BINDING_MISMATCH"),
+        ("wrong_run_id", "TWO_NODE_E2E_MANUAL_OPS_DISPLAY_RESPONSE_RUN_ID_MISMATCH"),
+    ],
+)
+def test_manual_ops_response_evidence_must_be_structured_producer_evidence(
+    mutator: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"manual-response-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    manual_ops = _read(config.run_dir / "manual-ops" / "summary.json")
+    action = manual_ops["display_actions"][0]
+    if mutator == "missing":
+        action.pop("response_evidence", None)
+    elif mutator == "boolean":
+        action["response_evidence"] = True
+    elif mutator == "string":
+        action["response_evidence"] = "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
+    elif mutator == "empty":
+        action["response_evidence"] = {}
+    elif mutator == "wrong_status":
+        action["response_evidence"]["http_status"] = 200
+    elif mutator == "wrong_error_code":
+        action["response_evidence"]["error_code"] = "OK"
+    elif mutator == "missing_redaction":
+        action["response_evidence"].pop("body_redacted", None)
+    elif mutator == "wrong_action":
+        action["response_evidence"]["action"] = "cancel"
+    elif mutator == "wrong_source":
+        action["source"] = "GFS"
+        action["response_evidence"]["source"] = "IFS"
+    elif mutator == "wrong_run_id":
+        action["response_evidence"]["evidence_run_id"] = "older-bundle"
+    _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    manual_lane = summary["lane_summaries"]["manual_ops"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert manual_lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(manual_lane["blockers"])
 
 
 @pytest.mark.parametrize(
