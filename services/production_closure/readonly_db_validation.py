@@ -1130,7 +1130,14 @@ def merge_readonly_db_source_evidence(
     if config.force:
         for filename in AUTHORITATIVE_EVIDENCE_FILENAMES:
             writer.remove_json(config.lane_dir / filename)
-    source_evidence = [_read_source_evidence(source_dir, expected_run_id=config.run_id) for source_dir in source_dirs]
+    source_evidence = [
+        _read_source_evidence(
+            source_dir,
+            expected_run_id=config.run_id,
+            expected_evidence_parent=config.evidence_root,
+        )
+        for source_dir in source_dirs
+    ]
     summary = _merged_readonly_db_summary(
         config,
         source_evidence=source_evidence,
@@ -1144,7 +1151,12 @@ def merge_readonly_db_source_evidence(
     return redact_payload(summary)
 
 
-def _read_source_evidence(source_dir: Path, *, expected_run_id: str) -> ReadonlyDbMergeSourceEvidence:
+def _read_source_evidence(
+    source_dir: Path,
+    *,
+    expected_run_id: str,
+    expected_evidence_parent: Path,
+) -> ReadonlyDbMergeSourceEvidence:
     resolved_dir = _safe_merge_source_dir(source_dir)
     artifacts: dict[str, dict[str, Any]] = {}
     payloads: dict[str, Any] = {}
@@ -1168,6 +1180,8 @@ def _read_source_evidence(source_dir: Path, *, expected_run_id: str) -> Readonly
         summary,
         artifacts=artifacts,
         expected_run_id=expected_run_id,
+        source_dir=resolved_dir,
+        expected_evidence_parent=expected_evidence_parent,
     )
     _validate_merge_source_live_provenance(summary)
     return ReadonlyDbMergeSourceEvidence(
@@ -1313,6 +1327,8 @@ def _validate_merge_source_run(
     *,
     artifacts: Mapping[str, Mapping[str, Any]],
     expected_run_id: str,
+    source_dir: Path,
+    expected_evidence_parent: Path,
 ) -> str:
     run_id = summary.get("run_id")
     if not isinstance(run_id, str) or not run_id.strip():
@@ -1331,11 +1347,33 @@ def _validate_merge_source_run(
             "READONLY_DB_MERGE_SOURCE_PARENT_RUN_MISMATCH",
             "Readonly DB merge source parent/current bundle binding must match the final bundle.",
         )
-    if parent_binding is None and not _is_expected_per_source_run_id(run_id, expected_run_id):
+    expected_parent = expected_evidence_parent.expanduser().resolve(strict=False)
+    observed_parent = source_dir.parent.parent.parent.expanduser().resolve(strict=False)
+    if parent_binding is None and _is_expected_per_source_run_id(run_id, expected_run_id):
+        if observed_parent != expected_parent:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_PARENT_ROOT_MISMATCH",
+                "Readonly DB run_id-prefix merge source must live under the current final evidence parent.",
+            )
+    elif parent_binding is None:
         raise ReadonlyDbValidationError(
             "READONLY_DB_MERGE_SOURCE_PARENT_RUN_MISMATCH",
             "Readonly DB merge source must be a current per-source lane or explicitly bind to the final bundle.",
         )
+    else:
+        root_binding = _merge_source_root_binding(summary)
+        if root_binding is None:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_PARENT_ROOT_MISSING",
+                "Readonly DB external merge source must explicitly bind to the current final evidence root.",
+            )
+        observed_root = Path(root_binding[1]).expanduser().resolve(strict=False)
+        expected_run_dir = expected_parent / expected_run_id
+        if observed_root not in {expected_parent, expected_run_dir.resolve(strict=False)}:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_PARENT_ROOT_MISMATCH",
+                "Readonly DB external merge source root binding must match the final bundle root.",
+            )
     for filename, artifact in artifacts.items():
         artifact_run_id = artifact.get("run_id")
         if artifact_run_id is not None and artifact_run_id != run_id:
@@ -1391,6 +1429,34 @@ def _merge_source_parent_binding(summary: Mapping[str, Any]) -> tuple[str, str] 
             "current_evidence_run_id",
             "current_bundle_run_id",
             "expected_evidence_run_id",
+        ):
+            value = provenance.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"validation_provenance.{key}", value
+    return None
+
+
+def _merge_source_root_binding(summary: Mapping[str, Any]) -> tuple[str, str] | None:
+    for key in (
+        "parent_evidence_root",
+        "parent_bundle_root",
+        "current_evidence_root",
+        "current_bundle_root",
+        "final_evidence_root",
+        "final_run_dir",
+    ):
+        value = summary.get(key)
+        if isinstance(value, str) and value.strip():
+            return key, value
+    provenance = summary.get("validation_provenance")
+    if isinstance(provenance, Mapping):
+        for key in (
+            "parent_evidence_root",
+            "parent_bundle_root",
+            "current_evidence_root",
+            "current_bundle_root",
+            "final_evidence_root",
+            "final_run_dir",
         ):
             value = provenance.get(key)
             if isinstance(value, str) and value.strip():
@@ -1591,6 +1657,12 @@ def _merge_source_validation_provenance(payload: Mapping[str, Any]) -> dict[str,
                 "current_evidence_run_id",
                 "current_bundle_run_id",
                 "expected_evidence_run_id",
+                "parent_evidence_root",
+                "parent_bundle_root",
+                "current_evidence_root",
+                "current_bundle_root",
+                "final_evidence_root",
+                "final_run_dir",
             )
             if key in provenance
         },

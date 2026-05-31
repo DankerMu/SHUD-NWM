@@ -9,9 +9,9 @@ import stat
 import sys
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
@@ -141,7 +141,57 @@ CURRENT_EVIDENCE_RUN_ID_KEYS = (
     "bundle_run_id",
     "evidence_bundle_id",
     "validation_run_id",
+    "current_evidence_run_id",
+    "current_bundle_run_id",
+    "expected_evidence_run_id",
+    "parent_evidence_run_id",
+    "parent_bundle_run_id",
+    "parent_bundle_id",
 )
+PRODUCER_EVIDENCE_KEYS = (
+    "source_artifacts",
+    "commands",
+    "requests",
+    "responses",
+    "browser_artifacts",
+    "screenshots",
+    "network",
+    "artifacts",
+    "evidence",
+    "proofs",
+)
+LOG_URI_KEYS = ("log_uri", "published_log_uri")
+LOG_UNAVAILABLE_ERROR_CODES = frozenset({"JOB_LOG_NOT_PUBLISHED", "JOB_LOG_NOT_FOUND"})
+PUBLISHED_LOG_ROOT_KEYS = frozenset(
+    {
+        "published_artifact_root",
+        "published_root",
+        "publish_root",
+        "log_publish_root",
+        "nhms_published_artifact_root",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+    }
+)
+DEFAULT_PUBLISHED_LOG_ROOTS = (Path("/var/lib/nhms/published"), Path("/mnt/nhms-published"))
+PUBLISHED_LOG_S3_BUCKET_KEYS = frozenset(
+    {
+        "published_artifact_s3_bucket",
+        "published_s3_bucket",
+        "s3_bucket",
+        "nhms_published_artifact_s3_bucket",
+        "NHMS_PUBLISHED_ARTIFACT_S3_BUCKET",
+    }
+)
+PUBLISHED_LOG_S3_PREFIX_KEYS = frozenset(
+    {
+        "published_artifact_s3_prefix",
+        "published_s3_prefix",
+        "s3_prefix",
+        "nhms_published_artifact_s3_prefix",
+        "NHMS_PUBLISHED_ARTIFACT_S3_PREFIX",
+    }
+)
+LOG_URI_ENCODED_FORBIDDEN_RE = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
 DOCKER_PREFLIGHT_SCHEMA = "nhms.two_node_docker.preflight.v1"
 DOCKER_PREFLIGHT_REQUIRED_COMMANDS = (
     "docker_version",
@@ -293,6 +343,14 @@ READONLY_DB_SOURCE_PARENT_BINDING_KEYS = (
     "current_evidence_run_id",
     "current_bundle_run_id",
     "expected_evidence_run_id",
+)
+READONLY_DB_SOURCE_ROOT_BINDING_KEYS = (
+    "parent_evidence_root",
+    "parent_bundle_root",
+    "current_evidence_root",
+    "current_bundle_root",
+    "final_evidence_root",
+    "final_run_dir",
 )
 READONLY_DB_SOURCE_ARTIFACT_FILENAMES = (
     "summary.json",
@@ -1054,6 +1112,17 @@ def _evaluate_source_lane(
         )
     if status == STATUS_PASS:
         blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name=name))
+        blockers.extend(
+            _recursive_current_run_blockers(payload, evidence_run_id, lane_name=name)
+        )
+        blockers.extend(
+            _producer_source_artifact_blockers(
+                payload,
+                evidence_run_id=evidence_run_id,
+                lane_name=name,
+                run_dir=doc.path.parents[1],
+            )
+        )
         if not _has_live_lane_evidence(payload, live_flag=live_flag):
             blockers.append(
                 _blocker(
@@ -1067,6 +1136,15 @@ def _evaluate_source_lane(
                     f"TWO_NODE_E2E_{name.upper()}_PRODUCER_EVIDENCE_MISSING",
                     f"{name} PASS requires producer-backed command, artifact, request/response, browser, "
                     "network, or per-check evidence.",
+                )
+            )
+        if name in {"api", "browser", "logs"}:
+            blockers.extend(
+                _source_lane_check_producer_blockers(
+                    name,
+                    payload,
+                    declared_sources=declared_sources,
+                    required_checks=required_checks,
                 )
             )
     records = _source_records(payload)
@@ -1181,6 +1259,21 @@ def _evaluate_source_lane(
                 _with_context(item, lane=name, source=source, check=check)
                 for item in check_blockers
             )
+            if name == "logs" and check == "job_logs":
+                blockers.extend(
+                    _with_context(
+                        item,
+                        lane=name,
+                        source=source,
+                        check=check,
+                    )
+                    for item in _logs_check_published_artifact_blockers(
+                        check_result,
+                        source_record=record,
+                        lane_payload=payload,
+                        expected_identity=strict_identities.get(source, {}),
+                    )
+                )
     if findings:
         status = STATUS_FAIL
     elif status == STATUS_PASS:
@@ -1214,6 +1307,17 @@ def _evaluate_simple_live_lane(
     findings: list[dict[str, Any]] = []
     if status == STATUS_PASS:
         blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name=name))
+        blockers.extend(
+            _recursive_current_run_blockers(payload, evidence_run_id, lane_name=name)
+        )
+        blockers.extend(
+            _producer_source_artifact_blockers(
+                payload,
+                evidence_run_id=evidence_run_id,
+                lane_name=name,
+                run_dir=doc.path.parents[1],
+            )
+        )
         if not _has_live_lane_evidence(payload, live_flag=live_flag):
             blockers.append(
                 _blocker(
@@ -1450,6 +1554,17 @@ def _evaluate_cross_plane(
     findings: list[dict[str, Any]] = []
     if status == STATUS_PASS:
         blockers.extend(_current_run_blockers(payload, evidence_run_id, lane_name="cross_plane"))
+        blockers.extend(
+            _recursive_current_run_blockers(payload, evidence_run_id, lane_name="cross_plane")
+        )
+        blockers.extend(
+            _producer_source_artifact_blockers(
+                payload,
+                evidence_run_id=evidence_run_id,
+                lane_name="cross_plane",
+                run_dir=doc.path.parents[1],
+            )
+        )
         if not _has_producer_backed_lane_evidence(payload):
             blockers.append(
                 _blocker(
@@ -3760,6 +3875,8 @@ def _readonly_db_single_source_artifact_issues(
         record,
         evidence_run_id=evidence_run_id,
         source_index=source_index,
+        source_dir=source_dir,
+        lane_dir=lane_dir,
     )
     if parent_blocker is not None:
         blockers.append(parent_blocker)
@@ -3825,6 +3942,8 @@ def _readonly_db_single_source_artifact_issues(
         source_index=source_index,
         evidence_run_id=evidence_run_id,
         summary_run_id=summary_run_id if isinstance(summary_run_id, str) else None,
+        source_dir=source_dir,
+        lane_dir=lane_dir,
     )
     blockers.extend(sibling_blockers)
     findings.extend(sibling_findings)
@@ -3870,11 +3989,15 @@ def _readonly_db_source_parent_binding_blocker(
     *,
     evidence_run_id: str,
     source_index: int,
+    source_dir: Path | None,
+    lane_dir: Path | None,
 ) -> dict[str, Any] | None:
     parent_binding = record.get("parent_binding")
     provenance = record.get("validation_provenance")
     parent_value = None
     parent_key = None
+    root_value = None
+    root_key = None
     if isinstance(provenance, Mapping):
         for key in READONLY_DB_SOURCE_PARENT_BINDING_KEYS:
             value = provenance.get(key)
@@ -3882,12 +4005,30 @@ def _readonly_db_source_parent_binding_blocker(
                 parent_key = f"validation_provenance.{key}"
                 parent_value = value
                 break
+        for key in READONLY_DB_SOURCE_ROOT_BINDING_KEYS:
+            value = provenance.get(key)
+            if isinstance(value, str) and value.strip():
+                root_key = f"validation_provenance.{key}"
+                root_value = value
+                break
     if isinstance(parent_binding, str) and parent_binding in {"run_id_prefix"}:
+        if source_dir is not None and lane_dir is not None:
+            expected_source_parent = lane_dir.parents[1].resolve(strict=False).parent.resolve(strict=False)
+            observed_source_parent = source_dir.parent.parent.parent.resolve(strict=False)
+            if observed_source_parent != expected_source_parent:
+                return _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PARENT_ROOT_MISMATCH",
+                    "Readonly DB run_id-prefix source artifact must live under the current final evidence parent.",
+                    source_index=source_index,
+                    source_dir=_public_path(source_dir),
+                    observed_source_parent=_public_path(observed_source_parent),
+                    expected_source_parent=_public_path(expected_source_parent),
+                )
         return None
     if parent_value is None:
         return _blocker(
             "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PARENT_BINDING_MISSING",
-            "Readonly DB source artifact must be current-run-prefixed or explicitly parent-bound.",
+            "Readonly DB source artifact must be current-run-prefixed or explicitly parent/root-bound.",
             source_index=source_index,
             parent_binding=parent_binding,
         )
@@ -3900,6 +4041,27 @@ def _readonly_db_source_parent_binding_blocker(
             evidence_run_id=parent_value,
             expected_evidence_run_id=evidence_run_id,
         )
+    if source_dir is not None and lane_dir is not None:
+        if root_value is None:
+            return _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PARENT_ROOT_MISSING",
+                "Readonly DB external source artifact must explicitly bind to the current final evidence root.",
+                source_index=source_index,
+                parent_binding=parent_key,
+            )
+        final_run_dir = lane_dir.parents[1].resolve(strict=False)
+        final_parent = final_run_dir.parent.resolve(strict=False)
+        observed_root = Path(root_value).expanduser().resolve(strict=False)
+        if observed_root not in {final_run_dir, final_parent}:
+            return _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PARENT_ROOT_MISMATCH",
+                "Readonly DB external source artifact root binding must match the current final evidence root.",
+                source_index=source_index,
+                parent_binding=parent_key,
+                root_binding=root_key,
+                observed_root=_public_path(observed_root),
+                expected_roots=sorted((_public_path(final_parent), _public_path(final_run_dir))),
+            )
     return None
 
 
@@ -4042,6 +4204,8 @@ def _readonly_db_source_artifact_payload_issues(
     source_index: int,
     evidence_run_id: str,
     summary_run_id: str | None,
+    source_dir: Path,
+    lane_dir: Path,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
     blockers: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
@@ -4095,6 +4259,8 @@ def _readonly_db_source_artifact_payload_issues(
         },
         evidence_run_id=evidence_run_id,
         source_index=source_index,
+        source_dir=source_dir,
+        lane_dir=lane_dir,
     )
     if parent_blocker is not None:
         blockers.append(parent_blocker)
@@ -4798,17 +4964,9 @@ def _has_live_lane_evidence(payload: Mapping[str, Any], *, live_flag: str) -> bo
 def _has_producer_backed_lane_evidence(payload: Mapping[str, Any]) -> bool:
     if _has_source_artifact_proof(payload):
         return True
-    for key in (
-        "commands",
-        "requests",
-        "responses",
-        "browser_artifacts",
-        "screenshots",
-        "network",
-        "artifacts",
-        "evidence",
-        "proofs",
-    ):
+    for key in PRODUCER_EVIDENCE_KEYS:
+        if key == "source_artifacts":
+            continue
         if _structured_evidence_value(payload.get(key)):
             return True
     records = _source_records(payload)
@@ -4824,18 +4982,7 @@ def _has_producer_backed_lane_evidence(payload: Mapping[str, Any]) -> bool:
 
 
 def _check_has_producer_evidence(check: Mapping[str, Any]) -> bool:
-    for key in (
-        "source_artifacts",
-        "commands",
-        "requests",
-        "responses",
-        "browser_artifacts",
-        "screenshots",
-        "network",
-        "artifacts",
-        "evidence",
-        "proofs",
-    ):
+    for key in PRODUCER_EVIDENCE_KEYS:
         if key == "source_artifacts":
             if _has_source_artifact_proof(check):
                 return True
@@ -4843,6 +4990,716 @@ def _check_has_producer_evidence(check: Mapping[str, Any]) -> bool:
         if _structured_evidence_value(check.get(key)):
             return True
     return False
+
+
+def _source_lane_check_producer_blockers(
+    lane_name: str,
+    payload: Mapping[str, Any],
+    *,
+    declared_sources: tuple[str, ...],
+    required_checks: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    records = _source_records(payload)
+    for source in declared_sources:
+        record = records.get(source)
+        if record is None:
+            continue
+        check_results = _check_results(record)
+        for check_name in required_checks:
+            check = check_results.get(check_name)
+            if check is None:
+                continue
+            if _check_has_producer_evidence(check):
+                continue
+            if _source_scoped_producer_evidence_for_check(record, source=source, check=check_name):
+                continue
+            blockers.append(
+                _blocker(
+                    f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_EVIDENCE_MISSING",
+                    f"{lane_name} required check must include check-scoped producer evidence.",
+                    source=source,
+                    check=check_name,
+                )
+            )
+    return blockers
+
+
+def _source_scoped_producer_evidence_for_check(
+    source_record: Mapping[str, Any],
+    *,
+    source: str,
+    check: str,
+) -> bool:
+    for key in ("source_artifacts", "evidence", "proofs", "artifacts"):
+        if _producer_value_mentions_scope(source_record.get(key), source=source, check=check):
+            return True
+    return False
+
+
+def _producer_value_mentions_scope(value: Any, *, source: str, check: str) -> bool:
+    source_name = _source_name(source)
+    for _parent, _key, nested, _depth in _walk_evidence_values(value):
+        if not isinstance(nested, Mapping):
+            continue
+        if not _looks_like_evidence_record(nested):
+            continue
+        nested_source = _source_name(nested.get("source") or nested.get("source_id"))
+        nested_check = str(
+            nested.get("check")
+            or nested.get("check_name")
+            or nested.get("name")
+            or nested.get("route")
+            or nested.get("operation")
+            or ""
+        ).strip()
+        if nested_source == source_name and nested_check == check:
+            return True
+    return False
+
+
+def _recursive_current_run_blockers(
+    value: Any,
+    evidence_run_id: str,
+    *,
+    lane_name: str,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for _parent, key, nested, depth in _walk_evidence_values(value):
+        if depth == 0 or key not in CURRENT_EVIDENCE_RUN_ID_KEYS:
+            continue
+        if nested is None or not str(nested).strip():
+            continue
+        if str(nested) != evidence_run_id:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_NESTED_CURRENT_EVIDENCE_RUN_ID_MISMATCH",
+                    "Nested producer evidence belongs to a different evidence bundle.",
+                    lane=lane_name,
+                    key=key,
+                    evidence_run_id=nested,
+                    expected_evidence_run_id=evidence_run_id,
+                )
+            )
+    return blockers
+
+
+def _producer_source_artifact_blockers(
+    value: Any,
+    *,
+    evidence_run_id: str,
+    lane_name: str,
+    run_dir: Path,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for record in _producer_source_artifact_records(value):
+        artifact_blockers = _producer_source_artifact_record_blockers(
+            record,
+            evidence_run_id=evidence_run_id,
+            lane_name=lane_name,
+            run_dir=run_dir,
+        )
+        blockers.extend(artifact_blockers)
+    return blockers
+
+
+def _producer_source_artifact_records(value: Any) -> list[Mapping[str, Any]]:
+    records: list[Mapping[str, Any]] = []
+    for _parent, key, nested, _depth in _walk_evidence_values(value):
+        if key != "source_artifacts":
+            continue
+        candidates: list[Any]
+        if isinstance(nested, Mapping):
+            candidates = list(nested.values())
+        elif isinstance(nested, list):
+            candidates = list(nested)
+        else:
+            continue
+        for candidate in candidates:
+            if isinstance(candidate, Mapping) and _source_artifact_records([candidate]):
+                records.append(candidate)
+    return records
+
+
+def _producer_source_artifact_record_blockers(
+    record: Mapping[str, Any],
+    *,
+    evidence_run_id: str,
+    lane_name: str,
+    run_dir: Path,
+) -> list[dict[str, Any]]:
+    raw_path = record.get("path") or record.get("artifact_path")
+    raw_sha256 = record.get("sha256") or record.get("digest")
+    blockers: list[dict[str, Any]] = []
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_PATH_MISSING",
+                "Producer source artifact proof must include a path.",
+                lane=lane_name,
+            )
+        )
+        return blockers
+    if not isinstance(raw_sha256, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", raw_sha256.strip()):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_SHA_MISSING",
+                "Producer source artifact proof must include a sha256 digest.",
+                lane=lane_name,
+                path=raw_path,
+            )
+        )
+        return blockers
+    try:
+        path = _approved_artifact_path(raw_path)
+    except TwoNodeE2EEvidenceError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_OUTSIDE_APPROVED_ROOT",
+                "Producer source artifact path must stay under approved evidence roots.",
+                lane=lane_name,
+                path=raw_path,
+            )
+        )
+        return blockers
+    explicit_ids = _explicit_bundle_run_ids(record)
+    if not _path_is_relative_to(path, run_dir) and not (
+        explicit_ids and all(str(value) == evidence_run_id for _, value in explicit_ids)
+    ):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_STALE_OR_UNSCOPED",
+                "Producer source artifact must be in the current run or explicitly bind to it.",
+                lane=lane_name,
+                path=_public_path(path),
+                expected_evidence_run_id=evidence_run_id,
+            )
+        )
+        return blockers
+    containment_root = _approved_artifact_containment_root(path)
+    try:
+        content = read_bytes_limited_no_follow(
+            path,
+            max_bytes=MAX_EVIDENCE_PAYLOAD_BYTES,
+            containment_root=containment_root,
+        )
+    except FileNotFoundError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_MISSING",
+                "Producer source artifact file is missing.",
+                lane=lane_name,
+                path=_public_path(path),
+            )
+        )
+        return blockers
+    except SafeFilesystemError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_PATH_UNSAFE",
+                "Producer source artifact path is unsafe.",
+                lane=lane_name,
+                path=_public_path(path),
+            )
+        )
+        return blockers
+    if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_TOO_LARGE",
+                "Producer source artifact file is too large.",
+                lane=lane_name,
+                path=_public_path(path),
+            )
+        )
+        return blockers
+    if hashlib.sha256(content).hexdigest() != raw_sha256.lower():
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_HASH_MISMATCH",
+                "Producer source artifact sha256 does not match file content.",
+                lane=lane_name,
+                path=_public_path(path),
+            )
+        )
+    try:
+        payload = json.loads(content.decode("utf-8"))
+        _ensure_bounded_evidence_value(payload, path=path)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, TwoNodeE2EEvidenceError):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_JSON_INVALID",
+                "Producer source artifact must be bounded valid JSON.",
+                lane=lane_name,
+                path=_public_path(path),
+            )
+        )
+        return blockers
+    nested_ids = _explicit_bundle_run_ids_from_value(payload)
+    if not nested_ids:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_RUN_ID_MISSING",
+                "Producer source artifact payload must bind to the current evidence run.",
+                lane=lane_name,
+                path=_public_path(path),
+                expected_evidence_run_id=evidence_run_id,
+            )
+        )
+    for key, value in nested_ids:
+        if str(value) != evidence_run_id:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_RUN_ID_MISMATCH",
+                    "Producer source artifact payload belongs to a different evidence run.",
+                    lane=lane_name,
+                    path=_public_path(path),
+                    key=key,
+                    evidence_run_id=value,
+                    expected_evidence_run_id=evidence_run_id,
+                )
+            )
+    return blockers
+
+
+def _logs_check_published_artifact_blockers(
+    check: Mapping[str, Any],
+    *,
+    source_record: Mapping[str, Any],
+    lane_payload: Mapping[str, Any],
+    expected_identity: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    observed_identity = _record_identity(check)
+    if not _identity_has_required_fields(observed_identity, STRICT_LOG_IDENTITY_FIELDS):
+        return []
+    blockers: list[dict[str, Any]] = []
+    log_uri_values = _log_uri_values(check)
+    invalid_log_uris: list[dict[str, Any]] = []
+    allowed_log_uris: list[str] = []
+    for uri in log_uri_values:
+        uri_blockers = _published_log_uri_blockers(
+            uri,
+            lane_payload=lane_payload,
+            source_record=source_record,
+            check=check,
+        )
+        if uri_blockers:
+            invalid_log_uris.extend(uri_blockers)
+        else:
+            allowed_log_uris.append(uri)
+    if invalid_log_uris:
+        return invalid_log_uris
+    if allowed_log_uris:
+        if not _structured_evidence_value(check):
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_READ_EVIDENCE_MISSING",
+                    "Logs job_logs check must include producer evidence for published log read result.",
+                    log_uri=allowed_log_uris[0],
+                )
+            )
+        return blockers
+    unavailable = _published_log_unavailable_records(check)
+    if unavailable:
+        for record in unavailable:
+            blockers.extend(
+                _published_log_unavailable_binding_blockers(
+                    record,
+                    observed_identity=observed_identity,
+                    expected_identity=expected_identity,
+                )
+            )
+        return blockers
+    return [
+        _blocker(
+            "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_EVIDENCE_MISSING",
+            "Logs job_logs check must include an allowed published log URI or a typed published-log unavailable "
+            "response.",
+        )
+    ]
+
+
+def _log_uri_values(value: Any) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for _parent, key, nested, _depth in _walk_evidence_values(value):
+        if key not in LOG_URI_KEYS or not isinstance(nested, str) or not nested.strip():
+            continue
+        uri = nested.strip()
+        if uri not in seen:
+            values.append(uri)
+            seen.add(uri)
+    return values
+
+
+def _published_log_uri_blockers(
+    uri: str,
+    *,
+    lane_payload: Mapping[str, Any],
+    source_record: Mapping[str, Any],
+    check: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if uri.startswith("published://"):
+        suffix = uri.removeprefix("published://").lstrip("/")
+        return _published_log_relative_path_blockers(uri, suffix)
+    if uri.startswith("file://"):
+        return _published_log_file_uri_blockers(
+            uri,
+            lane_payload=lane_payload,
+            source_record=source_record,
+            check=check,
+        )
+    if uri.startswith("s3://"):
+        return _published_log_s3_uri_blockers(uri, lane_payload=lane_payload, source_record=source_record, check=check)
+    parsed = urlsplit(uri)
+    if parsed.scheme:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+                "Logs evidence uses an unsupported log URI scheme.",
+                log_uri=_safe_log_uri_summary(uri),
+                scheme=parsed.scheme,
+            )
+        ]
+    return [
+        _blocker(
+            "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI",
+            "Logs evidence must not use private workspace or local log paths.",
+            log_uri=_safe_log_uri_summary(uri),
+        )
+    ]
+
+
+def _published_log_relative_path_blockers(uri: str, relative: str) -> list[dict[str, Any]]:
+    blockers = _safe_log_relative_path_blockers(relative, require_logs_prefix=True)
+    return [
+        _blocker(
+            "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSAFE",
+            "Published log URI contains unsafe path components.",
+            log_uri=_safe_log_uri_summary(uri),
+            reason=reason,
+        )
+        for reason in blockers
+    ]
+
+
+def _published_log_file_uri_blockers(
+    uri: str,
+    *,
+    lane_payload: Mapping[str, Any],
+    source_record: Mapping[str, Any],
+    check: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    parsed = urlsplit(uri)
+    if parsed.netloc not in {"", "localhost"}:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+                "File log URI host is unsupported.",
+                log_uri=_safe_log_uri_summary(uri),
+                host=parsed.netloc,
+            )
+        ]
+    if not parsed.path.startswith("/"):
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSAFE",
+                "File log URI must use an absolute allowed published artifact path.",
+                log_uri=_safe_log_uri_summary(uri),
+            )
+        ]
+    raw_path_blockers = _safe_log_absolute_path_blockers(parsed.path)
+    if raw_path_blockers:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI",
+                "Logs evidence must not use private workspace or unsafe local paths.",
+                log_uri=_safe_log_uri_summary(uri),
+                reason=reason,
+            )
+            for reason in raw_path_blockers
+        ]
+    path = Path(unquote(parsed.path)).resolve(strict=False)
+    roots = _published_log_roots(lane_payload, source_record, check)
+    for root in roots:
+        root_resolved = root.expanduser().resolve(strict=False)
+        if _path_is_relative_to(path, root_resolved):
+            relative = _relative_posix(path, root_resolved)
+            blockers = _safe_log_relative_path_blockers(relative, require_logs_prefix=True)
+            return [
+                _blocker(
+                    "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSAFE",
+                    "Published file log URI contains unsafe path components.",
+                    log_uri=_safe_log_uri_summary(uri),
+                    reason=reason,
+                )
+                for reason in blockers
+            ]
+    return [
+        _blocker(
+            "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI",
+            "File log URI must be under an allowed published artifact root.",
+            log_uri=_safe_log_uri_summary(uri),
+            allowed_roots=[_public_path(root) for root in roots],
+        )
+    ]
+
+
+def _published_log_s3_uri_blockers(
+    uri: str,
+    *,
+    lane_payload: Mapping[str, Any],
+    source_record: Mapping[str, Any],
+    check: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    parsed = urlsplit(uri)
+    bucket = parsed.netloc
+    if not bucket:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+                "S3 log URI is missing a bucket.",
+                log_uri=_safe_log_uri_summary(uri),
+            )
+        ]
+    key = parsed.path.lstrip("/")
+    blockers = _safe_log_relative_path_blockers(key, require_logs_prefix=False)
+    if blockers:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSAFE",
+                "S3 log URI contains unsafe key components.",
+                log_uri=_safe_log_uri_summary(uri),
+                reason=reason,
+            )
+            for reason in blockers
+        ]
+    allowed_bucket = _first_nested_text(lane_payload, source_record, check, keys=PUBLISHED_LOG_S3_BUCKET_KEYS)
+    if not allowed_bucket:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+                "S3 log URI requires an explicit published-artifact bucket allowlist.",
+                log_uri=_safe_log_uri_summary(uri),
+            )
+        ]
+    allowed_prefix = (
+        _first_nested_text(lane_payload, source_record, check, keys=PUBLISHED_LOG_S3_PREFIX_KEYS) or ""
+    ).strip("/")
+    if bucket != allowed_bucket or not _s3_key_matches_published_log_prefix(key, allowed_prefix):
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI",
+                "S3 log URI must be under the allowed published artifact bucket/prefix.",
+                log_uri=_safe_log_uri_summary(uri),
+                allowed_bucket=allowed_bucket,
+                allowed_prefix=allowed_prefix,
+            )
+        ]
+    return []
+
+
+def _safe_log_relative_path_blockers(relative: str, *, require_logs_prefix: bool) -> list[str]:
+    try:
+        decoded = _safe_log_decoded_path(relative)
+    except ValueError as error:
+        return [str(error)]
+    if decoded.startswith("/"):
+        return ["absolute_path_forbidden"]
+    parts = PurePosixPath(decoded).parts
+    if not parts:
+        return ["empty_path"]
+    if any(part in {"", ".", ".."} for part in parts):
+        return ["unsafe_path_component"]
+    if ".nhms-runs" in parts:
+        return ["private_workspace_path"]
+    if require_logs_prefix and parts[0] != "logs":
+        return ["published_logs_prefix_required"]
+    return []
+
+
+def _safe_log_absolute_path_blockers(raw_path: str) -> list[str]:
+    try:
+        decoded = _safe_log_decoded_path(raw_path)
+    except ValueError as error:
+        return [str(error)]
+    parts = PurePosixPath(decoded).parts
+    if any(part in {".", ".."} for part in parts):
+        return ["unsafe_path_component"]
+    if ".nhms-runs" in parts:
+        return ["private_workspace_path"]
+    return []
+
+
+def _safe_log_decoded_path(raw_path: str) -> str:
+    if "\\" in raw_path or LOG_URI_ENCODED_FORBIDDEN_RE.search(raw_path):
+        raise ValueError("encoded_or_backslash_path")
+    decoded = unquote(raw_path)
+    if "\\" in decoded:
+        raise ValueError("backslash_path")
+    if any(ord(character) < 32 for character in decoded):
+        raise ValueError("malformed_path")
+    return decoded
+
+
+def _published_log_roots(*values: Mapping[str, Any]) -> list[Path]:
+    roots: list[Path] = []
+    for value in values:
+        for _parent, key, nested, _depth in _walk_evidence_values(value):
+            if key not in PUBLISHED_LOG_ROOT_KEYS or not isinstance(nested, str) or not nested.strip():
+                continue
+            roots.append(Path(nested.strip()))
+    if not roots:
+        roots.extend(DEFAULT_PUBLISHED_LOG_ROOTS)
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        resolved = str(root.expanduser().resolve(strict=False))
+        if resolved not in seen:
+            deduped.append(root)
+            seen.add(resolved)
+    return deduped
+
+
+def _s3_key_matches_published_log_prefix(key: str, prefix: str) -> bool:
+    if not prefix:
+        return key.startswith("logs/")
+    if key.startswith(f"{prefix}/logs/"):
+        return True
+    parts = PurePosixPath(key).parts
+    prefix_parts = PurePosixPath(prefix).parts
+    if not prefix_parts or parts[: len(prefix_parts)] != prefix_parts:
+        return False
+    remainder = parts[len(prefix_parts) :]
+    if remainder and remainder[0] == "runs":
+        return len(remainder) >= 4 and remainder[2] == "logs"
+    return len(remainder) >= 2 and remainder[0] == "logs"
+
+
+def _published_log_unavailable_records(check: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    records: list[Mapping[str, Any]] = []
+    for _parent, _key, nested, _depth in _walk_evidence_values(check):
+        if not isinstance(nested, Mapping):
+            continue
+        code = str(
+            nested.get("error_code")
+            or nested.get("code")
+            or _nested_get(nested, ("error", "code"))
+            or _nested_get(nested, ("body", "error", "code"))
+            or ""
+        ).strip()
+        if code in LOG_UNAVAILABLE_ERROR_CODES:
+            records.append(nested)
+    return records
+
+
+def _published_log_unavailable_binding_blockers(
+    record: Mapping[str, Any],
+    *,
+    observed_identity: Mapping[str, Any],
+    expected_identity: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    status_code = record.get("status_code") or record.get("http_status")
+    if status_code is not None and str(status_code) not in {"404"}:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_UNAVAILABLE_STATUS_INVALID",
+                "Typed published-log unavailable response must be a 404 response.",
+                status_code=status_code,
+            )
+        )
+    record_identity = _record_identity(record)
+    if record_identity:
+        for field in STRICT_LOG_IDENTITY_FIELDS:
+            expected_value = _identity_value(expected_identity, field) or _identity_value(observed_identity, field)
+            observed_value = _identity_value(record_identity, field)
+            if expected_value and observed_value and str(expected_value) != str(observed_value):
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_UNAVAILABLE_IDENTITY_MISMATCH",
+                        "Typed published-log unavailable response identity must match the job log check identity.",
+                        field=field,
+                        observed=observed_value,
+                        expected=expected_value,
+                    )
+                )
+    else:
+        for field in STRICT_LOG_IDENTITY_FIELDS:
+            value = record.get(field)
+            if value is None and field == "source":
+                value = record.get("source_id")
+            if value is None:
+                continue
+            expected_value = _identity_value(expected_identity, field) or _identity_value(observed_identity, field)
+            if expected_value and str(value) != str(expected_value):
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_UNAVAILABLE_IDENTITY_MISMATCH",
+                        "Typed published-log unavailable response identity must match the job log check identity.",
+                        field=field,
+                        observed=value,
+                        expected=expected_value,
+                    )
+                )
+    expected_job_id = _identity_value(expected_identity, "job_id") or _identity_value(observed_identity, "job_id")
+    if not _record_mentions_job_id(record, expected_job_id):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_UNAVAILABLE_JOB_ID_MISSING",
+                "Typed published-log unavailable response must bind to the same job_id.",
+                expected_job_id=expected_job_id,
+            )
+        )
+    if not _structured_evidence_value(record):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_UNAVAILABLE_EVIDENCE_MISSING",
+                "Typed published-log unavailable response must include producer response evidence.",
+            )
+        )
+    return blockers
+
+
+def _record_mentions_job_id(record: Mapping[str, Any], expected_job_id: str | None) -> bool:
+    if not expected_job_id:
+        return False
+    for _parent, key, nested, _depth in _walk_evidence_values(record):
+        if key == "job_id" and str(nested) == expected_job_id:
+            return True
+        if key in {"path", "url"} and isinstance(nested, str) and expected_job_id in nested:
+            return True
+    return False
+
+
+def _identity_has_required_fields(identity: Mapping[str, Any], fields: Sequence[str]) -> bool:
+    return all(_identity_value(identity, field) for field in fields)
+
+
+def _first_nested_text(*values: Any, keys: frozenset[str]) -> str | None:
+    for value in values:
+        for _parent, key, nested, _depth in _walk_evidence_values(value):
+            if key in keys and isinstance(nested, str) and nested.strip():
+                return nested.strip()
+    return None
+
+
+def _relative_posix(path: Path, root: Path) -> str:
+    try:
+        return path.resolve(strict=False).relative_to(root.resolve(strict=False)).as_posix()
+    except ValueError:
+        return path.resolve(strict=False).as_posix().lstrip("/")
+
+
+def _safe_log_uri_summary(uri: str) -> str:
+    parsed = urlsplit(uri)
+    if parsed.scheme == "file":
+        return "file://redacted"
+    if not parsed.scheme:
+        return "[redacted-local-log-path]"
+    if parsed.query or parsed.fragment:
+        return f"{parsed.scheme}://[redacted]"
+    return uri
 
 
 def _has_source_artifact_proof(payload: Mapping[str, Any]) -> bool:

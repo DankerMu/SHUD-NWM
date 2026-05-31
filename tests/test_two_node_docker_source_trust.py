@@ -15,7 +15,7 @@ SCRIPT = REPO_ROOT / "scripts" / "validate_two_node_docker_source_trust.py"
 
 def test_source_trust_preflight_passes_for_trusted_owner_and_0600_role_envs(tmp_path: Path) -> None:
     checkout = _make_checkout(tmp_path / "checkout")
-    evidence_root = tmp_path / "evidence"
+    evidence_root = checkout / "artifacts" / "evidence"
 
     result = _run_preflight(
         checkout_root=checkout,
@@ -98,11 +98,88 @@ def test_source_trust_single_role_report_is_role_scoped_and_explicit_run_bound(t
     evidence_root.parent.rmdir()
 
 
+def test_source_trust_allows_repo_artifacts_evidence_root(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    evidence_root = checkout / "artifacts" / "source-trust"
+
+    result = _run_preflight(
+        checkout_root=checkout,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=[_current_owner()],
+        roles=["display"],
+    )
+
+    assert result.returncode == 0
+    assert (evidence_root / "two-node-docker-source-trust-display.json").is_file()
+    assert (evidence_root / "two-node-docker-source-trust-display.txt").is_file()
+
+
+def test_source_trust_rejects_unapproved_tmp_evidence_root(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    evidence_root = tmp_path / "outside-evidence"
+
+    result = _run_preflight(
+        checkout_root=checkout,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=[_current_owner()],
+        roles=["compute"],
+    )
+
+    assert result.returncode == 2
+    assert "evidence root must be under checkout artifacts/ or /scratch/frd_muziyao" in result.stderr
+    assert not evidence_root.exists()
+
+
+def test_source_trust_rejects_symlink_evidence_root(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    real_evidence = checkout / "artifacts" / "real-evidence"
+    real_evidence.mkdir(parents=True)
+    evidence_root = checkout / "artifacts" / "linked-evidence"
+    evidence_root.symlink_to(real_evidence, target_is_directory=True)
+
+    result = _run_preflight(
+        checkout_root=checkout,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=[_current_owner()],
+        roles=["compute"],
+    )
+
+    assert result.returncode == 2
+    assert "must not be a symlink" in result.stderr
+    assert not (real_evidence / "two-node-docker-source-trust-compute.json").exists()
+
+
+def test_source_trust_rejects_existing_symlink_text_target(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    evidence_root = checkout / "artifacts" / "source-trust"
+    evidence_root.mkdir(parents=True)
+    target = tmp_path / "outside-text-target"
+    target.write_text("do not overwrite\n", encoding="utf-8")
+    text_target = evidence_root / "two-node-docker-source-trust-display.txt"
+    text_target.symlink_to(target)
+
+    result = _run_preflight(
+        checkout_root=checkout,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=[_current_owner()],
+        roles=["display"],
+    )
+
+    assert result.returncode == 2
+    assert "must not be a symlink" in result.stderr
+    assert target.read_text(encoding="utf-8") == "do not overwrite\n"
+    assert not (evidence_root / "two-node-docker-source-trust-display.json").exists()
+
+
 def test_source_trust_blocks_0644_role_env_before_direct_compose_sentinel(tmp_path: Path) -> None:
     checkout = _make_checkout(tmp_path / "checkout")
     display_env = checkout / "infra" / "env" / "display.env"
     display_env.chmod(0o644)
-    evidence_root = tmp_path / "evidence with spaces"
+    evidence_root = checkout / "artifacts" / "evidence with spaces"
     sentinel = tmp_path / "compose-sentinel"
 
     command = _shell_command(
@@ -135,7 +212,7 @@ def test_source_trust_blocks_0644_role_env_before_direct_compose_sentinel(tmp_pa
 
 def test_source_trust_untrusted_owner_allowlist_covers_role_env_and_sources(tmp_path: Path) -> None:
     checkout = _make_checkout(tmp_path / "checkout")
-    evidence_root = tmp_path / "evidence"
+    evidence_root = checkout / "artifacts" / "evidence"
 
     result = _run_preflight(
         checkout_root=checkout,
@@ -169,7 +246,7 @@ def test_source_trust_rejects_symlink_source(tmp_path: Path) -> None:
     target.write_text("services: {}\n", encoding="utf-8")
     compose.unlink()
     compose.symlink_to(target)
-    evidence_root = tmp_path / "evidence"
+    evidence_root = checkout / "artifacts" / "evidence"
 
     result = _run_preflight(
         checkout_root=checkout,
@@ -189,7 +266,7 @@ def test_source_trust_rejects_symlink_checkout_path_component(tmp_path: Path) ->
     real_checkout = _make_checkout(tmp_path / "real-checkout")
     checkout_link = tmp_path / "checkout-link"
     checkout_link.symlink_to(real_checkout, target_is_directory=True)
-    evidence_root = tmp_path / "evidence"
+    evidence_root = real_checkout / "artifacts" / "evidence"
 
     result = _run_preflight(
         checkout_root=checkout_link,

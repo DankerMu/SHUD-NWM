@@ -470,7 +470,9 @@ sibling 与 summary 不一致、source dir 越界或 symlink、重复/缺失 sou
 `validation_provenance.mode != "live"`、`live_readonly_proof != true`，以及与当前 final bundle 无关的 stale
 source run。合法 per-source run ID 是 `$EVIDENCE_RUN_ID-db-GFS`/`$EVIDENCE_RUN_ID-db-IFS`
 或 `$EVIDENCE_RUN_ID-gfs`/`$EVIDENCE_RUN_ID-ifs`；其他命名必须在 source summary 或
-`validation_provenance` 里显式记录 parent/current evidence bundle 等于 `$EVIDENCE_RUN_ID`。merged summary
+`validation_provenance` 里显式记录 parent/current evidence bundle 等于 `$EVIDENCE_RUN_ID`，并记录
+`parent_evidence_root`/`final_evidence_root` 指向当前 `$EVIDENCE_PARENT` 或 `$EVIDENCE_ROOT`。prefix-style
+source lane 也必须实际位于当前 `$EVIDENCE_PARENT` 下；不能从另一个 approved root 复用同名 run ID。merged summary
 会记录每个 source artifact 的路径、sha256、run ID 和 source provenance。`command_index.md` 只记录脱敏形式，例如：
 
 ```text

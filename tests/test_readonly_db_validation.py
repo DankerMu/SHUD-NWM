@@ -1014,6 +1014,7 @@ def test_merge_readonly_db_source_evidence_accepts_explicit_parent_bundle_bindin
     for config in (gfs_config, ifs_config):
         summary = json.loads((config.lane_dir / "summary.json").read_text(encoding="utf-8"))
         summary["validation_provenance"]["parent_evidence_run_id"] = run_id
+        summary["validation_provenance"]["parent_evidence_root"] = str(evidence_root)
         _write_json(config.lane_dir / "summary.json", summary)
 
     summary = merge_readonly_db_source_evidence(
@@ -1027,6 +1028,60 @@ def test_merge_readonly_db_source_evidence_accepts_explicit_parent_bundle_bindin
     assert {
         artifact["parent_binding"] for artifact in summary["validation_provenance"]["source_artifacts"]
     } == {"validation_provenance.parent_evidence_run_id"}
+
+
+def test_merge_readonly_db_source_evidence_rejects_prefix_source_under_different_parent() -> None:
+    evidence_root = _evidence_root()
+    alternate_root = REPO_ROOT / "artifacts" / "test-readonly-db-validation-alt"
+    run_id = _run_id("merge-prefix-parent")
+    gfs_config = _seed_live_readonly_source(
+        evidence_root=alternate_root,
+        run_id=f"{run_id}-gfs",
+        source="GFS",
+    )
+    ifs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-ifs",
+        source="IFS",
+    )
+
+    with pytest.raises(ReadonlyDbValidationError) as exc_info:
+        merge_readonly_db_source_evidence(
+            evidence_root=evidence_root,
+            run_id=run_id,
+            source_dirs=(gfs_config.lane_dir, ifs_config.lane_dir),
+            force=True,
+        )
+
+    assert exc_info.value.error_code == "READONLY_DB_MERGE_SOURCE_PARENT_ROOT_MISMATCH"
+
+
+def test_merge_readonly_db_source_evidence_external_source_requires_root_binding() -> None:
+    evidence_root = _evidence_root()
+    run_id = _run_id("merge-external-root")
+    gfs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-external-gfs",
+        source="GFS",
+    )
+    ifs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-ifs",
+        source="IFS",
+    )
+    gfs_summary = json.loads((gfs_config.lane_dir / "summary.json").read_text(encoding="utf-8"))
+    gfs_summary["validation_provenance"]["parent_evidence_run_id"] = run_id
+    _write_json(gfs_config.lane_dir / "summary.json", gfs_summary)
+
+    with pytest.raises(ReadonlyDbValidationError) as exc_info:
+        merge_readonly_db_source_evidence(
+            evidence_root=evidence_root,
+            run_id=run_id,
+            source_dirs=(gfs_config.lane_dir, ifs_config.lane_dir),
+            force=True,
+        )
+
+    assert exc_info.value.error_code == "READONLY_DB_MERGE_SOURCE_PARENT_ROOT_MISSING"
 
 
 def test_merge_readonly_db_source_evidence_accepts_declared_reduced_scope() -> None:

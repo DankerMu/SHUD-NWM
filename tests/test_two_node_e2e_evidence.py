@@ -4,7 +4,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 import pytest
@@ -834,6 +834,75 @@ def test_readonly_db_final_pass_requires_merged_source_artifact_provenance(
     assert expected_code in _codes(readonly_lane["blockers"])
 
 
+def test_readonly_db_final_rejects_prefix_source_under_different_parent() -> None:
+    run_id = _run_id("db-prefix-parent")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    source_artifacts = db_summary["validation_provenance"]["source_artifacts"]
+    gfs_record = next(artifact for artifact in source_artifacts if artifact["sources"] == ["GFS"])
+    old_source_dir = Path(gfs_record["source_dir"])
+    alternate_root = REPO_ROOT / "artifacts" / "test-two-node-e2e-evidence-alt"
+    new_source_dir = alternate_root / f"{run_id}-gfs" / "db" / "readonly-db-boundary"
+    for filename in ("summary.json", "role.json", "route_smoke.json", "permission_probes.json"):
+        payload = json.loads((old_source_dir / filename).read_text(encoding="utf-8"))
+        _write(new_source_dir / filename, payload)
+        gfs_record["artifacts"][filename] = _readonly_source_artifact(
+            new_source_dir / filename,
+            gfs_record["summary_run_id"],
+        )
+    gfs_record["source_dir"] = str(new_source_dir.resolve(strict=False))
+    _write(lane / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PARENT_ROOT_MISMATCH" in _codes(
+        readonly_lane["blockers"]
+    )
+
+
+def test_readonly_db_final_rejects_external_source_child_root_mismatch() -> None:
+    run_id = _run_id("db-external-child-root")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    source_artifacts = db_summary["validation_provenance"]["source_artifacts"]
+    gfs_record = next(artifact for artifact in source_artifacts if artifact["sources"] == ["GFS"])
+    source_dir = Path(gfs_record["source_dir"])
+    current_parent = config.run_dir.parent.resolve(strict=False)
+    stale_parent = (REPO_ROOT / "artifacts" / "test-two-node-e2e-evidence-alt").resolve(strict=False)
+    stale_parent.mkdir(parents=True, exist_ok=True)
+
+    gfs_summary = _read(source_dir / "summary.json")
+    gfs_summary["run_id"] = f"{run_id}-external-gfs"
+    gfs_summary["validation_provenance"]["parent_evidence_run_id"] = run_id
+    gfs_summary["validation_provenance"]["parent_evidence_root"] = str(stale_parent)
+    _write(source_dir / "summary.json", gfs_summary)
+
+    gfs_record["summary_run_id"] = gfs_summary["run_id"]
+    gfs_record["parent_binding"] = "validation_provenance.parent_evidence_run_id"
+    gfs_record["validation_provenance"]["parent_evidence_run_id"] = run_id
+    gfs_record["validation_provenance"]["parent_evidence_root"] = str(current_parent)
+    for filename in ("summary.json", "role.json", "route_smoke.json", "permission_probes.json"):
+        gfs_record["artifacts"][filename] = _readonly_source_artifact(
+            source_dir / filename,
+            gfs_summary["run_id"],
+        )
+    _write(lane / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PARENT_ROOT_MISMATCH" in _codes(
+        readonly_lane["blockers"]
+    )
+
+
 def test_readonly_db_final_pass_requires_merged_source_flag() -> None:
     run_id = _run_id("db-source-flag")
     config = _seed_pass_bundle(run_id)
@@ -1494,6 +1563,171 @@ def test_cross_plane_boolean_only_live_evidence_blocks() -> None:
     assert "TWO_NODE_E2E_CROSS_PLANE_PRODUCER_EVIDENCE_MISSING" in _codes(lane["blockers"])
 
 
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "path_to_check"),
+    [
+        ("api", "api", ("sources", "GFS", "checks", "latest_product")),
+        ("browser", "browser", ("sources", "GFS", "checks", "ops_job_logs")),
+        ("logs", "logs", ("sources", "GFS", "checks", "job_logs")),
+        ("cross-plane", "cross_plane", ("sources", "GFS")),
+        ("slurm", "slurm", ()),
+    ],
+)
+def test_nested_stale_current_run_producer_evidence_blocks(
+    lane_dir: str,
+    lane_name: str,
+    path_to_check: tuple[str, ...],
+) -> None:
+    run_id = _run_id(f"{lane_name}-nested-stale")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    target = payload
+    for key in path_to_check:
+        target = target[key]
+    target.setdefault("evidence", {})["bundle_run_id"] = "older-bundle"
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_NESTED_CURRENT_EVIDENCE_RUN_ID_MISMATCH" in _codes(lane["blockers"])
+
+
+def test_nested_source_artifact_with_stale_path_hash_blocks() -> None:
+    old_run_id = _run_id("old-source-artifact")
+    old_config = _seed_pass_bundle(old_run_id)
+    old_artifact = old_config.run_dir / "api" / "old-producer.json"
+    _write(old_artifact, {"status": STATUS_PASS, "evidence_run_id": old_run_id})
+
+    run_id = _run_id("new-source-artifact")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    latest = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    latest["source_artifacts"] = [
+        {
+            "path": str(old_artifact.resolve(strict=False)),
+            "sha256": _sha256_file(old_artifact),
+        }
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_PRODUCER_SOURCE_ARTIFACT_STALE_OR_UNSCOPED" in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "live_flag"),
+    [
+        ("api", "api", "live_api_evidence"),
+        ("browser", "browser", "live_browser_evidence"),
+        ("logs", "logs", "live_log_evidence"),
+    ],
+)
+def test_source_lane_required_checks_need_check_scoped_producer_evidence(
+    lane_dir: str,
+    lane_name: str,
+    live_flag: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-check-scope")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    payload["commands"] = {"unrelated_probe": {"returncode": 0}}
+    payload[live_flag] = True
+    for source in payload["sources"].values():
+        for check in source["checks"].values():
+            status = check["status"]
+            identity = check["identity"]
+            check.clear()
+            check.update({"status": status, "identity": identity})
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_EVIDENCE_MISSING" in _codes(lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("log_uri", "expected_code"),
+    [
+        ("/scratch/private/.nhms-runs/old/job.out", "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI"),
+        ("file:///scratch/frd_muziyao/workspace/.nhms-runs/job.out", "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI"),
+        ("https://logs.example/job.out", "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED"),
+        ("published://../logs/job.out", "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSAFE"),
+    ],
+)
+def test_logs_lane_rejects_private_or_unsupported_log_uri(log_uri: str, expected_code: str) -> None:
+    run_id = _run_id("logs-private-uri")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    check["log_uri"] = log_uri
+    check["evidence"]["response"]["body"]["log_uri"] = log_uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(logs_lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "published_uri",
+        "file_uri",
+        "s3_uri",
+        "typed_missing",
+    ],
+)
+def test_logs_lane_accepts_published_log_uri_or_typed_unavailable(mutation: str) -> None:
+    run_id = _run_id(f"logs-valid-{mutation}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    for source, record in logs_summary["sources"].items():
+        check = record["checks"]["job_logs"]
+        identity = check["identity"]
+        if mutation == "published_uri":
+            uri = f"published://logs/{source.lower()}/{identity['run_id']}/{identity['job_id']}.out"
+            check["log_uri"] = uri
+            check["evidence"]["response"]["body"]["log_uri"] = uri
+        elif mutation == "file_uri":
+            root = Path("/mnt/nhms-published")
+            uri = f"file://{root}/logs/{source.lower()}/{identity['run_id']}/{identity['job_id']}.out"
+            check["published_artifact_root"] = str(root)
+            check["log_uri"] = uri
+            check["evidence"]["response"]["body"]["log_uri"] = uri
+        elif mutation == "s3_uri":
+            uri = f"s3://nhms-prod/published/logs/{source.lower()}/{identity['run_id']}/{identity['job_id']}.out"
+            check["published_artifact_s3_bucket"] = "nhms-prod"
+            check["published_artifact_s3_prefix"] = "published"
+            check["log_uri"] = uri
+            check["evidence"]["response"]["body"]["log_uri"] = uri
+        else:
+            check.pop("log_uri", None)
+            check["evidence"]["response"] = {
+                "status_code": 404,
+                "error_code": "JOB_LOG_NOT_PUBLISHED",
+                **copy.deepcopy(identity),
+            }
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["logs"]["status"] == STATUS_PASS
+
+
 def test_browser_evidence_missing_ops_jobs_or_logs_blocks() -> None:
     run_id = _run_id("browser-missing-ops-log")
     config = _seed_pass_bundle(run_id)
@@ -1986,6 +2220,7 @@ def _seed_pass_bundle(
             identities,
             required_checks=("latest_product", "series", "ops_status", "ops_stages", "jobs"),
             live_flag="live_api_evidence",
+            lane_name="api",
         ),
     )
     _write(
@@ -2001,6 +2236,7 @@ def _seed_pass_bundle(
                 *((() if len(sources) == 1 else ("source_switch",))),
             ),
             live_flag="live_browser_evidence",
+            lane_name="browser",
         ),
     )
     _write(
@@ -2010,6 +2246,7 @@ def _seed_pass_bundle(
             identities,
             required_checks=("job_logs",),
             live_flag="live_log_evidence",
+            lane_name="logs",
         ),
     )
     _write(
@@ -2623,6 +2860,7 @@ def _source_lane_payload(
     *,
     required_checks: tuple[str, ...],
     live_flag: str,
+    lane_name: str,
 ) -> dict[str, Any]:
     return {
         "status": STATUS_PASS,
@@ -2637,18 +2875,54 @@ def _source_lane_payload(
                         "status": STATUS_PASS,
                         "identity": copy.deepcopy(identity),
                         "evidence": {
+                            "evidence_run_id": run_id,
                             "request": {
                                 "method": "GET",
                                 "path": f"/producer/{source.lower()}/{check}",
+                                "source": source,
+                                "check": check,
                             },
-                            "response": {"status_code": 200},
+                            "response": {
+                                "status_code": 200,
+                                "source": source,
+                                "check": check,
+                                **_log_response_fields(lane_name, check, identity),
+                            },
                         },
+                        **_log_check_fields(lane_name, check, identity),
                     }
                     for check in required_checks
                 },
             }
             for source, identity in identities.items()
         },
+    }
+
+
+def _log_check_fields(lane_name: str, check: str, identity: Mapping[str, str]) -> dict[str, Any]:
+    if lane_name != "logs" or check != "job_logs":
+        return {}
+    log_uri = f"published://logs/{identity['source'].lower()}/{identity['run_id']}/{identity['job_id']}.out"
+    return {
+        "log_uri": log_uri,
+        "published_log_read": {
+            "status": STATUS_PASS,
+            "status_code": 200,
+            "log_uri": log_uri,
+            "job_id": identity["job_id"],
+        },
+    }
+
+
+def _log_response_fields(lane_name: str, check: str, identity: Mapping[str, str]) -> dict[str, Any]:
+    if lane_name != "logs" or check != "job_logs":
+        return {}
+    log_uri = f"published://logs/{identity['source'].lower()}/{identity['run_id']}/{identity['job_id']}.out"
+    return {
+        "body": {
+            "job_id": identity["job_id"],
+            "log_uri": log_uri,
+        }
     }
 
 
