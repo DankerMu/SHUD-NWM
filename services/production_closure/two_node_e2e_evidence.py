@@ -267,6 +267,36 @@ MAX_BOUNDED_EVIDENCE_DEPTH = 5
 MAX_BOUNDED_EVIDENCE_DICT_KEYS = 32
 MAX_BOUNDED_EVIDENCE_LIST_ITEMS = 12
 MAX_BOUNDED_EVIDENCE_STRING_CHARS = 512
+MAX_EVIDENCE_TRAVERSAL_DEPTH = 256
+MAX_EVIDENCE_TRAVERSAL_NODES = 100_000
+READONLY_DB_SOURCE_PARENT_BINDING_KEYS = (
+    "parent_evidence_run_id",
+    "parent_bundle_run_id",
+    "parent_bundle_id",
+    "current_evidence_run_id",
+    "current_bundle_run_id",
+    "expected_evidence_run_id",
+)
+READONLY_DB_SOURCE_ARTIFACT_FILENAMES = (
+    "summary.json",
+    "role.json",
+    "route_smoke.json",
+    "permission_probes.json",
+)
+READONLY_DB_MANUAL_WRITE_PROOF_ALIASES: Mapping[str, tuple[str, ...]] = {
+    "write_dependency_constructed": (
+        "write_dependency_constructed",
+        "db_write_dependency_constructed",
+        "control_write_dependency_constructed",
+        "state_mutation_dependency_constructed",
+    ),
+    "write_executed": (
+        "write_executed",
+        "db_write_executed",
+        "control_executed",
+        "state_mutation_executed",
+    ),
+}
 
 
 class TwoNodeE2EEvidenceError(RuntimeError):
@@ -367,7 +397,13 @@ class EvidenceWriter:
                 "TWO_NODE_E2E_EVIDENCE_EXISTS",
                 f"Final evidence file already exists: {safe_path}. Use --force to overwrite this run_id.",
             )
-        content = json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        try:
+            content = json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        except RecursionError as error:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_REDACTION_DEPTH_EXCEEDED",
+                "Final evidence payload is too deeply nested to redact safely.",
+            ) from error
         if len(content) > MAX_EVIDENCE_PAYLOAD_BYTES:
             raise TwoNodeE2EEvidenceError(
                 "TWO_NODE_E2E_EVIDENCE_PAYLOAD_TOO_LARGE",
@@ -431,6 +467,17 @@ class LaneEvaluation:
     evidence: Mapping[str, Any] | None = None
 
     def to_summary(self) -> dict[str, Any]:
+        evidence = self.evidence
+        if evidence is not None:
+            try:
+                redacted_evidence = redact_payload(evidence)
+            except RecursionError as error:
+                raise TwoNodeE2EEvidenceError(
+                    "TWO_NODE_E2E_EVIDENCE_REDACTION_DEPTH_EXCEEDED",
+                    f"Evidence lane {self.name} is too deeply nested to redact safely.",
+                ) from error
+        else:
+            redacted_evidence = None
         payload: dict[str, Any] = {
             "status": self.status,
             "evidence_path": self.evidence_path,
@@ -439,8 +486,8 @@ class LaneEvaluation:
             "blockers": list(self.blockers),
             "findings": list(self.findings),
         }
-        if self.evidence is not None:
-            payload["redacted_evidence"] = redact_payload(self.evidence)
+        if redacted_evidence is not None:
+            payload["redacted_evidence"] = redacted_evidence
         return payload
 
 
@@ -923,6 +970,14 @@ def _evaluate_readonly_db(
     )
     blockers.extend(sibling_blockers)
     findings.extend(sibling_findings)
+    source_artifact_blockers, source_artifact_findings = _readonly_db_source_artifact_issues(
+        doc.path,
+        payload,
+        declared_sources=declared_sources,
+        evidence_run_id=evidence_run_id,
+    )
+    blockers.extend(source_artifact_blockers)
+    findings.extend(source_artifact_findings)
     recomputed_status = _readonly_db_recomputed_status(
         payload,
         declared_sources=declared_sources,
@@ -1878,7 +1933,7 @@ def _read_json(path: Path, *, containment_root: Path) -> EvidenceDocument:
     content = _read_json_bytes(path, containment_root=containment_root)
     try:
         payload = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise TwoNodeE2EEvidenceError(
             "TWO_NODE_E2E_EVIDENCE_JSON_INVALID",
             f"Evidence file is not valid UTF-8 JSON: {path}.",
@@ -1888,6 +1943,7 @@ def _read_json(path: Path, *, containment_root: Path) -> EvidenceDocument:
             "TWO_NODE_E2E_EVIDENCE_JSON_INVALID",
             f"Evidence JSON must be an object: {path}.",
         )
+    _ensure_bounded_evidence_value(payload, path=path)
     return EvidenceDocument(
         path=path.resolve(strict=False),
         payload=payload,
@@ -1898,12 +1954,14 @@ def _read_json(path: Path, *, containment_root: Path) -> EvidenceDocument:
 def _read_json_value(path: Path, *, containment_root: Path) -> Any:
     content = _read_json_bytes(path, containment_root=containment_root)
     try:
-        return json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise TwoNodeE2EEvidenceError(
             "TWO_NODE_E2E_EVIDENCE_JSON_INVALID",
             f"Evidence file is not valid UTF-8 JSON: {path}.",
         ) from error
+    _ensure_bounded_evidence_value(payload, path=path)
+    return payload
 
 
 def _read_json_bytes(path: Path, *, containment_root: Path) -> bytes:
@@ -1924,6 +1982,42 @@ def _read_json_bytes(path: Path, *, containment_root: Path) -> bytes:
             f"Evidence file exceeds {MAX_EVIDENCE_PAYLOAD_BYTES} bytes: {path}.",
         )
     return content
+
+
+def _ensure_bounded_evidence_value(value: Any, *, path: Path) -> None:
+    try:
+        for _parent, _key, _nested, _depth in _walk_evidence_values(value):
+            pass
+    except TwoNodeE2EEvidenceError as error:
+        raise TwoNodeE2EEvidenceError(
+            "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+            f"Evidence JSON exceeds traversal bounds: {path}.",
+        ) from error
+
+
+def _walk_evidence_values(value: Any):
+    stack: list[tuple[Any, str | None, Any, int]] = [(None, None, value, 0)]
+    visited = 0
+    while stack:
+        parent, key, current, depth = stack.pop()
+        visited += 1
+        if visited > MAX_EVIDENCE_TRAVERSAL_NODES:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal node limit was exceeded.",
+            )
+        if depth > MAX_EVIDENCE_TRAVERSAL_DEPTH:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal depth limit was exceeded.",
+            )
+        yield parent, key, current, depth
+        if isinstance(current, Mapping):
+            for nested_key, nested in reversed(list(current.items())):
+                stack.append((current, str(nested_key), nested, depth + 1))
+        elif isinstance(current, list):
+            for index in range(len(current) - 1, -1, -1):
+                stack.append((current, str(index), current[index], depth + 1))
 
 
 def _missing_lane(name: str, code: str) -> LaneEvaluation:
@@ -1956,7 +2050,7 @@ def _lane_from_status(
         summary_status=summary_status,
         blockers=tuple(dict(item) for item in blockers),
         findings=tuple(dict(item) for item in findings),
-        evidence=redact_payload(_bounded_evidence_payload(doc.payload)),
+        evidence=_bounded_evidence_payload(doc.payload),
     )
 
 
@@ -2445,6 +2539,12 @@ def _docker_security_child_artifact_issues(
                 expected_evidence_run_id=evidence_run_id,
             )
         )
+    child_contract_blockers, child_contract_findings = _docker_security_child_subcontract_issues(
+        artifact_name,
+        child_payload,
+    )
+    blockers.extend(child_contract_blockers)
+    findings.extend(child_contract_findings)
     return blockers, findings
 
 
@@ -2454,13 +2554,173 @@ def _docker_security_child_current_run_compatible(
     child_payload: Mapping[str, Any],
     evidence_run_id: str,
 ) -> bool:
+    explicit_ids = _explicit_bundle_run_ids_from_value(child_payload)
+    if explicit_ids:
+        return all(str(value) == evidence_run_id for _, value in explicit_ids)
     try:
         path.relative_to(run_dir.resolve(strict=False))
         return True
     except ValueError:
-        pass
-    explicit_ids = _explicit_bundle_run_ids(child_payload)
-    return bool(explicit_ids) and all(str(value) == evidence_run_id for _, value in explicit_ids)
+        return False
+
+
+def _docker_security_child_subcontract_issues(
+    artifact_name: str,
+    child_payload: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    child_status = _normalized_status(child_payload.get("status"))
+    producer_blockers = _payload_blockers(child_payload)
+    producer_findings = _payload_findings(child_payload)
+    if child_status == STATUS_PASS:
+        if producer_blockers:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_PRODUCER_BLOCKERS_PRESENT",
+                    "Docker security PASS child cannot contain producer blockers.",
+                    artifact=artifact_name,
+                    producer_blocker_count=len(producer_blockers),
+                )
+            )
+        if producer_findings:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_PRODUCER_FINDINGS_PRESENT",
+                    "Docker security PASS child cannot contain producer findings.",
+                    artifact=artifact_name,
+                    producer_finding_count=len(producer_findings),
+                )
+            )
+    if artifact_name == "source_trust":
+        blockers.extend(_docker_source_trust_child_blockers(child_payload, child_status=child_status))
+    elif artifact_name == "static":
+        static_blockers, static_findings = _docker_static_child_issues(child_payload, child_status=child_status)
+        blockers.extend(static_blockers)
+        findings.extend(static_findings)
+    elif artifact_name == "smoke":
+        blockers.extend(_docker_smoke_child_blockers(child_payload, child_status=child_status))
+    return blockers, findings
+
+
+def _docker_source_trust_child_blockers(
+    child_payload: Mapping[str, Any],
+    *,
+    child_status: str,
+) -> list[dict[str, Any]]:
+    if child_status != STATUS_PASS:
+        return []
+    untrusted_keys = (
+        "untrusted_owner",
+        "source_trust_failed",
+        "trusted_owner_missing",
+        "group_or_world_writable",
+        "symlink_rejected",
+    )
+    for key in untrusted_keys:
+        if _bool_lookup_any(child_payload, (key,)) is True:
+            return [
+                _blocker(
+                    "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_TRUST_UNCLEAN",
+                    "Docker source_trust child PASS contradicts source-trust safety fields.",
+                    artifact="source_trust",
+                    evidence_key=key,
+                )
+            ]
+    return []
+
+
+def _docker_static_child_issues(
+    child_payload: Mapping[str, Any],
+    *,
+    child_status: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    if child_status != STATUS_PASS:
+        return blockers, findings
+    proofs = _docker_display_security_proofs(child_payload)
+    blockers.extend(
+        _with_context(blocker, artifact="static")
+        for blocker in _docker_missing_required_static_child_proof_blockers(proofs)
+    )
+    findings.extend(_with_context(finding, artifact="static") for finding in _docker_proof_findings(proofs))
+    for key in DOCKER_FORBIDDEN_BOOL_KEYS:
+        value = _bool_lookup(child_payload, key)
+        if value is True:
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_DOCKER_DISPLAY_FORBIDDEN_CAPABILITY",
+                    f"Docker static child exposes forbidden capability {key}.",
+                    artifact="static",
+                    capability=key,
+                )
+            )
+    for finding in _payload_findings(child_payload):
+        code = str(finding.get("code") or "")
+        if any(token in code.upper() for token in DOCKER_FORBIDDEN_FINDING_TOKENS):
+            findings.append(
+                _finding(
+                    "TWO_NODE_E2E_DOCKER_DISPLAY_SECURITY_FINDING",
+                    "Docker static child contains a forbidden security finding.",
+                    artifact="static",
+                    source_code=code,
+                )
+            )
+    return blockers, findings
+
+
+def _docker_missing_required_static_child_proof_blockers(
+    proofs: Mapping[str, bool | None],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    static_required = (
+        "privileged",
+        "host_network",
+        "host_pid",
+        "host_ipc",
+        "cap_add_present",
+        "forbidden_hostconfig_hazard",
+        "forbidden_mount_hazard",
+        "forbidden_env_hazard",
+        "docker_socket_present",
+        "broad_host_bind_present",
+        "private_workspace_bind_present",
+        "workspace_mount_present",
+        "writable_published_artifact_mount",
+        "display_write_capability_present",
+        "published_artifacts_readonly",
+        "root_filesystem_readonly",
+        "cap_drop_all",
+    )
+    for proof_name in static_required:
+        if proofs.get(proof_name) is None:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_DOCKER_STATIC_CHILD_PROOF_MISSING",
+                    "Docker static child PASS requires explicit static HostConfig/mount/env proof.",
+                    proof=proof_name,
+                )
+            )
+    return blockers
+
+
+def _docker_smoke_child_blockers(
+    child_payload: Mapping[str, Any],
+    *,
+    child_status: str,
+) -> list[dict[str, Any]]:
+    if child_status != STATUS_PASS:
+        return []
+    if _has_live_docker_evidence(child_payload):
+        return []
+    return [
+        _blocker(
+            "TWO_NODE_E2E_DOCKER_SMOKE_LIVE_COMMAND_EVIDENCE_MISSING",
+            "Docker smoke child PASS requires live Docker command/smoke evidence.",
+            artifact="smoke",
+        )
+    ]
 
 
 def _governed_false_proof(payload: Mapping[str, Any], aliases: Sequence[str]) -> bool | None:
@@ -3043,6 +3303,518 @@ def _readonly_db_sibling_issues(
     return blockers, findings
 
 
+def _readonly_db_source_artifact_issues(
+    summary_path: Path,
+    summary_payload: Mapping[str, Any],
+    *,
+    declared_sources: tuple[str, ...],
+    evidence_run_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    provenance = summary_payload.get("validation_provenance")
+    if not isinstance(provenance, Mapping):
+        return (
+            [
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACTS_MISSING",
+                    "Readonly DB final PASS requires validation_provenance.source_artifacts.",
+                )
+            ],
+            findings,
+        )
+    if provenance.get("merged_source_evidence") is not True:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_MERGED_SOURCE_EVIDENCE_MISSING",
+                "Readonly DB final PASS requires merged_source_evidence=true.",
+            )
+        )
+    source_artifacts = provenance.get("source_artifacts")
+    if not isinstance(source_artifacts, list) or not source_artifacts:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACTS_MISSING",
+                "Readonly DB final PASS requires non-empty merged source_artifacts.",
+            )
+        )
+        return blockers, findings
+    lane_dir = summary_path.parent
+    observed_sources: set[str] = set()
+    seen_dirs: set[str] = set()
+    for index, record in enumerate(source_artifacts):
+        if not isinstance(record, Mapping):
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_INVALID",
+                    "Readonly DB source artifact record must be an object.",
+                    source_index=index,
+                )
+            )
+            continue
+        record_blockers, record_findings, record_sources = _readonly_db_single_source_artifact_issues(
+            record,
+            source_index=index,
+            lane_dir=lane_dir,
+            evidence_run_id=evidence_run_id,
+        )
+        blockers.extend(record_blockers)
+        findings.extend(record_findings)
+        duplicate_sources = sorted(source for source in record_sources if source in observed_sources)
+        if duplicate_sources:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_DUPLICATE_SOURCE",
+                    "Readonly DB source artifacts must not duplicate source coverage.",
+                    source_index=index,
+                    duplicate_sources=duplicate_sources,
+                )
+            )
+        observed_sources.update(record_sources)
+        source_dir = str(record.get("source_dir") or "")
+        if source_dir in seen_dirs:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_DUPLICATE_SOURCE_DIR",
+                    "Readonly DB source artifacts must not duplicate source directories.",
+                    source_index=index,
+                    source_dir=source_dir,
+                )
+            )
+        if source_dir:
+            seen_dirs.add(source_dir)
+    missing_sources = sorted(source for source in declared_sources if source not in observed_sources)
+    if missing_sources:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SOURCE_COVERAGE_MISSING",
+                "Readonly DB source artifacts must cover every declared source.",
+                missing_sources=missing_sources,
+                observed_sources=sorted(observed_sources),
+            )
+        )
+    return blockers, findings
+
+
+def _readonly_db_single_source_artifact_issues(
+    record: Mapping[str, Any],
+    *,
+    source_index: int,
+    lane_dir: Path,
+    evidence_run_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    observed_sources = set(_sources_from_value(record.get("sources")))
+    source_dir = _readonly_db_source_artifact_dir(record, source_index=source_index, lane_dir=lane_dir)
+    if source_dir is None:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_DIR_UNSAFE",
+                "Readonly DB source artifact record must include a safe approved source_dir.",
+                source_index=source_index,
+                source_dir=record.get("source_dir"),
+            )
+        )
+        return blockers, findings, observed_sources
+    if _path_is_relative_to(lane_dir, source_dir) or source_dir == lane_dir.resolve(strict=False):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_FINAL_LANE_REUSE",
+                "Readonly DB source artifact must point to per-source evidence, not the final merge lane.",
+                source_index=source_index,
+                source_dir=_public_path(source_dir),
+            )
+        )
+    parent_blocker = _readonly_db_source_parent_binding_blocker(
+        record,
+        evidence_run_id=evidence_run_id,
+        source_index=source_index,
+    )
+    if parent_blocker is not None:
+        blockers.append(parent_blocker)
+    provenance = record.get("validation_provenance")
+    if not isinstance(provenance, Mapping) or provenance.get("mode") != "live" or provenance.get(
+        "live_readonly_proof"
+    ) is not True:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_LIVE_PROVENANCE_MISSING",
+                "Readonly DB source artifact must carry live source validation provenance.",
+                source_index=source_index,
+            )
+        )
+    summary_run_id = record.get("summary_run_id")
+    if not isinstance(summary_run_id, str) or not summary_run_id.strip():
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_RUN_ID_MISSING",
+                "Readonly DB source artifact record must include summary_run_id.",
+                source_index=source_index,
+            )
+        )
+    artifacts = record.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACTS_MISSING",
+                "Readonly DB source artifact record must include authoritative artifact metadata.",
+                source_index=source_index,
+            )
+        )
+        return blockers, findings, observed_sources
+    missing_filenames = [filename for filename in READONLY_DB_SOURCE_ARTIFACT_FILENAMES if filename not in artifacts]
+    if missing_filenames:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_FILE_MISSING",
+                "Readonly DB source artifact record is missing authoritative artifact metadata.",
+                source_index=source_index,
+                missing_filenames=missing_filenames,
+            )
+        )
+    source_payloads: dict[str, Any] = {}
+    source_hashes: dict[str, str] = {}
+    for filename in READONLY_DB_SOURCE_ARTIFACT_FILENAMES:
+        artifact = artifacts.get(filename)
+        if not isinstance(artifact, Mapping):
+            continue
+        artifact_blockers, payload, sha256 = _readonly_db_source_artifact_file_issues(
+            artifact,
+            filename=filename,
+            source_index=source_index,
+            source_dir=source_dir,
+            summary_run_id=summary_run_id if isinstance(summary_run_id, str) else None,
+        )
+        blockers.extend(artifact_blockers)
+        if payload is not None:
+            source_payloads[filename] = payload
+            source_hashes[filename] = sha256 or ""
+    sibling_blockers, sibling_findings, payload_sources = _readonly_db_source_artifact_payload_issues(
+        source_payloads,
+        source_index=source_index,
+        evidence_run_id=evidence_run_id,
+        summary_run_id=summary_run_id if isinstance(summary_run_id, str) else None,
+    )
+    blockers.extend(sibling_blockers)
+    findings.extend(sibling_findings)
+    observed_sources.update(payload_sources)
+    return blockers, findings, observed_sources
+
+
+def _readonly_db_source_artifact_dir(
+    record: Mapping[str, Any],
+    *,
+    source_index: int,
+    lane_dir: Path,
+) -> Path | None:
+    raw_source_dir = record.get("source_dir")
+    if not isinstance(raw_source_dir, str) or not raw_source_dir.strip():
+        return None
+    try:
+        source_dir = _approved_artifact_path(raw_source_dir)
+    except TwoNodeE2EEvidenceError:
+        return None
+    try:
+        _refuse_symlink_components(source_dir)
+    except TwoNodeE2EEvidenceError:
+        return None
+    if source_dir.exists() and not source_dir.is_dir():
+        return None
+    if source_dir == lane_dir.resolve(strict=False):
+        return source_dir
+    return source_dir
+
+
+def _readonly_db_source_parent_binding_blocker(
+    record: Mapping[str, Any],
+    *,
+    evidence_run_id: str,
+    source_index: int,
+) -> dict[str, Any] | None:
+    parent_binding = record.get("parent_binding")
+    provenance = record.get("validation_provenance")
+    parent_value = None
+    parent_key = None
+    if isinstance(provenance, Mapping):
+        for key in READONLY_DB_SOURCE_PARENT_BINDING_KEYS:
+            value = provenance.get(key)
+            if isinstance(value, str) and value.strip():
+                parent_key = f"validation_provenance.{key}"
+                parent_value = value
+                break
+    if isinstance(parent_binding, str) and parent_binding in {"run_id_prefix"}:
+        return None
+    if parent_value is None:
+        return _blocker(
+            "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PARENT_BINDING_MISSING",
+            "Readonly DB source artifact must be current-run-prefixed or explicitly parent-bound.",
+            source_index=source_index,
+            parent_binding=parent_binding,
+        )
+    if str(parent_value) != evidence_run_id:
+        return _blocker(
+            "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PARENT_BINDING_MISMATCH",
+            "Readonly DB source artifact parent/current binding must match the final evidence run.",
+            source_index=source_index,
+            parent_binding=parent_key,
+            evidence_run_id=parent_value,
+            expected_evidence_run_id=evidence_run_id,
+        )
+    return None
+
+
+def _readonly_db_source_artifact_file_issues(
+    artifact: Mapping[str, Any],
+    *,
+    filename: str,
+    source_index: int,
+    source_dir: Path,
+    summary_run_id: str | None,
+) -> tuple[list[dict[str, Any]], Any | None, str | None]:
+    blockers: list[dict[str, Any]] = []
+    raw_path = artifact.get("path")
+    raw_sha256 = artifact.get("sha256")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PATH_MISSING",
+                "Readonly DB source artifact file metadata must include a path.",
+                source_index=source_index,
+                filename=filename,
+            )
+        )
+        return blockers, None, None
+    if not isinstance(raw_sha256, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", raw_sha256.strip()):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SHA_MISSING",
+                "Readonly DB source artifact file metadata must include a sha256 digest.",
+                source_index=source_index,
+                filename=filename,
+                path=raw_path,
+            )
+        )
+        return blockers, None, None
+    try:
+        path = _approved_artifact_path(raw_path)
+    except TwoNodeE2EEvidenceError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PATH_UNSAFE",
+                "Readonly DB source artifact file path must stay under approved evidence roots.",
+                source_index=source_index,
+                filename=filename,
+                path=raw_path,
+            )
+        )
+        return blockers, None, None
+    if path.name != filename or path.resolve(strict=False).parent != source_dir.resolve(strict=False):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PATH_UNSAFE",
+                "Readonly DB source artifact file path must stay in source_dir with the authoritative filename.",
+                source_index=source_index,
+                filename=filename,
+                path=_public_path(path),
+                source_dir=_public_path(source_dir),
+            )
+        )
+        return blockers, None, None
+    try:
+        content = read_bytes_limited_no_follow(
+            path,
+            max_bytes=MAX_EVIDENCE_PAYLOAD_BYTES,
+            containment_root=source_dir,
+        )
+        payload = json.loads(content.decode("utf-8"))
+        _ensure_bounded_evidence_value(payload, path=path)
+    except FileNotFoundError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_FILE_MISSING",
+                "Readonly DB source authoritative artifact is missing.",
+                source_index=source_index,
+                filename=filename,
+                path=_public_path(path),
+            )
+        )
+        return blockers, None, None
+    except SafeFilesystemError:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PATH_UNSAFE",
+                "Readonly DB source authoritative artifact path is unsafe.",
+                source_index=source_index,
+                filename=filename,
+                path=_public_path(path),
+            )
+        )
+        return blockers, None, None
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, TwoNodeE2EEvidenceError):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_JSON_INVALID",
+                "Readonly DB source authoritative artifact must be bounded valid JSON.",
+                source_index=source_index,
+                filename=filename,
+                path=_public_path(path),
+            )
+        )
+        return blockers, None, None
+    sha256 = hashlib.sha256(content).hexdigest()
+    if sha256 != raw_sha256.lower():
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_HASH_MISMATCH",
+                "Readonly DB source authoritative artifact sha256 does not match file content.",
+                source_index=source_index,
+                filename=filename,
+                path=_public_path(path),
+            )
+        )
+    artifact_run_id = artifact.get("run_id")
+    if summary_run_id and artifact_run_id is not None and str(artifact_run_id) != summary_run_id:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_RUN_ID_MISMATCH",
+                "Readonly DB source artifact metadata run_id must match source summary run_id.",
+                source_index=source_index,
+                filename=filename,
+                artifact_run_id=artifact_run_id,
+                summary_run_id=summary_run_id,
+            )
+        )
+    if artifact_run_id is None:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_RUN_ID_MISSING",
+                "Readonly DB source artifact metadata must include run_id.",
+                source_index=source_index,
+                filename=filename,
+            )
+        )
+    return blockers, payload, sha256
+
+
+def _readonly_db_source_artifact_payload_issues(
+    payloads: Mapping[str, Any],
+    *,
+    source_index: int,
+    evidence_run_id: str,
+    summary_run_id: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    sources: set[str] = set()
+    summary = payloads.get("summary.json")
+    if not isinstance(summary, Mapping):
+        if "summary.json" in payloads:
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_JSON_INVALID",
+                    "Readonly DB source summary artifact must be a JSON object.",
+                    source_index=source_index,
+                    filename="summary.json",
+                )
+            )
+        return blockers, findings, sources
+    if summary.get("schema") != READONLY_DB_LIVE_SCHEMA:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_LIVE_SCHEMA_MISSING",
+                "Readonly DB source summary artifact must use the live evidence schema.",
+                source_index=source_index,
+                schema=summary.get("schema"),
+            )
+        )
+    if summary.get("status") != STATUS_PASS:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_NOT_PASS",
+                "Readonly DB source summary artifact must be PASS before final DB PASS.",
+                source_index=source_index,
+                status=summary.get("status"),
+            )
+        )
+    if summary_run_id and str(summary.get("run_id") or "") != summary_run_id:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_RUN_ID_MISMATCH",
+                "Readonly DB source summary run_id must match recorded summary_run_id.",
+                source_index=source_index,
+                observed_run_id=summary.get("run_id"),
+                summary_run_id=summary_run_id,
+            )
+        )
+    parent_blocker = _readonly_db_source_parent_binding_blocker(
+        {
+            "parent_binding": "run_id_prefix"
+            if _is_source_run_prefix(str(summary.get("run_id") or ""), evidence_run_id)
+            else None,
+            "validation_provenance": summary.get("validation_provenance"),
+        },
+        evidence_run_id=evidence_run_id,
+        source_index=source_index,
+    )
+    if parent_blocker is not None:
+        blockers.append(parent_blocker)
+    provenance = summary.get("validation_provenance")
+    if not isinstance(provenance, Mapping) or provenance.get("mode") != "live" or provenance.get(
+        "live_readonly_proof"
+    ) is not True:
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_LIVE_PROVENANCE_MISSING",
+                "Readonly DB source summary artifact must carry live mode/proof provenance.",
+                source_index=source_index,
+            )
+        )
+    role_payload = payloads.get("role.json")
+    if role_payload != summary.get("role"):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SIBLING_MISMATCH",
+                "Readonly DB source role.json must match source summary role.",
+                source_index=source_index,
+                filename="role.json",
+            )
+        )
+    route_payload = payloads.get("route_smoke.json")
+    if route_payload != summary.get("route_smoke"):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SIBLING_MISMATCH",
+                "Readonly DB source route_smoke.json must match source summary route_smoke.",
+                source_index=source_index,
+                filename="route_smoke.json",
+            )
+        )
+    permission_payload = payloads.get("permission_probes.json")
+    if permission_payload != summary.get("permission_probes"):
+        blockers.append(
+            _blocker(
+                "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SIBLING_MISMATCH",
+                "Readonly DB source permission_probes.json must match source summary permission_probes.",
+                source_index=source_index,
+                filename="permission_probes.json",
+            )
+        )
+    sources.update(_readonly_db_evidence_sources(summary))
+    return blockers, findings, sources
+
+
+def _is_source_run_prefix(run_id: str, evidence_run_id: str) -> bool:
+    run_id_lower = run_id.lower()
+    expected_lower = evidence_run_id.lower()
+    return run_id_lower in {
+        f"{expected_lower}-gfs",
+        f"{expected_lower}-ifs",
+        f"{expected_lower}-db-gfs",
+        f"{expected_lower}-db-ifs",
+    }
+
+
 def _readonly_db_child_evidence_issues(
     payload: Mapping[str, Any],
     *,
@@ -3320,12 +4092,40 @@ def _readonly_db_manual_action_issues(actions: list[Any]) -> list[dict[str, Any]
                     observed_error_code=action.get("observed_error_code") or action.get("error_code"),
                 )
             )
-        if action.get("write_dependency_constructed") is not False and action.get("write_executed") is not False:
+        no_write_blockers = _readonly_db_manual_action_no_write_issues(
+            action,
+            action_name=action_name,
+        )
+        blockers.extend(no_write_blockers)
+    return blockers
+
+
+def _readonly_db_manual_action_no_write_issues(
+    action: Mapping[str, Any],
+    *,
+    action_name: str,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for proof_name, aliases in READONLY_DB_MANUAL_WRITE_PROOF_ALIASES.items():
+        observed = [(key, action.get(key)) for key in aliases if isinstance(action.get(key), bool)]
+        if any(value is True for _key, value in observed):
+            blockers.append(
+                _blocker(
+                    "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_WRITE_PROOF_FAILED",
+                    "Readonly DB manual action child recorded a write dependency or write execution.",
+                    action=action_name,
+                    proof=proof_name,
+                    true_fields=[key for key, value in observed if value is True],
+                )
+            )
+        elif not observed:
             blockers.append(
                 _blocker(
                     "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_NO_WRITE_PROOF_MISSING",
-                    "Readonly DB manual action child must explicitly prove no write dependency was constructed.",
+                    "Readonly DB manual action child must explicitly prove no write dependency and no write execution.",
                     action=action_name,
+                    proof=proof_name,
+                    accepted_fields=list(aliases),
                 )
             )
     return blockers
@@ -3652,6 +4452,13 @@ def _payload_findings(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return []
 
 
+def _payload_blockers(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    blockers = payload.get("blockers")
+    if isinstance(blockers, list):
+        return [item for item in blockers if isinstance(item, Mapping)]
+    return []
+
+
 def _stale_lane_blockers(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     evidence_run_id = payload.get("evidence_run_id") or payload.get("bundle_run_id")
     expected_run_id = payload.get("expected_evidence_run_id")
@@ -3707,13 +4514,9 @@ def _explicit_bundle_run_ids(payload: Mapping[str, Any]) -> list[tuple[str, Any]
 
 def _explicit_bundle_run_ids_from_value(value: Any) -> list[tuple[str, Any]]:
     result: list[tuple[str, Any]] = []
-    if isinstance(value, Mapping):
-        result.extend(_explicit_bundle_run_ids(value))
-        for nested in value.values():
-            result.extend(_explicit_bundle_run_ids_from_value(nested))
-    elif isinstance(value, list):
-        for nested in value:
-            result.extend(_explicit_bundle_run_ids_from_value(nested))
+    for _parent, _key, nested, _depth in _walk_evidence_values(value):
+        if isinstance(nested, Mapping):
+            result.extend(_explicit_bundle_run_ids(nested))
     return result
 
 
@@ -3731,42 +4534,30 @@ def _database_url_is_redacted(value: str) -> bool:
 
 
 def _has_mock_or_fixture(value: Any) -> bool:
-    if isinstance(value, Mapping):
-        for key, nested in value.items():
-            key_text = str(key)
-            if key_text in MOCK_KEYS and nested is True:
-                return True
-            if key_text == "execution_mode" and str(nested).lower() in {
-                "mock",
-                "mocked",
-                "deterministic_fixture",
-                "fixture",
-                "fixture_only",
-            }:
-                return True
-            if _has_mock_or_fixture(nested):
-                return True
-    elif isinstance(value, list):
-        return any(_has_mock_or_fixture(item) for item in value)
+    for _parent, key, nested, _depth in _walk_evidence_values(value):
+        if key in MOCK_KEYS and nested is True:
+            return True
+        if key == "execution_mode" and str(nested).lower() in {
+            "mock",
+            "mocked",
+            "deterministic_fixture",
+            "fixture",
+            "fixture_only",
+        }:
+            return True
     return False
 
 
 def _has_historical_latest(value: Any) -> bool:
-    if isinstance(value, Mapping):
-        for key, nested in value.items():
-            key_text = str(key)
-            if key_text in HISTORICAL_KEYS and nested is True:
-                return True
-            if key_text in {"latest_mode", "selection_mode"} and str(nested).lower() in {
-                "historical_latest",
-                "source_only",
-                "fallback_latest",
-            }:
-                return True
-            if _has_historical_latest(nested):
-                return True
-    elif isinstance(value, list):
-        return any(_has_historical_latest(item) for item in value)
+    for _parent, key, nested, _depth in _walk_evidence_values(value):
+        if key in HISTORICAL_KEYS and nested is True:
+            return True
+        if key in {"latest_mode", "selection_mode"} and str(nested).lower() in {
+            "historical_latest",
+            "source_only",
+            "fallback_latest",
+        }:
+            return True
     return False
 
 
@@ -3793,35 +4584,20 @@ def _bool_lookup_any(payload: Mapping[str, Any], keys: Sequence[str]) -> bool | 
 
 def _bool_lookup_values(value: Any, keys: frozenset[str]) -> list[bool]:
     values: list[bool] = []
-    if isinstance(value, Mapping):
-        for key, nested in value.items():
-            if str(key) in keys:
-                parsed = _raw_bool(nested)
-                if parsed is not None:
-                    values.append(parsed)
-            values.extend(_bool_lookup_values(nested, keys))
-    elif isinstance(value, list):
-        for nested in value:
-            values.extend(_bool_lookup_values(nested, keys))
+    for _parent, key, nested, _depth in _walk_evidence_values(value):
+        if key in keys:
+            parsed = _raw_bool(nested)
+            if parsed is not None:
+                values.append(parsed)
     return values
 
 
 def _deep_bool_lookup(value: Any, keys: frozenset[str]) -> bool | None:
-    if isinstance(value, Mapping):
-        for key, nested in value.items():
-            if str(key) in keys:
-                parsed = _raw_bool(nested)
-                if parsed is not None:
-                    return parsed
-        for nested in value.values():
-            found = _deep_bool_lookup(nested, keys)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for nested in value:
-            found = _deep_bool_lookup(nested, keys)
-            if found is not None:
-                return found
+    for _parent, key, nested, _depth in _walk_evidence_values(value):
+        if key in keys:
+            parsed = _raw_bool(nested)
+            if parsed is not None:
+                return parsed
     return None
 
 

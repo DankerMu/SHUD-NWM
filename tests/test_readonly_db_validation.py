@@ -972,6 +972,32 @@ def test_merge_readonly_db_source_evidence_rejects_untrusted_sources(mutator: st
         assert exc_info.value.error_code == error_code
 
 
+def test_merge_readonly_db_source_evidence_rejects_deep_nested_source_json() -> None:
+    evidence_root = _evidence_root()
+    run_id = _run_id("merge-deep-json")
+    gfs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-gfs",
+        source="GFS",
+    )
+    ifs_config = _seed_live_readonly_source(
+        evidence_root=evidence_root,
+        run_id=f"{run_id}-ifs",
+        source="IFS",
+    )
+    (gfs_config.lane_dir / "summary.json").write_text(_deep_nested_json(320), encoding="utf-8")
+
+    with pytest.raises(ReadonlyDbValidationError) as exc_info:
+        merge_readonly_db_source_evidence(
+            evidence_root=evidence_root,
+            run_id=run_id,
+            source_dirs=(gfs_config.lane_dir, ifs_config.lane_dir),
+            force=True,
+        )
+
+    assert exc_info.value.error_code == "READONLY_DB_MERGE_SOURCE_JSON_TOO_DEEP"
+
+
 def test_merge_readonly_db_source_evidence_accepts_explicit_parent_bundle_binding() -> None:
     evidence_root = _evidence_root()
     run_id = _run_id("merge-explicit-parent")
@@ -1871,3 +1897,7 @@ def _run_id(prefix: str) -> str:
 
 def _evidence_text(lane_dir: Path) -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in sorted(lane_dir.glob("*.json")))
+
+
+def _deep_nested_json(depth: int) -> str:
+    return "{" + '"x":{' * depth + '"status":"PASS"' + "}" * depth + "}"

@@ -33,6 +33,8 @@ APPROVED_EVIDENCE_ROOTS = (REPO_ROOT / "artifacts", Path("/scratch/frd_muziyao")
 SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SAFE_DDL_SUFFIX_RE = re.compile(r"[^a-z0-9_]+")
 MAX_EVIDENCE_PAYLOAD_BYTES = 1024 * 1024
+MAX_EVIDENCE_TRAVERSAL_DEPTH = 256
+MAX_EVIDENCE_TRAVERSAL_NODES = 100_000
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -298,7 +300,13 @@ class EvidenceWriter:
                 "READONLY_DB_EVIDENCE_EXISTS",
                 f"Evidence file already exists: {safe_path}. Use --force to overwrite this run_id.",
             )
-        content = json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        try:
+            content = json.dumps(redact_payload(payload), indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        except RecursionError as error:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_EVIDENCE_REDACTION_DEPTH_EXCEEDED",
+                "Readonly DB evidence payload is too deeply nested to redact safely.",
+            ) from error
         try:
             atomic_write_bytes_no_follow(safe_path, content, containment_root=self.lane_dir)
             self._created_paths.add(safe_path)
@@ -1143,6 +1151,10 @@ def _read_source_evidence(source_dir: Path, *, expected_run_id: str) -> Readonly
             "READONLY_DB_MERGE_SOURCE_JSON_INVALID",
             f"Readonly DB source summary must be a JSON object: {resolved_dir / 'summary.json'}",
         )
+    summary_run_id = summary.get("run_id")
+    for artifact in artifacts.values():
+        if artifact.get("run_id") is None and isinstance(summary_run_id, str) and summary_run_id.strip():
+            artifact["run_id"] = summary_run_id
     _validate_source_siblings(resolved_dir, summary, payloads)
     parent_binding_field = _validate_merge_source_run(
         summary,
@@ -1195,6 +1207,7 @@ def _read_source_json_file(path: Path, *, source_dir: Path) -> tuple[Any, str]:
                 f"Readonly DB source evidence exceeds {MAX_EVIDENCE_PAYLOAD_BYTES} bytes: {path}",
             )
         payload = json.loads(content.decode("utf-8"))
+        _ensure_bounded_json_value(payload, path=path)
         sha256 = hashlib.sha256(content).hexdigest()
     except FileNotFoundError as error:
         raise ReadonlyDbValidationError(
@@ -1206,11 +1219,13 @@ def _read_source_json_file(path: Path, *, source_dir: Path) -> tuple[Any, str]:
             "READONLY_DB_MERGE_SOURCE_PATH_UNSAFE",
             f"Readonly DB source evidence path is unsafe: {path}",
         ) from error
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise ReadonlyDbValidationError(
             "READONLY_DB_MERGE_SOURCE_JSON_INVALID",
             f"Readonly DB source evidence is invalid JSON: {path}",
         ) from error
+    except ReadonlyDbValidationError:
+        raise
     return payload, sha256
 
 
@@ -1223,16 +1238,49 @@ def _source_artifact_record(path: Path, payload: Any, *, sha256: str) -> dict[st
 
 
 def _artifact_run_id(payload: Any) -> str | None:
-    if isinstance(payload, Mapping):
-        value = payload.get("run_id") or payload.get("evidence_run_id") or payload.get("bundle_run_id")
+    for _parent, _key, nested, _depth in _walk_json_values(payload):
+        if not isinstance(nested, Mapping):
+            continue
+        value = nested.get("run_id") or nested.get("evidence_run_id") or nested.get("bundle_run_id")
         if value is not None and str(value).strip():
             return str(value)
-    if isinstance(payload, list):
-        for item in payload:
-            value = _artifact_run_id(item)
-            if value:
-                return value
     return None
+
+
+def _ensure_bounded_json_value(value: Any, *, path: Path) -> None:
+    try:
+        for _parent, _key, _nested, _depth in _walk_json_values(value):
+            pass
+    except ReadonlyDbValidationError as error:
+        raise ReadonlyDbValidationError(
+            "READONLY_DB_MERGE_SOURCE_JSON_TOO_DEEP",
+            f"Readonly DB source evidence exceeds traversal bounds: {path}",
+        ) from error
+
+
+def _walk_json_values(value: Any):
+    stack: list[tuple[Any, str | None, Any, int]] = [(None, None, value, 0)]
+    visited = 0
+    while stack:
+        parent, key, current, depth = stack.pop()
+        visited += 1
+        if visited > MAX_EVIDENCE_TRAVERSAL_NODES:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_JSON_TOO_DEEP",
+                "Readonly DB source evidence traversal node limit was exceeded.",
+            )
+        if depth > MAX_EVIDENCE_TRAVERSAL_DEPTH:
+            raise ReadonlyDbValidationError(
+                "READONLY_DB_MERGE_SOURCE_JSON_TOO_DEEP",
+                "Readonly DB source evidence traversal depth limit was exceeded.",
+            )
+        yield parent, key, current, depth
+        if isinstance(current, Mapping):
+            for nested_key, nested in reversed(list(current.items())):
+                stack.append((current, str(nested_key), nested, depth + 1))
+        elif isinstance(current, list):
+            for index in range(len(current) - 1, -1, -1):
+                stack.append((current, str(index), current[index], depth + 1))
 
 
 def _validate_source_siblings(source_dir: Path, summary: Mapping[str, Any], payloads: Mapping[str, Any]) -> None:

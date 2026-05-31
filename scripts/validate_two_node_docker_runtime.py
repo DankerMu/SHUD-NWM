@@ -779,6 +779,7 @@ def write_static_report(result: StaticCheckResult, report_path: Path, repo_root:
     payload = {
         "schema_version": "nhms.two_node_docker.static_check.v1",
         "change_id": CHANGE_ID,
+        "evidence_run_id": _evidence_run_id_from_output(report_path),
         "checked_at": _now_iso(),
         **result.to_dict(),
     }
@@ -1131,6 +1132,11 @@ def _docker_security_summary_status(
     static_payload: Mapping[str, Any],
     smoke_payload: Mapping[str, Any],
 ) -> str:
+    payloads = (source_trust_payload, static_payload, smoke_payload)
+    if any(_child_findings(payload) for payload in payloads):
+        return "FAIL"
+    if any(_child_blockers(payload) for payload in payloads):
+        return "BLOCKED"
     statuses = {source_trust_payload.get("status"), static_payload.get("status"), smoke_payload.get("status")}
     if "FAIL" in statuses:
         return "FAIL"
@@ -1150,22 +1156,30 @@ def _docker_security_summary_blockers(
         ("static", static_payload),
         ("smoke", smoke_payload),
     ):
-        if payload.get("status") == "PASS":
+        child_blockers = _child_blockers(payload)
+        child_findings = _child_findings(payload)
+        if payload.get("status") == "PASS" and not child_blockers and not child_findings:
             continue
         blockers.append(
             {
                 "code": "DOCKER_SECURITY_SOURCE_NOT_PASS",
                 "source": label,
                 "status": payload.get("status"),
-                "source_blockers": (
-                    list(payload.get("blockers", [])) if isinstance(payload.get("blockers"), list) else []
-                ),
-                "source_findings": (
-                    list(payload.get("findings", [])) if isinstance(payload.get("findings"), list) else []
-                ),
+                "source_blockers": child_blockers,
+                "source_findings": child_findings,
             }
         )
     return blockers
+
+
+def _child_blockers(payload: Mapping[str, Any]) -> list[Any]:
+    blockers = payload.get("blockers")
+    return list(blockers) if isinstance(blockers, list) else []
+
+
+def _child_findings(payload: Mapping[str, Any]) -> list[Any]:
+    findings = payload.get("findings")
+    return list(findings) if isinstance(findings, list) else []
 
 
 def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list[Finding]:
@@ -2718,6 +2732,7 @@ def _docker_smoke_payload(
     return {
         "schema_version": "nhms.two_node_docker.app_smoke.v1",
         "change_id": CHANGE_ID,
+        "evidence_run_id": _evidence_run_id_from_output(evidence_root),
         "status": status,
         "checked_at": _now_iso(),
         "evidence_root": str(evidence_root),
@@ -2730,6 +2745,18 @@ def _docker_smoke_payload(
         "expected_absent_paths": list(APP_IMAGE_FORBIDDEN_PATHS),
         "blockers": list(blockers),
     }
+
+
+def _evidence_run_id_from_output(path: Path) -> str | None:
+    resolved = path.resolve(strict=False)
+    parts = resolved.parts
+    for marker in ("two-node-e2e", "test-two-node-e2e-evidence"):
+        if marker not in parts:
+            continue
+        index = parts.index(marker)
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    return None
 
 
 def _docker_smoke_command_blockers(commands: Mapping[str, CommandResult]) -> list[dict[str, Any]]:

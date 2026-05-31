@@ -284,6 +284,85 @@ def test_docker_security_source_artifact_contract_blocks_false_pass(
     assert expected_code in _codes(docker_lane["blockers"])
 
 
+def test_docker_security_child_with_explicit_stale_run_id_blocks_even_under_current_run() -> None:
+    run_id = _run_id("docker-child-stale")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    static_artifact = docker_security["source_artifacts"]["static"]
+    static_path = Path(static_artifact["path"])
+    static_payload = _read(static_path)
+    static_payload["evidence_run_id"] = "older-bundle"
+    _write(static_path, static_payload)
+    static_artifact["sha256"] = _sha256_file(static_path)
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert docker_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_STALE_OR_UNSCOPED" in _codes(
+        docker_lane["blockers"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "mutation", "expected_status", "expected_code"),
+    [
+        (
+            "source_trust",
+            {"blockers": [{"code": "UNTRUSTED_OWNER"}]},
+            STATUS_BLOCKED,
+            "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_PRODUCER_BLOCKERS_PRESENT",
+        ),
+        (
+            "static",
+            {"findings": [{"code": "DISPLAY_FORBIDDEN_MOUNT"}]},
+            STATUS_FAIL,
+            "TWO_NODE_E2E_DOCKER_SECURITY_SOURCE_ARTIFACT_PRODUCER_FINDINGS_PRESENT",
+        ),
+        (
+            "static",
+            {"HostConfig": {"Privileged": True}},
+            STATUS_FAIL,
+            "TWO_NODE_E2E_DOCKER_DISPLAY_FORBIDDEN_CAPABILITY",
+        ),
+        (
+            "smoke",
+            {"commands": None},
+            STATUS_BLOCKED,
+            "TWO_NODE_E2E_DOCKER_SMOKE_LIVE_COMMAND_EVIDENCE_MISSING",
+        ),
+    ],
+)
+def test_docker_security_child_subcontracts_reject_unsafe_pass(
+    artifact_name: str,
+    mutation: dict[str, Any],
+    expected_status: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"docker-child-{artifact_name}")
+    config = _seed_pass_bundle(run_id)
+    docker_security = _read(config.run_dir / "docker-security" / "summary.json")
+    artifact = docker_security["source_artifacts"][artifact_name]
+    artifact_path = Path(artifact["path"])
+    payload = _read(artifact_path)
+    if "commands" in mutation and mutation["commands"] is None:
+        payload.pop("commands", None)
+    else:
+        _deep_update(payload, mutation)
+    _write(artifact_path, payload)
+    artifact["sha256"] = _sha256_file(artifact_path)
+    _write(config.run_dir / "docker-security" / "summary.json", docker_security)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    docker_lane = summary["lane_summaries"]["docker_security"]
+    assert summary["status"] == expected_status
+    assert docker_lane["status"] == expected_status
+    assert expected_code in _codes(docker_lane["blockers"]) | _codes(docker_lane["findings"])
+
+
 @pytest.mark.parametrize(
     "raw_evidence",
     [
@@ -415,6 +494,68 @@ def test_readonly_db_pass_requires_live_readonly_proof(proof_state: str) -> None
     assert "TWO_NODE_E2E_READONLY_DB_LIVE_PROOF_MISSING" in _codes(readonly_lane["blockers"])
 
 
+@pytest.mark.parametrize(
+    ("mutator", "expected_code"),
+    [
+        ("remove_source_artifacts", "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACTS_MISSING"),
+        ("missing_path", "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PATH_MISSING"),
+        ("missing_sha", "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SHA_MISSING"),
+        ("hash_mismatch", "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_HASH_MISMATCH"),
+        ("stale_source_run", "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_RUN_ID_MISMATCH"),
+        ("unsafe_path", "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_PATH_UNSAFE"),
+        ("missing_ifs", "TWO_NODE_E2E_READONLY_DB_SOURCE_ARTIFACT_SOURCE_COVERAGE_MISSING"),
+    ],
+)
+def test_readonly_db_final_pass_requires_merged_source_artifact_provenance(
+    mutator: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"db-source-artifact-{mutator}")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    source_artifacts = db_summary["validation_provenance"]["source_artifacts"]
+    if mutator == "remove_source_artifacts":
+        db_summary["validation_provenance"].pop("source_artifacts")
+    elif mutator == "missing_path":
+        source_artifacts[0]["artifacts"]["summary.json"].pop("path")
+    elif mutator == "missing_sha":
+        source_artifacts[0]["artifacts"]["summary.json"].pop("sha256")
+    elif mutator == "hash_mismatch":
+        source_artifacts[0]["artifacts"]["summary.json"]["sha256"] = "0" * 64
+    elif mutator == "stale_source_run":
+        source_artifacts[0]["artifacts"]["summary.json"]["run_id"] = "older-source-run"
+    elif mutator == "unsafe_path":
+        source_artifacts[0]["artifacts"]["summary.json"]["path"] = "/tmp/readonly-summary.json"
+    elif mutator == "missing_ifs":
+        db_summary["validation_provenance"]["source_artifacts"] = [
+            artifact for artifact in source_artifacts if artifact["sources"] == ["GFS"]
+        ]
+    _write(lane / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(readonly_lane["blockers"])
+
+
+def test_readonly_db_final_pass_requires_merged_source_flag() -> None:
+    run_id = _run_id("db-source-flag")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    db_summary["validation_provenance"]["merged_source_evidence"] = False
+    _write(lane / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_READONLY_DB_MERGED_SOURCE_EVIDENCE_MISSING" in _codes(readonly_lane["blockers"])
+
+
 @pytest.mark.parametrize("producer_status", [STATUS_PARTIAL, STATUS_BLOCKED])
 @pytest.mark.parametrize(
     "operation_patch",
@@ -503,6 +644,39 @@ def test_readonly_db_child_failure_or_coverage_gap_blocks(mutator: str) -> None:
 
     assert summary["status"] == STATUS_BLOCKED
     assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_BLOCKED
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"write_dependency_constructed": True, "write_executed": False},
+        {"write_dependency_constructed": False, "write_executed": True},
+        {"write_dependency_constructed": None, "write_executed": False},
+        {"write_dependency_constructed": False, "write_executed": None},
+    ],
+)
+def test_readonly_db_manual_action_no_write_fields_are_independent(mutation: dict[str, Any]) -> None:
+    run_id = _run_id("db-manual-no-write")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    action = db_summary["manual_action_probes"][0]
+    for key, value in mutation.items():
+        if value is None:
+            action.pop(key, None)
+        else:
+            action[key] = value
+    _write(lane / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert readonly_lane["status"] == STATUS_BLOCKED
+    assert (
+        "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_WRITE_PROOF_FAILED" in _codes(readonly_lane["blockers"])
+        or "TWO_NODE_E2E_READONLY_DB_MANUAL_ACTION_NO_WRITE_PROOF_MISSING" in _codes(readonly_lane["blockers"])
+    )
 
 
 def test_readonly_db_missing_table_update_or_delete_blocks() -> None:
@@ -1095,6 +1269,18 @@ def test_stale_pass_evidence_is_blocked_when_authoritative_files_are_missing_or_
     }
 
 
+def test_deep_nested_lane_json_raises_structured_evidence_error() -> None:
+    run_id = _run_id("deep-json")
+    config = _seed_pass_bundle(run_id)
+    nested = _deep_nested_json(320)
+    (config.run_dir / "api" / "summary.json").write_text(nested, encoding="utf-8")
+
+    with pytest.raises(TwoNodeE2EEvidenceError) as exc_info:
+        validate_two_node_e2e_evidence(config)
+
+    assert exc_info.value.error_code == "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP"
+
+
 def _seed_pass_bundle(
     run_id: str,
     *,
@@ -1379,73 +1565,117 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
             probe["schema_privileges"] = {"create": False}
         probe["operations"] = operations
         permission_probes.append(probe)
-    route_smoke = [
+    merged_route_smoke = [
         {"name": "health", "status": STATUS_PASS, "path": "/health"},
         {"name": "runtime_config", "status": STATUS_PASS, "path": "/api/v1/runtime/config"},
         {"name": "models", "status": STATUS_PASS, "path": "/api/v1/models?active=all&limit=1"},
     ]
-    for identity in identities.values():
+    source_artifacts = []
+    source_summaries = []
+    role = {
+        "current_user": "display_ro",
+        "role_type": "readonly_candidate",
+    }
+    for source_index, identity in enumerate(identities.values()):
+        source = identity["source"]
         strict_identity = copy.deepcopy(identity)
         strict_query = (
             f"source={strict_identity['source']}&cycle_time={strict_identity['cycle_time']}"
             f"&run_id={strict_identity['run_id']}&model_id={strict_identity['model_id']}"
         )
-        route_smoke.extend(
-            [
-                {
-                    "name": "stations",
-                    "source": strict_identity["source"],
-                    "status": STATUS_PASS,
-                    "path": f"/api/v1/met/stations?model_id={strict_identity['model_id']}&limit=1",
+        source_route_smoke = [
+            {"name": "health", "status": STATUS_PASS, "path": "/health"},
+            {"name": "runtime_config", "status": STATUS_PASS, "path": "/api/v1/runtime/config"},
+            {"name": "models", "status": STATUS_PASS, "path": "/api/v1/models?active=all&limit=1"},
+            {
+                "name": "stations",
+                "source": strict_identity["source"],
+                "status": STATUS_PASS,
+                "path": f"/api/v1/met/stations?model_id={strict_identity['model_id']}&limit=1",
+            },
+            {
+                "name": "latest_product",
+                "source": strict_identity["source"],
+                "status": STATUS_PASS,
+                "path": f"/api/v1/mvp/qhh/latest-product?{strict_query}",
+                "strict_identity": strict_identity,
+            },
+            {
+                "name": "pipeline_status",
+                "source": strict_identity["source"],
+                "status": STATUS_PASS,
+                "path": f"/api/v1/pipeline/status?{strict_query}",
+                "strict_identity": strict_identity,
+            },
+            {
+                "name": "pipeline_stages",
+                "source": strict_identity["source"],
+                "status": STATUS_PASS,
+                "path": f"/api/v1/pipeline/stages?{strict_query}",
+                "strict_identity": strict_identity,
+            },
+            {
+                "name": "jobs",
+                "source": strict_identity["source"],
+                "status": STATUS_PASS,
+                "path": f"/api/v1/jobs?{strict_query}&limit=1",
+                "strict_identity": strict_identity,
+            },
+            {
+                "name": "job_logs",
+                "source": strict_identity["source"],
+                "status": STATUS_PASS,
+                "path": (
+                    f"/api/v1/jobs/{strict_identity['job_id']}/logs?{strict_query}"
+                    f"&job_id={strict_identity['job_id']}"
+                ),
+                "strict_identity": strict_identity,
+            },
+        ]
+        for route in source_route_smoke:
+            if route not in merged_route_smoke:
+                merged_route_smoke.append(route)
+        source_lane = config.evidence_root / f"{config.run_id}-{source.lower()}" / "db" / "readonly-db-boundary"
+        source_summary = {
+            "schema": READONLY_DB_LIVE_SCHEMA,
+            "status": STATUS_PASS,
+            "run_id": f"{config.run_id}-{source.lower()}",
+            "database_url": "postgresql://db.example:5432/nhms",
+            "validation_provenance": {
+                "mode": "live",
+                "live_readonly_proof": True,
+            },
+            "role": role,
+            "display_identity": copy.deepcopy(strict_identity),
+            "route_smoke": source_route_smoke,
+            "manual_action_probes": _readonly_manual_actions(),
+            "permission_probes": permission_probes,
+        }
+        _write(source_lane / "role.json", role)
+        _write(source_lane / "route_smoke.json", source_route_smoke)
+        _write(source_lane / "permission_probes.json", permission_probes)
+        _write(source_lane / "summary.json", source_summary)
+        source_artifacts.append(
+            {
+                "source_index": source_index,
+                "sources": [source],
+                "source_dir": str(source_lane.resolve(strict=False)),
+                "summary_run_id": source_summary["run_id"],
+                "parent_binding": "run_id_prefix",
+                "validation_provenance": {
+                    "mode": "live",
+                    "live_readonly_proof": True,
                 },
-                {
-                    "name": "latest_product",
-                    "source": strict_identity["source"],
-                    "status": STATUS_PASS,
-                    "path": f"/api/v1/mvp/qhh/latest-product?{strict_query}",
-                    "strict_identity": strict_identity,
+                "artifacts": {
+                    filename: _readonly_source_artifact(source_lane / filename, source_summary["run_id"])
+                    for filename in ("summary.json", "role.json", "route_smoke.json", "permission_probes.json")
                 },
-                {
-                    "name": "pipeline_status",
-                    "source": strict_identity["source"],
-                    "status": STATUS_PASS,
-                    "path": f"/api/v1/pipeline/status?{strict_query}",
-                    "strict_identity": strict_identity,
-                },
-                {
-                    "name": "pipeline_stages",
-                    "source": strict_identity["source"],
-                    "status": STATUS_PASS,
-                    "path": f"/api/v1/pipeline/stages?{strict_query}",
-                    "strict_identity": strict_identity,
-                },
-                {
-                    "name": "jobs",
-                    "source": strict_identity["source"],
-                    "status": STATUS_PASS,
-                    "path": f"/api/v1/jobs?{strict_query}&limit=1",
-                    "strict_identity": strict_identity,
-                },
-                {
-                    "name": "job_logs",
-                    "source": strict_identity["source"],
-                    "status": STATUS_PASS,
-                    "path": (
-                        f"/api/v1/jobs/{strict_identity['job_id']}/logs?{strict_query}"
-                        f"&job_id={strict_identity['job_id']}"
-                    ),
-                    "strict_identity": strict_identity,
-                },
-            ]
+            }
         )
-    role = {
-        "evidence_run_id": config.run_id,
-        "current_user": "display_ro",
-        "role_type": "readonly_candidate",
-    }
+        source_summaries.append(source_summary)
     lane = config.run_dir / "db" / "readonly-db-boundary"
     _write(lane / "role.json", role)
-    _write(lane / "route_smoke.json", route_smoke)
+    _write(lane / "route_smoke.json", merged_route_smoke)
     _write(lane / "permission_probes.json", permission_probes)
     _write(
         lane / "summary.json",
@@ -1454,31 +1684,65 @@ def _write_readonly_db_lane(config: TwoNodeE2EEvidenceConfig, identities: dict[s
             "status": STATUS_PASS,
             "run_id": config.run_id,
             "database_url": "postgresql://db.example:5432/nhms",
-            "validation_provenance": {"mode": "live", "live_readonly_proof": True},
+            "validation_provenance": {
+                "mode": "live",
+                "live_readonly_proof": True,
+                "merged_source_evidence": True,
+                "source_bundle_count": len(source_summaries),
+                "source_artifacts": source_artifacts,
+            },
             "role": role,
             "display_identity": copy.deepcopy(identities),
-            "route_smoke": route_smoke,
-            "manual_action_probes": [
-                {
-                    "name": "display_retry_manual_action",
-                    "action": "retry",
-                    "status": STATUS_PASS,
-                    "http_status": 409,
-                    "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
-                    "write_dependency_constructed": False,
-                },
-                {
-                    "name": "display_cancel_manual_action",
-                    "action": "cancel",
-                    "status": STATUS_PASS,
-                    "http_status": 409,
-                    "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
-                    "write_dependency_constructed": False,
-                },
-            ],
+            "route_smoke": merged_route_smoke,
+            "manual_action_probes": _readonly_manual_actions(),
             "permission_probes": permission_probes,
         },
     )
+
+
+def _readonly_manual_actions() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "display_retry_manual_action",
+            "action": "retry",
+            "status": STATUS_PASS,
+            "http_status": 409,
+            "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+            "write_dependency_constructed": False,
+            "write_executed": False,
+        },
+        {
+            "name": "display_cancel_manual_action",
+            "action": "cancel",
+            "status": STATUS_PASS,
+            "http_status": 409,
+            "observed_error_code": "CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
+            "write_dependency_constructed": False,
+            "write_executed": False,
+        },
+    ]
+
+
+def _readonly_source_artifact(path: Path, source_run_id: str) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        "path": str(path.resolve(strict=False)),
+        "sha256": _sha256_file(path),
+        "run_id": _artifact_run_id(payload) or source_run_id,
+    }
+
+
+def _artifact_run_id(value: Any) -> str | None:
+    if isinstance(value, dict):
+        raw = value.get("run_id") or value.get("evidence_run_id") or value.get("bundle_run_id")
+        if raw is not None and str(raw).strip():
+            return str(raw)
+    if isinstance(value, list):
+        for item in value:
+            raw = _artifact_run_id(item)
+            if raw:
+                return raw
+    return None
 
 
 def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: str) -> dict[str, Any]:
@@ -1503,6 +1767,23 @@ def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: s
             "status": STATUS_PASS,
             "evidence_run_id": run_id,
             "findings": [],
+            "privileged": False,
+            "host_network": False,
+            "host_pid": False,
+            "host_ipc": False,
+            "cap_add_present": False,
+            "forbidden_hostconfig_hazard": False,
+            "forbidden_mount_hazard": False,
+            "forbidden_env_hazard": False,
+            "docker_socket_present": False,
+            "broad_host_bind_present": False,
+            "private_workspace_bind_present": False,
+            "workspace_mount_present": False,
+            "writable_published_artifact_mount": False,
+            "display_write_capability_present": False,
+            "published_artifacts_readonly": True,
+            "root_filesystem_readonly": True,
+            "cap_drop_all": True,
         },
     )
     _write(
@@ -1513,6 +1794,11 @@ def _docker_security_summary_payload(config: TwoNodeE2EEvidenceConfig, run_id: s
             "evidence_run_id": run_id,
             "image_tag": "nhms-app:test",
             "dockerfile": "infra/docker/Dockerfile.app",
+            "commands": {
+                "image_absence_probe": {"returncode": 0},
+                "display_startup_start": {"returncode": 0},
+                "display_startup_probe": {"returncode": 0},
+            },
         },
     )
     return {
@@ -1632,3 +1918,7 @@ def _run_id(prefix: str) -> str:
 
 def _codes(items: list[dict[str, Any]]) -> set[str]:
     return {str(item.get("code")) for item in items}
+
+
+def _deep_nested_json(depth: int) -> str:
+    return "{" + '"x":{' * depth + '"status":"PASS"' + "}" * depth + "}"
