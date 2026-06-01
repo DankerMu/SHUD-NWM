@@ -35,6 +35,9 @@ NON_AUTHORITATIVE_WRAPPER_KEYS = (
     "extra",
     "notes",
 )
+COMPACT_CYCLE_TIME = "2026052900"
+ISO_OFFSET_CYCLE_TIME = "2026-05-29T00:00:00+00:00"
+SHIFTED_CYCLE_TIME = "2026-05-29T01:00:00Z"
 
 
 def test_complete_synthetic_real_evidence_bundle_passes_with_redaction() -> None:
@@ -1290,6 +1293,34 @@ def test_readonly_db_route_response_identity_mismatch_blocks() -> None:
     assert "TWO_NODE_E2E_STRICT_IDENTITY_MISMATCH" in _codes(readonly_lane["findings"])
 
 
+@pytest.mark.parametrize(
+    ("display_cycle_time", "expected_status"),
+    [
+        (COMPACT_CYCLE_TIME, STATUS_PASS),
+        (ISO_OFFSET_CYCLE_TIME, STATUS_PASS),
+        (SHIFTED_CYCLE_TIME, STATUS_FAIL),
+    ],
+)
+def test_readonly_db_route_display_identity_cycle_time_uses_timestamp_semantics(
+    display_cycle_time: str,
+    expected_status: str,
+) -> None:
+    run_id = _run_id(f"db-route-display-cycle-{expected_status.lower()}")
+    config = _seed_pass_bundle(run_id)
+    lane = config.run_dir / "db" / "readonly-db-boundary"
+    db_summary = _read(lane / "summary.json")
+    db_summary["display_identity"]["GFS"]["cycle_time"] = display_cycle_time
+    _write(lane / "summary.json", db_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    readonly_lane = summary["lane_summaries"]["readonly_db"]
+    assert summary["status"] == expected_status
+    assert readonly_lane["status"] == expected_status
+    if expected_status == STATUS_FAIL:
+        assert "TWO_NODE_E2E_READONLY_DB_ROUTE_DISPLAY_IDENTITY_MISMATCH" in _codes(readonly_lane["findings"])
+
+
 def test_readonly_db_route_request_path_without_response_identity_blocks() -> None:
     run_id = _run_id("db-request-only-identity")
     config = _seed_pass_bundle(run_id)
@@ -1348,6 +1379,41 @@ def test_strict_identity_historical_latest_and_mock_evidence_do_not_pass(
 
     assert summary["status"] == expected_status
     assert summary["status"] != STATUS_PASS
+
+
+@pytest.mark.parametrize(
+    ("metadata_cycle_time", "expected_status"),
+    [
+        (COMPACT_CYCLE_TIME, STATUS_PASS),
+        (ISO_OFFSET_CYCLE_TIME, STATUS_PASS),
+        (SHIFTED_CYCLE_TIME, STATUS_FAIL),
+    ],
+)
+def test_final_evidence_strict_identity_cycle_time_uses_timestamp_semantics(
+    metadata_cycle_time: str,
+    expected_status: str,
+) -> None:
+    run_id = _run_id(f"strict-cycle-{expected_status.lower()}")
+    config = _seed_pass_bundle(run_id)
+    metadata = _read(config.run_dir / "run.json")
+    metadata["strict_identities"]["GFS"]["cycle_time"] = metadata_cycle_time
+    _write(config.run_dir / "run.json", metadata)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == expected_status
+    if expected_status == STATUS_PASS:
+        assert summary["lane_summaries"]["readonly_db"]["status"] == STATUS_PASS
+        assert summary["lane_summaries"]["api"]["status"] == STATUS_PASS
+        assert summary["lane_summaries"]["browser"]["status"] == STATUS_PASS
+        assert summary["lane_summaries"]["logs"]["status"] == STATUS_PASS
+        assert summary["lane_summaries"]["cross_plane"]["status"] == STATUS_PASS
+        assert summary["lane_summaries"]["manual_ops"]["status"] == STATUS_PASS
+    else:
+        mismatch_codes = set()
+        for lane_name in ("api", "browser", "logs", "cross_plane", "manual_ops"):
+            mismatch_codes.update(_codes(summary["lane_summaries"][lane_name]["findings"]))
+        assert "TWO_NODE_E2E_STRICT_IDENTITY_MISMATCH" in mismatch_codes
 
 
 @pytest.mark.parametrize(
@@ -5359,6 +5425,47 @@ def test_logs_lane_accepts_published_log_uri_or_typed_unavailable(mutation: str)
     assert summary["lane_summaries"]["logs"]["status"] == STATUS_PASS
 
 
+@pytest.mark.parametrize(
+    ("unavailable_cycle_time", "expected_status"),
+    [
+        (COMPACT_CYCLE_TIME, STATUS_PASS),
+        (ISO_OFFSET_CYCLE_TIME, STATUS_PASS),
+        (SHIFTED_CYCLE_TIME, STATUS_BLOCKED),
+    ],
+)
+def test_published_log_unavailable_binding_cycle_time_uses_timestamp_semantics(
+    unavailable_cycle_time: str,
+    expected_status: str,
+) -> None:
+    run_id = _run_id(f"logs-unavailable-cycle-{expected_status.lower()}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    for record in logs_summary["sources"].values():
+        check = record["checks"]["job_logs"]
+        identity = copy.deepcopy(check["identity"])
+        check.pop("log_uri", None)
+        check.pop("published_log_read", None)
+        unavailable = {
+            "status_code": 404,
+            "error_code": "JOB_LOG_NOT_PUBLISHED",
+            "method": "GET",
+            "path": f"/api/v1/jobs/{identity['job_id']}/logs",
+            **identity,
+        }
+        if identity["source"] == "GFS":
+            unavailable["cycle_time"] = unavailable_cycle_time
+        check["evidence"]["response"] = unavailable
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    assert summary["status"] == expected_status
+    assert logs_lane["status"] == expected_status
+    if expected_status == STATUS_BLOCKED:
+        assert "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_UNAVAILABLE_IDENTITY_MISMATCH" in _codes(logs_lane["blockers"])
+
+
 def test_browser_evidence_missing_ops_jobs_or_logs_blocks() -> None:
     run_id = _run_id("browser-missing-ops-log")
     config = _seed_pass_bundle(run_id)
@@ -5554,6 +5661,38 @@ def test_manual_ops_receipt_artifact_payload_must_match_provenance(
     assert summary["status"] == STATUS_BLOCKED
     assert manual_lane["status"] == STATUS_BLOCKED
     assert expected_code in _codes(manual_lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("artifact_cycle_time", "expected_status"),
+    [
+        (COMPACT_CYCLE_TIME, STATUS_PASS),
+        (ISO_OFFSET_CYCLE_TIME, STATUS_PASS),
+        (SHIFTED_CYCLE_TIME, STATUS_BLOCKED),
+    ],
+)
+def test_manual_ops_receipt_artifact_cycle_time_uses_timestamp_semantics(
+    artifact_cycle_time: str,
+    expected_status: str,
+) -> None:
+    run_id = _run_id(f"manual-artifact-cycle-{expected_status.lower()}")
+    config = _seed_pass_bundle(run_id)
+    manual_ops = _read(config.run_dir / "manual-ops" / "summary.json")
+    receipt = next(item for item in manual_ops["control_receipts"] if item.get("source") == "GFS")
+    artifact_path = Path(receipt["provenance"]["artifact_path"])
+    artifact = _read(artifact_path)
+    artifact["cycle_time"] = artifact_cycle_time
+    _write(artifact_path, artifact)
+    receipt["provenance"]["sha256"] = _sha256_file(artifact_path)
+    _write(config.run_dir / "manual-ops" / "summary.json", manual_ops)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    manual_lane = summary["lane_summaries"]["manual_ops"]
+    assert summary["status"] == expected_status
+    assert manual_lane["status"] == expected_status
+    if expected_status == STATUS_BLOCKED:
+        assert "TWO_NODE_E2E_MANUAL_OPS_RECEIPT_ARTIFACT_IDENTITY_MISMATCH" in _codes(manual_lane["blockers"])
 
 
 def test_manual_ops_response_evidence_valid_fixture_passes() -> None:

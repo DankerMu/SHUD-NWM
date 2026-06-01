@@ -2521,10 +2521,7 @@ def _identity_match_status(
         observed_value = _identity_value(observed, identity_field)
         if not expected_value or not observed_value:
             continue
-        if identity_field == "source":
-            matches = _source_name(expected_value) == _source_name(observed_value)
-        else:
-            matches = str(expected_value) == str(observed_value)
+        matches = _strict_identity_value_matches(identity_field, observed_value, expected_value)
         if not matches:
             findings.append(
                 _finding(
@@ -2550,6 +2547,25 @@ def _record_identity(record: Mapping[str, Any]) -> dict[str, Any]:
     if "source_id" in identity and "source" not in identity:
         identity["source"] = identity["source_id"]
     return identity
+
+
+def _identity_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _strict_identity_value_matches(field: str, observed: Any, expected: Any) -> bool:
+    observed_text = _identity_text(observed)
+    expected_text = _identity_text(expected)
+    if observed_text is None or expected_text is None:
+        return False
+    if field == "source":
+        return _source_name(observed_text) == _source_name(expected_text)
+    if field == "cycle_time":
+        return _cycle_time_identity_matches(observed_text, expected_text)
+    return observed_text == expected_text
 
 
 def _permission_operations(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -4653,7 +4669,7 @@ def _readonly_db_route_issues(
         for identity_field in required_fields:
             expected = _identity_value(expected_identity, identity_field)
             observed = _identity_value(identity, identity_field)
-            if expected and observed and str(expected) != str(observed):
+            if expected and observed and not _strict_identity_value_matches(identity_field, observed, expected):
                 findings.append(
                     _finding(
                         "TWO_NODE_E2E_READONLY_DB_ROUTE_DISPLAY_IDENTITY_MISMATCH",
@@ -7575,7 +7591,11 @@ def _published_log_unavailable_binding_blockers(
         for field in STRICT_LOG_IDENTITY_FIELDS:
             expected_value = _identity_value(expected_identity, field) or _identity_value(observed_identity, field)
             observed_value = _identity_value(record_identity, field)
-            if expected_value and observed_value and str(expected_value) != str(observed_value):
+            if expected_value and observed_value and not _strict_identity_value_matches(
+                field,
+                observed_value,
+                expected_value,
+            ):
                 blockers.append(
                     _blocker(
                         "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_UNAVAILABLE_IDENTITY_MISMATCH",
@@ -7593,7 +7613,7 @@ def _published_log_unavailable_binding_blockers(
             if value is None:
                 continue
             expected_value = _identity_value(expected_identity, field) or _identity_value(observed_identity, field)
-            if expected_value and str(value) != str(expected_value):
+            if expected_value and not _strict_identity_value_matches(field, value, expected_value):
                 blockers.append(
                     _blocker(
                         "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_UNAVAILABLE_IDENTITY_MISMATCH",
@@ -8707,9 +8727,9 @@ def _manual_ops_receipt_artifact_payload_blockers(
                 )
             continue
         if identity_field == "source":
-            if _source_name(receipt_value) == _source_name(payload_value):
+            if _strict_identity_value_matches(identity_field, payload_value, receipt_value):
                 continue
-        elif str(receipt_value) == str(payload_value):
+        elif _strict_identity_value_matches(identity_field, payload_value, receipt_value):
             continue
         blockers.append(
             _blocker(
