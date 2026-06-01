@@ -17,6 +17,19 @@
 - [ ] 1.5 Update `infra/compose.compute.yml`, env examples, and systemd/timer docs so scheduler-once and continuous/timer modes can run with explicit roots, locks, service role, source/model filters, and evidence paths.
 - [ ] 1.6 Verify with `uv run pytest -q tests/test_production_scheduler.py tests/test_production_slurm_validation.py` plus `uv run ruff check .` and a Docker `nhms-pipeline plan-production --plan` smoke without `--workspace-root`.
 
+### Issue #253 Evidence Floor
+
+- `nhms-pipeline plan-production --plan` with documented env roots and no `--workspace-root`: resolves `WORKSPACE_ROOT`, object-store, published, lock, evidence, and temp/runtime roots from env/config; evidence contains redacted resolved roots and no app-local `.nhms-workspace`.
+- Missing/invalid/unwritable workspace, object-store, published, lock, evidence, or temp root: returns a stable pre-mutation blocker or CLI/config error before download, Slurm, SHUD, hydro, met, parse, or publish mutation.
+- Explicit safe `--workspace-root` diagnostic path: remains supported and keeps lock/evidence under that workspace.
+- `infra/compose.compute.yml` `scheduler-once` and documented continuous/timer examples: run the business validation command without manual root flags and with explicit roots, locks, service role, source/model filters, interval/max-pass bounds, and evidence paths.
+- The live E2E requirements in `specs/compute-scheduler-operationalization/spec.md` remain downstream Task 7 evidence for #260; #253 only needs a Docker scheduler no-flag smoke that reports PASS or BLOCKED for the scheduler entrypoint.
+- Required commands:
+  - `uv run pytest -q tests/test_production_scheduler.py tests/test_production_slurm_validation.py`
+  - `uv run ruff check .`
+  - `openspec validate m23-qhh-22-production-automation --strict --no-interactive`
+  - Docker smoke: `docker exec nhms-compute-compute-api-1 uv run nhms-pipeline plan-production --plan`, or `BLOCKED` evidence if the live container is unavailable.
+
 ### Issue #252 Evidence Floor
 
 - `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py`: identity/status/URI contract fixtures pass without live runtime mutation.
