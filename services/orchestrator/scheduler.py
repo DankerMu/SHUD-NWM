@@ -28,6 +28,8 @@ from packages.common.slurm_env import (
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, PipelineResult, scenario_for_source
 from services.orchestrator.production_contract import (
+    PRODUCTION_EVIDENCE_CORRELATION_FIELDS,
+    PRODUCTION_IDENTITY_FIELDS,
     ProductionContractError,
     production_contract_matrix,
     production_identity_contract_evidence,
@@ -62,6 +64,21 @@ MAX_SLURM_ENV_VALUE_LENGTH = 1024
 DEFAULT_RETRY_LIMIT = 3
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
+STATE_M23_COMPARISON_FIELDS = (
+    "basin_id",
+    "basin_version_id",
+    "river_network_version_id",
+    "canonical_product_id",
+    "forcing_version_id",
+    "hydro_run_id",
+    "published_manifest_id",
+)
+STATE_CANDIDATE_SCOPED_PROOF_FIELDS = (
+    "run_id",
+    "forcing_version_id",
+    "hydro_run_id",
+    "published_manifest_id",
+)
 LOCK_OWNER = "production_scheduler"
 LOCK_SCHEMA_VERSION = 1
 SCHEDULER_EVIDENCE_SCHEMA_VERSION = "nhms.production_scheduler.pass_evidence.v1"
@@ -2058,6 +2075,22 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
     return filtered
 
 
+def _candidate_state_source_has_authoritative_ancestor(source: str, authoritative_sources: set[str]) -> bool:
+    current = source
+    while "." in current:
+        current = current.rsplit(".", 1)[0]
+        if current in authoritative_sources:
+            return True
+    return False
+
+
+def _candidate_state_source_has_authoritative_descendant(source: str, authoritative_sources: set[str]) -> bool:
+    if not source.startswith("pipeline_events["):
+        return False
+    prefix = f"{source}."
+    return any(authoritative.startswith(prefix) for authoritative in authoritative_sources)
+
+
 def _strip_top_level_candidate_state_decision_fields(state: dict[str, Any]) -> None:
     _strip_top_level_hydro_decision_fields(state)
     _strip_top_level_pipeline_decision_fields(state)
@@ -2312,18 +2345,41 @@ def _candidate_state_identity_validation(
     mismatches: list[dict[str, Any]] = []
     compared: dict[str, dict[str, Any]] = {}
     legacy_non_authoritative: list[str] = []
-    for source, payload in containers:
-        if _legacy_non_authoritative_state_row(expected, payload):
+    records = [
+        {
+            "source": source,
+            "payload": payload,
+            "authoritative": _state_row_has_authoritative_candidate_proof(
+                expected,
+                payload,
+                include_nested=(source != "candidate_state"),
+            ),
+        }
+        for source, payload in containers
+    ]
+    authoritative_sources = {str(record["source"]) for record in records if record["authoritative"] is True}
+    for record in records:
+        source = str(record["source"])
+        payload = record["payload"]
+        if not isinstance(payload, Mapping):
+            continue
+        authoritative = record["authoritative"] is True
+        if authoritative or _state_row_has_m23_comparison_evidence(payload):
+            validation_payload = _legacy_compatible_state_row(expected, payload)
+            try:
+                fields = validate_compatible_production_identity(expected, validation_payload)
+            except ProductionContractError as exc:
+                mismatches.append({"source": source, **exc.to_dict()})
+                continue
+            if fields:
+                compared[source] = fields
+        if (
+            bool(payload)
+            and not authoritative
+            and not _candidate_state_source_has_authoritative_ancestor(source, authoritative_sources)
+            and not _candidate_state_source_has_authoritative_descendant(source, authoritative_sources)
+        ):
             legacy_non_authoritative.append(source)
-            continue
-        validation_payload = _legacy_compatible_state_row(expected, payload)
-        try:
-            fields = validate_compatible_production_identity(expected, validation_payload)
-        except ProductionContractError as exc:
-            mismatches.append({"source": source, **exc.to_dict()})
-            continue
-        if fields:
-            compared[source] = fields
     return {
         "schema_version": "nhms.production.identity_validation.v1",
         "status": "mismatch" if mismatches else "compatible",
@@ -2382,20 +2438,61 @@ def _event_identity_containers(index: int, event: Mapping[str, Any]) -> list[tup
 
 
 def _legacy_non_authoritative_state_row(expected: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    return bool(row) and not _state_row_has_authoritative_candidate_proof(expected, row)
+
+
+def _state_row_has_authoritative_candidate_proof(
+    expected: Mapping[str, Any],
+    row: Mapping[str, Any],
+    *,
+    include_nested: bool = True,
+) -> bool:
     row_values = _legacy_identity_values(row)
     expected_values = _legacy_identity_values(expected)
-    if _m23_identity_fields_present(row_values):
+    if _state_values_have_authoritative_candidate_proof(row_values, expected_values):
+        return True
+    if not include_nested:
         return False
     for nested in _nested_state_identity_payloads(row):
         nested_values = _legacy_identity_values(nested)
-        if _m23_identity_fields_present(nested_values):
-            return False
-    if _legacy_values_prove_same_candidate(row_values, expected_values):
+        if _state_values_have_authoritative_candidate_proof(nested_values, expected_values):
+            return True
+    return False
+
+
+def _state_values_have_authoritative_candidate_proof(
+    row_values: Mapping[str, str],
+    expected_values: Mapping[str, str],
+) -> bool:
+    if not row_values:
         return False
-    for nested in _nested_state_identity_payloads(row):
-        if _legacy_values_prove_same_candidate(_legacy_identity_values(nested), expected_values):
+    if _state_values_have_complete_m23_identity(row_values, expected_values):
+        return True
+    if _state_values_have_candidate_scoped_m23_proof(row_values, expected_values):
+        return True
+    return _legacy_values_prove_same_candidate(row_values, expected_values)
+
+
+def _state_values_have_complete_m23_identity(
+    row_values: Mapping[str, str],
+    expected_values: Mapping[str, str],
+) -> bool:
+    for identity_field in PRODUCTION_IDENTITY_FIELDS:
+        value = row_values.get(identity_field)
+        expected = expected_values.get(identity_field)
+        if value in (None, "") or expected in (None, "") or value != expected:
             return False
-    return bool(row)
+    return True
+
+
+def _state_values_have_candidate_scoped_m23_proof(
+    row_values: Mapping[str, str],
+    expected_values: Mapping[str, str],
+) -> bool:
+    return any(
+        row_values.get(field) not in (None, "") and row_values.get(field) == expected_values.get(field)
+        for field in STATE_CANDIDATE_SCOPED_PROOF_FIELDS
+    )
 
 
 def _legacy_values_prove_same_candidate(
@@ -2427,18 +2524,22 @@ def _legacy_values_prove_same_candidate(
     return model_id in (None, "", expected_values.get("model_id"))
 
 
-def _m23_identity_fields_present(values: Mapping[str, str]) -> bool:
+def _state_row_has_m23_comparison_fields(values: Mapping[str, str]) -> bool:
     return any(
         field in values
         for field in (
-            "basin_id",
-            "basin_version_id",
-            "river_network_version_id",
-            "canonical_product_id",
-            "forcing_version_id",
-            "hydro_run_id",
-            "published_manifest_id",
+            *STATE_M23_COMPARISON_FIELDS,
+            *PRODUCTION_EVIDENCE_CORRELATION_FIELDS,
         )
+    )
+
+
+def _state_row_has_m23_comparison_evidence(row: Mapping[str, Any]) -> bool:
+    if _state_row_has_m23_comparison_fields(_legacy_identity_values(row)):
+        return True
+    return any(
+        _state_row_has_m23_comparison_fields(_legacy_identity_values(nested))
+        for nested in _nested_state_identity_payloads(row)
     )
 
 
@@ -2504,10 +2605,7 @@ def _bounded_task_result_sample(
 def _legacy_compatible_state_row(expected: Mapping[str, Any], row: Mapping[str, Any]) -> Mapping[str, Any]:
     row_values = _legacy_identity_values(row)
     expected_values = _legacy_identity_values(expected)
-    if _m23_identity_fields_present(row_values) or not _stage_cycle_run_matches_candidate(
-        row_values.get("run_id"),
-        expected_values,
-    ):
+    if not _stage_cycle_run_matches_candidate(row_values.get("run_id"), expected_values):
         return row
     payload = dict(row)
     payload.pop("run_id", None)
