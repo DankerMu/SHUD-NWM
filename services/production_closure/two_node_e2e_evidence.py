@@ -184,7 +184,9 @@ PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS = frozenset(
     }
 )
 LOG_URI_KEYS = ("log_uri", "published_log_uri")
-LOG_URI_IDENTITY_FIELDS = ("source", "run_id", "job_id")
+LOG_URI_IDENTITY_FIELDS = ("source", "cycle_time", "run_id", "job_id")
+LOG_URI_REQUIRED_IDENTITY_FIELDS = ("source", "run_id", "job_id")
+LOG_URI_STREAM_SUFFIXES = (".out", ".err")
 LOG_UNAVAILABLE_ERROR_CODES = frozenset({"JOB_LOG_NOT_PUBLISHED", "JOB_LOG_NOT_FOUND"})
 PUBLISHED_LOG_ROOT_KEYS = frozenset(
     {
@@ -5332,6 +5334,11 @@ def _source_scoped_producer_evidence_scan(
             excluded_root_keys=(*SOURCE_SCOPED_PRODUCER_EVIDENCE_KEYS, "checks", "check_results"),
         )
     )
+    saw_structured = saw_structured or _producer_full_surface_non_authoritative_structured_record_present(
+        source_record,
+        target_check=check,
+        excluded_root_keys=(*SOURCE_SCOPED_PRODUCER_EVIDENCE_KEYS, "checks", "check_results"),
+    )
     source_record_text_blockers = _producer_full_scope_text_identity_blockers(
         source_record,
         lane_name=lane_name,
@@ -5467,6 +5474,11 @@ def _check_producer_identity_blockers(
             required_identity_fields=_producer_required_identity_fields(check_name),
             excluded_root_keys=PRODUCER_EVIDENCE_KEYS,
         )
+    )
+    saw_structured = saw_structured or _producer_full_surface_non_authoritative_structured_record_present(
+        check,
+        target_check=check_name,
+        excluded_root_keys=PRODUCER_EVIDENCE_KEYS,
     )
     check_text_blockers = _producer_full_scope_text_identity_blockers(
         check,
@@ -5778,6 +5790,25 @@ def _producer_full_surface_non_authoritative_structured_identity_conflict_blocke
     return blockers
 
 
+def _producer_full_surface_non_authoritative_structured_record_present(
+    value: Mapping[str, Any],
+    *,
+    target_check: str,
+    excluded_root_keys: Sequence[str],
+) -> bool:
+    for _key, nested in _producer_full_surface_non_authoritative_structured_values(
+        value,
+        excluded_root_keys=frozenset(excluded_root_keys),
+    ):
+        if _producer_value_target_structured_record_present(
+            nested,
+            target_check=target_check,
+            default_to_target_context=False,
+        ):
+            return True
+    return False
+
+
 def _producer_full_surface_non_authoritative_structured_values(
     value: Any,
     *,
@@ -5801,7 +5832,7 @@ def _producer_full_surface_non_authoritative_structured_values(
         if depth == 1 and key in excluded_root_keys:
             continue
         if (
-            key in PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS
+            depth >= 1
             and (isinstance(current, Mapping) or isinstance(current, list))
             and _producer_value_contains_explicit_identity(current)
         ):
@@ -6035,7 +6066,34 @@ def _producer_identity_value_matches(field: str, observed: Any, expected: str) -
         return _source_name(observed_text) == _source_name(expected_text)
     if field == "check":
         return _producer_check_value_matches(observed_text, expected_text)
+    if field == "cycle_time":
+        return _cycle_time_identity_matches(observed_text, expected_text)
     return observed_text == expected_text
+
+
+def _cycle_time_identity_matches(observed: str, expected: str) -> bool:
+    if observed == expected:
+        return True
+    observed_normalized = _normalized_cycle_time_identity(observed)
+    expected_normalized = _normalized_cycle_time_identity(expected)
+    return bool(observed_normalized and expected_normalized and observed_normalized == expected_normalized)
+
+
+def _normalized_cycle_time_identity(value: str) -> str | None:
+    candidate = value.strip()
+    try:
+        if len(candidate) == 10 and candidate.isdigit():
+            parsed = datetime.strptime(candidate, "%Y%m%d%H").replace(tzinfo=UTC)
+        else:
+            iso_candidate = f"{candidate[:-1]}+00:00" if candidate.endswith("Z") else candidate
+            parsed = datetime.fromisoformat(iso_candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            else:
+                parsed = parsed.astimezone(UTC)
+    except ValueError:
+        return None
+    return parsed.strftime("%Y%m%d%H")
 
 
 def _producer_check_value_matches(observed: str, expected: str) -> bool:
@@ -6419,7 +6477,7 @@ def _producer_log_uri_text_applies_to_target_check(
 ) -> bool:
     if _producer_check_token(target_check) not in PRODUCER_JOB_ID_REQUIRED_CHECKS:
         return False
-    return all(parsed_values.get(field) for field in LOG_URI_IDENTITY_FIELDS)
+    return all(parsed_values.get(field) for field in LOG_URI_REQUIRED_IDENTITY_FIELDS)
 
 
 def _producer_text_mentions_check(value: str, expected: str) -> bool:
@@ -6522,27 +6580,50 @@ def _identity_checks_from_path(path: str) -> list[str]:
 
 def _append_log_uri_identity_values(values: dict[str, list[str]], text: str) -> None:
     for uri in _candidate_log_uri_texts(text):
-        try:
-            parsed = urlsplit(uri)
-        except ValueError:
-            continue
-        if parsed.scheme not in {"published", "file", "s3"}:
-            continue
-        path_parts = [unquote(part) for part in PurePosixPath(parsed.path).parts if part not in {"", "/"}]
-        if parsed.scheme == "published" and parsed.netloc:
-            path_parts.insert(0, unquote(parsed.netloc))
-        try:
-            logs_index = next(index for index, part in enumerate(path_parts) if part.lower() == "logs")
-        except StopIteration:
-            continue
-        if len(path_parts) <= logs_index + 3:
-            continue
-        source, run_id, job_file = path_parts[logs_index + 1 : logs_index + 4]
-        job_id = job_file.removesuffix(".out")
-        values["source"].append(source)
-        values["run_id"].append(run_id)
-        if job_id:
-            values["job_id"].append(job_id)
+        for identity_field, observed_values in _parse_log_uri_identity(uri).items():
+            values[identity_field].extend(observed_values)
+
+
+def _parse_log_uri_identity(uri: str) -> dict[str, list[str]]:
+    try:
+        parsed = urlsplit(uri)
+    except ValueError:
+        return {}
+    if parsed.scheme not in {"published", "file", "s3"}:
+        return {}
+    path_parts = [unquote(part) for part in PurePosixPath(parsed.path).parts if part not in {"", "/"}]
+    if parsed.scheme == "published" and parsed.netloc:
+        path_parts.insert(0, unquote(parsed.netloc))
+    try:
+        logs_index = next(index for index, part in enumerate(path_parts) if part.lower() == "logs")
+    except StopIteration:
+        return {}
+    log_parts = path_parts[logs_index + 1 :]
+    if len(log_parts) not in {3, 4}:
+        return {}
+    source = log_parts[0]
+    job_file = log_parts[3] if len(log_parts) == 4 else log_parts[2]
+    job_id = _log_job_id_from_filename(job_file)
+    if not source or not job_id:
+        return {}
+    if len(log_parts) == 4:
+        cycle_time, run_id = log_parts[1], log_parts[2]
+        return {
+            "source": [source],
+            "cycle_time": [cycle_time],
+            "run_id": [run_id],
+            "job_id": [job_id],
+        }
+    run_id = log_parts[1]
+    return {"source": [source], "run_id": [run_id], "job_id": [job_id]}
+
+
+def _log_job_id_from_filename(value: str) -> str | None:
+    for suffix in LOG_URI_STREAM_SUFFIXES:
+        if value.endswith(suffix):
+            job_id = value[: -len(suffix)]
+            return job_id or None
+    return None
 
 
 def _candidate_log_uri_texts(text: str) -> list[str]:
@@ -6664,7 +6745,7 @@ def _text_contains_log_uri_identity(text: str) -> bool:
         if parsed.scheme not in {"published", "file", "s3"}:
             continue
         uri_identity = _log_uri_identity_values(uri)
-        if all(uri_identity.get(field) for field in LOG_URI_IDENTITY_FIELDS):
+        if all(uri_identity.get(field) for field in LOG_URI_REQUIRED_IDENTITY_FIELDS):
             return True
     return False
 
@@ -7037,7 +7118,7 @@ def _published_log_uri_identity_blockers(
     blockers: list[dict[str, Any]] = []
     for evidence_key, uri in log_uri_entries:
         uri_identity = _log_uri_identity_values(uri)
-        for identity_field in LOG_URI_IDENTITY_FIELDS:
+        for identity_field in LOG_URI_REQUIRED_IDENTITY_FIELDS:
             expected = _identity_value(observed_identity, identity_field)
             if not expected:
                 continue
@@ -7056,6 +7137,24 @@ def _published_log_uri_identity_blockers(
                 )
                 continue
             for observed in observed_values:
+                if _producer_identity_value_matches(identity_field, observed, expected):
+                    continue
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH",
+                        "logs published log URI identity conflicts with the required check identity.",
+                        field=identity_field,
+                        observed=observed,
+                        expected=expected,
+                        evidence_key=evidence_key,
+                        log_uri=_safe_log_uri_summary(uri),
+                    )
+                )
+        for identity_field in ("cycle_time",):
+            expected = _identity_value(observed_identity, identity_field)
+            if not expected:
+                continue
+            for observed in uri_identity.get(identity_field, []):
                 if _producer_identity_value_matches(identity_field, observed, expected):
                     continue
                 blockers.append(

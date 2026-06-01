@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
@@ -10,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 from scripts import validate_two_node_docker_runtime as docker_runtime
+from services.artifacts.reader import published_log_uri
 from services.production_closure.readonly_db_validation import merge_readonly_db_source_evidence
 from services.production_closure.two_node_e2e_evidence import (
     READONLY_DB_LIVE_SCHEMA,
@@ -3065,6 +3067,97 @@ def test_logs_top_level_non_authoritative_structured_job_id_conflict_blocks(
     )
 
 
+@pytest.mark.parametrize("surface", ["check", "source_record"])
+def test_api_arbitrary_container_structured_conflict_blocks_with_complete_proof(surface: str) -> None:
+    run_id = _run_id(f"api-{surface}-arbitrary-transport-context-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    conflict = _structured_producer_metadata_record(identity, "latest_product", source="IFS")
+    if surface == "check":
+        latest["proofs"] = [_structured_producer_metadata_record(identity, "latest_product")]
+        latest["transport_context"] = conflict
+    else:
+        latest.pop("evidence", None)
+        source_record["proofs"] = {
+            "latest_product": _structured_producer_metadata_record(identity, "latest_product"),
+        }
+        source_record["transport_context"] = conflict
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == "transport_context"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("surface", ["check", "source_record"])
+def test_api_arbitrary_container_structured_other_check_does_not_block_target(surface: str) -> None:
+    run_id = _run_id(f"api-{surface}-arbitrary-transport-context-other-check-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    other_check_record = _structured_producer_metadata_record(
+        identity,
+        "hydro_met",
+        source="IFS",
+        run_id=f"{identity['run_id']}-sibling",
+    )
+    if surface == "check":
+        latest["proofs"] = [_structured_producer_metadata_record(identity, "latest_product")]
+        latest["transport_context"] = other_check_record
+    else:
+        latest.pop("evidence", None)
+        source_record["proofs"] = {
+            "latest_product": _structured_producer_metadata_record(identity, "latest_product"),
+        }
+        source_record["transport_context"] = other_check_record
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("surface", ["check", "source_record"])
+def test_api_arbitrary_container_structured_record_alone_is_unscoped(surface: str) -> None:
+    run_id = _run_id(f"api-{surface}-arbitrary-transport-context-alone-unscoped")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    if surface == "check":
+        latest["transport_context"] = _structured_producer_metadata_record(identity, "latest_product")
+    else:
+        source_record["transport_context"] = _structured_producer_metadata_record(identity, "latest_product")
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(api_lane["blockers"])
+
+
 @pytest.mark.parametrize(
     ("lane_dir", "lane_name", "check_name", "conflict_root", "expected_code"),
     [
@@ -5026,6 +5119,141 @@ def test_logs_job_logs_allowed_uri_fields_must_match_check_identity(field: str, 
 
 
 @pytest.mark.parametrize(
+    ("uri_scheme", "stream"),
+    [
+        ("published", "out"),
+        ("published", "err"),
+        ("file", "out"),
+        ("s3", "out"),
+    ],
+)
+def test_logs_lane_accepts_canonical_log_uri_identity(uri_scheme: str, stream: str) -> None:
+    run_id = _run_id(f"logs-canonical-{uri_scheme}-{stream}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    for source, record in logs_summary["sources"].items():
+        check = record["checks"]["job_logs"]
+        identity = check["identity"]
+        uri = _log_uri_for_scheme(
+            uri_scheme,
+            source=identity["source"],
+            cycle_time=identity["cycle_time"],
+            run_id=identity["run_id"],
+            job_id=identity["job_id"],
+            stream=stream,
+        )
+        if uri_scheme == "file":
+            check["published_artifact_root"] = "/mnt/nhms-published"
+        elif uri_scheme == "s3":
+            check["published_artifact_s3_bucket"] = "nhms-prod"
+            check["published_artifact_s3_prefix"] = "published"
+        check["log_uri"] = uri
+        check["published_log_read"]["log_uri"] = uri
+        check["evidence"]["response"]["body"]["log_uri"] = uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["logs"]["status"] == STATUS_PASS
+
+
+def test_logs_lane_accepts_real_published_log_uri_helper_contract() -> None:
+    run_id = _run_id("logs-canonical-producer-helper")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    identity = check["identity"]
+    uri = published_log_uri(
+        source=identity["source"],
+        cycle_time=datetime.fromisoformat(identity["cycle_time"].replace("Z", "+00:00")),
+        run_id=identity["run_id"],
+        job_id=identity["job_id"],
+    )
+    check["log_uri"] = uri
+    check["published_log_read"]["log_uri"] = uri
+    check["evidence"]["response"]["body"]["log_uri"] = uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["logs"]["status"] == STATUS_PASS
+
+
+@pytest.mark.parametrize("field", ["source", "cycle_time", "run_id", "job_id"])
+def test_logs_lane_canonical_log_uri_identity_mismatch_blocks(field: str) -> None:
+    run_id = _run_id(f"logs-canonical-{field}-mismatch")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    identity = check["identity"]
+    observed = "IFS" if field == "source" else f"{identity[field]}-sibling"
+    uri_identity = {
+        "source": identity["source"],
+        "cycle_time": identity["cycle_time"],
+        "run_id": identity["run_id"],
+        "job_id": identity["job_id"],
+        field: observed,
+    }
+    uri = _log_uri_for_scheme("published", **uri_identity)
+    check["log_uri"] = uri
+    check["published_log_read"]["log_uri"] = uri
+    check["evidence"]["response"]["body"]["log_uri"] = uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == field
+        and blocker.get("observed") == (observed.lower() if field == "source" else observed)
+        and blocker.get("evidence_key") == "log_uri"
+        for blocker in blockers
+    )
+
+
+def test_logs_lane_canonical_log_uri_with_extra_segment_reports_missing_identity() -> None:
+    run_id = _run_id("logs-canonical-extra-segment")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    identity = check["identity"]
+    uri = (
+        _log_uri_for_scheme(
+            "published",
+            source=identity["source"],
+            cycle_time=identity["cycle_time"],
+            run_id=identity["run_id"],
+            job_id=identity["job_id"],
+        )
+        + "/tail"
+    )
+    check["log_uri"] = uri
+    check["published_log_read"]["log_uri"] = uri
+    check["evidence"]["response"]["body"]["log_uri"] = uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") in {"source", "run_id", "job_id"}
+        and blocker.get("observed") is None
+        and blocker.get("evidence_key") == "log_uri"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize(
     ("log_uri", "expected_code"),
     [
         ("/scratch/private/.nhms-runs/old/job.out", "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI"),
@@ -6101,14 +6329,23 @@ def _producer_identity_text(
     return " ".join(parts)
 
 
-def _log_uri_for_scheme(uri_scheme: str, *, source: str, run_id: str, job_id: str) -> str:
+def _log_uri_for_scheme(
+    uri_scheme: str,
+    *,
+    source: str,
+    run_id: str,
+    job_id: str,
+    cycle_time: str | None = None,
+    stream: str = "out",
+) -> str:
     source_slug = source.lower()
+    cycle_segment = f"{cycle_time}/" if cycle_time else ""
     if uri_scheme == "published":
-        return f"published://logs/{source_slug}/{run_id}/{job_id}.out"
+        return f"published://logs/{source_slug}/{cycle_segment}{run_id}/{job_id}.{stream}"
     if uri_scheme == "file":
-        return f"file:///mnt/nhms-published/logs/{source_slug}/{run_id}/{job_id}.out"
+        return f"file:///mnt/nhms-published/logs/{source_slug}/{cycle_segment}{run_id}/{job_id}.{stream}"
     if uri_scheme == "s3":
-        return f"s3://nhms-prod/published/logs/{source_slug}/{run_id}/{job_id}.out"
+        return f"s3://nhms-prod/published/logs/{source_slug}/{cycle_segment}{run_id}/{job_id}.{stream}"
     raise AssertionError(f"Unsupported log URI scheme: {uri_scheme}")
 
 
