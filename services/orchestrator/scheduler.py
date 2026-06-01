@@ -57,6 +57,7 @@ MAX_EVIDENCE_BYTES = 5_000_000
 MAX_LOCK_PAYLOAD_BYTES = 16_384
 MAX_CONTINUOUS_JSON_PASSES = 100
 MAX_MODEL_RUN_STAGE_TASK_ROWS = 16
+CANDIDATE_STATE_TASK_RESULT_LIMIT = MAX_MODEL_RUN_STAGE_TASK_ROWS
 MAX_SLURM_ENV_VALUE_LENGTH = 1024
 DEFAULT_RETRY_LIMIT = 3
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
@@ -1814,7 +1815,7 @@ def _candidate_state_decision(
 ) -> CandidateStateDecision | None:
     if raw_state is None:
         return None
-    state = dict(raw_state)
+    state = _bounded_candidate_state(raw_state)
     evidence = _candidate_state_evidence(candidate, state)
     if _candidate_state_has_identity_mismatch(evidence):
         return CandidateStateDecision(
@@ -1981,7 +1982,7 @@ def _call_candidate_state_provider(
     payload.setdefault("retry_limit", retry_limit)
     payload.setdefault("job_limit", job_limit)
     payload.setdefault("event_limit", event_limit)
-    return payload
+    return _bounded_candidate_state(payload)
 
 
 def _candidate_state_is_candidate_scoped_retry(decision: CandidateStateDecision | None) -> bool:
@@ -2023,14 +2024,21 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
     validation = evidence.get("production_identity_validation")
     if not isinstance(validation, Mapping):
         return dict(state)
-    legacy_sources = {
-        str(source)
-        for source in validation.get("legacy_non_authoritative", [])
-        if str(source).startswith(("pipeline_jobs[", "pipeline_events["))
-    }
+    legacy_sources = {str(source) for source in validation.get("legacy_non_authoritative", [])}
     if not legacy_sources:
         return dict(state)
     filtered = dict(state)
+    if "candidate_state" in legacy_sources:
+        _strip_top_level_candidate_state_decision_fields(filtered)
+    for key in ("hydro_run", "forcing_version", "forecast_cycle", "published_manifest", "canonical_product"):
+        if key in legacy_sources:
+            filtered.pop(key, None)
+    if "hydro_run" in legacy_sources:
+        _strip_top_level_hydro_decision_fields(filtered)
+    for key in ("pipeline_job", "job"):
+        if key in legacy_sources:
+            filtered.pop(key, None)
+            _strip_top_level_pipeline_decision_fields(filtered)
     jobs = _state_jobs(state)
     if jobs:
         filtered["pipeline_jobs"] = [
@@ -2044,11 +2052,82 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
         ]
         filtered.pop("events", None)
     if filtered.get("pipeline_jobs") == []:
-        filtered.pop("pipeline_status", None)
-        filtered.pop("job_status", None)
-        if state.get("status") in ACTIVE_PIPELINE_STATUSES | TERMINAL_PIPELINE_STATUSES | FAILED_PIPELINE_STATUSES:
-            filtered.pop("status", None)
+        _strip_top_level_pipeline_decision_fields(filtered)
+    if filtered.get("pipeline_events") == [] and not filtered.get("pipeline_jobs"):
+        _strip_top_level_pipeline_decision_fields(filtered)
     return filtered
+
+
+def _strip_top_level_candidate_state_decision_fields(state: dict[str, Any]) -> None:
+    _strip_top_level_hydro_decision_fields(state)
+    _strip_top_level_pipeline_decision_fields(state)
+    for key in (
+        "retry_limit",
+        "max_retries",
+        "cycle_status",
+        "forecast_cycle_status",
+        "forcing_status",
+        "forcing_version_status",
+    ):
+        state.pop(key, None)
+
+
+def _strip_top_level_hydro_decision_fields(state: dict[str, Any]) -> None:
+    for key in (
+        "hydro_status",
+        "hydro_run_status",
+        "output_uri",
+        "durable_output_uri",
+        "hydro_error_code",
+        "hydro_error_message",
+        "durable_shud_output_exists",
+        "force_native_shud_rerun",
+        "force_rerun",
+        "force_shud_rerun",
+    ):
+        state.pop(key, None)
+
+
+def _strip_top_level_pipeline_decision_fields(state: dict[str, Any]) -> None:
+    for key in (
+        "active_slurm_jobs",
+        "pipeline_status",
+        "job_status",
+        "status",
+        "failed_stage",
+        "stage",
+        "restart_stage",
+        "error_code",
+        "reason_code",
+        "failure_reason",
+        "last_error",
+        "previous_error",
+        "error_message",
+        "message",
+        "retry_attempt",
+        "attempt",
+        "retry_count",
+        "manual_retry",
+        "manual_retry_marker",
+        "manual_retry_requested_by",
+        "manual_retry_request_id",
+        "manual_retry_reason",
+        "manual_retry_created_at",
+        "manual_retry_requested_at",
+        "prior_failure_reason",
+        "retryable",
+        "permanent",
+        "failure_classifier",
+        "classifier",
+        "array_task_id",
+        "task_id",
+        "original_task_id",
+        "slurm_job_id",
+        "successful_sibling_outputs_reused",
+        "shared_cycle_aggregate",
+        "shared_cycle_ambiguous_failure",
+    ):
+        state.pop(key, None)
 
 
 def _pipeline_terminal_success_is_candidate_scoped(
@@ -2123,12 +2202,7 @@ def _has_candidate_task_failure(state: Mapping[str, Any]) -> bool:
         details = event.get("details")
         if not isinstance(details, Mapping):
             continue
-        task_results = details.get("task_results")
-        if not isinstance(task_results, Sequence) or isinstance(task_results, str | bytes | bytearray):
-            continue
-        for task in task_results:
-            if not isinstance(task, Mapping):
-                continue
+        for task in _bounded_task_result_rows(details):
             if str(task.get("status") or task.get("state") or "") not in {"", "succeeded"}:
                 return True
     return False
@@ -2155,6 +2229,7 @@ def _bounded_active_slurm_jobs(
 
 
 def _candidate_state_evidence(candidate: SchedulerCandidate, state: Mapping[str, Any]) -> dict[str, Any]:
+    state = _bounded_candidate_state(state)
     jobs = [_job_state_evidence(job) for job in _state_jobs(state)]
     events = [_evidence_safe(event) for event in _state_events(state)]
     identity_validation = _candidate_state_identity_validation(candidate, state)
@@ -2219,6 +2294,7 @@ def _candidate_state_identity_validation(
     candidate: SchedulerCandidate,
     state: Mapping[str, Any],
 ) -> dict[str, Any]:
+    state = _bounded_candidate_state(state)
     expected = _candidate_production_identity(candidate)
     containers: list[tuple[str, Mapping[str, Any]]] = [("candidate_state", state)]
     for key in ("hydro_run", "forcing_version", "forecast_cycle", "published_manifest", "canonical_product"):
@@ -2258,6 +2334,30 @@ def _candidate_state_identity_validation(
     }
 
 
+def _bounded_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    bounded = dict(state)
+    events = _state_events(bounded)
+    if events:
+        bounded["pipeline_events"] = [_bounded_candidate_event(event) for event in events]
+        bounded.pop("events", None)
+    return bounded
+
+
+def _bounded_candidate_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(event)
+    details = payload.get("details")
+    if not isinstance(details, Mapping):
+        return payload
+    details_payload = dict(details)
+    task_sample = _bounded_task_result_sample(details_payload)
+    if task_sample is not None:
+        task_rows, task_metadata = task_sample
+        details_payload["task_results"] = task_rows
+        details_payload.update(task_metadata)
+    payload["details"] = details_payload
+    return payload
+
+
 def _event_identity_containers(index: int, event: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
     containers: list[tuple[str, Mapping[str, Any]]] = [(f"pipeline_events[{index}]", event)]
     details = event.get("details")
@@ -2267,16 +2367,13 @@ def _event_identity_containers(index: int, event: Mapping[str, Any]) -> list[tup
     if isinstance(identity, Mapping):
         containers.append((f"pipeline_events[{index}].details.identity", identity))
     containers.append((f"pipeline_events[{index}].details", details))
-    task_results = details.get("task_results")
-    if isinstance(task_results, Sequence) and not isinstance(task_results, str | bytes | bytearray):
-        for task_index, task in enumerate(task_results):
-            if isinstance(task, Mapping):
-                containers.append((f"pipeline_events[{index}].details.task_results[{task_index}]", task))
-                task_identity = task.get("identity")
-                if isinstance(task_identity, Mapping):
-                    containers.append(
-                        (f"pipeline_events[{index}].details.task_results[{task_index}].identity", task_identity)
-                    )
+    for task_index, task in enumerate(_bounded_task_result_rows(details)):
+        containers.append((f"pipeline_events[{index}].details.task_results[{task_index}]", task))
+        task_identity = task.get("identity")
+        if isinstance(task_identity, Mapping):
+            containers.append(
+                (f"pipeline_events[{index}].details.task_results[{task_index}].identity", task_identity)
+            )
     for key in ("task_identity", "failed_task", "failed_task_identity"):
         value = details.get(key)
         if isinstance(value, Mapping):
@@ -2341,8 +2438,6 @@ def _m23_identity_fields_present(values: Mapping[str, str]) -> bool:
             "forcing_version_id",
             "hydro_run_id",
             "published_manifest_id",
-            "pipeline_job_id",
-            "pipeline_event_id",
         )
     )
 
@@ -2360,16 +2455,50 @@ def _nested_state_identity_payloads(row: Mapping[str, Any]) -> list[Mapping[str,
             value = details.get(key)
             if isinstance(value, Mapping):
                 payloads.append(value)
-        task_results = details.get("task_results")
-        if isinstance(task_results, Sequence) and not isinstance(task_results, str | bytes | bytearray):
-            for task in task_results:
-                if not isinstance(task, Mapping):
-                    continue
-                payloads.append(task)
-                identity = task.get("identity")
-                if isinstance(identity, Mapping):
-                    payloads.append(identity)
+        for task in _bounded_task_result_rows(details):
+            payloads.append(task)
+            identity = task.get("identity")
+            if isinstance(identity, Mapping):
+                payloads.append(identity)
     return payloads
+
+
+def _bounded_task_result_rows(details: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    task_sample = _bounded_task_result_sample(details)
+    if task_sample is None:
+        return []
+    return task_sample[0]
+
+
+def _bounded_task_result_sample(
+    details: Mapping[str, Any],
+) -> tuple[list[Mapping[str, Any]], dict[str, Any]] | None:
+    task_results = details.get("task_results")
+    if not isinstance(task_results, Sequence) or isinstance(task_results, str | bytes | bytearray):
+        return None
+    task_rows: list[Mapping[str, Any]] = []
+    observed_count = 0
+    overflow = False
+    for index, task in enumerate(task_results):
+        observed_count = index + 1
+        if index >= CANDIDATE_STATE_TASK_RESULT_LIMIT:
+            overflow = True
+            break
+        if isinstance(task, Mapping):
+            task_rows.append(dict(task))
+    reported_total = _coerce_optional_nonnegative_int(details.get("task_results_total"))
+    total = max(reported_total, observed_count) if reported_total is not None else observed_count
+    included = len(task_rows)
+    overflow = overflow or total > included
+    metadata: dict[str, Any] = {
+        "task_results_total": total,
+        "task_results_included": included,
+        "task_results_limit": CANDIDATE_STATE_TASK_RESULT_LIMIT,
+        "task_results_overflow": overflow,
+    }
+    if overflow:
+        metadata["task_results_omitted"] = max(total - included, 0)
+    return task_rows, metadata
 
 
 def _legacy_compatible_state_row(expected: Mapping[str, Any], row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -3128,21 +3257,17 @@ def _state_task_identity(state: Mapping[str, Any]) -> dict[str, Any]:
                         identity[nested_key] = nested_value
                 if identity:
                     return _evidence_safe(identity)
-        task_results = details.get("task_results")
-        if isinstance(task_results, Sequence) and not isinstance(task_results, str | bytes | bytearray):
-            for task in task_results:
-                if not isinstance(task, Mapping):
-                    continue
-                status = str(task.get("status") or task.get("state") or "")
-                if status in {"succeeded", ""}:
-                    continue
-                identity["array_task_id"] = task.get("array_task_id", task.get("task_id"))
-                identity["task_id"] = task.get("task_id", task.get("array_task_id"))
-                if details.get("stage") not in (None, ""):
-                    identity["stage"] = details.get("stage")
-                if task.get("slurm_job_id") not in (None, ""):
-                    identity["slurm_job_id"] = task.get("slurm_job_id")
-                return _evidence_safe(identity)
+        for task in _bounded_task_result_rows(details):
+            status = str(task.get("status") or task.get("state") or "")
+            if status in {"succeeded", ""}:
+                continue
+            identity["array_task_id"] = task.get("array_task_id", task.get("task_id"))
+            identity["task_id"] = task.get("task_id", task.get("array_task_id"))
+            if details.get("stage") not in (None, ""):
+                identity["stage"] = details.get("stage")
+            if task.get("slurm_job_id") not in (None, ""):
+                identity["slurm_job_id"] = task.get("slurm_job_id")
+            return _evidence_safe(identity)
     for job in reversed(_state_jobs(state)):
         for key in ("array_task_id", "stage", "job_id", "slurm_job_id"):
             value = job.get(key)
@@ -3184,6 +3309,16 @@ def _coerce_int(value: Any, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_optional_nonnegative_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return number
 
 
 def _restart_compatible_candidate_cohorts(

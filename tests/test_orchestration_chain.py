@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -3991,6 +3992,160 @@ def test_psycopg_candidate_state_later_retry_success_supersedes_older_failed_tas
     assert state["original_task_id"] is None
 
 
+def test_psycopg_candidate_state_bounds_nested_task_results_before_state_decision() -> None:
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            del statement, parameters
+            return None
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            del parameters
+            if "FROM ops.pipeline_event" in statement:
+                task_results = [
+                    {
+                        "task_id": index,
+                        "original_task_id": index,
+                        "model_id": "model_a",
+                        "status": "succeeded",
+                    }
+                    for index in range(17)
+                ]
+                task_results[-1] = {
+                    **task_results[-1],
+                    "status": "failed",
+                    "error_code": "NODE_FAILURE",
+                }
+                return [
+                    {
+                        "event_id": 1,
+                        "entity_type": "pipeline_job",
+                        "entity_id": "job_cycle_gfs_2026050100_forecast",
+                        "event_type": "status_change",
+                        "status_to": "partially_failed",
+                        "created_at": "2026-05-01T00:05:00Z",
+                        "details": {
+                            "stage": "forecast",
+                            "task_results": task_results,
+                        },
+                    }
+                ]
+            if "FROM ops.pipeline_job" in statement:
+                return [
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_forecast",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "partially_failed",
+                        "stage": "forecast",
+                        "error_code": "NODE_FAILURE",
+                    }
+                ]
+            return []
+
+    repository = CapturingRepository("postgresql://example")
+
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_a",
+        run_id="fcst_gfs_2026050100_model_a",
+        forcing_version_id="forc_gfs_2026050100_model_a",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_a:forecast_gfs_deterministic",
+        retry_limit=3,
+        job_limit=10,
+        event_limit=10,
+    )
+
+    assert state is not None
+    details = state["pipeline_events"][0]["details"]
+    assert state["pipeline_status"] is None
+    assert state["array_task_id"] is None
+    assert len(details["task_results"]) == 16
+    assert details["task_results_total"] == 17
+    assert details["task_results_included"] == 16
+    assert details["task_results_overflow"] is True
+    assert details["task_results_omitted"] == 1
+
+
+def test_psycopg_candidate_state_does_not_scan_task_results_past_overflow_sentinel() -> None:
+    task_results = BoundedReadSequence(
+        [
+            {
+                "task_id": index,
+                "original_task_id": index,
+                "model_id": "model_b",
+                "status": "succeeded",
+            }
+            for index in range(24)
+        ],
+        allowed_reads=17,
+    )
+
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+            del statement, parameters
+            return None
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            del parameters
+            if "FROM ops.pipeline_event" in statement:
+                return [
+                    {
+                        "event_id": 1,
+                        "entity_type": "pipeline_job",
+                        "entity_id": "job_cycle_gfs_2026050100_forecast",
+                        "event_type": "status_change",
+                        "status_to": "partially_failed",
+                        "created_at": "2026-05-01T00:05:00Z",
+                        "details": {
+                            "stage": "forecast",
+                            "task_results": task_results,
+                            "task_results_total": 120,
+                        },
+                    }
+                ]
+            if "FROM ops.pipeline_job" in statement:
+                return [
+                    {
+                        "job_id": "job_cycle_gfs_2026050100_forecast",
+                        "run_id": "cycle_gfs_2026050100",
+                        "cycle_id": "gfs_2026050100",
+                        "model_id": None,
+                        "status": "partially_failed",
+                        "stage": "forecast",
+                        "error_code": "NODE_FAILURE",
+                    }
+                ]
+            return []
+
+    repository = CapturingRepository("postgresql://example")
+
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_b",
+        run_id="fcst_gfs_2026050100_model_b",
+        forcing_version_id="forc_gfs_2026050100_model_b",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+        retry_limit=3,
+        job_limit=10,
+        event_limit=10,
+    )
+
+    assert state is not None
+    details = state["pipeline_events"][0]["details"]
+    assert state["pipeline_status"] is None
+    assert state["array_task_id"] is None
+    assert len(details["task_results"]) == 16
+    assert details["task_results_total"] == 120
+    assert details["task_results_included"] == 16
+    assert details["task_results_limit"] == 16
+    assert details["task_results_overflow"] is True
+    assert details["task_results_omitted"] == 104
+    assert task_results.read_count == 17
+
+
 def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = PublishFailureSlurmClient()
@@ -4074,6 +4229,31 @@ def _pipeline_status_not_in_clause(statement: str) -> set[str]:
     start = statement.index(marker) + len(marker)
     end = statement.index(")", start)
     return {status.strip().strip("'") for status in statement[start:end].split(",") if status.strip()}
+
+
+class BoundedReadSequence(Sequence[Any]):
+    def __init__(self, items: list[Any], *, allowed_reads: int) -> None:
+        self.items = items
+        self.allowed_reads = allowed_reads
+        self.read_count = 0
+
+    def __iter__(self) -> Any:
+        for index, item in enumerate(self.items):
+            if index >= self.allowed_reads:
+                raise AssertionError("task_results scanned past overflow sentinel")
+            self.read_count = index + 1
+            yield item
+
+    def __getitem__(self, index: int | slice) -> Any:
+        if isinstance(index, slice):
+            raise AssertionError("task_results must not be sliced")
+        if index >= self.allowed_reads:
+            raise AssertionError("task_results scanned past overflow sentinel")
+        self.read_count = max(self.read_count, index + 1)
+        return self.items[index]
+
+    def __len__(self) -> int:
+        raise AssertionError("task_results length must not be required")
 
 
 def _fmt(value: datetime) -> str:

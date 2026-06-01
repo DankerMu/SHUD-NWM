@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from services.orchestrator.production_contract import (
     production_stage_for,
     production_status_for,
     validate_display_artifact_evidence,
+    validate_display_readable_uri,
     validate_same_production_identity,
 )
 from services.orchestrator.scheduler import (
@@ -338,6 +340,189 @@ def test_scheduler_candidate_state_legacy_rows_without_m23_identity_remain_compa
     assert "pipeline_jobs[0]" in validation["legacy_non_authoritative"]
 
 
+@pytest.mark.parametrize(
+    "state",
+    [
+        {
+            "pipeline_status": "running",
+            "pipeline_jobs": [
+                {
+                    "pipeline_job_id": "job_unrelated_optional_only",
+                    "status": "running",
+                    "stage": "forecast",
+                    "slurm_job_id": "7777",
+                }
+            ],
+        },
+        {
+            "pipeline_status": "succeeded",
+            "pipeline_events": [
+                {
+                    "event_id": 10,
+                    "pipeline_event_id": "event_unrelated_optional_only",
+                    "event_type": "status_change",
+                    "status_to": "running",
+                    "details": {
+                        "pipeline_event_id": "event_unrelated_optional_only",
+                        "status": "running",
+                    },
+                }
+            ],
+        },
+    ],
+)
+def test_scheduler_candidate_state_optional_correlation_only_rows_are_non_authoritative(
+    tmp_path: Path,
+    state: dict[str, Any],
+) -> None:
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    validation = scheduler_module._candidate_state_identity_validation(_scheduler_candidate_fixture(), state)
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert validation["status"] == "compatible"
+    assert validation["legacy_non_authoritative"]
+    assert validation["compared"] == {}
+    assert orchestrator.calls
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {
+            "hydro_status": "succeeded",
+            "output_uri": "s3://nhms/runs/stale_sibling/output/",
+        },
+        {
+            "pipeline_status": "running",
+            "slurm_job_id": "7777",
+        },
+        {
+            "pipeline_status": "failed",
+            "failed_stage": "forecast",
+            "error_code": "NODE_FAILURE",
+            "retry_count": 1,
+        },
+        {
+            "pipeline_status": "permanently_failed",
+            "failed_stage": "forecast",
+            "error_code": "INVALID_MANIFEST",
+            "retry_count": 3,
+        },
+        {
+            "pipeline_status": "cancelled",
+            "hydro_status": "cancelled",
+            "retry_count": 1,
+        },
+    ],
+)
+def test_top_level_legacy_candidate_state_without_identity_proof_does_not_drive_decisions(
+    tmp_path: Path,
+    state: dict[str, Any],
+) -> None:
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    candidate = _scheduler_candidate_fixture()
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    validation = scheduler_module._candidate_state_identity_validation(candidate, state)
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert "candidate_state" in validation["legacy_non_authoritative"]
+    assert decision is None
+    assert orchestrator.calls
+
+
+def test_top_level_legacy_candidate_state_with_old_same_candidate_proof_can_skip_terminal(
+    tmp_path: Path,
+) -> None:
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(
+            {
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "model_id": "model_a",
+                "source": "gfs",
+                "cycle_time": "2026-05-21T06:00:00Z",
+                "hydro_status": "succeeded",
+                "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+            }
+        ),
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    skipped = result.evidence["skipped_candidates"][0]
+    validation = skipped["state_evidence"]["production_identity_validation"]
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert skipped["reason"] == "terminal_hydro_success"
+    assert "candidate_state" not in validation["legacy_non_authoritative"]
+
+
+def test_scheduler_candidate_state_correlation_mismatch_still_blocks_when_expected_and_actual_present(
+    tmp_path: Path,
+) -> None:
+    orchestrator = StrictNoSubmitOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry(
+            [
+                _model(
+                    "model_a",
+                    "basin_a",
+                    resource_profile={"runnable": True, "pipeline_job_id": "expected_pipeline_job"},
+                )
+            ]
+        ),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(
+            {
+                "pipeline_jobs": [
+                    {
+                        **_production_identity_fixture(),
+                        "pipeline_job_id": "actual_pipeline_job",
+                        "status": "running",
+                        "stage": "forecast",
+                    }
+                ],
+            }
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    mismatch = blocked["state_evidence"]["production_identity_validation"]["mismatches"][0]
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert blocked["reason"] == "production_identity_mismatch"
+    assert mismatch["field"] == "pipeline_job_id"
+    assert mismatch["expected"] == "expected_pipeline_job"
+    assert mismatch["actual"] == "actual_pipeline_job"
+
+
 def test_production_identity_correlation_fields_compare_only_when_both_present() -> None:
     expected = _production_identity_fixture()
     validate_same_production_identity(expected, {**expected, "pipeline_job_id": "stage_job_1"})
@@ -377,6 +562,21 @@ def test_display_artifact_boundary_requires_same_identity_and_published_uri(tmp_
     assert published["uri_boundary"]["normalized_uri"] == published_uri
     assert file_result["display_readable"] is True
     assert file_result["uri_boundary"]["kind"] == "published_root_file"
+
+
+def test_display_artifact_evidence_wrong_identity_wrapper_raises_identity_mismatch(tmp_path: Path) -> None:
+    identity = _production_identity_fixture()
+    evidence = {
+        **identity,
+        "basin_id": "basin_other",
+        "uri": f"published://manifests/GFS/2026052106/{identity['run_id']}/manifest.json",
+    }
+
+    with pytest.raises(ProductionContractError) as exc_info:
+        validate_display_artifact_evidence(evidence, identity, published_root=tmp_path / "published")
+
+    assert exc_info.value.code == "PRODUCTION_IDENTITY_MISMATCH"
+    assert exc_info.value.field == "basin_id"
 
 
 @pytest.mark.parametrize(
@@ -437,6 +637,26 @@ def test_display_artifact_boundary_redacts_credential_bearing_uris(tmp_path: Pat
 @pytest.mark.parametrize(
     "uri",
     [
+        "https://example.com:abc/log",
+        "https://[::1/log",
+        "https://user:pass@example.com:abc/token_secret/log",
+    ],
+)
+def test_display_readable_uri_malformed_inputs_raise_typed_redacted_contract_error(uri: str) -> None:
+    with pytest.raises(ProductionContractError) as exc_info:
+        validate_display_readable_uri(uri)
+
+    payload = exc_info.value.to_dict()
+    payload_text = str(payload)
+    assert payload["code"] == "DISPLAY_URI_MALFORMED"
+    assert "user:pass" not in payload_text
+    assert "token_secret" not in payload_text
+    assert "/log" not in payload_text
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
         "/workspace/runs/fcst_gfs_2026052106_model_a/logs/slurm.out",
         "/scratch/frd_muziyao/NWM/.nhms-workspace/runs/fcst_gfs_2026052106_model_a/logs/slurm.out",
         "/var/spool/slurm/job-123.out",
@@ -462,13 +682,38 @@ def test_display_artifact_boundary_rejects_private_or_unallowlisted_paths(tmp_pa
 
 
 def test_production_stage_and_status_taxonomy_maps_known_legacy_values() -> None:
+    assert set(PRODUCTION_STAGE_TAXONOMY) == {
+        "download",
+        "convert",
+        "forcing",
+        "forecast",
+        "parse",
+        "q_down_publish",
+        "frequency_publish",
+        "production_run",
+    }
+    assert set(PRODUCTION_STATUS_TAXONOMY) == {
+        "pending",
+        "ready",
+        "running",
+        "succeeded",
+        "blocked",
+        "unavailable",
+        "partial",
+        "failed",
+        "cancelled",
+        "superseded",
+    }
     assert production_stage_for("download_gfs") == "download"
+    assert production_stage_for("frequency") == "frequency_publish"
     assert production_stage_for("publish_tiles") == "q_down_publish"
     assert production_stage_for("unknown_stage") == "production_run"
     assert production_status_for("skipped") == "superseded"
     assert production_status_for("complete") == "succeeded"
     assert production_status_for("source_cycle_unavailable") == "unavailable"
     assert production_status_for("lock_contended") == "blocked"
+    assert production_status_for("preflight_blocked") == "blocked"
+    assert production_status_for("partially_failed") == "partial"
     assert production_status_for("unexpected_status") == "failed"
     assert "q_down_publish" in PRODUCTION_STAGE_TAXONOMY
     assert "superseded" in PRODUCTION_STATUS_TAXONOMY
@@ -2983,6 +3228,156 @@ def test_candidate_state_rows_and_events_are_bounded_before_evidence_amplificati
     assert state["state_bounds"]["pipeline_events_total"] == 4
 
 
+def test_candidate_state_nested_task_results_are_bounded_before_evidence_and_scanning(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        candidate_state_event_limit=1,
+    )
+    task_count = MAX_MODEL_RUN_STAGE_TASK_ROWS + 5
+    task_results = [
+        {
+            **_production_identity_fixture(),
+            "task_id": index,
+            "array_task_id": index,
+            "status": "succeeded",
+            "large_payload": "x" * 100,
+        }
+        for index in range(task_count)
+    ]
+    task_results[0] = {
+        **task_results[0],
+        "basin_id": "basin_other",
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+    }
+    active_repository = RawCandidateStateRepository(
+        {
+            "pipeline_events": [
+                {
+                    "event_id": 20,
+                    "event_type": "status_change",
+                    "details": {
+                        "stage": "forecast",
+                        "task_results": task_results,
+                    },
+                }
+            ],
+        }
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    event_details = blocked["state_evidence"]["pipeline_events"][0]["details"]
+    mismatch = blocked["state_evidence"]["production_identity_validation"]["mismatches"][0]
+    assert blocked["reason"] == "production_identity_mismatch"
+    assert len(event_details["task_results"]) == MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert event_details["task_results_total"] == MAX_MODEL_RUN_STAGE_TASK_ROWS + 1
+    assert event_details["task_results_included"] == MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert event_details["task_results_overflow"] is True
+    assert event_details["task_results_omitted"] == 1
+    assert mismatch["source"] == "pipeline_events[0].details.task_results[0]"
+    assert mismatch["field"] == "basin_id"
+
+
+def test_candidate_state_nested_task_results_do_not_scan_past_overflow_sentinel() -> None:
+    task_results = BoundedReadSequence(
+        [
+            {
+                **_production_identity_fixture(),
+                "task_id": index,
+                "array_task_id": index,
+                "status": "succeeded",
+            }
+            for index in range(MAX_MODEL_RUN_STAGE_TASK_ROWS + 8)
+        ],
+        allowed_reads=MAX_MODEL_RUN_STAGE_TASK_ROWS + 1,
+    )
+    state = {
+        "pipeline_events": [
+            {
+                "event_id": 22,
+                "event_type": "status_change",
+                "details": {
+                    "stage": "forecast",
+                    "task_results": task_results,
+                    "task_results_total": 999,
+                },
+            }
+        ],
+    }
+
+    evidence = scheduler_module._candidate_state_evidence(_scheduler_candidate_fixture(), state)
+
+    event_details = evidence["pipeline_events"][0]["details"]
+    assert len(event_details["task_results"]) == MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert event_details["task_results_total"] == 999
+    assert event_details["task_results_included"] == MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert event_details["task_results_limit"] == MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert event_details["task_results_overflow"] is True
+    assert event_details["task_results_omitted"] == 999 - MAX_MODEL_RUN_STAGE_TASK_ROWS
+    assert task_results.read_count == MAX_MODEL_RUN_STAGE_TASK_ROWS + 1
+
+
+def test_candidate_state_nested_task_results_outside_bound_do_not_drive_retry_or_evidence(
+    tmp_path: Path,
+) -> None:
+    task_count = MAX_MODEL_RUN_STAGE_TASK_ROWS + 1
+    task_results = [
+        {
+            "task_id": index,
+            "array_task_id": index,
+            "status": "succeeded",
+        }
+        for index in range(task_count)
+    ]
+    task_results[-1] = {
+        **task_results[-1],
+        "status": "failed",
+        "error_code": "NODE_FAILURE",
+        "slurm_job_id": "hidden_overflow_task",
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(
+            {
+                "pipeline_status": "failed",
+                "failed_stage": "forecast",
+                "error_code": "NODE_FAILURE",
+                "pipeline_events": [
+                    {
+                        "event_id": 21,
+                        "event_type": "status_change",
+                        "details": {"stage": "forecast", "task_results": task_results},
+                    }
+                ],
+            }
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
+    assert orchestrator.calls
+
+
 @pytest.mark.parametrize(
     ("latest_status", "expected_reason"),
         [
@@ -5242,6 +5637,50 @@ class FakeCandidateStateRepository(FakeActiveRepository):
         }
 
 
+class RawCandidateStateRepository(FakeActiveRepository):
+    def __init__(self, state: dict[str, Any]) -> None:
+        super().__init__(active=False, completed=False)
+        self.state = state
+
+    def candidate_state(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        run_id: str,
+        forcing_version_id: str,
+        candidate_id: str,
+    ) -> dict[str, Any]:
+        del source_id, cycle_time, model_id, run_id, forcing_version_id, candidate_id
+        return dict(self.state)
+
+
+class BoundedReadSequence(Sequence[Any]):
+    def __init__(self, items: list[Any], *, allowed_reads: int) -> None:
+        self.items = items
+        self.allowed_reads = allowed_reads
+        self.read_count = 0
+
+    def __iter__(self) -> Any:
+        for index, item in enumerate(self.items):
+            if index >= self.allowed_reads:
+                raise AssertionError("task_results scanned past overflow sentinel")
+            self.read_count = index + 1
+            yield item
+
+    def __getitem__(self, index: int | slice) -> Any:
+        if isinstance(index, slice):
+            raise AssertionError("task_results must not be sliced")
+        if index >= self.allowed_reads:
+            raise AssertionError("task_results scanned past overflow sentinel")
+        self.read_count = max(self.read_count, index + 1)
+        return self.items[index]
+
+    def __len__(self) -> int:
+        raise AssertionError("task_results length must not be required")
+
+
 class CandidateAndActiveRepository(FakeCandidateStateRepository):
     def __init__(self, state: dict[str, Any], active_jobs: list[dict[str, Any]]) -> None:
         super().__init__(state)
@@ -5581,6 +6020,33 @@ def _production_identity_fixture() -> dict[str, str]:
         "hydro_run_id": "fcst_gfs_2026052106_model_a",
         "published_manifest_id": "manifest_fcst_gfs_2026052106_model_a",
     }
+
+
+def _scheduler_candidate_fixture() -> scheduler_module.SchedulerCandidate:
+    return scheduler_module._candidate_for(
+        discovery=CycleDiscovery(
+            cycle_id="gfs_2026052106",
+            source_id="gfs",
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            cycle_hour=6,
+            available=True,
+            status="discovered",
+        ),
+        model=scheduler_module.RegisteredSchedulerModel(
+            model_id="model_a",
+            basin_id="basin_a",
+            basin_version_id="basin_a_v1",
+            river_network_version_id="basin_a_rivnet_v1",
+            segment_count=3,
+            model_package_uri="s3://nhms/models/model_a/package/",
+            shud_code_version="2.0",
+            resource_profile={},
+            resource_profile_summary={},
+            display_capabilities={},
+            frequency_capabilities={},
+        ),
+        horizon={},
+    )
 
 
 def _dt(value: str) -> datetime:

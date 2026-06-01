@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
-from urllib.parse import unquote, urlsplit
+from urllib.parse import SplitResult, unquote, urlsplit
 
 from packages.common.source_identity import normalize_source_id
 from services.artifacts.reader import DEFAULT_PUBLISHED_URI_PREFIX
@@ -444,8 +444,8 @@ def validate_display_readable_uri(
     raw_uri = str(uri or "").strip()
     if not raw_uri:
         raise ProductionContractError("DISPLAY_URI_MISSING", "Display-readable URI is missing.", field="uri")
-    _reject_control_or_credential_uri(raw_uri)
-    if raw_uri.startswith(uri_prefix) or urlsplit(raw_uri).scheme == "published":
+    parsed = _reject_control_or_credential_uri(raw_uri)
+    if raw_uri.startswith(uri_prefix) or parsed.scheme == "published":
         return _published_uri_boundary(raw_uri, uri_prefix=uri_prefix)
     if raw_uri.startswith("file://"):
         return _file_uri_boundary(
@@ -576,7 +576,7 @@ def _artifact_uri_from_evidence(evidence: Mapping[str, Any], *, uri_field: str |
 
 
 def _published_uri_boundary(uri: str, *, uri_prefix: str) -> dict[str, Any]:
-    parsed = urlsplit(uri)
+    parsed = _urlsplit_or_contract_error(uri)
     if parsed.query or parsed.fragment or parsed.username or parsed.password:
         raise ProductionContractError(
             "DISPLAY_URI_MALFORMED",
@@ -610,7 +610,7 @@ def _file_uri_boundary(
     published_root: Path | str | None,
     allowed_published_roots: Sequence[Path | str],
 ) -> dict[str, Any]:
-    parsed = urlsplit(uri)
+    parsed = _urlsplit_or_contract_error(uri)
     if parsed.netloc not in {"", "localhost"}:
         raise ProductionContractError(
             "DISPLAY_URI_UNSUPPORTED_FILE_HOST",
@@ -671,7 +671,7 @@ def _local_path_boundary(
 
 
 def _s3_uri_boundary(uri: str, *, allowed_bucket: str | None, allowed_prefix: str) -> dict[str, Any]:
-    parsed = urlsplit(uri)
+    parsed = _urlsplit_or_contract_error(uri)
     bucket = parsed.netloc
     if not bucket:
         raise ProductionContractError("DISPLAY_URI_MALFORMED", "S3 artifact URI is missing a bucket.", field="uri")
@@ -759,7 +759,10 @@ def _uri_has_exact_path_segment(boundary: Mapping[str, Any], expected_segment: s
         parts = PurePosixPath(str(path_value)).parts
         return segment in parts
     normalized = str(boundary.get("normalized_uri") or "")
-    parsed = urlsplit(normalized)
+    try:
+        parsed = _urlsplit_or_contract_error(normalized)
+    except ProductionContractError:
+        return False
     path = f"{parsed.netloc}/{parsed.path.lstrip('/')}" if parsed.scheme == "published" else parsed.path
     try:
         return segment in PurePosixPath(_safe_decoded_path(path)).parts
@@ -793,7 +796,7 @@ def _safe_decoded_path(raw_path: str) -> str:
     return decoded
 
 
-def _reject_control_or_credential_uri(uri: str) -> None:
+def _reject_control_or_credential_uri(uri: str) -> SplitResult:
     if any(ord(character) < 32 or ord(character) == 127 for character in uri):
         raise ProductionContractError(
             "DISPLAY_URI_MALFORMED",
@@ -801,7 +804,8 @@ def _reject_control_or_credential_uri(uri: str) -> None:
             field="uri",
             actual="[redacted]",
         )
-    parsed = urlsplit(uri)
+    parsed = _urlsplit_or_contract_error(uri)
+    _port_or_contract_error(parsed)
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ProductionContractError(
             "DISPLAY_URI_MALFORMED",
@@ -809,6 +813,7 @@ def _reject_control_or_credential_uri(uri: str) -> None:
             field="uri",
             actual=_safe_uri_summary(uri),
         )
+    return parsed
 
 
 def _published_roots(
@@ -863,7 +868,11 @@ def _safe_uri_summary(uri: str) -> str:
         return "[redacted]"
     if parsed.scheme and parsed.hostname:
         host = parsed.hostname
-        port = f":{parsed.port}" if parsed.port is not None else ""
+        try:
+            parsed_port = parsed.port
+        except ValueError:
+            return f"{parsed.scheme}://[redacted]"
+        port = f":{parsed_port}" if parsed_port is not None else ""
         return f"{parsed.scheme}://{host}{port}/[redacted]"
     if parsed.scheme:
         return f"{parsed.scheme}://[redacted]"
@@ -872,3 +881,27 @@ def _safe_uri_summary(uri: str) -> str:
     if _CREDENTIAL_WORD_RE.search(uri):
         return "[redacted]"
     return "[relative-path-redacted]"
+
+
+def _urlsplit_or_contract_error(uri: str) -> SplitResult:
+    try:
+        return urlsplit(uri)
+    except ValueError as exc:
+        raise ProductionContractError(
+            "DISPLAY_URI_MALFORMED",
+            "Display-readable artifact URI is malformed.",
+            field="uri",
+            actual="[redacted]",
+        ) from exc
+
+
+def _port_or_contract_error(parsed: SplitResult) -> int | None:
+    try:
+        return parsed.port
+    except ValueError as exc:
+        raise ProductionContractError(
+            "DISPLAY_URI_MALFORMED",
+            "Display-readable artifact URI port is malformed.",
+            field="uri",
+            actual=f"{parsed.scheme}://[redacted]" if parsed.scheme else "[redacted]",
+        ) from exc
