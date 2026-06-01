@@ -1146,3 +1146,93 @@ Non-goals:
 - Do not change runtime code, Dockerfile, entrypoint, compose semantics, or frontend/backend behavior in this issue.
 - Do not run or claim final two-node Docker E2E, readonly DB validation, or browser evidence PASS; that is #239.
 - Do not add a scheduler daemon loop or Slurm Gateway container unless a real dedicated implementation already exists and is independently tested.
+
+## Issue #239 Fixture: Docker Security, Readonly Display E2E, and Evidence Closure
+
+Implementation surface:
+
+- Add final validation scripts, tests, or runbook entrypoints that compose the already-delivered M22 surfaces into one evidence lane.
+- The lane must validate Docker display physical isolation, readonly DB behavior, strict cross-plane identity, GFS/IFS pass scope, manual ops boundaries, and evidence location/redaction.
+- The lane may add small harness fixes when prerequisite surfaces are already present but not directly callable by the final evidence flow.
+
+Must preserve:
+
+- 22 remains the only control/write plane. 27 display evidence must never submit/cancel jobs, mutate hydro/met/ops terminal state, mount private compute workspace, or consume Slurm/Munge/Docker socket capability.
+- Strict identity is the cross-plane proof key: `run_id`, `source`, `cycle_time`, and `model_id` from 22 evidence must bind latest-product, `/hydro-met`, `/ops`, jobs, and logs on 27; job logs also bind `job_id`.
+- GFS/IFS scope is honest: a full cross-plane `PASS` requires every declared source to pass strict latest/series/ops/logs/browser checks; reduced or missing source coverage is `PARTIAL` or `BLOCKED`, not full `PASS`.
+- Evidence and temporary outputs stay under `artifacts/` or explicitly configured `/scratch/frd_muziyao/...`; secrets are redacted from DSNs, command output, logs, and JSON evidence.
+- Missing real external dependencies such as readonly DB URL, Docker daemon, target browsers, Slurm Gateway, or live two-node hosts produce `BLOCKED` or skipped evidence, not mock-only `PASS`.
+
+Must add/change:
+
+- Docker display security checks for no Slurm route, no Slurm CLI/config/socket, no Munge, no Docker socket, no forbidden HostConfig/mount/env hazards, readonly published artifact mount, and runtime config `display_readonly`.
+- Readonly DB validation evidence that combines display route smoke, catalog-first write-capability inventory, permission-denied probes, redacted DSN/current_user/role metadata, and retry/cancel no-write ordering.
+- Cross-plane E2E checks that reject historical latest, mocked API data, wrong run/model/source/cycle, missing strict identity, and stale evidence reuse.
+- Manual ops boundary checks that prove 27 returns/display read-only manual-action state while any real retry/cancel receipt is produced on 22.
+- Evidence summary/reporting that separates compute, display, cross-plane, manual ops, DB, API, browser, Slurm, logs, Docker preflight, and Docker security lanes with PASS/PARTIAL/FAIL/BLOCKED semantics.
+
+Selected risk packs:
+
+- Config / project setup: selected - final validation depends on Docker, env files, readonly DB URL, browser/frontend tooling, and evidence roots.
+- File IO / path safety / overwrite: selected - evidence, logs, Docker smoke outputs, published artifact probes, and temp dirs must stay under approved roots and avoid stale PASS reuse.
+- Schema / columns / units / field names: selected - strict identity fields, evidence JSON fields, readonly DB probe surfaces, API error codes, and HostConfig/mount/env names are contract-bearing.
+- Auth / permissions / secrets: selected - readonly DB permissions, display control mutation denial, operator auth tokens, DSN redaction, and Docker root-equivalent source trust are security boundaries.
+- API compatibility / public contract: selected - final E2E consumes runtime config, latest-product strict identity, ops strict identity, retry/cancel manual-action errors, log errors, and frontend routes.
+- Concurrency / idempotency / stale state: selected - repeated validations must not reuse stale evidence or produce false PASS when Docker/DB/browser prerequisites change.
+- Resource limits / large input / discovery: selected - Docker build/cache, browser artifacts, DB probes, and log tails can be expensive and must fail blocked before system-disk pressure.
+- Error handling / rollback / partial outputs: selected - missing prerequisites, reduced source scope, partial evidence, and permission blockers must produce stable PASS/PARTIAL/FAIL/BLOCKED outcomes.
+- Documentation / migration notes: selected - runbook and summary output must be operator-safe and must not claim production readiness without real evidence.
+
+Not selected risk packs:
+
+- Data model migration: not selected - #239 should validate existing schema/API surfaces and not introduce database migrations.
+- New product features: not selected - #239 is a verification/evidence closure lane, not a new control channel, orchestrator, or frontend feature beyond small harness fixes.
+
+Invariant Matrix:
+
+- Governing invariant: Final two-node evidence may report `PASS` only when the 27 display service proves readonly physical/runtime behavior and all identity-bound API/browser/log evidence matches
+  the exact 22-produced strict identity for every declared source; otherwise the lane must report `PARTIAL`, `FAIL`, or `BLOCKED` with redacted evidence.
+- Source-of-truth identity/contract: 22 evidence `run_id/source/cycle_time/model_id`, optional `job_id` for logs, `NHMS_SERVICE_ROLE=display_readonly`, readonly DB URL/current_user/role metadata, `NHMS_PUBLISHED_ARTIFACT_*`, Docker compose/display service inspection, and approved evidence root.
+- Producers: 22 compute evidence, published artifact/log metadata, Docker compose/display container inspection, readonly DB validation probes, frontend/browser harness, and final evidence summary writer.
+- Validators/preflight: source-trust preflight, Docker disk/runtime static checks, compose config/build smoke, display security smoke, readonly DB validator, strict identity API checks, browser checks, OpenSpec validation, and CI/local test commands.
+- Storage/cache/query: repository `artifacts/`, `/scratch/frd_muziyao/...`, Docker daemon/cache, readonly database, published artifact root/S3, browser traces/screenshots, and logs.
+- Public routes/entrypoints: `/api/v1/runtime/config`, `/api/v1/slurm/*`, retry/cancel, queue depth, latest-product, pipeline status/stages/jobs/logs, `/hydro-met`, `/ops`, Docker compose/systemd commands, and final validation CLI/runbook command.
+- Frontend/downstream consumers: `/ops`, `/hydro-met`, browser evidence readers, operators following the runbook, CI evidence comments, and the epic closure summary.
+- Failure paths/rollback/stale state: missing Docker/DB/browser/Slurm prerequisites, unsafe display HostConfig, writable published artifact mount, source-scope reduction, wrong strict identity, stale evidence files, readonly permission leaks, 27 control mutation attempts, and secret-bearing output.
+- Evidence/audit/readiness: per-lane JSON/text summaries, redacted command logs, CI/local test output, Docker security reports, readonly DB report, browser artifacts, final PASS/PARTIAL/FAIL/BLOCKED summary, and review artifacts.
+- Regression rows:
+  - display container with no Slurm/Munge/Docker/workspace capability and `display_readonly` runtime config -> Docker display security lane `PASS`.
+  - any Slurm route/CLI/config/socket, Munge path, Docker socket, forbidden mount/env, privileged/host namespace, or writable published artifact mount on 27 -> Docker display security lane `FAIL`.
+  - readonly DB URL absent or real target unavailable -> DB lane `BLOCKED` or explicit skip, never `PASS`.
+  - readonly DB catalog shows mutating table/column/sequence/schema/database/reachable-role capability -> DB lane `FAIL` before DML/DDL probes execute.
+  - readonly DB catalog clean and controlled DML/DDL probes are denied before commit -> permission lane `PASS`.
+  - retry/cancel on 27 -> manual-action/no-write evidence; actual retry/cancel receipt must come from 22 before manual ops lane can pass.
+  - strict identity matches 22 `run_id/source/cycle_time/model_id` for latest-product, ops, jobs, logs, `/hydro-met`, and browser checks -> cross-plane lane can pass for that source.
+  - missing/partial/wrong strict identity, historical latest fallback, mocked API response, wrong job/log run, or stale evidence -> lane `BLOCKED` or `FAIL`, not `PASS`.
+  - both GFS and IFS declared and both pass all strict lanes -> full cross-plane `PASS`; only one source or missing-source evidence -> `PARTIAL` or reduced-scope result.
+
+Boundary-surface checklist:
+
+- Shared helper roots: final validation/evidence writer, readonly DB validator, Docker display security probe, strict identity evidence parser, browser evidence harness.
+- Public entrypoints: validation CLI/runbook command, Docker compose/systemd commands, backend API routes, frontend browser routes.
+- Read surfaces: readonly DB queries, published artifact/log reads, Docker inspect/config output, API responses, browser DOM/state, existing evidence files.
+- Write/delete/overwrite surfaces: evidence output directory, Docker build/smoke logs, browser traces/screenshots, optional temp dirs; no hydro/met/ops terminal writes from 27.
+- Staging/publish/rollback surfaces: published artifact mounts, Docker compose up/down/restart, systemd restart, evidence replacement, and rollback summaries.
+- Producer/consumer evidence boundaries: 22-produced identity and receipts consumed by 27 E2E/browser/log checks; final summary consumed by PR/epic closure.
+- Stale-state/idempotency boundaries: repeated runs must use unique run IDs or overwrite explicitly scoped evidence and must not reuse stale PASS from older Docker/DB/browser state.
+- Unchanged downstream consumers: prerequisite backend/frontend/Docker contracts from #229-#238 remain source of truth; #239 should not redesign them.
+
+Required evidence:
+
+- Fixture review and `openspec validate m22-two-node-docker-readonly-display --strict --no-interactive`.
+- Focused backend/API tests from prerequisite surfaces that prove readonly DB no-write ordering, display mutation fail-closed behavior, strict latest/ops/log identity, and runtime config role.
+- Frontend tests/build or documented focused equivalents for `/ops` and `/hydro-met` strict/display behavior.
+- Docker preflight, compose config/build smoke, source-trust preflight, display container security smoke, and static runtime validator results under approved evidence roots.
+- Readonly DB validation result showing PASS/FAIL/BLOCKED with redacted DSN, `current_user`, DB role metadata, command/probe results, and strict identity route smoke.
+- Browser/API evidence proving strict source scope, no historical/mock fallback, manual ops boundary, and final PASS/PARTIAL/FAIL/BLOCKED summary.
+
+Non-goals:
+
+- Do not implement missing #229-#238 product/runtime features under #239 except small harness fixes required to call already-delivered surfaces.
+- Do not claim production readiness from mocks, local-only fixtures, writer DB credentials, historical latest data, or single-source evidence presented as full scope.
+- Do not add a 27-to-22 control channel, operation request queue, Kubernetes/orchestrator deployment, or new Slurm Gateway implementation.

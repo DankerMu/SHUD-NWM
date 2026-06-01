@@ -5,16 +5,25 @@ import grp
 import json
 import os
 import pwd
+import re
 import stat
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
+)
+
 REPORT_JSON_NAME = "two-node-docker-source-trust.json"
 REPORT_TEXT_NAME = "two-node-docker-source-trust.txt"
 VALID_ROLES = frozenset({"compute", "display"})
+SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+SCRATCH_ROOT = Path("/scratch/frd_muziyao")
 
 
 @dataclass(frozen=True)
@@ -191,6 +200,7 @@ def validate_source_trust(
     trusted_owners: set[str],
     roles: Sequence[str],
     trust_root: Path | None,
+    evidence_run_id: str | None = None,
 ) -> dict[str, Any]:
     checkout_root = _absolute_path(checkout_root)
     evidence_root = _absolute_path(evidence_root)
@@ -242,9 +252,13 @@ def validate_source_trust(
         )
 
     status = "BLOCKED" if blockers else "PASS"
+    resolved_run_id = evidence_run_id or _evidence_run_id_from_root(evidence_root)
+    if resolved_run_id is not None:
+        resolved_run_id = _safe_evidence_run_id(resolved_run_id)
     return {
         "schema": "nhms.two_node_docker.source_trust.v1",
         "status": status,
+        "evidence_run_id": resolved_run_id,
         "checkout_root": str(checkout_root),
         "trust_root": str(trust_root),
         "evidence_root": str(evidence_root),
@@ -255,16 +269,51 @@ def validate_source_trust(
     }
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
-        json.dump(payload, tmp, indent=2, sort_keys=True)
-        tmp.write("\n")
-        tmp_path = Path(tmp.name)
-    os.replace(tmp_path, path)
+def _evidence_run_id_from_root(path: Path) -> str | None:
+    parts = _absolute_path(path).parts
+    for marker in ("two-node-e2e", "test-two-node-e2e-evidence"):
+        if marker not in parts:
+            continue
+        index = parts.index(marker)
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    return None
 
 
-def _write_text_report(path: Path, payload: dict[str, Any]) -> None:
+def _safe_evidence_run_id(value: str) -> str:
+    text = str(value).strip()
+    if not SAFE_RUN_ID_RE.fullmatch(text) or ".." in text:
+        raise ValueError("evidence_run_id must use only alphanumerics, '.', '_' or '-' and be at most 128 chars")
+    return text
+
+
+def _approved_evidence_root(evidence_root: Path, *, checkout_root: Path) -> Path:
+    evidence_root = _absolute_path(evidence_root)
+    checkout_root = _absolute_path(checkout_root)
+    checkout_artifacts = checkout_root / "artifacts"
+    allowed_roots = (checkout_artifacts.resolve(strict=False), SCRATCH_ROOT.resolve(strict=False))
+    _reject_symlink_components(evidence_root)
+    resolved = evidence_root.resolve(strict=False)
+    if not any(_path_is_relative_to(resolved, root) for root in allowed_roots):
+        raise ValueError("source-trust evidence root must be under checkout artifacts/ or /scratch/frd_muziyao")
+    _reject_symlink_components(resolved)
+    try:
+        ensure_directory_no_follow(resolved)
+    except SafeFilesystemError as error:
+        raise OSError(str(error)) from error
+    _reject_symlink_components(resolved)
+    return resolved
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any], *, containment_root: Path) -> None:
+    content = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        atomic_write_bytes_no_follow(path, content, containment_root=containment_root)
+    except SafeFilesystemError as error:
+        raise OSError(str(error)) from error
+
+
+def _write_text_report(path: Path, payload: dict[str, Any], *, containment_root: Path) -> None:
     lines = [
         f"status: {payload['status']}",
         f"checkout_root: {payload['checkout_root']}",
@@ -281,16 +330,147 @@ def _write_text_report(path: Path, payload: dict[str, Any]) -> None:
         lines.append("blockers:")
         for blocker in payload["blockers"]:
             lines.append(f"- BLOCKED: {blocker['message']}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        atomic_write_bytes_no_follow(
+            path,
+            ("\n".join(lines) + "\n").encode("utf-8"),
+            containment_root=containment_root,
+        )
+    except SafeFilesystemError as error:
+        raise OSError(str(error)) from error
 
 
-def write_evidence(evidence_root: Path, payload: dict[str, Any]) -> Path:
-    evidence_root.mkdir(parents=True, exist_ok=True)
-    json_path = evidence_root / REPORT_JSON_NAME
-    text_path = evidence_root / REPORT_TEXT_NAME
-    _write_json_atomic(json_path, payload)
-    _write_text_report(text_path, payload)
+def _blocked_publication_payload(
+    payload: dict[str, Any],
+    *,
+    json_path: Path,
+    text_path: Path,
+    error: Exception,
+) -> dict[str, Any]:
+    blocked = dict(payload)
+    blockers = list(blocked.get("blockers", [])) if isinstance(blocked.get("blockers"), list) else []
+    blockers.append(
+        {
+            "code": "SOURCE_TRUST_PUBLICATION_FAILED",
+            "message": "source-trust evidence publication failed; previous PASS JSON was invalidated.",
+            "json_path": str(json_path),
+            "text_path": str(text_path),
+            "error_type": type(error).__name__,
+            "error": str(error),
+        }
+    )
+    blocked["status"] = "BLOCKED"
+    blocked["blockers"] = blockers
+    blocked["publication"] = {
+        "status": "BLOCKED",
+        "json_path": str(json_path),
+        "text_path": str(text_path),
+        "previous_pass_invalidated": True,
+    }
+    return blocked
+
+
+def _existing_json_is_current_run_pass(path: Path, payload: dict[str, Any], *, containment_root: Path) -> bool:
+    expected_run_id = payload.get("evidence_run_id")
+    try:
+        content = read_bytes_limited_no_follow(path, max_bytes=1024 * 1024, containment_root=containment_root)
+    except (FileNotFoundError, OSError, SafeFilesystemError):
+        return False
+    try:
+        existing = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(existing, dict) or existing.get("status") != "PASS":
+        return False
+    if expected_run_id is None:
+        return True
+    return str(existing.get("evidence_run_id") or "") == str(expected_run_id)
+
+
+def _invalidate_json_on_publication_failure(
+    json_path: Path,
+    text_path: Path,
+    payload: dict[str, Any],
+    *,
+    containment_root: Path,
+    error: Exception,
+) -> None:
+    if not _existing_json_is_current_run_pass(json_path, payload, containment_root=containment_root):
+        return
+    blocked = _blocked_publication_payload(payload, json_path=json_path, text_path=text_path, error=error)
+    _write_json_atomic(json_path, blocked, containment_root=containment_root)
+
+
+def _preflight_output_target(path: Path, *, containment_root: Path) -> None:
+    if path.parent != containment_root:
+        raise ValueError("source-trust output target must be directly under the evidence root")
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise OSError(f"cannot inspect source-trust output target {path}: {error}") from error
+    if stat.S_ISLNK(status.st_mode):
+        raise OSError(f"source-trust output target must not be a symlink: {path}")
+    if not stat.S_ISREG(status.st_mode):
+        raise OSError(f"source-trust output target must be a regular file: {path}")
+
+
+def _preflight_output_targets(paths: Sequence[Path], *, containment_root: Path) -> None:
+    for path in paths:
+        _preflight_output_target(path, containment_root=containment_root)
+
+
+def write_evidence(
+    evidence_root: Path,
+    payload: dict[str, Any],
+    *,
+    output_name: str | None = None,
+    checkout_root: Path | None = None,
+) -> Path:
+    checkout_root = checkout_root or Path(str(payload.get("checkout_root") or "."))
+    evidence_root = _approved_evidence_root(evidence_root, checkout_root=checkout_root)
+    json_name = output_name or _default_report_json_name(payload)
+    if not json_name.endswith(".json") or "/" in json_name or "\\" in json_name:
+        raise ValueError("source-trust output name must be a local .json filename")
+    json_path = evidence_root / json_name
+    text_path = evidence_root / f"{json_path.stem}.txt"
+    try:
+        _preflight_output_targets((json_path, text_path), containment_root=evidence_root)
+        _write_text_report(text_path, payload, containment_root=evidence_root)
+        _write_json_atomic(json_path, payload, containment_root=evidence_root)
+    except (OSError, ValueError) as error:
+        _invalidate_json_on_publication_failure(
+            json_path,
+            text_path,
+            payload,
+            containment_root=evidence_root,
+            error=error,
+        )
+        raise
     return json_path
+
+
+def _default_report_json_name(payload: dict[str, Any]) -> str:
+    roles = payload.get("roles")
+    if isinstance(roles, list) and len(roles) == 1 and roles[0] in VALID_ROLES:
+        return f"two-node-docker-source-trust-{roles[0]}.json"
+    return REPORT_JSON_NAME
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _reject_symlink_components(path: Path) -> None:
+    current = path.expanduser()
+    for component in (current, *current.parents):
+        if component.exists() and component.is_symlink():
+            raise ValueError(f"source-trust evidence path component must not be a symlink: {component}")
 
 
 def _split_csv(values: Sequence[str] | None) -> list[str]:
@@ -339,8 +519,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path component root to check through CHECKOUT_ROOT/infra; defaults to CHECKOUT_ROOT parent.",
     )
+    parser.add_argument(
+        "--evidence-run-id",
+        help="Current final E2E evidence run id. Defaults to path inference when omitted.",
+    )
+    parser.add_argument(
+        "--output-name",
+        help="Optional local JSON report filename. Defaults to role-scoped names for single-role reports.",
+    )
     args = parser.parse_args(argv)
     args.trusted_owners = set(_split_csv(args.trusted_owner))
+    if args.evidence_run_id is not None:
+        try:
+            args.evidence_run_id = _safe_evidence_run_id(args.evidence_run_id)
+        except ValueError as exc:
+            parser.error(str(exc))
     try:
         args.roles = _parse_roles(args.role)
     except argparse.ArgumentTypeError as exc:
@@ -356,9 +549,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         trusted_owners=args.trusted_owners,
         roles=args.roles,
         trust_root=args.trust_root,
+        evidence_run_id=args.evidence_run_id,
     )
     try:
-        evidence_path = write_evidence(_absolute_path(args.evidence_root), payload)
+        evidence_path = write_evidence(
+            _absolute_path(args.evidence_root),
+            payload,
+            output_name=args.output_name,
+            checkout_root=args.checkout_root,
+        )
+    except ValueError as exc:
+        print(f"BLOCKED: invalid source-trust evidence settings: {exc}", file=sys.stderr)
+        return 2
     except OSError as exc:
         print(f"BLOCKED: cannot write source-trust evidence under {args.evidence_root}: {exc}", file=sys.stderr)
         return 2

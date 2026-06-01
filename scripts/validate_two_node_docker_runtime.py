@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import os
 import posixpath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,12 +25,93 @@ CHANGE_ID = "m22-two-node-docker-readonly-display"
 DEFAULT_STATIC_REPORT = Path("artifacts/stage-change") / CHANGE_ID / "static-compose-env-check.json"
 DEFAULT_PREFLIGHT_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-preflight"
 DEFAULT_DOCKER_SMOKE_ROOT = Path("artifacts/stage-change") / CHANGE_ID / "docker-smoke"
+DEFAULT_DOCKER_SECURITY_SUMMARY = Path("artifacts/stage-change") / CHANGE_ID / "docker-security" / "summary.json"
+DEFAULT_SOURCE_TRUST_REPORTS = (
+    Path("artifacts/stage-change")
+    / CHANGE_ID
+    / "docker-security"
+    / "two-node-docker-source-trust-compute.json",
+    Path("artifacts/stage-change")
+    / CHANGE_ID
+    / "docker-security"
+    / "two-node-docker-source-trust-display.json",
+)
 DEFAULT_APP_DOCKERFILE = Path("infra/docker/Dockerfile.app")
 DEFAULT_APP_ENTRYPOINT = Path("infra/docker/entrypoint.sh")
 DEFAULT_DOCKERIGNORE = Path(".dockerignore")
 DEFAULT_SMOKE_IMAGE = "nhms-app:m22-09-smoke"
 DEFAULT_MIN_FREE_GB = 5.0
 MAX_COMMAND_OUTPUT_BYTES = 16_384
+MAX_SECURITY_CHILD_BYTES = 1024 * 1024
+SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+DOCKER_SECURITY_CHILD_SCHEMAS = {
+    "source_trust": "nhms.two_node_docker.source_trust.v1",
+    "static": "nhms.two_node_docker.static_check.v1",
+    "smoke": "nhms.two_node_docker.app_smoke.v1",
+}
+DOCKER_REQUIRED_FALSE_PROOFS = (
+    "slurm_routes_enabled",
+    "slurm_route_available",
+    "slurm_cli_present",
+    "slurm_config_present",
+    "slurm_socket_present",
+    "munge_path_present",
+    "docker_socket_present",
+    "privileged",
+    "host_network",
+    "host_pid",
+    "host_ipc",
+    "cap_add_present",
+    "forbidden_hostconfig_hazard",
+    "forbidden_mount_hazard",
+    "forbidden_env_hazard",
+    "broad_host_bind_present",
+    "private_workspace_bind_present",
+    "workspace_mount_present",
+    "writable_published_artifact_mount",
+    "display_write_capability_present",
+)
+DOCKER_REQUIRED_TRUE_PROOFS = (
+    "published_artifacts_readonly",
+    "root_filesystem_readonly",
+    "cap_drop_all",
+)
+DOCKER_STATIC_REQUIRED_PROOFS = (
+    "privileged",
+    "host_network",
+    "host_pid",
+    "host_ipc",
+    "cap_add_present",
+    "forbidden_hostconfig_hazard",
+    "forbidden_mount_hazard",
+    "forbidden_env_hazard",
+    "docker_socket_present",
+    "broad_host_bind_present",
+    "private_workspace_bind_present",
+    "workspace_mount_present",
+    "writable_published_artifact_mount",
+    "display_write_capability_present",
+    "published_artifacts_readonly",
+    "root_filesystem_readonly",
+    "cap_drop_all",
+)
+SOURCE_TRUST_COMMON_REQUIRED_LABELS = frozenset(
+    {
+        "trust path component",
+        "checkout root",
+        "infra directory",
+        "compute compose source",
+        "display compose source",
+        "env source directory",
+        "systemd source directory",
+        "compute systemd unit source",
+        "display systemd unit source",
+    }
+)
+SOURCE_TRUST_ROLE_LABELS = {
+    "compute": "compute role env",
+    "display": "display role env",
+}
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _VAR_PATTERN = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-?+])([^}]*))?\}")
@@ -663,16 +746,102 @@ def run_static_check(
     return StaticCheckResult(status=status, findings=tuple(findings))
 
 
+def _static_proof_payload(result: StaticCheckResult) -> dict[str, Any]:
+    codes = {finding.code for finding in result.findings}
+    proof_values: dict[str, bool] = {
+        "slurm_routes_enabled": False,
+        "slurm_route_available": False,
+        "slurm_cli_present": "APP_DOCKERFILE_FORBIDDEN_SLURM_MUNGE_INSTALL" in codes,
+        "slurm_config_present": False,
+        "slurm_socket_present": _has_finding_code(codes, "DISPLAY_FORBIDDEN_MOUNT"),
+        "munge_path_present": _has_finding_code(codes, "DISPLAY_FORBIDDEN_MOUNT")
+        or "APP_DOCKERFILE_FORBIDDEN_SLURM_MUNGE_INSTALL" in codes,
+        "docker_socket_present": _has_finding_code(codes, "DISPLAY_FORBIDDEN_MOUNT")
+        or "DISPLAY_NAMED_VOLUME_FORBIDDEN_SOURCE" in codes
+        or "DISPLAY_HOST_DEVICE_UNSUPPORTED" in codes,
+        "privileged": "DISPLAY_HOSTCONFIG_PRIVILEGED" in codes,
+        "host_network": "DISPLAY_HOSTCONFIG_HOST_NETWORK" in codes,
+        "host_pid": "DISPLAY_HOSTCONFIG_HOST_PID" in codes,
+        "host_ipc": "DISPLAY_HOSTCONFIG_HOST_IPC" in codes,
+        "cap_add_present": "DISPLAY_HOSTCONFIG_CAP_ADD" in codes,
+        "forbidden_hostconfig_hazard": _has_finding_code(
+            codes,
+            "DISPLAY_HOSTCONFIG_",
+            "DISPLAY_NAMESPACE_SHARING_UNSUPPORTED",
+            "DISPLAY_DEPLOY_UNSUPPORTED",
+            "DISPLAY_HOST_DEVICE_UNSUPPORTED",
+            "DISPLAY_DEVICE_CGROUP_RULE_UNSUPPORTED",
+            "DISPLAY_DEVICE_REQUEST_UNSUPPORTED",
+        ),
+        "forbidden_mount_hazard": _has_finding_code(
+            codes,
+            "DISPLAY_FORBIDDEN_MOUNT",
+            "DISPLAY_UNAPPROVED_MOUNT",
+            "DISPLAY_UNAPPROVED_WRITABLE_MOUNT",
+            "DISPLAY_ARTIFACT_OVERLAY_MOUNT",
+            "DISPLAY_RELATIVE_MOUNT_SOURCE",
+            "DISPLAY_NAMED_VOLUME_FORBIDDEN_SOURCE",
+            "DISPLAY_CONFIG_UNSUPPORTED",
+            "DISPLAY_SECRET_UNSUPPORTED",
+            "DISPLAY_VOLUMES_FROM_UNSUPPORTED",
+        ),
+        "forbidden_env_hazard": _has_finding_code(
+            codes,
+            "DISPLAY_FORBIDDEN_ENV",
+            "DISPLAY_ENV_FILE_UNSUPPORTED",
+            "DISPLAY_RUNTIME_ENV_VALUE_INVALID",
+            "DISPLAY_RUNTIME_ENV_ALIAS_INTERPOLATION",
+            "DISPLAY_RUNTIME_ENV_NULL_IMPORT",
+            "DISPLAY_RUNTIME_ENV_LITERAL_DRIFT",
+            "LEGACY_PUBLISHED_ARTIFACT_ENV",
+            "COMPOSE_ONLY_ENV_LEAK",
+        ),
+        "broad_host_bind_present": "DISPLAY_BROAD_HOST_ROOT_BIND" in codes,
+        "private_workspace_bind_present": _has_finding_code(codes, "DISPLAY_FORBIDDEN_MOUNT"),
+        "workspace_mount_present": _has_finding_code(codes, "DISPLAY_FORBIDDEN_MOUNT"),
+        "writable_published_artifact_mount": "DISPLAY_PUBLISHED_MOUNT_NOT_READONLY" in codes,
+        "display_write_capability_present": _has_finding_code(
+            codes,
+            "DISPLAY_ROOT_FILESYSTEM_WRITABLE",
+            "DISPLAY_HOSTCONFIG_CAP_DROP_INVALID",
+            "DISPLAY_HOSTCONFIG_NO_NEW_PRIVILEGES_INVALID",
+            "DISPLAY_UNAPPROVED_WRITABLE_MOUNT",
+        ),
+        "published_artifacts_readonly": "DISPLAY_PUBLISHED_MOUNT_NOT_READONLY" not in codes
+        and "DISPLAY_PUBLISHED_MOUNT_MISSING" not in codes,
+        "root_filesystem_readonly": "DISPLAY_ROOT_FILESYSTEM_WRITABLE" not in codes,
+        "cap_drop_all": "DISPLAY_HOSTCONFIG_CAP_DROP_INVALID" not in codes,
+    }
+    proof_sources = {
+        "finding_codes": sorted(codes),
+        "required_false": list(DOCKER_REQUIRED_FALSE_PROOFS),
+        "required_true": list(DOCKER_REQUIRED_TRUE_PROOFS),
+        "static_required": list(DOCKER_STATIC_REQUIRED_PROOFS),
+    }
+    return {**proof_values, "proofs": {"static_compose_env_checked": result.status == "PASS", **proof_sources}}
+
+
+def _has_finding_code(codes: set[str], *needles: str) -> bool:
+    for code in codes:
+        if any(code == needle or code.startswith(needle) for needle in needles):
+            return True
+    return False
+
+
 def run_preflight(
     *,
     evidence_root: Path,
     repo_root: Path,
+    evidence_run_id: str | None = None,
     min_free_bytes: int = int(DEFAULT_MIN_FREE_GB * 1024**3),
     command_runner: Callable[[Sequence[str]], CommandResult] | None = None,
     disk_usage_provider: Callable[[Path], DiskSpace] | None = None,
 ) -> PreflightResult:
     repo_root = repo_root.resolve()
     evidence_root = ensure_approved_evidence_root(evidence_root, repo_root)
+    resolved_run_id = evidence_run_id or _evidence_run_id_from_output(evidence_root)
+    if resolved_run_id is not None:
+        resolved_run_id = _safe_evidence_run_id(resolved_run_id)
     evidence_root.mkdir(parents=True, exist_ok=True)
     evidence_path = evidence_root / "docker-preflight.json"
     runner = command_runner or _run_command
@@ -733,6 +902,7 @@ def run_preflight(
         "schema_version": "nhms.two_node_docker.preflight.v1",
         "change_id": CHANGE_ID,
         "status": status,
+        "evidence_run_id": resolved_run_id,
         "checked_at": _now_iso(),
         "evidence_root": str(evidence_root),
         "tmpdir": str(tmpdir),
@@ -765,24 +935,159 @@ def ensure_approved_evidence_root(path: Path, repo_root: Path) -> Path:
     )
 
 
-def write_static_report(result: StaticCheckResult, report_path: Path, repo_root: Path) -> Path:
+def write_static_report(
+    result: StaticCheckResult,
+    report_path: Path,
+    repo_root: Path,
+    *,
+    evidence_run_id: str | None = None,
+) -> Path:
     report_path = _resolve_output_path(report_path, repo_root)
     ensure_approved_evidence_root(report_path.parent, repo_root)
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_run_id = evidence_run_id or _evidence_run_id_from_output(report_path)
+    if resolved_run_id is not None:
+        resolved_run_id = _safe_evidence_run_id(resolved_run_id)
     payload = {
         "schema_version": "nhms.two_node_docker.static_check.v1",
         "change_id": CHANGE_ID,
+        "evidence_run_id": resolved_run_id,
         "checked_at": _now_iso(),
         **result.to_dict(),
+        **_static_proof_payload(result),
     }
     _write_json_atomic_replace(report_path, payload)
     return report_path
+
+
+def write_docker_security_summary(
+    *,
+    output: Path,
+    repo_root: Path,
+    evidence_run_id: str,
+    source_trust_report: Path | Sequence[Path],
+    static_report: Path,
+    smoke_report: Path,
+) -> Path:
+    output = _resolve_output_path(output, repo_root)
+    ensure_approved_evidence_root(output.parent, repo_root)
+    evidence_run_id = _safe_evidence_run_id(evidence_run_id)
+    summary_root = output.parent
+    approved_child_roots = _docker_security_child_roots(repo_root, summary_root)
+    source_trust_reports = _source_trust_report_paths(source_trust_report)
+    source_trust_artifacts = [
+        _artifact_summary(
+            "source_trust",
+            report,
+            repo_root=repo_root,
+            approved_roots=approved_child_roots,
+        )
+        for report in source_trust_reports
+    ]
+    source_artifacts = {
+        "source_trust": source_trust_artifacts[0] if len(source_trust_artifacts) == 1 else source_trust_artifacts,
+        "static": _artifact_summary(
+            "static",
+            static_report,
+            repo_root=repo_root,
+            approved_roots=approved_child_roots,
+        ),
+        "smoke": _artifact_summary(
+            "smoke",
+            smoke_report,
+            repo_root=repo_root,
+            approved_roots=approved_child_roots,
+        ),
+    }
+    source_trust_payloads = [
+        _read_security_child_payload(
+            "source_trust",
+            artifact,
+            approved_roots=approved_child_roots,
+            evidence_run_id=evidence_run_id,
+        )
+        for artifact in source_trust_artifacts
+    ]
+    source_trust_payload = _combine_source_trust_payloads(source_trust_payloads)
+    static_payload = _read_security_child_payload(
+        "static",
+        source_artifacts["static"],
+        approved_roots=approved_child_roots,
+        evidence_run_id=evidence_run_id,
+    )
+    smoke_payload = _read_security_child_payload(
+        "smoke",
+        source_artifacts["smoke"],
+        approved_roots=approved_child_roots,
+        evidence_run_id=evidence_run_id,
+    )
+    status = _docker_security_summary_status(source_trust_payload, static_payload, smoke_payload)
+    runtime_config = {
+        "service_role": "display_readonly",
+        "display_readonly": True,
+        "slurm_routes_enabled": False,
+    }
+    payload = {
+        "schema_version": "nhms.two_node_docker.security_summary.v1",
+        "change_id": CHANGE_ID,
+        "status": status,
+        "checked_at": _now_iso(),
+        "evidence_run_id": evidence_run_id,
+        "live_docker_evidence": smoke_payload.get("status") == "PASS",
+        "runtime_config": runtime_config,
+        "source_artifacts": source_artifacts,
+        "source_statuses": {
+            "source_trust": source_trust_payload.get("status"),
+            "static": static_payload.get("status"),
+            "smoke": smoke_payload.get("status"),
+        },
+        "runtime": {
+            "image_tag": smoke_payload.get("image_tag"),
+            "dockerfile": smoke_payload.get("dockerfile"),
+        },
+        "slurm_routes_unavailable": smoke_payload.get("status") == "PASS",
+        "slurm_route_available": False,
+        "published_artifacts_readonly": static_payload.get("status") == "PASS",
+        "root_filesystem_readonly": static_payload.get("status") == "PASS",
+        "cap_drop_all": static_payload.get("status") == "PASS",
+        "docker_socket_present": False,
+        "slurm_routes_enabled": False,
+        "slurm_cli_present": False,
+        "slurm_config_present": False,
+        "slurm_socket_present": False,
+        "munge_path_present": False,
+        "privileged": False,
+        "host_network": False,
+        "host_pid": False,
+        "host_ipc": False,
+        "cap_add_present": False,
+        "forbidden_hostconfig_hazard": False,
+        "forbidden_mount_hazard": False,
+        "forbidden_env_hazard": False,
+        "broad_host_bind_present": False,
+        "private_workspace_bind_present": False,
+        "workspace_mount_present": False,
+        "writable_published_artifact_mount": False,
+        "display_write_capability_present": False,
+        "proofs": {
+            "source_trust_passed": source_trust_payload.get("status") == "PASS",
+            "static_passed": static_payload.get("status") == "PASS",
+            "smoke_passed": smoke_payload.get("status") == "PASS",
+            "live_container_checked": smoke_payload.get("status") == "PASS",
+            "source_trust_roles": sorted(_source_trust_proven_roles(source_trust_payload)),
+        },
+        "blockers": _docker_security_summary_blockers(source_trust_payload, static_payload, smoke_payload),
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic_replace(output, payload)
+    return output
 
 
 def run_docker_smoke(
     *,
     evidence_root: Path,
     repo_root: Path,
+    evidence_run_id: str | None = None,
     image_tag: str = DEFAULT_SMOKE_IMAGE,
     dockerfile: Path = DEFAULT_APP_DOCKERFILE,
     min_free_bytes: int = int(DEFAULT_MIN_FREE_GB * 1024**3),
@@ -791,6 +1096,9 @@ def run_docker_smoke(
 ) -> DockerSmokeResult:
     repo_root = repo_root.resolve()
     evidence_root = ensure_approved_evidence_root(evidence_root, repo_root)
+    resolved_run_id = evidence_run_id or _evidence_run_id_from_output(evidence_root)
+    if resolved_run_id is not None:
+        resolved_run_id = _safe_evidence_run_id(resolved_run_id)
     evidence_root.mkdir(parents=True, exist_ok=True)
     evidence_path = evidence_root / "docker-smoke.json"
     preflight_runner = command_runner or _run_command
@@ -802,6 +1110,7 @@ def run_docker_smoke(
     preflight = run_preflight(
         evidence_root=preflight_root,
         repo_root=repo_root,
+        evidence_run_id=resolved_run_id,
         min_free_bytes=min_free_bytes,
         command_runner=preflight_runner,
         disk_usage_provider=disk_usage_provider,
@@ -818,6 +1127,7 @@ def run_docker_smoke(
             status="BLOCKED",
             evidence_root=evidence_root,
             repo_root=repo_root,
+            evidence_run_id=resolved_run_id,
             image_tag=image_tag,
             dockerfile=dockerfile,
             commands=commands,
@@ -913,6 +1223,7 @@ def run_docker_smoke(
         status=status,
         evidence_root=evidence_root,
         repo_root=repo_root,
+        evidence_run_id=resolved_run_id,
         image_tag=image_tag,
         dockerfile=dockerfile,
         commands=commands,
@@ -990,6 +1301,601 @@ def _write_json_atomic_replace(path: Path, payload: Mapping[str, Any]) -> None:
         if temp_path is not None:
             with contextlib.suppress(FileNotFoundError):
                 temp_path.unlink()
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"status": "BLOCKED", "blockers": [{"code": "ARTIFACT_MISSING", "path": str(path)}]}
+    if isinstance(payload, dict):
+        return payload
+    return {"status": "BLOCKED", "blockers": [{"code": "ARTIFACT_JSON_NOT_OBJECT", "path": str(path)}]}
+
+
+def _read_security_child_payload(
+    label: str,
+    artifact: Mapping[str, Any],
+    *,
+    approved_roots: Sequence[Path],
+    evidence_run_id: str,
+) -> dict[str, Any]:
+    raw_path = artifact.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_PATH_MISSING",
+            "Docker security source artifact path is missing.",
+            path=None,
+        )
+    try:
+        path = _approved_security_child_path(Path(raw_path), approved_roots=approved_roots)
+        content = _read_security_child_bytes(path, approved_roots=approved_roots)
+    except FileNotFoundError:
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_MISSING",
+            "Docker security source artifact is missing.",
+            path=raw_path,
+        )
+    except ValueError as error:
+        return _blocked_security_child(
+            label,
+            str(error),
+            "Docker security source artifact path is outside the approved evidence roots.",
+            path=raw_path,
+        )
+    except OSError:
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_READ_FAILED",
+            "Docker security source artifact could not be read safely.",
+            path=raw_path,
+        )
+    except RuntimeError as error:
+        return _blocked_security_child(
+            label,
+            str(error),
+            "Docker security source artifact could not be read safely.",
+            path=raw_path,
+        )
+
+    digest = hashlib.sha256(content).hexdigest()
+    raw_sha256 = artifact.get("sha256")
+    if isinstance(raw_sha256, str) and re.fullmatch(r"[a-fA-F0-9]{64}", raw_sha256.strip()):
+        if digest != raw_sha256.lower():
+            return _blocked_security_child(
+                label,
+                "DOCKER_SECURITY_SOURCE_HASH_MISMATCH",
+                "Docker security source artifact sha256 does not match file content.",
+                path=raw_path,
+            )
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_JSON_INVALID",
+            "Docker security source artifact must be bounded valid JSON.",
+            path=raw_path,
+        )
+    if not isinstance(payload, dict):
+        return _blocked_security_child(
+            label,
+            "DOCKER_SECURITY_SOURCE_JSON_NOT_OBJECT",
+            "Docker security source artifact JSON must be an object.",
+            path=raw_path,
+        )
+    _bind_security_child_to_current_run(payload, label=label, path=raw_path, evidence_run_id=evidence_run_id)
+    expected_schema = DOCKER_SECURITY_CHILD_SCHEMAS[label]
+    observed_schema = payload.get("schema_version") or payload.get("schema")
+    if observed_schema != expected_schema:
+        blockers = list(payload.get("blockers", [])) if isinstance(payload.get("blockers"), list) else []
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_SCHEMA_INVALID",
+                "source": label,
+                "expected_schema": expected_schema,
+                "schema": observed_schema,
+                "path": str(path),
+            }
+        )
+        payload = dict(payload)
+        payload["status"] = "BLOCKED" if payload.get("status") != "FAIL" else "FAIL"
+        payload["blockers"] = blockers
+    _enforce_security_child_contract(payload, label=label)
+    return payload
+
+
+def _enforce_security_child_contract(payload: dict[str, Any], *, label: str) -> None:
+    if payload.get("status") != "PASS":
+        return
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    if label == "source_trust":
+        blockers.extend(_source_trust_contract_blockers(payload))
+    elif label == "static":
+        child_blockers, child_findings = _static_contract_issues(payload)
+        blockers.extend(child_blockers)
+        findings.extend(child_findings)
+    elif label == "smoke" and not _smoke_contract_passes(payload):
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SMOKE_LIVE_COMMAND_EVIDENCE_MISSING",
+                "source": label,
+                "message": "Docker smoke PASS must include live command evidence.",
+            }
+        )
+    if blockers:
+        payload["status"] = "BLOCKED"
+        payload["blockers"] = [*_child_blockers(payload), *blockers]
+    if findings:
+        payload["status"] = "FAIL"
+        payload["findings"] = [*_child_findings(payload), *findings]
+
+
+def _source_trust_contract_blockers(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    checked_paths = payload.get("checked_paths")
+    if not isinstance(checked_paths, list) or not checked_paths:
+        return [
+            {
+                "code": "DOCKER_SECURITY_SOURCE_TRUST_CHECKED_PATHS_MISSING",
+                "source": "source_trust",
+                "message": "source_trust PASS must include non-empty checked_paths proof records.",
+            }
+        ]
+    records = [record for record in checked_paths if isinstance(record, Mapping)]
+    blockers: list[dict[str, Any]] = []
+    labels = {str(record.get("label") or "") for record in records}
+    required_labels = _required_source_trust_labels(payload)
+    for label in sorted(required_labels - labels):
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_TRUST_REQUIRED_LABEL_MISSING",
+                "source": "source_trust",
+                "label": label,
+                "message": "source_trust PASS is missing a required checked path label.",
+            }
+        )
+    required_label_set = set(required_labels)
+    for record in records:
+        label = str(record.get("label") or "")
+        if label not in required_label_set:
+            continue
+        blockers.extend(_source_trust_record_blockers(record))
+    return blockers
+
+
+def _required_source_trust_labels(payload: Mapping[str, Any]) -> set[str]:
+    required = set(SOURCE_TRUST_COMMON_REQUIRED_LABELS)
+    role_values = _source_trust_required_roles(payload)
+    for role in role_values:
+        label = SOURCE_TRUST_ROLE_LABELS.get(role)
+        if label:
+            required.add(label)
+    return required
+
+
+def _source_trust_required_roles(payload: Mapping[str, Any]) -> set[str]:
+    default_roles = set(SOURCE_TRUST_ROLE_LABELS)
+    roles = payload.get("roles")
+    if not isinstance(roles, list):
+        return default_roles
+    role_values = {str(role).strip() for role in roles if str(role).strip()}
+    if role_values and role_values <= set(SOURCE_TRUST_ROLE_LABELS):
+        return role_values
+    return default_roles
+
+
+def _source_trust_record_blockers(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    label = str(record.get("label") or "")
+    blockers: list[dict[str, Any]] = []
+    expected_kind = str(record.get("expected_kind") or "")
+    if label in {
+        "checkout root",
+        "infra directory",
+        "env source directory",
+        "systemd source directory",
+        "trust path component",
+    }:
+        required_kind = "directory"
+        kind_key = "is_directory"
+    else:
+        required_kind = "file"
+        kind_key = "is_regular"
+    checks = (
+        ("exists", True, "DOCKER_SECURITY_SOURCE_TRUST_PATH_MISSING"),
+        ("is_symlink", False, "DOCKER_SECURITY_SOURCE_TRUST_SYMLINK"),
+        ("trusted_owner", True, "DOCKER_SECURITY_SOURCE_TRUST_OWNER_UNTRUSTED"),
+        ("group_writable", False, "DOCKER_SECURITY_SOURCE_TRUST_GROUP_WRITABLE"),
+        ("world_writable", False, "DOCKER_SECURITY_SOURCE_TRUST_WORLD_WRITABLE"),
+        (kind_key, True, "DOCKER_SECURITY_SOURCE_TRUST_KIND_MISMATCH"),
+    )
+    if expected_kind != required_kind:
+        blockers.append(_source_trust_record_blocker(record, "DOCKER_SECURITY_SOURCE_TRUST_KIND_MISMATCH"))
+    for key, expected, code in checks:
+        if record.get(key) is not expected:
+            blockers.append(_source_trust_record_blocker(record, code, evidence_key=key, observed=record.get(key)))
+    if label in set(SOURCE_TRUST_ROLE_LABELS.values()) and str(record.get("mode") or "") != "0600":
+        blockers.append(
+            _source_trust_record_blocker(
+                record,
+                "DOCKER_SECURITY_SOURCE_TRUST_ROLE_ENV_MODE_INVALID",
+                evidence_key="mode",
+                observed=record.get("mode"),
+            )
+        )
+    return blockers
+
+
+def _source_trust_record_blocker(
+    record: Mapping[str, Any],
+    code: str,
+    *,
+    evidence_key: str | None = None,
+    observed: Any = None,
+) -> dict[str, Any]:
+    blocker: dict[str, Any] = {
+        "code": code,
+        "source": "source_trust",
+        "label": record.get("label"),
+        "path": record.get("path"),
+        "message": "source_trust PASS contains an unsafe or incomplete checked path record.",
+    }
+    if evidence_key is not None:
+        blocker["evidence_key"] = evidence_key
+        blocker["observed"] = observed
+    return blocker
+
+
+def _source_trust_report_paths(value: Path | Sequence[Path]) -> list[Path]:
+    if isinstance(value, Path):
+        return [value]
+    paths = list(value)
+    if not paths:
+        raise ValueError("at least one --source-trust-report is required")
+    return paths
+
+
+def _combine_source_trust_payloads(payloads: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    if not payloads:
+        return _blocked_security_child(
+            "source_trust",
+            "DOCKER_SECURITY_SOURCE_TRUST_MISSING",
+            "Docker security summary requires source-trust evidence.",
+            path=None,
+        )
+    combined: dict[str, Any] = {
+        "schema": DOCKER_SECURITY_CHILD_SCHEMAS["source_trust"],
+        "status": "PASS",
+        "roles": [],
+        "checked_paths": [],
+        "blockers": [],
+        "findings": [],
+        "source_reports": [],
+    }
+    roles: list[str] = []
+    checked_paths: list[Any] = []
+    blockers: list[Any] = []
+    findings: list[Any] = []
+    statuses: set[Any] = set()
+    evidence_run_id: Any = None
+    for payload in payloads:
+        statuses.add(payload.get("status"))
+        if evidence_run_id is None:
+            evidence_run_id = payload.get("evidence_run_id") or payload.get("bundle_run_id")
+        raw_roles = payload.get("roles")
+        if isinstance(raw_roles, list):
+            for role in raw_roles:
+                role_text = str(role).strip()
+                if role_text and role_text not in roles:
+                    roles.append(role_text)
+        raw_checked = payload.get("checked_paths")
+        if isinstance(raw_checked, list):
+            checked_paths.extend(raw_checked)
+        blockers.extend(_child_blockers(payload))
+        findings.extend(_child_findings(payload))
+        combined["source_reports"].append(
+            {
+                "status": payload.get("status"),
+                "roles": list(raw_roles) if isinstance(raw_roles, list) else [],
+            }
+        )
+    combined["evidence_run_id"] = evidence_run_id
+    combined["roles"] = roles
+    combined["checked_paths"] = checked_paths
+    combined["blockers"] = blockers
+    combined["findings"] = findings
+    missing_roles = sorted(set(SOURCE_TRUST_ROLE_LABELS) - _source_trust_proven_roles(combined))
+    for role in missing_roles:
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_TRUST_ROLE_ENV_PROOF_MISSING",
+                "source": "source_trust",
+                "role": role,
+                "label": SOURCE_TRUST_ROLE_LABELS[role],
+                "message": "source_trust PASS requires both compute and display role env proof.",
+            }
+        )
+    if "FAIL" in statuses or findings:
+        combined["status"] = "FAIL"
+    elif statuses != {"PASS"} or blockers:
+        combined["status"] = "BLOCKED"
+    else:
+        combined["status"] = "PASS"
+    return combined
+
+
+def _source_trust_proven_roles(payload: Mapping[str, Any]) -> set[str]:
+    checked_paths = payload.get("checked_paths")
+    if not isinstance(checked_paths, list):
+        return set()
+    roles: set[str] = set()
+    for role, label in SOURCE_TRUST_ROLE_LABELS.items():
+        for record in checked_paths:
+            if not isinstance(record, Mapping) or str(record.get("label") or "") != label:
+                continue
+            if not _source_trust_record_blockers(record):
+                roles.add(role)
+                break
+    return roles
+
+
+def _static_contract_issues(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    for proof_name in DOCKER_STATIC_REQUIRED_PROOFS:
+        expected = proof_name in DOCKER_REQUIRED_TRUE_PROOFS
+        observed = payload.get(proof_name)
+        if observed is None:
+            blockers.append(
+                {
+                    "code": "DOCKER_SECURITY_STATIC_PROOF_MISSING",
+                    "source": "static",
+                    "proof": proof_name,
+                    "message": "static PASS must include final-compatible Docker proof fields.",
+                }
+            )
+        elif observed is not expected:
+            findings.append(
+                {
+                    "code": "DOCKER_SECURITY_STATIC_PROOF_CONTRADICTS_PASS",
+                    "source": "static",
+                    "proof": proof_name,
+                    "observed": observed,
+                    "expected": expected,
+                    "message": "static PASS contradicts a required Docker proof field.",
+                }
+            )
+    return blockers, findings
+
+
+def _smoke_contract_passes(payload: Mapping[str, Any]) -> bool:
+    commands = payload.get("commands")
+    if not isinstance(commands, Mapping):
+        return False
+    required_success = ("image_absence_probe", "display_startup_start", "display_startup_probe")
+    return all(
+        isinstance(commands.get(name), Mapping) and commands[name].get("returncode") == 0
+        for name in required_success
+    )
+
+
+def _bind_security_child_to_current_run(
+    payload: dict[str, Any],
+    *,
+    label: str,
+    path: str,
+    evidence_run_id: str,
+) -> None:
+    raw_id = payload.get("evidence_run_id") or payload.get("bundle_run_id") or payload.get("evidence_bundle_id")
+    if raw_id is not None and str(raw_id).strip() == evidence_run_id:
+        return
+    blockers = list(payload.get("blockers", [])) if isinstance(payload.get("blockers"), list) else []
+    if raw_id is None or not str(raw_id).strip():
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_RUN_ID_MISSING",
+                "source": label,
+                "path": path,
+                "expected_evidence_run_id": evidence_run_id,
+            }
+        )
+    else:
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_RUN_ID_MISMATCH",
+                "source": label,
+                "path": path,
+                "evidence_run_id": raw_id,
+                "expected_evidence_run_id": evidence_run_id,
+            }
+        )
+    payload["status"] = "BLOCKED" if payload.get("status") != "FAIL" else "FAIL"
+    payload["blockers"] = blockers
+
+
+def _blocked_security_child(label: str, code: str, message: str, *, path: str | None) -> dict[str, Any]:
+    blocker: dict[str, Any] = {"code": code, "source": label, "message": message}
+    if path is not None:
+        blocker["path"] = path
+    return {"status": "BLOCKED", "blockers": [blocker]}
+
+
+def _artifact_summary(
+    label: str,
+    path: Path,
+    *,
+    repo_root: Path,
+    approved_roots: Sequence[Path],
+) -> dict[str, Any]:
+    resolved = _resolve_child_path_no_follow(path, repo_root)
+    summary: dict[str, Any] = {"path": str(resolved)}
+    try:
+        approved_path = _approved_security_child_path(resolved, approved_roots=approved_roots)
+        content = _read_security_child_bytes(approved_path, approved_roots=approved_roots)
+    except FileNotFoundError:
+        summary["sha256"] = None
+        summary["blocked"] = True
+        summary["blocker_code"] = "DOCKER_SECURITY_SOURCE_MISSING"
+    except ValueError as error:
+        summary["sha256"] = None
+        summary["blocked"] = True
+        summary["blocker_code"] = str(error)
+    except (OSError, RuntimeError):
+        summary["sha256"] = None
+        summary["blocked"] = True
+        summary["blocker_code"] = "DOCKER_SECURITY_SOURCE_UNSAFE"
+    else:
+        summary["sha256"] = hashlib.sha256(content).hexdigest()
+    summary["source"] = label
+    return summary
+
+
+def _docker_security_child_roots(repo_root: Path, summary_root: Path) -> tuple[Path, ...]:
+    stage_change_root = (repo_root / "artifacts" / "stage-change" / CHANGE_ID).resolve(strict=False)
+    roots = [summary_root.resolve(strict=False), stage_change_root]
+    return tuple(dict.fromkeys(roots))
+
+
+def _approved_security_child_path(path: Path, *, approved_roots: Sequence[Path]) -> Path:
+    candidate = path.expanduser()
+    _reject_symlink_components(candidate.parent)
+    resolved = candidate.parent.resolve(strict=False) / candidate.name
+    if not any(_is_relative_to(resolved, root.resolve(strict=False)) for root in approved_roots):
+        raise ValueError("DOCKER_SECURITY_SOURCE_OUTSIDE_APPROVED_ROOT")
+    _reject_symlink_components(resolved.parent)
+    return resolved
+
+
+def _read_security_child_bytes(path: Path, *, approved_roots: Sequence[Path]) -> bytes:
+    root = _security_child_containment_root(path, approved_roots=approved_roots)
+    relative = path.relative_to(root)
+    parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = parent_fd
+        for part in relative.parts[:-1]:
+            if part in {"", ".", ".."}:
+                raise RuntimeError("DOCKER_SECURITY_SOURCE_UNSAFE_PATH")
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+            if fd != parent_fd:
+                os.close(fd)
+            fd = next_fd
+        target = relative.name
+        if target in {"", ".", ".."}:
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_UNSAFE_PATH")
+        st = os.stat(target, dir_fd=fd, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode):
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_SYMLINK")
+        if not stat.S_ISREG(st.st_mode):
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_NOT_FILE")
+        if st.st_size > MAX_SECURITY_CHILD_BYTES:
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_TOO_LARGE")
+        read_fd = os.open(
+            target,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=fd,
+        )
+        try:
+            opened = os.fstat(read_fd)
+            if opened.st_dev != st.st_dev or opened.st_ino != st.st_ino:
+                raise RuntimeError("DOCKER_SECURITY_SOURCE_CHANGED")
+            content = os.read(read_fd, MAX_SECURITY_CHILD_BYTES + 1)
+        finally:
+            os.close(read_fd)
+        if len(content) > MAX_SECURITY_CHILD_BYTES:
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_TOO_LARGE")
+        return content
+    finally:
+        if "fd" in locals() and fd != parent_fd:
+            os.close(fd)
+        os.close(parent_fd)
+
+
+def _security_child_containment_root(path: Path, *, approved_roots: Sequence[Path]) -> Path:
+    resolved = path.parent.resolve(strict=False) / path.name
+    for root in approved_roots:
+        resolved_root = root.resolve(strict=False)
+        if _is_relative_to(resolved, resolved_root):
+            return resolved_root
+    raise ValueError("DOCKER_SECURITY_SOURCE_OUTSIDE_APPROVED_ROOT")
+
+
+def _reject_symlink_components(path: Path) -> None:
+    current = path.expanduser()
+    for component in [current, *current.parents]:
+        if component.exists() and component.is_symlink():
+            raise RuntimeError("DOCKER_SECURITY_SOURCE_SYMLINK")
+
+
+def _resolve_child_path_no_follow(path: Path, repo_root: Path) -> Path:
+    candidate = path if path.is_absolute() else repo_root / path
+    candidate = candidate.expanduser()
+    _reject_symlink_components(candidate.parent)
+    return candidate.parent.resolve(strict=False) / candidate.name
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _docker_security_summary_status(
+    source_trust_payload: Mapping[str, Any],
+    static_payload: Mapping[str, Any],
+    smoke_payload: Mapping[str, Any],
+) -> str:
+    payloads = (source_trust_payload, static_payload, smoke_payload)
+    if any(_child_findings(payload) for payload in payloads):
+        return "FAIL"
+    if any(_child_blockers(payload) for payload in payloads):
+        return "BLOCKED"
+    statuses = {source_trust_payload.get("status"), static_payload.get("status"), smoke_payload.get("status")}
+    if "FAIL" in statuses:
+        return "FAIL"
+    if statuses == {"PASS"}:
+        return "PASS"
+    return "BLOCKED"
+
+
+def _docker_security_summary_blockers(
+    source_trust_payload: Mapping[str, Any],
+    static_payload: Mapping[str, Any],
+    smoke_payload: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for label, payload in (
+        ("source_trust", source_trust_payload),
+        ("static", static_payload),
+        ("smoke", smoke_payload),
+    ):
+        child_blockers = _child_blockers(payload)
+        child_findings = _child_findings(payload)
+        if payload.get("status") == "PASS" and not child_blockers and not child_findings:
+            continue
+        blockers.append(
+            {
+                "code": "DOCKER_SECURITY_SOURCE_NOT_PASS",
+                "source": label,
+                "status": payload.get("status"),
+                "source_blockers": child_blockers,
+                "source_findings": child_findings,
+            }
+        )
+    return blockers
+
+
+def _child_blockers(payload: Mapping[str, Any]) -> list[Any]:
+    blockers = payload.get("blockers")
+    return list(blockers) if isinstance(blockers, list) else []
+
+
+def _child_findings(payload: Mapping[str, Any]) -> list[Any]:
+    findings = payload.get("findings")
+    return list(findings) if isinstance(findings, list) else []
 
 
 def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list[Finding]:
@@ -2533,6 +3439,7 @@ def _docker_smoke_payload(
     status: str,
     evidence_root: Path,
     repo_root: Path,
+    evidence_run_id: str | None,
     image_tag: str,
     dockerfile: Path,
     commands: Mapping[str, CommandResult],
@@ -2542,6 +3449,7 @@ def _docker_smoke_payload(
     return {
         "schema_version": "nhms.two_node_docker.app_smoke.v1",
         "change_id": CHANGE_ID,
+        "evidence_run_id": evidence_run_id or _evidence_run_id_from_output(evidence_root),
         "status": status,
         "checked_at": _now_iso(),
         "evidence_root": str(evidence_root),
@@ -2554,6 +3462,25 @@ def _docker_smoke_payload(
         "expected_absent_paths": list(APP_IMAGE_FORBIDDEN_PATHS),
         "blockers": list(blockers),
     }
+
+
+def _evidence_run_id_from_output(path: Path) -> str | None:
+    resolved = path.resolve(strict=False)
+    parts = resolved.parts
+    for marker in ("two-node-e2e", "test-two-node-e2e-evidence"):
+        if marker not in parts:
+            continue
+        index = parts.index(marker)
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    return None
+
+
+def _safe_evidence_run_id(value: str) -> str:
+    text = str(value).strip()
+    if not SAFE_RUN_ID_RE.fullmatch(text) or ".." in text:
+        raise ValueError("evidence_run_id must use only alphanumerics, '.', '_' or '-' and be at most 128 chars")
+    return text
 
 
 def _docker_smoke_command_blockers(commands: Mapping[str, CommandResult]) -> list[dict[str, Any]]:
@@ -3940,16 +4867,48 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     static_parser.add_argument("--compute-env", type=Path, default=Path("infra/env/compute.example"))
     static_parser.add_argument("--display-env", type=Path, default=Path("infra/env/display.example"))
     static_parser.add_argument("--report", type=Path, default=DEFAULT_STATIC_REPORT)
+    static_parser.add_argument(
+        "--evidence-run-id",
+        help="Current final E2E evidence run id. Defaults to the segment after artifacts/two-node-e2e/ when present.",
+    )
 
     preflight_parser = subparsers.add_parser("preflight", help="Record Docker disk/cache preflight evidence.")
     preflight_parser.add_argument("--evidence-root", type=Path, default=DEFAULT_PREFLIGHT_ROOT)
+    preflight_parser.add_argument(
+        "--evidence-run-id",
+        help="Current final E2E evidence run id. Defaults to the segment after artifacts/two-node-e2e/ when present.",
+    )
     preflight_parser.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
 
     smoke_parser = subparsers.add_parser("smoke", help="Build and smoke-test the default app Docker image.")
     smoke_parser.add_argument("--evidence-root", type=Path, default=DEFAULT_DOCKER_SMOKE_ROOT)
+    smoke_parser.add_argument(
+        "--evidence-run-id",
+        help="Current final E2E evidence run id. Defaults to the segment after artifacts/two-node-e2e/ when present.",
+    )
     smoke_parser.add_argument("--image-tag", default=DEFAULT_SMOKE_IMAGE)
     smoke_parser.add_argument("--dockerfile", type=Path, default=DEFAULT_APP_DOCKERFILE)
     smoke_parser.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
+
+    summary_parser = subparsers.add_parser(
+        "security-summary",
+        help="Aggregate Docker security evidence for final gate.",
+    )
+    summary_parser.add_argument("--output", type=Path, default=DEFAULT_DOCKER_SECURITY_SUMMARY)
+    summary_parser.add_argument("--evidence-run-id", required=True)
+    summary_parser.add_argument(
+        "--source-trust-report",
+        type=Path,
+        action="append",
+        default=None,
+        help="Source-trust report path. Repeat for role-scoped compute/display reports.",
+    )
+    summary_parser.add_argument("--static-report", type=Path, default=DEFAULT_STATIC_REPORT)
+    summary_parser.add_argument(
+        "--smoke-report",
+        type=Path,
+        default=DEFAULT_DOCKER_SMOKE_ROOT / "docker-smoke.json",
+    )
     return parser.parse_args(argv)
 
 
@@ -3982,7 +4941,7 @@ def _run_static_command(args: argparse.Namespace, repo_root: Path) -> int:
         )
     except Exception as error:
         result = _static_setup_failure_result(error)
-        report_path = write_static_report(result, args.report, repo_root)
+        report_path = write_static_report(result, args.report, repo_root, evidence_run_id=args.evidence_run_id)
         redacted_error = _redact_static_output_text(str(error))
         print(
             json.dumps(
@@ -3996,7 +4955,7 @@ def _run_static_command(args: argparse.Namespace, repo_root: Path) -> int:
             )
         )
         return 2
-    report_path = write_static_report(result, args.report, repo_root)
+    report_path = write_static_report(result, args.report, repo_root, evidence_run_id=args.evidence_run_id)
     print(json.dumps({"status": result.status, "report": str(report_path)}, sort_keys=True))
     return 0 if result.status == "PASS" else 1
 
@@ -4011,6 +4970,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = run_preflight(
                 evidence_root=args.evidence_root,
                 repo_root=repo_root,
+                evidence_run_id=args.evidence_run_id,
                 min_free_bytes=int(args.min_free_gb * 1024**3),
             )
             print(json.dumps({"status": result.status, "evidence_path": str(result.evidence_path)}, sort_keys=True))
@@ -4019,6 +4979,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = run_docker_smoke(
                 evidence_root=args.evidence_root,
                 repo_root=repo_root,
+                evidence_run_id=args.evidence_run_id,
                 image_tag=args.image_tag,
                 dockerfile=args.dockerfile,
                 min_free_bytes=int(args.min_free_gb * 1024**3),
@@ -4027,6 +4988,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             if result.status == "PASS":
                 return 0
             if result.status == "BLOCKED":
+                return 3
+            return 1
+        if args.command == "security-summary":
+            output = write_docker_security_summary(
+                output=args.output,
+                repo_root=repo_root,
+                evidence_run_id=args.evidence_run_id,
+                source_trust_report=args.source_trust_report or list(DEFAULT_SOURCE_TRUST_REPORTS),
+                static_report=args.static_report,
+                smoke_report=args.smoke_report,
+            )
+            payload = _read_json_file(output)
+            print(json.dumps({"status": payload.get("status"), "summary": str(output)}, sort_keys=True))
+            if payload.get("status") == "PASS":
+                return 0
+            if payload.get("status") == "BLOCKED":
                 return 3
             return 1
     except ValueError as error:

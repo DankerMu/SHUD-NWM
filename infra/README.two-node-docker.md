@@ -142,10 +142,12 @@ export EVIDENCE_ROOT="artifacts/two-node-e2e/$RUN_ID"
 mkdir -p "$EVIDENCE_ROOT/docker-preflight"
 export TMPDIR="$PWD/artifacts/tmp"
 mkdir -p "$TMPDIR"
-uv run python scripts/validate_two_node_docker_runtime.py preflight --evidence-root "$EVIDENCE_ROOT/docker-preflight"
+uv run python scripts/validate_two_node_docker_runtime.py preflight \
+  --evidence-run-id "$RUN_ID" \
+  --evidence-root "$EVIDENCE_ROOT/docker-preflight"
 ```
 
-该命令记录 Docker version、compose version、DockerRootDir、`docker system df`、`df -h`、`TMPDIR` 和 evidence root。Docker 不可用或空间不足时，本 lane 记为 `BLOCKED`，不能继续并声明 `PASS`。Docker daemon 自身 cache 位置由 DockerRootDir 决定，必须在 evidence 中单独记录。
+该命令记录当前 `evidence_run_id`、Docker version、compose version、DockerRootDir、`docker system df`、`df -h`、`TMPDIR` 和 evidence root。最终 E2E 聚合要求 Docker preflight `PASS` payload 显式绑定当前 run；复制旧的无 ID preflight JSON 不能作为当前 run 的 PASS。Docker 不可用或空间不足时，本 lane 记为 `BLOCKED`，不能继续并声明 `PASS`。Docker daemon 自身 cache 位置由 DockerRootDir 决定，必须在 evidence 中单独记录。
 
 ## 7. Env Files
 
@@ -172,6 +174,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 ```
@@ -195,6 +198,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 ```
@@ -242,6 +246,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/compute.env" -f "$CHECKOUT_ROOT/infra/compose.compute.yml" config --quiet
@@ -263,6 +268,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/compute.env" -f "$CHECKOUT_ROOT/infra/compose.compute.yml" run --rm scheduler-once
@@ -280,6 +286,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/display.env" -f "$CHECKOUT_ROOT/infra/compose.display.yml" config --quiet
@@ -297,7 +304,10 @@ source-trust preflight；失败时本 lane 记为 `BLOCKED`，不得让 compose 
 静态验证：
 
 ```bash
-uv run python scripts/validate_two_node_docker_runtime.py static
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+uv run python scripts/validate_two_node_docker_runtime.py static \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
+  --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"
 ```
 
 ## 9. Systemd Install
@@ -337,6 +347,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 sudo install -m 0644 "$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service" /etc/systemd/system/nhms-compute-compose.service
@@ -350,6 +361,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 sudo systemctl restart nhms-compute-compose.service
@@ -367,6 +379,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 sudo install -m 0644 "$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service" /etc/systemd/system/nhms-display-compose.service
@@ -380,6 +393,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 sudo systemctl restart nhms-display-compose.service
@@ -413,6 +427,46 @@ minimal submit probe evidence
 
 27 容器安全检查必须以 `scripts/validate_two_node_docker_runtime.py static` 和 Docker smoke/image absence evidence 作为 `docker-security/` 的权威边界。下面的容器内探针只是补充性快速检查，但覆盖同一组代表性 Slurm/Munge/Docker socket binary/path：
 
+在最终 E2E 聚合前，先用 checked-in helpers 生成本 run 的 source-trust、static 和 smoke producer evidence，
+再把它们规范化成 `$EVIDENCE_ROOT/docker-security/summary.json`；不要手写该 JSON。compute/display
+source-trust 必须分别写入 role-scoped 报告，`security-summary` 通过重复 `--source-trust-report` 同时消费两份报告：
+
+```bash
+set -euo pipefail
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+CHECKOUT_ROOT="${CHECKOUT_ROOT:-$PWD}"
+TRUST_ROOT="${TRUST_ROOT:-$(dirname "$CHECKOUT_ROOT")}"
+EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
+cd "$CHECKOUT_ROOT"
+uv run python scripts/validate_two_node_docker_source_trust.py \
+  --checkout-root "$CHECKOUT_ROOT" \
+  --trust-root "$TRUST_ROOT" \
+  --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --trusted-owner root --trusted-owner nhms-deploy \
+  --role compute
+uv run python scripts/validate_two_node_docker_source_trust.py \
+  --checkout-root "$CHECKOUT_ROOT" \
+  --trust-root "$TRUST_ROOT" \
+  --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --trusted-owner root --trusted-owner nhms-deploy \
+  --role display
+uv run python scripts/validate_two_node_docker_runtime.py static \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"
+uv run python scripts/validate_two_node_docker_runtime.py smoke \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --evidence-root "$EVIDENCE_ROOT/docker-security"
+uv run python scripts/validate_two_node_docker_runtime.py security-summary \
+  --evidence-run-id "$EVIDENCE_RUN_ID" \
+  --source-trust-report "$EVIDENCE_ROOT/docker-security/two-node-docker-source-trust-compute.json" \
+  --source-trust-report "$EVIDENCE_ROOT/docker-security/two-node-docker-source-trust-display.json" \
+  --static-report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json" \
+  --smoke-report "$EVIDENCE_ROOT/docker-security/docker-smoke.json" \
+  --output "$EVIDENCE_ROOT/docker-security/summary.json"
+```
+
 ```bash
 set -euo pipefail
 : "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
@@ -423,6 +477,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/display.env" -f "$CHECKOUT_ROOT/infra/compose.display.yml" exec display-api sh -lc '
@@ -569,7 +624,7 @@ operator_auth_curl -i -X POST http://127.0.0.1:8000/api/v1/runs/<run_id>/cancel
 ```bash
 export RUN_ID="two-node-e2e-$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="artifacts/two-node-e2e/$RUN_ID"
-mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,browser,slurm,logs,docker-security,docker-preflight}
+mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,browser,slurm,logs,docker-security,docker-preflight,final-e2e-evidence}
 ```
 
 允许的 project-created 输出路径只有：
@@ -581,6 +636,36 @@ artifacts/
 
 每个 evidence bundle 必须记录 status：`PASS`、`PARTIAL`、`FAIL` 或 `BLOCKED`。缺真实 readonly DB、缺 live browser、缺 Slurm probe 或缺 cross-plane strict identity 时，只能记 `BLOCKED` 或 `PARTIAL`，不能补写 `PASS`。
 
+最终聚合前必须写 `$EVIDENCE_ROOT/run.json`，作为当前 bundle 的 metadata 和 strict identity 真相源：
+
+```json
+{
+  "schema": "nhms.two_node_e2e.run.v1",
+  "evidence_run_id": "<EVIDENCE_RUN_ID>",
+  "declared_sources": ["GFS", "IFS"],
+  "reduced_scope": false,
+  "strict_identities": {
+    "GFS": {
+      "source": "GFS",
+      "cycle_time": "<gfs-cycle-time>",
+      "run_id": "<gfs-business-run-id>",
+      "model_id": "basins_qhh_shud",
+      "job_id": "<gfs-job-id-with-published-log>"
+    },
+    "IFS": {
+      "source": "IFS",
+      "cycle_time": "<ifs-cycle-time>",
+      "run_id": "<ifs-business-run-id>",
+      "model_id": "basins_qhh_shud",
+      "job_id": "<ifs-job-id-with-published-log>"
+    }
+  }
+}
+```
+
+创建后先执行 `python -m json.tool "$EVIDENCE_ROOT/run.json" >/dev/null`。单 source 演练必须把 `declared_sources`
+缩成实际 source，并设置 `"reduced_scope": true`。
+
 ## 13. Docker Validation Matrix
 
 | Evidence | 记录内容 | PASS 边界 |
@@ -590,12 +675,78 @@ artifacts/
 | `27-display/` | display compose config/up/ps/logs、runtime config、readonly mount | 只证明 27 display lane |
 | `db/` | readonly DB role、`current_user`、permission probes、redacted DSN | 真实 readonly DB 缺失时 BLOCKED |
 | `api/` | health、runtime config、models、stations、latest-product、ops/jobs/logs | strict identity 缺失时不得 PASS |
-| `browser/` | `/hydro-met`、`/ops` screenshots、DOM/network/console | mock API 不能算 production-like PASS |
+| `browser/` | `/hydro-met`、`/ops` screenshots、DOM/network/console、identity-bound `ops_jobs` 和 `ops_job_logs`（含 `job_id`） | mock API 或缺 `/ops` jobs/logs payload 不能算 production-like PASS |
 | `slurm/` | 22 Gateway health、minimal submit probe、Slurm receipt | 27 不需要也不应具备 Slurm CLI |
 | `logs/` | published log URI、read result、缺失原因 | 不能读取 22 private workspace |
-| `manual-ops/` | 27 fail-closed retry/cancel、22 实际处理 receipt、27 只读展示结果 | 27 不能产生控制面 receipt |
-| `docker-security/` | source-trust preflight、static validator、Docker smoke/image absence evidence、no Slurm/Munge/Docker socket、HostConfig/mount/env 检查；inline probe 仅为补充 | 任一 27 控制能力为 FAIL |
+| `manual-ops/` | `nhms.two_node_e2e.manual_ops.v1`，含当前 `evidence_run_id`、脱敏 operator auth metadata、27 response evidence、27 no-side-effect proof、22 receipt provenance；每个实际 22 receipt provenance 必须绑定 producer、source、当前 bundle、redaction 和可选 artifact hash | 布尔断言、空 provenance 或 27 receipt 不能 PASS |
+| `docker-security/` | `security-summary` 生成的 `nhms.two_node_docker.security_summary.v1`，含 source-trust/static/smoke artifact 路径与 sha256、no Slurm/Munge/Docker socket、HostConfig/mount/env 检查 | 手写或缺 source artifact 不能 PASS；任一 27 控制能力为 FAIL |
 | `cross-plane/` | 同一 `run_id/source/cycle_time/model_id` 从 22 到 27 | historical latest/mock 数据不能 PASS |
+| `final-e2e-evidence/` | `scripts/validate_two_node_e2e_evidence.py` 聚合后的 lane/source/blocker/finding 汇总 | 只有全 lane、全 declared source、live readonly/display/strict identity 证据都通过才 PASS |
+
+完整 GFS/IFS readonly DB evidence 不能只跑一次单 source。先分别运行 `scripts/validate_readonly_db_boundary.py`
+写入 per-source lane，再用同一脚本的 `--merge-source-dir` 合并到 `$EVIDENCE_ROOT/db/readonly-db-boundary/`：
+每个 source dir 必须包含匹配的 `summary.json`、`role.json`、`route_smoke.json`、`permission_probes.json`；
+merge 会拒绝缺 sibling、sibling 与 summary 不一致、source dir 越界或 symlink、非 live/PASS source、
+`validation_provenance.mode != "live"`、`live_readonly_proof != true`、重复/缺失 source，以及与当前 final
+bundle 无关的 stale source dir。source run ID 使用 `$EVIDENCE_RUN_ID-db-GFS`/`$EVIDENCE_RUN_ID-db-IFS`
+或 `$EVIDENCE_RUN_ID-gfs`/`$EVIDENCE_RUN_ID-ifs`；其他命名必须在 source summary 或
+`validation_provenance` 中显式绑定当前 final bundle，并记录 `parent_evidence_root`/`final_evidence_root`
+指向当前 `$EVIDENCE_PARENT` 或 `$EVIDENCE_ROOT`。prefix-style source lane 必须实际位于当前
+`$EVIDENCE_PARENT` 下；不能从另一个 approved root 复用同名 run ID。merged summary 会记录 source artifact path/sha256/run ID
+和 source provenance。
+
+```bash
+uv run python scripts/validate_readonly_db_boundary.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID-db-GFS" \
+  --source GFS \
+  --cycle-time '<gfs-cycle-time>' \
+  --strict-run-id '<gfs-business-run-id>' \
+  --model-id basins_qhh_shud \
+  --job-id '<gfs-job-id-with-published-log>' \
+  --force
+
+uv run python scripts/validate_readonly_db_boundary.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID-db-IFS" \
+  --source IFS \
+  --cycle-time '<ifs-cycle-time>' \
+  --strict-run-id '<ifs-business-run-id>' \
+  --model-id basins_qhh_shud \
+  --job-id '<ifs-job-id-with-published-log>' \
+  --force
+
+uv run python scripts/validate_readonly_db_boundary.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID" \
+  --merge-declared-source GFS \
+  --merge-declared-source IFS \
+  --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-GFS/db/readonly-db-boundary" \
+  --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-IFS/db/readonly-db-boundary" \
+  --force
+```
+
+最终聚合命令：
+
+```bash
+set -euo pipefail
+: "${EVIDENCE_ROOT:?export shared E2E EVIDENCE_ROOT first}"
+EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"
+EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
+uv run python scripts/validate_two_node_e2e_evidence.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID" \
+  --source GFS \
+  --source IFS \
+  --force
+```
+
+单 source 或明确缩减范围的演练必须在 DB merge 和 final 聚合两处使用 `--reduced-scope`，并用
+`--merge-declared-source <source>` 声明实际 source scope；最终只能是 `PARTIAL` 或更低状态，不能作为完整跨面 PASS。
+默认 full-scope merge 仍要求 GFS 和 IFS 两个 source dir。
+聚合器会拒绝非 `artifacts/` 或 `/scratch/frd_muziyao/...` evidence root，并把 stale bundle ID、缺 live Docker/container、
+缺真实 readonly DB、缺 browser/API/log strict identity、缺生产 operator auth、mock/historical latest、writer DB 和 27 控制面 receipt
+纳入最终 blocker/finding。
 
 ## 14. Rollback
 
@@ -611,6 +762,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role display
 sudo systemctl stop nhms-display-compose.service
@@ -629,6 +781,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute
 sudo systemctl stop nhms-compute-compose.service
@@ -649,6 +802,7 @@ uv run python scripts/validate_two_node_docker_source_trust.py \
   --checkout-root "$CHECKOUT_ROOT" \
   --trust-root "$TRUST_ROOT" \
   --evidence-root "$EVIDENCE_ROOT/docker-security" \
+  --evidence-run-id "$(basename "$EVIDENCE_ROOT")" \
   --trusted-owner root --trusted-owner nhms-deploy \
   --role compute --role display
 sudo systemctl restart nhms-compute-compose.service
