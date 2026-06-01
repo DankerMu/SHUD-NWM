@@ -5,6 +5,7 @@
     "contract_id": "m23-qhh-22-production-identity-status-uri.v1",
     "run_id": "fcst_gfs_2026043000_yangtze_shud_v12",
     "model_id": "yangtze_shud_v12",
+    "basin_id": "yangtze",
     "source": "GFS",
     "source_id": "GFS",
     "cycle_time": "2026-04-30T00:00:00Z",

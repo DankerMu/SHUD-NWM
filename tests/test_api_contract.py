@@ -6,6 +6,7 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from fastapi.testclient import TestClient
@@ -20,6 +21,10 @@ from packages.common.forecast_store import (
     QHH_LATEST_REFLECTED_VALUE_LIMIT,
     QHH_LATEST_SEARCH_LIMIT,
     ForecastStoreError,
+)
+from services.orchestrator.production_contract import (
+    PRODUCTION_STAGE_TAXONOMY,
+    PRODUCTION_STATUS_TAXONOMY,
 )
 from tests.test_monitoring_api import (
     _client,
@@ -497,6 +502,39 @@ def test_pipeline_stage_contract_exposes_formal_job_evidence_and_ops_statuses() 
     retry_types = generated_types[retry_start:cancel_start]
     assert 'status: "submitted";' in retry_types
     assert '"submission_failed"' not in retry_types
+
+
+def test_production_identity_status_schema_examples_match_contract_constants() -> None:
+    schema_dir = Path(__file__).resolve().parents[1] / "schemas"
+    pairs = {
+        "pipeline_job": (
+            json.loads((schema_dir / "pipeline_job.schema.json").read_text(encoding="utf-8")),
+            json.loads((schema_dir / "examples" / "pipeline_job.example.json").read_text(encoding="utf-8")),
+        ),
+        "run_manifest": (
+            json.loads((schema_dir / "run_manifest.schema.json").read_text(encoding="utf-8")),
+            json.loads((schema_dir / "examples" / "run_manifest.example.json").read_text(encoding="utf-8")),
+        ),
+        "run_status": (
+            json.loads((schema_dir / "run_status.schema.json").read_text(encoding="utf-8")),
+            json.loads((schema_dir / "examples" / "run_status.example.json").read_text(encoding="utf-8")),
+        ),
+    }
+
+    for name, (schema, example) in pairs.items():
+        _assert_schema_example_shape(schema, example, path=name)
+        identity_schema = schema["properties"]["identity"]
+        identity_example = example["identity"]
+        assert "basin_id" in identity_schema["required"]
+        assert "pipeline_job_id" not in identity_schema["required"]
+        for field in identity_schema["required"]:
+            assert identity_example.get(field) not in (None, "")
+        if "production_stage" in schema["properties"]:
+            assert schema["properties"]["production_stage"]["enum"] == list(PRODUCTION_STAGE_TAXONOMY)
+            assert example["production_stage"] in PRODUCTION_STAGE_TAXONOMY
+        if "production_status" in schema["properties"]:
+            assert schema["properties"]["production_status"]["enum"] == list(PRODUCTION_STATUS_TAXONOMY)
+            assert example["production_status"] in PRODUCTION_STATUS_TAXONOMY
 
 
 def test_queue_depth_contract_uses_success_envelope() -> None:
@@ -1437,6 +1475,60 @@ def _bounded_qhh_latest_reflected_value(value: Any) -> str:
 def _persisted_pipeline_job_statuses() -> list[str]:
     schema = json.loads(PIPELINE_JOB_SCHEMA_PATH.read_text(encoding="utf-8"))
     return list(schema["properties"]["status"]["enum"])
+
+
+def _assert_schema_example_shape(schema: dict[str, Any], example: dict[str, Any], *, path: str) -> None:
+    assert schema.get("type") == "object", path
+    for field in schema.get("required", []):
+        assert field in example, f"{path}.{field}"
+    properties = schema.get("properties", {})
+    if schema.get("additionalProperties") is False:
+        assert set(example).issubset(properties), path
+    for key, value in example.items():
+        if key not in properties:
+            continue
+        _assert_schema_value_shape(properties[key], value, path=f"{path}.{key}")
+
+
+def _assert_schema_value_shape(schema: dict[str, Any], value: Any, *, path: str) -> None:
+    if "enum" in schema:
+        assert value in schema["enum"], path
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        assert isinstance(value, dict), path
+        for field in schema.get("required", []):
+            assert field in value, f"{path}.{field}"
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            assert set(value).issubset(properties), path
+        for key, nested in value.items():
+            if key in properties:
+                _assert_schema_value_shape(properties[key], nested, path=f"{path}.{key}")
+    elif schema_type == "array":
+        assert isinstance(value, list), path
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                _assert_schema_value_shape(item_schema, item, path=f"{path}[{index}]")
+    elif schema_type == "string":
+        assert isinstance(value, str), path
+        if schema.get("minLength") is not None:
+            assert len(value) >= int(schema["minLength"]), path
+        if schema.get("format") == "uri":
+            parsed = urlparse(value)
+            assert parsed.scheme, path
+        if schema.get("format") == "date-time":
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+    elif schema_type == "integer":
+        assert isinstance(value, int) and not isinstance(value, bool), path
+        if schema.get("minimum") is not None:
+            assert value >= schema["minimum"], path
+    elif schema_type == "number":
+        assert isinstance(value, int | float) and not isinstance(value, bool), path
+        if schema.get("minimum") is not None:
+            assert value >= schema["minimum"], path
+        if schema.get("maximum") is not None:
+            assert value <= schema["maximum"], path
 
 
 class _RetryGateway(_MockGateway):

@@ -425,10 +425,11 @@ class SchedulerCandidate:
             "forcing_version_id": self.forcing_version_id,
             "hydro_run_id": contract_identity["hydro_run_id"],
             "published_manifest_id": contract_identity["published_manifest_id"],
-            "pipeline_job_id": contract_identity["pipeline_job_id"],
             "status": self.status,
             "reason": self.reason,
         }
+        if contract_identity.get("pipeline_job_id") not in (None, ""):
+            payload["pipeline_job_id"] = contract_identity["pipeline_job_id"]
         if self.state_evidence:
             payload["state_evidence"] = _evidence_safe(self.state_evidence)
         return payload
@@ -1815,7 +1816,18 @@ def _candidate_state_decision(
         return None
     state = dict(raw_state)
     evidence = _candidate_state_evidence(candidate, state)
-    active_jobs = _state_active_jobs(state)
+    if _candidate_state_has_identity_mismatch(evidence):
+        return CandidateStateDecision(
+            "blocked",
+            "production_identity_mismatch",
+            {
+                **evidence,
+                "decision": "blocked_identity_mismatch",
+                "replacement_submitted": False,
+            },
+        )
+    decision_state = _candidate_state_decision_state(state, evidence)
+    active_jobs = _state_active_jobs(decision_state)
     if active_jobs:
         return CandidateStateDecision(
             "skip",
@@ -1828,8 +1840,8 @@ def _candidate_state_decision(
             },
         )
 
-    hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
-    pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
+    hydro_status = _state_status(decision_state, "hydro_status", "hydro_run_status")
+    pipeline_status = _state_status(decision_state, "pipeline_status", "job_status", "status")
     if hydro_status in ACTIVE_HYDRO_STATUSES or pipeline_status in ACTIVE_PIPELINE_STATUSES:
         return CandidateStateDecision(
             "skip",
@@ -1841,7 +1853,7 @@ def _candidate_state_decision(
                 "replacement_submitted": False,
             },
         )
-    active_truth = _latest_manual_retry_blocker(state)
+    active_truth = _latest_manual_retry_blocker(decision_state)
     if active_truth is not None and active_truth.get("active") is True:
         return CandidateStateDecision(
             "skip",
@@ -1855,7 +1867,7 @@ def _candidate_state_decision(
             },
         )
 
-    if hydro_status in DURABLE_HYDRO_SUCCESS_STATUSES and _terminal_hydro_truth_supersedes_failure(state):
+    if hydro_status in DURABLE_HYDRO_SUCCESS_STATUSES and _terminal_hydro_truth_supersedes_failure(decision_state):
         return CandidateStateDecision(
             "skip",
             "terminal_hydro_success",
@@ -1865,7 +1877,7 @@ def _candidate_state_decision(
                 "terminal_source": "hydro_run",
                 "terminal_status": hydro_status,
                 "durable_hydro_status": hydro_status,
-                "durable_output_reused": bool(_state_output_uri(state)),
+                "durable_output_reused": bool(_state_output_uri(decision_state)),
                 "native_shud_resubmitted": False,
                 "parse_resubmitted": False,
                 "frequency_resubmitted": False,
@@ -1875,7 +1887,7 @@ def _candidate_state_decision(
 
     if pipeline_status in TERMINAL_PIPELINE_SUCCESS_STATUSES and _pipeline_terminal_success_is_candidate_scoped(
         candidate,
-        state,
+        decision_state,
     ):
         return CandidateStateDecision(
             "skip",
@@ -1889,18 +1901,18 @@ def _candidate_state_decision(
             },
         )
 
-    if _manual_retry_requested(state):
+    if _manual_retry_requested(decision_state):
         return CandidateStateDecision(
             "retry",
             "manual_retry_requested",
-            _manual_retry_state_evidence(candidate, state, evidence),
+            _manual_retry_state_evidence(candidate, decision_state, evidence),
         )
 
-    downstream_retry = _downstream_retry_evidence(candidate, state, evidence)
+    downstream_retry = _downstream_retry_evidence(candidate, decision_state, evidence)
     if downstream_retry is not None:
         return CandidateStateDecision("retry", "resume_downstream_after_durable_shud", downstream_retry)
 
-    permanent = _permanent_failure_evidence(candidate, state, evidence)
+    permanent = _permanent_failure_evidence(candidate, decision_state, evidence)
     if permanent is not None:
         return CandidateStateDecision(
             "blocked",
@@ -1908,7 +1920,7 @@ def _candidate_state_decision(
             permanent,
         )
 
-    cancelled = _cancelled_state_evidence(candidate, state, evidence)
+    cancelled = _cancelled_state_evidence(candidate, decision_state, evidence)
     if cancelled is not None:
         return CandidateStateDecision(
             "blocked",
@@ -1920,7 +1932,7 @@ def _candidate_state_decision(
         return CandidateStateDecision(
             "retry",
             "retry_failed_candidate",
-            _retry_failure_evidence(candidate, state, evidence),
+            _retry_failure_evidence(candidate, decision_state, evidence),
         )
 
     return None
@@ -2005,6 +2017,38 @@ def _call_active_slurm_jobs_provider(
         if "unexpected keyword" not in str(error):
             raise
     return provider(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+
+
+def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    validation = evidence.get("production_identity_validation")
+    if not isinstance(validation, Mapping):
+        return dict(state)
+    legacy_sources = {
+        str(source)
+        for source in validation.get("legacy_non_authoritative", [])
+        if str(source).startswith(("pipeline_jobs[", "pipeline_events["))
+    }
+    if not legacy_sources:
+        return dict(state)
+    filtered = dict(state)
+    jobs = _state_jobs(state)
+    if jobs:
+        filtered["pipeline_jobs"] = [
+            dict(job) for index, job in enumerate(jobs) if f"pipeline_jobs[{index}]" not in legacy_sources
+        ]
+        filtered.pop("jobs", None)
+    events = _state_events(state)
+    if events:
+        filtered["pipeline_events"] = [
+            dict(event) for index, event in enumerate(events) if f"pipeline_events[{index}]" not in legacy_sources
+        ]
+        filtered.pop("events", None)
+    if filtered.get("pipeline_jobs") == []:
+        filtered.pop("pipeline_status", None)
+        filtered.pop("job_status", None)
+        if state.get("status") in ACTIVE_PIPELINE_STATUSES | TERMINAL_PIPELINE_STATUSES | FAILED_PIPELINE_STATUSES:
+            filtered.pop("status", None)
+    return filtered
 
 
 def _pipeline_terminal_success_is_candidate_scoped(
@@ -2122,13 +2166,13 @@ def _candidate_state_evidence(candidate: SchedulerCandidate, state: Mapping[str,
             "forcing_version_id": candidate.forcing_version_id,
             "hydro_run_id": candidate.run_id,
             "published_manifest_id": _candidate_published_manifest_id(candidate),
-            "pipeline_job_id": _candidate_contract_pipeline_job_id(candidate),
             "source_id": candidate.source_id,
             "source": candidate.source_id,
             "cycle_time_utc": _format_utc(candidate.cycle_time_utc),
             "cycle_time": _format_utc(candidate.cycle_time_utc),
             "model_id": candidate.model_id,
             "scenario_id": candidate.scenario_id,
+            "basin_id": candidate.basin_id,
             "basin_version_id": candidate.basin_version_id,
             "river_network_version_id": candidate.river_network_version_id,
         },
@@ -2185,11 +2229,20 @@ def _candidate_state_identity_validation(
         value = state.get(key)
         if isinstance(value, Mapping):
             containers.append((key, value))
+    for index, job in enumerate(_state_jobs(state)):
+        containers.append((f"pipeline_jobs[{index}]", job))
+    for index, event in enumerate(_state_events(state)):
+        containers.extend(_event_identity_containers(index, event))
     mismatches: list[dict[str, Any]] = []
     compared: dict[str, dict[str, Any]] = {}
+    legacy_non_authoritative: list[str] = []
     for source, payload in containers:
+        if _legacy_non_authoritative_state_row(expected, payload):
+            legacy_non_authoritative.append(source)
+            continue
+        validation_payload = _legacy_compatible_state_row(expected, payload)
         try:
-            fields = validate_compatible_production_identity(expected, payload)
+            fields = validate_compatible_production_identity(expected, validation_payload)
         except ProductionContractError as exc:
             mismatches.append({"source": source, **exc.to_dict()})
             continue
@@ -2200,8 +2253,230 @@ def _candidate_state_identity_validation(
         "status": "mismatch" if mismatches else "compatible",
         "checked_sources": [source for source, _payload in containers],
         "compared": compared,
+        "legacy_non_authoritative": legacy_non_authoritative,
         "mismatches": mismatches,
     }
+
+
+def _event_identity_containers(index: int, event: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    containers: list[tuple[str, Mapping[str, Any]]] = [(f"pipeline_events[{index}]", event)]
+    details = event.get("details")
+    if not isinstance(details, Mapping):
+        return containers
+    identity = details.get("identity")
+    if isinstance(identity, Mapping):
+        containers.append((f"pipeline_events[{index}].details.identity", identity))
+    containers.append((f"pipeline_events[{index}].details", details))
+    task_results = details.get("task_results")
+    if isinstance(task_results, Sequence) and not isinstance(task_results, str | bytes | bytearray):
+        for task_index, task in enumerate(task_results):
+            if isinstance(task, Mapping):
+                containers.append((f"pipeline_events[{index}].details.task_results[{task_index}]", task))
+                task_identity = task.get("identity")
+                if isinstance(task_identity, Mapping):
+                    containers.append(
+                        (f"pipeline_events[{index}].details.task_results[{task_index}].identity", task_identity)
+                    )
+    for key in ("task_identity", "failed_task", "failed_task_identity"):
+        value = details.get(key)
+        if isinstance(value, Mapping):
+            containers.append((f"pipeline_events[{index}].details.{key}", value))
+    return containers
+
+
+def _legacy_non_authoritative_state_row(expected: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    row_values = _legacy_identity_values(row)
+    expected_values = _legacy_identity_values(expected)
+    if _m23_identity_fields_present(row_values):
+        return False
+    for nested in _nested_state_identity_payloads(row):
+        nested_values = _legacy_identity_values(nested)
+        if _m23_identity_fields_present(nested_values):
+            return False
+    if _legacy_values_prove_same_candidate(row_values, expected_values):
+        return False
+    for nested in _nested_state_identity_payloads(row):
+        if _legacy_values_prove_same_candidate(_legacy_identity_values(nested), expected_values):
+            return False
+    return bool(row)
+
+
+def _legacy_values_prove_same_candidate(
+    row_values: Mapping[str, str],
+    expected_values: Mapping[str, str],
+) -> bool:
+    if not row_values:
+        return False
+    for identity_field in ("model_id", "source", "cycle_time"):
+        value = row_values.get(identity_field)
+        expected_value = expected_values.get(identity_field)
+        if value not in (None, "") and expected_value not in (None, "") and value != expected_value:
+            return False
+    run_id = row_values.get("run_id")
+    expected_run_id = expected_values.get("run_id")
+    if run_id not in (None, ""):
+        if run_id == expected_run_id:
+            return True
+        if not _stage_cycle_run_matches_candidate(run_id, expected_values):
+            return False
+        return True
+    source = row_values.get("source")
+    cycle_time = row_values.get("cycle_time")
+    model_id = row_values.get("model_id")
+    if source in (None, "") or cycle_time in (None, ""):
+        return False
+    if source != expected_values.get("source") or cycle_time != expected_values.get("cycle_time"):
+        return False
+    return model_id in (None, "", expected_values.get("model_id"))
+
+
+def _m23_identity_fields_present(values: Mapping[str, str]) -> bool:
+    return any(
+        field in values
+        for field in (
+            "basin_id",
+            "basin_version_id",
+            "river_network_version_id",
+            "canonical_product_id",
+            "forcing_version_id",
+            "hydro_run_id",
+            "published_manifest_id",
+            "pipeline_job_id",
+            "pipeline_event_id",
+        )
+    )
+
+
+def _nested_state_identity_payloads(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    payloads: list[Mapping[str, Any]] = []
+    for key in ("identity", "task_identity", "failed_task", "failed_task_identity"):
+        value = row.get(key)
+        if isinstance(value, Mapping):
+            payloads.append(value)
+    details = row.get("details")
+    if isinstance(details, Mapping):
+        payloads.append(details)
+        for key in ("identity", "task_identity", "failed_task", "failed_task_identity"):
+            value = details.get(key)
+            if isinstance(value, Mapping):
+                payloads.append(value)
+        task_results = details.get("task_results")
+        if isinstance(task_results, Sequence) and not isinstance(task_results, str | bytes | bytearray):
+            for task in task_results:
+                if not isinstance(task, Mapping):
+                    continue
+                payloads.append(task)
+                identity = task.get("identity")
+                if isinstance(identity, Mapping):
+                    payloads.append(identity)
+    return payloads
+
+
+def _legacy_compatible_state_row(expected: Mapping[str, Any], row: Mapping[str, Any]) -> Mapping[str, Any]:
+    row_values = _legacy_identity_values(row)
+    expected_values = _legacy_identity_values(expected)
+    if _m23_identity_fields_present(row_values) or not _stage_cycle_run_matches_candidate(
+        row_values.get("run_id"),
+        expected_values,
+    ):
+        return row
+    payload = dict(row)
+    payload.pop("run_id", None)
+    identity = payload.get("identity")
+    if isinstance(identity, Mapping):
+        identity_payload = dict(identity)
+        identity_payload.pop("run_id", None)
+        payload["identity"] = identity_payload
+    return payload
+
+
+def _legacy_identity_values(payload: Mapping[str, Any]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    aliases: dict[str, tuple[tuple[str, ...], ...]] = {
+        "run_id": (("run_id",), ("identity", "run_id")),
+        "model_id": (("model_id",), ("identity", "model_id")),
+        "basin_id": (("basin_id",), ("identity", "basin_id")),
+        "source": (("source",), ("source_id",), ("identity", "source"), ("identity", "source_id")),
+        "cycle_time": (
+            ("cycle_time",),
+            ("cycle_time_utc",),
+            ("identity", "cycle_time"),
+            ("identity", "cycle_time_utc"),
+        ),
+        "basin_version_id": (("basin_version_id",), ("identity", "basin_version_id")),
+        "river_network_version_id": (("river_network_version_id",), ("identity", "river_network_version_id")),
+        "canonical_product_id": (("canonical_product_id",), ("identity", "canonical_product_id")),
+        "forcing_version_id": (("forcing_version_id",), ("identity", "forcing_version_id")),
+        "hydro_run_id": (("hydro_run_id",), ("identity", "hydro_run_id")),
+        "published_manifest_id": (("published_manifest_id",), ("identity", "published_manifest_id")),
+        "pipeline_job_id": (("pipeline_job_id",), ("identity", "pipeline_job_id")),
+        "pipeline_event_id": (("pipeline_event_id",), ("identity", "pipeline_event_id")),
+    }
+    for identity_field, field_aliases in aliases.items():
+        value = _first_nested_state_value(payload, field_aliases)
+        if value in (None, ""):
+            continue
+        if identity_field == "source":
+            try:
+                value = normalize_source_id(str(value))
+            except ValueError:
+                value = str(value).strip()
+        elif identity_field == "cycle_time":
+            try:
+                value = _format_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+            except ValueError:
+                try:
+                    value = _format_utc(datetime.strptime(str(value), "%Y%m%d%H").replace(tzinfo=UTC))
+                except ValueError:
+                    value = str(value).strip()
+        else:
+            value = str(value).strip()
+        if value:
+            values[identity_field] = value
+    job_id = payload.get("job_id") or payload.get("entity_id")
+    if "pipeline_job_id" not in values and job_id not in (None, "") and _looks_like_production_job_id(job_id):
+        values["stage_job_id"] = str(job_id).strip()
+    event_id = payload.get("event_id")
+    if "pipeline_event_id" not in values and event_id not in (None, ""):
+        values["stage_event_id"] = str(event_id).strip()
+    return values
+
+
+def _stage_cycle_run_matches_candidate(run_id: str | None, expected_values: Mapping[str, str]) -> bool:
+    if run_id in (None, ""):
+        return False
+    source = str(expected_values.get("source") or "").lower()
+    cycle_time = str(expected_values.get("cycle_time") or "")
+    model_id = str(expected_values.get("model_id") or "")
+    if not source or not cycle_time or not model_id:
+        return False
+    try:
+        compact_cycle = format_cycle_time(cycle_time)
+    except (TypeError, ValueError):
+        return False
+    prefix = f"cycle_{source}_{compact_cycle}"
+    text = str(run_id)
+    return text == prefix or (
+        text.startswith(f"{prefix}_") and (text.endswith(f"_{model_id}") or f"_{model_id}_" in text)
+    )
+
+
+def _first_nested_state_value(payload: Mapping[str, Any], aliases: Sequence[tuple[str, ...]]) -> Any:
+    for path in aliases:
+        current: Any = payload
+        for key in path:
+            if not isinstance(current, Mapping) or key not in current:
+                current = None
+                break
+            current = current[key]
+        if current not in (None, ""):
+            return current
+    return None
+
+
+def _looks_like_production_job_id(value: Any) -> bool:
+    text = str(value or "")
+    return text.startswith(("job_fcst_", "job_cycle_"))
 
 
 def _candidate_state_has_identity_mismatch(evidence: Mapping[str, Any]) -> bool:
@@ -2294,12 +2569,23 @@ def _job_state_evidence(job: Mapping[str, Any]) -> dict[str, Any]:
         for key in (
             "job_id",
             "pipeline_job_id",
+            "pipeline_event_id",
             "run_id",
             "cycle_id",
             "job_type",
             "slurm_job_id",
             "array_task_id",
             "model_id",
+            "basin_id",
+            "source",
+            "source_id",
+            "cycle_time",
+            "basin_version_id",
+            "river_network_version_id",
+            "canonical_product_id",
+            "forcing_version_id",
+            "hydro_run_id",
+            "published_manifest_id",
             "status",
             "stage",
             "exit_code",
@@ -3277,7 +3563,6 @@ def _candidate_basin_manifest(
         "forcing_version_id": candidate.forcing_version_id,
         "hydro_run_id": candidate.run_id,
         "published_manifest_id": _candidate_published_manifest_id(candidate),
-        "pipeline_job_id": _candidate_contract_pipeline_job_id(candidate),
         "forecast_horizon_hours": candidate.horizon.get("forecast_horizon_hours")
         or candidate.horizon.get("max_lead_hours"),
         "max_lead_hours": candidate.horizon.get("max_lead_hours"),
@@ -3295,6 +3580,9 @@ def _candidate_basin_manifest(
     }
     if orchestration_run_id not in (None, ""):
         manifest["orchestration_run_id"] = orchestration_run_id
+    pipeline_job_id = _candidate_contract_pipeline_job_id(candidate)
+    if pipeline_job_id not in (None, ""):
+        manifest["pipeline_job_id"] = pipeline_job_id
     if candidate.state_evidence:
         state_evidence = _evidence_safe(candidate.state_evidence)
         manifest["state_evidence"] = state_evidence
@@ -3341,7 +3629,6 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
         "forcing_version_id": candidate.forcing_version_id,
         "hydro_run_id": contract_identity["hydro_run_id"],
         "published_manifest_id": contract_identity["published_manifest_id"],
-        "pipeline_job_id": contract_identity["pipeline_job_id"],
         "model_package_uri": _redact_secret_manifest_for_evidence(candidate.model_package_uri, "model_package_uri"),
         "model_package_manifest_uri": _redact_secret_manifest_for_evidence(
             _model_package_manifest_uri(candidate),
@@ -3352,6 +3639,8 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
         "segment_count": candidate.segment_count,
         "output_key": _candidate_output_key(candidate),
     }
+    if contract_identity.get("pipeline_job_id") not in (None, ""):
+        evidence["pipeline_job_id"] = contract_identity["pipeline_job_id"]
     resolved_output_uri = output_uri or _candidate_output_uri(candidate)
     if resolved_output_uri is not None:
         evidence["output_uri"] = _redact_secret_manifest_for_evidence(resolved_output_uri, "output_uri")
@@ -3799,6 +4088,11 @@ def _task_result_matches_candidate(
     for field_name, expected in identity_fields.items():
         if _normalized_identity(task.get(field_name)) == _normalized_identity(expected):
             return True
+    identity = task.get("identity")
+    if isinstance(identity, Mapping):
+        for field_name, expected in identity_fields.items():
+            if _normalized_identity(identity.get(field_name)) == _normalized_identity(expected):
+                return True
     if outcome is None:
         return False
     for field_name in TASK_RESULT_CANDIDATE_IDENTITY_FIELDS:
@@ -3826,6 +4120,11 @@ def _task_candidate_matching_available(
 ) -> bool:
     for task in tasks:
         if any(task.get(field_name) not in (None, "") for field_name in TASK_RESULT_CANDIDATE_IDENTITY_FIELDS):
+            return True
+        identity = task.get("identity")
+        if isinstance(identity, Mapping) and any(
+            identity.get(field_name) not in (None, "") for field_name in TASK_RESULT_CANDIDATE_IDENTITY_FIELDS
+        ):
             return True
     if outcome is None:
         return False
@@ -4132,9 +4431,10 @@ def _candidate_product_counts(candidate: SchedulerCandidate, *, outcome: Mapping
 
 
 def _candidate_production_identity(candidate: SchedulerCandidate) -> dict[str, Any]:
-    return {
+    identity = {
         "run_id": candidate.run_id,
         "model_id": candidate.model_id,
+        "basin_id": candidate.basin_id,
         "source": candidate.source_id,
         "source_id": candidate.source_id,
         "cycle_time": _format_utc(candidate.cycle_time_utc),
@@ -4144,8 +4444,11 @@ def _candidate_production_identity(candidate: SchedulerCandidate) -> dict[str, A
         "forcing_version_id": candidate.forcing_version_id,
         "hydro_run_id": candidate.run_id,
         "published_manifest_id": _candidate_published_manifest_id(candidate),
-        "pipeline_job_id": _candidate_contract_pipeline_job_id(candidate),
     }
+    pipeline_job_id = _candidate_contract_pipeline_job_id(candidate)
+    if pipeline_job_id not in (None, ""):
+        identity["pipeline_job_id"] = pipeline_job_id
+    return identity
 
 
 def _candidate_canonical_product_id(candidate: SchedulerCandidate) -> str:
@@ -4162,11 +4465,11 @@ def _candidate_published_manifest_id(candidate: SchedulerCandidate) -> str:
     return f"manifest_{candidate.run_id}"
 
 
-def _candidate_contract_pipeline_job_id(candidate: SchedulerCandidate) -> str:
+def _candidate_contract_pipeline_job_id(candidate: SchedulerCandidate) -> str | None:
     explicit = candidate.resource_profile.get("pipeline_job_id")
     if explicit not in (None, ""):
         return str(explicit)
-    return f"job_{candidate.run_id}"
+    return None
 
 
 def _first_present_value(

@@ -902,7 +902,8 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
     assert runtime_manifest["identity"]["forcing_version_id"] == basin["forcing_version_id"]
     assert runtime_manifest["identity"]["hydro_run_id"] == basin["run_id"]
     assert runtime_manifest["identity"]["published_manifest_id"] == f"manifest_{basin['run_id']}"
-    assert runtime_manifest["identity"]["pipeline_job_id"] == f"job_{basin['run_id']}"
+    assert runtime_manifest["identity"]["basin_id"] == basin["basin_id"]
+    assert "pipeline_job_id" not in runtime_manifest["identity"]
     assert runtime_manifest["model"]["model_package_uri"] == basin["model_package_uri"]
     assert runtime_manifest["model"]["model_package_manifest_uri"] == "s3://nhms/models/model_0/v1/manifest.json"
     assert runtime_manifest["forcing"]["station_count"] == 2
@@ -925,7 +926,8 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
     assert model_run_evidence["production_stage"] == "parse"
     assert model_run_evidence["canonical_product_id"] == "canon_gfs_2026050100"
     assert model_run_evidence["published_manifest_id"] == f"manifest_{basin['run_id']}"
-    assert model_run_evidence["pipeline_job_id"] == f"job_{basin['run_id']}"
+    assert model_run_evidence["basin_id"] == basin["basin_id"]
+    assert "pipeline_job_id" not in model_run_evidence
     assert parse_entry["model_run_assembly"]["identity"]["candidate_id"] == basin["candidate_id"]
     assert frequency_entry["model_run_assembly"]["identity"]["run_id"] == basin["run_id"]
     assert frequency_submission["manifest"]["quality_states"][0]["quality_flag"] == "frequency_inputs_unavailable"

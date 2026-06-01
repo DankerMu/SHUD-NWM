@@ -18,6 +18,7 @@
       "required": [
         "run_id",
         "model_id",
+        "basin_id",
         "source",
         "cycle_time",
         "basin_version_id",
@@ -25,14 +26,14 @@
         "canonical_product_id",
         "forcing_version_id",
         "hydro_run_id",
-        "published_manifest_id",
-        "pipeline_job_id"
+        "published_manifest_id"
       ],
       "properties": {
         "schema_version": { "type": "string" },
         "contract_id": { "type": "string" },
         "run_id": { "type": "string", "minLength": 1 },
         "model_id": { "type": "string", "minLength": 1 },
+        "basin_id": { "type": "string", "minLength": 1 },
         "source": { "type": "string", "minLength": 1 },
         "source_id": { "type": "string", "minLength": 1 },
         "cycle_time": { "type": "string", "format": "date-time" },

@@ -31,7 +31,7 @@ The corrected architecture is: rSHUD/AutoSHUD informs the static SHUD project/fo
 
 ### 0. Production identity contract is the shared fixture for all M23 issues
 
-M23-1 defines a single QHH production contract before any worker/runtime issue can add mutation. Every downstream stage must carry the same identity tuple: `run_id`, `model_id`, `basin_id`, `basin_version_id`, `river_network_version_id`, `source`, `cycle_time`, `canonical_product_id`, `forcing_version_id`, `hydro_run_id`, `published_manifest_id`, and `pipeline_job_id`/`pipeline_event` correlation. A later issue may add fields only by preserving this tuple and documenting migration behavior in this change.
+M23-1 defines a single QHH production contract before any worker/runtime issue can add mutation. Every downstream stage must carry the same required identity tuple: `run_id`, `model_id`, `basin_id`, `basin_version_id`, `river_network_version_id`, `source`, `cycle_time`, `canonical_product_id`, `forcing_version_id`, `hydro_run_id`, and `published_manifest_id`. `pipeline_job_id` and `pipeline_event_id` are optional stage/event evidence-correlation fields: when both expected and actual evidence provide them, they must match, but they must not be synthesized as run-level identity. A later issue may add fields only by preserving this tuple and documenting migration behavior in this change.
 
 Alternative considered: let scheduler, forcing, Slurm, parser, and publisher each define local identity fields. Rejected because cross-stage evidence can otherwise mix a fresh forecast from one cycle with forcing, hydro output, or display artifacts from a sibling run.
 
@@ -132,7 +132,7 @@ Boundary-surface checklist:
 Invariant Matrix
 
 Governing invariant: Every production artifact, DB row, pipeline event, and display-readable URI accepted for a QHH run must bind to the same production identity tuple and must never use private compute workspace paths as node-27-readable evidence.
-Source-of-truth identity/contract: `run_id` plus `model_id`, `source`, `cycle_time`, `basin_version_id`, `river_network_version_id`, `canonical_product_id`, `forcing_version_id`, `hydro_run_id`, `published_manifest_id`, and pipeline job/event correlation.
+Source-of-truth identity/contract: `run_id` plus `model_id`, `basin_id`, `source`, `cycle_time`, `basin_version_id`, `river_network_version_id`, `canonical_product_id`, `forcing_version_id`, `hydro_run_id`, `published_manifest_id`, and optional pipeline job/event correlation.
 Surfaces:
 
 - Producers: scheduler candidate/evidence helpers, later forcing/Slurm/parser/publisher producers.
@@ -146,7 +146,7 @@ Surfaces:
 Regression rows:
 
 - Full identity tuple for one QHH source/cycle/run -> accepted as same-run evidence and reusable by downstream issue tests.
-- Same `run_id` with mismatched `model_id`, `source`, `cycle_time`, basin/river version, canonical product, forcing version, hydro run, manifest, or pipeline job -> rejected as identity mismatch before evidence reuse.
+- Same `run_id` with mismatched `model_id`, `basin_id`, `source`, `cycle_time`, basin/river version, canonical product, forcing version, hydro run, manifest, or present pipeline job/event correlation -> rejected as identity mismatch before evidence reuse.
 - `published://` or allowlisted published-root URI bound to the same identity -> accepted as display-readable boundary evidence.
 - Workspace-only, scratch-only, Slurm-private, traversal, or non-allowlisted local path -> rejected as display-readable artifact/log evidence.
 - Existing M22 readonly DB/published artifact consumer -> remains compatible and is not required to mount node-22 private workspace paths.

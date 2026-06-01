@@ -1484,7 +1484,7 @@ class ForecastOrchestrator:
 
         poll_timed_out = isinstance(terminal, dict) and terminal.get("error_code") == "SLURM_JOB_TIMEOUT"
         aggregation = (
-            self._aggregate_array_stage(stage, context, slurm_job_id, terminal)
+            self._aggregate_array_stage(stage, context, slurm_job_id, terminal, pipeline_job_id)
             if stage.is_array and not poll_timed_out
             else None
         )
@@ -1554,7 +1554,13 @@ class ForecastOrchestrator:
             and job.get("slurm_job_id")
             and status not in {"failed", "cancelled", "submission_failed", "permanently_failed"}
         ):
-            aggregation = self._aggregate_array_stage(stage, context, str(job["slurm_job_id"]), terminal)
+            aggregation = self._aggregate_array_stage(
+                stage,
+                context,
+                str(job["slurm_job_id"]),
+                terminal,
+                str(job["job_id"]),
+            )
             status = aggregation.status
             if str(job.get("status")) not in TERMINAL_JOB_STATUSES or status != str(job.get("status")):
                 publication = self._display_log_publication_for_pipeline_job(job)
@@ -1812,6 +1818,7 @@ class ForecastOrchestrator:
         context: CycleOrchestrationContext,
         slurm_job_id: str,
         terminal: dict[str, Any],
+        pipeline_job_id: str,
     ) -> ArrayAggregation:
         provider = getattr(self.slurm_client, "get_array_task_results", None)
         if callable(provider):
@@ -1823,7 +1830,7 @@ class ForecastOrchestrator:
                 self._record_cycle_stage_accounting_gap(
                     stage,
                     context,
-                    _pipeline_job_id(context.run_id, stage.stage),
+                    pipeline_job_id,
                     slurm_job_id=slurm_job_id,
                     message="Slurm array accounting was unavailable or malformed.",
                     details={"error": str(error), "error_code": getattr(error, "error_code", None)},
@@ -1847,7 +1854,7 @@ class ForecastOrchestrator:
                     self._record_cycle_stage_accounting_gap(
                         stage,
                         context,
-                        _pipeline_job_id(context.run_id, stage.stage),
+                        pipeline_job_id,
                         slurm_job_id=slurm_job_id,
                         message="Slurm array accounting was unavailable or malformed.",
                         details={"error": str(error), "error_code": getattr(error, "error_code", None)},
@@ -1873,7 +1880,7 @@ class ForecastOrchestrator:
                 self._record_cycle_stage_accounting_gap(
                     stage,
                     context,
-                    _pipeline_job_id(context.run_id, stage.stage),
+                    pipeline_job_id,
                     slurm_job_id=slurm_job_id,
                     message="Slurm array accounting was unavailable or malformed.",
                     details={"error": error.message, "error_code": error.error_code},
@@ -1882,7 +1889,7 @@ class ForecastOrchestrator:
         self._record_cycle_stage_accounting_gap(
             stage,
             context,
-            _pipeline_job_id(context.run_id, stage.stage),
+            pipeline_job_id,
             slurm_job_id=slurm_job_id,
             message="Slurm array accounting was unavailable or incomplete.",
             details={
@@ -1956,6 +1963,7 @@ class ForecastOrchestrator:
                     "succeeded": aggregation.succeeded,
                     "failed": aggregation.failed,
                     "cancelled": aggregation.cancelled,
+                    "pipeline_job_id": pipeline_job_id,
                     "slurm": {
                         "job_id": terminal.get("job_id") or terminal.get("slurm_job_id"),
                         "state": aggregation.status,
@@ -5410,7 +5418,6 @@ def build_model_run_assembly(
         "run_id": run_id,
         "hydro_run_id": str(basin.get("hydro_run_id") or run_id),
         "published_manifest_id": str(basin.get("published_manifest_id") or f"manifest_{run_id}"),
-        "pipeline_job_id": str(basin.get("pipeline_job_id") or f"job_{run_id}"),
         "canonical_product_id": str(
             basin.get("canonical_product_id") or f"canon_{source_id.lower()}_{compact_cycle}"
         ),
@@ -5733,8 +5740,8 @@ def _model_run_stage_evidence(stage: str, entry: Mapping[str, Any], *, cycle_id:
         "canonical_product_id": identity.get("canonical_product_id") or entry.get("canonical_product_id"),
         "forcing_version_id": identity.get("forcing_version_id") or entry.get("forcing_version_id"),
         "published_manifest_id": identity.get("published_manifest_id") or entry.get("published_manifest_id"),
-        "pipeline_job_id": identity.get("pipeline_job_id") or entry.get("pipeline_job_id"),
         "model_package_uri": identity.get("model_package_uri") or entry.get("model_package_uri"),
+        "basin_id": identity.get("basin_id") or entry.get("basin_id"),
         "basin_version_id": identity.get("basin_version_id") or entry.get("basin_version_id"),
         "river_network_version_id": identity.get("river_network_version_id") or entry.get("river_network_version_id"),
         "output_uri": _nested_mapping(assembly.get("outputs")).get("output_uri") or entry.get("output_uri"),
@@ -6050,7 +6057,18 @@ def _stage_task_result_evidence(
             "resource_metrics": _resource_metrics_from_payload(task.accounting),
         }
         if basin is not None:
-            for key in ("model_id", "candidate_id", "run_id"):
+            for key in (
+                "model_id",
+                "basin_id",
+                "candidate_id",
+                "run_id",
+                "source_id",
+                "cycle_time",
+                "canonical_product_id",
+                "forcing_version_id",
+                "hydro_run_id",
+                "published_manifest_id",
+            ):
                 value = basin.get(key)
                 if value not in (None, ""):
                     payload[key] = value

@@ -13,8 +13,12 @@ from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator.chain import M3_STAGES, PipelineResult, StageRunResult
 from services.orchestrator.production_contract import (
+    PRODUCTION_STAGE_TAXONOMY,
+    PRODUCTION_STATUS_TAXONOMY,
     ProductionContractError,
     production_contract_matrix,
+    production_stage_for,
+    production_status_for,
     validate_display_artifact_evidence,
     validate_same_production_identity,
 )
@@ -100,6 +104,7 @@ def test_production_contract_matrix_is_exposed_in_scheduler_pass_evidence(tmp_pa
     assert identity_contract["identity"] == {
         "run_id": "fcst_gfs_2026052106_model_a",
         "model_id": "model_a",
+        "basin_id": "basin_a",
         "source": "gfs",
         "cycle_time": "2026-05-21T06:00:00Z",
         "basin_version_id": "basin_a_v1",
@@ -108,7 +113,6 @@ def test_production_contract_matrix_is_exposed_in_scheduler_pass_evidence(tmp_pa
         "forcing_version_id": "forc_gfs_2026052106_model_a",
         "hydro_run_id": "fcst_gfs_2026052106_model_a",
         "published_manifest_id": "manifest_fcst_gfs_2026052106_model_a",
-        "pipeline_job_id": "job_fcst_gfs_2026052106_model_a",
     }
     assert candidate["canonical_product_id"] == "canon_gfs_2026052106"
     assert candidate["published_manifest_id"] == "manifest_fcst_gfs_2026052106_model_a"
@@ -119,6 +123,7 @@ def test_production_contract_matrix_is_exposed_in_scheduler_pass_evidence(tmp_pa
     [
         ("run_id", "fcst_gfs_2026052106_other"),
         ("model_id", "model_b"),
+        ("basin_id", "basin_b"),
         ("source", "IFS"),
         ("cycle_time", "2026-05-21T12:00:00Z"),
         ("basin_version_id", "basin_other_v1"),
@@ -127,7 +132,6 @@ def test_production_contract_matrix_is_exposed_in_scheduler_pass_evidence(tmp_pa
         ("forcing_version_id", "forc_gfs_2026052106_other"),
         ("hydro_run_id", "fcst_gfs_2026052106_other_hydro"),
         ("published_manifest_id", "manifest_other"),
-        ("pipeline_job_id", "job_other"),
     ],
 )
 def test_same_run_evidence_rejects_each_m23_identity_mismatch(field_name: str, replacement: str) -> None:
@@ -145,9 +149,9 @@ def test_scheduler_candidate_state_identity_mismatch_blocks_evidence_reuse_befor
     state = {
         "pipeline_status": "succeeded",
         "pipeline_job": {
-            "job_id": "job_fcst_gfs_2026052106_model_a",
             "run_id": "fcst_gfs_2026052106_model_a",
             "model_id": "model_a",
+            "basin_id": "basin_other",
             "source": "gfs",
             "cycle_time": "2026-05-21T06:00:00Z",
             "basin_version_id": "basin_a_v1",
@@ -156,7 +160,7 @@ def test_scheduler_candidate_state_identity_mismatch_blocks_evidence_reuse_befor
             "forcing_version_id": "forc_gfs_2026052106_model_a",
             "hydro_run_id": "fcst_gfs_2026052106_model_a",
             "published_manifest_id": "manifest_fcst_gfs_2026052106_model_a",
-            "pipeline_job_id": "wrong_pipeline_job",
+            "pipeline_job_id": "job_fcst_gfs_2026052106_model_a_forecast",
             "status": "succeeded",
         },
     }
@@ -176,7 +180,176 @@ def test_scheduler_candidate_state_identity_mismatch_blocks_evidence_reuse_befor
     assert result.evidence["counts"]["submitted_count"] == 0
     assert blocked["reason"] == "production_identity_mismatch"
     assert mismatch["code"] == "PRODUCTION_IDENTITY_MISMATCH"
-    assert mismatch["field"] == "pipeline_job_id"
+    assert mismatch["field"] == "basin_id"
+
+
+@pytest.mark.parametrize(
+    ("state_key", "row_factory", "expected_source"),
+    [
+        (
+            "pipeline_jobs",
+            lambda identity: {
+                **identity,
+                "job_id": "job_fcst_gfs_2026052106_model_a_forecast",
+                "status": "running",
+                "stage": "forecast",
+                "slurm_job_id": "7777",
+                "basin_id": "basin_other",
+            },
+            "pipeline_jobs[0]",
+        ),
+        (
+            "jobs",
+            lambda identity: {
+                **identity,
+                "job_id": "job_fcst_gfs_2026052106_model_a_forecast",
+                "status": "succeeded",
+                "stage": "forecast",
+                "basin_id": "basin_other",
+            },
+            "pipeline_jobs[0]",
+        ),
+        (
+            "pipeline_events",
+            lambda identity: {
+                "event_id": 7,
+                "entity_id": "job_fcst_gfs_2026052106_model_a_forecast",
+                "event_type": "status_change",
+                "status_to": "running",
+                "details": {
+                    "identity": {**identity, "basin_id": "basin_other"},
+                    "stage": "forecast",
+                    "pipeline_event_id": "event_7",
+                },
+            },
+            "pipeline_events[0].details.identity",
+        ),
+        (
+            "pipeline_events",
+            lambda identity: {
+                "event_id": 8,
+                "entity_id": "job_fcst_gfs_2026052106_model_a_forecast",
+                "event_type": "status_change",
+                "status_to": "partially_failed",
+                "details": {
+                    "stage": "forcing",
+                    "task_results": [
+                        {**identity, "basin_id": "basin_other", "task_id": 0, "status": "failed"}
+                    ],
+                },
+            },
+            "pipeline_events[0].details.task_results[0]",
+        ),
+    ],
+)
+def test_scheduler_candidate_state_list_identity_mismatch_blocks_before_reuse(
+    tmp_path: Path,
+    state_key: str,
+    row_factory: Any,
+    expected_source: str,
+) -> None:
+    identity = _production_identity_fixture()
+    state = {
+        state_key: [row_factory(identity)],
+        "pipeline_status": "running",
+    }
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    mismatch = blocked["state_evidence"]["production_identity_validation"]["mismatches"][0]
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert blocked["reason"] == "production_identity_mismatch"
+    assert mismatch["source"] == expected_source
+    assert mismatch["field"] == "basin_id"
+
+
+def test_scheduler_candidate_state_legacy_rows_without_m23_identity_remain_compatible(
+    tmp_path: Path,
+) -> None:
+    state = {
+        "pipeline_jobs": [
+            {
+                "job_id": "legacy_job_1",
+                "run_id": "legacy_sibling_run",
+                "model_id": "legacy_model",
+                "status": "running",
+                "stage": "forecast",
+                "slurm_job_id": "7777",
+            }
+        ],
+        "pipeline_events": [
+            {
+                "event_id": 9,
+                "event_type": "status_change",
+                "status_to": "running",
+                "details": {"stage": "forecast"},
+            }
+        ],
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls
+    candidate = scheduler_module._candidate_for(
+        discovery=CycleDiscovery(
+            cycle_id="gfs_2026052106",
+            source_id="gfs",
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            cycle_hour=6,
+            available=True,
+            status="discovered",
+        ),
+        model=scheduler_module.RegisteredSchedulerModel(
+            model_id="model_a",
+            basin_id="basin_a",
+            basin_version_id="basin_a_v1",
+            river_network_version_id="basin_a_rivnet_v1",
+            segment_count=3,
+            model_package_uri="s3://nhms/models/model_a/package/",
+            shud_code_version="2.0",
+            resource_profile={},
+            resource_profile_summary={},
+            display_capabilities={},
+            frequency_capabilities={},
+        ),
+        horizon={},
+    )
+    validation = scheduler_module._candidate_state_identity_validation(candidate, state)
+    assert validation["status"] == "compatible"
+    assert "pipeline_jobs[0]" in validation["legacy_non_authoritative"]
+
+
+def test_production_identity_correlation_fields_compare_only_when_both_present() -> None:
+    expected = _production_identity_fixture()
+    validate_same_production_identity(expected, {**expected, "pipeline_job_id": "stage_job_1"})
+
+    with pytest.raises(ProductionContractError) as exc_info:
+        validate_same_production_identity(
+            {**expected, "pipeline_event_id": "event_1"},
+            {**expected, "pipeline_event_id": "event_2"},
+        )
+
+    assert exc_info.value.code == "PRODUCTION_IDENTITY_MISMATCH"
+    assert exc_info.value.field == "pipeline_event_id"
 
 
 def test_display_artifact_boundary_requires_same_identity_and_published_uri(tmp_path: Path) -> None:
@@ -201,8 +374,64 @@ def test_display_artifact_boundary_requires_same_identity_and_published_uri(tmp_
 
     assert published["display_readable"] is True
     assert published["uri_boundary"]["kind"] == "published"
+    assert published["uri_boundary"]["normalized_uri"] == published_uri
     assert file_result["display_readable"] is True
     assert file_result["uri_boundary"]["kind"] == "published_root_file"
+
+
+@pytest.mark.parametrize(
+    "uri_template",
+    [
+        "published://manifests/GFS/2026052106/{sibling}/manifest.json",
+        "{file_uri}",
+        "s3://nhms/manifests/GFS/2026052106/{sibling}/manifest.json",
+    ],
+)
+def test_display_artifact_boundary_rejects_run_id_substring_path_segments(
+    tmp_path: Path,
+    uri_template: str,
+) -> None:
+    identity = _production_identity_fixture()
+    sibling = f"{identity['run_id']}_retry"
+    published_root = tmp_path / "published"
+    sibling_file = published_root / "manifests" / "GFS" / "2026052106" / sibling / "manifest.json"
+    sibling_file.parent.mkdir(parents=True)
+    sibling_file.write_text("{}", encoding="utf-8")
+    uri = uri_template.format(sibling=sibling, file_uri=sibling_file.as_uri())
+
+    with pytest.raises(ProductionContractError) as exc_info:
+        validate_display_artifact_evidence(
+            {**identity, "uri": uri},
+            identity,
+            published_root=published_root,
+            allowed_s3_bucket="nhms",
+        )
+
+    assert exc_info.value.code == "DISPLAY_URI_IDENTITY_MISMATCH"
+
+
+def test_display_artifact_boundary_redacts_credential_bearing_uris(tmp_path: Path) -> None:
+    identity = _production_identity_fixture()
+
+    with pytest.raises(ProductionContractError) as userinfo_error:
+        validate_display_artifact_evidence(
+            {
+                **identity,
+                "uri": f"published://user:pass@logs/GFS/2026052106/{identity['run_id']}/job.out",
+            },
+            identity,
+            published_root=tmp_path / "published",
+        )
+
+    with pytest.raises(ProductionContractError) as relative_error:
+        validate_display_artifact_evidence(
+            {**identity, "uri": "token_secret/logs/job.out"},
+            identity,
+            published_root=tmp_path / "published",
+        )
+
+    assert "user:pass" not in str(userinfo_error.value.to_dict())
+    assert "token_secret" not in str(relative_error.value.to_dict())
 
 
 @pytest.mark.parametrize(
@@ -230,6 +459,19 @@ def test_display_artifact_boundary_rejects_private_or_unallowlisted_paths(tmp_pa
         "DISPLAY_URI_TRAVERSAL",
         "DISPLAY_URI_NOT_ALLOWLISTED",
     }
+
+
+def test_production_stage_and_status_taxonomy_maps_known_legacy_values() -> None:
+    assert production_stage_for("download_gfs") == "download"
+    assert production_stage_for("publish_tiles") == "q_down_publish"
+    assert production_stage_for("unknown_stage") == "production_run"
+    assert production_status_for("skipped") == "superseded"
+    assert production_status_for("complete") == "succeeded"
+    assert production_status_for("source_cycle_unavailable") == "unavailable"
+    assert production_status_for("lock_contended") == "blocked"
+    assert production_status_for("unexpected_status") == "failed"
+    assert "q_down_publish" in PRODUCTION_STAGE_TAXONOMY
+    assert "superseded" in PRODUCTION_STATUS_TAXONOMY
 
 
 def test_model_and_basin_filters_select_subset_and_record_excluded_runnable_count(tmp_path: Path) -> None:
@@ -2649,6 +2891,10 @@ def test_manual_retry_event_in_candidate_state_preserves_prior_reason_and_attemp
             "pipeline_events": [
                 {
                     "event_type": "retry",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "model_id": "model_a",
+                    "source": "gfs",
+                    "cycle_time": "2026-05-21T06:00:00Z",
                     "details": {
                         "trigger": "manual",
                         "manual_retry_marker": True,
@@ -2831,6 +3077,10 @@ def test_latest_manual_retry_event_outside_oldest_first_cap_allows_candidate(tmp
     ]
     latest_manual_retry = {
         "event_type": "retry",
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "model_id": "model_a",
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
         "created_at": "2026-05-21T06:10:00Z",
         "details": {
             "trigger": "manual",
@@ -2972,6 +3222,10 @@ def test_newer_manual_retry_after_terminal_truth_allows_candidate_and_preserves_
                 {
                     "event_id": 5,
                     "event_type": "retry",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "model_id": "model_a",
+                    "source": "gfs",
+                    "cycle_time": "2026-05-21T06:00:00Z",
                     "entity_id": "job_retry",
                     "created_at": "2026-05-21T06:30:00Z",
                     "details": {
@@ -3060,6 +3314,10 @@ def test_newer_manual_retry_after_terminal_truth_allows_candidate_and_preserves_
                     {
                         "event_id": 8,
                         "event_type": "status_change",
+                        "run_id": "fcst_gfs_2026052106_model_a",
+                        "model_id": "model_a",
+                        "source": "gfs",
+                        "cycle_time": "2026-05-21T06:00:00Z",
                         "entity_id": "job_event_only_running",
                         "status_to": "running",
                         "created_at": "2026-05-21T06:20:00Z",
@@ -3087,6 +3345,10 @@ def test_newer_manual_retry_marker_does_not_override_active_truth(
                 {
                     "event_id": 9,
                     "event_type": "retry",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "model_id": "model_a",
+                    "source": "gfs",
+                    "cycle_time": "2026-05-21T06:00:00Z",
                     "entity_id": "job_manual_retry",
                     "created_at": "2026-05-21T06:30:00Z",
                     "details": {
@@ -5308,6 +5570,7 @@ def _production_identity_fixture() -> dict[str, str]:
     return {
         "run_id": "fcst_gfs_2026052106_model_a",
         "model_id": "model_a",
+        "basin_id": "basin_a",
         "source": "gfs",
         "source_id": "gfs",
         "cycle_time": "2026-05-21T06:00:00Z",
@@ -5317,7 +5580,6 @@ def _production_identity_fixture() -> dict[str, str]:
         "forcing_version_id": "forc_gfs_2026052106_model_a",
         "hydro_run_id": "fcst_gfs_2026052106_model_a",
         "published_manifest_id": "manifest_fcst_gfs_2026052106_model_a",
-        "pipeline_job_id": "job_fcst_gfs_2026052106_model_a",
     }
 
 

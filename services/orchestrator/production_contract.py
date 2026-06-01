@@ -17,6 +17,7 @@ PRODUCTION_CONTRACT_ID = "m23-qhh-22-production-identity-status-uri.v1"
 PRODUCTION_IDENTITY_FIELDS: tuple[str, ...] = (
     "run_id",
     "model_id",
+    "basin_id",
     "source",
     "cycle_time",
     "basin_version_id",
@@ -25,9 +26,9 @@ PRODUCTION_IDENTITY_FIELDS: tuple[str, ...] = (
     "forcing_version_id",
     "hydro_run_id",
     "published_manifest_id",
-    "pipeline_job_id",
 )
-OPTIONAL_PRODUCTION_IDENTITY_FIELDS: tuple[str, ...] = ("pipeline_event_id",)
+OPTIONAL_PRODUCTION_IDENTITY_FIELDS: tuple[str, ...] = ("pipeline_job_id", "pipeline_event_id")
+PRODUCTION_EVIDENCE_CORRELATION_FIELDS: tuple[str, ...] = OPTIONAL_PRODUCTION_IDENTITY_FIELDS
 
 PRODUCTION_STAGE_TAXONOMY: tuple[str, ...] = (
     "download",
@@ -64,6 +65,13 @@ _PUBLIC_S3_PREFIXES = ("logs", "manifests", "products", "runs")
 _IDENTITY_ALIASES: dict[str, tuple[tuple[str, ...], ...]] = {
     "run_id": (("run_id",), ("identity", "run_id"), ("hydro_run", "run_id")),
     "model_id": (("model_id",), ("identity", "model_id"), ("model", "model_id"), ("pipeline_job", "model_id")),
+    "basin_id": (
+        ("basin_id",),
+        ("identity", "basin_id"),
+        ("model", "basin_id"),
+        ("pipeline_job", "basin_id"),
+        ("hydro_run", "basin_id"),
+    ),
     "source": (
         ("source",),
         ("source_id",),
@@ -117,15 +125,11 @@ _IDENTITY_ALIASES: dict[str, tuple[tuple[str, ...], ...]] = {
     ),
     "pipeline_job_id": (
         ("pipeline_job_id",),
-        ("job_id",),
         ("identity", "pipeline_job_id"),
-        ("pipeline_job", "job_id"),
     ),
     "pipeline_event_id": (
         ("pipeline_event_id",),
-        ("event_id",),
         ("identity", "pipeline_event_id"),
-        ("pipeline_event", "event_id"),
     ),
 }
 
@@ -166,6 +170,7 @@ class ProductionContractError(ValueError):
 class ProductionIdentity:
     run_id: str
     model_id: str
+    basin_id: str
     source: str
     cycle_time: str
     basin_version_id: str
@@ -174,7 +179,7 @@ class ProductionIdentity:
     forcing_version_id: str
     hydro_run_id: str
     published_manifest_id: str
-    pipeline_job_id: str
+    pipeline_job_id: str | None = None
     pipeline_event_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -234,6 +239,7 @@ def production_identity_from_payload(
     return ProductionIdentity(
         run_id=str(values.get("run_id") or ""),
         model_id=str(values.get("model_id") or ""),
+        basin_id=str(values.get("basin_id") or ""),
         source=str(values.get("source") or ""),
         cycle_time=str(values.get("cycle_time") or ""),
         basin_version_id=str(values.get("basin_version_id") or ""),
@@ -242,7 +248,9 @@ def production_identity_from_payload(
         forcing_version_id=str(values.get("forcing_version_id") or ""),
         hydro_run_id=str(values.get("hydro_run_id") or ""),
         published_manifest_id=str(values.get("published_manifest_id") or ""),
-        pipeline_job_id=str(values.get("pipeline_job_id") or ""),
+        pipeline_job_id=(
+            str(values.get("pipeline_job_id")) if values.get("pipeline_job_id") not in (None, "") else None
+        ),
         pipeline_event_id=(
             str(values.get("pipeline_event_id")) if values.get("pipeline_event_id") not in (None, "") else None
         ),
@@ -266,14 +274,17 @@ def validate_same_production_identity(
                 expected=expected_values.get(field),
                 actual=actual_values.get(field),
             )
-    if expected_identity.pipeline_event_id and actual_identity.pipeline_event_id != expected_identity.pipeline_event_id:
-        raise ProductionContractError(
-            "PRODUCTION_IDENTITY_MISMATCH",
-            "Production identity field pipeline_event_id does not match.",
-            field="pipeline_event_id",
-            expected=expected_identity.pipeline_event_id,
-            actual=actual_identity.pipeline_event_id,
-        )
+    for field in PRODUCTION_EVIDENCE_CORRELATION_FIELDS:
+        expected_value = expected_values.get(field)
+        actual_value = actual_values.get(field)
+        if expected_value not in (None, "") and actual_value not in (None, "") and actual_value != expected_value:
+            raise ProductionContractError(
+                "PRODUCTION_IDENTITY_MISMATCH",
+                f"Production evidence correlation field {field} does not match.",
+                field=field,
+                expected=expected_value,
+                actual=actual_value,
+            )
     return actual_identity
 
 
@@ -282,6 +293,7 @@ def validate_compatible_production_identity(
     actual: Mapping[str, Any],
     *,
     fields: Sequence[str] = PRODUCTION_IDENTITY_FIELDS,
+    correlation_fields: Sequence[str] = PRODUCTION_EVIDENCE_CORRELATION_FIELDS,
 ) -> dict[str, Any]:
     expected_values = _identity_values(expected)
     actual_values = _identity_values(actual)
@@ -296,6 +308,20 @@ def validate_compatible_production_identity(
             raise ProductionContractError(
                 "PRODUCTION_IDENTITY_MISMATCH",
                 f"Production identity field {field} does not match.",
+                field=field,
+                expected=expected_value,
+                actual=actual_value,
+            )
+    for field in correlation_fields:
+        actual_value = actual_values.get(field)
+        expected_value = expected_values.get(field)
+        if actual_value in (None, "") or expected_value in (None, ""):
+            continue
+        compared[field] = actual_value
+        if actual_value != expected_value:
+            raise ProductionContractError(
+                "PRODUCTION_IDENTITY_MISMATCH",
+                f"Production evidence correlation field {field} does not match.",
                 field=field,
                 expected=expected_value,
                 actual=actual_value,
@@ -345,12 +371,16 @@ def production_status_for(value: Any) -> str:
         "published": "succeeded",
         "parsed": "succeeded",
         "frequency_done": "succeeded",
+        "skipped": "superseded",
+        "skip": "superseded",
+        "not_run": "unavailable",
+        "planned": "pending",
+        "lock_contended": "blocked",
         "partially_failed": "partial",
         "parsed_partial": "partial",
         "forcing_ready_partial": "partial",
         "preflight_blocked": "blocked",
         "resource_limit_blocked": "blocked",
-        "lock_contended": "blocked",
         "submission_failed": "failed",
         "permanently_failed": "failed",
         "failed_download": "failed",
@@ -385,13 +415,13 @@ def validate_display_artifact_evidence(
         allowed_s3_bucket=allowed_s3_bucket,
         allowed_s3_prefix=allowed_s3_prefix,
     )
-    if require_run_id_in_uri and identity.run_id not in str(boundary["normalized_uri"]):
+    if require_run_id_in_uri and not _uri_has_exact_path_segment(boundary, identity.run_id):
         raise ProductionContractError(
             "DISPLAY_URI_IDENTITY_MISMATCH",
             "Display-readable artifact URI is not bound to the production run_id.",
             field="uri",
             expected=identity.run_id,
-            actual=boundary["normalized_uri"],
+            actual=_safe_uri_summary(str(boundary["normalized_uri"])),
         )
     return {
         "schema_version": PRODUCTION_CONTRACT_SCHEMA_VERSION,
@@ -438,7 +468,7 @@ def validate_display_readable_uri(
             "DISPLAY_URI_RELATIVE_LOCAL_PATH",
             "Display-readable artifact URI must be published:// or an allowlisted absolute published path.",
             field="uri",
-            actual=raw_uri,
+            actual=_safe_uri_summary(raw_uri),
         )
     return _local_path_boundary(
         path,
@@ -568,7 +598,7 @@ def _published_uri_boundary(uri: str, *, uri_prefix: str) -> dict[str, Any]:
     relative = _safe_relative_public_path(namespace)
     return {
         "kind": "published",
-        "normalized_uri": f"{uri_prefix.rstrip('/')}/{relative}",
+        "normalized_uri": f"{_published_uri_prefix(uri_prefix)}{relative}",
         "relative_path": relative,
         "display_readable": True,
     }
@@ -709,6 +739,34 @@ def _safe_relative_public_path(raw_path: str) -> str:
     return "/".join(parts)
 
 
+def _published_uri_prefix(uri_prefix: str) -> str:
+    prefix = str(uri_prefix or DEFAULT_PUBLISHED_URI_PREFIX).strip()
+    if prefix == "published:":
+        return DEFAULT_PUBLISHED_URI_PREFIX
+    if prefix.endswith("://"):
+        return prefix
+    if prefix.startswith("published://"):
+        return prefix.rstrip("/") + "/"
+    return prefix.rstrip("/") + "/"
+
+
+def _uri_has_exact_path_segment(boundary: Mapping[str, Any], expected_segment: str) -> bool:
+    if expected_segment in (None, ""):
+        return False
+    segment = str(expected_segment)
+    path_value = boundary.get("relative_path") or boundary.get("key")
+    if path_value not in (None, ""):
+        parts = PurePosixPath(str(path_value)).parts
+        return segment in parts
+    normalized = str(boundary.get("normalized_uri") or "")
+    parsed = urlsplit(normalized)
+    path = f"{parsed.netloc}/{parsed.path.lstrip('/')}" if parsed.scheme == "published" else parsed.path
+    try:
+        return segment in PurePosixPath(_safe_decoded_path(path)).parts
+    except ProductionContractError:
+        return False
+
+
 def _safe_decoded_path(raw_path: str) -> str:
     if "\\" in raw_path or _ENCODED_FORBIDDEN_RE.search(raw_path):
         raise ProductionContractError(
@@ -799,10 +857,18 @@ def _safe_uri_summary(uri: str) -> str:
         return "[redacted]"
     if parsed.scheme == "file":
         return "file://[redacted]"
-    if parsed.scheme and parsed.netloc:
-        return f"{parsed.scheme}://{parsed.netloc}/[redacted]"
+    if parsed.username or parsed.password:
+        if parsed.scheme:
+            return f"{parsed.scheme}://[redacted]"
+        return "[redacted]"
+    if parsed.scheme and parsed.hostname:
+        host = parsed.hostname
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        return f"{parsed.scheme}://{host}{port}/[redacted]"
     if parsed.scheme:
         return f"{parsed.scheme}://[redacted]"
     if Path(uri).is_absolute():
         return "[local-path-redacted]"
-    return uri
+    if _CREDENTIAL_WORD_RE.search(uri):
+        return "[redacted]"
+    return "[relative-path-redacted]"
