@@ -738,6 +738,195 @@ def test_full_tuple_and_candidate_scoped_m23_proofs_remain_authoritative(
     assert "pipeline_jobs[0]" not in validation["legacy_non_authoritative"]
 
 
+def test_nested_task_proof_does_not_authorize_parent_event_active_status(
+    tmp_path: Path,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "pipeline_events": [
+            {
+                "event_id": 101,
+                "event_type": "status_change",
+                "status_to": "running",
+                "created_at": "2026-05-21T06:30:00Z",
+                "details": {
+                    "stage": "forecast",
+                    "task_results": [
+                        {
+                            "run_id": candidate.run_id,
+                            "task_id": 0,
+                            "status": "succeeded",
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    validation = scheduler_module._candidate_state_identity_validation(candidate, state)
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert decision is None
+    assert "pipeline_events[0]" in validation["legacy_non_authoritative"]
+    assert "pipeline_events[0].details.task_results[0]" not in validation["legacy_non_authoritative"]
+    assert orchestrator.calls
+
+
+def test_nested_task_proof_does_not_authorize_parent_event_manual_retry(
+    tmp_path: Path,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "pipeline_events": [
+            {
+                "event_id": 102,
+                "event_type": "retry",
+                "created_at": "2026-05-21T06:30:00Z",
+                "details": {
+                    "trigger": "manual",
+                    "manual_retry_marker": True,
+                    "retry_count": 4,
+                    "task_results": [
+                        {
+                            "run_id": candidate.run_id,
+                            "task_id": 0,
+                            "status": "succeeded",
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    validation = scheduler_module._candidate_state_identity_validation(candidate, state)
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert decision is None
+    assert "pipeline_events[0]" in validation["legacy_non_authoritative"]
+    assert "pipeline_events[0].details.task_results[0]" not in validation["legacy_non_authoritative"]
+    assert orchestrator.calls
+
+
+def test_nested_failed_task_identity_remains_available_when_failure_state_is_candidate_scoped() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        "pipeline_status": "failed",
+        "failed_stage": "forecast",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 1,
+        "pipeline_events": [
+            {
+                "event_id": 103,
+                "event_type": "status_change",
+                "status_to": "failed",
+                "created_at": "2026-05-21T06:30:00Z",
+                "details": {
+                    "stage": "forecast",
+                    "task_results": [
+                        {
+                            "run_id": candidate.run_id,
+                            "task_id": 2,
+                            "array_task_id": 2,
+                            "original_task_id": 12,
+                            "status": "failed",
+                            "error_code": "NODE_FAILURE",
+                            "slurm_job_id": "slurm_task_2",
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    validation = scheduler_module._candidate_state_identity_validation(candidate, state)
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "retry_failed_candidate"
+    assert decision.evidence["task_identity"]["array_task_id"] == 2
+    assert decision.evidence["task_identity"]["task_id"] == 2
+    assert decision.evidence["task_identity"]["stage"] == "forecast"
+    assert "pipeline_events[0]" in validation["legacy_non_authoritative"]
+
+
+@pytest.mark.parametrize(
+    ("event", "expected_action", "expected_reason"),
+    [
+        (
+            {
+                "event_id": 104,
+                "event_type": "status_change",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "status_to": "running",
+                "created_at": "2026-05-21T06:30:00Z",
+                "details": {"stage": "forecast"},
+            },
+            "skip",
+            "active_duplicate_pipeline",
+        ),
+        (
+            {
+                "event_id": 105,
+                "event_type": "retry",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "created_at": "2026-05-21T06:30:00Z",
+                "details": {
+                    "trigger": "manual",
+                    "manual_retry_marker": True,
+                    "retry_count": 4,
+                    "prior_failure_reason": "NODE_FAILURE",
+                },
+            },
+            "retry",
+            "manual_retry_requested",
+        ),
+    ],
+)
+def test_parent_event_with_event_level_candidate_proof_remains_authoritative(
+    event: dict[str, Any],
+    expected_action: str,
+    expected_reason: str,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {"pipeline_events": [event]}
+
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    validation = scheduler_module._candidate_state_identity_validation(candidate, state)
+
+    assert decision is not None
+    assert decision.action == expected_action
+    assert decision.reason == expected_reason
+    assert "pipeline_events[0]" not in validation["legacy_non_authoritative"]
+
+
 @pytest.mark.parametrize(
     "state",
     [

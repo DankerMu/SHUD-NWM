@@ -2065,7 +2065,8 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
     events = _state_events(state)
     if events:
         filtered["pipeline_events"] = [
-            dict(event) for index, event in enumerate(events) if f"pipeline_events[{index}]" not in legacy_sources
+            _candidate_state_decision_event(event, authoritative=f"pipeline_events[{index}]" not in legacy_sources)
+            for index, event in enumerate(events)
         ]
         filtered.pop("events", None)
     if filtered.get("pipeline_jobs") == []:
@@ -2084,11 +2085,40 @@ def _candidate_state_source_has_authoritative_ancestor(source: str, authoritativ
     return False
 
 
-def _candidate_state_source_has_authoritative_descendant(source: str, authoritative_sources: set[str]) -> bool:
-    if not source.startswith("pipeline_events["):
-        return False
-    prefix = f"{source}."
-    return any(authoritative.startswith(prefix) for authoritative in authoritative_sources)
+def _candidate_state_source_allows_nested_authority(source: str) -> bool:
+    return source != "candidate_state" and not re.fullmatch(r"pipeline_events\[\d+\]", source)
+
+
+def _candidate_state_decision_event(event: Mapping[str, Any], *, authoritative: bool) -> dict[str, Any]:
+    if authoritative:
+        return dict(event)
+    sanitized: dict[str, Any] = {}
+    for key in ("event_id", "entity_id", "created_at", "updated_at"):
+        value = event.get(key)
+        if value not in (None, ""):
+            sanitized[key] = value
+    details = event.get("details")
+    if isinstance(details, Mapping):
+        details_payload: dict[str, Any] = {}
+        for key in (
+            "stage",
+            "job_type",
+            "task_identity",
+            "failed_task",
+            "failed_task_identity",
+            "task_results",
+            "task_results_total",
+            "task_results_included",
+            "task_results_limit",
+            "task_results_overflow",
+            "task_results_omitted",
+        ):
+            value = details.get(key)
+            if value not in (None, ""):
+                details_payload[key] = value
+        if details_payload:
+            sanitized["details"] = details_payload
+    return sanitized
 
 
 def _strip_top_level_candidate_state_decision_fields(state: dict[str, Any]) -> None:
@@ -2352,7 +2382,7 @@ def _candidate_state_identity_validation(
             "authoritative": _state_row_has_authoritative_candidate_proof(
                 expected,
                 payload,
-                include_nested=(source != "candidate_state"),
+                include_nested=_candidate_state_source_allows_nested_authority(source),
             ),
         }
         for source, payload in containers
@@ -2377,7 +2407,6 @@ def _candidate_state_identity_validation(
             bool(payload)
             and not authoritative
             and not _candidate_state_source_has_authoritative_ancestor(source, authoritative_sources)
-            and not _candidate_state_source_has_authoritative_descendant(source, authoritative_sources)
         ):
             legacy_non_authoritative.append(source)
     return {
