@@ -2065,7 +2065,12 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
     events = _state_events(state)
     if events:
         filtered["pipeline_events"] = [
-            _candidate_state_decision_event(event, authoritative=f"pipeline_events[{index}]" not in legacy_sources)
+            _candidate_state_decision_event(
+                event,
+                authoritative=f"pipeline_events[{index}]" not in legacy_sources,
+                source=f"pipeline_events[{index}]",
+                legacy_sources=legacy_sources,
+            )
             for index, event in enumerate(events)
         ]
         filtered.pop("events", None)
@@ -2089,7 +2094,13 @@ def _candidate_state_source_allows_nested_authority(source: str) -> bool:
     return source != "candidate_state" and not re.fullmatch(r"pipeline_events\[\d+\]", source)
 
 
-def _candidate_state_decision_event(event: Mapping[str, Any], *, authoritative: bool) -> dict[str, Any]:
+def _candidate_state_decision_event(
+    event: Mapping[str, Any],
+    *,
+    authoritative: bool,
+    source: str,
+    legacy_sources: set[str],
+) -> dict[str, Any]:
     if authoritative:
         return dict(event)
     sanitized: dict[str, Any] = {}
@@ -2100,22 +2111,26 @@ def _candidate_state_decision_event(event: Mapping[str, Any], *, authoritative: 
     details = event.get("details")
     if isinstance(details, Mapping):
         details_payload: dict[str, Any] = {}
-        for key in (
-            "stage",
-            "job_type",
-            "task_identity",
-            "failed_task",
-            "failed_task_identity",
-            "task_results",
-            "task_results_total",
-            "task_results_included",
-            "task_results_limit",
-            "task_results_overflow",
-            "task_results_omitted",
-        ):
+        for key in ("stage", "job_type"):
             value = details.get(key)
             if value not in (None, ""):
                 details_payload[key] = value
+        for key in ("task_identity", "failed_task", "failed_task_identity"):
+            value = details.get(key)
+            nested_source = f"{source}.details.{key}"
+            if isinstance(value, Mapping) and nested_source not in legacy_sources:
+                details_payload[key] = value
+        task_results = [
+            task
+            for task_index, task in enumerate(_bounded_task_result_rows(details))
+            if f"{source}.details.task_results[{task_index}]" not in legacy_sources
+        ]
+        if task_results:
+            details_payload["task_results"] = task_results
+            details_payload["task_results_total"] = len(task_results)
+            details_payload["task_results_included"] = len(task_results)
+            details_payload["task_results_limit"] = CANDIDATE_STATE_TASK_RESULT_LIMIT
+            details_payload["task_results_overflow"] = False
         if details_payload:
             sanitized["details"] = details_payload
     return sanitized

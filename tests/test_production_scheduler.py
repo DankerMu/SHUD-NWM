@@ -877,6 +877,107 @@ def test_nested_failed_task_identity_remains_available_when_failure_state_is_can
     assert "pipeline_events[0]" in validation["legacy_non_authoritative"]
 
 
+def test_non_authoritative_task_results_do_not_populate_retry_task_identity() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        "pipeline_status": "failed",
+        "failed_stage": "forecast",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 1,
+        "pipeline_events": [
+            {
+                "event_id": 104,
+                "event_type": "status_change",
+                "status_to": "failed",
+                "created_at": "2026-05-21T06:30:00Z",
+                "details": {
+                    "stage": "forecast",
+                    "task_results": [
+                        {
+                            "task_id": 9,
+                            "array_task_id": 9,
+                            "status": "failed",
+                            "error_code": "NODE_FAILURE",
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    evidence = scheduler_module._candidate_state_evidence(candidate, state)
+    decision_state = scheduler_module._candidate_state_decision_state(state, evidence)
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    validation = evidence["production_identity_validation"]
+
+    assert "pipeline_events[0].details.task_results[0]" in validation["legacy_non_authoritative"]
+    assert scheduler_module._state_task_identity(decision_state) == {}
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.evidence["task_identity"] == {}
+    assert scheduler_module._candidate_state_is_candidate_scoped_retry(decision) is False
+
+
+def test_non_authoritative_task_results_do_not_bypass_active_cycle_duplicate_block(
+    tmp_path: Path,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        "pipeline_status": "failed",
+        "failed_stage": "forecast",
+        "error_code": "NODE_FAILURE",
+        "retry_count": 1,
+        "pipeline_events": [
+            {
+                "event_id": 105,
+                "event_type": "status_change",
+                "status_to": "failed",
+                "created_at": "2026-05-21T06:30:00Z",
+                "details": {
+                    "stage": "forecast",
+                    "task_results": [
+                        {
+                            "task_id": 9,
+                            "array_task_id": 9,
+                            "status": "failed",
+                            "error_code": "NODE_FAILURE",
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+    class ActiveCycleRawCandidateStateRepository(RawCandidateStateRepository):
+        def has_active_orchestration(self, *, source_id: str, cycle_time: datetime) -> bool:
+            del source_id, cycle_time
+            return True
+
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=ActiveCycleRawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    skipped = result.evidence["skipped_candidates"][0]
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert skipped["reason"] == "active_duplicate_pipeline"
+    assert skipped["state_evidence"]["decision"] == "retry_failed"
+    assert skipped["state_evidence"]["task_identity"] == {}
+    assert orchestrator.calls == []
+
+
 @pytest.mark.parametrize(
     ("event", "expected_action", "expected_reason"),
     [
@@ -1210,6 +1311,62 @@ def test_display_artifact_boundary_rejects_private_or_unallowlisted_paths(tmp_pa
         "DISPLAY_URI_TRAVERSAL",
         "DISPLAY_URI_NOT_ALLOWLISTED",
     }
+
+
+@pytest.mark.parametrize(
+    ("configured_root", "uri"),
+    [
+        (
+            Path("/scratch/nhms-published"),
+            "file:///scratch/nhms-published/manifests/GFS/2026052106/{run_id}/manifest.json",
+        ),
+        (
+            Path("/workspace/nhms-published"),
+            "file:///workspace/nhms-published/manifests/GFS/2026052106/{run_id}/manifest.json",
+        ),
+        (
+            Path("/var/spool/slurm/nhms-published"),
+            "file:///var/spool/slurm/nhms-published/manifests/GFS/2026052106/{run_id}/manifest.json",
+        ),
+    ],
+)
+def test_display_artifact_boundary_rejects_private_configured_published_roots(
+    configured_root: Path,
+    uri: str,
+) -> None:
+    identity = _production_identity_fixture()
+
+    with pytest.raises(ProductionContractError) as exc_info:
+        validate_display_artifact_evidence(
+            {**identity, "uri": uri.format(run_id=identity["run_id"])},
+            identity,
+            published_root=configured_root,
+        )
+
+    assert exc_info.value.code == "DISPLAY_URI_PRIVATE_COMPUTE_PATH"
+    assert exc_info.value.details["reason"] in {
+        "scratch_private_path",
+        "workspace_private_path",
+        "slurm_private_path",
+    }
+
+
+def test_display_artifact_boundary_rejects_private_allowed_published_root() -> None:
+    identity = _production_identity_fixture()
+
+    with pytest.raises(ProductionContractError) as exc_info:
+        validate_display_artifact_evidence(
+            {
+                **identity,
+                "uri": f"file:///scratch/nhms-published/manifests/GFS/2026052106/{identity['run_id']}/manifest.json",
+            },
+            identity,
+            published_root=Path("/var/lib/nhms/published"),
+            allowed_published_roots=(Path("/scratch/nhms-published"),),
+        )
+
+    assert exc_info.value.code == "DISPLAY_URI_PRIVATE_COMPUTE_PATH"
+    assert exc_info.value.details["reason"] == "scratch_private_path"
 
 
 def test_production_stage_and_status_taxonomy_maps_known_legacy_values() -> None:

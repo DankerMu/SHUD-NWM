@@ -641,9 +641,15 @@ def _local_path_boundary(
     allowed_published_roots: Sequence[Path | str],
 ) -> dict[str, Any]:
     decoded_path = Path(_safe_decoded_path(str(path)))
+    private_reason = _private_local_path_reason(decoded_path)
+    if private_reason is not None:
+        raise _private_local_path_error(raw_uri, private_reason)
     roots = _published_roots(published_root, allowed_published_roots)
     for root in roots:
         if _path_is_relative_to(decoded_path, root):
+            private_root_reason = _private_local_path_reason(root)
+            if private_root_reason is not None:
+                raise _private_local_path_error(raw_uri, private_root_reason)
             relative = _absolute_path(decoded_path).relative_to(_absolute_path(root)).as_posix()
             _safe_relative_public_path(relative)
             return {
@@ -653,15 +659,6 @@ def _local_path_boundary(
                 "relative_path": relative,
                 "display_readable": True,
             }
-    private_reason = _private_local_path_reason(decoded_path)
-    if private_reason is not None:
-        raise ProductionContractError(
-            "DISPLAY_URI_PRIVATE_COMPUTE_PATH",
-            "Private compute workspace paths are outside the display-readable artifact boundary.",
-            field="uri",
-            actual=_safe_uri_summary(raw_uri),
-            details={"reason": private_reason},
-        )
     raise ProductionContractError(
         "DISPLAY_URI_NOT_ALLOWLISTED",
         "Local artifact path is outside the allowlisted published roots.",
@@ -842,7 +839,16 @@ def _path_is_relative_to(path: Path, root: Path) -> bool:
 
 def _private_local_path_reason(path: Path) -> str | None:
     absolute = _absolute_path(path)
-    normalized = absolute.as_posix()
+    paths = (absolute, absolute.resolve(strict=False))
+    for candidate in paths:
+        reason = _private_local_path_candidate_reason(candidate)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _private_local_path_candidate_reason(path: Path) -> str | None:
+    normalized = path.as_posix()
     parts = tuple(part.lower() for part in PurePosixPath(normalized).parts)
     if ".nhms-workspace" in parts or ".nhms-runs" in parts or "workspace" in parts:
         return "workspace_private_path"
@@ -853,6 +859,16 @@ def _private_local_path_reason(path: Path) -> str | None:
     if "slurm" in parts or "sbatch" in parts:
         return "slurm_private_path"
     return None
+
+
+def _private_local_path_error(raw_uri: str, reason: str) -> ProductionContractError:
+    return ProductionContractError(
+        "DISPLAY_URI_PRIVATE_COMPUTE_PATH",
+        "Private compute workspace paths are outside the display-readable artifact boundary.",
+        field="uri",
+        actual=_safe_uri_summary(raw_uri),
+        details={"reason": reason},
+    )
 
 
 def _safe_uri_summary(uri: str) -> str:
