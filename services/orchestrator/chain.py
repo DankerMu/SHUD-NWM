@@ -26,6 +26,12 @@ from packages.common.source_identity import normalize_source_id
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
 from services.orchestrator.persistence import PipelineJob, PipelineStore
+from services.orchestrator.production_contract import (
+    PRODUCTION_CONTRACT_ID,
+    PRODUCTION_CONTRACT_SCHEMA_VERSION,
+    production_stage_for,
+    production_status_for,
+)
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.slurm_gateway.config import SlurmGatewaySettings
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
@@ -5398,9 +5404,18 @@ def build_model_run_assembly(
         "output_river": output_river,
     }
     identity = {
+        "schema_version": PRODUCTION_CONTRACT_SCHEMA_VERSION,
+        "contract_id": PRODUCTION_CONTRACT_ID,
         "candidate_id": candidate_id,
         "run_id": run_id,
+        "hydro_run_id": str(basin.get("hydro_run_id") or run_id),
+        "published_manifest_id": str(basin.get("published_manifest_id") or f"manifest_{run_id}"),
+        "pipeline_job_id": str(basin.get("pipeline_job_id") or f"job_{run_id}"),
+        "canonical_product_id": str(
+            basin.get("canonical_product_id") or f"canon_{source_id.lower()}_{compact_cycle}"
+        ),
         "forcing_version_id": forcing_version_id,
+        "source": source_id,
         "source_id": source_id,
         "cycle_id": cycle_id,
         "cycle_time": _format_time(cycle_time),
@@ -5705,14 +5720,20 @@ def _model_run_stage_evidence(stage: str, entry: Mapping[str, Any], *, cycle_id:
     identity = dict(assembly.get("identity") or {})
     return {
         "stage": stage,
+        "production_stage": production_stage_for(stage),
         "cycle_id": cycle_id,
         "candidate_id": identity.get("candidate_id") or entry.get("candidate_id"),
         "run_id": identity.get("run_id") or entry.get("run_id"),
+        "hydro_run_id": identity.get("hydro_run_id") or entry.get("hydro_run_id") or entry.get("run_id"),
         "model_id": identity.get("model_id") or entry.get("model_id"),
+        "source": identity.get("source") or identity.get("source_id") or entry.get("source_id"),
         "source_id": identity.get("source_id") or entry.get("source_id"),
         "cycle_time": identity.get("cycle_time") or entry.get("cycle_time"),
         "scenario_id": identity.get("scenario_id") or entry.get("scenario_id"),
+        "canonical_product_id": identity.get("canonical_product_id") or entry.get("canonical_product_id"),
         "forcing_version_id": identity.get("forcing_version_id") or entry.get("forcing_version_id"),
+        "published_manifest_id": identity.get("published_manifest_id") or entry.get("published_manifest_id"),
+        "pipeline_job_id": identity.get("pipeline_job_id") or entry.get("pipeline_job_id"),
         "model_package_uri": identity.get("model_package_uri") or entry.get("model_package_uri"),
         "basin_version_id": identity.get("basin_version_id") or entry.get("basin_version_id"),
         "river_network_version_id": identity.get("river_network_version_id") or entry.get("river_network_version_id"),
@@ -6020,6 +6041,7 @@ def _stage_task_result_evidence(
             "slurm_job_id": task.slurm_job_id,
             "state": task.status,
             "status": task.status,
+            "production_status": production_status_for(task.status),
             "exit_code": task.exit_code,
             "error_code": task.error_code,
             "error_message": task.error_message,

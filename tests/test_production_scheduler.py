@@ -12,6 +12,12 @@ from packages.common.object_store import LocalObjectStore
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator.chain import M3_STAGES, PipelineResult, StageRunResult
+from services.orchestrator.production_contract import (
+    ProductionContractError,
+    production_contract_matrix,
+    validate_display_artifact_evidence,
+    validate_same_production_identity,
+)
 from services.orchestrator.scheduler import (
     LOCK_OWNER,
     LOCK_SCHEMA_VERSION,
@@ -73,6 +79,157 @@ def test_all_active_models_and_gfs_ifs_window_produce_stable_candidate_ids(tmp_p
     )
     assert ifs_06z["horizon"]["max_lead_hours"] == 144
     assert first.evidence["counts"]["submitted_count"] == 0
+
+
+def test_production_contract_matrix_is_exposed_in_scheduler_pass_evidence(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    contract = result.evidence["production_contract"]
+    candidate = result.evidence["candidates"][0]
+    identity_contract = candidate["production_identity_contract"]
+    assert contract == production_contract_matrix()
+    assert identity_contract["schema_version"] == "nhms.production.identity_status_uri_contract.v1"
+    assert identity_contract["complete"] is True
+    assert identity_contract["identity"] == {
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "model_id": "model_a",
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "basin_version_id": "basin_a_v1",
+        "river_network_version_id": "basin_a_rivnet_v1",
+        "canonical_product_id": "canon_gfs_2026052106",
+        "forcing_version_id": "forc_gfs_2026052106_model_a",
+        "hydro_run_id": "fcst_gfs_2026052106_model_a",
+        "published_manifest_id": "manifest_fcst_gfs_2026052106_model_a",
+        "pipeline_job_id": "job_fcst_gfs_2026052106_model_a",
+    }
+    assert candidate["canonical_product_id"] == "canon_gfs_2026052106"
+    assert candidate["published_manifest_id"] == "manifest_fcst_gfs_2026052106_model_a"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("run_id", "fcst_gfs_2026052106_other"),
+        ("model_id", "model_b"),
+        ("source", "IFS"),
+        ("cycle_time", "2026-05-21T12:00:00Z"),
+        ("basin_version_id", "basin_other_v1"),
+        ("river_network_version_id", "river_other_v1"),
+        ("canonical_product_id", "canon_gfs_2026052112"),
+        ("forcing_version_id", "forc_gfs_2026052106_other"),
+        ("hydro_run_id", "fcst_gfs_2026052106_other_hydro"),
+        ("published_manifest_id", "manifest_other"),
+        ("pipeline_job_id", "job_other"),
+    ],
+)
+def test_same_run_evidence_rejects_each_m23_identity_mismatch(field_name: str, replacement: str) -> None:
+    expected = _production_identity_fixture()
+    actual = {**expected, field_name: replacement}
+
+    with pytest.raises(ProductionContractError) as exc_info:
+        validate_same_production_identity(expected, actual)
+
+    assert exc_info.value.code == "PRODUCTION_IDENTITY_MISMATCH"
+    assert exc_info.value.field == field_name
+
+
+def test_scheduler_candidate_state_identity_mismatch_blocks_evidence_reuse_before_submit(tmp_path: Path) -> None:
+    state = {
+        "pipeline_status": "succeeded",
+        "pipeline_job": {
+            "job_id": "job_fcst_gfs_2026052106_model_a",
+            "run_id": "fcst_gfs_2026052106_model_a",
+            "model_id": "model_a",
+            "source": "gfs",
+            "cycle_time": "2026-05-21T06:00:00Z",
+            "basin_version_id": "basin_a_v1",
+            "river_network_version_id": "basin_a_rivnet_v1",
+            "canonical_product_id": "canon_gfs_2026052106",
+            "forcing_version_id": "forc_gfs_2026052106_model_a",
+            "hydro_run_id": "fcst_gfs_2026052106_model_a",
+            "published_manifest_id": "manifest_fcst_gfs_2026052106_model_a",
+            "pipeline_job_id": "wrong_pipeline_job",
+            "status": "succeeded",
+        },
+    }
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    mismatch = blocked["state_evidence"]["production_identity_validation"]["mismatches"][0]
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert blocked["reason"] == "production_identity_mismatch"
+    assert mismatch["code"] == "PRODUCTION_IDENTITY_MISMATCH"
+    assert mismatch["field"] == "pipeline_job_id"
+
+
+def test_display_artifact_boundary_requires_same_identity_and_published_uri(tmp_path: Path) -> None:
+    identity = _production_identity_fixture()
+    published_root = tmp_path / "published"
+    published_artifact = published_root / "manifests" / "GFS" / "2026052106" / identity["run_id"] / "manifest.json"
+    published_artifact.parent.mkdir(parents=True)
+    published_artifact.write_text("{}", encoding="utf-8")
+    published_uri = f"published://manifests/GFS/2026052106/{identity['run_id']}/manifest.json"
+    file_uri = published_artifact.as_uri()
+
+    published = validate_display_artifact_evidence(
+        {**identity, "uri": published_uri},
+        identity,
+        published_root=published_root,
+    )
+    file_result = validate_display_artifact_evidence(
+        {**identity, "uri": file_uri},
+        identity,
+        published_root=published_root,
+    )
+
+    assert published["display_readable"] is True
+    assert published["uri_boundary"]["kind"] == "published"
+    assert file_result["display_readable"] is True
+    assert file_result["uri_boundary"]["kind"] == "published_root_file"
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "/workspace/runs/fcst_gfs_2026052106_model_a/logs/slurm.out",
+        "/scratch/frd_muziyao/NWM/.nhms-workspace/runs/fcst_gfs_2026052106_model_a/logs/slurm.out",
+        "/var/spool/slurm/job-123.out",
+        "published://logs/GFS/2026052106/fcst_gfs_2026052106_model_a/../job.out",
+        "/opt/nhms/logs/fcst_gfs_2026052106_model_a/job.out",
+    ],
+)
+def test_display_artifact_boundary_rejects_private_or_unallowlisted_paths(tmp_path: Path, uri: str) -> None:
+    identity = _production_identity_fixture()
+
+    with pytest.raises(ProductionContractError) as exc_info:
+        validate_display_artifact_evidence(
+            {**identity, "uri": uri},
+            identity,
+            published_root=tmp_path / "published",
+        )
+
+    assert exc_info.value.code in {
+        "DISPLAY_URI_PRIVATE_COMPUTE_PATH",
+        "DISPLAY_URI_TRAVERSAL",
+        "DISPLAY_URI_NOT_ALLOWLISTED",
+    }
 
 
 def test_model_and_basin_filters_select_subset_and_record_excluded_runnable_count(tmp_path: Path) -> None:
@@ -5144,6 +5301,23 @@ def _model(model_id: str, basin_id: str, *, resource_profile: dict[str, Any] | N
         "active_flag": True,
         "lifecycle_state": "active",
         "resource_profile": profile,
+    }
+
+
+def _production_identity_fixture() -> dict[str, str]:
+    return {
+        "run_id": "fcst_gfs_2026052106_model_a",
+        "model_id": "model_a",
+        "source": "gfs",
+        "source_id": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "basin_version_id": "basin_a_v1",
+        "river_network_version_id": "basin_a_rivnet_v1",
+        "canonical_product_id": "canon_gfs_2026052106",
+        "forcing_version_id": "forc_gfs_2026052106_model_a",
+        "hydro_run_id": "fcst_gfs_2026052106_model_a",
+        "published_manifest_id": "manifest_fcst_gfs_2026052106_model_a",
+        "pipeline_job_id": "job_fcst_gfs_2026052106_model_a",
     }
 
 

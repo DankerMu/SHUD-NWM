@@ -11,6 +11,41 @@
       "type": "string",
       "minLength": 1
     },
+    "identity": {
+      "description": "M23 production identity tuple bound to this pipeline job or event.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "run_id",
+        "model_id",
+        "source",
+        "cycle_time",
+        "basin_version_id",
+        "river_network_version_id",
+        "canonical_product_id",
+        "forcing_version_id",
+        "hydro_run_id",
+        "published_manifest_id",
+        "pipeline_job_id"
+      ],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "contract_id": { "type": "string" },
+        "run_id": { "type": "string", "minLength": 1 },
+        "model_id": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "source_id": { "type": "string", "minLength": 1 },
+        "cycle_time": { "type": "string", "format": "date-time" },
+        "basin_version_id": { "type": "string", "minLength": 1 },
+        "river_network_version_id": { "type": "string", "minLength": 1 },
+        "canonical_product_id": { "type": "string", "minLength": 1 },
+        "forcing_version_id": { "type": "string", "minLength": 1 },
+        "hydro_run_id": { "type": "string", "minLength": 1 },
+        "published_manifest_id": { "type": "string", "minLength": 1 },
+        "pipeline_job_id": { "type": "string", "minLength": 1 },
+        "pipeline_event_id": { "type": "string" }
+      }
+    },
     "job_type": {
       "description": "Pipeline job type.",
       "type": "string",
@@ -31,6 +66,34 @@
         "permanently_failed",
         "cancelled",
         "skipped"
+      ]
+    },
+    "production_stage": {
+      "type": "string",
+      "enum": [
+        "download",
+        "convert",
+        "forcing",
+        "forecast",
+        "parse",
+        "q_down_publish",
+        "frequency_publish",
+        "production_run"
+      ]
+    },
+    "production_status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "ready",
+        "running",
+        "succeeded",
+        "blocked",
+        "unavailable",
+        "partial",
+        "failed",
+        "cancelled",
+        "superseded"
       ]
     },
     "run_id": {

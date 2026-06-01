@@ -27,6 +27,14 @@ from packages.common.slurm_env import (
 )
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, PipelineResult, scenario_for_source
+from services.orchestrator.production_contract import (
+    ProductionContractError,
+    production_contract_matrix,
+    production_identity_contract_evidence,
+    production_stage_for,
+    production_status_for,
+    validate_compatible_production_identity,
+)
 from services.orchestrator.retry import classify_failure
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from services.slurm_gateway.gateway import ConfigurationError
@@ -392,11 +400,15 @@ class SchedulerCandidate:
     state_evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        contract_identity = _candidate_production_identity(self)
         payload = {
+            "production_identity_contract": production_identity_contract_evidence(contract_identity),
             "candidate_id": self.candidate_id,
             "source_id": self.source_id,
+            "source": self.source_id,
             "cycle_id": self.cycle_id,
             "cycle_time_utc": _format_utc(self.cycle_time_utc),
+            "cycle_time": _format_utc(self.cycle_time_utc),
             "model_id": self.model_id,
             "basin_id": self.basin_id,
             "basin_version_id": self.basin_version_id,
@@ -409,7 +421,11 @@ class SchedulerCandidate:
             "horizon": dict(self.horizon),
             "scenario_id": self.scenario_id,
             "run_id": self.run_id,
+            "canonical_product_id": contract_identity["canonical_product_id"],
             "forcing_version_id": self.forcing_version_id,
+            "hydro_run_id": contract_identity["hydro_run_id"],
+            "published_manifest_id": contract_identity["published_manifest_id"],
+            "pipeline_job_id": contract_identity["pipeline_job_id"],
             "status": self.status,
             "reason": self.reason,
         }
@@ -947,6 +963,7 @@ class ProductionScheduler:
                 "openspec_change": SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE,
                 "scope": "scheduler_pass_evidence",
             },
+            "production_contract": production_contract_matrix(),
             "pass_id": pass_id,
             "started_at": _format_utc(started_at),
             "execution_mode": execution_mode,
@@ -1195,6 +1212,15 @@ class ProductionScheduler:
                     if callable(state_provider)
                     else None
                 )
+                if state_decision is not None and _candidate_state_has_identity_mismatch(state_decision.evidence):
+                    blocked.append(
+                        _blocked_candidate(
+                            candidate,
+                            "production_identity_mismatch",
+                            state_evidence=state_decision.evidence,
+                        )
+                    )
+                    continue
                 if state_decision is not None and state_decision.action == "blocked":
                     blocked.append(
                         _blocked_candidate(
@@ -1270,6 +1296,17 @@ class ProductionScheduler:
                                 if callable(state_provider)
                                 else state_decision
                             )
+                            if state_decision is not None and _candidate_state_has_identity_mismatch(
+                                state_decision.evidence,
+                            ):
+                                blocked.append(
+                                    _blocked_candidate(
+                                        candidate,
+                                        "production_identity_mismatch",
+                                        state_evidence=state_decision.evidence,
+                                    )
+                                )
+                                continue
                             active_slurm_jobs = (
                                 _bounded_active_slurm_jobs(
                                     list(
@@ -2076,16 +2113,26 @@ def _bounded_active_slurm_jobs(
 def _candidate_state_evidence(candidate: SchedulerCandidate, state: Mapping[str, Any]) -> dict[str, Any]:
     jobs = [_job_state_evidence(job) for job in _state_jobs(state)]
     events = [_evidence_safe(event) for event in _state_events(state)]
+    identity_validation = _candidate_state_identity_validation(candidate, state)
     evidence = {
         "candidate_identity": {
             "candidate_id": candidate.candidate_id,
             "run_id": candidate.run_id,
+            "canonical_product_id": _candidate_canonical_product_id(candidate),
             "forcing_version_id": candidate.forcing_version_id,
+            "hydro_run_id": candidate.run_id,
+            "published_manifest_id": _candidate_published_manifest_id(candidate),
+            "pipeline_job_id": _candidate_contract_pipeline_job_id(candidate),
             "source_id": candidate.source_id,
+            "source": candidate.source_id,
             "cycle_time_utc": _format_utc(candidate.cycle_time_utc),
+            "cycle_time": _format_utc(candidate.cycle_time_utc),
             "model_id": candidate.model_id,
             "scenario_id": candidate.scenario_id,
+            "basin_version_id": candidate.basin_version_id,
+            "river_network_version_id": candidate.river_network_version_id,
         },
+        "production_identity_validation": identity_validation,
         "pipeline_jobs": jobs,
         "pipeline_events": events,
         "hydro_run": _optional_mapping_state(
@@ -2122,6 +2169,44 @@ def _candidate_state_evidence(candidate: SchedulerCandidate, state: Mapping[str,
     if overflow:
         evidence["state_bounds"] = overflow
     return evidence
+
+
+def _candidate_state_identity_validation(
+    candidate: SchedulerCandidate,
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = _candidate_production_identity(candidate)
+    containers: list[tuple[str, Mapping[str, Any]]] = [("candidate_state", state)]
+    for key in ("hydro_run", "forcing_version", "forecast_cycle", "published_manifest", "canonical_product"):
+        value = state.get(key)
+        if isinstance(value, Mapping):
+            containers.append((key, value))
+    for key in ("pipeline_job", "job"):
+        value = state.get(key)
+        if isinstance(value, Mapping):
+            containers.append((key, value))
+    mismatches: list[dict[str, Any]] = []
+    compared: dict[str, dict[str, Any]] = {}
+    for source, payload in containers:
+        try:
+            fields = validate_compatible_production_identity(expected, payload)
+        except ProductionContractError as exc:
+            mismatches.append({"source": source, **exc.to_dict()})
+            continue
+        if fields:
+            compared[source] = fields
+    return {
+        "schema_version": "nhms.production.identity_validation.v1",
+        "status": "mismatch" if mismatches else "compatible",
+        "checked_sources": [source for source, _payload in containers],
+        "compared": compared,
+        "mismatches": mismatches,
+    }
+
+
+def _candidate_state_has_identity_mismatch(evidence: Mapping[str, Any]) -> bool:
+    validation = evidence.get("production_identity_validation")
+    return isinstance(validation, Mapping) and validation.get("status") == "mismatch"
 
 
 def _state_jobs(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -3188,7 +3273,11 @@ def _candidate_basin_manifest(
         "frequency_capabilities": dict(candidate.frequency_capabilities),
         "scenario_id": candidate.scenario_id,
         "run_id": candidate.run_id,
+        "canonical_product_id": _candidate_canonical_product_id(candidate),
         "forcing_version_id": candidate.forcing_version_id,
+        "hydro_run_id": candidate.run_id,
+        "published_manifest_id": _candidate_published_manifest_id(candidate),
+        "pipeline_job_id": _candidate_contract_pipeline_job_id(candidate),
         "forecast_horizon_hours": candidate.horizon.get("forecast_horizon_hours")
         or candidate.horizon.get("max_lead_hours"),
         "max_lead_hours": candidate.horizon.get("max_lead_hours"),
@@ -3236,15 +3325,23 @@ def _candidate_execution_attempted(outcome: Mapping[str, Any] | None, submitted:
 
 
 def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: str | None = None) -> dict[str, Any]:
+    contract_identity = _candidate_production_identity(candidate)
     evidence = {
+        "production_identity_contract": production_identity_contract_evidence(contract_identity),
         "candidate_id": candidate.candidate_id,
         "source_id": candidate.source_id,
+        "source": candidate.source_id,
         "cycle_id": candidate.cycle_id,
         "cycle_time_utc": _format_utc(candidate.cycle_time_utc),
+        "cycle_time": _format_utc(candidate.cycle_time_utc),
         "model_id": candidate.model_id,
         "scenario_id": candidate.scenario_id,
         "run_id": candidate.run_id,
+        "canonical_product_id": contract_identity["canonical_product_id"],
         "forcing_version_id": candidate.forcing_version_id,
+        "hydro_run_id": contract_identity["hydro_run_id"],
+        "published_manifest_id": contract_identity["published_manifest_id"],
+        "pipeline_job_id": contract_identity["pipeline_job_id"],
         "model_package_uri": _redact_secret_manifest_for_evidence(candidate.model_package_uri, "model_package_uri"),
         "model_package_manifest_uri": _redact_secret_manifest_for_evidence(
             _model_package_manifest_uri(candidate),
@@ -3616,6 +3713,10 @@ def _candidate_stage_evidence_item(
     outcome: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     stage_payload = dict(stage)
+    stage_payload["production_stage"] = production_stage_for(
+        stage_payload.get("stage") or stage_payload.get("job_type")
+    )
+    stage_payload["production_status"] = production_status_for(stage_payload.get("status"))
     task_results = _stage_task_results(stage_payload)
     total_count = len(task_results)
     status_counts = Counter(str(task.get("status") or task.get("state") or "unknown") for task in task_results)
@@ -3653,10 +3754,12 @@ def _stage_run_evidence(stage: Any) -> dict[str, Any]:
     ]
     payload = {
         "stage": getattr(stage, "stage", None),
+        "production_stage": production_stage_for(getattr(stage, "stage", None) or getattr(stage, "job_type", None)),
         "job_type": getattr(stage, "job_type", None),
         "pipeline_job_id": getattr(stage, "pipeline_job_id", None),
         "slurm_job_id": getattr(stage, "slurm_job_id", None),
         "status": getattr(stage, "status", None),
+        "production_status": production_status_for(getattr(stage, "status", None)),
         "exit_code": getattr(stage, "exit_code", None),
         "error_code": getattr(stage, "error_code", None),
         "error_message": getattr(stage, "error_message", None),
@@ -4026,6 +4129,44 @@ def _candidate_product_counts(candidate: SchedulerCandidate, *, outcome: Mapping
     if station_count is not None:
         counts["forcing_stations"] = station_count
     return counts
+
+
+def _candidate_production_identity(candidate: SchedulerCandidate) -> dict[str, Any]:
+    return {
+        "run_id": candidate.run_id,
+        "model_id": candidate.model_id,
+        "source": candidate.source_id,
+        "source_id": candidate.source_id,
+        "cycle_time": _format_utc(candidate.cycle_time_utc),
+        "basin_version_id": candidate.basin_version_id,
+        "river_network_version_id": candidate.river_network_version_id,
+        "canonical_product_id": _candidate_canonical_product_id(candidate),
+        "forcing_version_id": candidate.forcing_version_id,
+        "hydro_run_id": candidate.run_id,
+        "published_manifest_id": _candidate_published_manifest_id(candidate),
+        "pipeline_job_id": _candidate_contract_pipeline_job_id(candidate),
+    }
+
+
+def _candidate_canonical_product_id(candidate: SchedulerCandidate) -> str:
+    explicit = candidate.resource_profile.get("canonical_product_id")
+    if explicit not in (None, ""):
+        return str(explicit)
+    return f"canon_{candidate.source_id.lower()}_{format_cycle_time(candidate.cycle_time_utc)}"
+
+
+def _candidate_published_manifest_id(candidate: SchedulerCandidate) -> str:
+    explicit = candidate.resource_profile.get("published_manifest_id")
+    if explicit not in (None, ""):
+        return str(explicit)
+    return f"manifest_{candidate.run_id}"
+
+
+def _candidate_contract_pipeline_job_id(candidate: SchedulerCandidate) -> str:
+    explicit = candidate.resource_profile.get("pipeline_job_id")
+    if explicit not in (None, ""):
+        return str(explicit)
+    return f"job_{candidate.run_id}"
 
 
 def _first_present_value(

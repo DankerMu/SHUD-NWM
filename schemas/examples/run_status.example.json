@@ -1,8 +1,26 @@
 {
   "run_id": "fcst_gfs_2026043000_yangtze_shud_v12",
   "status": "running",
+  "production_stage": "forecast",
+  "production_status": "running",
+  "identity": {
+    "schema_version": "nhms.production.identity_status_uri_contract.v1",
+    "contract_id": "m23-qhh-22-production-identity-status-uri.v1",
+    "run_id": "fcst_gfs_2026043000_yangtze_shud_v12",
+    "model_id": "yangtze_shud_v12",
+    "source": "GFS",
+    "source_id": "GFS",
+    "cycle_time": "2026-04-30T00:00:00Z",
+    "basin_version_id": "yangtze_v2026_01",
+    "river_network_version_id": "yangtze_rivnet_v2026_01",
+    "canonical_product_id": "canon_gfs_2026043000",
+    "forcing_version_id": "forc_gfs_2026043000_yangtze_shud_v12",
+    "hydro_run_id": "fcst_gfs_2026043000_yangtze_shud_v12",
+    "published_manifest_id": "manifest_fcst_gfs_2026043000_yangtze_shud_v12",
+    "pipeline_job_id": "job_fcst_gfs_2026043000_yangtze_shud_v12_forecast"
+  },
   "timestamp": "2026-04-30T05:15:00Z",
   "progress_pct": 42.5,
   "current_step": "shud_solver",
-  "log_uri": "s3://nhms/runs/fcst_gfs_2026043000_yangtze_shud_v12/logs/slurm.out"
+  "log_uri": "published://logs/GFS/2026043000/fcst_gfs_2026043000_yangtze_shud_v12/job_fcst_gfs_2026043000_yangtze_shud_v12_forecast.out"
 }

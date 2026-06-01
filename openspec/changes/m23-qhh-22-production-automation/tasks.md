@@ -7,12 +7,22 @@
 
 ## 1. Production Contract and Scheduler Roots
 
-- [ ] 1.1 Define the QHH production identity matrix covering `run_id`, `model_id`, `basin_version_id`, `river_network_version_id`, `source`, `cycle_time`, `canonical_product_id`, `forcing_version_id`, `hydro_run`, published manifest identity, and pipeline job/event correlation.
-- [ ] 1.2 Define the production stage/status/error taxonomy for download, convert, forcing, forecast, parse, q_down publish, frequency/flood publish, and aggregate terminal states, including blocked/partial/unavailable semantics.
-- [ ] 1.3 Define the URI and artifact boundary for workspace, object store, published root, `published://` logs/manifests, and private path rejection.
+- [x] 1.1 Define the QHH production identity matrix covering `run_id`, `model_id`, `basin_version_id`, `river_network_version_id`, `source`, `cycle_time`, `canonical_product_id`, `forcing_version_id`, `hydro_run`, published manifest identity, and pipeline job/event correlation.
+- [x] 1.2 Define the production stage/status/error taxonomy for download, convert, forcing, forecast, parse, q_down publish, frequency/flood publish, and aggregate terminal states, including blocked/partial/unavailable semantics.
+- [x] 1.3 Define the URI and artifact boundary for workspace, object store, published root, `published://` logs/manifests, and private path rejection.
+- [x] 1.3a Add reusable contract helpers or fixtures for the M23 identity/status/URI boundary without adding live download, SHUD execution, Slurm submission, parse, or publish mutation.
+- [x] 1.3b Add regression tests proving a full QHH identity tuple is accepted as same-run evidence and that mismatched `run_id`, `model_id`, `source`, `cycle_time`, basin/river version, canonical product, forcing version, hydro run, manifest, or pipeline job/event identity is rejected.
+- [x] 1.3c Add regression tests proving `published://` or allowlisted published-root URIs can be display-readable evidence only when identity-bound, while private workspace, scratch-only, Slurm-private, traversal, and non-allowlisted local paths are rejected.
 - [ ] 1.4 Fix `nhms-pipeline plan-production` so omitted `--workspace-root`, lock, evidence, temporary, object-store, and published-root paths use documented environment/config defaults instead of `.nhms-workspace` under the app directory.
 - [ ] 1.5 Update `infra/compose.compute.yml`, env examples, and systemd/timer docs so scheduler-once and continuous/timer modes can run with explicit roots, locks, service role, source/model filters, and evidence paths.
 - [ ] 1.6 Verify with `uv run pytest -q tests/test_production_scheduler.py tests/test_production_slurm_validation.py` plus `uv run ruff check .` and a Docker `nhms-pipeline plan-production --plan` smoke without `--workspace-root`.
+
+### Issue #252 Evidence Floor
+
+- `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py`: identity/status/URI contract fixtures pass without live runtime mutation.
+- `uv run ruff check .`: contract helper/schema changes are lint-clean.
+- `openspec validate m23-qhh-22-production-automation --strict --no-interactive`: OpenSpec remains valid.
+- Non-goal evidence: implementation must not add live forecast download, SHUD execution, Slurm submission, parse/publish mutation, or frontend behavior in #252.
 
 ## 2. QHH Model Bootstrap
 

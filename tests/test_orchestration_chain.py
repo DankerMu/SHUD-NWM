@@ -896,7 +896,13 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
     assert result.status == "complete"
     assert runtime_manifest["identity"]["candidate_id"] == basin["candidate_id"]
     assert runtime_manifest["identity"]["run_id"] == basin["run_id"]
+    assert runtime_manifest["identity"]["schema_version"] == "nhms.production.identity_status_uri_contract.v1"
+    assert runtime_manifest["identity"]["contract_id"] == "m23-qhh-22-production-identity-status-uri.v1"
+    assert runtime_manifest["identity"]["canonical_product_id"] == "canon_gfs_2026050100"
     assert runtime_manifest["identity"]["forcing_version_id"] == basin["forcing_version_id"]
+    assert runtime_manifest["identity"]["hydro_run_id"] == basin["run_id"]
+    assert runtime_manifest["identity"]["published_manifest_id"] == f"manifest_{basin['run_id']}"
+    assert runtime_manifest["identity"]["pipeline_job_id"] == f"job_{basin['run_id']}"
     assert runtime_manifest["model"]["model_package_uri"] == basin["model_package_uri"]
     assert runtime_manifest["model"]["model_package_manifest_uri"] == "s3://nhms/models/model_0/v1/manifest.json"
     assert runtime_manifest["forcing"]["station_count"] == 2
@@ -915,6 +921,11 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
     }
     parse_entry = parse_submission["tasks"][0]
     frequency_entry = frequency_submission["tasks"][0]
+    model_run_evidence = parse_submission["manifest"]["model_runs"][0]
+    assert model_run_evidence["production_stage"] == "parse"
+    assert model_run_evidence["canonical_product_id"] == "canon_gfs_2026050100"
+    assert model_run_evidence["published_manifest_id"] == f"manifest_{basin['run_id']}"
+    assert model_run_evidence["pipeline_job_id"] == f"job_{basin['run_id']}"
     assert parse_entry["model_run_assembly"]["identity"]["candidate_id"] == basin["candidate_id"]
     assert frequency_entry["model_run_assembly"]["identity"]["run_id"] == basin["run_id"]
     assert frequency_submission["manifest"]["quality_states"][0]["quality_flag"] == "frequency_inputs_unavailable"

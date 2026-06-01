@@ -29,6 +29,12 @@ The corrected architecture is: rSHUD/AutoSHUD informs the static SHUD project/fo
 
 ## Decisions
 
+### 0. Production identity contract is the shared fixture for all M23 issues
+
+M23-1 defines a single QHH production contract before any worker/runtime issue can add mutation. Every downstream stage must carry the same identity tuple: `run_id`, `model_id`, `basin_id`, `basin_version_id`, `river_network_version_id`, `source`, `cycle_time`, `canonical_product_id`, `forcing_version_id`, `hydro_run_id`, `published_manifest_id`, and `pipeline_job_id`/`pipeline_event` correlation. A later issue may add fields only by preserving this tuple and documenting migration behavior in this change.
+
+Alternative considered: let scheduler, forcing, Slurm, parser, and publisher each define local identity fields. Rejected because cross-stage evidence can otherwise mix a fresh forecast from one cycle with forcing, hydro output, or display artifacts from a sibling run.
+
 ### 1. Bootstrap fixed model state before scheduling
 
 The scheduler must treat "no active model" as a blocker, not as an empty success. A bootstrap command or service task will import/publish the QHH Basins package, create/activate the model instance, seed fixed forcing stations from `qhh.tsd.forc`, and seed output river/segment identities before candidate discovery can submit work.
@@ -53,11 +59,97 @@ Node 22 writes logs, manifests, and display products under the configured publis
 
 Alternative considered: share the entire workspace through NFS. Rejected because M22 already established a narrower readonly display boundary and because private workspaces may contain intermediate files, secrets, or unstable paths.
 
-### 5. Scheduler operationalization includes env defaults and service loop
+### 5. Stage/status taxonomy is shared, not display-specific
+
+Pipeline stages are `download`, `convert`, `forcing`, `forecast`, `parse`, `q_down_publish`, `frequency_publish`, and aggregate `production_run`. Stable statuses are `pending`, `ready`, `running`, `succeeded`, `blocked`, `unavailable`, `partial`, `failed`, `cancelled`, and `superseded`. Stage-specific error codes may be added, but they must map to one of those statuses and must not allow deterministic/mock evidence to mark live business readiness true.
+
+Alternative considered: keep existing ad hoc status strings in each module. Rejected because operations, E2E evidence, and node-27 display need to distinguish blocked live dependencies from successful production outputs.
+
+### 6. Scheduler operationalization includes env defaults and service loop
 
 The production scheduler CLI must honor `WORKSPACE_ROOT`, `OBJECT_STORE_ROOT`, and evidence root env values when flags are absent. Docker/systemd `scheduler-once` and continuous/timer modes must set locks, evidence directories, and source/model filters explicitly enough to avoid duplicate submissions and accidental system-disk output.
 
 Alternative considered: document manual `--workspace-root` invocation only. Rejected because the requested target is business automation, not an operator-run diagnostic command.
+
+## Issue #252 Fixture
+
+Issue type: feature/contract
+Project profile: other, with AutoSHUD/SHUD contract surfaces
+Blast radius: high
+Fixture level: expanded
+Repair intensity: high
+
+Change surface:
+
+- `services/orchestrator` production planning/evidence contract helpers.
+- `schemas/*run*` and `schemas/pipeline_job.schema.json` example/validation fixtures where the contract is expressed.
+- `tests/test_production_scheduler.py` and `tests/test_orchestration_chain.py` reusable contract tests.
+- This OpenSpec design/tasks/spec delta.
+
+Must preserve:
+
+- Existing M22 readonly-display contract: node 27 consumes DB state and published artifacts only.
+- Existing scheduler dry-run behavior and no-mutation evidence guarantees.
+- Existing strict ops identity API behavior for `source`, `cycle_time`, `run_id`, and `model_id`.
+
+Must add/change:
+
+- A documented production identity matrix reusable by scheduler, forcing, Slurm, parser, publisher, and E2E evidence.
+- A documented stage/status/error taxonomy for the full M23 lane.
+- A URI/artifact boundary that rejects private workspace/scratch paths as display-readable artifacts.
+- Contract tests proving identity mismatch and private path evidence cannot be accepted as same-run display evidence.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - contract helpers and fixtures become the input to later CLI/scheduler issues.
+- Config / project setup: selected - URI roots and evidence roots are part of the contract.
+- File IO / path safety / overwrite: selected - private workspace paths must not cross into display-readable artifact state.
+- Schema / columns / units / field names: selected - identity/status fields become DB/API/schema evidence fields.
+- Legacy compatibility / examples: selected - M22 node-27 display boundary and existing ops identity behavior must remain valid.
+- Error handling / rollback / partial outputs: selected - blocked/unavailable/partial statuses drive later stage behavior.
+- Documentation / migration notes: selected - downstream issues use this contract as their fixture.
+
+Risk packs considered:
+
+- Geospatial / CRS / shapefile sidecars: not selected - M23-1 defines identity only; station/segment geometry appears in later bootstrap/forcing issues.
+- Time series / forcing / temporal boundaries: not selected - cycle identity is selected here, but dynamic forcing values are out of scope.
+- Numerical stability / conservation / NaN: not selected - no solver output or numerical processing in this issue.
+- Solver runtime / performance / threading: not selected - SHUD runtime and Slurm behavior are later issues.
+- Resource limits / large input / discovery: not selected - no forecast discovery or large artifact ingestion in this issue.
+- Release / packaging / dependency compatibility: not selected - no package/runtime dependency changes.
+
+Boundary-surface checklist:
+
+- Shared helper roots: production contract helpers and schema examples created for M23-1.
+- Public entrypoints: scheduler/evidence consumers that later read the helper output; no new live runtime command in M23-1.
+- Read surfaces: tests and docs that validate persisted evidence/manifest identity.
+- Write/delete/overwrite surfaces: none in live runtime; contract tests may write temp fixtures only.
+- Staging/publish/rollback surfaces: published artifact URI classification and private-path rejection.
+- Producer/consumer evidence boundaries: scheduler, forcing producer, SHUD runtime, output parser, tile publisher, `/ops`, and node-27 artifact reader.
+- Stale-state/idempotency boundaries: duplicate or mismatched run/model/source/cycle identities must be rejected before reuse.
+- Unchanged downstream consumers: M22 readonly display and strict ops identity endpoints.
+
+Invariant Matrix
+
+Governing invariant: Every production artifact, DB row, pipeline event, and display-readable URI accepted for a QHH run must bind to the same production identity tuple and must never use private compute workspace paths as node-27-readable evidence.
+Source-of-truth identity/contract: `run_id` plus `model_id`, `source`, `cycle_time`, `basin_version_id`, `river_network_version_id`, `canonical_product_id`, `forcing_version_id`, `hydro_run_id`, `published_manifest_id`, and pipeline job/event correlation.
+Surfaces:
+
+- Producers: scheduler candidate/evidence helpers, later forcing/Slurm/parser/publisher producers.
+- Validators/preflight: contract validators and reusable tests introduced by M23-1.
+- Storage/cache/query: `ops.pipeline_job`, `ops.pipeline_event`, `hydro.hydro_run`, `met.forcing_version`, manifests.
+- Public routes/entrypoints: production scheduler CLI and `/ops`/jobs display readers that consume identity evidence.
+- Frontend/downstream consumers: node-27 readonly display and published artifact reader.
+- Failure paths/rollback/stale state: blocked/unavailable/partial/error evidence, duplicate same-run detection, sibling-cycle rejection.
+- Evidence/audit/readiness: OpenSpec fixture, schema examples, contract tests, and later E2E artifacts.
+
+Regression rows:
+
+- Full identity tuple for one QHH source/cycle/run -> accepted as same-run evidence and reusable by downstream issue tests.
+- Same `run_id` with mismatched `model_id`, `source`, `cycle_time`, basin/river version, canonical product, forcing version, hydro run, manifest, or pipeline job -> rejected as identity mismatch before evidence reuse.
+- `published://` or allowlisted published-root URI bound to the same identity -> accepted as display-readable boundary evidence.
+- Workspace-only, scratch-only, Slurm-private, traversal, or non-allowlisted local path -> rejected as display-readable artifact/log evidence.
+- Existing M22 readonly DB/published artifact consumer -> remains compatible and is not required to mount node-22 private workspace paths.
 
 ## Risks / Trade-offs
 
