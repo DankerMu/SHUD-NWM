@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
+)
 
 REPORT_JSON_NAME = "two-node-docker-source-trust.json"
 REPORT_TEXT_NAME = "two-node-docker-source-trust.txt"
@@ -335,6 +340,67 @@ def _write_text_report(path: Path, payload: dict[str, Any], *, containment_root:
         raise OSError(str(error)) from error
 
 
+def _blocked_publication_payload(
+    payload: dict[str, Any],
+    *,
+    json_path: Path,
+    text_path: Path,
+    error: Exception,
+) -> dict[str, Any]:
+    blocked = dict(payload)
+    blockers = list(blocked.get("blockers", [])) if isinstance(blocked.get("blockers"), list) else []
+    blockers.append(
+        {
+            "code": "SOURCE_TRUST_PUBLICATION_FAILED",
+            "message": "source-trust evidence publication failed; previous PASS JSON was invalidated.",
+            "json_path": str(json_path),
+            "text_path": str(text_path),
+            "error_type": type(error).__name__,
+            "error": str(error),
+        }
+    )
+    blocked["status"] = "BLOCKED"
+    blocked["blockers"] = blockers
+    blocked["publication"] = {
+        "status": "BLOCKED",
+        "json_path": str(json_path),
+        "text_path": str(text_path),
+        "previous_pass_invalidated": True,
+    }
+    return blocked
+
+
+def _existing_json_is_current_run_pass(path: Path, payload: dict[str, Any], *, containment_root: Path) -> bool:
+    expected_run_id = payload.get("evidence_run_id")
+    try:
+        content = read_bytes_limited_no_follow(path, max_bytes=1024 * 1024, containment_root=containment_root)
+    except (FileNotFoundError, OSError, SafeFilesystemError):
+        return False
+    try:
+        existing = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(existing, dict) or existing.get("status") != "PASS":
+        return False
+    if expected_run_id is None:
+        return True
+    return str(existing.get("evidence_run_id") or "") == str(expected_run_id)
+
+
+def _invalidate_json_on_publication_failure(
+    json_path: Path,
+    text_path: Path,
+    payload: dict[str, Any],
+    *,
+    containment_root: Path,
+    error: Exception,
+) -> None:
+    if not _existing_json_is_current_run_pass(json_path, payload, containment_root=containment_root):
+        return
+    blocked = _blocked_publication_payload(payload, json_path=json_path, text_path=text_path, error=error)
+    _write_json_atomic(json_path, blocked, containment_root=containment_root)
+
+
 def _preflight_output_target(path: Path, *, containment_root: Path) -> None:
     if path.parent != containment_root:
         raise ValueError("source-trust output target must be directly under the evidence root")
@@ -369,9 +435,19 @@ def write_evidence(
         raise ValueError("source-trust output name must be a local .json filename")
     json_path = evidence_root / json_name
     text_path = evidence_root / f"{json_path.stem}.txt"
-    _preflight_output_targets((json_path, text_path), containment_root=evidence_root)
-    _write_text_report(text_path, payload, containment_root=evidence_root)
-    _write_json_atomic(json_path, payload, containment_root=evidence_root)
+    try:
+        _preflight_output_targets((json_path, text_path), containment_root=evidence_root)
+        _write_text_report(text_path, payload, containment_root=evidence_root)
+        _write_json_atomic(json_path, payload, containment_root=evidence_root)
+    except (OSError, ValueError) as error:
+        _invalidate_json_on_publication_failure(
+            json_path,
+            text_path,
+            payload,
+            containment_root=evidence_root,
+            error=error,
+        )
+        raise
     return json_path
 
 

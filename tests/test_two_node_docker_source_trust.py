@@ -175,6 +175,49 @@ def test_source_trust_rejects_existing_symlink_text_target(tmp_path: Path) -> No
     assert not (evidence_root / "two-node-docker-source-trust-display.json").exists()
 
 
+def test_source_trust_failed_sidecar_publication_invalidates_same_run_pass_json(tmp_path: Path) -> None:
+    checkout = _make_checkout(tmp_path / "checkout")
+    evidence_root = checkout / "artifacts" / "source-trust"
+    evidence_root.mkdir(parents=True)
+    stale_json = evidence_root / "two-node-docker-source-trust-display.json"
+    stale_json.write_text(
+        json.dumps(
+            {
+                "schema": "nhms.two_node_docker.source_trust.v1",
+                "status": "PASS",
+                "evidence_run_id": "source-trust-stale",
+                "roles": ["display"],
+                "checked_paths": [],
+                "blockers": [],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    outside_target = tmp_path / "outside-text-target"
+    outside_target.write_text("do not overwrite\n", encoding="utf-8")
+    text_target = evidence_root / "two-node-docker-source-trust-display.txt"
+    text_target.symlink_to(outside_target)
+
+    result = _run_preflight(
+        checkout_root=checkout,
+        evidence_root=evidence_root,
+        trust_root=tmp_path,
+        trusted_owners=[_current_owner()],
+        roles=["display"],
+        evidence_run_id="source-trust-stale",
+    )
+
+    assert result.returncode == 2
+    assert "must not be a symlink" in result.stderr
+    assert outside_target.read_text(encoding="utf-8") == "do not overwrite\n"
+    replacement = json.loads(stale_json.read_text(encoding="utf-8"))
+    assert replacement["status"] == "BLOCKED"
+    assert replacement["evidence_run_id"] == "source-trust-stale"
+    assert any(blocker["code"] == "SOURCE_TRUST_PUBLICATION_FAILED" for blocker in replacement["blockers"])
+
+
 def test_source_trust_blocks_0644_role_env_before_direct_compose_sentinel(tmp_path: Path) -> None:
     checkout = _make_checkout(tmp_path / "checkout")
     display_env = checkout / "infra" / "env" / "display.env"

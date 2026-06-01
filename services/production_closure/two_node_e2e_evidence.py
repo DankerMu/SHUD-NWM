@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 from packages.common.redaction import redact_payload, redact_text
 from packages.common.safe_fs import (
@@ -160,7 +160,31 @@ PRODUCER_EVIDENCE_KEYS = (
     "evidence",
     "proofs",
 )
+SOURCE_SCOPED_PRODUCER_EVIDENCE_KEYS = ("source_artifacts", "evidence", "proofs", "artifacts")
+PRODUCER_AUTHORITATIVE_PROOF_CONTAINER_KEYS = frozenset(
+    {
+        "request",
+        "response",
+        "producer",
+        "proof",
+        "record",
+        "result",
+    }
+)
+PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS = frozenset(
+    {
+        "metadata",
+        "wrapper",
+        "collector",
+        "context",
+        "diagnostics",
+        "debug",
+        "extra",
+        "notes",
+    }
+)
 LOG_URI_KEYS = ("log_uri", "published_log_uri")
+LOG_URI_IDENTITY_FIELDS = ("source", "run_id", "job_id")
 LOG_UNAVAILABLE_ERROR_CODES = frozenset({"JOB_LOG_NOT_PUBLISHED", "JOB_LOG_NOT_FOUND"})
 PUBLISHED_LOG_ROOT_KEYS = frozenset(
     {
@@ -192,6 +216,58 @@ PUBLISHED_LOG_S3_PREFIX_KEYS = frozenset(
     }
 )
 LOG_URI_ENCODED_FORBIDDEN_RE = re.compile(r"%(?:2e|2f|5c)", re.IGNORECASE)
+LOG_URI_CREDENTIAL_WORD_RE = re.compile(
+    r"(token|password|passwd|pwd|secret|credential|api[_-]?key|access[_-]?key|session[_-]?key|signature)",
+    re.IGNORECASE,
+)
+PRIVATE_LOG_PATH_TOKENS = (
+    ".nhms-runs",
+    "workspace",
+    "basins",
+    "model_asset",
+    "model-assets",
+    "shud",
+)
+PRODUCER_SOURCE_KEYS = frozenset({"source", "source_id"})
+PRODUCER_CHECK_KEYS = frozenset({"check", "check_name", "operation", "route"})
+PRODUCER_TEXT_IDENTITY_KEYS = frozenset(
+    {
+        "path",
+        "url",
+        "uri",
+        "request_path",
+        "query",
+        "query_string",
+        "text",
+        "stdout",
+        "stderr",
+        "message",
+        "details",
+        "summary",
+        "body",
+        "response_body",
+        "log_uri",
+        "published_log_uri",
+        "artifact_path",
+        "proof_path",
+    }
+)
+PRODUCER_CHECK_ALIASES: Mapping[str, tuple[str, ...]] = {
+    "latest_product": ("latest_product", "latest-product", "/latest-product", "/mvp/qhh/latest-product"),
+    "series": ("series", "/series"),
+    "ops_status": ("ops_status", "ops-status", "/pipeline/status"),
+    "ops_stages": ("ops_stages", "ops-stages", "/pipeline/stages"),
+    "jobs": ("jobs", "/jobs"),
+    "hydro_met": ("hydro_met", "hydro-met", "/hydro-met"),
+    "ops": ("ops", "/ops"),
+    "ops_jobs": ("ops_jobs", "ops-jobs"),
+    "ops_job_logs": ("ops_job_logs", "ops-job-logs", "/logs"),
+    "source_switch": ("source_switch", "source-switch"),
+    "job_logs": ("job_logs", "job-logs", "/logs"),
+}
+PRODUCER_BASE_REQUIRED_IDENTITY_FIELDS = ("source", "check", "run_id", "cycle_time", "model_id")
+PRODUCER_TEXT_AUTHORITY_IDENTITY_FIELDS = (*STRICT_LOG_IDENTITY_FIELDS, "check")
+PRODUCER_JOB_ID_REQUIRED_CHECKS = frozenset({"job_logs", "ops_jobs", "ops_job_logs"})
 DOCKER_PREFLIGHT_SCHEMA = "nhms.two_node_docker.preflight.v1"
 DOCKER_PREFLIGHT_REQUIRED_COMMANDS = (
     "docker_version",
@@ -636,6 +712,7 @@ def validate_two_node_e2e_evidence(config: TwoNodeE2EEvidenceConfig) -> dict[str
             live_flag="live_log_evidence",
             require_job_id=True,
             evidence_run_id=config.run_id,
+            docker_security_doc=lane_docs["docker_security"],
         ),
         "slurm": _evaluate_simple_live_lane(
             "slurm",
@@ -1088,6 +1165,7 @@ def _evaluate_source_lane(
     live_flag: str,
     require_job_id: bool = False,
     evidence_run_id: str,
+    docker_security_doc: EvidenceDocument | None = None,
 ) -> LaneEvaluation:
     if doc is None:
         return _missing_lane(name, f"TWO_NODE_E2E_{name.upper()}_EVIDENCE_MISSING")
@@ -1145,6 +1223,8 @@ def _evaluate_source_lane(
                     payload,
                     declared_sources=declared_sources,
                     required_checks=required_checks,
+                    strict_identities=strict_identities,
+                    evidence_run_id=evidence_run_id,
                 )
             )
     records = _source_records(payload)
@@ -1272,6 +1352,9 @@ def _evaluate_source_lane(
                         source_record=record,
                         lane_payload=payload,
                         expected_identity=strict_identities.get(source, {}),
+                        docker_security_payload=(
+                            docker_security_doc.payload if docker_security_doc is not None else None
+                        ),
                     )
                 )
     if findings:
@@ -2181,6 +2264,113 @@ def _walk_evidence_values(value: Any):
                 stack.append((current, str(index), current[index], depth + 1))
 
 
+def _walk_producer_proof_candidate_values(value: Any):
+    stack: list[tuple[Any, str | None, Any, int, bool, bool, bool]] = [
+        (None, None, value, 0, False, False, True)
+    ]
+    visited = 0
+    while stack:
+        parent, key, current, depth, hidden_text_identity, authority_blocked, candidate_position = stack.pop()
+        visited += 1
+        if visited > MAX_EVIDENCE_TRAVERSAL_NODES:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal node limit was exceeded.",
+            )
+        if depth > MAX_EVIDENCE_TRAVERSAL_DEPTH:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal depth limit was exceeded.",
+            )
+        current_hidden_text_identity = hidden_text_identity or (
+            key is not None and key in PRODUCER_TEXT_IDENTITY_KEYS
+        )
+        current_authority_blocked = authority_blocked or (
+            key is not None and key in PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS
+        )
+        if candidate_position and not current_hidden_text_identity and not current_authority_blocked:
+            yield parent, key, current, depth
+        if isinstance(current, Mapping):
+            for nested_key, nested in reversed(list(current.items())):
+                nested_key_text = str(nested_key)
+                stack.append(
+                    (
+                        current,
+                        nested_key_text,
+                        nested,
+                        depth + 1,
+                        current_hidden_text_identity,
+                        current_authority_blocked,
+                        _producer_proof_child_is_candidate_position(
+                            key=nested_key_text,
+                            authority_blocked=current_authority_blocked,
+                            parent_is_candidate=candidate_position,
+                        ),
+                    )
+                )
+        elif isinstance(current, list):
+            for index in range(len(current) - 1, -1, -1):
+                stack.append(
+                    (
+                        current,
+                        str(index),
+                        current[index],
+                        depth + 1,
+                        current_hidden_text_identity,
+                        current_authority_blocked,
+                        candidate_position,
+                    )
+                )
+
+
+def _producer_proof_child_is_candidate_position(
+    *,
+    key: str,
+    authority_blocked: bool,
+    parent_is_candidate: bool,
+) -> bool:
+    if authority_blocked:
+        return False
+    if key in PRODUCER_TEXT_IDENTITY_KEYS or key in PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS:
+        return False
+    if key in PRODUCER_AUTHORITATIVE_PROOF_CONTAINER_KEYS:
+        return True
+    if not parent_is_candidate:
+        return False
+    if _is_producer_check_key(key):
+        return True
+    return False
+
+
+def _walk_producer_non_text_values(value: Any):
+    stack: list[tuple[Any, str | None, Any, int, bool]] = [(None, None, value, 0, False)]
+    visited = 0
+    while stack:
+        parent, key, current, depth, hidden_text_identity = stack.pop()
+        visited += 1
+        if visited > MAX_EVIDENCE_TRAVERSAL_NODES:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal node limit was exceeded.",
+            )
+        if depth > MAX_EVIDENCE_TRAVERSAL_DEPTH:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal depth limit was exceeded.",
+            )
+        current_hidden_text_identity = hidden_text_identity or (
+            key is not None and key in PRODUCER_TEXT_IDENTITY_KEYS
+        )
+        if not current_hidden_text_identity:
+            yield parent, key, current, depth
+        if isinstance(current, Mapping):
+            for nested_key, nested in reversed(list(current.items())):
+                stack.append((current, str(nested_key), nested, depth + 1, current_hidden_text_identity))
+        elif isinstance(current, list):
+            for index in range(len(current) - 1, -1, -1):
+                stack.append((current, str(index), current[index], depth + 1, current_hidden_text_identity))
+
+
 def _missing_lane(name: str, code: str) -> LaneEvaluation:
     return LaneEvaluation(
         name=name,
@@ -2350,7 +2540,7 @@ def _identity_match_status(
 def _record_identity(record: Mapping[str, Any]) -> dict[str, Any]:
     raw = record.get("identity") or record.get("strict_identity") or record.get("lineage") or {}
     identity = dict(raw) if isinstance(raw, Mapping) else {}
-    for identity_field in STRICT_LOG_IDENTITY_FIELDS:
+    for identity_field in PRODUCER_TEXT_AUTHORITY_IDENTITY_FIELDS:
         if identity_field in record and identity_field not in identity:
             identity[identity_field] = record[identity_field]
     if "source_id" in record and "source" not in identity:
@@ -4998,6 +5188,8 @@ def _source_lane_check_producer_blockers(
     *,
     declared_sources: tuple[str, ...],
     required_checks: tuple[str, ...],
+    strict_identities: Mapping[str, Mapping[str, Any]],
+    evidence_run_id: str,
 ) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
     records = _source_records(payload)
@@ -5010,9 +5202,53 @@ def _source_lane_check_producer_blockers(
             check = check_results.get(check_name)
             if check is None:
                 continue
-            if _check_has_producer_evidence(check):
+            expected_identity = strict_identities.get(source, {})
+            check_blockers: list[dict[str, Any]] = []
+            source_scoped_scan = _source_scoped_producer_evidence_scan(
+                record,
+                lane_name=lane_name,
+                source=source,
+                check=check_name,
+                expected_identity=expected_identity,
+                evidence_run_id=evidence_run_id,
+            )
+            source_conflict_blockers = _producer_identity_conflict_blockers(source_scoped_scan[0])
+            check_blockers = _check_producer_identity_blockers(
+                check,
+                lane_name=lane_name,
+                source=source,
+                check_name=check_name,
+                expected_identity=expected_identity,
+                evidence_run_id=evidence_run_id,
+            )
+            conflict_blockers = _producer_identity_conflict_blockers(check_blockers)
+            if conflict_blockers:
+                blockers.extend(conflict_blockers)
+                blockers.extend(source_conflict_blockers)
                 continue
-            if _source_scoped_producer_evidence_for_check(record, source=source, check=check_name):
+            if source_conflict_blockers:
+                blockers.extend(source_conflict_blockers)
+                continue
+            if _check_has_producer_evidence(check):
+                blockers.extend(check_blockers)
+                continue
+            source_scoped_blockers = _source_scoped_producer_evidence_blockers(
+                record,
+                lane_name=lane_name,
+                source=source,
+                check=check_name,
+                expected_identity=expected_identity,
+                evidence_run_id=evidence_run_id,
+                scan=source_scoped_scan,
+            )
+            if not source_scoped_blockers:
+                continue
+            missing_code = f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_EVIDENCE_MISSING"
+            if any(item.get("code") != missing_code for item in source_scoped_blockers):
+                blockers.extend(source_scoped_blockers)
+                continue
+            if check_blockers:
+                blockers.extend(check_blockers)
                 continue
             blockers.append(
                 _blocker(
@@ -5025,14 +5261,1455 @@ def _source_lane_check_producer_blockers(
     return blockers
 
 
-def _source_scoped_producer_evidence_for_check(
+def _source_scoped_producer_evidence_blockers(
     source_record: Mapping[str, Any],
     *,
+    lane_name: str,
     source: str,
     check: str,
+    expected_identity: Mapping[str, Any],
+    evidence_run_id: str,
+    scan: tuple[list[dict[str, Any]], bool, bool] | None = None,
+) -> list[dict[str, Any]]:
+    blockers, saw_structured, saw_matching = scan or _source_scoped_producer_evidence_scan(
+        source_record,
+        lane_name=lane_name,
+        source=source,
+        check=check,
+        expected_identity=expected_identity,
+        evidence_run_id=evidence_run_id,
+    )
+    if saw_matching:
+        conflict_blockers = _producer_identity_conflict_blockers(blockers)
+        if conflict_blockers:
+            return conflict_blockers
+        return []
+    if blockers:
+        return blockers
+    if saw_structured:
+        return [
+            _blocker(
+                f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_UNSCOPED",
+                f"{lane_name} source-scoped producer evidence must explicitly name the same source and check.",
+                source=source,
+                check=check,
+            )
+        ]
+    return [
+        _blocker(
+            f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_EVIDENCE_MISSING",
+            f"{lane_name} required check must include check-scoped producer evidence.",
+            source=source,
+            check=check,
+        )
+    ]
+
+
+def _source_scoped_producer_evidence_scan(
+    source_record: Mapping[str, Any],
+    *,
+    lane_name: str,
+    source: str,
+    check: str,
+    expected_identity: Mapping[str, Any],
+    evidence_run_id: str,
+) -> tuple[list[dict[str, Any]], bool, bool]:
+    saw_structured = False
+    saw_matching = False
+    blockers: list[dict[str, Any]] = []
+    expected = _expected_producer_identity(
+        source=source,
+        check_name=check,
+        expected_identity=expected_identity,
+        evidence_run_id=evidence_run_id,
+    )
+    blockers.extend(
+        _producer_full_surface_non_authoritative_structured_identity_conflict_blockers(
+            source_record,
+            lane_name=lane_name,
+            expected=expected,
+            required_identity_fields=_producer_required_identity_fields(check),
+            excluded_root_keys=(*SOURCE_SCOPED_PRODUCER_EVIDENCE_KEYS, "checks", "check_results"),
+        )
+    )
+    source_record_text_blockers = _producer_full_scope_text_identity_blockers(
+        source_record,
+        lane_name=lane_name,
+        expected=expected,
+        excluded_root_keys=(*SOURCE_SCOPED_PRODUCER_EVIDENCE_KEYS, "checks", "check_results"),
+    )
+    for key in SOURCE_SCOPED_PRODUCER_EVIDENCE_KEYS:
+        value = source_record.get(key)
+        if value is None:
+            continue
+        non_artifact_source_artifacts = key == "source_artifacts" and not _source_artifact_records(value)
+        for sibling_value in _source_scoped_check_keyed_sibling_values(value, target_check=check):
+            blockers.extend(
+                _producer_value_target_text_identity_blockers(
+                    sibling_value,
+                    lane_name=lane_name,
+                    expected=expected,
+                    target_check=check,
+                    evidence_key=key,
+                )
+            )
+            if non_artifact_source_artifacts:
+                continue
+            blockers.extend(
+                _producer_value_hidden_record_identity_conflict_blockers(
+                    sibling_value,
+                    lane_name=lane_name,
+                    expected=expected,
+                    required_identity_fields=_producer_required_identity_fields(check),
+                    default_to_target_context=False,
+                )
+            )
+        for metadata_value in _source_scoped_keyed_metadata_text_values(value, target_check=check):
+            blockers.extend(
+                _producer_value_text_identity_blockers(
+                    metadata_value,
+                    lane_name=lane_name,
+                    expected=expected,
+                    evidence_key=key,
+                )
+            )
+        for target_value in _source_scoped_target_text_values(value, target_check=check):
+            blockers.extend(
+                _producer_value_text_identity_blockers(
+                    target_value,
+                    lane_name=lane_name,
+                    expected=expected,
+                    evidence_key=key,
+                )
+            )
+        if isinstance(value, list):
+            blockers.extend(
+                _producer_value_identity_only_record_conflict_blockers(
+                    value,
+                    lane_name=lane_name,
+                    expected=expected,
+                    required_identity_fields=_producer_required_identity_fields(check),
+                    default_to_target_context=False,
+                )
+            )
+        if non_artifact_source_artifacts:
+            saw_structured = saw_structured or _producer_value_target_structured_record_present(
+                value,
+                target_check=check,
+                default_to_target_context=False,
+            )
+            blockers.extend(
+                _producer_value_hidden_record_identity_conflict_blockers(
+                    value,
+                    lane_name=lane_name,
+                    expected=expected,
+                    required_identity_fields=_producer_required_identity_fields(check),
+                    default_to_target_context=False,
+                )
+            )
+            continue
+        metadata_blockers, metadata_saw_target_structured = (
+            _source_scoped_keyed_metadata_structured_identity_conflict_blockers(
+                value,
+                lane_name=lane_name,
+                expected=expected,
+                required_identity_fields=_producer_required_identity_fields(check),
+                target_check=check,
+            )
+        )
+        blockers.extend(metadata_blockers)
+        saw_structured = saw_structured or metadata_saw_target_structured
+        for target_value in _source_scoped_target_proof_values(value, target_check=check):
+            if not _structured_evidence_value(target_value):
+                continue
+            saw_structured = True
+            value_blockers = _producer_value_semantic_identity_blockers(
+                target_value,
+                lane_name=lane_name,
+                source=source,
+                check_name=check,
+                expected_identity=expected_identity,
+                evidence_run_id=evidence_run_id,
+                require_explicit_scope=True,
+                include_text_conflicts=False,
+            )
+            if value_blockers:
+                blockers.extend(value_blockers)
+            else:
+                saw_matching = True
+    blockers.extend(source_record_text_blockers)
+    return blockers, saw_structured, saw_matching
+
+
+def _check_producer_identity_blockers(
+    check: Mapping[str, Any],
+    *,
+    lane_name: str,
+    source: str,
+    check_name: str,
+    expected_identity: Mapping[str, Any],
+    evidence_run_id: str,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    saw_matching = False
+    saw_structured = False
+    expected = _expected_producer_identity(
+        source=source,
+        check_name=check_name,
+        expected_identity=expected_identity,
+        evidence_run_id=evidence_run_id,
+    )
+    blockers.extend(
+        _producer_full_surface_non_authoritative_structured_identity_conflict_blockers(
+            check,
+            lane_name=lane_name,
+            expected=expected,
+            required_identity_fields=_producer_required_identity_fields(check_name),
+            excluded_root_keys=PRODUCER_EVIDENCE_KEYS,
+        )
+    )
+    check_text_blockers = _producer_full_scope_text_identity_blockers(
+        check,
+        lane_name=lane_name,
+        expected=expected,
+        excluded_root_keys=PRODUCER_EVIDENCE_KEYS,
+    )
+    for key in PRODUCER_EVIDENCE_KEYS:
+        if key == "source_artifacts":
+            value = check.get(key)
+            if value is not None:
+                blockers.extend(
+                    _producer_value_text_identity_blockers(
+                        value,
+                        lane_name=lane_name,
+                        expected=expected,
+                        evidence_key=key,
+                        target_check=check_name,
+                    )
+                )
+            if not _has_source_artifact_proof(check):
+                if value is not None:
+                    saw_structured = saw_structured or _producer_value_target_structured_record_present(
+                        value,
+                        target_check=check_name,
+                        default_to_target_context=True,
+                    )
+                    blockers.extend(
+                        _producer_value_hidden_record_identity_conflict_blockers(
+                            value,
+                            lane_name=lane_name,
+                            expected=expected,
+                            required_identity_fields=_producer_required_identity_fields(check_name),
+                            default_to_target_context=True,
+                        )
+                    )
+                continue
+        else:
+            value = check.get(key)
+            if value is None:
+                continue
+            blockers.extend(
+                _producer_value_text_identity_blockers(
+                    value,
+                    lane_name=lane_name,
+                    expected=expected,
+                    evidence_key=key,
+                    target_check=check_name,
+                )
+            )
+            blockers.extend(
+                _producer_value_hidden_record_identity_conflict_blockers(
+                    value,
+                    lane_name=lane_name,
+                    expected=expected,
+                    required_identity_fields=_producer_required_identity_fields(check_name),
+                    default_to_target_context=True,
+                )
+            )
+            if not _structured_evidence_value(value):
+                continue
+        saw_structured = True
+        value_blockers = _producer_value_semantic_identity_blockers(
+            value,
+            lane_name=lane_name,
+            source=source,
+            check_name=check_name,
+            expected_identity=expected_identity,
+            evidence_run_id=evidence_run_id,
+            require_explicit_scope=False,
+            include_text_conflicts=False,
+        )
+        if value_blockers:
+            blockers.extend(value_blockers)
+        else:
+            saw_matching = True
+    blockers.extend(check_text_blockers)
+    if saw_matching:
+        conflict_blockers = _producer_identity_conflict_blockers(blockers)
+        if conflict_blockers:
+            return conflict_blockers
+        return []
+    if blockers:
+        return blockers
+    if saw_structured:
+        return [
+            _blocker(
+                f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_UNSCOPED",
+                f"{lane_name} required check producer evidence must bind to the same source and check.",
+                source=source,
+                check=check_name,
+            )
+        ]
+    return []
+
+
+def _producer_value_semantic_identity_blockers(
+    value: Any,
+    *,
+    lane_name: str,
+    source: str,
+    check_name: str,
+    expected_identity: Mapping[str, Any],
+    evidence_run_id: str,
+    require_explicit_scope: bool,
+    include_text_conflicts: bool = True,
+) -> list[dict[str, Any]]:
+    expected = _expected_producer_identity(
+        source=source,
+        check_name=check_name,
+        expected_identity=expected_identity,
+        evidence_run_id=evidence_run_id,
+    )
+    required_identity_fields = _producer_required_identity_fields(check_name)
+    blockers: list[dict[str, Any]] = []
+    matching_records = 0
+    scoped_records = 0
+    text_blockers: list[dict[str, Any]] = []
+    proof_candidate_ids: set[int] = set()
+    if include_text_conflicts:
+        text_blockers = _producer_value_text_identity_blockers(
+            value,
+            lane_name=lane_name,
+            expected=expected,
+            target_check=check_name,
+        )
+    for _parent, _key, nested, _depth in _walk_producer_proof_candidate_values(value):
+        if not isinstance(nested, Mapping) or not _looks_like_evidence_record(nested):
+            continue
+        proof_candidate_ids.add(id(nested))
+        record_blockers, record_matches, record_scoped = _producer_record_identity_blockers(
+            nested,
+            lane_name=lane_name,
+            expected=expected,
+            required_identity_fields=required_identity_fields,
+        )
+        blockers.extend(record_blockers)
+        if record_matches:
+            matching_records += 1
+        if record_scoped:
+            scoped_records += 1
+    blockers.extend(
+        _producer_value_hidden_record_identity_conflict_blockers(
+            value,
+            lane_name=lane_name,
+            expected=expected,
+            required_identity_fields=required_identity_fields,
+            excluded_record_ids=proof_candidate_ids,
+            default_to_target_context=True,
+        )
+    )
+    blockers.extend(text_blockers)
+    if blockers:
+        return blockers
+    if require_explicit_scope and scoped_records == 0:
+        return [
+            _blocker(
+                f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_UNSCOPED",
+                f"{lane_name} source-scoped producer evidence must bind strict required check identity.",
+                source=source,
+                check=check_name,
+                required_fields=list(required_identity_fields),
+            )
+        ]
+    if matching_records == 0:
+        return [
+            _blocker(
+                f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_UNSCOPED",
+                f"{lane_name} producer evidence identity is unscoped for the required check identity.",
+                source=source,
+                check=check_name,
+                required_fields=list(required_identity_fields),
+            )
+        ]
+    return []
+
+
+def _producer_value_hidden_record_identity_conflict_blockers(
+    value: Any,
+    *,
+    lane_name: str,
+    expected: Mapping[str, str],
+    required_identity_fields: Sequence[str],
+    excluded_record_ids: set[int] = frozenset(),
+    default_to_target_context: bool = False,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    expected_check = expected.get("check")
+    for _parent, key, nested, _depth in _walk_producer_non_text_values(value):
+        if not isinstance(nested, Mapping) or id(nested) in excluded_record_ids:
+            continue
+        if not _producer_record_has_explicit_identity(nested):
+            continue
+        if not _producer_record_applies_to_target_check(
+            nested,
+            target_check=expected_check,
+            default_to_target_context=default_to_target_context,
+        ):
+            continue
+        record_blockers, _record_matches, _record_scoped = _producer_record_identity_blockers(
+            nested,
+            lane_name=lane_name,
+            expected=expected,
+            required_identity_fields=required_identity_fields,
+        )
+        for blocker in record_blockers:
+            if key is not None:
+                blocker.setdefault("evidence_key", key)
+            signature = (
+                blocker.get("code"),
+                blocker.get("source"),
+                blocker.get("check"),
+                blocker.get("field"),
+                blocker.get("observed"),
+                blocker.get("expected"),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            blockers.append(blocker)
+    return blockers
+
+
+def _producer_value_identity_only_record_conflict_blockers(
+    value: Any,
+    *,
+    lane_name: str,
+    expected: Mapping[str, str],
+    required_identity_fields: Sequence[str],
+    default_to_target_context: bool = False,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    expected_check = expected.get("check")
+    for _parent, key, nested, _depth in _walk_producer_non_text_values(value):
+        if not isinstance(nested, Mapping):
+            continue
+        if _looks_like_evidence_record(nested):
+            continue
+        if not _producer_record_has_explicit_identity(nested):
+            continue
+        if not _producer_record_applies_to_target_check(
+            nested,
+            target_check=expected_check,
+            default_to_target_context=default_to_target_context,
+        ):
+            continue
+        record_blockers, _record_matches, _record_scoped = _producer_record_identity_blockers(
+            nested,
+            lane_name=lane_name,
+            expected=expected,
+            required_identity_fields=required_identity_fields,
+        )
+        for blocker in record_blockers:
+            if key is not None:
+                blocker.setdefault("evidence_key", key)
+            signature = (
+                blocker.get("code"),
+                blocker.get("source"),
+                blocker.get("check"),
+                blocker.get("field"),
+                blocker.get("observed"),
+                blocker.get("expected"),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            blockers.append(blocker)
+    return blockers
+
+
+def _producer_full_surface_non_authoritative_structured_identity_conflict_blockers(
+    value: Mapping[str, Any],
+    *,
+    lane_name: str,
+    expected: Mapping[str, str],
+    required_identity_fields: Sequence[str],
+    excluded_root_keys: Sequence[str],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for key, nested in _producer_full_surface_non_authoritative_structured_values(
+        value,
+        excluded_root_keys=frozenset(excluded_root_keys),
+    ):
+        wrapper_blockers = _producer_value_hidden_record_identity_conflict_blockers(
+            nested,
+            lane_name=lane_name,
+            expected=expected,
+            required_identity_fields=required_identity_fields,
+            default_to_target_context=False,
+        )
+        for blocker in wrapper_blockers:
+            blocker.setdefault("evidence_key", key)
+            signature = (
+                blocker.get("code"),
+                blocker.get("source"),
+                blocker.get("check"),
+                blocker.get("field"),
+                blocker.get("observed"),
+                blocker.get("expected"),
+                blocker.get("evidence_key"),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            blockers.append(blocker)
+    return blockers
+
+
+def _producer_full_surface_non_authoritative_structured_values(
+    value: Any,
+    *,
+    excluded_root_keys: frozenset[str],
+):
+    stack: list[tuple[Any, str | None, Any, int]] = [(None, None, value, 0)]
+    visited = 0
+    while stack:
+        parent, key, current, depth = stack.pop()
+        visited += 1
+        if visited > MAX_EVIDENCE_TRAVERSAL_NODES:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal node limit was exceeded.",
+            )
+        if depth > MAX_EVIDENCE_TRAVERSAL_DEPTH:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal depth limit was exceeded.",
+            )
+        if depth == 1 and key in excluded_root_keys:
+            continue
+        if (
+            key in PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS
+            and (isinstance(current, Mapping) or isinstance(current, list))
+            and _producer_value_contains_explicit_identity(current)
+        ):
+            yield key, current
+            continue
+        if isinstance(current, Mapping):
+            for nested_key, nested in reversed(list(current.items())):
+                stack.append((current, str(nested_key), nested, depth + 1))
+        elif isinstance(current, list):
+            for index in range(len(current) - 1, -1, -1):
+                stack.append((current, str(index), current[index], depth + 1))
+
+
+def _source_scoped_keyed_metadata_structured_identity_conflict_blockers(
+    value: Any,
+    *,
+    lane_name: str,
+    expected: Mapping[str, str],
+    required_identity_fields: Sequence[str],
+    target_check: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    if not _is_check_keyed_producer_mapping(value):
+        return [], False
+    blockers: list[dict[str, Any]] = []
+    saw_target_structured = False
+    for key, nested in value.items():
+        key_text = str(key)
+        if _is_producer_check_key(key_text):
+            continue
+        metadata_value = {key_text: nested}
+        if _producer_value_target_structured_record_present(
+            metadata_value,
+            target_check=target_check,
+            default_to_target_context=False,
+        ):
+            saw_target_structured = True
+        blockers.extend(
+            _producer_value_hidden_record_identity_conflict_blockers(
+                metadata_value,
+                lane_name=lane_name,
+                expected=expected,
+                required_identity_fields=required_identity_fields,
+                default_to_target_context=False,
+            )
+        )
+    return blockers, saw_target_structured
+
+
+def _source_scoped_check_keyed_sibling_values(value: Any, *, target_check: str) -> list[Any]:
+    if not _is_check_keyed_producer_mapping(value):
+        return []
+    return [
+        nested
+        for key, nested in value.items()
+        if _is_producer_check_key(str(key))
+        and not _producer_identity_value_matches("check", str(key), target_check)
+    ]
+
+
+def _producer_value_target_structured_record_present(
+    value: Any,
+    *,
+    target_check: str,
+    default_to_target_context: bool,
 ) -> bool:
-    for key in ("source_artifacts", "evidence", "proofs", "artifacts"):
-        if _producer_value_mentions_scope(source_record.get(key), source=source, check=check):
+    for _parent, _key, nested, _depth in _walk_producer_non_text_values(value):
+        if not isinstance(nested, Mapping):
+            continue
+        if not (_looks_like_evidence_record(nested) or _producer_record_has_explicit_identity(nested)):
+            continue
+        if _producer_record_applies_to_target_check(
+            nested,
+            target_check=target_check,
+            default_to_target_context=default_to_target_context,
+        ):
+            return True
+    return False
+
+
+def _producer_record_applies_to_target_check(
+    record: Mapping[str, Any],
+    *,
+    target_check: str | None,
+    default_to_target_context: bool,
+) -> bool:
+    if not target_check:
+        return True
+    check_values = _producer_record_explicit_values(record, PRODUCER_CHECK_KEYS)
+    if not check_values:
+        return default_to_target_context
+    return any(_producer_identity_value_matches("check", item, target_check) for item in check_values)
+
+
+def _producer_value_contains_explicit_identity(value: Any) -> bool:
+    for _parent, _key, nested, _depth in _walk_producer_non_text_values(value):
+        if isinstance(nested, Mapping) and _producer_record_has_explicit_identity(nested):
+            return True
+    return False
+
+
+def _producer_record_has_explicit_identity(record: Mapping[str, Any]) -> bool:
+    identity_key_sets = (
+        PRODUCER_SOURCE_KEYS,
+        PRODUCER_CHECK_KEYS,
+        frozenset({"run_id"}),
+        frozenset({"cycle_time"}),
+        frozenset({"model_id"}),
+        frozenset({"job_id"}),
+        frozenset(CURRENT_EVIDENCE_RUN_ID_KEYS),
+    )
+    return any(_producer_record_explicit_values(record, keys) for keys in identity_key_sets)
+
+
+def _producer_identity_conflict_blockers(blockers: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        dict(blocker)
+        for blocker in blockers
+        if str(blocker.get("code", "")).endswith("_CHECK_PRODUCER_IDENTITY_MISMATCH")
+    ]
+
+
+def _expected_producer_identity(
+    *,
+    source: str,
+    check_name: str,
+    expected_identity: Mapping[str, Any],
+    evidence_run_id: str,
+) -> dict[str, str]:
+    expected: dict[str, str] = {"source": _source_name(source) or str(source), "check": check_name}
+    for identity_field in STRICT_LOG_IDENTITY_FIELDS:
+        value = _identity_value(expected_identity, identity_field)
+        if value:
+            expected[identity_field] = value
+    expected.setdefault("source", _source_name(source) or str(source))
+    expected["evidence_run_id"] = evidence_run_id
+    return expected
+
+
+def _producer_required_identity_fields(check_name: str) -> tuple[str, ...]:
+    if _producer_check_token(check_name) in PRODUCER_JOB_ID_REQUIRED_CHECKS:
+        return (*PRODUCER_BASE_REQUIRED_IDENTITY_FIELDS, "job_id")
+    return PRODUCER_BASE_REQUIRED_IDENTITY_FIELDS
+
+
+def _producer_record_identity_blockers(
+    record: Mapping[str, Any],
+    *,
+    lane_name: str,
+    expected: Mapping[str, str],
+    required_identity_fields: Sequence[str],
+) -> tuple[list[dict[str, Any]], bool, bool]:
+    blockers: list[dict[str, Any]] = []
+    expected_source = expected.get("source")
+    expected_check = expected.get("check")
+    matched_fields: set[str] = set()
+    for identity_field in ("source", "check", "run_id", "cycle_time", "model_id", "job_id", "evidence_run_id"):
+        if identity_field == "source":
+            values = _producer_record_explicit_values(record, PRODUCER_SOURCE_KEYS)
+        elif identity_field == "check":
+            values = _producer_record_explicit_values(record, PRODUCER_CHECK_KEYS)
+        elif identity_field == "evidence_run_id":
+            values = _producer_record_explicit_values(record, frozenset(CURRENT_EVIDENCE_RUN_ID_KEYS))
+        else:
+            values = _producer_record_explicit_values(record, frozenset({identity_field}))
+        expected_value = expected.get(identity_field)
+        if not expected_value:
+            continue
+        field_matched = False
+        for observed in values:
+            if _producer_identity_value_matches(identity_field, observed, expected_value):
+                field_matched = True
+            else:
+                blockers.append(
+                    _blocker(
+                        f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_MISMATCH",
+                        f"{lane_name} producer evidence identity conflicts with the required check identity.",
+                        source=expected_source,
+                        check=expected_check,
+                        field=identity_field,
+                        observed=observed,
+                        expected=expected_value,
+                    )
+                )
+        if field_matched:
+            matched_fields.add(identity_field)
+    record_scoped = {"source", "check"}.issubset(matched_fields)
+    if blockers:
+        return blockers, False, record_scoped
+    record_matches = all(field in matched_fields for field in required_identity_fields if expected.get(field))
+    return [], record_matches, record_scoped
+
+
+def _producer_record_explicit_values(record: Mapping[str, Any], keys: frozenset[str]) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        value = record.get(key)
+        if value is not None and not isinstance(value, Mapping) and not isinstance(value, list):
+            text = str(value).strip()
+            if text:
+                values.append(text)
+    for key in keys:
+        for value in _producer_record_authoritative_identity_values(record, key):
+            text = str(value).strip()
+            if text and text not in values:
+                values.append(text)
+    return values
+
+
+def _producer_record_authoritative_identity_values(record: Mapping[str, Any], key: str) -> list[Any]:
+    identity_keys = ("source", "source_id") if key in {"source", "source_id"} else (key,)
+    values: list[Any] = []
+    for object_key in ("identity", "strict_identity"):
+        identity = record.get(object_key)
+        if not isinstance(identity, Mapping):
+            continue
+        for identity_key in identity_keys:
+            value = identity.get(identity_key)
+            if value is not None:
+                values.append(value)
+    return values
+
+
+def _producer_identity_value_matches(field: str, observed: Any, expected: str) -> bool:
+    if observed is None or not expected:
+        return False
+    observed_text = str(observed).strip()
+    expected_text = str(expected).strip()
+    if not observed_text:
+        return False
+    if field == "source":
+        return _source_name(observed_text) == _source_name(expected_text)
+    if field == "check":
+        return _producer_check_value_matches(observed_text, expected_text)
+    return observed_text == expected_text
+
+
+def _producer_check_value_matches(observed: str, expected: str) -> bool:
+    observed_norm = _producer_check_token(observed)
+    expected_norm = _producer_check_token(expected)
+    if observed_norm == expected_norm:
+        return True
+    return _producer_text_mentions_check(observed, expected)
+
+
+def _producer_check_token(value: str) -> str:
+    text = str(value).strip().lower().replace("-", "_")
+    text = text.rsplit("/", maxsplit=1)[-1]
+    return text
+
+
+def _producer_value_text_identity_blockers(
+    value: Any,
+    *,
+    lane_name: str,
+    expected: Mapping[str, str],
+    evidence_key: str = "root",
+    target_check: str | None = None,
+) -> list[dict[str, Any]]:
+    expected_source = expected.get("source")
+    expected_check = expected.get("check")
+    return [
+        _blocker(
+            f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_MISMATCH",
+            f"{lane_name} producer evidence text conflicts with the required check identity.",
+            source=expected_source,
+            check=expected_check,
+            **conflict,
+        )
+        for conflict in _producer_value_text_identity_conflicts(
+            value,
+            expected=expected,
+            evidence_key=evidence_key,
+            target_check=target_check,
+        )
+    ]
+
+
+def _producer_value_target_text_identity_blockers(
+    value: Any,
+    *,
+    lane_name: str,
+    expected: Mapping[str, str],
+    target_check: str,
+    evidence_key: str = "root",
+) -> list[dict[str, Any]]:
+    expected_source = expected.get("source")
+    expected_check = expected.get("check")
+    return [
+        _blocker(
+            f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_MISMATCH",
+            f"{lane_name} producer evidence text conflicts with the required check identity.",
+            source=expected_source,
+            check=expected_check,
+            **conflict,
+        )
+        for conflict in _producer_value_target_text_identity_conflicts(
+            value,
+            expected=expected,
+            target_check=target_check,
+            evidence_key=evidence_key,
+        )
+    ]
+
+
+def _producer_full_scope_text_identity_blockers(
+    value: Any,
+    *,
+    lane_name: str,
+    expected: Mapping[str, str],
+    excluded_root_keys: Sequence[str],
+) -> list[dict[str, Any]]:
+    expected_source = expected.get("source")
+    expected_check = expected.get("check")
+    return [
+        _blocker(
+            f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_MISMATCH",
+            f"{lane_name} producer evidence text conflicts with the required check identity.",
+            source=expected_source,
+            check=expected_check,
+            **conflict,
+        )
+        for conflict in _producer_full_scope_text_identity_conflicts(
+            value,
+            expected=expected,
+            excluded_root_keys=excluded_root_keys,
+        )
+    ]
+
+
+def _producer_full_scope_text_identity_conflicts(
+    value: Any,
+    *,
+    expected: Mapping[str, str],
+    excluded_root_keys: Sequence[str],
+) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    excluded_keys = frozenset(excluded_root_keys)
+    for _parent, key, nested, _depth in _walk_producer_full_scope_text_values(
+        value,
+        excluded_root_keys=excluded_keys,
+    ):
+        if key not in PRODUCER_TEXT_IDENTITY_KEYS:
+            if key in PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS:
+                for text in _producer_non_authoritative_scalar_texts(nested):
+                    parsed_values = _identity_values_from_text(text)
+                    if _producer_text_names_only_other_check(parsed_values, expected):
+                        continue
+                    conflicts.extend(
+                        _producer_text_identity_conflicts(
+                            text,
+                            expected=expected,
+                            evidence_key=key,
+                            parsed_values=parsed_values,
+                        )
+                    )
+            continue
+        if isinstance(nested, Mapping):
+            text = json.dumps(nested, sort_keys=True, default=str)
+        elif isinstance(nested, list):
+            text = json.dumps(nested, sort_keys=True, default=str)
+        elif isinstance(nested, str):
+            text = nested
+        else:
+            continue
+        parsed_values = _identity_values_from_text(text)
+        if _producer_text_names_only_other_check(parsed_values, expected):
+            continue
+        conflicts.extend(
+            _producer_text_identity_conflicts(
+                text,
+                expected=expected,
+                evidence_key=key,
+                parsed_values=parsed_values,
+            )
+        )
+    return conflicts
+
+
+def _walk_producer_full_scope_text_values(
+    value: Any,
+    *,
+    excluded_root_keys: frozenset[str],
+):
+    stack: list[tuple[Any, str | None, Any, int]] = [(None, None, value, 0)]
+    visited = 0
+    while stack:
+        parent, key, current, depth = stack.pop()
+        visited += 1
+        if visited > MAX_EVIDENCE_TRAVERSAL_NODES:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal node limit was exceeded.",
+            )
+        if depth > MAX_EVIDENCE_TRAVERSAL_DEPTH:
+            raise TwoNodeE2EEvidenceError(
+                "TWO_NODE_E2E_EVIDENCE_JSON_TOO_DEEP",
+                "Evidence JSON traversal depth limit was exceeded.",
+            )
+        if depth == 1 and key in excluded_root_keys:
+            continue
+        yield parent, key, current, depth
+        if isinstance(current, Mapping):
+            for nested_key, nested in reversed(list(current.items())):
+                stack.append((current, str(nested_key), nested, depth + 1))
+        elif isinstance(current, list):
+            for index in range(len(current) - 1, -1, -1):
+                stack.append((current, str(index), current[index], depth + 1))
+
+
+def _producer_value_text_identity_conflicts(
+    value: Any,
+    *,
+    expected: Mapping[str, str],
+    evidence_key: str = "root",
+    target_check: str | None = None,
+) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    target_expected = {"check": target_check} if target_check is not None else expected
+    for text, text_evidence_key, root_scalar_text, parent in _producer_identity_text_context_items(
+        value,
+        root_evidence_key=evidence_key,
+    ):
+        parsed_values = _identity_values_from_text(text)
+        if (root_scalar_text or target_check is not None) and _producer_text_names_only_other_check(
+            parsed_values,
+            target_expected,
+        ):
+            if root_scalar_text or not _producer_text_parent_applies_to_target_check(
+                parent,
+                target_check=target_check,
+            ):
+                continue
+        conflicts.extend(
+            _producer_text_identity_conflicts(
+                text,
+                expected=expected,
+                evidence_key=text_evidence_key,
+                parsed_values=parsed_values,
+            )
+        )
+    return conflicts
+
+
+def _producer_value_target_text_identity_conflicts(
+    value: Any,
+    *,
+    expected: Mapping[str, str],
+    target_check: str,
+    evidence_key: str = "root",
+) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    value_has_target_context = _producer_value_target_structured_record_present(
+        value,
+        target_check=target_check,
+        default_to_target_context=False,
+    )
+    for text, text_evidence_key, _root_scalar_text in _producer_identity_text_items(
+        value,
+        root_evidence_key=evidence_key,
+    ):
+        parsed_values = _identity_values_from_text(text)
+        if not _producer_text_applies_to_target_check(
+            text,
+            parsed_values=parsed_values,
+            target_check=target_check,
+            value_has_target_context=value_has_target_context,
+        ):
+            continue
+        conflicts.extend(
+            _producer_text_identity_conflicts(
+                text,
+                expected=expected,
+                evidence_key=text_evidence_key,
+                parsed_values=parsed_values,
+            )
+        )
+    return conflicts
+
+
+def _producer_text_identity_conflicts(
+    value: str,
+    *,
+    expected: Mapping[str, str],
+    evidence_key: str,
+    parsed_values: Mapping[str, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    if parsed_values is None:
+        parsed_values = _identity_values_from_text(value)
+    conflicts: list[dict[str, Any]] = []
+    for identity_field in PRODUCER_TEXT_AUTHORITY_IDENTITY_FIELDS:
+        expected_value = expected.get(identity_field)
+        if not expected_value:
+            continue
+        for observed in parsed_values.get(identity_field, []):
+            if not _producer_identity_value_matches(identity_field, observed, expected_value):
+                conflicts.append(
+                    {
+                        "field": identity_field,
+                        "observed": observed,
+                        "expected": expected_value,
+                        "evidence_key": evidence_key,
+                    }
+                )
+    return conflicts
+
+
+def _producer_record_text_mentions_identity(record: Mapping[str, Any], field: str, expected: str | None) -> bool:
+    if not expected:
+        return False
+    for _parent, key, nested, _depth in _walk_evidence_values(record):
+        if key not in PRODUCER_TEXT_IDENTITY_KEYS or not isinstance(nested, str):
+            continue
+        parsed_values = _identity_values_from_text(nested)
+        if any(_producer_identity_value_matches(field, item, expected) for item in parsed_values.get(field, [])):
+            return True
+        if field == "check" and _producer_text_mentions_check(nested, expected):
+            return True
+    return False
+
+
+def _producer_identity_text_items(
+    value: Any,
+    *,
+    root_evidence_key: str = "root",
+):
+    for text, evidence_key, root_scalar_text, _parent in _producer_identity_text_context_items(
+        value,
+        root_evidence_key=root_evidence_key,
+    ):
+        yield text, evidence_key, root_scalar_text
+
+
+def _producer_identity_text_context_items(
+    value: Any,
+    *,
+    root_evidence_key: str = "root",
+):
+    if isinstance(value, str):
+        yield value, root_evidence_key, True, None
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, str):
+                yield item, root_evidence_key, True, None
+    for _parent, key, nested, _depth in _walk_evidence_values(value):
+        if key in PRODUCER_NON_AUTHORITATIVE_PROOF_CONTAINER_KEYS:
+            for text in _producer_non_authoritative_scalar_texts(nested):
+                yield text, key, True, _parent
+            continue
+        if key not in PRODUCER_TEXT_IDENTITY_KEYS:
+            continue
+        if isinstance(nested, Mapping):
+            text = json.dumps(nested, sort_keys=True, default=str)
+        elif isinstance(nested, list):
+            text = json.dumps(nested, sort_keys=True, default=str)
+        elif isinstance(nested, str):
+            text = nested
+        else:
+            continue
+        yield text, key, False, _parent
+
+
+def _producer_text_parent_applies_to_target_check(parent: Any, *, target_check: str | None) -> bool:
+    if not isinstance(parent, Mapping) or not target_check:
+        return False
+    return _producer_record_applies_to_target_check(
+        parent,
+        target_check=target_check,
+        default_to_target_context=False,
+    )
+
+
+def _producer_non_authoritative_scalar_texts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def _producer_text_names_only_other_check(
+    parsed_values: Mapping[str, list[str]],
+    expected: Mapping[str, str],
+) -> bool:
+    expected_check = expected.get("check")
+    if not expected_check:
+        return False
+    check_values = parsed_values.get("check", [])
+    return bool(check_values) and not any(
+        _producer_identity_value_matches("check", item, expected_check) for item in check_values
+    )
+
+
+def _producer_text_applies_to_target_check(
+    value: str,
+    *,
+    parsed_values: Mapping[str, list[str]],
+    target_check: str,
+    value_has_target_context: bool = False,
+) -> bool:
+    expected = {"check": target_check}
+    if _producer_text_names_only_other_check(parsed_values, expected):
+        return False
+    if _producer_text_mentions_check(value, target_check):
+        return True
+    return value_has_target_context and _producer_log_uri_text_applies_to_target_check(
+        parsed_values,
+        target_check=target_check,
+    )
+
+
+def _producer_log_uri_text_applies_to_target_check(
+    parsed_values: Mapping[str, list[str]],
+    *,
+    target_check: str,
+) -> bool:
+    if _producer_check_token(target_check) not in PRODUCER_JOB_ID_REQUIRED_CHECKS:
+        return False
+    return all(parsed_values.get(field) for field in LOG_URI_IDENTITY_FIELDS)
+
+
+def _producer_text_mentions_check(value: str, expected: str) -> bool:
+    expected_token = _producer_check_token(expected)
+    if not expected_token:
+        return False
+    parsed_values = _identity_values_from_text(value)
+    if any(_producer_check_token(item) == expected_token for item in parsed_values.get("check", [])):
+        return True
+    return any(
+        _producer_check_alias_matches_text(alias, value)
+        for alias in PRODUCER_CHECK_ALIASES.get(expected_token, ())
+    )
+
+
+def _identity_values_from_text(value: str) -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {field: [] for field in PRODUCER_TEXT_AUTHORITY_IDENTITY_FIELDS}
+    text = str(value)
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        parsed = None
+    query = parsed.query if parsed is not None else ""
+    path = parsed.path if parsed is not None else text
+    for key, item in parse_qsl(query, keep_blank_values=True):
+        _append_text_identity_value(values, key, item)
+    _append_log_uri_identity_values(values, text)
+    for key, item in re.findall(r"([A-Za-z][A-Za-z0-9_-]*)=([^&\s,'\"}]+)", text):
+        _append_text_identity_value(values, key, item)
+    for key, item in re.findall(r"['\"]([A-Za-z][A-Za-z0-9_-]*)['\"]\s*:\s*['\"]([^'\"]+)['\"]", text):
+        _append_text_identity_value(values, key, item)
+    for source_name in _identity_sources_from_path(path):
+        values["source"].append(source_name)
+    values["check"].extend(_identity_checks_from_path(path))
+    return {key: _dedupe_text_values(items) for key, items in values.items()}
+
+
+def _producer_check_alias_matches_text(alias: str, text: str) -> bool:
+    normalized_alias = _producer_check_token(alias)
+    if not normalized_alias:
+        return False
+    alias_text = str(alias).strip()
+    if not alias_text.startswith("/"):
+        return any(token == normalized_alias for token in _producer_check_candidate_tokens(text))
+    try:
+        parsed = urlsplit(str(text))
+    except ValueError:
+        return False
+    alias_path = alias_text.lower()
+    path = unquote(parsed.path if parsed.scheme or parsed.netloc else str(text)).lower()
+    return _normalized_path_matches_alias(path, alias_path)
+
+
+def _producer_check_candidate_tokens(text: str) -> list[str]:
+    try:
+        parsed = urlsplit(str(text))
+    except ValueError:
+        parsed = None
+    candidates: list[str] = []
+    if parsed is not None:
+        candidates.extend(part for part in PurePosixPath(unquote(parsed.path)).parts if part not in {"", "/"})
+    candidates.extend(re.findall(r"[A-Za-z][A-Za-z0-9_-]*", str(text)))
+    return [_producer_check_token(candidate) for candidate in candidates]
+
+
+def _normalized_path_matches_alias(path: str, alias_path: str) -> bool:
+    normalized_path = "/" + "/".join(
+        _producer_check_token(part) for part in PurePosixPath(path).parts if part not in {"", "/"}
+    )
+    normalized_alias = "/" + "/".join(
+        _producer_check_token(part) for part in PurePosixPath(alias_path).parts if part not in {"", "/"}
+    )
+    return normalized_path == normalized_alias or normalized_path.endswith(normalized_alias)
+
+
+def _identity_checks_from_path(path: str) -> list[str]:
+    parts = [unquote(part) for part in PurePosixPath(path).parts if part not in {"", "/"}]
+    checks: list[str] = []
+    for index, part in enumerate(parts):
+        if part.lower() == "producer" and index + 2 < len(parts):
+            checks.append(parts[index + 2])
+    normalized_path = "/" + "/".join(_producer_check_token(part) for part in parts)
+    alias_to_checks: dict[str, list[str]] = {}
+    for check_name, aliases in PRODUCER_CHECK_ALIASES.items():
+        for alias in aliases:
+            alias_text = str(alias).strip()
+            if not alias_text.startswith("/"):
+                continue
+            normalized_alias = "/" + "/".join(
+                _producer_check_token(part) for part in PurePosixPath(alias_text).parts if part not in {"", "/"}
+            )
+            alias_to_checks.setdefault(normalized_alias, []).append(check_name)
+    for normalized_alias, check_names in alias_to_checks.items():
+        if len(check_names) != 1:
+            continue
+        if normalized_path == normalized_alias or normalized_path.endswith(normalized_alias):
+            checks.append(check_names[0])
+    return _dedupe_text_values(checks)
+
+
+def _append_log_uri_identity_values(values: dict[str, list[str]], text: str) -> None:
+    for uri in _candidate_log_uri_texts(text):
+        try:
+            parsed = urlsplit(uri)
+        except ValueError:
+            continue
+        if parsed.scheme not in {"published", "file", "s3"}:
+            continue
+        path_parts = [unquote(part) for part in PurePosixPath(parsed.path).parts if part not in {"", "/"}]
+        if parsed.scheme == "published" and parsed.netloc:
+            path_parts.insert(0, unquote(parsed.netloc))
+        try:
+            logs_index = next(index for index, part in enumerate(path_parts) if part.lower() == "logs")
+        except StopIteration:
+            continue
+        if len(path_parts) <= logs_index + 3:
+            continue
+        source, run_id, job_file = path_parts[logs_index + 1 : logs_index + 4]
+        job_id = job_file.removesuffix(".out")
+        values["source"].append(source)
+        values["run_id"].append(run_id)
+        if job_id:
+            values["job_id"].append(job_id)
+
+
+def _candidate_log_uri_texts(text: str) -> list[str]:
+    stripped = text.strip()
+    candidates = [stripped]
+    candidates.extend(
+        match.rstrip(".,;)]}'\"")
+        for match in re.findall(r"(?:published|file|s3)://[^\s,'\"}]+", text)
+    )
+    return _dedupe_text_values([candidate for candidate in candidates if candidate])
+
+
+def _identity_sources_from_path(path: str) -> list[str]:
+    parts = [unquote(part) for part in PurePosixPath(path).parts if part not in {"", "/"}]
+    sources: list[str] = []
+    for index, part in enumerate(parts):
+        if part.lower() == "logs" and index + 1 < len(parts):
+            sources.append(parts[index + 1])
+        if part.lower() == "producer" and index + 1 < len(parts):
+            sources.append(parts[index + 1])
+    return sources
+
+
+def _append_text_identity_value(values: dict[str, list[str]], raw_key: str, raw_value: str) -> None:
+    key = raw_key.strip().lower().replace("-", "_")
+    value = unquote(str(raw_value).strip())
+    if not value:
+        return
+    if key in {"source", "source_id"}:
+        values["source"].append(value)
+    elif key in {"run_id", "runid"}:
+        values["run_id"].append(value)
+    elif key in {"cycle_time", "cycletime"}:
+        values["cycle_time"].append(value)
+    elif key in {"model_id", "modelid"}:
+        values["model_id"].append(value)
+    elif key in {"job_id", "jobid"}:
+        values["job_id"].append(value)
+    elif key in {"check", "check_name", "operation", "route"}:
+        values["check"].append(value)
+
+
+def _dedupe_text_values(values: Sequence[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+def _source_scoped_target_text_values(value: Any, *, target_check: str) -> list[Any]:
+    if _is_check_keyed_producer_mapping(value):
+        return [
+            nested
+            for key, nested in value.items()
+            if _producer_identity_value_matches("check", str(key), target_check)
+        ]
+    if isinstance(value, list):
+        return [
+            item
+            for item in value
+            if not _producer_value_explicitly_identifies_other_check(item, target_check=target_check)
+            or _producer_value_text_mentions_check(item, target_check)
+        ]
+    return [value]
+
+
+def _source_scoped_target_proof_values(value: Any, *, target_check: str) -> list[Any]:
+    if _is_check_keyed_producer_mapping(value):
+        return _source_scoped_target_text_values(value, target_check=target_check)
+    if isinstance(value, list):
+        return [
+            item
+            for item in value
+            if not _producer_value_explicitly_identifies_other_check(item, target_check=target_check)
+        ]
+    if _producer_value_explicitly_identifies_other_check(value, target_check=target_check):
+        return []
+    return [value]
+
+
+def _source_scoped_keyed_metadata_text_values(value: Any, *, target_check: str) -> list[Mapping[str, Any]]:
+    if not _is_check_keyed_producer_mapping(value):
+        return []
+    metadata_values: list[Mapping[str, Any]] = []
+    for key, nested in value.items():
+        key_text = str(key)
+        if _is_producer_check_key(key_text):
+            continue
+        metadata_value = {key_text: nested}
+        if _producer_value_text_mentions_check(
+            metadata_value,
+            target_check,
+        ) or _source_scoped_keyed_log_uri_metadata_applies(
+            metadata_value,
+            target_check=target_check,
+        ):
+            metadata_values.append(metadata_value)
+    return metadata_values
+
+
+def _source_scoped_keyed_log_uri_metadata_applies(value: Any, *, target_check: str) -> bool:
+    if _producer_check_token(target_check) not in PRODUCER_JOB_ID_REQUIRED_CHECKS:
+        return False
+    for text, _evidence_key, _root_scalar_text in _producer_identity_text_items(value):
+        if _text_contains_log_uri_identity(text):
+            return True
+    return False
+
+
+def _text_contains_log_uri_identity(text: str) -> bool:
+    for uri in _candidate_log_uri_texts(str(text)):
+        try:
+            parsed = urlsplit(uri)
+        except ValueError:
+            continue
+        if parsed.scheme not in {"published", "file", "s3"}:
+            continue
+        uri_identity = _log_uri_identity_values(uri)
+        if all(uri_identity.get(field) for field in LOG_URI_IDENTITY_FIELDS):
+            return True
+    return False
+
+
+def _is_check_keyed_producer_mapping(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    for key in value:
+        if _is_producer_check_key(str(key)):
+            return True
+    return False
+
+
+def _is_producer_check_key(key: str) -> bool:
+    known_checks = frozenset(PRODUCER_CHECK_ALIASES)
+    key_token = _producer_check_token(key)
+    if key_token in known_checks:
+        return True
+    return any(_producer_identity_value_matches("check", key, check_name) for check_name in known_checks)
+
+
+def _producer_value_explicitly_identifies_other_check(value: Any, *, target_check: str) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    check_values: list[str] = []
+    for _parent, _key, nested, _depth in _walk_producer_non_text_values(value):
+        if not isinstance(nested, Mapping):
+            continue
+        check_values.extend(_producer_record_explicit_values(nested, PRODUCER_CHECK_KEYS))
+    check_values.extend(_producer_value_hidden_text_check_values(value))
+    return bool(check_values) and not any(
+        _producer_identity_value_matches("check", item, target_check) for item in check_values
+    )
+
+
+def _producer_value_hidden_text_check_values(value: Any) -> list[str]:
+    check_values: list[str] = []
+    for text, _evidence_key, _root_scalar_text in _producer_identity_text_items(value):
+        check_values.extend(_identity_values_from_text(text).get("check", []))
+    return _dedupe_text_values(check_values)
+
+
+def _producer_value_text_mentions_check(value: Any, target_check: str) -> bool:
+    for text, _evidence_key, _root_scalar_text in _producer_identity_text_items(value):
+        if _producer_text_mentions_check(text, target_check):
             return True
     return False
 
@@ -5268,28 +6945,37 @@ def _logs_check_published_artifact_blockers(
     source_record: Mapping[str, Any],
     lane_payload: Mapping[str, Any],
     expected_identity: Mapping[str, Any],
+    docker_security_payload: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     observed_identity = _record_identity(check)
     if not _identity_has_required_fields(observed_identity, STRICT_LOG_IDENTITY_FIELDS):
         return []
     blockers: list[dict[str, Any]] = []
-    log_uri_values = _log_uri_values(check)
+    log_uri_entries = _log_uri_entries(check)
     invalid_log_uris: list[dict[str, Any]] = []
-    allowed_log_uris: list[str] = []
-    for uri in log_uri_values:
+    allowed_log_uri_entries: list[tuple[str, str]] = []
+    for evidence_key, uri in log_uri_entries:
         uri_blockers = _published_log_uri_blockers(
             uri,
             lane_payload=lane_payload,
             source_record=source_record,
             check=check,
+            docker_security_payload=docker_security_payload,
         )
         if uri_blockers:
             invalid_log_uris.extend(uri_blockers)
         else:
-            allowed_log_uris.append(uri)
+            allowed_log_uri_entries.append((evidence_key, uri))
     if invalid_log_uris:
         return invalid_log_uris
+    allowed_log_uris = [uri for _evidence_key, uri in allowed_log_uri_entries]
     if allowed_log_uris:
+        blockers.extend(
+            _published_log_uri_identity_blockers(
+                allowed_log_uri_entries,
+                observed_identity=observed_identity,
+            )
+        )
         if not _structured_evidence_value(check):
             blockers.append(
                 _blocker(
@@ -5322,14 +7008,73 @@ def _logs_check_published_artifact_blockers(
 def _log_uri_values(value: Any) -> list[str]:
     values: list[str] = []
     seen: set[str] = set()
-    for _parent, key, nested, _depth in _walk_evidence_values(value):
-        if key not in LOG_URI_KEYS or not isinstance(nested, str) or not nested.strip():
-            continue
-        uri = nested.strip()
+    for _evidence_key, uri in _log_uri_entries(value):
         if uri not in seen:
             values.append(uri)
             seen.add(uri)
     return values
+
+
+def _log_uri_entries(value: Any) -> list[tuple[str, str]]:
+    values: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for _parent, key, nested, _depth in _walk_evidence_values(value):
+        if key not in LOG_URI_KEYS or not isinstance(nested, str) or not nested.strip():
+            continue
+        uri = nested.strip()
+        entry = (key, uri)
+        if entry not in seen:
+            values.append(entry)
+            seen.add(entry)
+    return values
+
+
+def _published_log_uri_identity_blockers(
+    log_uri_entries: Sequence[tuple[str, str]],
+    *,
+    observed_identity: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    for evidence_key, uri in log_uri_entries:
+        uri_identity = _log_uri_identity_values(uri)
+        for identity_field in LOG_URI_IDENTITY_FIELDS:
+            expected = _identity_value(observed_identity, identity_field)
+            if not expected:
+                continue
+            observed_values = uri_identity.get(identity_field, [])
+            if not observed_values:
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH",
+                        "logs published log URI identity is missing required check identity.",
+                        field=identity_field,
+                        observed=None,
+                        expected=expected,
+                        evidence_key=evidence_key,
+                        log_uri=_safe_log_uri_summary(uri),
+                    )
+                )
+                continue
+            for observed in observed_values:
+                if _producer_identity_value_matches(identity_field, observed, expected):
+                    continue
+                blockers.append(
+                    _blocker(
+                        "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH",
+                        "logs published log URI identity conflicts with the required check identity.",
+                        field=identity_field,
+                        observed=observed,
+                        expected=expected,
+                        evidence_key=evidence_key,
+                        log_uri=_safe_log_uri_summary(uri),
+                    )
+                )
+    return blockers
+
+
+def _log_uri_identity_values(uri: str) -> dict[str, list[str]]:
+    parsed_values = _identity_values_from_text(uri)
+    return {field: parsed_values.get(field, []) for field in LOG_URI_IDENTITY_FIELDS}
 
 
 def _published_log_uri_blockers(
@@ -5338,7 +7083,11 @@ def _published_log_uri_blockers(
     lane_payload: Mapping[str, Any],
     source_record: Mapping[str, Any],
     check: Mapping[str, Any],
+    docker_security_payload: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    generic_blockers = _published_log_generic_uri_blockers(uri)
+    if generic_blockers:
+        return generic_blockers
     if uri.startswith("published://"):
         suffix = uri.removeprefix("published://").lstrip("/")
         return _published_log_relative_path_blockers(uri, suffix)
@@ -5348,6 +7097,7 @@ def _published_log_uri_blockers(
             lane_payload=lane_payload,
             source_record=source_record,
             check=check,
+            docker_security_payload=docker_security_payload,
         )
     if uri.startswith("s3://"):
         return _published_log_s3_uri_blockers(uri, lane_payload=lane_payload, source_record=source_record, check=check)
@@ -5370,6 +7120,50 @@ def _published_log_uri_blockers(
     ]
 
 
+def _published_log_generic_uri_blockers(uri: str) -> list[dict[str, Any]]:
+    try:
+        parsed = urlsplit(uri)
+        parsed.hostname
+        parsed.port
+    except ValueError:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+                "Logs evidence uses a malformed log URI.",
+                log_uri=_safe_log_uri_summary(uri),
+                reason="malformed_uri",
+            )
+        ]
+    if parsed.username or parsed.password:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+                "Logs evidence must not include URI userinfo or credentials.",
+                log_uri=_unsafe_log_uri_summary(_safe_log_uri_summary(uri)),
+                reason="userinfo_forbidden",
+            )
+        ]
+    if parsed.query or parsed.fragment:
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+                "Logs evidence must not include query strings or fragments.",
+                log_uri=_unsafe_log_uri_summary(_safe_log_uri_summary(uri)),
+                reason="query_or_fragment_forbidden",
+            )
+        ]
+    if parsed.scheme in {"published", "file", "s3"} and _path_has_credential_like_part(parsed.path):
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+                "Logs evidence must not include credential-like URI path components.",
+                log_uri=_unsafe_log_uri_summary(_safe_log_uri_summary(uri)),
+                reason="credential_path_component",
+            )
+        ]
+    return []
+
+
 def _published_log_relative_path_blockers(uri: str, relative: str) -> list[dict[str, Any]]:
     blockers = _safe_log_relative_path_blockers(relative, require_logs_prefix=True)
     return [
@@ -5389,6 +7183,7 @@ def _published_log_file_uri_blockers(
     lane_payload: Mapping[str, Any],
     source_record: Mapping[str, Any],
     check: Mapping[str, Any],
+    docker_security_payload: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     parsed = urlsplit(uri)
     if parsed.netloc not in {"", "localhost"}:
@@ -5420,7 +7215,21 @@ def _published_log_file_uri_blockers(
             for reason in raw_path_blockers
         ]
     path = Path(unquote(parsed.path)).resolve(strict=False)
-    roots = _published_log_roots(lane_payload, source_record, check)
+    if _is_suspicious_private_log_path(path):
+        return [
+            _blocker(
+                "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI",
+                "Logs evidence must not use private workspace or local compute paths.",
+                log_uri=_safe_log_uri_summary(uri),
+                reason="private_workspace_path",
+            )
+        ]
+    roots = _published_log_roots(
+        lane_payload,
+        source_record,
+        check,
+        docker_security_payload=docker_security_payload,
+    )
     for root in roots:
         root_resolved = root.expanduser().resolve(strict=False)
         if _path_is_relative_to(path, root_resolved):
@@ -5526,7 +7335,8 @@ def _safe_log_absolute_path_blockers(raw_path: str) -> list[str]:
     parts = PurePosixPath(decoded).parts
     if any(part in {".", ".."} for part in parts):
         return ["unsafe_path_component"]
-    if ".nhms-runs" in parts:
+    lowered_parts = tuple(part.lower() for part in parts)
+    if ".nhms-runs" in lowered_parts:
         return ["private_workspace_path"]
     return []
 
@@ -5542,23 +7352,75 @@ def _safe_log_decoded_path(raw_path: str) -> str:
     return decoded
 
 
-def _published_log_roots(*values: Mapping[str, Any]) -> list[Path]:
-    roots: list[Path] = []
+def _path_has_credential_like_part(raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    try:
+        path = unquote(raw_path)
+    except Exception:
+        path = raw_path
+    return any(LOG_URI_CREDENTIAL_WORD_RE.search(part) for part in PurePosixPath(path).parts)
+
+
+def _published_log_roots(
+    *values: Mapping[str, Any],
+    docker_security_payload: Mapping[str, Any] | None = None,
+) -> list[Path]:
+    roots: list[Path] = list(DEFAULT_PUBLISHED_LOG_ROOTS)
+    if docker_security_payload is not None:
+        roots.extend(_authoritative_published_log_roots(docker_security_payload))
+    candidate_roots: list[Path] = []
     for value in values:
         for _parent, key, nested, _depth in _walk_evidence_values(value):
             if key not in PUBLISHED_LOG_ROOT_KEYS or not isinstance(nested, str) or not nested.strip():
                 continue
-            roots.append(Path(nested.strip()))
-    if not roots:
-        roots.extend(DEFAULT_PUBLISHED_LOG_ROOTS)
+            candidate_roots.append(Path(nested.strip()))
+    authoritative = {
+        str(root.expanduser().resolve(strict=False))
+        for root in roots
+        if not _is_suspicious_private_log_path(root)
+    }
+    for root in candidate_roots:
+        resolved = str(root.expanduser().resolve(strict=False))
+        if resolved in authoritative:
+            roots.append(root)
     deduped: list[Path] = []
     seen: set[str] = set()
     for root in roots:
         resolved = str(root.expanduser().resolve(strict=False))
-        if resolved not in seen:
+        if resolved not in seen and not _is_suspicious_private_log_path(root):
             deduped.append(root)
             seen.add(resolved)
     return deduped
+
+
+def _authoritative_published_log_roots(payload: Mapping[str, Any]) -> list[Path]:
+    if _normalized_status(payload.get("status")) != STATUS_PASS:
+        return []
+    if _docker_display_security_proofs(payload).get("published_artifacts_readonly") is not True:
+        return []
+    roots: list[Path] = []
+    for _parent, key, nested, _depth in _walk_evidence_values(payload):
+        if key not in PUBLISHED_LOG_ROOT_KEYS or not isinstance(nested, str) or not nested.strip():
+            continue
+        root = Path(nested.strip())
+        if not _is_suspicious_private_log_path(root):
+            roots.append(root)
+    return roots
+
+
+def _is_suspicious_private_log_path(path: Path | str) -> bool:
+    normalized = _normalize_posix_path(str(path)).lower()
+    parts = PurePosixPath(normalized).parts
+    if any(part in PRIVATE_LOG_PATH_TOKENS for part in parts):
+        return True
+    if any(token in normalized for token in ("/workspace", "/basins", "/shud", "model_asset", "model-assets")):
+        return True
+    if normalized in {"/scratch", "/tmp"} or normalized.startswith("/tmp/"):
+        return True
+    if normalized.startswith("/scratch/") and not normalized.startswith("/scratch/frd_muziyao/nhms-published"):
+        return True
+    return False
 
 
 def _s3_key_matches_published_log_prefix(key: str, prefix: str) -> bool:
@@ -5692,14 +7554,48 @@ def _relative_posix(path: Path, root: Path) -> str:
 
 
 def _safe_log_uri_summary(uri: str) -> str:
-    parsed = urlsplit(uri)
+    try:
+        parsed = urlsplit(uri)
+        parsed.hostname
+        parsed.port
+    except ValueError:
+        return "[redacted]"
     if parsed.scheme == "file":
         return "file://redacted"
     if not parsed.scheme:
         return "[redacted-local-log-path]"
-    if parsed.query or parsed.fragment:
-        return f"{parsed.scheme}://[redacted]"
+    if (
+        parsed.query
+        or parsed.fragment
+        or parsed.username
+        or parsed.password
+        or _path_has_credential_like_part(parsed.path)
+    ):
+        return _unsafe_log_uri_summary(uri)
     return uri
+
+
+def _unsafe_log_uri_summary(uri: str | None) -> str:
+    if uri is None:
+        return "[redacted]"
+    try:
+        parsed = urlsplit(str(uri))
+        parsed.hostname
+        parsed.port
+    except ValueError:
+        return "[redacted]"
+    if parsed.scheme == "file":
+        return "file://redacted"
+    if parsed.scheme == "published":
+        namespace = f"{parsed.netloc}/{parsed.path.lstrip('/')}" if parsed.netloc else parsed.path.lstrip("/")
+        if namespace.split("/", maxsplit=1)[0] == "logs":
+            return "published://logs/[redacted]"
+        return "published://redacted/[redacted]"
+    if parsed.scheme and parsed.netloc:
+        return urlunsplit((parsed.scheme, parsed.hostname or "[redacted]", "[redacted]", "", ""))
+    if parsed.scheme:
+        return f"{parsed.scheme}://[redacted]"
+    return "[redacted]"
 
 
 def _has_source_artifact_proof(payload: Mapping[str, Any]) -> bool:
@@ -5740,7 +7636,7 @@ def _looks_like_evidence_record(value: Mapping[str, Any]) -> bool:
         return True
     if "returncode" in value:
         return True
-    if any(key in value for key in ("method", "url", "path", "status_code", "http_status")):
+    if any(key in value for key in ("method", "url", "path", "status_code", "http_status", "log_uri")):
         return True
     if any(key in value for key in ("sha256", "screenshot_path", "artifact_path", "trace_path")):
         return True

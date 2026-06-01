@@ -3607,6 +3607,56 @@ def test_docker_security_summary_blocks_single_display_source_trust_without_comp
     assert blocker["source_blockers"][0]["role"] == "compute"
 
 
+def test_docker_security_summary_rejects_blocked_source_trust_after_failed_publication(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    security_root = repo_root / "artifacts" / "docker-security"
+    source_trust = security_root / "two-node-docker-source-trust-compute.json"
+    source_trust_display = security_root / "two-node-docker-source-trust-display.json"
+    static_report = security_root / "static-compose-env-check.json"
+    smoke_report = security_root / "docker-smoke.json"
+    run_id = "run-123"
+    blocked_display = _source_trust_payload(run_id, security_root, roles=("display",))
+    blocked_display["status"] = "BLOCKED"
+    blocked_display["blockers"] = [
+        {
+            "code": "SOURCE_TRUST_PUBLICATION_FAILED",
+            "message": "source-trust evidence publication failed; previous PASS JSON was invalidated.",
+        }
+    ]
+    _write_json(source_trust, _source_trust_payload(run_id, security_root, roles=("compute",)))
+    _write_json(source_trust_display, blocked_display)
+    _write_json(
+        static_report,
+        {
+            "schema_version": "nhms.two_node_docker.static_check.v1",
+            "status": "PASS",
+            "evidence_run_id": run_id,
+            "findings": [],
+            **_static_proof_payload(),
+        },
+    )
+    _write_json(smoke_report, _smoke_payload(run_id))
+
+    output = docker_runtime.write_docker_security_summary(
+        output=security_root / "summary.json",
+        repo_root=repo_root,
+        evidence_run_id=run_id,
+        source_trust_report=[source_trust, source_trust_display],
+        static_report=static_report,
+        smoke_report=smoke_report,
+    )
+
+    summary = json.loads(output.read_text(encoding="utf-8"))
+    assert summary["status"] == "BLOCKED"
+    assert summary["source_statuses"]["source_trust"] == "BLOCKED"
+    blocker = next(item for item in summary["blockers"] if item["source"] == "source_trust")
+    assert any(
+        item.get("code") == "SOURCE_TRUST_PUBLICATION_FAILED"
+        for item in blocker["source_blockers"]
+    )
+    assert summary["proofs"]["source_trust_passed"] is False
+
+
 def test_docker_security_summary_blocks_unsafe_child_before_hash(tmp_path: Path) -> None:
     repo_root = tmp_path
     security_root = repo_root / "artifacts" / "docker-security"

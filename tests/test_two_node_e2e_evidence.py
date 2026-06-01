@@ -23,6 +23,16 @@ from services.production_closure.two_node_e2e_evidence import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+NON_AUTHORITATIVE_WRAPPER_KEYS = (
+    "metadata",
+    "wrapper",
+    "collector",
+    "context",
+    "diagnostics",
+    "debug",
+    "extra",
+    "notes",
+)
 
 
 def test_complete_synthetic_real_evidence_bundle_passes_with_redaction() -> None:
@@ -1656,12 +1666,3383 @@ def test_source_lane_required_checks_need_check_scoped_producer_evidence(
 
 
 @pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "check_name", "missing_fields"),
+    [
+        ("api", "api", "latest_product", ("run_id", "cycle_time", "model_id")),
+        ("browser", "browser", "ops_job_logs", ("run_id", "cycle_time", "model_id", "job_id")),
+    ],
+)
+def test_source_lane_producer_evidence_requires_complete_strict_identity(
+    lane_dir: str,
+    lane_name: str,
+    check_name: str,
+    missing_fields: tuple[str, ...],
+) -> None:
+    run_id = _run_id(f"{lane_name}-producer-unscoped")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    check = payload["sources"]["GFS"]["checks"][check_name]
+    check["evidence"] = {
+        "evidence_run_id": run_id,
+        "request": {
+            "method": "GET",
+            "path": f"/producer/gfs/{check_name}",
+            "source": "GFS",
+            "check": check_name,
+        },
+        "response": {
+            "status_code": 200,
+            "source": "GFS",
+            "check": check_name,
+        },
+    }
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    blockers = lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(blockers)
+    assert any(
+        "unscoped for the required check identity" in str(blocker.get("message", ""))
+        and set(missing_fields).issubset(set(blocker.get("missing_fields", []) or blocker.get("required_fields", [])))
+        for blocker in blockers
+    )
+
+
+def test_api_latest_product_lineage_does_not_satisfy_producer_identity() -> None:
+    run_id = _run_id("api-lineage-unscoped")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["evidence"] = {
+        "request": {
+            "method": "GET",
+            "path": "/mvp/qhh/latest-product",
+        },
+        "response": {
+            "status_code": 200,
+            "lineage": _producer_lineage(identity, "latest_product"),
+        },
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(api_lane["blockers"])
+
+
+def test_browser_ops_job_logs_lineage_does_not_satisfy_producer_identity() -> None:
+    run_id = _run_id("browser-lineage-unscoped")
+    config = _seed_pass_bundle(run_id)
+    browser_summary = _read(config.run_dir / "browser" / "summary.json")
+    check = browser_summary["sources"]["GFS"]["checks"]["ops_job_logs"]
+    identity = check["identity"]
+    check["evidence"] = {
+        "request": {
+            "method": "GET",
+            "path": f"/api/v1/jobs/{identity['job_id']}/logs",
+        },
+        "response": {
+            "status_code": 200,
+            "lineage": _producer_lineage(identity, "ops_job_logs", include_job_id=True),
+        },
+    }
+    _write(config.run_dir / "browser" / "summary.json", browser_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    browser_lane = summary["lane_summaries"]["browser"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert browser_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_BROWSER_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(browser_lane["blockers"])
+
+
+def test_api_latest_product_nested_identity_satisfies_producer_identity() -> None:
+    run_id = _run_id("api-nested-identity-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = _producer_lineage(check["identity"], "latest_product")
+    check["evidence"] = {
+        "request": {
+            "method": "GET",
+            "path": "/mvp/qhh/latest-product",
+        },
+        "response": {
+            "status_code": 200,
+            "identity": identity,
+        },
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["api"]["status"] == STATUS_PASS
+
+
+def test_api_latest_product_authoritative_nested_request_response_satisfies_producer_identity() -> None:
+    run_id = _run_id("api-authoritative-request-response-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["evidence"] = {
+        "transport": {
+            "request": {
+                "method": "GET",
+                "path": "/mvp/qhh/latest-product",
+                "source": identity["source"],
+                "check": "latest_product",
+                "run_id": identity["run_id"],
+                "cycle_time": identity["cycle_time"],
+                "model_id": identity["model_id"],
+            },
+            "response": {
+                "status_code": 200,
+                "source": identity["source"],
+                "check": "latest_product",
+                "run_id": identity["run_id"],
+                "cycle_time": identity["cycle_time"],
+                "model_id": identity["model_id"],
+            },
+        }
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["api"]["status"] == STATUS_PASS
+
+
+def test_api_latest_product_explicit_list_item_satisfies_producer_identity() -> None:
+    run_id = _run_id("api-list-item-proof-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    check["proofs"] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["api"]["status"] == STATUS_PASS
+
+
+def test_source_scoped_producer_evidence_lineage_only_strict_fields_blocks() -> None:
+    run_id = _run_id("source-lineage-unscoped")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    source_record["evidence"] = {
+        "request": {
+            "method": "GET",
+            "path": "/mvp/qhh/latest-product",
+            "source": "GFS",
+            "check": "latest_product",
+        },
+        "response": {
+            "status_code": 200,
+            "source": "GFS",
+            "check": "latest_product",
+            "lineage": {
+                "run_id": identity["run_id"],
+                "cycle_time": identity["cycle_time"],
+                "model_id": identity["model_id"],
+            },
+        },
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(api_lane["blockers"])
+
+
+def test_api_latest_product_hidden_text_identity_does_not_satisfy_producer_identity() -> None:
+    run_id = _run_id("api-hidden-text-unscoped")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    query = _producer_identity_query(identity, "latest_product")
+    request = check["evidence"]["request"]
+    response = check["evidence"]["response"]
+    request["path"] = f"/producer/gfs/latest_product?{query}"
+    request["query"] = query
+    request["body"] = {
+        "status_code": 200,
+        "source": identity["source"],
+        "check": "latest_product",
+        "run_id": identity["run_id"],
+        "cycle_time": identity["cycle_time"],
+        "model_id": identity["model_id"],
+    }
+    _remove_explicit_producer_identity_fields(
+        (request, response),
+        ("run_id", "cycle_time", "model_id"),
+    )
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(blockers)
+
+
+def test_browser_ops_job_logs_hidden_text_identity_does_not_satisfy_producer_identity() -> None:
+    run_id = _run_id("browser-hidden-log-unscoped")
+    config = _seed_pass_bundle(run_id)
+    browser_summary = _read(config.run_dir / "browser" / "summary.json")
+    check = browser_summary["sources"]["GFS"]["checks"]["ops_job_logs"]
+    identity = check["identity"]
+    query = _producer_identity_query(identity, "ops_job_logs", include_job_id=True)
+    request = check["evidence"]["request"]
+    response = check["evidence"]["response"]
+    request["path"] = f"/producer/gfs/ops_job_logs?{query}"
+    request["query"] = query
+    response["body"] = {
+        "status_code": 200,
+        "source": identity["source"],
+        "check": "ops_job_logs",
+        "run_id": identity["run_id"],
+        "cycle_time": identity["cycle_time"],
+        "model_id": identity["model_id"],
+        "job_id": identity["job_id"],
+        "log_uri": f"published://logs/gfs/{identity['run_id']}/{identity['job_id']}.out",
+    }
+    _remove_explicit_producer_identity_fields(
+        (request, response),
+        ("run_id", "cycle_time", "model_id", "job_id"),
+    )
+    _write(config.run_dir / "browser" / "summary.json", browser_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    browser_lane = summary["lane_summaries"]["browser"]
+    blockers = browser_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert browser_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_BROWSER_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(blockers)
+
+
+def test_source_scoped_producer_evidence_requires_complete_required_check_identity() -> None:
+    run_id = _run_id("source-artifact-unscoped")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    latest = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = latest["identity"]
+    query = _producer_identity_query(identity, "latest_product")
+    latest.pop("evidence", None)
+    api_summary["sources"]["GFS"]["evidence"] = {
+        "request": {
+            "method": "GET",
+            "path": f"/producer/gfs/latest_product?{query}",
+            "query": query,
+            "source": "GFS",
+            "check": "latest_product",
+            "body": {
+                "status_code": 200,
+                "source": identity["source"],
+                "check": "latest_product",
+                "run_id": identity["run_id"],
+                "cycle_time": identity["cycle_time"],
+                "model_id": identity["model_id"],
+            },
+        },
+        "response": {"status_code": 200, "source": "GFS", "check": "latest_product"},
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(blockers)
+    assert any("required check identity" in str(blocker.get("message", "")) for blocker in blockers)
+
+
+def test_complete_explicit_producer_record_still_reports_sibling_hidden_text_conflict() -> None:
+    run_id = _run_id("api-sibling-hidden-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    sibling_query = (
+        f"source=IFS&check=latest_product&run_id={identity['run_id']}"
+        f"&cycle_time={identity['cycle_time']}&model_id={identity['model_id']}"
+    )
+    check["evidence"]["request"]["body"] = {
+        "status_code": 200,
+        "source": "IFS",
+        "check": "latest_product",
+        "run_id": identity["run_id"],
+        "cycle_time": identity["cycle_time"],
+        "model_id": identity["model_id"],
+        "path": f"/producer/ifs/latest_product?{sibling_query}",
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(blocker.get("field") == "source" for blocker in blockers)
+
+
+def test_api_check_proofs_hidden_only_body_sibling_conflict_blocks() -> None:
+    run_id = _run_id("api-proofs-hidden-body-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["proofs"] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        {
+            "body": {
+                "status_code": 200,
+                "source": "IFS",
+                "check": "latest_product",
+                "run_id": identity["run_id"],
+                "cycle_time": identity["cycle_time"],
+                "model_id": identity["model_id"],
+            }
+        },
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "body"
+        for blocker in blockers
+    )
+
+
+def test_api_check_proofs_hidden_only_text_sibling_conflict_blocks() -> None:
+    run_id = _run_id("api-proofs-hidden-text-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["proofs"] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        {
+            "text": _producer_identity_text(
+                identity,
+                "latest_product",
+                source="IFS",
+            )
+        },
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "text"
+        for blocker in blockers
+    )
+
+
+def test_api_check_unstructured_evidence_root_hidden_conflict_blocks_with_complete_proof() -> None:
+    run_id = _run_id("api-unstructured-root-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["proofs"] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check["evidence"] = {
+        "message": _producer_identity_text(identity, "latest_product", source="IFS"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "message"
+        for blocker in blockers
+    )
+
+
+def test_api_check_scalar_evidence_root_hidden_conflict_blocks_with_complete_proof() -> None:
+    run_id = _run_id("api-scalar-evidence-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["proofs"] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check["evidence"] = _producer_identity_text(identity, "latest_product", source="IFS")
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "evidence"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("root_key", ["source_artifacts", "commands"])
+@pytest.mark.parametrize("root_shape", ["scalar", "list"])
+def test_api_check_scalar_or_list_producer_root_hidden_conflict_blocks_with_complete_proof(
+    root_key: str,
+    root_shape: str,
+) -> None:
+    run_id = _run_id(f"api-{root_key}-{root_shape}-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    conflict_text = _producer_identity_text(identity, "latest_product", source="IFS")
+    check["proofs"] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check[root_key] = conflict_text if root_shape == "scalar" else ["collector ok", conflict_text]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == root_key
+        for blocker in blockers
+    )
+
+
+def test_api_check_scalar_evidence_root_does_not_satisfy_producer_identity() -> None:
+    run_id = _run_id("api-scalar-evidence-unscoped")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("proofs", None)
+    check["evidence"] = _producer_identity_text(identity, "latest_product")
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_EVIDENCE_MISSING" in _codes(api_lane["blockers"])
+
+
+def test_api_check_scalar_text_for_other_check_does_not_block_target_with_complete_proof() -> None:
+    run_id = _run_id("api-scalar-other-check-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["proofs"] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check["evidence"] = _producer_identity_text(identity, "series", source="IFS")
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("root_key", ["proofs", "evidence", "commands", "source_artifacts"])
+@pytest.mark.parametrize("text_key", ["message", "text", "details", "body"])
+def test_api_latest_product_check_producer_root_nested_other_check_text_does_not_block_target(
+    root_key: str,
+    text_key: str,
+) -> None:
+    run_id = _run_id(f"api-check-root-{root_key}-{text_key}-other-check-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    series_identity = source_record["checks"]["series"]["identity"]
+    sibling_run_id = f"{series_identity['run_id']}-sibling"
+    target_proof = _complete_explicit_producer_record(identity, "latest_product")
+    sibling_text = {
+        text_key: _producer_identity_text(
+            series_identity,
+            "series",
+            source="IFS",
+            run_id=sibling_run_id,
+        )
+    }
+    check["proofs"] = [target_proof]
+    check[root_key] = [target_proof, sibling_text] if root_key == "proofs" else [sibling_text]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("root_key", ["proofs", "evidence", "commands", "source_artifacts"])
+@pytest.mark.parametrize("text_key", ["message", "text", "details", "body"])
+def test_api_latest_product_check_producer_root_nested_target_text_conflict_blocks(
+    root_key: str,
+    text_key: str,
+) -> None:
+    run_id = _run_id(f"api-check-root-{root_key}-{text_key}-target-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    target_proof = _complete_explicit_producer_record(identity, "latest_product")
+    sibling_conflict = {
+        text_key: _producer_identity_text(
+            identity,
+            "latest_product",
+            source="IFS",
+        )
+    }
+    check["proofs"] = [target_proof]
+    check[root_key] = [target_proof, sibling_conflict] if root_key == "proofs" else [sibling_conflict]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == text_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("root_key", ["evidence", "source_artifacts"])
+@pytest.mark.parametrize("wrapper_key", NON_AUTHORITATIVE_WRAPPER_KEYS)
+@pytest.mark.parametrize("wrapper_shape", ["scalar", "list"])
+def test_api_check_non_authoritative_wrapper_scalar_text_conflict_blocks_with_complete_proof(
+    root_key: str,
+    wrapper_key: str,
+    wrapper_shape: str,
+) -> None:
+    run_id = _run_id(f"api-{root_key}-{wrapper_key}-{wrapper_shape}-text-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    conflict_text = _producer_identity_text(identity, "latest_product", source="IFS")
+    check["proofs"] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check[root_key] = {
+        wrapper_key: conflict_text if wrapper_shape == "scalar" else ["collector ok", conflict_text],
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == wrapper_key
+        for blocker in blockers
+    )
+
+
+def test_api_check_non_authoritative_wrapper_scalar_other_check_does_not_block_target() -> None:
+    run_id = _run_id("api-wrapper-scalar-other-check-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["proofs"] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check["evidence"] = {
+        "metadata": _producer_identity_text(identity, "series", source="IFS", run_id=f"{identity['run_id']}-sibling"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+def test_api_check_top_level_identity_only_metadata_conflict_blocks_with_complete_proof() -> None:
+    run_id = _run_id("api-top-metadata-identity-only-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["proofs"] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check["metadata"] = _identity_only_producer_record(identity, "latest_product", source="IFS")
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == "metadata"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize(
+    ("root_key", "wrapper_key", "identity_key"),
+    [
+        ("evidence", "metadata", "identity"),
+        ("proofs", "wrapper", "strict_identity"),
+    ],
+)
+def test_api_check_producer_root_identity_only_wrapper_conflict_blocks_with_complete_proof(
+    root_key: str,
+    wrapper_key: str,
+    identity_key: str,
+) -> None:
+    run_id = _run_id(f"api-root-{root_key}-{wrapper_key}-identity-only-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    explicit_proof_root = "proofs" if root_key == "evidence" else "evidence"
+    check[explicit_proof_root] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check[root_key] = {
+        wrapper_key: {
+            identity_key: _identity_only_producer_record(identity, "latest_product", source="IFS"),
+        },
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == wrapper_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize(
+    ("surface", "source_key"),
+    [
+        ("arbitrary_container", "transport"),
+        ("source_keyed_root", "proofs"),
+    ],
+)
+def test_source_scoped_identity_only_metadata_conflict_blocks_with_complete_proof(
+    surface: str,
+    source_key: str,
+) -> None:
+    run_id = _run_id(f"source-{surface}-identity-only-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    proof = _complete_explicit_producer_record(identity, "latest_product")
+    conflict = _identity_only_producer_record(identity, "latest_product", source="IFS")
+    if surface == "arbitrary_container":
+        source_record["proofs"] = {"latest_product": proof}
+        source_record[source_key] = {
+            "latest_product": {"status": "context"},
+            "metadata": conflict,
+        }
+    else:
+        source_record[source_key] = {
+            "latest_product": proof,
+            "metadata": conflict,
+        }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(blocker.get("field") == "source" and blocker.get("observed") == "IFS" for blocker in blockers)
+
+
+def test_api_check_source_artifacts_identity_only_metadata_conflict_blocks_without_artifact_proof() -> None:
+    run_id = _run_id("api-source-artifacts-identity-only-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["proofs"] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check["source_artifacts"] = {
+        "metadata": _identity_only_producer_record(identity, "latest_product", source="IFS"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(blocker.get("field") == "source" and blocker.get("observed") == "IFS" for blocker in blockers)
+
+
+@pytest.mark.parametrize("surface", ["check_metadata", "source_keyed_root"])
+def test_identity_only_metadata_naming_other_check_does_not_block_target(surface: str) -> None:
+    run_id = _run_id(f"identity-only-other-check-{surface}")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    conflict = _identity_only_producer_record(
+        identity,
+        "hydro_met",
+        source="IFS",
+        run_id=f"{identity['run_id']}-sibling",
+    )
+    if surface == "check_metadata":
+        check["proofs"] = [_complete_explicit_producer_record(identity, "latest_product")]
+        check["metadata"] = conflict
+    else:
+        check.pop("evidence", None)
+        source_record["proofs"] = {
+            "latest_product": _complete_explicit_producer_record(identity, "latest_product"),
+            "metadata": conflict,
+        }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+def test_logs_check_identity_only_metadata_job_id_conflict_blocks_with_complete_proof() -> None:
+    run_id = _run_id("logs-identity-only-job-conflict")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    identity = check["identity"]
+    observed_job_id = f"{identity['job_id']}-sibling"
+    check["proofs"] = [_complete_explicit_producer_record(identity, "job_logs")]
+    check["metadata"] = _identity_only_producer_record(identity, "job_logs", job_id=observed_job_id)
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "job_id"
+        and blocker.get("observed") == observed_job_id
+        and blocker.get("evidence_key") == "metadata"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("root_key", ["proofs", "evidence", "artifacts", "commands"])
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper", "collector"])
+def test_api_check_non_authoritative_wrapper_record_does_not_satisfy_producer_identity(
+    root_key: str,
+    wrapper_key: str,
+) -> None:
+    run_id = _run_id(f"api-{root_key}-{wrapper_key}-wrapper-unscoped")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    check[root_key] = {
+        wrapper_key: _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("root_key", ["proofs", "evidence", "artifacts", "commands"])
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper", "collector"])
+def test_api_check_non_authoritative_wrapper_record_conflict_still_blocks_with_explicit_proof(
+    root_key: str,
+    wrapper_key: str,
+) -> None:
+    run_id = _run_id(f"api-{root_key}-{wrapper_key}-wrapper-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    explicit_proof_root = "evidence" if root_key == "proofs" else "proofs"
+    check[explicit_proof_root] = [_complete_explicit_producer_record(identity, "latest_product")]
+    check[root_key] = {
+        wrapper_key: {
+            **_complete_explicit_producer_record(identity, "latest_product"),
+            "source": "IFS",
+        },
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(blocker.get("field") == "source" and blocker.get("observed") == "IFS" for blocker in blockers)
+
+
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper", "collector", "context"])
+@pytest.mark.parametrize("field", ["source", "run_id", "cycle_time", "model_id"])
+def test_api_check_source_artifacts_non_authoritative_structured_conflict_blocks(
+    wrapper_key: str,
+    field: str,
+) -> None:
+    run_id = _run_id(f"api-source-artifacts-{wrapper_key}-{field}-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    observed = "IFS" if field == "source" else f"{identity[field]}-sibling"
+    check.pop("evidence", None)
+    check["proofs"] = [_structured_producer_metadata_record(identity, "latest_product")]
+    check["source_artifacts"] = {
+        wrapper_key: _structured_producer_metadata_record(identity, "latest_product", **{field: observed}),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == field and blocker.get("observed") == observed
+        for blocker in blockers
+    )
+
+
+def test_logs_check_source_artifacts_non_authoritative_structured_job_id_conflict_blocks() -> None:
+    run_id = _run_id("logs-source-artifacts-structured-job-conflict")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    identity = check["identity"]
+    observed_job_id = f"{identity['job_id']}-sibling"
+    check["proofs"] = [_structured_producer_metadata_record(identity, "job_logs")]
+    check["source_artifacts"] = {
+        "metadata": _structured_producer_metadata_record(
+            identity,
+            "job_logs",
+            job_id=observed_job_id,
+        ),
+    }
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "job_id" and blocker.get("observed") == observed_job_id
+        for blocker in blockers
+    )
+
+
+def test_api_check_source_artifacts_structured_metadata_other_check_does_not_block_target() -> None:
+    run_id = _run_id("api-source-artifacts-structured-other-check-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    series = source_record["checks"]["series"]
+    latest_identity = latest["identity"]
+    series_identity = series["identity"]
+    latest.pop("evidence", None)
+    latest["proofs"] = [_structured_producer_metadata_record(latest_identity, "latest_product")]
+    latest["source_artifacts"] = {
+        "metadata": _structured_producer_metadata_record(
+            series_identity,
+            "series",
+            source="IFS",
+            run_id=f"{series_identity['run_id']}-sibling",
+        ),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper", "collector", "context"])
+def test_api_check_source_artifacts_non_authoritative_structured_record_alone_is_unscoped(
+    wrapper_key: str,
+) -> None:
+    run_id = _run_id(f"api-source-artifacts-{wrapper_key}-alone-unscoped")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    check["source_artifacts"] = {
+        wrapper_key: _structured_producer_metadata_record(identity, "latest_product"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper", "collector"])
+@pytest.mark.parametrize("field", ["source", "run_id", "cycle_time", "model_id"])
+def test_api_check_top_level_non_authoritative_structured_conflict_blocks_with_complete_proof(
+    wrapper_key: str,
+    field: str,
+) -> None:
+    run_id = _run_id(f"api-check-top-{wrapper_key}-{field}-structured-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    observed = "IFS" if field == "source" else f"{identity[field]}-sibling"
+    check["proofs"] = [_structured_producer_metadata_record(identity, "latest_product")]
+    check[wrapper_key] = _structured_producer_metadata_record(
+        identity,
+        "latest_product",
+        **{field: observed},
+    )
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == field
+        and blocker.get("observed") == observed
+        and blocker.get("evidence_key") == wrapper_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper"])
+@pytest.mark.parametrize("field", ["source", "run_id", "cycle_time", "model_id"])
+def test_api_source_top_level_non_authoritative_structured_conflict_blocks_with_source_scoped_proof(
+    wrapper_key: str,
+    field: str,
+) -> None:
+    run_id = _run_id(f"api-source-top-{wrapper_key}-{field}-structured-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    observed = "IFS" if field == "source" else f"{identity[field]}-sibling"
+    check.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _structured_producer_metadata_record(identity, "latest_product"),
+    }
+    source_record[wrapper_key] = _structured_producer_metadata_record(
+        identity,
+        "latest_product",
+        **{field: observed},
+    )
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == field
+        and blocker.get("observed") == observed
+        and blocker.get("evidence_key") == wrapper_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("wrapper_shape", ["mapping", "list"])
+def test_api_check_nested_non_authoritative_structured_conflict_blocks_with_complete_proof(
+    wrapper_shape: str,
+) -> None:
+    run_id = _run_id(f"api-check-nested-{wrapper_shape}-structured-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["proofs"] = [_structured_producer_metadata_record(identity, "latest_product")]
+    conflict = _structured_producer_metadata_record(identity, "latest_product", source="IFS")
+    if wrapper_shape == "mapping":
+        wrapper_key = "metadata"
+        check["transport"] = {wrapper_key: conflict}
+    else:
+        wrapper_key = "wrapper"
+        check["transport"] = [{wrapper_key: conflict}]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == wrapper_key
+        for blocker in blockers
+    )
+
+
+def test_api_source_nested_non_authoritative_structured_conflict_blocks_with_source_scoped_proof() -> None:
+    run_id = _run_id("api-source-nested-structured-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _structured_producer_metadata_record(identity, "latest_product"),
+    }
+    source_record["transport"] = {
+        "metadata": _structured_producer_metadata_record(identity, "latest_product", source="IFS"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == "metadata"
+        for blocker in blockers
+    )
+
+
+def test_api_source_arbitrary_container_check_sibling_structured_metadata_conflict_blocks() -> None:
+    run_id = _run_id("api-source-arbitrary-transport-structured-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _structured_producer_metadata_record(identity, "latest_product"),
+    }
+    source_record["transport"] = {
+        "latest_product": {"status": "context"},
+        "metadata": _structured_producer_metadata_record(identity, "latest_product", source="IFS"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == "metadata"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("evidence_key", ["metadata", "message"])
+def test_api_source_arbitrary_container_check_sibling_scalar_text_conflict_blocks(
+    evidence_key: str,
+) -> None:
+    run_id = _run_id(f"api-source-arbitrary-transport-{evidence_key}-text-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _structured_producer_metadata_record(identity, "latest_product"),
+    }
+    source_record["transport"] = {
+        "latest_product": {"status": "context"},
+        evidence_key: _producer_identity_text(identity, "latest_product", source="IFS"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == evidence_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("evidence_key", ["metadata", "message"])
+def test_api_source_arbitrary_container_check_sibling_other_check_text_does_not_block_target(
+    evidence_key: str,
+) -> None:
+    run_id = _run_id(f"api-source-arbitrary-transport-{evidence_key}-series-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    latest_identity = latest["identity"]
+    latest.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _structured_producer_metadata_record(latest_identity, "latest_product"),
+    }
+    source_record["transport"] = {
+        "latest_product": {"status": "context"},
+        evidence_key: _producer_identity_text(
+            latest_identity,
+            "hydro_met",
+            source="IFS",
+            run_id=f"{latest_identity['run_id']}-sibling",
+        ),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+def test_api_check_nested_non_authoritative_structured_other_check_does_not_block_target() -> None:
+    run_id = _run_id("api-check-nested-structured-other-check-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    series = source_record["checks"]["series"]
+    latest_identity = latest["identity"]
+    series_identity = series["identity"]
+    latest["proofs"] = [_structured_producer_metadata_record(latest_identity, "latest_product")]
+    latest["transport"] = {
+        "metadata": _structured_producer_metadata_record(
+            series_identity,
+            "series",
+            source="IFS",
+            run_id=f"{series_identity['run_id']}-sibling",
+        ),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+def test_logs_check_nested_non_authoritative_structured_job_id_conflict_blocks_with_complete_proof() -> None:
+    run_id = _run_id("logs-check-nested-structured-job-conflict")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    identity = check["identity"]
+    observed_job_id = f"{identity['job_id']}-sibling"
+    check["proofs"] = [_structured_producer_metadata_record(identity, "job_logs")]
+    check["transport"] = {
+        "metadata": _structured_producer_metadata_record(
+            identity,
+            "job_logs",
+            job_id=observed_job_id,
+        ),
+    }
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "job_id"
+        and blocker.get("observed") == observed_job_id
+        and blocker.get("evidence_key") == "metadata"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("surface", ["check", "source_record"])
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper", "collector"])
+def test_api_top_level_non_authoritative_structured_other_check_does_not_block_target(
+    surface: str,
+    wrapper_key: str,
+) -> None:
+    run_id = _run_id(f"api-{surface}-top-{wrapper_key}-series-structured-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    latest_identity = latest["identity"]
+    latest.pop("evidence", None)
+    if surface == "check":
+        latest["proofs"] = [_structured_producer_metadata_record(latest_identity, "latest_product")]
+        latest[wrapper_key] = _structured_producer_metadata_record(
+            latest_identity,
+            "hydro_met",
+            source="IFS",
+            run_id=f"{latest_identity['run_id']}-sibling",
+        )
+    else:
+        source_record["proofs"] = {
+            "latest_product": _structured_producer_metadata_record(latest_identity, "latest_product"),
+        }
+        source_record[wrapper_key] = _structured_producer_metadata_record(
+            latest_identity,
+            "hydro_met",
+            source="IFS",
+            run_id=f"{latest_identity['run_id']}-sibling",
+        )
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("surface", ["check", "source_record"])
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper"])
+def test_logs_top_level_non_authoritative_structured_job_id_conflict_blocks(
+    surface: str,
+    wrapper_key: str,
+) -> None:
+    run_id = _run_id(f"logs-{surface}-top-{wrapper_key}-job-structured-conflict")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    check = source_record["checks"]["job_logs"]
+    identity = check["identity"]
+    observed_job_id = f"{identity['job_id']}-sibling"
+    if surface == "check":
+        check["proofs"] = [_structured_producer_metadata_record(identity, "job_logs")]
+        check[wrapper_key] = _structured_producer_metadata_record(
+            identity,
+            "job_logs",
+            job_id=observed_job_id,
+        )
+    else:
+        check.pop("evidence", None)
+        source_record["proofs"] = {
+            "job_logs": _structured_producer_metadata_record(identity, "job_logs"),
+        }
+        source_record[wrapper_key] = _structured_producer_metadata_record(
+            identity,
+            "job_logs",
+            job_id=observed_job_id,
+        )
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "job_id"
+        and blocker.get("observed") == observed_job_id
+        and blocker.get("evidence_key") == wrapper_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "check_name", "conflict_root", "expected_code"),
+    [
+        ("browser", "browser", "ops_job_logs", "artifacts", "TWO_NODE_E2E_BROWSER_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+        ("logs", "logs", "job_logs", "commands", "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+    ],
+)
+def test_job_log_unstructured_producer_root_hidden_conflict_blocks_with_complete_proof(
+    lane_dir: str,
+    lane_name: str,
+    check_name: str,
+    conflict_root: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-{conflict_root}-unstructured-conflict")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    check = payload["sources"]["GFS"]["checks"][check_name]
+    identity = check["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    check["proofs"] = [_complete_explicit_producer_record(identity, check_name)]
+    check[conflict_root] = {
+        "collector": {
+            "message": _producer_identity_text(
+                identity,
+                check_name,
+                run_id=sibling_run_id,
+                job_id=sibling_job_id,
+            )
+        }
+    }
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    blockers = lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(blockers)
+    assert any(
+        blocker.get("field") in {"run_id", "job_id"} and blocker.get("evidence_key") == "message"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "check_name", "other_check", "root_key", "text_key", "expected_code"),
+    [
+        (
+            "logs",
+            "logs",
+            "job_logs",
+            "ops_job_logs",
+            "proofs",
+            "message",
+            "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH",
+        ),
+        (
+            "browser",
+            "browser",
+            "ops_job_logs",
+            "job_logs",
+            "commands",
+            "details",
+            "TWO_NODE_E2E_BROWSER_CHECK_PRODUCER_IDENTITY_MISMATCH",
+        ),
+    ],
+)
+def test_job_log_check_producer_root_nested_other_check_text_does_not_block_target(
+    lane_dir: str,
+    lane_name: str,
+    check_name: str,
+    other_check: str,
+    root_key: str,
+    text_key: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-{root_key}-{text_key}-other-check-pass")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    source_record = payload["sources"]["GFS"]
+    check = source_record["checks"][check_name]
+    identity = check["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    target_proof = _complete_explicit_producer_record(identity, check_name)
+    sibling_text = {
+        text_key: _producer_identity_text(
+            identity,
+            other_check,
+            source="IFS",
+            run_id=sibling_run_id,
+            job_id=sibling_job_id,
+        )
+    }
+    check["proofs"] = [target_proof]
+    check[root_key] = [target_proof, sibling_text] if root_key == "proofs" else [sibling_text]
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    assert summary["status"] == STATUS_PASS
+    assert lane["status"] == STATUS_PASS
+    assert expected_code not in _codes(lane["blockers"])
+
+
+@pytest.mark.parametrize("evidence_key", ["message", "text"])
+def test_api_latest_product_check_top_level_hidden_text_conflict_blocks(evidence_key: str) -> None:
+    run_id = _run_id(f"api-check-top-{evidence_key}-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check["evidence"] = {
+        "producer": _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    check[evidence_key] = _producer_identity_text(identity, "latest_product", source="IFS")
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == evidence_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("evidence_key", ["message", "text", "details", "body", "response_body"])
+def test_api_latest_product_check_top_level_hidden_text_conflict_blocks_with_source_scoped_fallback(
+    evidence_key: str,
+) -> None:
+    run_id = _run_id(f"api-check-top-source-fallback-{evidence_key}-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    check[evidence_key] = _producer_identity_text(identity, "latest_product", source="IFS")
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("check") == "latest_product"
+        and blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == evidence_key
+        for blocker in blockers
+    )
+
+
+def test_api_latest_product_check_top_level_other_check_text_passes_with_source_scoped_fallback() -> None:
+    run_id = _run_id("api-check-top-other-check-source-fallback-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    check["message"] = _producer_identity_text(
+        identity,
+        "series",
+        source="IFS",
+        run_id=f"{identity['run_id']}-sibling",
+    )
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+def test_api_latest_product_source_top_level_message_conflict_blocks_with_check_evidence_intact() -> None:
+    run_id = _run_id("api-source-top-message-check-proof-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    identity = source_record["checks"]["latest_product"]["identity"]
+    source_record["message"] = _producer_identity_text(identity, "latest_product", source="IFS")
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("check") == "latest_product"
+        and blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == "message"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+@pytest.mark.parametrize("conflict_shape", ["hidden_message", "identity_only"])
+def test_api_latest_product_source_scoped_root_conflict_blocks_with_check_evidence_intact(
+    source_evidence_key: str,
+    conflict_shape: str,
+) -> None:
+    run_id = _run_id(f"api-source-{source_evidence_key}-{conflict_shape}-check-proof-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    identity = source_record["checks"]["latest_product"]["identity"]
+    if conflict_shape == "hidden_message":
+        source_record[source_evidence_key] = [
+            {"message": _producer_identity_text(identity, "latest_product", source="IFS")}
+        ]
+    else:
+        source_record[source_evidence_key] = [
+            _identity_only_producer_record(identity, "latest_product", source="IFS")
+        ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("check") == "latest_product"
+        and blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        for blocker in blockers
+    )
+
+
+def test_api_latest_product_source_proofs_wrapper_structured_conflict_blocks_with_check_evidence_intact() -> None:
+    run_id = _run_id("api-source-proofs-wrapper-structured-check-proof-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    identity = source_record["checks"]["latest_product"]["identity"]
+    source_record["proofs"] = [
+        {
+            "wrapper": _structured_producer_metadata_record(
+                identity,
+                "latest_product",
+                source="IFS",
+            )
+        }
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("check") == "latest_product"
+        and blocker.get("field") == "source"
+        and blocker.get("observed") == "IFS"
+        and blocker.get("evidence_key") == "wrapper"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "check_name", "expected_code"),
+    [
+        ("browser", "browser", "ops_job_logs", "TWO_NODE_E2E_BROWSER_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+        ("logs", "logs", "job_logs", "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+    ],
+)
+def test_job_log_source_level_log_uri_conflict_blocks_with_check_evidence_intact(
+    lane_dir: str,
+    lane_name: str,
+    check_name: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-source-log-uri-check-proof-conflict")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    source_record = payload["sources"]["GFS"]
+    identity = source_record["checks"][check_name]["identity"]
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    sibling_uri = f"published://logs/gfs/{identity['run_id']}/{sibling_job_id}.out"
+    source_record["message"] = f"producer log check={check_name} log_uri={sibling_uri}"
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    blockers = lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(blockers)
+    assert any(
+        blocker.get("check") == check_name
+        and blocker.get("field") == "job_id"
+        and blocker.get("observed") == sibling_job_id
+        and blocker.get("evidence_key") == "message"
+        for blocker in blockers
+    )
+
+
+def test_api_source_top_level_other_check_only_conflict_passes_with_check_evidence_intact() -> None:
+    run_id = _run_id("api-source-other-check-only-check-proof-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    identity = source_record["checks"]["latest_product"]["identity"]
+    source_record["message"] = _producer_identity_text(
+        identity,
+        "hydro_met",
+        source="IFS",
+        run_id=f"{identity['run_id']}-sibling",
+    )
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "check_name", "expected_code"),
+    [
+        ("browser", "browser", "ops_job_logs", "TWO_NODE_E2E_BROWSER_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+        ("logs", "logs", "job_logs", "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+    ],
+)
+def test_job_log_proofs_hidden_only_response_body_sibling_conflict_blocks(
+    lane_dir: str,
+    lane_name: str,
+    check_name: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-proofs-hidden-response-conflict")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    check = payload["sources"]["GFS"]["checks"][check_name]
+    identity = check["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    check["proofs"] = [
+        _complete_explicit_producer_record(identity, check_name),
+        {
+            "response_body": {
+                "status_code": 200,
+                "source": "IFS",
+                "check": check_name,
+                "run_id": sibling_run_id,
+                "cycle_time": identity["cycle_time"],
+                "model_id": identity["model_id"],
+                "job_id": sibling_job_id,
+                "log_uri": f"published://logs/ifs/{sibling_run_id}/{sibling_job_id}.out",
+            }
+        },
+    ]
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    blockers = lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(blockers)
+    assert any(blocker.get("field") in {"source", "run_id", "job_id"} for blocker in blockers)
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "check_name", "evidence_key", "expected_code"),
+    [
+        ("browser", "browser", "ops_job_logs", "text", "TWO_NODE_E2E_BROWSER_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+        ("browser", "browser", "ops_job_logs", "message", "TWO_NODE_E2E_BROWSER_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+        ("logs", "logs", "job_logs", "text", "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+        ("logs", "logs", "job_logs", "message", "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+    ],
+)
+def test_job_log_proofs_hidden_text_or_message_sibling_conflict_blocks(
+    lane_dir: str,
+    lane_name: str,
+    check_name: str,
+    evidence_key: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-proofs-hidden-{evidence_key}-conflict")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    check = payload["sources"]["GFS"]["checks"][check_name]
+    identity = check["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    check["proofs"] = [
+        _complete_explicit_producer_record(identity, check_name),
+        {
+            evidence_key: _producer_identity_text(
+                identity,
+                check_name,
+                run_id=sibling_run_id,
+                job_id=sibling_job_id,
+            )
+        },
+    ]
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    blockers = lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(blockers)
+    assert any(
+        blocker.get("field") in {"run_id", "job_id"} and blocker.get("evidence_key") == evidence_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "check_name", "evidence_key", "expected_code"),
+    [
+        ("browser", "browser", "ops_job_logs", "message", "TWO_NODE_E2E_BROWSER_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+        ("logs", "logs", "job_logs", "details", "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+    ],
+)
+def test_job_log_check_top_level_hidden_text_conflict_blocks(
+    lane_dir: str,
+    lane_name: str,
+    check_name: str,
+    evidence_key: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-check-top-{evidence_key}-conflict")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    check = payload["sources"]["GFS"]["checks"][check_name]
+    identity = check["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    check["evidence"] = {
+        "producer": _complete_explicit_producer_record(identity, check_name),
+    }
+    check[evidence_key] = _producer_identity_text(
+        identity,
+        check_name,
+        run_id=sibling_run_id,
+        job_id=sibling_job_id,
+    )
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    blockers = lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(blockers)
+    assert any(
+        blocker.get("field") in {"run_id", "job_id"} and blocker.get("evidence_key") == evidence_key
+        for blocker in blockers
+    )
+
+
+def test_source_scoped_check_keyed_proofs_ignore_unrelated_sibling_checks() -> None:
+    run_id = _run_id("source-keyed-proofs-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    series = source_record["checks"]["series"]
+    latest_identity = latest["identity"]
+    series_identity = series["identity"]
+    latest.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _complete_explicit_producer_record(latest_identity, "latest_product"),
+        "series": _complete_explicit_producer_record(series_identity, "series"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["api"]["status"] == STATUS_PASS
+
+
+def test_source_scoped_check_keyed_target_proof_hidden_conflict_blocks() -> None:
+    run_id = _run_id("source-keyed-target-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    series = source_record["checks"]["series"]
+    latest_identity = latest["identity"]
+    series_identity = series["identity"]
+    latest.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": {
+            "producer": _complete_explicit_producer_record(latest_identity, "latest_product"),
+            "message": _producer_identity_text(latest_identity, "latest_product", source="IFS"),
+        },
+        "series": _complete_explicit_producer_record(series_identity, "series"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "message"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_evidence_key", "metadata_key"),
+    [
+        ("proofs", "message"),
+        ("evidence", "summary"),
+        ("artifacts", "message"),
+    ],
+)
+def test_source_scoped_check_keyed_root_non_check_hidden_target_conflict_blocks(
+    source_evidence_key: str,
+    metadata_key: str,
+) -> None:
+    run_id = _run_id(f"source-keyed-{source_evidence_key}-{metadata_key}-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    series = source_record["checks"]["series"]
+    latest_identity = latest["identity"]
+    series_identity = series["identity"]
+    latest.pop("evidence", None)
+    source_record[source_evidence_key] = {
+        "latest_product": _complete_explicit_producer_record(latest_identity, "latest_product"),
+        "series": _complete_explicit_producer_record(series_identity, "series"),
+        metadata_key: _producer_identity_text(latest_identity, "latest_product", source="IFS"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == metadata_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+@pytest.mark.parametrize("wrapper_key", NON_AUTHORITATIVE_WRAPPER_KEYS)
+@pytest.mark.parametrize("wrapper_shape", ["scalar", "list"])
+def test_source_scoped_check_keyed_root_non_check_wrapper_scalar_text_conflict_blocks(
+    source_evidence_key: str,
+    wrapper_key: str,
+    wrapper_shape: str,
+) -> None:
+    run_id = _run_id(f"source-keyed-{source_evidence_key}-{wrapper_key}-{wrapper_shape}-text-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    conflict_text = _producer_identity_text(identity, "latest_product", source="IFS")
+    proof_root = "evidence" if source_evidence_key == "proofs" else "proofs"
+    source_record[proof_root] = {
+        "latest_product": _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    source_record[source_evidence_key] = {
+        "series": _complete_explicit_producer_record(
+            source_record["checks"]["series"]["identity"],
+            "series",
+        ),
+        wrapper_key: conflict_text if wrapper_shape == "scalar" else ["collector ok", conflict_text],
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == wrapper_key
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+@pytest.mark.parametrize("metadata_key", ["metadata", "wrapper", "collector", "context"])
+def test_source_scoped_check_keyed_root_non_check_structured_target_conflict_blocks(
+    source_evidence_key: str,
+    metadata_key: str,
+) -> None:
+    run_id = _run_id(f"source-keyed-{source_evidence_key}-{metadata_key}-structured-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    series = source_record["checks"]["series"]
+    latest_identity = latest["identity"]
+    series_identity = series["identity"]
+    latest.pop("evidence", None)
+    if source_evidence_key == "source_artifacts":
+        source_record["proofs"] = {
+            "latest_product": _structured_producer_metadata_record(latest_identity, "latest_product"),
+        }
+    source_record[source_evidence_key] = {
+        "latest_product": _structured_producer_metadata_record(latest_identity, "latest_product"),
+        "series": _structured_producer_metadata_record(series_identity, "series"),
+        metadata_key: _structured_producer_metadata_record(
+            latest_identity,
+            "latest_product",
+            source="IFS",
+        ),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(blocker.get("field") == "source" and blocker.get("observed") == "IFS" for blocker in blockers)
+
+
+def test_source_scoped_check_keyed_root_non_check_structured_run_id_conflict_blocks() -> None:
+    run_id = _run_id("source-keyed-metadata-structured-run-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    observed_run_id = f"{identity['run_id']}-sibling"
+    latest.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _structured_producer_metadata_record(identity, "latest_product"),
+        "metadata": _structured_producer_metadata_record(
+            identity,
+            "latest_product",
+            run_id=observed_run_id,
+        ),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "run_id" and blocker.get("observed") == observed_run_id
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts"])
+def test_source_scoped_check_keyed_root_non_check_hidden_other_check_does_not_block_target(
+    source_evidence_key: str,
+) -> None:
+    run_id = _run_id(f"source-keyed-{source_evidence_key}-metadata-other-check")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    series = source_record["checks"]["series"]
+    latest_identity = latest["identity"]
+    latest.pop("evidence", None)
+    source_record[source_evidence_key] = {
+        "latest_product": _complete_explicit_producer_record(latest_identity, "latest_product"),
+        "series": _complete_explicit_producer_record(series["identity"], "series"),
+        "message": _producer_identity_text(
+            latest_identity,
+            "hydro_met",
+            source="IFS",
+            run_id=f"{latest_identity['run_id']}-sibling",
+        ),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+def test_source_scoped_check_keyed_root_non_check_structured_other_check_does_not_block_target(
+    source_evidence_key: str,
+) -> None:
+    run_id = _run_id(f"source-keyed-{source_evidence_key}-structured-other-check")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    series = source_record["checks"]["series"]
+    latest_identity = latest["identity"]
+    latest.pop("evidence", None)
+    if source_evidence_key == "source_artifacts":
+        source_record["proofs"] = {
+            "latest_product": _structured_producer_metadata_record(latest_identity, "latest_product"),
+        }
+    source_record[source_evidence_key] = {
+        "latest_product": _structured_producer_metadata_record(latest_identity, "latest_product"),
+        "series": _structured_producer_metadata_record(series["identity"], "series"),
+        "metadata": _structured_producer_metadata_record(
+            latest_identity,
+            "hydro_met",
+            source="IFS",
+            run_id=f"{latest_identity['run_id']}-sibling",
+        ),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+@pytest.mark.parametrize("metadata_key", ["metadata", "wrapper", "collector", "context"])
+def test_source_scoped_check_keyed_root_non_check_structured_record_alone_is_unscoped(
+    source_evidence_key: str,
+    metadata_key: str,
+) -> None:
+    run_id = _run_id(f"source-keyed-{source_evidence_key}-{metadata_key}-structured-alone")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    source_record[source_evidence_key] = {
+        metadata_key: _structured_producer_metadata_record(identity, "latest_product"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(api_lane["blockers"])
+
+
+def test_source_scoped_check_keyed_root_non_check_hidden_job_id_conflict_blocks() -> None:
+    run_id = _run_id("source-keyed-job-metadata-conflict")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    job_logs = source_record["checks"]["job_logs"]
+    identity = job_logs["identity"]
+    job_logs.pop("evidence", None)
+    source_record["proofs"] = {
+        "job_logs": _complete_explicit_producer_record(identity, "job_logs"),
+        "ops_job_logs": _complete_explicit_producer_record(identity, "ops_job_logs"),
+        "summary": _producer_identity_text(
+            identity,
+            "job_logs",
+            job_id=f"{identity['job_id']}-sibling",
+        ),
+    }
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "job_id" and blocker.get("evidence_key") == "summary"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts"])
+@pytest.mark.parametrize("metadata_key", ["log_uri", "published_log_uri"])
+@pytest.mark.parametrize("uri_scheme", ["published", "file", "s3"])
+def test_source_scoped_check_keyed_root_non_check_log_uri_identity_conflict_blocks(
+    source_evidence_key: str,
+    metadata_key: str,
+    uri_scheme: str,
+) -> None:
+    run_id = _run_id(f"source-keyed-{source_evidence_key}-{metadata_key}-{uri_scheme}-conflict")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    job_logs = source_record["checks"]["job_logs"]
+    identity = job_logs["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    job_logs.pop("evidence", None)
+    source_record[source_evidence_key] = {
+        "job_logs": _complete_explicit_producer_record(identity, "job_logs"),
+        "ops_job_logs": _complete_explicit_producer_record(identity, "ops_job_logs"),
+        metadata_key: _log_uri_for_scheme(
+            uri_scheme,
+            source=identity["source"],
+            run_id=sibling_run_id,
+            job_id=sibling_job_id,
+        ),
+    }
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") in {"run_id", "job_id"}
+        and blocker.get("evidence_key") == metadata_key
+        and blocker.get("observed") in {sibling_run_id, sibling_job_id}
+        and blocker.get("expected") in {identity["run_id"], identity["job_id"]}
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("metadata_key", ["log_uri", "published_log_uri"])
+def test_source_scoped_check_keyed_root_matching_log_uri_metadata_does_not_block(
+    metadata_key: str,
+) -> None:
+    run_id = _run_id(f"source-keyed-{metadata_key}-matching-log-uri-pass")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    job_logs = source_record["checks"]["job_logs"]
+    identity = job_logs["identity"]
+    job_logs.pop("evidence", None)
+    source_record["proofs"] = {
+        "job_logs": _complete_explicit_producer_record(identity, "job_logs"),
+        "ops_job_logs": _complete_explicit_producer_record(identity, "ops_job_logs"),
+        metadata_key: _log_uri_for_scheme(
+            "published",
+            source=identity["source"],
+            run_id=identity["run_id"],
+            job_id=identity["job_id"],
+        ),
+    }
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    assert summary["status"] == STATUS_PASS
+    assert logs_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(logs_lane["blockers"])
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+def test_logs_job_logs_check_keyed_sibling_hidden_target_text_conflict_blocks(
+    source_evidence_key: str,
+) -> None:
+    run_id = _run_id(f"logs-sibling-key-text-{source_evidence_key}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    job_logs = source_record["checks"]["job_logs"]
+    identity = job_logs["identity"]
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    job_logs.pop("evidence", None)
+    target_proof = {"job_logs": _complete_explicit_producer_record(identity, "job_logs")}
+    sibling_conflict = {
+        "message": _producer_identity_text(
+            identity,
+            "job_logs",
+            job_id=sibling_job_id,
+        )
+    }
+    if source_evidence_key == "source_artifacts":
+        source_record["proofs"] = target_proof
+        source_record["source_artifacts"] = {"ops_job_logs": sibling_conflict}
+    else:
+        source_record[source_evidence_key] = {**target_proof, "ops_job_logs": sibling_conflict}
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "job_id"
+        and blocker.get("evidence_key") == "message"
+        and blocker.get("observed") == sibling_job_id
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+@pytest.mark.parametrize("identity_key", ["identity", "strict_identity"])
+def test_logs_job_logs_check_keyed_sibling_nested_identity_target_conflict_blocks(
+    source_evidence_key: str,
+    identity_key: str,
+) -> None:
+    run_id = _run_id(f"logs-sibling-key-{identity_key}-{source_evidence_key}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    job_logs = source_record["checks"]["job_logs"]
+    identity = job_logs["identity"]
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    job_logs.pop("evidence", None)
+    target_proof = {"job_logs": _complete_explicit_producer_record(identity, "job_logs")}
+    sibling_conflict = {
+        identity_key: _identity_only_producer_record(
+            identity,
+            "job_logs",
+            job_id=sibling_job_id,
+        )
+    }
+    if source_evidence_key == "source_artifacts":
+        source_record["proofs"] = target_proof
+        source_record["source_artifacts"] = {"ops_job_logs": sibling_conflict}
+    else:
+        source_record[source_evidence_key] = {**target_proof, "ops_job_logs": sibling_conflict}
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "job_id" and blocker.get("observed") == sibling_job_id for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+def test_logs_job_logs_check_keyed_sibling_target_log_uri_conflict_blocks(
+    source_evidence_key: str,
+) -> None:
+    run_id = _run_id(f"logs-sibling-key-log-uri-{source_evidence_key}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    job_logs = source_record["checks"]["job_logs"]
+    identity = job_logs["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    job_logs.pop("evidence", None)
+    target_proof = {"job_logs": _complete_explicit_producer_record(identity, "job_logs")}
+    sibling_conflict = {
+        "check": "job_logs",
+        "log_uri": _log_uri_for_scheme(
+            "published",
+            source=identity["source"],
+            run_id=sibling_run_id,
+            job_id=sibling_job_id,
+        ),
+    }
+    if source_evidence_key == "source_artifacts":
+        source_record["proofs"] = target_proof
+        source_record["source_artifacts"] = {"ops_job_logs": sibling_conflict}
+    else:
+        source_record[source_evidence_key] = {**target_proof, "ops_job_logs": sibling_conflict}
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") in {"run_id", "job_id"}
+        and blocker.get("evidence_key") == "log_uri"
+        and blocker.get("observed") in {sibling_run_id, sibling_job_id}
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+def test_logs_job_logs_check_keyed_sibling_other_check_text_does_not_block_target(
+    source_evidence_key: str,
+) -> None:
+    run_id = _run_id(f"logs-sibling-key-other-{source_evidence_key}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    job_logs = source_record["checks"]["job_logs"]
+    identity = job_logs["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    job_logs.pop("evidence", None)
+    target_proof = {"job_logs": _complete_explicit_producer_record(identity, "job_logs")}
+    sibling_other_check = {
+        "message": _producer_identity_text(
+            identity,
+            "ops_job_logs",
+            run_id=sibling_run_id,
+            job_id=sibling_job_id,
+        )
+    }
+    if source_evidence_key == "source_artifacts":
+        source_record["proofs"] = target_proof
+        source_record["source_artifacts"] = {"ops_job_logs": sibling_other_check}
+    else:
+        source_record[source_evidence_key] = {**target_proof, "ops_job_logs": sibling_other_check}
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    assert summary["status"] == STATUS_PASS
+    assert logs_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(logs_lane["blockers"])
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+@pytest.mark.parametrize("conflict_shape", ["text", "identity", "strict_identity"])
+def test_api_latest_product_check_keyed_sibling_target_conflict_blocks(
+    source_evidence_key: str,
+    conflict_shape: str,
+) -> None:
+    run_id = _run_id(f"api-sibling-key-{conflict_shape}-{source_evidence_key}")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    target_proof = {"latest_product": _complete_explicit_producer_record(identity, "latest_product")}
+    if conflict_shape == "text":
+        sibling_conflict = {
+            "message": _producer_identity_text(identity, "latest_product", source="IFS"),
+        }
+    else:
+        sibling_conflict = {
+            conflict_shape: _identity_only_producer_record(
+                identity,
+                "latest_product",
+                source="IFS",
+            )
+        }
+    if source_evidence_key == "source_artifacts":
+        source_record["proofs"] = target_proof
+        source_record["source_artifacts"] = {"series": sibling_conflict}
+    else:
+        source_record[source_evidence_key] = {**target_proof, "series": sibling_conflict}
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(blocker.get("field") == "source" and blocker.get("observed") == "IFS" for blocker in blockers)
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+def test_api_latest_product_check_keyed_sibling_other_check_text_does_not_block_target(
+    source_evidence_key: str,
+) -> None:
+    run_id = _run_id(f"api-sibling-key-series-{source_evidence_key}")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    target_proof = {"latest_product": _complete_explicit_producer_record(identity, "latest_product")}
+    series_identity = source_record["checks"]["series"]["identity"]
+    sibling_other_check = {
+        "message": _producer_identity_text(
+            series_identity,
+            "series",
+        )
+    }
+    if source_evidence_key == "source_artifacts":
+        source_record["proofs"] = target_proof
+        source_record["source_artifacts"] = {"series": sibling_other_check}
+    else:
+        source_record[source_evidence_key] = {**target_proof, "series": sibling_other_check}
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+def test_logs_job_logs_check_top_level_log_uri_conflict_blocks_with_source_scoped_fallback() -> None:
+    run_id = _run_id("logs-check-top-log-uri-source-fallback-conflict")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    check = source_record["checks"]["job_logs"]
+    identity = check["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    check.pop("evidence", None)
+    source_record["proofs"] = {
+        "job_logs": _complete_explicit_producer_record(identity, "job_logs"),
+    }
+    check["log_uri"] = _log_uri_for_scheme(
+        "published",
+        source=identity["source"],
+        run_id=sibling_run_id,
+        job_id=sibling_job_id,
+    )
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("check") == "job_logs"
+        and blocker.get("field") in {"run_id", "job_id"}
+        and blocker.get("evidence_key") == "log_uri"
+        and blocker.get("observed") in {sibling_run_id, sibling_job_id}
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts", "source_artifacts"])
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper"])
+def test_source_scoped_check_keyed_root_wrapper_scalar_log_uri_conflict_blocks(
+    source_evidence_key: str,
+    wrapper_key: str,
+) -> None:
+    run_id = _run_id(f"source-keyed-{source_evidence_key}-{wrapper_key}-log-uri-conflict")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    job_logs = source_record["checks"]["job_logs"]
+    identity = job_logs["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    job_logs.pop("evidence", None)
+    proof_root = "evidence" if source_evidence_key == "proofs" else "proofs"
+    source_record[proof_root] = {
+        "job_logs": _complete_explicit_producer_record(identity, "job_logs"),
+    }
+    source_record[source_evidence_key] = {
+        "ops_job_logs": _complete_explicit_producer_record(identity, "ops_job_logs"),
+        wrapper_key: _log_uri_for_scheme(
+            "published",
+            source=identity["source"],
+            run_id=sibling_run_id,
+            job_id=sibling_job_id,
+        ),
+    }
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") in {"run_id", "job_id"}
+        and blocker.get("evidence_key") == wrapper_key
+        and blocker.get("observed") in {sibling_run_id, sibling_job_id}
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["source_artifacts", "proofs", "evidence", "artifacts"])
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper", "collector"])
+def test_source_scoped_non_authoritative_wrapper_record_does_not_satisfy_producer_identity(
+    source_evidence_key: str,
+    wrapper_key: str,
+) -> None:
+    run_id = _run_id(f"source-{source_evidence_key}-{wrapper_key}-wrapper-unscoped")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    source_record[source_evidence_key] = {
+        wrapper_key: _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(api_lane["blockers"])
+
+
+@pytest.mark.parametrize("source_evidence_key", ["source_artifacts", "proofs", "evidence", "artifacts"])
+@pytest.mark.parametrize("wrapper_key", ["metadata", "wrapper", "collector"])
+def test_source_scoped_non_authoritative_wrapper_record_conflict_still_blocks_with_explicit_proof(
+    source_evidence_key: str,
+    wrapper_key: str,
+) -> None:
+    run_id = _run_id(f"source-{source_evidence_key}-{wrapper_key}-wrapper-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    explicit_proof_root = "evidence" if source_evidence_key == "proofs" else "proofs"
+    source_record[explicit_proof_root] = {
+        "latest_product": _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    source_record[source_evidence_key] = {
+        wrapper_key: {
+            **_complete_explicit_producer_record(identity, "latest_product"),
+            "source": "IFS",
+        },
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(blocker.get("field") == "source" and blocker.get("observed") == "IFS" for blocker in blockers)
+
+
+def test_source_scoped_unstructured_evidence_root_hidden_conflict_blocks_with_complete_proof() -> None:
+    run_id = _run_id("source-unstructured-root-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    latest = source_record["checks"]["latest_product"]
+    identity = latest["identity"]
+    latest.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    source_record["evidence"] = {
+        "message": _producer_identity_text(identity, "latest_product", source="IFS"),
+    }
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "message"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("root_shape", ["scalar", "list"])
+def test_source_scoped_scalar_or_list_evidence_root_hidden_conflict_blocks_with_complete_proof(
+    root_shape: str,
+) -> None:
+    run_id = _run_id(f"source-scalar-evidence-{root_shape}-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    conflict_text = _producer_identity_text(identity, "latest_product", source="IFS")
+    check.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    source_record["evidence"] = conflict_text if root_shape == "scalar" else ["collector ok", conflict_text]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "evidence"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["evidence", "proofs"])
+def test_source_scoped_producer_value_hidden_only_sibling_conflict_blocks(
+    source_evidence_key: str,
+) -> None:
+    run_id = _run_id(f"source-{source_evidence_key}-hidden-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record[source_evidence_key] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        {
+            "body": {
+                "status_code": 200,
+                "source": "IFS",
+                "check": "latest_product",
+                "run_id": identity["run_id"],
+                "cycle_time": identity["cycle_time"],
+                "model_id": identity["model_id"],
+            }
+        },
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "body"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["evidence", "proofs"])
+def test_source_scoped_producer_value_hidden_only_text_sibling_conflict_blocks(
+    source_evidence_key: str,
+) -> None:
+    run_id = _run_id(f"source-{source_evidence_key}-hidden-text-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record[source_evidence_key] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        {
+            "text": _producer_identity_text(
+                identity,
+                "latest_product",
+                source="IFS",
+            )
+        },
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "text"
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize("source_evidence_key", ["proofs", "evidence", "artifacts"])
+def test_api_latest_product_source_scoped_list_identity_only_sibling_conflict_blocks(
+    source_evidence_key: str,
+) -> None:
+    run_id = _run_id(f"source-{source_evidence_key}-identity-only-list-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record[source_evidence_key] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        _identity_only_producer_record(identity, "latest_product", source="IFS"),
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(blocker.get("field") == "source" and blocker.get("observed") == "IFS" for blocker in blockers)
+
+
+@pytest.mark.parametrize("identity_key", ["identity", "strict_identity"])
+def test_api_latest_product_source_scoped_list_nested_identity_only_sibling_conflict_blocks(
+    identity_key: str,
+) -> None:
+    run_id = _run_id(f"source-list-{identity_key}-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        {identity_key: _identity_only_producer_record(identity, "latest_product", source="IFS")},
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(blocker.get("field") == "source" and blocker.get("observed") == "IFS" for blocker in blockers)
+
+
+def test_logs_job_logs_source_scoped_list_identity_only_job_id_sibling_conflict_blocks() -> None:
+    run_id = _run_id("logs-source-list-identity-job-conflict")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    check = source_record["checks"]["job_logs"]
+    identity = check["identity"]
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    check.pop("evidence", None)
+    source_record["proofs"] = [
+        _complete_explicit_producer_record(identity, "job_logs"),
+        _identity_only_producer_record(identity, "job_logs", job_id=sibling_job_id),
+    ]
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "job_id" and blocker.get("observed") == sibling_job_id
+        for blocker in blockers
+    )
+
+
+def test_source_scoped_list_other_check_identity_only_sibling_does_not_block_target() -> None:
+    run_id = _run_id("source-list-other-check-identity-only-pass")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        _identity_only_producer_record(
+            identity,
+            "hydro_met",
+            source="IFS",
+            run_id=f"{identity['run_id']}-sibling",
+        ),
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+def test_source_scoped_list_other_check_hidden_target_text_conflict_blocks() -> None:
+    run_id = _run_id("source-list-other-check-hidden-target")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        {
+            "source": "GFS",
+            "check": "series",
+            "run_id": identity["run_id"],
+            "cycle_time": identity["cycle_time"],
+            "model_id": identity["model_id"],
+            "message": _producer_identity_text(identity, "latest_product", source="IFS"),
+        },
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == "message"
+        for blocker in blockers
+    )
+
+
+def test_source_scoped_list_other_check_without_target_text_does_not_block_target() -> None:
+    run_id = _run_id("source-list-other-check-ignored")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        {
+            "source": "GFS",
+            "check": "series",
+            "run_id": identity["run_id"],
+            "cycle_time": identity["cycle_time"],
+            "model_id": identity["model_id"],
+            "message": "producer response source=GFS check=series",
+        },
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    assert summary["status"] == STATUS_PASS
+    assert summary["lane_summaries"]["api"]["status"] == STATUS_PASS
+
+
+def test_source_scoped_list_hidden_other_check_without_target_text_does_not_block_target() -> None:
+    run_id = _run_id("source-list-hidden-other-check")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    check.pop("evidence", None)
+    source_record["proofs"] = [
+        _complete_explicit_producer_record(identity, "latest_product"),
+        {
+            "message": _producer_identity_text(
+                identity,
+                "hydro_met",
+                source="IFS",
+                run_id=sibling_run_id,
+            ),
+        },
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    assert summary["status"] == STATUS_PASS
+    assert api_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(api_lane["blockers"])
+
+
+def test_source_scoped_job_id_list_other_check_hidden_target_text_conflict_blocks() -> None:
+    run_id = _run_id("source-job-list-other-check-hidden-target")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    check = source_record["checks"]["job_logs"]
+    identity = check["identity"]
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    check.pop("evidence", None)
+    source_record["proofs"] = [
+        _complete_explicit_producer_record(identity, "job_logs"),
+        {
+            "source": "GFS",
+            "check": "ops_job_logs",
+            "run_id": identity["run_id"],
+            "cycle_time": identity["cycle_time"],
+            "model_id": identity["model_id"],
+            "job_id": identity["job_id"],
+            "message": _producer_identity_text(
+                identity,
+                "job_logs",
+                job_id=sibling_job_id,
+            ),
+        },
+    ]
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "job_id" and blocker.get("evidence_key") == "message"
+        for blocker in blockers
+    )
+
+
+def test_source_scoped_job_id_list_hidden_other_check_without_target_text_does_not_block_target() -> None:
+    run_id = _run_id("source-job-list-hidden-other-check")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    source_record = logs_summary["sources"]["GFS"]
+    check = source_record["checks"]["job_logs"]
+    identity = check["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    check.pop("evidence", None)
+    source_record["proofs"] = [
+        _complete_explicit_producer_record(identity, "job_logs"),
+        {
+            "message": _producer_identity_text(
+                identity,
+                "ops_job_logs",
+                source="IFS",
+                run_id=sibling_run_id,
+                job_id=sibling_job_id,
+            ),
+        },
+    ]
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    assert summary["status"] == STATUS_PASS
+    assert logs_lane["status"] == STATUS_PASS
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" not in _codes(logs_lane["blockers"])
+
+
+@pytest.mark.parametrize("evidence_key", ["summary", "message"])
+def test_source_scoped_producer_top_level_hidden_text_conflict_blocks(evidence_key: str) -> None:
+    run_id = _run_id(f"source-top-{evidence_key}-conflict")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    source_record = api_summary["sources"]["GFS"]
+    check = source_record["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    source_record["proofs"] = {
+        "latest_product": _complete_explicit_producer_record(identity, "latest_product"),
+    }
+    source_record[evidence_key] = _producer_identity_text(identity, "latest_product", source="IFS")
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") == "source" and blocker.get("evidence_key") == evidence_key
+        for blocker in blockers
+    )
+
+
+def test_hidden_text_identity_fields_do_not_become_proof_candidates() -> None:
+    run_id = _run_id("api-hidden-text-candidate")
+    config = _seed_pass_bundle(run_id)
+    api_summary = _read(config.run_dir / "api" / "summary.json")
+    check = api_summary["sources"]["GFS"]["checks"]["latest_product"]
+    identity = check["identity"]
+    check.pop("evidence", None)
+    check["proofs"] = [
+        {
+            "text": {
+                "status_code": 200,
+                "source": identity["source"],
+                "check": "latest_product",
+                "run_id": identity["run_id"],
+                "cycle_time": identity["cycle_time"],
+                "model_id": identity["model_id"],
+            }
+        }
+    ]
+    _write(config.run_dir / "api" / "summary.json", api_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    api_lane = summary["lane_summaries"]["api"]
+    blockers = api_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert api_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_UNSCOPED" in _codes(blockers)
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "check_name", "mutation"),
+    [
+        ("api", "api", "latest_product", "sibling_source"),
+        ("api", "api", "latest_product", "stale_run"),
+        ("api", "api", "latest_product", "wrong_check"),
+        ("browser", "browser", "ops_job_logs", "sibling_source"),
+        ("browser", "browser", "ops_job_logs", "stale_run"),
+        ("browser", "browser", "ops_job_logs", "wrong_check"),
+        ("browser", "browser", "ops_job_logs", "wrong_job"),
+        ("logs", "logs", "job_logs", "sibling_source"),
+        ("logs", "logs", "job_logs", "stale_run"),
+        ("logs", "logs", "job_logs", "wrong_check"),
+        ("logs", "logs", "job_logs", "wrong_job"),
+    ],
+)
+def test_source_lane_producer_evidence_must_semantically_bind_required_check(
+    lane_dir: str,
+    lane_name: str,
+    check_name: str,
+    mutation: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-producer-{mutation}")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    check = payload["sources"]["GFS"]["checks"][check_name]
+    evidence = check["evidence"]
+
+    if mutation == "sibling_source":
+        evidence["request"]["path"] = evidence["request"]["path"].replace("/gfs/", "/ifs/")
+        evidence["request"]["source"] = "IFS"
+        evidence["response"]["source"] = "IFS"
+        evidence["response"].setdefault("body", {})["source"] = "IFS"
+    elif mutation == "stale_run":
+        evidence["request"]["path"] = f"{evidence['request']['path']}?run_id=older-run"
+        evidence["response"].setdefault("body", {})["run_id"] = "older-run"
+    elif mutation == "wrong_check":
+        evidence["request"]["path"] = evidence["request"]["path"].replace(check_name, "ops_status")
+        evidence["request"]["check"] = "ops_status"
+        evidence["response"]["check"] = "ops_status"
+    else:
+        evidence["request"]["path"] = f"{evidence['request']['path']}?job_id=sibling-job"
+        evidence["response"].setdefault("body", {})["job_id"] = "sibling-job"
+
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert f"TWO_NODE_E2E_{lane_name.upper()}_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(lane["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("lane_dir", "lane_name", "check_name", "hidden_check", "expected_code"),
+    [
+        ("api", "api", "jobs", "ops_status", "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH"),
+        (
+            "api",
+            "api",
+            "latest_product",
+            "ops_status",
+            "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH",
+        ),
+        (
+            "logs",
+            "logs",
+            "job_logs",
+            "ops_job_logs",
+            "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH",
+        ),
+        (
+            "api",
+            "api",
+            "latest_product",
+            "not_latest_product",
+            "TWO_NODE_E2E_API_CHECK_PRODUCER_IDENTITY_MISMATCH",
+        ),
+    ],
+)
+def test_source_lane_producer_text_check_identity_conflicts_even_when_explicit_fields_match(
+    lane_dir: str,
+    lane_name: str,
+    check_name: str,
+    hidden_check: str,
+    expected_code: str,
+) -> None:
+    run_id = _run_id(f"{lane_name}-hidden-{hidden_check}")
+    config = _seed_pass_bundle(run_id)
+    payload = _read(config.run_dir / lane_dir / "summary.json")
+    check = payload["sources"]["GFS"]["checks"][check_name]
+    evidence = check["evidence"]
+    identity = check["identity"]
+
+    query = (
+        f"source=GFS&check={hidden_check}&run_id={identity['run_id']}"
+        f"&cycle_time={identity['cycle_time']}&model_id={identity['model_id']}"
+    )
+    if check_name == "job_logs":
+        query = f"{query}&job_id={identity['job_id']}"
+    evidence["request"]["path"] = f"/producer/gfs/{hidden_check}?{query}"
+    evidence["request"]["query"] = query
+    evidence["request"]["body"] = {"check": hidden_check, "source": "GFS"}
+    evidence["request"]["check"] = check_name
+    evidence["response"]["check"] = check_name
+    evidence["response"]["body"] = {
+        **dict(evidence["response"].get("body", {})),
+        "check": hidden_check,
+    }
+    _write(config.run_dir / lane_dir / "summary.json", payload)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    lane = summary["lane_summaries"][lane_name]
+    blockers = lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert lane["status"] == STATUS_BLOCKED
+    assert expected_code in _codes(blockers)
+    assert any(blocker.get("field") == "check" for blocker in blockers)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["request_path", "log_uri"],
+)
+def test_logs_job_logs_producer_rejects_sibling_identity_in_path_or_uri(field: str) -> None:
+    run_id = _run_id(f"logs-sibling-{field}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    identity = check["identity"]
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    sibling_uri = f"published://logs/gfs/{sibling_run_id}/{sibling_job_id}.out"
+    if field == "request_path":
+        check["evidence"]["request"]["path"] = (
+            f"/api/v1/jobs/{sibling_job_id}/logs?source=GFS&run_id={sibling_run_id}"
+            f"&cycle_time={identity['cycle_time']}&model_id={identity['model_id']}&job_id={sibling_job_id}"
+        )
+    else:
+        check["log_uri"] = sibling_uri
+        check["evidence"]["response"]["body"]["log_uri"] = sibling_uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any("conflicts with the required check identity" in str(blocker.get("message", "")) for blocker in blockers)
+
+
+@pytest.mark.parametrize(
+    ("field", "uri_scheme"),
+    [
+        ("log_uri", "published"),
+        ("published_log_read.log_uri", "published"),
+        ("log_uri", "file"),
+        ("published_log_read.log_uri", "s3"),
+    ],
+)
+def test_logs_job_logs_allowed_uri_fields_must_match_check_identity(field: str, uri_scheme: str) -> None:
+    run_id = _run_id(f"logs-uri-identity-{field.replace('.', '-')}-{uri_scheme}")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    identity = check["identity"]
+    correct_uri = f"published://logs/gfs/{identity['run_id']}/{identity['job_id']}.out"
+    sibling_run_id = f"{identity['run_id']}-sibling"
+    sibling_job_id = f"{identity['job_id']}-sibling"
+    if uri_scheme == "published":
+        sibling_uri = f"published://logs/gfs/{sibling_run_id}/{sibling_job_id}.out"
+    elif uri_scheme == "file":
+        root = Path("/mnt/nhms-published")
+        check["published_artifact_root"] = str(root)
+        sibling_uri = f"file://{root}/logs/gfs/{sibling_run_id}/{sibling_job_id}.out"
+    else:
+        check["published_artifact_s3_bucket"] = "nhms-prod"
+        check["published_artifact_s3_prefix"] = "published"
+        sibling_uri = f"s3://nhms-prod/published/logs/gfs/{sibling_run_id}/{sibling_job_id}.out"
+
+    check["evidence"]["response"]["body"]["log_uri"] = correct_uri
+    if field == "log_uri":
+        check["log_uri"] = sibling_uri
+    else:
+        check["log_uri"] = correct_uri
+        check["published_log_read"]["log_uri"] = sibling_uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    blockers = logs_lane["blockers"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_CHECK_PRODUCER_IDENTITY_MISMATCH" in _codes(blockers)
+    assert any(
+        blocker.get("field") in {"run_id", "job_id"}
+        and blocker.get("evidence_key") == "log_uri"
+        and blocker.get("observed") in {sibling_run_id, sibling_job_id}
+        and blocker.get("expected") in {identity["run_id"], identity["job_id"]}
+        for blocker in blockers
+    )
+
+
+@pytest.mark.parametrize(
     ("log_uri", "expected_code"),
     [
         ("/scratch/private/.nhms-runs/old/job.out", "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI"),
         ("file:///scratch/frd_muziyao/workspace/.nhms-runs/job.out", "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI"),
         ("https://logs.example/job.out", "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED"),
         ("published://../logs/job.out", "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSAFE"),
+        ("published://logs/gfs/run/job.out?token=SECRET", "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED"),
+        ("published://logs/gfs/run/job.out#SECRET", "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED"),
+        ("published://user:pass@logs/gfs/run/job.out", "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED"),
+        (
+            "file:///mnt/nhms-published/logs/gfs/run/job.out?token=SECRET",
+            "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+        ),
+        (
+            "s3://nhms-prod/published/logs/gfs/run/job.out?X-Amz-Signature=SECRET",
+            "TWO_NODE_E2E_LOGS_PUBLISHED_LOG_URI_UNSUPPORTED",
+        ),
     ],
 )
 def test_logs_lane_rejects_private_or_unsupported_log_uri(log_uri: str, expected_code: str) -> None:
@@ -1679,6 +5060,28 @@ def test_logs_lane_rejects_private_or_unsupported_log_uri(log_uri: str, expected
     assert summary["status"] == STATUS_BLOCKED
     assert logs_lane["status"] == STATUS_BLOCKED
     assert expected_code in _codes(logs_lane["blockers"])
+    assert "SECRET" not in json.dumps(logs_lane["blockers"])
+
+
+def test_logs_lane_rejects_self_declared_private_file_publish_root() -> None:
+    run_id = _run_id("logs-self-root")
+    config = _seed_pass_bundle(run_id)
+    logs_summary = _read(config.run_dir / "logs" / "summary.json")
+    check = logs_summary["sources"]["GFS"]["checks"]["job_logs"]
+    identity = check["identity"]
+    private_root = Path("/scratch/private/workspace")
+    log_uri = f"file://{private_root}/logs/gfs/{identity['run_id']}/{identity['job_id']}.out"
+    check["published_artifact_root"] = str(private_root)
+    check["log_uri"] = log_uri
+    check["evidence"]["response"]["body"]["log_uri"] = log_uri
+    _write(config.run_dir / "logs" / "summary.json", logs_summary)
+
+    summary = validate_two_node_e2e_evidence(config)
+
+    logs_lane = summary["lane_summaries"]["logs"]
+    assert summary["status"] == STATUS_BLOCKED
+    assert logs_lane["status"] == STATUS_BLOCKED
+    assert "TWO_NODE_E2E_LOGS_PRIVATE_LOG_URI" in _codes(logs_lane["blockers"])
 
 
 @pytest.mark.parametrize(
@@ -2667,6 +6070,126 @@ def _route_without_embedded_identity(route: dict[str, Any]) -> dict[str, Any]:
     return producer_route
 
 
+def _producer_identity_query(identity: Mapping[str, str], check: str, *, include_job_id: bool = False) -> str:
+    query = (
+        f"source={identity['source']}&check={check}&run_id={identity['run_id']}"
+        f"&cycle_time={identity['cycle_time']}&model_id={identity['model_id']}"
+    )
+    if include_job_id:
+        query = f"{query}&job_id={identity['job_id']}"
+    return query
+
+
+def _producer_identity_text(
+    identity: Mapping[str, str],
+    check: str,
+    *,
+    source: str | None = None,
+    run_id: str | None = None,
+    job_id: str | None = None,
+) -> str:
+    parts = [
+        "producer response",
+        f"source={source or identity['source']}",
+        f"check={check}",
+        f"run_id={run_id or identity['run_id']}",
+        f"cycle_time={identity['cycle_time']}",
+        f"model_id={identity['model_id']}",
+    ]
+    if job_id is not None or "job_id" in identity:
+        parts.append(f"job_id={job_id or identity['job_id']}")
+    return " ".join(parts)
+
+
+def _log_uri_for_scheme(uri_scheme: str, *, source: str, run_id: str, job_id: str) -> str:
+    source_slug = source.lower()
+    if uri_scheme == "published":
+        return f"published://logs/{source_slug}/{run_id}/{job_id}.out"
+    if uri_scheme == "file":
+        return f"file:///mnt/nhms-published/logs/{source_slug}/{run_id}/{job_id}.out"
+    if uri_scheme == "s3":
+        return f"s3://nhms-prod/published/logs/{source_slug}/{run_id}/{job_id}.out"
+    raise AssertionError(f"Unsupported log URI scheme: {uri_scheme}")
+
+
+def _producer_lineage(identity: Mapping[str, str], check: str, *, include_job_id: bool = False) -> dict[str, str]:
+    lineage = {
+        "source": identity["source"],
+        "check": check,
+        "run_id": identity["run_id"],
+        "cycle_time": identity["cycle_time"],
+        "model_id": identity["model_id"],
+    }
+    if include_job_id:
+        lineage["job_id"] = identity["job_id"]
+    return lineage
+
+
+def _complete_explicit_producer_record(identity: Mapping[str, str], check: str) -> dict[str, Any]:
+    record = {
+        "status_code": 200,
+        "source": identity["source"],
+        "check": check,
+        "run_id": identity["run_id"],
+        "cycle_time": identity["cycle_time"],
+        "model_id": identity["model_id"],
+        "path": f"/producer/{identity['source'].lower()}/{check}",
+    }
+    if check in {"job_logs", "ops_jobs", "ops_job_logs"}:
+        record["job_id"] = identity["job_id"]
+    return record
+
+
+def _identity_only_producer_record(
+    identity: Mapping[str, str],
+    check: str,
+    **overrides: str,
+) -> dict[str, Any]:
+    record = {
+        "source": identity["source"],
+        "check": check,
+        "run_id": identity["run_id"],
+        "cycle_time": identity["cycle_time"],
+        "model_id": identity["model_id"],
+    }
+    if check in {"job_logs", "ops_jobs", "ops_job_logs"}:
+        record["job_id"] = identity["job_id"]
+    record.update(overrides)
+    return record
+
+
+def _structured_producer_metadata_record(
+    identity: Mapping[str, str],
+    check: str,
+    **overrides: str,
+) -> dict[str, Any]:
+    record = {
+        "status_code": 200,
+        "source": identity["source"],
+        "check": check,
+        "run_id": identity["run_id"],
+        "cycle_time": identity["cycle_time"],
+        "model_id": identity["model_id"],
+    }
+    if check in {"job_logs", "ops_jobs", "ops_job_logs"}:
+        record["job_id"] = identity["job_id"]
+    record.update(overrides)
+    return record
+
+
+def _remove_explicit_producer_identity_fields(
+    records: tuple[dict[str, Any], ...],
+    fields: tuple[str, ...],
+) -> None:
+    for record in records:
+        for field in fields:
+            record.pop(field, None)
+        identity = record.get("identity")
+        if isinstance(identity, dict):
+            for field in fields:
+                identity.pop(field, None)
+
+
 def _readonly_source_artifact(path: Path, source_run_id: str) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     return {
@@ -2862,6 +6385,30 @@ def _source_lane_payload(
     live_flag: str,
     lane_name: str,
 ) -> dict[str, Any]:
+    def _producer_request(source: str, check: str, identity: Mapping[str, str]) -> dict[str, Any]:
+        query = (
+            f"source={identity['source']}&check={check}&run_id={identity['run_id']}"
+            f"&cycle_time={identity['cycle_time']}&model_id={identity['model_id']}"
+        )
+        if check in {"job_logs", "ops_jobs", "ops_job_logs"}:
+            query = f"{query}&job_id={identity['job_id']}"
+        return {
+            "method": "GET",
+            "path": f"/producer/{source.lower()}/{check}?{query}",
+            "source": source,
+            "check": check,
+            **copy.deepcopy(identity),
+        }
+
+    def _producer_response(check: str, identity: Mapping[str, str]) -> dict[str, Any]:
+        return {
+            "status_code": 200,
+            "source": identity["source"],
+            "check": check,
+            **copy.deepcopy(identity),
+            **_log_response_fields(lane_name, check, identity),
+        }
+
     return {
         "status": STATUS_PASS,
         "evidence_run_id": run_id,
@@ -2876,18 +6423,8 @@ def _source_lane_payload(
                         "identity": copy.deepcopy(identity),
                         "evidence": {
                             "evidence_run_id": run_id,
-                            "request": {
-                                "method": "GET",
-                                "path": f"/producer/{source.lower()}/{check}",
-                                "source": source,
-                                "check": check,
-                            },
-                            "response": {
-                                "status_code": 200,
-                                "source": source,
-                                "check": check,
-                                **_log_response_fields(lane_name, check, identity),
-                            },
+                            "request": _producer_request(source, check, identity),
+                            "response": _producer_response(check, identity),
                         },
                         **_log_check_fields(lane_name, check, identity),
                     }
