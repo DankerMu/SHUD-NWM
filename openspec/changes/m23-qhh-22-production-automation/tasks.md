@@ -13,9 +13,9 @@
 - [x] 1.3a Add reusable contract helpers or fixtures for the M23 identity/status/URI boundary without adding live download, SHUD execution, Slurm submission, parse, or publish mutation.
 - [x] 1.3b Add regression tests proving a full QHH identity tuple is accepted as same-run evidence and that mismatched `run_id`, `model_id`, `basin_id`, `source`, `cycle_time`, basin/river version, canonical product, forcing version, hydro run, manifest, or present pipeline job/event correlation is rejected.
 - [x] 1.3c Add regression tests proving `published://` or allowlisted published-root URIs can be display-readable evidence only when identity-bound, while private workspace, scratch-only, Slurm-private, traversal, and non-allowlisted local paths are rejected.
-- [ ] 1.4 Fix `nhms-pipeline plan-production` so omitted `--workspace-root`, lock, evidence, temporary, object-store, and published-root paths use documented environment/config defaults instead of `.nhms-workspace` under the app directory.
-- [ ] 1.5 Update `infra/compose.compute.yml`, env examples, and systemd/timer docs so scheduler-once and continuous/timer modes can run with explicit roots, locks, service role, source/model filters, and evidence paths.
-- [ ] 1.6 Verify with `uv run pytest -q tests/test_production_scheduler.py tests/test_production_slurm_validation.py` plus `uv run ruff check .` and a Docker `nhms-pipeline plan-production --plan` smoke without `--workspace-root`.
+- [x] 1.4 Fix `nhms-pipeline plan-production` so omitted `--workspace-root`, lock, evidence, temporary, object-store, and published-root paths use documented environment/config defaults instead of `.nhms-workspace` under the app directory.
+- [x] 1.5 Update `infra/compose.compute.yml`, env examples, and systemd/timer docs so scheduler-once and continuous/timer modes can run with explicit roots, locks, service role, source/model filters, and evidence paths.
+- [x] 1.6 Verify with `uv run pytest -q tests/test_production_scheduler.py tests/test_production_slurm_validation.py` plus `uv run ruff check .` and a Docker `nhms-pipeline plan-production --plan` smoke without `--workspace-root`.
 
 ### Issue #253 Evidence Floor
 

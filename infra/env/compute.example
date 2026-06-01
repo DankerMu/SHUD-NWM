@@ -25,6 +25,18 @@ NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
 NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
 
+NHMS_SCHEDULER_LOCK_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/locks
+NHMS_SCHEDULER_EVIDENCE_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/evidence
+NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
+NHMS_SCHEDULER_TEMP_ROOT=/scratch/frd_muziyao/nhms-production/tmp
+NHMS_SCHEDULER_ALLOWED_ROOTS=/scratch/frd_muziyao/nhms-production/workspace:/scratch/frd_muziyao/nhms-production/object-store:/scratch/frd_muziyao/nhms-production/runtime:/scratch/frd_muziyao/nhms-production/tmp:/var/lib/nhms/published
+NHMS_SCHEDULER_SOURCES=gfs,IFS
+NHMS_SCHEDULER_MODEL_IDS=basins_qhh_shud
+NHMS_SCHEDULER_BASIN_IDS=basins_qhh
+NHMS_SCHEDULER_INTERVAL_SECONDS=300
+NHMS_SCHEDULER_MAX_PASSES=1
+NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE=1
+
 NHMS_BASINS_ROOT=/volume/data/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets
 SHUD_EXECUTABLE=/opt/shud/bin/shud

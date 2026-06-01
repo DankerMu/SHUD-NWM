@@ -3,7 +3,8 @@
 # Operator edits required before install:
 # - Replace /opt/SHUD-NWM with the absolute repository checkout path on node 22.
 # - Create infra/env/compute.env from infra/env/compute.example with real
-#   writer DB credentials, workspace paths, Basins/model paths, and image tag.
+#   writer DB credentials, workspace/object-store/published/scheduler roots,
+#   Basins/model paths, source/model filters, and image tag.
 # - Ensure the docker compose plugin is installed at /usr/bin/docker or update
 #   ExecStart/ExecStop/ExecReload to the local docker binary path.
 # - Before enable/start/reload/restart, run
@@ -11,6 +12,11 @@
 #   checkout root and record its docker-security evidence. It must pass before
 #   systemd consumes WorkingDirectory, compose, env, or unit sources. Docker
 #   access is root-equivalent.
+# - Business scheduler validation is the manual scheduler-once compose lane:
+#   docker compose --env-file env/compute.env -f compose.compute.yml run --rm scheduler-once
+#   It runs nhms-pipeline plan-production --plan without --workspace-root,
+#   --lock-path, or --evidence-dir. Those roots must come from compute.env;
+#   explicit root flags are diagnostic compatibility only.
 
 [Unit]
 Description=NHMS node 22 compute/control compose

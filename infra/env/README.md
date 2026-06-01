@@ -39,8 +39,17 @@ Compute role, node 22:
 
 - Required: `NHMS_SERVICE_ROLE=compute_control`,
   `NHMS_REQUIRE_SERVICE_ROLE=true`, writer-capable `DATABASE_URL`,
-  `WORKSPACE_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`, and
+  `WORKSPACE_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`, and
   `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`.
+- Scheduler no-flag business validation requires `NHMS_SCHEDULER_LOCK_ROOT`,
+  `NHMS_SCHEDULER_EVIDENCE_ROOT`, `NHMS_SCHEDULER_RUNTIME_ROOT`,
+  `NHMS_SCHEDULER_TEMP_ROOT`, and source/model filter envs such as
+  `NHMS_SCHEDULER_SOURCES`, `NHMS_SCHEDULER_MODEL_IDS`,
+  `NHMS_SCHEDULER_BASIN_IDS`, `NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE`,
+  `NHMS_SCHEDULER_INTERVAL_SECONDS`, and `NHMS_SCHEDULER_MAX_PASSES`.
+  Lock and evidence roots must be under `WORKSPACE_ROOT`; explicit
+  `--workspace-root`, `--lock-path`, and `--evidence-dir` are diagnostic
+  compatibility, not the compute scheduler-once proof path.
 - Allowed only on compute: Slurm gateway settings, writable workspace,
   Basins/model asset paths, and `SHUD_EXECUTABLE`.
 - The compute compose has no published host port by default. Keep any future

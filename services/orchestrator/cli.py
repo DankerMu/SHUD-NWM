@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Sequence
 
@@ -55,47 +56,110 @@ def _split_csv(values: Sequence[str] | None) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _split_env_csv(name: str) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return ()
+    return _split_csv((value,))
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    try:
+        return int(str(value))
+    except ValueError:
+        return default
+
+
+def _env_optional_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return None
+    try:
+        return int(str(value))
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    try:
+        return float(str(value))
+    except ValueError as error:
+        raise ValueError(f"{name} must be a float") from error
+
+
 def _plan_production(
     *,
     sources: Sequence[str],
     lookback_hours: int,
     cycle_lag_hours: int,
-    max_cycles_per_source: int,
+    max_cycles_per_source: int | None,
     model_ids: Sequence[str],
     basin_ids: Sequence[str],
     dry_run: bool,
     continuous: bool,
-    interval_seconds: float,
+    interval_seconds: float | None,
     max_passes: int | None,
     workspace_root: str | None,
     lock_path: str | None,
     evidence_dir: str | None,
 ) -> dict[str, object]:
+    resolved_interval_seconds = (
+        interval_seconds
+        if interval_seconds is not None
+        else _env_float("NHMS_SCHEDULER_INTERVAL_SECONDS", 300.0)
+    )
+    resolved_max_passes = max_passes
+    if continuous and resolved_max_passes is None:
+        resolved_max_passes = _env_optional_int("NHMS_SCHEDULER_MAX_PASSES")
     if continuous:
-        if max_passes is None:
-            raise ValueError("plan-production --continuous JSON output requires --max-passes")
-        if max_passes > MAX_CONTINUOUS_JSON_PASSES:
+        if resolved_max_passes is None:
+            raise ValueError(
+                "plan-production --continuous JSON output requires --max-passes "
+                "or NHMS_SCHEDULER_MAX_PASSES"
+            )
+        if resolved_max_passes > MAX_CONTINUOUS_JSON_PASSES:
             raise ValueError(
                 "plan-production --continuous JSON output max_passes exceeds limit "
                 f"{MAX_CONTINUOUS_JSON_PASSES}"
             )
+    resolved_workspace_root = workspace_root or os.getenv("WORKSPACE_ROOT")
+    if resolved_workspace_root in (None, ""):
+        raise ValueError(
+            "plan-production requires WORKSPACE_ROOT when --workspace-root is omitted"
+        )
+    require_runtime_roots = workspace_root is None
+    resolved_sources = tuple(sources) if sources else _split_env_csv("NHMS_SCHEDULER_SOURCES") or ("gfs", "IFS")
+    resolved_model_ids = tuple(model_ids) if model_ids else _split_env_csv("NHMS_SCHEDULER_MODEL_IDS")
+    resolved_basin_ids = tuple(basin_ids) if basin_ids else _split_env_csv("NHMS_SCHEDULER_BASIN_IDS")
+    resolved_max_cycles = (
+        max_cycles_per_source
+        if max_cycles_per_source is not None
+        else _env_int("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", 1)
+    )
     config = ProductionSchedulerConfig(
-        workspace_root=workspace_root or ".nhms-workspace",
-        sources=tuple(sources) if sources else ("gfs", "IFS"),
+        workspace_root=resolved_workspace_root,
+        sources=resolved_sources,
         lookback_hours=lookback_hours,
         cycle_lag_hours=cycle_lag_hours,
-        max_cycles_per_source=max_cycles_per_source,
-        model_ids=tuple(model_ids),
-        basin_ids=tuple(basin_ids),
+        max_cycles_per_source=resolved_max_cycles,
+        model_ids=resolved_model_ids,
+        basin_ids=resolved_basin_ids,
         dry_run=dry_run,
         continuous=continuous,
-        interval_seconds=interval_seconds,
+        interval_seconds=resolved_interval_seconds,
         lock_path=lock_path,
         evidence_dir=evidence_dir,
+        require_runtime_roots=require_runtime_roots,
     )
     scheduler = ProductionScheduler.from_env(config)
     if continuous:
-        results = scheduler.run_continuous(max_passes=max_passes)
+        results = scheduler.run_continuous(max_passes=resolved_max_passes)
         return {
             "status": results[-1].status if results else "not_run",
             "passes": [result.to_dict() for result in results],
@@ -139,7 +203,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     )
     @click.option("--lookback-hours", default=24, show_default=True, type=int)
     @click.option("--cycle-lag-hours", default=0, show_default=True, type=int)
-    @click.option("--max-cycles-per-source", default=1, show_default=True, type=int)
+    @click.option("--max-cycles-per-source", default=None, type=int)
     @click.option(
         "--model-id",
         "model_ids",
@@ -152,9 +216,11 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         multiple=True,
         help="Basin id filter. Repeat or pass comma-separated values.",
     )
-    @click.option("--dry-run/--plan", default=True, show_default=True)
+    @click.option("--dry-run", "dry_run", flag_value=True, default=True, show_default=True)
+    @click.option("--plan", "dry_run", flag_value=True, help="Planning-only alias for --dry-run.")
+    @click.option("--submit", "dry_run", flag_value=False, help="Allow production orchestration after preflight.")
     @click.option("--continuous", is_flag=True)
-    @click.option("--interval-seconds", default=300.0, show_default=True, type=float)
+    @click.option("--interval-seconds", default=None, type=float)
     @click.option("--max-passes", type=int)
     @click.option("--workspace-root")
     @click.option("--lock-path")
@@ -163,12 +229,12 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         sources: Sequence[str],
         lookback_hours: int,
         cycle_lag_hours: int,
-        max_cycles_per_source: int,
+        max_cycles_per_source: int | None,
         model_ids: Sequence[str],
         basin_ids: Sequence[str],
         dry_run: bool,
         continuous: bool,
-        interval_seconds: float,
+        interval_seconds: float | None,
         max_passes: int | None,
         workspace_root: str | None,
         lock_path: str | None,
@@ -218,13 +284,14 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     plan_parser.add_argument("--source", action="append", default=[])
     plan_parser.add_argument("--lookback-hours", type=int, default=24)
     plan_parser.add_argument("--cycle-lag-hours", type=int, default=0)
-    plan_parser.add_argument("--max-cycles-per-source", type=int, default=1)
+    plan_parser.add_argument("--max-cycles-per-source", type=int, default=None)
     plan_parser.add_argument("--model-id", action="append", default=[])
     plan_parser.add_argument("--basin-id", action="append", default=[])
     plan_parser.add_argument("--dry-run", action="store_true", default=True)
-    plan_parser.add_argument("--plan", action="store_false", dest="dry_run")
+    plan_parser.add_argument("--plan", action="store_true", dest="dry_run")
+    plan_parser.add_argument("--submit", action="store_false", dest="dry_run")
     plan_parser.add_argument("--continuous", action="store_true")
-    plan_parser.add_argument("--interval-seconds", type=float, default=300.0)
+    plan_parser.add_argument("--interval-seconds", type=float, default=None)
     plan_parser.add_argument("--max-passes", type=int)
     plan_parser.add_argument("--workspace-root")
     plan_parser.add_argument("--lock-path")
