@@ -26,6 +26,12 @@ from packages.common.source_identity import normalize_source_id
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
 from services.orchestrator.persistence import PipelineJob, PipelineStore
+from services.orchestrator.production_contract import (
+    PRODUCTION_CONTRACT_ID,
+    PRODUCTION_CONTRACT_SCHEMA_VERSION,
+    production_stage_for,
+    production_status_for,
+)
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.slurm_gateway.config import SlurmGatewaySettings
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
@@ -48,6 +54,7 @@ ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
+MAX_CANDIDATE_STATE_TASK_RESULTS = 16
 
 
 def scenario_for_source(source_id: str) -> str:
@@ -1478,7 +1485,7 @@ class ForecastOrchestrator:
 
         poll_timed_out = isinstance(terminal, dict) and terminal.get("error_code") == "SLURM_JOB_TIMEOUT"
         aggregation = (
-            self._aggregate_array_stage(stage, context, slurm_job_id, terminal)
+            self._aggregate_array_stage(stage, context, slurm_job_id, terminal, pipeline_job_id)
             if stage.is_array and not poll_timed_out
             else None
         )
@@ -1548,7 +1555,13 @@ class ForecastOrchestrator:
             and job.get("slurm_job_id")
             and status not in {"failed", "cancelled", "submission_failed", "permanently_failed"}
         ):
-            aggregation = self._aggregate_array_stage(stage, context, str(job["slurm_job_id"]), terminal)
+            aggregation = self._aggregate_array_stage(
+                stage,
+                context,
+                str(job["slurm_job_id"]),
+                terminal,
+                str(job["job_id"]),
+            )
             status = aggregation.status
             if str(job.get("status")) not in TERMINAL_JOB_STATUSES or status != str(job.get("status")):
                 publication = self._display_log_publication_for_pipeline_job(job)
@@ -1806,6 +1819,7 @@ class ForecastOrchestrator:
         context: CycleOrchestrationContext,
         slurm_job_id: str,
         terminal: dict[str, Any],
+        pipeline_job_id: str,
     ) -> ArrayAggregation:
         provider = getattr(self.slurm_client, "get_array_task_results", None)
         if callable(provider):
@@ -1817,7 +1831,7 @@ class ForecastOrchestrator:
                 self._record_cycle_stage_accounting_gap(
                     stage,
                     context,
-                    _pipeline_job_id(context.run_id, stage.stage),
+                    pipeline_job_id,
                     slurm_job_id=slurm_job_id,
                     message="Slurm array accounting was unavailable or malformed.",
                     details={"error": str(error), "error_code": getattr(error, "error_code", None)},
@@ -1841,7 +1855,7 @@ class ForecastOrchestrator:
                     self._record_cycle_stage_accounting_gap(
                         stage,
                         context,
-                        _pipeline_job_id(context.run_id, stage.stage),
+                        pipeline_job_id,
                         slurm_job_id=slurm_job_id,
                         message="Slurm array accounting was unavailable or malformed.",
                         details={"error": str(error), "error_code": getattr(error, "error_code", None)},
@@ -1867,7 +1881,7 @@ class ForecastOrchestrator:
                 self._record_cycle_stage_accounting_gap(
                     stage,
                     context,
-                    _pipeline_job_id(context.run_id, stage.stage),
+                    pipeline_job_id,
                     slurm_job_id=slurm_job_id,
                     message="Slurm array accounting was unavailable or malformed.",
                     details={"error": error.message, "error_code": error.error_code},
@@ -1876,7 +1890,7 @@ class ForecastOrchestrator:
         self._record_cycle_stage_accounting_gap(
             stage,
             context,
-            _pipeline_job_id(context.run_id, stage.stage),
+            pipeline_job_id,
             slurm_job_id=slurm_job_id,
             message="Slurm array accounting was unavailable or incomplete.",
             details={
@@ -1950,6 +1964,7 @@ class ForecastOrchestrator:
                     "succeeded": aggregation.succeeded,
                     "failed": aggregation.failed,
                     "cancelled": aggregation.cancelled,
+                    "pipeline_job_id": pipeline_job_id,
                     "slurm": {
                         "job_id": terminal.get("job_id") or terminal.get("slurm_job_id"),
                         "state": aggregation.status,
@@ -4119,6 +4134,7 @@ class PsycopgOrchestratorRepository:
                 _numeric_sort_key(event.get("event_id")),
             )
         )
+        events = [_bounded_candidate_state_event(event) for event in events]
         forcing_version = self._fetch_optional(
             """
             SELECT
@@ -5027,12 +5043,7 @@ def _candidate_failed_task_from_events(
         details = event.get("details")
         if not isinstance(details, Mapping):
             continue
-        task_results = details.get("task_results")
-        if not isinstance(task_results, Sequence) or isinstance(task_results, str | bytes | bytearray):
-            continue
-        for task_order, task in enumerate(task_results):
-            if not isinstance(task, Mapping):
-                continue
+        for task_order, task in enumerate(_bounded_candidate_state_task_results(details)):
             key = _task_identity_key(task, model_id=model_id, candidate_id=candidate_id)
             if key is None:
                 continue
@@ -5079,12 +5090,7 @@ def _successful_sibling_task_count(events: Sequence[Mapping[str, Any]], *, model
         details = event.get("details")
         if not isinstance(details, Mapping):
             continue
-        task_results = details.get("task_results")
-        if not isinstance(task_results, Sequence) or isinstance(task_results, str | bytes | bytearray):
-            continue
-        for task in task_results:
-            if not isinstance(task, Mapping):
-                continue
+        for task in _bounded_candidate_state_task_results(details):
             if str(task.get("status") or task.get("state") or "") != "succeeded":
                 continue
             task_model_id = _task_model_id(task)
@@ -5092,6 +5098,76 @@ def _successful_sibling_task_count(events: Sequence[Mapping[str, Any]], *, model
                 continue
             count += 1
     return count
+
+
+def _bounded_candidate_state_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(event)
+    details = payload.get("details")
+    if not isinstance(details, Mapping):
+        return payload
+    details_payload = dict(details)
+    task_sample = _bounded_candidate_state_task_result_sample(details_payload)
+    if task_sample is not None:
+        task_rows, task_metadata = task_sample
+        details_payload["task_results"] = task_rows
+        details_payload.update(task_metadata)
+    payload["details"] = details_payload
+    return payload
+
+
+def _bounded_candidate_state_task_results(details: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    task_sample = _bounded_candidate_state_task_result_sample(details)
+    if task_sample is None:
+        return []
+    return task_sample[0]
+
+
+def _bounded_candidate_state_task_result_sample(
+    details: Mapping[str, Any],
+) -> tuple[list[Mapping[str, Any]], dict[str, Any]] | None:
+    task_results = details.get("task_results")
+    if not isinstance(task_results, Sequence) or isinstance(task_results, str | bytes | bytearray):
+        return None
+    task_rows: list[Mapping[str, Any]] = []
+    observed_count = 0
+    overflow = False
+    for index, task in enumerate(task_results):
+        observed_count = index + 1
+        if index >= MAX_CANDIDATE_STATE_TASK_RESULTS:
+            overflow = True
+            break
+        if isinstance(task, Mapping):
+            task_rows.append(dict(task))
+    reported_total = _coerce_optional_nonnegative_int(details.get("task_results_total"))
+    total = max(reported_total, observed_count) if reported_total is not None else observed_count
+    included = len(task_rows)
+    overflow = overflow or total > included
+    metadata: dict[str, Any] = {
+        "task_results_total": total,
+        "task_results_included": included,
+        "task_results_limit": MAX_CANDIDATE_STATE_TASK_RESULTS,
+        "task_results_overflow": overflow,
+    }
+    if overflow:
+        metadata["task_results_omitted"] = max(total - included, 0)
+    return task_rows, metadata
+
+
+def _coerce_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_optional_nonnegative_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return number
 
 
 def _cycle_payload_model_id(context: CycleOrchestrationContext) -> str:
@@ -5398,9 +5474,17 @@ def build_model_run_assembly(
         "output_river": output_river,
     }
     identity = {
+        "schema_version": PRODUCTION_CONTRACT_SCHEMA_VERSION,
+        "contract_id": PRODUCTION_CONTRACT_ID,
         "candidate_id": candidate_id,
         "run_id": run_id,
+        "hydro_run_id": str(basin.get("hydro_run_id") or run_id),
+        "published_manifest_id": str(basin.get("published_manifest_id") or f"manifest_{run_id}"),
+        "canonical_product_id": str(
+            basin.get("canonical_product_id") or f"canon_{source_id.lower()}_{compact_cycle}"
+        ),
         "forcing_version_id": forcing_version_id,
+        "source": source_id,
         "source_id": source_id,
         "cycle_id": cycle_id,
         "cycle_time": _format_time(cycle_time),
@@ -5705,15 +5789,21 @@ def _model_run_stage_evidence(stage: str, entry: Mapping[str, Any], *, cycle_id:
     identity = dict(assembly.get("identity") or {})
     return {
         "stage": stage,
+        "production_stage": production_stage_for(stage),
         "cycle_id": cycle_id,
         "candidate_id": identity.get("candidate_id") or entry.get("candidate_id"),
         "run_id": identity.get("run_id") or entry.get("run_id"),
+        "hydro_run_id": identity.get("hydro_run_id") or entry.get("hydro_run_id") or entry.get("run_id"),
         "model_id": identity.get("model_id") or entry.get("model_id"),
+        "source": identity.get("source") or identity.get("source_id") or entry.get("source_id"),
         "source_id": identity.get("source_id") or entry.get("source_id"),
         "cycle_time": identity.get("cycle_time") or entry.get("cycle_time"),
         "scenario_id": identity.get("scenario_id") or entry.get("scenario_id"),
+        "canonical_product_id": identity.get("canonical_product_id") or entry.get("canonical_product_id"),
         "forcing_version_id": identity.get("forcing_version_id") or entry.get("forcing_version_id"),
+        "published_manifest_id": identity.get("published_manifest_id") or entry.get("published_manifest_id"),
         "model_package_uri": identity.get("model_package_uri") or entry.get("model_package_uri"),
+        "basin_id": identity.get("basin_id") or entry.get("basin_id"),
         "basin_version_id": identity.get("basin_version_id") or entry.get("basin_version_id"),
         "river_network_version_id": identity.get("river_network_version_id") or entry.get("river_network_version_id"),
         "output_uri": _nested_mapping(assembly.get("outputs")).get("output_uri") or entry.get("output_uri"),
@@ -6020,6 +6110,7 @@ def _stage_task_result_evidence(
             "slurm_job_id": task.slurm_job_id,
             "state": task.status,
             "status": task.status,
+            "production_status": production_status_for(task.status),
             "exit_code": task.exit_code,
             "error_code": task.error_code,
             "error_message": task.error_message,
@@ -6028,7 +6119,18 @@ def _stage_task_result_evidence(
             "resource_metrics": _resource_metrics_from_payload(task.accounting),
         }
         if basin is not None:
-            for key in ("model_id", "candidate_id", "run_id"):
+            for key in (
+                "model_id",
+                "basin_id",
+                "candidate_id",
+                "run_id",
+                "source_id",
+                "cycle_time",
+                "canonical_product_id",
+                "forcing_version_id",
+                "hydro_run_id",
+                "published_manifest_id",
+            ):
                 value = basin.get(key)
                 if value not in (None, ""):
                     payload[key] = value

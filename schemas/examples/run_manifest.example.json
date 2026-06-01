@@ -5,12 +5,30 @@
   "scenario_id": "forecast_gfs_deterministic",
   "source_id": "GFS",
   "cycle_time": "2026-04-30T00:00:00Z",
+  "identity": {
+    "schema_version": "nhms.production.identity_status_uri_contract.v1",
+    "contract_id": "m23-qhh-22-production-identity-status-uri.v1",
+    "run_id": "fcst_gfs_2026043000_yangtze_shud_v12",
+    "model_id": "yangtze_shud_v12",
+    "basin_id": "yangtze",
+    "source": "GFS",
+    "source_id": "GFS",
+    "cycle_time": "2026-04-30T00:00:00Z",
+    "basin_version_id": "yangtze_v2026_01",
+    "river_network_version_id": "yangtze_rivnet_v2026_01",
+    "canonical_product_id": "canon_gfs_2026043000",
+    "forcing_version_id": "forc_gfs_2026043000_yangtze_shud_v12",
+    "hydro_run_id": "fcst_gfs_2026043000_yangtze_shud_v12",
+    "published_manifest_id": "manifest_fcst_gfs_2026043000_yangtze_shud_v12",
+    "pipeline_job_id": "job_fcst_gfs_2026043000_yangtze_shud_v12_forecast"
+  },
   "issue_time": "2026-04-30T04:00:00Z",
   "start_time": "2026-04-30T00:00:00Z",
   "end_time": "2026-05-07T00:00:00Z",
   "model": {
     "model_id": "yangtze_shud_v12",
     "basin_version_id": "yangtze_v2026_01",
+    "river_network_version_id": "yangtze_rivnet_v2026_01",
     "model_package_uri": "s3://nhms/models/yangtze_shud_v12/model_package.tar.gz",
     "project_name": "yangtze_v12"
   },
@@ -20,6 +38,7 @@
   },
   "forcing": {
     "forcing_version_id": "forc_gfs_2026043000_yangtze_shud_v12",
+    "canonical_product_id": "canon_gfs_2026043000",
     "forcing_uri": "s3://nhms/forcing/gfs/2026043000/yangtze_shud_v12/"
   },
   "runtime": {
@@ -31,7 +50,9 @@
   },
   "outputs": {
     "output_uri": "s3://nhms/runs/fcst_gfs_2026043000_yangtze_shud_v12/output/",
-    "log_uri": "s3://nhms/runs/fcst_gfs_2026043000_yangtze_shud_v12/logs/",
+    "log_uri": "published://logs/GFS/2026043000/fcst_gfs_2026043000_yangtze_shud_v12/job_fcst_gfs_2026043000_yangtze_shud_v12_forecast.out",
+    "published_manifest_id": "manifest_fcst_gfs_2026043000_yangtze_shud_v12",
+    "run_manifest_uri": "published://manifests/GFS/2026043000/fcst_gfs_2026043000_yangtze_shud_v12/run_manifest.json",
     "required_files": ["*.rivqdown.csv", "*.rivystage.csv"]
   }
 }

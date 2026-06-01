@@ -15,8 +15,44 @@
     "forcing",
     "outputs"
   ],
-  "properties": {
-    "schema_version": {
+    "properties": {
+      "identity": {
+        "description": "M23 production identity/status/URI contract binding this manifest to scheduler, ops, hydro, and published artifacts.",
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "run_id",
+          "model_id",
+          "basin_id",
+          "source",
+          "cycle_time",
+          "basin_version_id",
+          "river_network_version_id",
+          "canonical_product_id",
+          "forcing_version_id",
+          "hydro_run_id",
+          "published_manifest_id"
+        ],
+        "properties": {
+          "schema_version": { "type": "string" },
+          "contract_id": { "type": "string" },
+          "run_id": { "type": "string", "minLength": 1 },
+          "model_id": { "type": "string", "minLength": 1 },
+          "basin_id": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "minLength": 1 },
+          "source_id": { "type": "string", "minLength": 1 },
+          "cycle_time": { "type": "string", "format": "date-time" },
+          "basin_version_id": { "type": "string", "minLength": 1 },
+          "river_network_version_id": { "type": "string", "minLength": 1 },
+          "canonical_product_id": { "type": "string", "minLength": 1 },
+          "forcing_version_id": { "type": "string", "minLength": 1 },
+          "hydro_run_id": { "type": "string", "minLength": 1 },
+          "published_manifest_id": { "type": "string", "minLength": 1 },
+          "pipeline_job_id": { "type": "string", "minLength": 1 },
+          "pipeline_event_id": { "type": "string" }
+        }
+      },
+      "schema_version": {
       "description": "Manifest schema version.",
       "type": "string"
     },
@@ -65,12 +101,15 @@
       "type": "object",
       "additionalProperties": true,
       "required": ["model_id", "model_package_uri"],
-      "properties": {
+        "properties": {
         "model_id": {
           "type": "string",
           "minLength": 1
         },
         "basin_version_id": {
+          "type": "string"
+        },
+        "river_network_version_id": {
           "type": "string"
         },
         "model_package_uri": {
@@ -103,6 +142,9 @@
       "required": ["forcing_uri"],
       "properties": {
         "forcing_version_id": {
+          "type": "string"
+        },
+        "canonical_product_id": {
           "type": "string"
         },
         "forcing_uri": {
@@ -147,6 +189,13 @@
           "format": "uri"
         },
         "log_uri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "published_manifest_id": {
+          "type": "string"
+        },
+        "run_manifest_uri": {
           "type": "string",
           "format": "uri"
         },
