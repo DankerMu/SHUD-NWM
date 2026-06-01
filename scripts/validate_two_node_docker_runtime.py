@@ -165,6 +165,8 @@ COMPUTE_REQUIRED_RUNTIME_ENV = frozenset(
     {
         "NHMS_SERVICE_ROLE",
         "NHMS_REQUIRE_SERVICE_ROLE",
+        "NHMS_AUTH_MODE",
+        "UV_CACHE_DIR",
         "DATABASE_URL",
         "WORKSPACE_ROOT",
         "NHMS_PUBLISHED_ARTIFACT_ROOT",
@@ -182,6 +184,7 @@ DISPLAY_REQUIRED_RUNTIME_ENV = frozenset(
         "NHMS_SERVICE_ROLE",
         "NHMS_REQUIRE_SERVICE_ROLE",
         "NHMS_AUTH_MODE",
+        "UV_CACHE_DIR",
         "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS",
         "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS",
         "DATABASE_URL",
@@ -198,6 +201,7 @@ NONEMPTY_RUNTIME_ENV = frozenset(
         "NHMS_SERVICE_ROLE",
         "NHMS_REQUIRE_SERVICE_ROLE",
         "NHMS_AUTH_MODE",
+        "UV_CACHE_DIR",
         "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS",
         "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS",
         "DATABASE_URL",
@@ -310,6 +314,7 @@ COMPUTE_AUDITED_INTERPOLATION_ENV = frozenset(
         "NHMS_IMAGE_TAG",
         "NHMS_CONTAINER_UID",
         "NHMS_CONTAINER_GID",
+        "NHMS_SUPPLEMENTAL_GID",
         "NHMS_AUTH_MODE",
         "DATABASE_URL",
         "WORKSPACE_ROOT",
@@ -336,6 +341,7 @@ COMPUTE_AUDITED_RUNTIME_ENV = frozenset(
         "NHMS_SERVICE_ROLE",
         "NHMS_REQUIRE_SERVICE_ROLE",
         "NHMS_AUTH_MODE",
+        "UV_CACHE_DIR",
         "DATABASE_URL",
         "WORKSPACE_ROOT",
         "OBJECT_STORE_ROOT",
@@ -392,6 +398,7 @@ API_SERVICE_COMMAND = (
 )
 COMPUTE_SCHEDULER_COMMAND = ("uv", "run", "nhms-pipeline", "plan-production", "--plan")
 COMPUTE_SCHEDULER_HELP_COMMAND = ("uv", "run", "nhms-pipeline", "plan-production", "--help")
+COMPUTE_REQUIRED_EXTRA_HOST = "host.docker.internal:host-gateway"
 DISPLAY_LOCALHOST_PROBE_SCRIPT = r"""
 import json
 import time
@@ -2162,6 +2169,7 @@ def _validate_compute_compose(path: Path, compose: Mapping[str, Any], env: Mappi
             )
         )
         findings.extend(_compute_runtime_env_contract_findings(path, service_name, service, env))
+        findings.extend(_compute_extra_hosts_findings(path, service_name, service))
         if service_env.get("NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
             findings.append(
                 Finding(
@@ -2211,6 +2219,21 @@ def _validate_compute_compose(path: Path, compose: Mapping[str, Any], env: Mappi
     return findings
 
 
+def _compute_extra_hosts_findings(path: Path, service_name: str, service: Mapping[str, Any]) -> list[Finding]:
+    extra_hosts = _compose_entry_list(service.get("extra_hosts"))
+    if COMPUTE_REQUIRED_EXTRA_HOST in {str(item) for item in extra_hosts}:
+        return []
+    return [
+        Finding(
+            "COMPUTE_HOST_GATEWAY_MISSING",
+            "compute services must map host.docker.internal to host-gateway for Linux Docker host service access.",
+            path=str(path),
+            service=service_name,
+            details={"required": COMPUTE_REQUIRED_EXTRA_HOST},
+        )
+    ]
+
+
 def _compute_mount_findings(
     path: Path,
     service_name: str,
@@ -2232,6 +2255,21 @@ def _compute_mount_findings(
             readonly_code="COMPUTE_WORKSPACE_MOUNT_READONLY",
             type_code="COMPUTE_WORKSPACE_MOUNT_TYPE_INVALID",
             identity_code="COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID",
+        )
+    )
+    findings.extend(
+        _require_mount(
+            volumes,
+            path=path,
+            service=service_name,
+            env=env,
+            source_key="OBJECT_STORE_ROOT",
+            target_key="OBJECT_STORE_ROOT",
+            read_only=False,
+            missing_code="COMPUTE_OBJECT_STORE_MOUNT_MISSING",
+            readonly_code="COMPUTE_OBJECT_STORE_MOUNT_READONLY",
+            type_code="COMPUTE_OBJECT_STORE_MOUNT_TYPE_INVALID",
+            identity_code="COMPUTE_OBJECT_STORE_MOUNT_IDENTITY_INVALID",
         )
     )
     findings.extend(

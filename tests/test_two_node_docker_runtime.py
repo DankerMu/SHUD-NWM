@@ -2593,6 +2593,7 @@ def test_static_checker_rejects_display_published_mount_literal_identity(tmp_pat
     ("source_key", "target_key", "expected_code"),
     [
         ("WORKSPACE_ROOT", "WORKSPACE_ROOT", "COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID"),
+        ("OBJECT_STORE_ROOT", "OBJECT_STORE_ROOT", "COMPUTE_OBJECT_STORE_MOUNT_IDENTITY_INVALID"),
         (
             "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT",
             "NHMS_PUBLISHED_ARTIFACT_ROOT",
@@ -2672,6 +2673,7 @@ def test_static_checker_rejects_compute_api_missing_required_env_and_mounts(tmp_
         volume
         for volume in compute_api["volumes"]
         if "WORKSPACE_ROOT" not in str(volume.get("target", ""))
+        and "OBJECT_STORE_ROOT" not in str(volume.get("target", ""))
         and "NHMS_MODEL_ASSET_ROOT" not in str(volume.get("target", ""))
     ]
     compute_compose = tmp_path / "compose.compute.yml"
@@ -2691,10 +2693,91 @@ def test_static_checker_rejects_compute_api_missing_required_env_and_mounts(tmp_
     assert compute_api_codes >= {
         "COMPUTE_RUNTIME_ENV_MISSING",
         "COMPUTE_WORKSPACE_MOUNT_MISSING",
+        "COMPUTE_OBJECT_STORE_MOUNT_MISSING",
         "COMPUTE_MODEL_ASSET_MOUNT_MISSING",
     }
     assert "COMPUTE_RUNTIME_ENV_MISSING" not in scheduler_codes
     assert "COMPUTE_WORKSPACE_MOUNT_MISSING" not in scheduler_codes
+
+
+def test_static_checker_requires_compute_host_gateway_extra_host(tmp_path: Path) -> None:
+    compose = _safe_compute_compose()
+    compose["services"]["compute-api"].pop("extra_hosts", None)
+    compose["services"]["scheduler-once"]["extra_hosts"] = ["example.internal:127.0.0.1"]
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    findings = {
+        (finding.service, finding.details.get("required"))
+        for finding in result.findings
+        if finding.code == "COMPUTE_HOST_GATEWAY_MISSING"
+    }
+    assert findings == {
+        ("compute-api", docker_runtime.COMPUTE_REQUIRED_EXTRA_HOST),
+        ("scheduler-once", docker_runtime.COMPUTE_REQUIRED_EXTRA_HOST),
+    }
+
+
+def test_static_checker_requires_literal_uv_cache_dir_for_non_root_runtime(tmp_path: Path) -> None:
+    compute = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
+    for service in compute["services"].values():
+        service["environment"].pop("UV_CACHE_DIR", None)
+    display = docker_runtime.load_compose(REPO_ROOT / "infra/compose.display.yml")
+    display["services"]["display-api"]["environment"].pop("UV_CACHE_DIR", None)
+    compute_compose = tmp_path / "compose.compute.yml"
+    display_compose = tmp_path / "compose.display.yml"
+    compute_compose.write_text(yaml.safe_dump(compute, sort_keys=False), encoding="utf-8")
+    display_compose.write_text(yaml.safe_dump(display, sort_keys=False), encoding="utf-8")
+
+    result = docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=display_compose,
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert {
+        (finding.code, finding.service, finding.details.get("key"))
+        for finding in result.findings
+        if finding.code.endswith("_RUNTIME_ENV_MISSING")
+    } >= {
+        ("COMPUTE_RUNTIME_ENV_MISSING", "compute-api", "UV_CACHE_DIR"),
+        ("COMPUTE_RUNTIME_ENV_MISSING", "scheduler-once", "UV_CACHE_DIR"),
+        ("DISPLAY_RUNTIME_ENV_MISSING", "display-api", "UV_CACHE_DIR"),
+    }
+
+
+def test_static_checker_rejects_uv_cache_dir_compose_interpolation(tmp_path: Path) -> None:
+    compute = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
+    for service in compute["services"].values():
+        service["environment"]["UV_CACHE_DIR"] = "${UV_CACHE_DIR:-/tmp/nhms-uv-cache}"
+    display = docker_runtime.load_compose(REPO_ROOT / "infra/compose.display.yml")
+    display["services"]["display-api"]["environment"]["UV_CACHE_DIR"] = "${UV_CACHE_DIR:-/tmp/nhms-uv-cache}"
+    compute_compose = tmp_path / "compose.compute.yml"
+    display_compose = tmp_path / "compose.display.yml"
+    compute_compose.write_text(yaml.safe_dump(compute, sort_keys=False), encoding="utf-8")
+    display_compose.write_text(yaml.safe_dump(display, sort_keys=False), encoding="utf-8")
+
+    result = docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=display_compose,
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert {
+        (finding.code, tuple(finding.details.get("unapproved_keys", ())))
+        for finding in result.findings
+    } >= {
+        ("COMPUTE_INTERPOLATION_ENV_UNAPPROVED", ("UV_CACHE_DIR",)),
+        ("DISPLAY_INTERPOLATION_ENV_UNAPPROVED", ("UV_CACHE_DIR",)),
+    }
 
 
 def test_static_checker_rejects_display_missing_required_inline_env(tmp_path: Path) -> None:

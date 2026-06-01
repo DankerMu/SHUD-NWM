@@ -25,7 +25,7 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /uvx /usr/local/bin/
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates libeccodes0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock README.md ./
@@ -44,6 +44,7 @@ COPY infra/sbatch infra/sbatch
 COPY --from=frontend /src/apps/frontend/dist apps/frontend/dist
 
 RUN UV_NO_SYNC=0 uv sync --frozen --no-dev \
+    && chmod -R go+rX /app \
     && chmod 0755 infra/docker/entrypoint.sh
 
 EXPOSE 8000

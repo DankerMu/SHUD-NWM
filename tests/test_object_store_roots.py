@@ -11,6 +11,9 @@ from jinja2.sandbox import SandboxedEnvironment
 from packages.common.object_store import LocalObjectStore
 from packages.common.state_manager import StateManager, StateSnapshot
 from services.artifacts import ArtifactLogError, ArtifactReader, ArtifactReaderConfig
+from workers.data_adapters.era5_adapter import ERA5Adapter, ERA5AdapterConfig
+from workers.data_adapters.gfs_adapter import GFSAdapter, GFSAdapterConfig
+from workers.data_adapters.ifs_adapter import IFSAdapter, IFSAdapterConfig
 from workers.forcing_producer.producer import ForcingProducer, ForcingProducerConfig
 
 INFRA_SBATCH_TEMPLATES = (
@@ -98,6 +101,36 @@ def test_split_root_forcing_uses_object_store_root(tmp_path: Path) -> None:
     producer = ForcingProducer(config=config)
 
     assert producer.object_store.root == object_store_root.resolve()
+
+
+def test_split_root_gfs_adapter_uses_object_store_root(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    config = GFSAdapterConfig(workspace_root=workspace_root, object_store_root=object_store_root)
+
+    adapter = GFSAdapter(config=config)
+
+    assert adapter.object_store.root == object_store_root.resolve()
+
+
+def test_split_root_ifs_adapter_uses_object_store_root(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    config = IFSAdapterConfig(workspace_root=workspace_root, object_store_root=object_store_root)
+
+    adapter = IFSAdapter(config=config)
+
+    assert adapter.object_store.root == object_store_root.resolve()
+
+
+def test_split_root_era5_adapter_uses_object_store_root(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    config = ERA5AdapterConfig(workspace_root=workspace_root, object_store_root=object_store_root)
+
+    adapter = ERA5Adapter(config=config, cds_client=object())
+
+    assert adapter.object_store.root == object_store_root.resolve()
 
 
 @pytest.mark.parametrize("template_name", INFRA_SBATCH_TEMPLATES)

@@ -11,14 +11,16 @@ NHMS_DISPLAY_API_PORT=8000
 NHMS_SERVICE_ROLE=display_readonly
 NHMS_REQUIRE_SERVICE_ROLE=true
 NHMS_AUTH_MODE=production
+UV_CACHE_DIR=/tmp/nhms-uv-cache
 NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 
 # Use a real readonly database role. The username here is intentionally ro-suffixed.
 DATABASE_URL=postgresql://nhms_display_ro:change-me@db.internal.example:5432/nhms
 
-# Host source is compose-only. The container receives NHMS_PUBLISHED_ARTIFACT_ROOT.
-NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/mnt/nhms-published
+# Host source is compose-only. 22 sees the same exported directory as
+# /ghdc/data/nwm/published; 27 reads it locally from /home/ghdc/nwm/published.
+NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/home/ghdc/nwm/published
 NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod

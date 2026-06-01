@@ -141,6 +141,7 @@ class GFSAdapterConfig:
         )
     )
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
+    object_store_root: Path | str = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT", ""))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
     cycle_hours_utc: tuple[int, ...] = (0, 6, 12, 18)
     forecast_start_hour: int = field(default_factory=lambda: int(os.getenv("GFS_FORECAST_START_HOUR", "0")))
@@ -162,6 +163,10 @@ class GFSAdapterConfig:
 
     def forecast_hours(self) -> list[int]:
         return list(range(self.forecast_start_hour, self.forecast_end_hour + 1, self.forecast_step_hours))
+
+    def __post_init__(self) -> None:
+        if not str(self.object_store_root):
+            object.__setattr__(self, "object_store_root", self.workspace_root)
 
     def as_data_source_config(self) -> dict[str, Any]:
         return {
@@ -196,7 +201,7 @@ class GFSAdapter(DataSourceAdapter):
         self.config = config or GFSAdapterConfig()
         self.repository = repository
         self.object_store = object_store or LocalObjectStore(
-            self.config.workspace_root,
+            self.config.object_store_root,
             object_store_prefix=self.config.object_store_prefix,
         )
         self.downloader = downloader or self._download_url

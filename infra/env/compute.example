@@ -6,10 +6,12 @@ NHMS_APP_IMAGE=nhms-app
 NHMS_IMAGE_TAG=m22-placeholder
 NHMS_CONTAINER_UID=1000
 NHMS_CONTAINER_GID=1000
+NHMS_SUPPLEMENTAL_GID=1107
 
 NHMS_SERVICE_ROLE=compute_control
 NHMS_REQUIRE_SERVICE_ROLE=true
 NHMS_AUTH_MODE=production
+UV_CACHE_DIR=/tmp/nhms-uv-cache
 
 DATABASE_URL=postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms
 
@@ -17,7 +19,7 @@ WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production/workspace
 OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
 OBJECT_STORE_PREFIX=s3://nhms-prod
 
-NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/scratch/frd_muziyao/nhms-production/published
+NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/ghdc/data/nwm/published
 NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod

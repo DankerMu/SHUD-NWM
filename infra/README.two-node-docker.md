@@ -7,6 +7,8 @@
 
 生产两节点部署只使用 `infra/compose.compute.yml` 和 `infra/compose.display.yml`。`infra/docker-compose.dev.yml` 只用于本地开发依赖栈，不是生产两节点部署文件，不能拿它声明 22/27 Docker 验收通过。
 
+面向部署阅读的角色、流程、产物和节点职责总览见 [`docs/runbooks/two-node-deployment-overview.md`](../docs/runbooks/two-node-deployment-overview.md)。本文只保留更偏操作执行的命令、预检和回滚细节。
+
 本 runbook 给出可执行的启动、停止、状态、日志、预检和回滚命令，但不声明最终 #239 E2E、只读 DB、浏览器或 live 部署已经 `PASS`。这些结果必须由实际证据单独记录。
 
 ## 2. 拓扑
@@ -17,6 +19,17 @@
 | 27 | `display_readonly` | readonly DB、readonly published artifacts、FastAPI/frontend display、`/ops` 只读诊断 | 不挂 Slurm/Munge、workspace、Basins、Docker socket，不配置 Gateway URL，不写业务终态 |
 
 共享面只允许是 PostgreSQL 和 published artifacts。27 不能通过挂载 22 私有 workspace、`.nhms-runs`、private `/scratch` 或 mock Gateway 来完成生产验收。
+
+当前两节点发布目录约定：
+
+| 视角 | Host path | 权限语义 |
+| --- | --- | --- |
+| 22 `compute_control` | `/ghdc/data/nwm/published` | 22 写入展示产品、manifest、日志和诊断证据 |
+| 27 `display_readonly` | `/home/ghdc/nwm/published` | 27 只读读取同一目录 |
+| 容器内 | `/var/lib/nhms/published` | 两个角色统一使用的应用内路径 |
+
+`/ghdc/data` 是 22 挂载的 27 NFS 发布面；不要把业务发布产物放到 22 私有 `/scratch` 或仓库
+`artifacts/` 里作为 27 展示依赖。
 
 ## 3. 目录和文件
 
@@ -50,11 +63,12 @@ infra/env/display-readonly-secrets.env
 发布产物变量必须使用 `NHMS_` 前缀：
 
 ```bash
+NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/ghdc/data/nwm/published   # 22 compute
+# NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/home/ghdc/nwm/published # 27 display
 NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
 NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
-NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/mnt/nhms-published
 ```
 
 `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT` 是 compose host bind source；容器内运行时读取 `NHMS_PUBLISHED_ARTIFACT_ROOT`。不要使用无前缀的 `PUBLISHED_ARTIFACT_ROOT` 作为应用运行时变量。
@@ -66,6 +80,7 @@ NHMS_SERVICE_ROLE=compute_control
 NHMS_REQUIRE_SERVICE_ROLE=true
 DATABASE_URL=postgresql://<writer-user>:<secret>@<db-host>:5432/<db-name>
 WORKSPACE_ROOT=<node-22-writable-workspace>
+NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/ghdc/data/nwm/published
 NHMS_BASINS_ROOT=<node-22-basins-root>
 NHMS_MODEL_ASSET_ROOT=<node-22-model-assets-root>
 ```
@@ -79,7 +94,7 @@ NHMS_AUTH_MODE=production
 NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 DATABASE_URL=postgresql://<readonly-user>:<secret>@<db-host>:5432/<db-name>
-NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/mnt/nhms-published
+NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/home/ghdc/nwm/published
 NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
@@ -147,7 +162,11 @@ uv run python scripts/validate_two_node_docker_runtime.py preflight \
   --evidence-root "$EVIDENCE_ROOT/docker-preflight"
 ```
 
-该命令记录当前 `evidence_run_id`、Docker version、compose version、DockerRootDir、`docker system df`、`df -h`、`TMPDIR` 和 evidence root。最终 E2E 聚合要求 Docker preflight `PASS` payload 显式绑定当前 run；复制旧的无 ID preflight JSON 不能作为当前 run 的 PASS。Docker 不可用或空间不足时，本 lane 记为 `BLOCKED`，不能继续并声明 `PASS`。Docker daemon 自身 cache 位置由 DockerRootDir 决定，必须在 evidence 中单独记录。
+该命令记录当前 `evidence_run_id`、Docker version、compose version、DockerRootDir、`docker system df`、
+`df -h`、`TMPDIR` 和 evidence root。最终 E2E 聚合要求 Docker preflight `PASS` payload 显式绑定当前 run；
+复制旧的无 ID preflight JSON 不能作为当前 run 的 PASS。Docker 不可用或空间不足时，本 lane 记为
+`BLOCKED`，不能继续并声明 `PASS`。Docker daemon 自身 cache 位置由 DockerRootDir 决定，必须在
+evidence 中单独记录。
 
 ## 7. Env Files
 
@@ -255,6 +274,13 @@ docker compose --env-file "$CHECKOUT_ROOT/infra/env/compute.env" -f "$CHECKOUT_R
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/compute.env" -f "$CHECKOUT_ROOT/infra/compose.compute.yml" logs --tail=200 compute-api
 docker compose --env-file "$CHECKOUT_ROOT/infra/env/compute.env" -f "$CHECKOUT_ROOT/infra/compose.compute.yml" down
 ```
+
+Linux Docker 上如果 `DATABASE_URL` 指向 22 host 上的 DB/Gateway 服务，可以使用
+`host.docker.internal`；`infra/compose.compute.yml` 已把它映射到 `host-gateway`。如果本地 E2E 的
+PostgreSQL 本身也是 Docker 容器，优先把该 DB 容器加入 `nhms-compute_default` 网络，并在未提交的
+`infra/env/compute.env` 中使用 DB 容器名和容器端口，例如
+`postgresql://<user>:<redacted>@nhms-22-e2e-db:5432/nhms`。不要为了本机测试把明文 DSN 写入
+checked-in example，也不要把测试 DB 产物放进仓库。
 
 22 scheduler-once 手工执行：
 
@@ -422,6 +448,11 @@ minimal submit probe evidence
 ```
 
 如果后续容器化 Gateway，只能在 22 启用，且必须单独证明 Slurm/Munge/container 边界；不能把 Gateway 容器或 Slurm/Munge 挂载加入 27 display compose。
+
+当前 22 live probe 暴露的站点边界是：Slurm 计算节点可能没有 `/ghdc` 挂载。此时 `/ghdc/data/nwm/published`
+仍然是 22 与 27 的发布共享面，但不应作为 sbatch runtime workspace。sbatch 应使用计算节点可见的
+workspace/object-store 路径；完成后由 22 publish/copyback 到 `/ghdc/data/nwm/published`，27 再从
+`/home/ghdc/nwm/published` 只读读取。
 
 ## 11. Security Probes
 

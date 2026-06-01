@@ -376,6 +376,7 @@ class ERA5AdapterConfig:
     adapter_name: str = "era5"
     dataset_name: str = ERA5_DATASET_NAME
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
+    object_store_root: Path | str = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT", ""))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
     variables: tuple[str, ...] = ERA5_VARIABLES
     cycle_hours_utc: tuple[int, ...] = (0,)
@@ -386,6 +387,10 @@ class ERA5AdapterConfig:
     min_file_size_bytes: int = 1
     availability_lag_days: int = 5
     backend: str = field(default_factory=lambda: os.getenv("ERA5_BACKEND", "gcs"))
+
+    def __post_init__(self) -> None:
+        if not str(self.object_store_root):
+            object.__setattr__(self, "object_store_root", self.workspace_root)
 
     def forecast_hours(self) -> list[int]:
         return list(ERA5_FORECAST_HOURS)
@@ -417,7 +422,7 @@ class ERA5Adapter(DataSourceAdapter):
         self.config = config or ERA5AdapterConfig()
         self.repository = repository
         self.object_store = object_store or LocalObjectStore(
-            self.config.workspace_root,
+            self.config.object_store_root,
             object_store_prefix=self.config.object_store_prefix,
         )
         self.cds_client = cds_client or self._default_client(self.config.backend)

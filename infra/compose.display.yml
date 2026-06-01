@@ -18,6 +18,7 @@ services:
       NHMS_SERVICE_ROLE: display_readonly
       NHMS_REQUIRE_SERVICE_ROLE: "true"
       NHMS_AUTH_MODE: ${NHMS_AUTH_MODE:-production}
+      UV_CACHE_DIR: /tmp/nhms-uv-cache
       NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS: "true"
       NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS: "false"
       DATABASE_URL: ${DATABASE_URL:?set readonly display database url}

@@ -135,6 +135,7 @@ class IFSAdapterConfig:
     native_format: str = "GRIB2"
     adapter_name: str = "ifs_adapter"
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
+    object_store_root: Path | str = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT", ""))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
     cycle_hours_utc: tuple[int, ...] = (0, 6, 12, 18)
     forecast_start_hour: int = field(default_factory=lambda: int(os.getenv("IFS_FORECAST_START_HOUR", "0")))
@@ -154,6 +155,10 @@ class IFSAdapterConfig:
         default_factory=lambda: int(os.getenv("IFS_MAX_FILE_SIZE_BYTES", str(500 * 1024 * 1024)))
     )
     variables: tuple[str, ...] = IFS_VARIABLES
+
+    def __post_init__(self) -> None:
+        if not str(self.object_store_root):
+            object.__setattr__(self, "object_store_root", self.workspace_root)
 
     def forecast_end_hour_for_cycle(self, cycle_hour: int) -> int:
         if override := os.getenv("IFS_FORECAST_END_HOUR"):
@@ -223,7 +228,7 @@ class IFSAdapter(DataSourceAdapter):
         self.config = config or IFSAdapterConfig()
         self.repository = repository
         self.object_store = object_store or LocalObjectStore(
-            self.config.workspace_root,
+            self.config.object_store_root,
             object_store_prefix=self.config.object_store_prefix,
         )
         self.downloader = downloader or self._download_url
