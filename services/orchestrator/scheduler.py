@@ -160,6 +160,7 @@ TRANSIENT_RETRY_REASON_CODES = {
     "SOURCE_UNAVAILABLE",
     "ADAPTER_UNAVAILABLE",
 }
+UNKNOWN_AFTER_ATTEMPT = "unknown_after_attempt"
 
 
 class SchedulerResourceLimitError(ValueError):
@@ -750,6 +751,7 @@ class ProductionScheduler:
             execution_boundary = "planning_only"
             pass_status = "planned"
             no_mutation_proof = _no_mutation_proof()
+            execution_write_proof = _execution_write_proof()
             slurm_preflight_evidence: dict[str, Any] | None = None
             evidence_reservation: dict[str, Any] = {"status": "not_required"}
             pending_status_sync_candidates = [
@@ -773,6 +775,10 @@ class ProductionScheduler:
                         _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
                         for candidate in candidates
                     ]
+                    execution_write_proof = _execution_write_proof_from_evidence(
+                        execution_evidence,
+                        reservation=evidence_reservation,
+                    )
                     execution_evidence.extend(
                         _sync_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
                         for candidate in pending_status_sync_candidates
@@ -839,6 +845,10 @@ class ProductionScheduler:
                                     _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
                                     for candidate in candidates
                                 ]
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=evidence_reservation,
+                                )
                                 execution_boundary = "slurm_preflight_blocked"
                                 pass_status = "preflight_blocked"
                             elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
@@ -846,11 +856,19 @@ class ProductionScheduler:
                                     _candidate_preflight_blocked_evidence(candidate, config=self.config)
                                     for candidate in candidates
                                 ]
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=evidence_reservation,
+                                )
                                 execution_boundary = "preflight_blocked"
                                 pass_status = "preflight_blocked"
                                 no_mutation_proof = _no_mutation_proof()
                             else:
                                 execution_evidence = self._execute_candidates(candidates)
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=evidence_reservation,
+                                )
                                 submitted_count = sum(
                                     1 for item in execution_evidence if item.get("submitted") is True
                                 )
@@ -874,20 +892,21 @@ class ProductionScheduler:
                 ):
                     pass_status = "slurm_status_synced"
                     execution_boundary = "slurm_status_sync"
-                pipeline_write_proof = _pipeline_write_proof_value(
-                    slurm_status_sync_proof,
-                    slurm_cancellation_proof,
+                scheduler_mutation_proof = _scheduler_mutation_proof(
+                    execution_write_proof=execution_write_proof,
+                    slurm_status_sync_proof=slurm_status_sync_proof,
+                    slurm_cancellation_proof=slurm_cancellation_proof,
                 )
                 no_mutation_proof = {
                     "adapter_download_called": False,
-                    "slurm_submit_called": submitted_count > 0,
+                    "slurm_submit_called": scheduler_mutation_proof["slurm_submit_called"],
                     "slurm_status_sync_called": slurm_status_sync_proof.get("sync_called") is True,
                     "slurm_cancellation_called": slurm_cancellation_proof.get("cancel_called") is True,
                     "shud_runtime_called": False,
-                    "hydro_result_table_writes": submitted_count > 0,
-                    "met_result_table_writes": submitted_count > 0,
-                    "pipeline_status_writes": pipeline_write_proof,
-                    "pipeline_event_writes": pipeline_write_proof,
+                    "hydro_result_table_writes": scheduler_mutation_proof["hydro_result_table_writes"],
+                    "met_result_table_writes": scheduler_mutation_proof["met_result_table_writes"],
+                    "pipeline_status_writes": scheduler_mutation_proof["pipeline_status_writes"],
+                    "pipeline_event_writes": scheduler_mutation_proof["pipeline_event_writes"],
                 }
                 failed_count = _scheduler_failed_count_from_execution(execution_evidence)
                 partial_count = _scheduler_partial_count_from_execution(execution_evidence)
@@ -934,6 +953,7 @@ class ProductionScheduler:
                         ),
                     },
                     "model_run_evidence": execution_evidence,
+                    "execution_write_proof": execution_write_proof,
                     "slurm_cancellation_evidence": cancellation_evidence,
                     "slurm_status_sync_proof": slurm_status_sync_proof,
                     "slurm_cancellation_proof": slurm_cancellation_proof,
@@ -985,6 +1005,8 @@ class ProductionScheduler:
                     "execution_boundary": "planning_only",
                 }
             )
+            if root_preflight["status"] != "not_required":
+                evidence["root_preflight"] = root_preflight
             artifact_path = self._write_evidence(pass_id, evidence)
             status = _evidence_status(evidence, "resource_limit_blocked")
             return SchedulerPassResult(
@@ -1225,26 +1247,45 @@ class ProductionScheduler:
             result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
         except Exception as error:
             safe_error_message = _evidence_safe(getattr(error, "message", str(error)))
+            error_code = str(getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"))
             for candidate in submitted_candidates:
                 output_uri = candidate_output_uris.get(candidate.candidate_id)
                 evidence.append(
                     {
                         **_candidate_identity_evidence(candidate, output_uri=output_uri),
-                        "status": "blocked",
+                        "status": "submission_failed",
                         "submitted": False,
-                        "mutation_occurred": False,
+                        "slurm_submit_called": UNKNOWN_AFTER_ATTEMPT,
+                        "execution_attempted": True,
+                        "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
+                        "mutation_occurred": UNKNOWN_AFTER_ATTEMPT,
                         "cycle_id": cycle_id,
-                        "error_code": getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"),
+                        "error_code": error_code,
                         "error_message": safe_error_message,
                         **_candidate_model_run_review_evidence(
                             candidate,
                             output_uri=output_uri,
                             outcome=None,
-                            status="blocked",
+                            status="submission_failed",
                             stage_statuses=[],
                         ),
                         "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
                         "qhh_script_invoked": False,
+                        "pipeline_status_write": UNKNOWN_AFTER_ATTEMPT,
+                        "pipeline_event_write": UNKNOWN_AFTER_ATTEMPT,
+                        "pipeline_status_writes_proven_absent": False,
+                        "pipeline_event_writes_proven_absent": False,
+                        "residual_blockers": [
+                            {
+                                "code": error_code,
+                                "state": "blocked",
+                                "quality_flag": "production_orchestration_failed",
+                                "residual_risk": (
+                                    "Production orchestration raised after the downstream orchestration method "
+                                    "was called; production write outcome is unknown."
+                                ),
+                            }
+                        ],
                     }
                 )
             return evidence
@@ -1294,7 +1335,6 @@ class ProductionScheduler:
                     max_jobs=self.config.candidate_state_job_limit,
                 )
             except Exception as error:
-                mutation_outcome = "unknown_after_attempt"
                 evidence.append(
                     {
                         "source_id": source_id,
@@ -1304,7 +1344,7 @@ class ProductionScheduler:
                         "error_code": getattr(error, "error_code", "SLURM_CANCEL_FAILED"),
                         "error_message": _evidence_safe(getattr(error, "message", str(error))),
                         "cancel_attempted": True,
-                        "mutation_outcome": mutation_outcome,
+                        "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
                         "replacement_submitted": False,
                         "active_slurm_jobs": _evidence_safe(skipped.get("active_slurm_jobs", [])),
                         "residual_blockers": [
@@ -1333,6 +1373,12 @@ class ProductionScheduler:
                 "replacement_submitted": False,
                 "active_slurm_jobs": _evidence_safe(skipped.get("active_slurm_jobs", [])),
             }
+            pipeline_status_write = any(_cancelled_job_pipeline_status_write(item) for item in cancelled)
+            pipeline_event_write = any(_cancelled_job_pipeline_event_write(item) for item in cancelled)
+            if pipeline_status_write:
+                cancellation_item["pipeline_status_write"] = True
+            if pipeline_event_write:
+                cancellation_item["pipeline_event_write"] = True
             if cancellation_status != "cancelled":
                 cancellation_item["error_code"] = "SLURM_CANCELLATION_GAP"
                 cancellation_item["cancellation_proven"] = False
@@ -1739,7 +1785,7 @@ class ProductionScheduler:
                                     "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
                                     "sync_required": True,
                                     "sync_attempted": True,
-                                    "mutation_outcome": "unknown_after_attempt",
+                                    "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
                                     "state_evidence": {"slurm_state_sync": slurm_state_sync},
                                 }
                             )
@@ -4376,6 +4422,126 @@ def _candidate_execution_attempted(outcome: Mapping[str, Any] | None, submitted:
     )
 
 
+def _pipeline_result_slurm_submit_called(result: PipelineResult) -> bool:
+    for stage in result.stages:
+        if _nonempty_evidence_value(getattr(stage, "slurm_job_id", None)):
+            return True
+        task_results = getattr(stage, "task_results", ()) or ()
+        for task in task_results:
+            if isinstance(task, Mapping) and _nonempty_evidence_value(task.get("slurm_job_id")):
+                return True
+    return any(
+        _nonempty_evidence_value(outcome.get("slurm_job_id"))
+        for outcome in getattr(result, "candidate_outcomes", ()) or ()
+        if isinstance(outcome, Mapping)
+    )
+
+
+def _pipeline_result_pipeline_status_write(result: PipelineResult) -> bool | str:
+    return _pipeline_result_pipeline_write_value(
+        result,
+        write_field="pipeline_status_write",
+        absent_field="pipeline_status_writes_proven_absent",
+    )
+
+
+def _pipeline_result_pipeline_event_write(result: PipelineResult) -> bool | str:
+    return _pipeline_result_pipeline_write_value(
+        result,
+        write_field="pipeline_event_write",
+        absent_field="pipeline_event_writes_proven_absent",
+    )
+
+
+def _pipeline_result_pipeline_write_value(
+    result: PipelineResult,
+    *,
+    write_field: str,
+    absent_field: str,
+) -> bool | str:
+    outcome_values = [
+        _candidate_pipeline_write_value(outcome, write_field, fallback=None)
+        for outcome in getattr(result, "candidate_outcomes", ()) or ()
+        if isinstance(outcome, Mapping)
+    ]
+    if any(value is True for value in outcome_values):
+        return True
+    if any(value == UNKNOWN_AFTER_ATTEMPT for value in outcome_values):
+        return UNKNOWN_AFTER_ATTEMPT
+    if _pipeline_result_has_pipeline_job_evidence(result):
+        return True
+    if outcome_values and all(value is False for value in outcome_values):
+        return False
+    if _pipeline_result_write_absence_proven(result, absent_field):
+        return False
+    return UNKNOWN_AFTER_ATTEMPT
+
+
+def _pipeline_result_has_pipeline_job_evidence(result: PipelineResult) -> bool:
+    for stage in result.stages:
+        if _nonempty_evidence_value(getattr(stage, "pipeline_job_id", None)):
+            return True
+        task_results = getattr(stage, "task_results", ()) or ()
+        for task in task_results:
+            if isinstance(task, Mapping) and _nonempty_evidence_value(task.get("pipeline_job_id")):
+                return True
+    return any(
+        _nonempty_evidence_value(outcome.get("pipeline_job_id"))
+        for outcome in getattr(result, "candidate_outcomes", ()) or ()
+        if isinstance(outcome, Mapping)
+    )
+
+
+def _pipeline_result_write_absence_proven(result: PipelineResult, absent_field: str) -> bool:
+    outcomes = [
+        outcome
+        for outcome in getattr(result, "candidate_outcomes", ()) or ()
+        if isinstance(outcome, Mapping)
+    ]
+    if outcomes and all(outcome.get(absent_field) is True for outcome in outcomes):
+        return True
+    return False
+
+
+def _candidate_slurm_submit_called(outcome: Mapping[str, Any] | None, fallback: bool) -> bool:
+    if outcome and _nonempty_evidence_value(outcome.get("slurm_job_id")):
+        return True
+    return fallback
+
+
+def _candidate_pipeline_write_value(
+    outcome: Mapping[str, Any] | None,
+    write_field: str,
+    *,
+    fallback: bool | str | None,
+) -> bool | str | None:
+    if outcome:
+        value = outcome.get(write_field)
+        if value == UNKNOWN_AFTER_ATTEMPT:
+            return UNKNOWN_AFTER_ATTEMPT
+        coerced = _nested_bool(outcome, write_field)
+        if coerced is True:
+            return True
+        absent_field = f"{write_field}s_proven_absent"
+        if outcome.get(absent_field) is True:
+            return False
+    return fallback
+
+
+def _execution_mutation_value(*values: bool | str | None) -> bool | str:
+    if any(value == UNKNOWN_AFTER_ATTEMPT for value in values):
+        return UNKNOWN_AFTER_ATTEMPT
+    return any(value is True for value in values)
+
+
+def _nonempty_evidence_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
 def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: str | None = None) -> dict[str, Any]:
     contract_identity = _candidate_production_identity(candidate)
     evidence = {
@@ -4711,7 +4877,9 @@ def _candidate_execution_evidence(
         _stage_run_evidence(stage)
         for stage in result.stages
     ]
-    submitted = any(stage.slurm_job_id for stage in result.stages)
+    slurm_submit_called = _pipeline_result_slurm_submit_called(result)
+    pipeline_status_write = _pipeline_result_pipeline_status_write(result)
+    pipeline_event_write = _pipeline_result_pipeline_event_write(result)
     outcomes_by_candidate = {
         str(outcome.get("candidate_id")): dict(outcome)
         for outcome in getattr(result, "candidate_outcomes", ()) or ()
@@ -4723,7 +4891,9 @@ def _candidate_execution_evidence(
             candidate,
             output_uri=(output_uris or {}).get(candidate.candidate_id),
             outcome=outcomes_by_candidate.get(candidate.candidate_id),
-            submitted=submitted,
+            slurm_submit_called=slurm_submit_called,
+            pipeline_status_write=pipeline_status_write,
+            pipeline_event_write=pipeline_event_write,
             stage_names=stage_names,
             stage_statuses=stage_statuses,
         )
@@ -4737,23 +4907,39 @@ def _candidate_execution_evidence_item(
     *,
     output_uri: str | None,
     outcome: Mapping[str, Any] | None,
-    submitted: bool,
+    slurm_submit_called: bool,
+    pipeline_status_write: bool | str,
+    pipeline_event_write: bool | str,
     stage_names: Sequence[str],
     stage_statuses: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     if outcome is None:
         status = result.status
-        candidate_submitted = submitted
-        mutation_occurred = submitted
+        candidate_submitted = slurm_submit_called
         candidate_outcome: dict[str, Any] | None = None
-        execution_attempted = submitted
+        execution_attempted = True
     else:
         outcome_status = str(outcome.get("status") or "")
         status = _candidate_status_from_outcome(result.status, outcome_status)
-        execution_attempted = _candidate_execution_attempted(outcome, submitted)
-        candidate_submitted = submitted and (outcome_status == "active" or execution_attempted)
-        mutation_occurred = candidate_submitted
+        execution_attempted = True
+        candidate_slurm_submit_called = _candidate_slurm_submit_called(outcome, slurm_submit_called)
+        candidate_submitted = candidate_slurm_submit_called and (outcome_status == "active" or execution_attempted)
         candidate_outcome = dict(outcome)
+    candidate_pipeline_status_write = _candidate_pipeline_write_value(
+        outcome,
+        "pipeline_status_write",
+        fallback=pipeline_status_write,
+    )
+    candidate_pipeline_event_write = _candidate_pipeline_write_value(
+        outcome,
+        "pipeline_event_write",
+        fallback=pipeline_event_write,
+    )
+    mutation_occurred = _execution_mutation_value(
+        candidate_submitted,
+        candidate_pipeline_status_write,
+        candidate_pipeline_event_write,
+    )
     review_evidence = _candidate_model_run_review_evidence(
         candidate,
         output_uri=output_uri,
@@ -4765,6 +4951,7 @@ def _candidate_execution_evidence_item(
         **review_evidence,
         "status": status,
         "submitted": candidate_submitted,
+        "slurm_submit_called": candidate_submitted,
         "execution_attempted": execution_attempted,
         "final_candidate_success": (
             status == result.status and not _is_non_submitted_terminal_or_unavailable_status(status)
@@ -4774,6 +4961,24 @@ def _candidate_execution_evidence_item(
         "standard_chain_shape": stage_names,
         "qhh_script_invoked": False,
     }
+    if candidate_pipeline_status_write is True:
+        item["pipeline_status_write"] = True
+        item["pipeline_status_writes_proven_absent"] = False
+    elif candidate_pipeline_status_write == UNKNOWN_AFTER_ATTEMPT:
+        item["pipeline_status_write"] = UNKNOWN_AFTER_ATTEMPT
+        item["pipeline_status_writes_proven_absent"] = False
+    else:
+        item["pipeline_status_writes_proven_absent"] = True
+    if candidate_pipeline_event_write is True:
+        item["pipeline_event_write"] = True
+        item["pipeline_event_writes_proven_absent"] = False
+    elif candidate_pipeline_event_write == UNKNOWN_AFTER_ATTEMPT:
+        item["pipeline_event_write"] = UNKNOWN_AFTER_ATTEMPT
+        item["pipeline_event_writes_proven_absent"] = False
+    else:
+        item["pipeline_event_writes_proven_absent"] = True
+    if mutation_occurred == UNKNOWN_AFTER_ATTEMPT:
+        item["mutation_outcome"] = UNKNOWN_AFTER_ATTEMPT
     if candidate_outcome is not None:
         candidate_outcome = _evidence_safe(candidate_outcome)
         item["candidate_outcome"] = candidate_outcome
@@ -5840,6 +6045,20 @@ def _scheduler_cancellation_status(cancelled_jobs: Sequence[Mapping[str, Any]]) 
     return "blocked"
 
 
+def _cancelled_job_pipeline_status_write(job: Mapping[str, Any]) -> bool:
+    status = str(job.get("status") or "").lower()
+    return status == "cancelled" and job.get("cancellation_proven") is not False and not job.get("error_code")
+
+
+def _cancelled_job_pipeline_event_write(job: Mapping[str, Any]) -> bool:
+    if _cancelled_job_pipeline_status_write(job):
+        return True
+    return (
+        job.get("cancellation_proven") is False
+        and str(job.get("error_code") or "") == "JOB_ALREADY_TERMINAL"
+    )
+
+
 def _scheduler_pass_status_from_cancellation(cancellation_evidence: Sequence[Mapping[str, Any]]) -> str:
     if not cancellation_evidence:
         return "planned"
@@ -5874,7 +6093,7 @@ def _slurm_status_sync_failed_evidence(
         "sync_required": True,
         "sync_called": True,
         "sync_attempted": True,
-        "mutation_outcome": "unknown_after_attempt",
+        "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
         "error_code": error_code,
         "error_message": _evidence_safe(getattr(error, "message", str(error))),
         "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
@@ -5935,7 +6154,7 @@ def _slurm_status_sync_proof_from_candidates(
     failed_payloads = [item for item in sync_payloads if str(item.get("status") or "") == "failed"]
     update_count = sum(len(item.get("updates") or []) for item in sync_payloads)
     terminal_update_count = sum(len(item.get("terminal_updates") or []) for item in sync_payloads)
-    unknown_after_attempt = any(item.get("mutation_outcome") == "unknown_after_attempt" for item in failed_payloads)
+    unknown_after_attempt = any(item.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT for item in failed_payloads)
     status = "failed" if failed_payloads else ("synced" if sync_payloads else "not_required")
     proof: dict[str, Any] = {
         "status": status,
@@ -5957,10 +6176,147 @@ def _slurm_status_sync_proof_from_candidates(
             }
         )
     if unknown_after_attempt:
-        proof["mutation_outcome"] = "unknown_after_attempt"
-        proof["mutation_occurred"] = "unknown_after_attempt"
+        proof["mutation_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["mutation_occurred"] = UNKNOWN_AFTER_ATTEMPT
         proof["pipeline_status_writes_proven_absent"] = False
         proof["pipeline_event_writes_proven_absent"] = False
+    return proof
+
+
+def _execution_write_proof(
+    *,
+    reservation: Mapping[str, Any] | None = None,
+    execution_required: bool = False,
+    blocked: bool = False,
+) -> dict[str, Any]:
+    proof: dict[str, Any] = {
+        "execution_required": execution_required,
+        "orchestration_called": False,
+        "mutation_occurred": False,
+        "protected_by_pre_execution_evidence": False,
+    }
+    if blocked:
+        proof["status"] = "preflight_blocked"
+    elif execution_required:
+        proof["status"] = "pending_reservation"
+    else:
+        proof["status"] = "not_required"
+    if reservation is not None:
+        proof["evidence_pre_execution_status"] = reservation.get("status")
+        proof["protected_by_pre_execution_evidence"] = reservation.get("status") == "reserved"
+        if reservation.get("status") == "blocked":
+            proof["block_reason"] = reservation.get("reason")
+    return proof
+
+
+def _execution_write_proof_from_evidence(
+    execution_evidence: Sequence[Mapping[str, Any]],
+    *,
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    execution_payloads = list(execution_evidence)
+    orchestration_called = any(item.get("execution_attempted") is True for item in execution_payloads)
+    submitted_count = sum(1 for item in execution_payloads if item.get("submitted") is True)
+    slurm_submit_count = sum(1 for item in execution_payloads if item.get("slurm_submit_called") is True)
+    unknown_slurm_submit_count = sum(
+        1 for item in execution_payloads if item.get("slurm_submit_called") == UNKNOWN_AFTER_ATTEMPT
+    )
+    pipeline_status_write_count = sum(
+        1 for item in execution_payloads if item.get("pipeline_status_write") is True
+    )
+    pipeline_event_write_count = sum(1 for item in execution_payloads if item.get("pipeline_event_write") is True)
+    unknown_pipeline_status_write_count = sum(
+        1 for item in execution_payloads if item.get("pipeline_status_write") == UNKNOWN_AFTER_ATTEMPT
+    )
+    unknown_pipeline_event_write_count = sum(
+        1 for item in execution_payloads if item.get("pipeline_event_write") == UNKNOWN_AFTER_ATTEMPT
+    )
+    unknown_after_attempt_count = sum(
+        1 for item in execution_payloads if item.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT
+    )
+    preflight_blocked = bool(execution_payloads) and all(
+        str(item.get("status") or "") == "preflight_blocked" for item in execution_payloads
+    )
+    if unknown_after_attempt_count:
+        status = UNKNOWN_AFTER_ATTEMPT
+    elif submitted_count:
+        status = "submitted"
+    elif preflight_blocked:
+        status = "preflight_blocked"
+    elif execution_payloads:
+        status = "completed_no_submit"
+    else:
+        status = "not_required"
+    slurm_submit_value: bool | str
+    if unknown_slurm_submit_count:
+        slurm_submit_value = UNKNOWN_AFTER_ATTEMPT
+    else:
+        slurm_submit_value = slurm_submit_count > 0
+    hydro_result_table_write: bool | str = slurm_submit_value
+    met_result_table_write: bool | str = slurm_submit_value
+    pipeline_status_write: bool | str
+    if unknown_pipeline_status_write_count:
+        pipeline_status_write = UNKNOWN_AFTER_ATTEMPT
+    else:
+        pipeline_status_write = pipeline_status_write_count > 0
+    pipeline_event_write: bool | str
+    if unknown_pipeline_event_write_count:
+        pipeline_event_write = UNKNOWN_AFTER_ATTEMPT
+    else:
+        pipeline_event_write = pipeline_event_write_count > 0
+    proof: dict[str, Any] = {
+        "status": status,
+        "execution_required": bool(execution_payloads),
+        "orchestration_called": orchestration_called,
+        "mutation_occurred": _execution_mutation_value(
+            slurm_submit_value,
+            pipeline_status_write,
+            pipeline_event_write,
+        ),
+        "protected_by_pre_execution_evidence": reservation.get("status") == "reserved",
+        "evidence_pre_execution_status": reservation.get("status"),
+        "submitted_count": submitted_count,
+        "slurm_submit_called": slurm_submit_value,
+        "slurm_submit_count": slurm_submit_count,
+        "hydro_result_table_writes": hydro_result_table_write,
+        "met_result_table_writes": met_result_table_write,
+        "pipeline_status_writes": pipeline_status_write,
+        "pipeline_event_writes": pipeline_event_write,
+        "pipeline_status_write_count": pipeline_status_write_count,
+        "pipeline_event_write_count": pipeline_event_write_count,
+    }
+    if unknown_slurm_submit_count:
+        proof["slurm_submit_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_slurm_submit_count"] = unknown_slurm_submit_count
+        proof["slurm_submit_proven_absent"] = False
+    else:
+        proof["slurm_submit_proven_absent"] = slurm_submit_count == 0
+    proof["hydro_result_table_writes_proven_absent"] = hydro_result_table_write is False
+    proof["met_result_table_writes_proven_absent"] = met_result_table_write is False
+    if unknown_pipeline_status_write_count:
+        proof["pipeline_status_write_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_pipeline_status_write_count"] = unknown_pipeline_status_write_count
+        proof["pipeline_status_writes_proven_absent"] = False
+    else:
+        proof["pipeline_status_writes_proven_absent"] = pipeline_status_write_count == 0
+    if unknown_pipeline_event_write_count:
+        proof["pipeline_event_write_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_pipeline_event_write_count"] = unknown_pipeline_event_write_count
+        proof["pipeline_event_writes_proven_absent"] = False
+    else:
+        proof["pipeline_event_writes_proven_absent"] = pipeline_event_write_count == 0
+    if unknown_after_attempt_count:
+        proof["mutation_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["mutation_occurred"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_execution_count"] = unknown_after_attempt_count
+        if hydro_result_table_write == UNKNOWN_AFTER_ATTEMPT:
+            proof["hydro_result_table_writes_proven_absent"] = False
+        if met_result_table_write == UNKNOWN_AFTER_ATTEMPT:
+            proof["met_result_table_writes_proven_absent"] = False
+        if unknown_pipeline_status_write_count or pipeline_status_write_count:
+            proof["pipeline_status_writes_proven_absent"] = False
+        if unknown_pipeline_event_write_count or pipeline_event_write_count:
+            proof["pipeline_event_writes_proven_absent"] = False
     return proof
 
 
@@ -5999,8 +6355,10 @@ def _slurm_cancellation_proof_from_evidence(
     cancelled_count = _slurm_cancelled_count(cancellation_evidence)
     blocked_count = _slurm_cancellation_blocked_count(cancellation_evidence)
     unknown_after_attempt_count = sum(
-        1 for item in cancellation_evidence if item.get("mutation_outcome") == "unknown_after_attempt"
+        1 for item in cancellation_evidence if item.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT
     )
+    pipeline_status_write_count = sum(1 for item in cancellation_evidence if item.get("pipeline_status_write") is True)
+    pipeline_event_write_count = sum(1 for item in cancellation_evidence if item.get("pipeline_event_write") is True)
     proof: dict[str, Any] = {
         "status": _scheduler_pass_status_from_cancellation(cancellation_evidence),
         "cancellation_required": bool(cancellation_evidence),
@@ -6010,14 +6368,21 @@ def _slurm_cancellation_proof_from_evidence(
         "evidence_pre_execution_status": reservation.get("status"),
         "cancelled_job_count": cancelled_count,
         "blocked_cancellation_count": blocked_count,
+        "pipeline_status_write_count": pipeline_status_write_count,
+        "pipeline_event_write_count": pipeline_event_write_count,
     }
+    if pipeline_status_write_count or pipeline_event_write_count:
+        proof["mutation_occurred"] = True
     if unknown_after_attempt_count:
-        proof["mutation_outcome"] = "unknown_after_attempt"
-        proof["mutation_occurred"] = "unknown_after_attempt"
+        proof["mutation_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["mutation_occurred"] = UNKNOWN_AFTER_ATTEMPT
         proof["unknown_cancellation_count"] = unknown_after_attempt_count
         proof["slurm_cancellation_proven_absent"] = False
         proof["pipeline_status_writes_proven_absent"] = False
         proof["pipeline_event_writes_proven_absent"] = False
+    else:
+        proof["pipeline_status_writes_proven_absent"] = pipeline_status_write_count == 0
+        proof["pipeline_event_writes_proven_absent"] = pipeline_event_write_count == 0
     return proof
 
 
@@ -6056,22 +6421,143 @@ def _slurm_cancellation_unknown_count(proof: Mapping[str, Any]) -> int:
     value = proof.get("unknown_cancellation_count")
     if isinstance(value, int) and not isinstance(value, bool):
         return value
-    return 1 if proof.get("mutation_outcome") == "unknown_after_attempt" else 0
+    return 1 if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT else 0
 
 
-def _pipeline_write_proof_value(
+def _scheduler_mutation_proof(
+    *,
+    execution_write_proof: Mapping[str, Any],
     slurm_status_sync_proof: Mapping[str, Any],
     slurm_cancellation_proof: Mapping[str, Any],
-) -> bool | str:
-    if (
-        slurm_status_sync_proof.get("mutation_outcome") == "unknown_after_attempt"
-        or slurm_cancellation_proof.get("mutation_outcome") == "unknown_after_attempt"
-    ):
-        return "unknown_after_attempt"
-    return (
-        slurm_status_sync_proof.get("mutation_occurred") is True
-        or slurm_cancellation_proof.get("mutation_occurred") is True
+) -> dict[str, bool | str]:
+    execution_slurm_submit = _slurm_submit_proof_value(execution_write_proof)
+    hydro_result_table_write = _named_proof_value(
+        execution_write_proof,
+        "hydro_result_table_writes",
+        "hydro_result_table_writes_proven_absent",
     )
+    met_result_table_write = _named_proof_value(
+        execution_write_proof,
+        "met_result_table_writes",
+        "met_result_table_writes_proven_absent",
+    )
+    sync_mutation = _proof_mutation_value(slurm_status_sync_proof)
+    cancellation_mutation = _proof_mutation_value(slurm_cancellation_proof)
+    pipeline_status_write = _merge_proof_values(
+        _pipeline_status_write_proof_value(execution_write_proof),
+        sync_mutation,
+        _pipeline_status_write_proof_value(slurm_cancellation_proof),
+    )
+    pipeline_event_write = _merge_proof_values(
+        _pipeline_event_write_proof_value(execution_write_proof),
+        sync_mutation,
+        _pipeline_event_write_proof_value(slurm_cancellation_proof),
+    )
+    return {
+        "slurm_submit_called": execution_slurm_submit,
+        "hydro_result_table_writes": hydro_result_table_write,
+        "met_result_table_writes": met_result_table_write,
+        "pipeline_status_writes": pipeline_status_write,
+        "pipeline_event_writes": pipeline_event_write,
+        "slurm_status_sync_writes": sync_mutation,
+        "slurm_cancellation_writes": cancellation_mutation,
+    }
+
+
+def _proof_mutation_value(proof: Mapping[str, Any]) -> bool | str:
+    if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if proof.get("mutation_occurred") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    return proof.get("mutation_occurred") is True
+
+
+def _named_proof_value(proof: Mapping[str, Any], write_field: str, absent_field: str) -> bool | str:
+    value = proof.get(write_field)
+    if value == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if proof.get(absent_field) is True:
+        return False
+    if proof.get(absent_field) is False and proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    return _proof_mutation_value(proof)
+
+
+def _slurm_submit_proof_value(proof: Mapping[str, Any]) -> bool | str:
+    value = proof.get("slurm_submit_called")
+    if value == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if proof.get("slurm_submit_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if _positive_count(proof.get("slurm_submit_count")):
+        return True
+    if proof.get("slurm_submit_proven_absent") is True:
+        return False
+    if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if proof.get("mutation_occurred") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    return proof.get("mutation_occurred") is True
+
+
+def _pipeline_status_write_proof_value(proof: Mapping[str, Any]) -> bool | str:
+    value = proof.get("pipeline_status_writes")
+    if value == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if proof.get("pipeline_status_write_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if "pipeline_status_write_count" in proof:
+        return _positive_count(proof.get("pipeline_status_write_count"))
+    if proof.get("pipeline_status_writes_proven_absent") is True:
+        return False
+    if proof.get("mutation_occurred") is True:
+        return True
+    return False
+
+
+def _pipeline_event_write_proof_value(proof: Mapping[str, Any]) -> bool | str:
+    value = proof.get("pipeline_event_writes")
+    if value == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if proof.get("pipeline_event_write_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if "pipeline_event_write_count" in proof:
+        return _positive_count(proof.get("pipeline_event_write_count"))
+    if proof.get("pipeline_event_writes_proven_absent") is True:
+        return False
+    if proof.get("mutation_occurred") is True:
+        return True
+    return False
+
+
+def _merge_proof_values(*values: bool | str) -> bool | str:
+    if any(value == UNKNOWN_AFTER_ATTEMPT for value in values):
+        return UNKNOWN_AFTER_ATTEMPT
+    return any(value is True for value in values)
+
+
+def _positive_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 def _nested_bool(mapping: Mapping[str, Any], key: str, *, fallback: bool | None = None) -> bool | None:
@@ -6964,6 +7450,7 @@ def _bounded_evidence_payload(payload: Mapping[str, Any], *, reason: str) -> dic
         "model_discovery": _empty_model_discovery(),
         "artifact_path": payload.get("artifact_path"),
         "execution_boundary": payload.get("execution_boundary", "planning_only"),
+        "execution_write_proof": payload.get("execution_write_proof"),
         "slurm_status_sync_proof": payload.get("slurm_status_sync_proof"),
         "slurm_cancellation_proof": payload.get("slurm_cancellation_proof"),
         "no_mutation_proof": payload.get("no_mutation_proof", _no_mutation_proof()),

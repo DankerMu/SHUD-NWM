@@ -2322,6 +2322,65 @@ def test_bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof(
         assert evidence["root_preflight"]["checks"]["allowed_roots_policy"]["non_empty"] is True
 
 
+def test_no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.delenv("NHMS_SCHEDULER_MODEL_IDS")
+    monkeypatch.delenv("NHMS_SCHEDULER_BASIN_IDS")
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
+        lambda: FakeRegistry([_model(f"model_{index:05d}", "basin_a") for index in range(626)]),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {
+            "gfs": FakeAdapter(
+                "gfs",
+                [(f"2026-05-21T{hour:02d}:00:00Z", True) for hour in range(16)],
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=False),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T18:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=16,
+        model_ids=(),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+
+    assert payload["status"] == "resource_limit_blocked"
+    assert payload["limit"]["reason"] == "candidate_limit_exceeded"
+    for evidence in (payload, persisted):
+        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(roots["workspace_root"].resolve())
+        assert evidence["resolved_runtime_roots"]["evidence_root"]["path"] == str(roots["evidence_root"].resolve())
+        assert evidence["runtime_config"]["require_runtime_roots"] is True
+        assert evidence["runtime_config"]["service_role"] == "compute_control"
+        assert evidence["root_preflight"]["status"] == "ready"
+        assert evidence["root_preflight"]["checks"]["allowed_roots_policy"]["non_empty"] is True
+
+
 def test_bounded_evidence_preserves_pre_execution_reservation_proof(
     monkeypatch: Any,
     tmp_path: Path,
@@ -3416,16 +3475,25 @@ def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
     assert cancellation["replacement_submitted"] is False
     assert cancellation["cancel_attempted"] is True
     assert cancellation["mutation_occurred"] is False
+    assert cancellation["pipeline_event_write"] is True
+    assert "pipeline_status_write" not in cancellation
     assert result.status == "slurm_cancellation_blocked"
     assert result.evidence["status"] == "slurm_cancellation_blocked"
     assert result.evidence["execution_boundary"] == "slurm_cancellation"
     assert result.evidence["counts"]["slurm_cancelled_count"] == 0
     assert result.evidence["counts"]["slurm_cancellation_blocked_count"] == 1
     assert result.evidence["slurm_cancellation_proof"]["cancel_called"] is True
-    assert result.evidence["slurm_cancellation_proof"]["mutation_occurred"] is False
+    assert result.evidence["slurm_cancellation_proof"]["mutation_occurred"] is True
+    assert result.evidence["slurm_cancellation_proof"]["cancelled_job_count"] == 0
+    assert result.evidence["slurm_cancellation_proof"]["pipeline_status_write_count"] == 0
+    assert result.evidence["slurm_cancellation_proof"]["pipeline_event_write_count"] == 1
+    assert result.evidence["slurm_cancellation_proof"]["pipeline_status_writes_proven_absent"] is True
+    assert result.evidence["slurm_cancellation_proof"]["pipeline_event_writes_proven_absent"] is False
     assert result.evidence["slurm_cancellation_proof"]["protected_by_pre_execution_evidence"] is True
     assert result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is True
     assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert result.evidence["no_mutation_proof"]["pipeline_status_writes"] is False
+    assert result.evidence["no_mutation_proof"]["pipeline_event_writes"] is True
 
 
 def test_active_cycle_orchestration_without_hydro_state_skips_all_candidates(
@@ -5131,13 +5199,188 @@ def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_pat
     result = scheduler.run_once()
 
     artifact_text = Path(result.artifact_path or "").read_text(encoding="utf-8")
+    persisted = json.loads(artifact_text)
     evidence_text = json.dumps(result.evidence, sort_keys=True)
-    assert result.evidence["model_run_evidence"][0]["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+    assert orchestrator.calls
+    assert result.status == "submission_failed"
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "submission_failed"
+        assert evidence["execution_boundary"] == "production_orchestration"
+        assert evidence["evidence_pre_execution"]["status"] == "reserved"
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["failed_count"] == 1
+        assert evidence["counts"]["partial_count"] == 1
+        model_run = evidence["model_run_evidence"][0]
+        assert model_run["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+        assert model_run["submitted"] is False
+        assert model_run["execution_attempted"] is True
+        assert model_run["mutation_outcome"] == "unknown_after_attempt"
+        assert model_run["mutation_occurred"] == "unknown_after_attempt"
+        assert model_run["pipeline_status_writes_proven_absent"] is False
+        assert model_run["pipeline_event_writes_proven_absent"] is False
+        proof = evidence["execution_write_proof"]
+        assert proof["orchestration_called"] is True
+        assert proof["protected_by_pre_execution_evidence"] is True
+        assert proof["mutation_outcome"] == "unknown_after_attempt"
+        assert proof["mutation_occurred"] == "unknown_after_attempt"
+        assert proof["unknown_execution_count"] == 1
+        assert proof["pipeline_status_writes_proven_absent"] is False
+        assert proof["pipeline_event_writes_proven_absent"] is False
+        assert evidence["no_mutation_proof"]["slurm_submit_called"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["hydro_result_table_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["met_result_table_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["pipeline_status_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["pipeline_event_writes"] == "unknown_after_attempt"
     for raw_secret in ("user:pass", "sig123", "tok123", "pass123", "signature=sig123", "token=tok123"):
         assert raw_secret not in evidence_text
         assert raw_secret not in artifact_text
     assert "[redacted]" in evidence_text
     assert "[redacted]" in artifact_text
+
+
+@pytest.mark.parametrize("result_status", ["failed", "submission_failed"])
+def test_returned_failed_pipeline_without_slurm_id_keeps_pipeline_write_proof(
+    tmp_path: Path,
+    result_status: str,
+) -> None:
+    class ReturnedFailureNoSlurmOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            basin = basins[0]
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status=result_status,
+                stages=(
+                    StageRunResult(
+                        stage="forcing",
+                        job_type="produce_forcing_array",
+                        pipeline_job_id="job_forcing",
+                        slurm_job_id="",
+                        status="submission_failed",
+                        error_code="SBATCH_SUBMISSION_FAILED",
+                    ),
+                ),
+                candidate_outcomes=(
+                    {
+                        "candidate_id": basin["candidate_id"],
+                        "run_id": basin["run_id"],
+                        "model_id": basin["model_id"],
+                        "status": "submission_failed",
+                        "stage": "forcing",
+                        "reason": "sbatch_submission_failed",
+                        "pipeline_status_write": True,
+                        "pipeline_event_write": True,
+                        "slurm_job_id": "",
+                    },
+                ),
+            )
+
+    orchestrator = ReturnedFailureNoSlurmOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert orchestrator.calls
+    assert result.status == "submission_failed"
+    for evidence in (result.evidence, persisted):
+        model_run = evidence["model_run_evidence"][0]
+        proof = evidence["execution_write_proof"]
+        no_mutation = evidence["no_mutation_proof"]
+
+        assert model_run["submitted"] is False
+        assert model_run["slurm_submit_called"] is False
+        assert model_run["execution_attempted"] is True
+        assert model_run["pipeline_status_write"] is True
+        assert model_run["pipeline_event_write"] is True
+        assert model_run["pipeline_status_writes_proven_absent"] is False
+        assert model_run["pipeline_event_writes_proven_absent"] is False
+        assert model_run["mutation_occurred"] is True
+
+        assert proof["orchestration_called"] is True
+        assert proof["slurm_submit_count"] == 0
+        assert proof["slurm_submit_proven_absent"] is True
+        assert proof["slurm_submit_called"] is False
+        assert proof["hydro_result_table_writes"] is False
+        assert proof["met_result_table_writes"] is False
+        assert proof["pipeline_status_writes"] is True
+        assert proof["pipeline_event_writes"] is True
+        assert proof["pipeline_status_write_count"] == 1
+        assert proof["pipeline_event_write_count"] == 1
+        assert proof["pipeline_status_writes_proven_absent"] is False
+        assert proof["pipeline_event_writes_proven_absent"] is False
+
+        assert no_mutation["slurm_submit_called"] is False
+        assert no_mutation["pipeline_status_writes"] is True
+        assert no_mutation["pipeline_event_writes"] is True
+
+
+def test_returned_pipeline_with_slurm_id_without_pipeline_write_proof_keeps_pipeline_writes_unknown(
+    tmp_path: Path,
+) -> None:
+    class ReturnedSlurmWithoutPipelineWriteOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=(
+                    StageRunResult(
+                        stage="forcing",
+                        job_type="produce_forcing_array",
+                        pipeline_job_id="",
+                        slurm_job_id="slurm_forcing_123",
+                        status="succeeded",
+                    ),
+                ),
+            )
+
+    orchestrator = ReturnedSlurmWithoutPipelineWriteOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert orchestrator.calls
+    for evidence in (result.evidence, persisted):
+        model_run = evidence["model_run_evidence"][0]
+        proof = evidence["execution_write_proof"]
+        no_mutation = evidence["no_mutation_proof"]
+
+        assert model_run["slurm_submit_called"] is True
+        assert model_run["submitted"] is True
+        assert model_run["pipeline_status_write"] == "unknown_after_attempt"
+        assert model_run["pipeline_event_write"] == "unknown_after_attempt"
+
+        assert proof["slurm_submit_called"] is True
+        assert proof["pipeline_status_writes"] == "unknown_after_attempt"
+        assert proof["pipeline_event_writes"] == "unknown_after_attempt"
+
+        assert no_mutation["slurm_submit_called"] is True
+        assert no_mutation["pipeline_status_writes"] == "unknown_after_attempt"
+        assert no_mutation["pipeline_event_writes"] == "unknown_after_attempt"
 
 
 def test_active_db_job_cancel_requested_calls_cancel_before_active_skip(tmp_path: Path) -> None:
