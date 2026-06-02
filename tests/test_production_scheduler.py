@@ -37,15 +37,69 @@ from services.orchestrator.scheduler import (
     SCHEDULER_EVIDENCE_GITHUB_ISSUE,
     SCHEDULER_EVIDENCE_SCHEMA_VERSION,
     FileSchedulerLease,
-    ProductionScheduler,
     ProductionSchedulerConfig,
     SchedulerEvidenceWriteError,
     SchedulerPassResult,
+)
+from services.orchestrator.scheduler import (
+    ProductionScheduler as _RealProductionScheduler,
 )
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES, evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 from workers.shud_runtime import runtime as shud_runtime_module
+
+_TEST_CANONICAL_READINESS_PROVIDER_UNSET = object()
+
+
+class _AlwaysReadyCanonicalReadinessProvider:
+    def canonical_readiness(self, **kwargs: Any) -> Mapping[str, Any]:
+        return {
+            "status": "canonical_ready",
+            "ready": True,
+            "reason": None,
+            "source_id": kwargs["source_id"],
+            "cycle_time": kwargs["cycle_time"],
+            "forecast_hours": list(kwargs["forecast_hours"]),
+            "policy_identity": dict(kwargs["policy_identity"]),
+            "source_object_identity": dict(kwargs["source_object_identity"]),
+            "canonical_product_id": kwargs["canonical_product_id"],
+            "model_id": kwargs["model_id"],
+            "basin_id": kwargs["basin_id"],
+        }
+
+
+class ProductionScheduler(_RealProductionScheduler):
+    def __init__(
+        self,
+        config: ProductionSchedulerConfig | None = None,
+        *,
+        registry: Any | None = None,
+        adapters: Mapping[str, Any] | None = None,
+        active_repository: Any | None = None,
+        canonical_readiness_provider: Any = _TEST_CANONICAL_READINESS_PROVIDER_UNSET,
+        orchestrator_factory: Any | None = None,
+        sleep: Any | None = None,
+    ) -> None:
+        self._test_canonical_readiness_omitted = (
+            canonical_readiness_provider is _TEST_CANONICAL_READINESS_PROVIDER_UNSET
+        )
+        if canonical_readiness_provider is _TEST_CANONICAL_READINESS_PROVIDER_UNSET:
+            canonical_readiness_provider = _AlwaysReadyCanonicalReadinessProvider()
+        super().__init__(
+            config,
+            registry=registry,
+            adapters=adapters,
+            active_repository=active_repository,
+            canonical_readiness_provider=canonical_readiness_provider,
+            orchestrator_factory=orchestrator_factory,
+            sleep=sleep,
+        )
+
+    def _canonical_readiness_for_candidate(self, candidate: Any, cycle: Any) -> dict[str, Any] | None:
+        if self._test_canonical_readiness_omitted:
+            return None
+        return super()._canonical_readiness_for_candidate(candidate, cycle)
 
 
 def test_all_active_models_and_gfs_ifs_window_produce_stable_candidate_ids(tmp_path: Path) -> None:
@@ -174,6 +228,193 @@ def test_canonical_incomplete_readiness_blocks_forcing_candidate_submission(tmp_
     assert canonical["status"] == "canonical_incomplete"
     assert canonical["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
     assert adapter.download_calls == 0
+
+
+def test_canonical_readiness_provider_absent_blocks_candidate_with_unavailable_evidence(tmp_path: Path) -> None:
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        canonical_readiness_provider=None,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "canonical_readiness_provider_absent"
+    canonical = blocked["state_evidence"]["canonical_readiness"]
+    assert canonical["status"] == "canonical_unavailable"
+    assert canonical["ready"] is False
+    assert canonical["dependency"]["name"] == "canonical_readiness_provider"
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+
+
+def test_omitted_canonical_readiness_provider_blocks_candidate_with_unavailable_evidence(tmp_path: Path) -> None:
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "canonical_readiness_provider_absent"
+    assert blocked["state_evidence"]["canonical_readiness"]["ready"] is False
+
+
+def test_canonical_readiness_query_error_blocks_and_redacts_dependency_details(tmp_path: Path) -> None:
+    class FailingReadinessProvider:
+        def canonical_readiness(self, **_kwargs: Any) -> Mapping[str, Any]:
+            raise RuntimeError("DATABASE_URL=postgres://user:super-secret@example.test/db token=secret-token")
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        canonical_readiness_provider=FailingReadinessProvider(),
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "canonical_readiness_query_failed"
+    rendered = json.dumps(blocked)
+    assert "super-secret" not in rendered
+    assert "secret-token" not in rendered
+    assert "DATABASE_URL" not in rendered
+    assert blocked["state_evidence"]["canonical_readiness"]["failure"]["error_type"] == "RuntimeError"
+
+
+def test_completed_duplicate_is_skipped_before_not_ready_canonical_gate(tmp_path: Path) -> None:
+    class FailingReadinessProvider:
+        def canonical_readiness(self, **_kwargs: Any) -> Mapping[str, Any]:
+            raise AssertionError("completed candidates must not query canonical readiness")
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False, completed=True),
+        canonical_readiness_provider=FailingReadinessProvider(),
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"][0]["reason"] == "completed_duplicate_pipeline"
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "classifier", "retryable"),
+    [
+        ("unavailable", "source_cycle_unavailable", "unavailable", True),
+        ("forbidden", "source_cycle_forbidden", "forbidden", False),
+        ("stale", "source_cycle_stale", "stale", True),
+        ("policy_blocked", "source_cycle_policy_blocked", "policy_blocked", False),
+    ],
+)
+def test_source_blocker_preserves_adapter_classifier_and_redacts_probe_credentials(
+    tmp_path: Path,
+    status: str,
+    reason: str,
+    classifier: str,
+    retryable: bool,
+) -> None:
+    signed_probe = "https://provider.example.test/file?token=super-secret&X-Amz-Signature=secret-signature"
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    (
+                        "2026-05-21T06:00:00Z",
+                        False,
+                        {
+                            "status": status,
+                            "reason": reason,
+                            "classifier": classifier,
+                            "retryable": retryable,
+                            "probe_uri": signed_probe,
+                            "evidence": {
+                                "probe": {"uri": signed_probe, "Authorization": "Bearer super-secret"},
+                            },
+                        },
+                    )
+                ],
+            )
+        },
+        canonical_readiness_provider=None,
+    )
+
+    result = scheduler.run_once()
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state = blocked["state_evidence"]
+    assert blocked["reason"] == reason
+    assert state["failure"]["classifier"] == classifier
+    assert state["failure"]["retryable"] is retryable
+    assert state["failure"]["permanent"] is (not retryable)
+    assert state["retry_policy"]["automatic_retry_allowed"] is retryable
+    assert state["identity"]["source_id"] == "gfs"
+    assert state["identity"]["cycle_id"] == "gfs_2026052106"
+    rendered = json.dumps(blocked)
+    assert "super-secret" not in rendered
+    assert "secret-signature" not in rendered
+
+
+def test_pass_source_cycle_evidence_redacts_forbidden_probe_credentials(tmp_path: Path) -> None:
+    signed_probe = (
+        "https://user:password@provider.example.test/file"
+        "?token=super-secret&X-Amz-Signature=secret-signature"
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    (
+                        "2026-05-21T06:00:00Z",
+                        False,
+                        {
+                            "status": "forbidden",
+                            "reason": "source_cycle_forbidden",
+                            "classifier": "forbidden",
+                            "retryable": False,
+                            "probe_uri": signed_probe,
+                            "evidence": {
+                                "probe": {
+                                    "uri": signed_probe,
+                                    "Authorization": "Bearer super-secret",
+                                    "env_name": "AWS_SECRET_ACCESS_KEY",
+                                    "env_value": "super-secret",
+                                    "headers": {"X-Api-Key": "secret-api-key"},
+                                }
+                            },
+                        },
+                    )
+                ],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    rendered = json.dumps(result.evidence)
+    assert "super-secret" not in rendered
+    assert "secret-signature" not in rendered
+    assert "password" not in rendered
+    assert "Authorization" not in rendered
+    assert "AWS_SECRET_ACCESS_KEY" not in rendered
+    assert "secret-api-key" not in rendered
 
 
 @pytest.mark.parametrize(
@@ -3953,6 +4194,42 @@ def test_candidate_state_terminal_hydro_success_records_durable_skip_reason(
     assert orchestrator.calls == []
 
 
+def test_terminal_candidate_state_is_recorded_before_not_ready_canonical_gate(tmp_path: Path) -> None:
+    class NotReadyReadinessProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def canonical_readiness(self, **_kwargs: Any) -> Mapping[str, Any]:
+            self.calls += 1
+            return {"status": "canonical_unavailable", "ready": False, "reason": "canonical_missing"}
+
+    provider = NotReadyReadinessProvider()
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "hydro_status": "succeeded",
+            "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+        }
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        canonical_readiness_provider=provider,
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert provider.calls == 0
+    assert result.evidence["blocked_candidates"] == []
+    skipped = result.evidence["skipped_candidates"][0]
+    assert skipped["reason"] == "terminal_hydro_success"
+    assert skipped["state_evidence"]["decision"] == "skip_terminal"
+    assert "canonical_readiness" not in skipped["state_evidence"]
+
+
 def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_without_native_rerun(
     tmp_path: Path,
 ) -> None:
@@ -7440,6 +7717,17 @@ def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
         lambda: FakeActiveRepository(active=False),
     )
     monkeypatch.setattr(
+        "services.orchestrator.scheduler._canonical_readiness_provider_from_env",
+        lambda: FakeCanonicalReadinessProvider(
+            {
+                ("gfs", _dt("2026-05-21T06:00:00Z")): {
+                    "status": "canonical_ready",
+                    "ready": True,
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
         scheduler_module,
         "_now",
         lambda _config: _dt("2026-05-21T12:00:00Z"),
@@ -8682,7 +8970,7 @@ class FakeAdapter:
     def __init__(
         self,
         source_id: str,
-        cycles: list[tuple[str, bool]],
+        cycles: list[tuple[str, bool] | tuple[str, bool, dict[str, Any]]],
         *,
         policy_identity: dict[str, Any] | None = None,
         source_object_identity: dict[str, Any] | None = None,
@@ -8696,18 +8984,29 @@ class FakeAdapter:
     def discover_cycles(self, cycle_date: Any, end_date: Any = None) -> list[CycleDiscovery]:
         del end_date
         requested_date = cycle_date.date() if isinstance(cycle_date, datetime) else cycle_date
-        return [
-            CycleDiscovery(
-                cycle_id=cycle_id_for(self.source_id, _dt(cycle_time)),
-                source_id=self.source_id,
-                cycle_time=_dt(cycle_time),
-                cycle_hour=_dt(cycle_time).hour,
-                available=available,
-                status="discovered" if available else "unavailable",
+        discoveries: list[CycleDiscovery] = []
+        for cycle in self.cycles:
+            cycle_time, available, *extra = cycle
+            parsed_cycle_time = _dt(cycle_time)
+            if parsed_cycle_time.date() != requested_date:
+                continue
+            metadata = dict(extra[0]) if extra else {}
+            discoveries.append(
+                CycleDiscovery(
+                    cycle_id=cycle_id_for(self.source_id, parsed_cycle_time),
+                    source_id=self.source_id,
+                    cycle_time=parsed_cycle_time,
+                    cycle_hour=parsed_cycle_time.hour,
+                    available=available,
+                    status=metadata.get("status") or ("discovered" if available else "unavailable"),
+                    reason=metadata.get("reason"),
+                    classifier=metadata.get("classifier"),
+                    retryable=metadata.get("retryable"),
+                    probe_uri=metadata.get("probe_uri"),
+                    evidence=dict(metadata.get("evidence") or {}),
+                )
             )
-            for cycle_time, available in self.cycles
-            if _dt(cycle_time).date() == requested_date
-        ]
+        return discoveries
 
     def download_plan(self, *_args: Any, **_kwargs: Any) -> None:
         self.download_calls += 1

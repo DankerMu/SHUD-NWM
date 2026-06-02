@@ -415,6 +415,7 @@ class GFSAdapter(DataSourceAdapter):
         if not needs_download:
             results = tuple(already_done_by_key[entry.local_key] for entry in manifest.entries)
             if existing_cycle is not None and existing_cycle.get("status") == "raw_complete":
+                self._refresh_manifest_source_object_identity(manifest)
                 return DownloadPlanResult(
                     status="already_done",
                     files=results,
@@ -432,6 +433,7 @@ class GFSAdapter(DataSourceAdapter):
                     total_bytes_written=0,
                     retry_count=0,
                 )
+            self._refresh_manifest_source_object_identity(manifest)
             return DownloadPlanResult(
                 status="raw_complete",
                 files=results,
@@ -501,6 +503,7 @@ class GFSAdapter(DataSourceAdapter):
             )
 
         self._update_cycle(cycle_time=cycle_time, status="raw_complete", retry_count=0)
+        self._refresh_manifest_source_object_identity(manifest)
         return DownloadPlanResult(
             status="raw_complete",
             files=tuple(results),
@@ -634,8 +637,19 @@ class GFSAdapter(DataSourceAdapter):
 
     def _normalize_payload(self, payload: bytes | DownloadedPayload) -> DownloadedPayload:
         if isinstance(payload, DownloadedPayload):
+            if (
+                payload.bytes_written > self.config.max_file_size_bytes
+                or len(payload.content) > self.config.max_file_size_bytes
+            ):
+                raise FileTooLargeError(
+                    f"Downloaded GFS payload exceeds maximum size {self.config.max_file_size_bytes} bytes"
+                )
             return payload
         content = bytes(payload)
+        if len(content) > self.config.max_file_size_bytes:
+            raise FileTooLargeError(
+                f"Downloaded GFS payload exceeds maximum size {self.config.max_file_size_bytes} bytes"
+            )
         return DownloadedPayload(content=content, checksum=sha256_bytes(content), bytes_written=len(content))
 
     def _entry_already_done(self, entry: ManifestEntry) -> bool:
@@ -763,6 +777,26 @@ class GFSAdapter(DataSourceAdapter):
             error_message=self._safe_text(error_message),
         )
 
+    def _refresh_manifest_source_object_identity(self, manifest: DownloadManifest) -> None:
+        hours = self._manifest_forecast_hours(manifest)
+        manifest.metadata["source_object_identity"] = self.source_object_identity(manifest.cycle_time, hours)
+        if manifest.manifest_uri is None:
+            return
+        try:
+            self.object_store.write_bytes_atomic(
+                manifest.manifest_uri,
+                json.dumps(manifest.as_dict(), indent=2, sort_keys=True).encode("utf-8"),
+            )
+        except (OSError, ObjectStoreError, ValueError):
+            LOGGER.exception("Failed to persist refreshed source object identity for %s", manifest.manifest_uri)
+            raise
+
+    def _manifest_forecast_hours(self, manifest: DownloadManifest) -> list[int]:
+        forecast_hours = manifest.metadata.get("forecast_hours")
+        if isinstance(forecast_hours, list):
+            return [int(forecast_hour) for forecast_hour in forecast_hours]
+        return sorted({int(entry.forecast_hour) for entry in manifest.entries})
+
     def source_policy_identity(self, forecast_hours: list[int] | None = None) -> dict[str, Any]:
         hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
         return {
@@ -784,7 +818,10 @@ class GFSAdapter(DataSourceAdapter):
     ) -> dict[str, Any]:
         parsed_cycle_time = parse_cycle_time(cycle_time)
         hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
+        entries = self._source_object_entry_identities(parsed_cycle_time, hours)
+        entry_digest = _stable_digest(entries)
         return {
+            "identity_schema_version": "nhms.source_object_identity.v2",
             "source": self.config.source_id,
             "cycle_time": parsed_cycle_time.isoformat(),
             "base_url": self._safe_text(self.config.base_url),
@@ -793,10 +830,63 @@ class GFSAdapter(DataSourceAdapter):
             "forecast_hour_count": len(hours),
             "variable_count": len(self.config.variables),
             "manifest_object_key": f"raw/{self.config.source_id}/{format_cycle_time(parsed_cycle_time)}/manifest.json",
+            "manifest_digest": _stable_digest(
+                {
+                    "source_id": self.config.source_id,
+                    "cycle_time": parsed_cycle_time.isoformat(),
+                    "entries": entries,
+                    "source_policy": self.source_policy_identity(hours),
+                }
+            ),
+            "raw_entry_count": len(entries),
+            "raw_entry_digest": entry_digest,
+            "remote_identity_digest": _stable_digest([entry["remote_identity"] for entry in entries]),
+            "raw_entry_samples": _entry_samples(entries),
         }
 
     def _safe_text(self, value: object) -> str:
         return str(redact_payload(str(value)))
+
+    def _source_object_entry_identities(
+        self,
+        cycle_time: datetime,
+        forecast_hours: list[int],
+    ) -> list[dict[str, Any]]:
+        compact_cycle = format_cycle_time(cycle_time)
+        entries: list[dict[str, Any]] = []
+        for forecast_hour in forecast_hours:
+            for variable in self.config.variables:
+                filename = self.raw_filename(cycle_time, forecast_hour, variable)
+                local_key = f"raw/{self.config.source_id}/{compact_cycle}/{filename}"
+                entries.append(
+                    {
+                        "local_key": local_key,
+                        "remote_identity": self._safe_text(self.remote_url(cycle_time, forecast_hour, variable)),
+                        "variable": variable,
+                        "forecast_hour": forecast_hour,
+                        "expected_checksum": None,
+                        "expected_size_bytes": None,
+                        "observed_raw_object": self._raw_object_observation(local_key),
+                    }
+                )
+        return entries
+
+    def _raw_object_observation(self, local_key: str) -> dict[str, Any]:
+        try:
+            if not self.object_store.exists(local_key):
+                return {"status": "missing", "checksum": None, "size_bytes": None}
+            return {
+                "status": "present",
+                "checksum": self.object_store.checksum(local_key),
+                "size_bytes": self.object_store.size(local_key),
+            }
+        except (OSError, ObjectStoreError, ValueError) as error:
+            return {
+                "status": "unavailable",
+                "checksum": None,
+                "size_bytes": None,
+                "error_type": type(error).__name__,
+            }
 
     def _get_cycle(self, cycle_time: datetime) -> dict[str, Any] | None:
         if self.repository is None:
@@ -866,3 +956,13 @@ class GFSAdapter(DataSourceAdapter):
         if "/cgi-bin/" in parsed.path:
             return self.config.base_url.rstrip("/")
         return f"{parsed.scheme}://{parsed.netloc}/cgi-bin/filter_gfs_0p25.pl"
+
+
+def _stable_digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def _entry_samples(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(entries) <= 2:
+        return [dict(entry) for entry in entries]
+    return [dict(entries[0]), dict(entries[-1])]

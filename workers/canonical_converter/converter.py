@@ -334,6 +334,9 @@ def evaluate_canonical_readiness(
     object_identities: set[str] = set()
     policy_identities: set[str] = set()
     identity_rejected_row_count = 0
+    missing_policy_identity_row_count = 0
+    missing_source_object_identity_row_count = 0
+    missing_required_lineage_row_count = 0
 
     expected_policy_id = _stable_identity(policy_identity)
     expected_object_id = _stable_identity(source_object_identity)
@@ -355,10 +358,19 @@ def evaluate_canonical_readiness(
         row_object = _stable_identity(
             lineage.get("source_object_identity") or lineage.get("source_identity") or lineage.get("object_identity")
         )
+        missing_required_lineage = False
+        if expected_policy_id and not row_policy:
+            missing_policy_identity_row_count += 1
+            missing_required_lineage = True
+        if expected_object_id and not row_object:
+            missing_source_object_identity_row_count += 1
+            missing_required_lineage = True
         if (expected_policy_id and row_policy != expected_policy_id) or (
             expected_object_id and row_object != expected_object_id
         ):
             identity_rejected_row_count += 1
+            if missing_required_lineage:
+                missing_required_lineage_row_count += 1
             continue
         if row_policy:
             policy_identities.add(row_policy)
@@ -416,10 +428,18 @@ def evaluate_canonical_readiness(
         "policy_identity_matched": not expected_policy_id or bool(policy_identities),
         "source_object_identity_matched": not expected_object_id or bool(object_identities),
         "identity_rejected_row_count": identity_rejected_row_count,
+        "missing_policy_identity_row_count": missing_policy_identity_row_count,
+        "missing_source_object_identity_row_count": missing_source_object_identity_row_count,
+        "missing_required_lineage_row_count": missing_required_lineage_row_count,
         "reused_existing_ready": ready,
     }
     if identity_mismatch:
-        evidence["reason"] = "canonical_identity_mismatch"
+        if missing_required_lineage_row_count == identity_rejected_row_count and not (
+            policy_identities and object_identities
+        ):
+            evidence["reason"] = "canonical_lineage_missing"
+        else:
+            evidence["reason"] = "canonical_identity_mismatch"
     elif missing_variables:
         evidence["reason"] = "missing_canonical_variables"
     elif missing_leads:
@@ -2159,6 +2179,8 @@ class IFSCanonicalConverter(CanonicalConverter):
         conversion_params: Mapping[str, Any],
         quality_flag: str = "ok",
         lineage_updates: Mapping[str, Any] | None = None,
+        policy_identity: Mapping[str, Any] | None = None,
+        source_object_identity: Mapping[str, Any] | None = None,
     ) -> CanonicalProductResult:
         valid_time = cycle_time + timedelta(hours=forecast_hour)
         compact_cycle = format_cycle_time(cycle_time)
@@ -2172,6 +2194,10 @@ class IFSCanonicalConverter(CanonicalConverter):
         }
         if lineage_updates:
             lineage_json.update(lineage_updates)
+        if policy_identity:
+            lineage_json["policy_identity"] = dict(policy_identity)
+        if source_object_identity:
+            lineage_json["source_object_identity"] = dict(source_object_identity)
         content = self._serialize_product(
             variable=standard_variable,
             values=values,

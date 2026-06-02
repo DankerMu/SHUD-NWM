@@ -264,6 +264,68 @@ class ProductionOrchestratorFactory(Protocol):
         raise NotImplementedError
 
 
+_CANONICAL_READINESS_PROVIDER_UNSET = object()
+
+
+class _UnavailableCanonicalReadinessProvider:
+    def __init__(self, *, reason: str, dependency: str, retryable: bool) -> None:
+        self.reason = reason
+        self.dependency = dependency
+        self.retryable = retryable
+
+    def canonical_readiness(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        forecast_hours: Sequence[int],
+        policy_identity: Mapping[str, Any],
+        source_object_identity: Mapping[str, Any],
+        canonical_product_id: str,
+        model_id: str,
+        basin_id: str,
+    ) -> Mapping[str, Any]:
+        discovery = CycleDiscovery(
+            cycle_id=cycle_id_for(source_id, cycle_time),
+            source_id=source_id,
+            cycle_time=cycle_time,
+            cycle_hour=cycle_time.hour,
+            available=True,
+            status="discovered",
+        )
+        candidate = SchedulerCandidate(
+            candidate_id=f"{source_id}:{_format_utc(cycle_time)}:{model_id}:canonical_readiness",
+            source_id=source_id,
+            cycle_id=cycle_id_for(source_id, cycle_time),
+            cycle_time_utc=cycle_time,
+            model_id=model_id,
+            basin_id=basin_id,
+            basin_version_id=None,
+            river_network_version_id=None,
+            segment_count=None,
+            output_segment_count=None,
+            model_package_uri=None,
+            resource_profile={},
+            display_capabilities={},
+            frequency_capabilities={},
+            horizon={},
+            scenario_id="canonical_readiness",
+            run_id="",
+            forcing_version_id="",
+            status="blocked",
+        )
+        return _canonical_readiness_unavailable_evidence(
+            discovery,
+            candidate,
+            forecast_hours=forecast_hours,
+            policy_identity=policy_identity,
+            source_object_identity=source_object_identity,
+            reason=self.reason,
+            dependency=self.dependency,
+            retryable=self.retryable,
+        )
+
+
 @dataclass(frozen=True)
 class ProductionSchedulerConfig:
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
@@ -628,7 +690,9 @@ class ProductionScheduler:
         registry: ModelRegistryReader | None = None,
         adapters: Mapping[str, CycleDiscoveryAdapter] | None = None,
         active_repository: ActiveCandidateRepository | None = None,
-        canonical_readiness_provider: CanonicalReadinessProvider | None = None,
+        canonical_readiness_provider: CanonicalReadinessProvider | None | object = (
+            _CANONICAL_READINESS_PROVIDER_UNSET
+        ),
         orchestrator_factory: ProductionOrchestratorFactory | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
@@ -636,7 +700,17 @@ class ProductionScheduler:
         self.registry = registry if registry is not None else PsycopgModelRegistryStore.from_env()
         self.adapters = dict(adapters if adapters is not None else _default_adapters())
         self.active_repository = active_repository
-        self.canonical_readiness_provider = canonical_readiness_provider
+        if (
+            canonical_readiness_provider is _CANONICAL_READINESS_PROVIDER_UNSET
+            or canonical_readiness_provider is None
+        ):
+            self.canonical_readiness_provider = _UnavailableCanonicalReadinessProvider(
+                reason="canonical_readiness_provider_absent",
+                dependency="canonical_readiness_provider",
+                retryable=True,
+            )
+        else:
+            self.canonical_readiness_provider = canonical_readiness_provider
         self.orchestrator_factory = orchestrator_factory
         self.sleep = sleep or _sleep
 
@@ -919,6 +993,8 @@ class ProductionScheduler:
                 ):
                     pass_status = "slurm_status_synced"
                     execution_boundary = "slurm_status_sync"
+                if pass_status == "planned" and not candidates and blocked_candidates:
+                    pass_status = _blocked_pass_status(blocked_candidates)
                 scheduler_mutation_proof = _scheduler_mutation_proof(
                     execution_write_proof=execution_write_proof,
                     slurm_status_sync_proof=slurm_status_sync_proof,
@@ -1659,16 +1735,29 @@ class ProductionScheduler:
         forecast_hours = _source_forecast_hours(cycle.discovery, adapter, cycle.horizon)
         policy_identity = _source_policy_identity(cycle.discovery, adapter, forecast_hours)
         source_object_identity = _source_object_identity(cycle.discovery, adapter, forecast_hours)
-        readiness = provider.canonical_readiness(
-            source_id=cycle.discovery.source_id,
-            cycle_time=cycle.discovery.cycle_time,
-            forecast_hours=forecast_hours,
-            policy_identity=policy_identity,
-            source_object_identity=source_object_identity,
-            canonical_product_id=_candidate_canonical_product_id(candidate),
-            model_id=candidate.model_id,
-            basin_id=candidate.basin_id,
-        )
+        try:
+            readiness = provider.canonical_readiness(
+                source_id=cycle.discovery.source_id,
+                cycle_time=cycle.discovery.cycle_time,
+                forecast_hours=forecast_hours,
+                policy_identity=policy_identity,
+                source_object_identity=source_object_identity,
+                canonical_product_id=_candidate_canonical_product_id(candidate),
+                model_id=candidate.model_id,
+                basin_id=candidate.basin_id,
+            )
+        except Exception as error:
+            readiness = _canonical_readiness_unavailable_evidence(
+                cycle.discovery,
+                candidate,
+                forecast_hours=forecast_hours,
+                policy_identity=policy_identity,
+                source_object_identity=source_object_identity,
+                reason="canonical_readiness_query_failed",
+                dependency="canonical_readiness_provider",
+                error=error,
+                retryable=True,
+            )
         evidence = dict(readiness)
         evidence.setdefault("source", cycle.discovery.source_id)
         evidence.setdefault("cycle_time", _format_utc(cycle.discovery.cycle_time))
@@ -1747,26 +1836,45 @@ class ProductionScheduler:
                     blocked.append(
                         _blocked_candidate(
                             candidate,
-                            "source_cycle_unavailable",
-                            state_evidence=_source_unavailable_retry_evidence(candidate),
+                            discovery.reason or "source_cycle_unavailable",
+                            state_evidence=_source_blocked_evidence(candidate, discovery),
                         )
                     )
                     continue
-                canonical_readiness = self._canonical_readiness_for_candidate(candidate, cycle)
-                if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
-                    blocked.append(
-                        _blocked_candidate(
-                            candidate,
-                            str(canonical_readiness.get("reason") or "canonical_incomplete"),
-                            state_evidence={"canonical_readiness": canonical_readiness},
+                if has_active_orchestration is None:
+                    has_active_orchestration = bool(
+                        callable(active_orchestration_provider)
+                        and active_orchestration_provider(
+                            source_id=discovery.source_id,
+                            cycle_time=discovery.cycle_time,
                         )
                     )
+                if (
+                    has_active_orchestration
+                    and not self.config.cancel_active_slurm
+                    and not callable(state_provider)
+                ):
+                    skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                     continue
-                if canonical_readiness is not None:
-                    candidate = _candidate_with_state_evidence(
-                        candidate,
-                        {"canonical_readiness": canonical_readiness},
+                if (
+                    not self.config.cancel_active_slurm
+                    and not callable(state_provider)
+                    and self.active_repository is not None
+                    and self.active_repository.has_active_pipeline(
+                        source_id=discovery.source_id,
+                        cycle_time=discovery.cycle_time,
+                        model_id=model.model_id,
                     )
+                ):
+                    skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
+                    continue
+                if callable(completed_provider) and completed_provider(
+                    source_id=discovery.source_id,
+                    cycle_time=discovery.cycle_time,
+                    model_id=model.model_id,
+                ):
+                    skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
+                    continue
                 state_decision = (
                     _candidate_state_decision(
                         candidate,
@@ -1804,6 +1912,37 @@ class ProductionScheduler:
                         )
                     )
                     continue
+                if (
+                    state_decision is not None
+                    and state_decision.action == "skip"
+                    and state_decision.reason != "active_slurm_job"
+                ):
+                    skipped.append(
+                        {
+                            **candidate.to_dict(),
+                            "reason": state_decision.reason,
+                            "state_evidence": _evidence_safe(state_decision.evidence),
+                        }
+                    )
+                    continue
+                canonical_readiness = self._canonical_readiness_for_candidate(candidate, cycle)
+                if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
+                    state_evidence = {"canonical_readiness": canonical_readiness}
+                    if state_decision is not None:
+                        state_evidence["candidate_state"] = state_decision.evidence
+                    blocked.append(
+                        _blocked_candidate(
+                            candidate,
+                            str(canonical_readiness.get("reason") or "canonical_incomplete"),
+                            state_evidence=state_evidence,
+                        )
+                    )
+                    continue
+                if canonical_readiness is not None:
+                    candidate = _candidate_with_state_evidence(
+                        candidate,
+                        {"canonical_readiness": canonical_readiness},
+                    )
                 if state_decision is not None and state_decision.action == "retry":
                     candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                 if has_active_orchestration is None:
@@ -2021,13 +2160,6 @@ class ProductionScheduler:
                     model_id=model.model_id,
                 ):
                     skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
-                    continue
-                if callable(completed_provider) and completed_provider(
-                    source_id=discovery.source_id,
-                    cycle_time=discovery.cycle_time,
-                    model_id=model.model_id,
-                ):
-                    skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                     continue
                 candidates.append(candidate)
         return candidates, blocked, skipped, duplicate_exclusions, slurm_status_sync_evidence
@@ -2506,29 +2638,35 @@ def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, A
         ),
         "classifier": discovery.classifier,
         "retryable": discovery.retryable,
-        "probe_uri": discovery.probe_uri,
+        "probe_uri": _source_secret_text_safe(discovery.probe_uri) if discovery.probe_uri is not None else None,
         "db_cycle_status_written": None,
         "cycle_status_candidate": "discovered" if available else "unavailable",
     }
     if discovery.evidence:
-        evidence["discovery_evidence"] = _evidence_safe(discovery.evidence)
-    return evidence
+        evidence["discovery_evidence"] = _source_discovery_evidence_safe(discovery.evidence)
+    return _evidence_safe(evidence)
 
 
-def _source_unavailable_retry_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
-    return {
-        "decision": "blocked_retryable",
-        "reason": "source_cycle_unavailable",
+def _source_blocked_evidence(candidate: SchedulerCandidate, discovery: CycleDiscovery) -> dict[str, Any]:
+    retryable = True if discovery.retryable is None else bool(discovery.retryable)
+    reason = discovery.reason or "source_cycle_unavailable"
+    classifier = discovery.classifier or (
+        "source_unavailable" if reason == "source_cycle_unavailable" else discovery.status or "unavailable"
+    )
+    evidence = {
+        "decision": "blocked_retryable" if retryable else "blocked_permanent",
+        "reason": reason,
         "failure": {
-            "classifier": "source_unavailable",
-            "reason_code": "SOURCE_CYCLE_UNAVAILABLE",
-            "retryable": True,
-            "permanent": False,
+            "classifier": classifier,
+            "status": discovery.status or "unavailable",
+            "reason_code": _reason_code(reason),
+            "retryable": retryable,
+            "permanent": not retryable,
             "attempt": 0,
             "retry_limit": None,
         },
         "retry_policy": {
-            "automatic_retry_allowed": True,
+            "automatic_retry_allowed": retryable,
             "enum_safe_storage": "scheduler_evidence",
             "unsupported_db_enum_written": False,
         },
@@ -2540,8 +2678,108 @@ def _source_unavailable_retry_evidence(candidate: SchedulerCandidate) -> dict[st
             "candidate_id": candidate.candidate_id,
             "run_id": candidate.run_id,
             "forcing_version_id": candidate.forcing_version_id,
+            "source_id": discovery.source_id,
+            "cycle_id": discovery.cycle_id,
+            "cycle_time_utc": _format_utc(discovery.cycle_time),
+            "cycle_hour": discovery.cycle_hour,
+            "probe_uri": _source_secret_text_safe(discovery.probe_uri) if discovery.probe_uri is not None else None,
         },
     }
+    if discovery.evidence:
+        evidence["source_discovery"] = _source_discovery_evidence_safe(discovery.evidence)
+    return _evidence_safe(evidence)
+
+
+SOURCE_DISCOVERY_SENSITIVE_KEY_RE = re.compile(
+    r"(authorization|auth|header|env|token|signature|credential|secret|password|passwd|pwd|api[_-]?key|"
+    r"access[_-]?key|session[_-]?key)",
+    re.IGNORECASE,
+)
+SOURCE_DISCOVERY_SENSITIVE_TEXT_RE = re.compile(
+    r"(authorization|bearer|basic|token|signature|credential|secret|password|passwd|pwd|api[_-]?key|"
+    r"access[_-]?key|session[_-]?key)",
+    re.IGNORECASE,
+)
+
+
+def _source_discovery_evidence_safe(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for key, nested in value.items():
+            key_text = str(key)
+            if SOURCE_DISCOVERY_SENSITIVE_KEY_RE.search(key_text):
+                redacted["[redacted_key]"] = "[redacted]"
+            else:
+                redacted[key_text] = _source_discovery_evidence_safe(nested)
+        return _evidence_safe(redacted)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_source_discovery_evidence_safe(item) for item in value]
+    if isinstance(value, str):
+        return _source_secret_text_safe(value)
+    return _evidence_safe(value)
+
+
+def _source_secret_text_safe(value: str) -> str:
+    safe = _evidence_safe(value)
+    if not isinstance(safe, str):
+        return str(safe)
+    if SOURCE_DISCOVERY_SENSITIVE_TEXT_RE.search(safe):
+        return "[redacted]"
+    return safe
+
+
+def _reason_code(reason: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", reason.upper()).strip("_") or "UNKNOWN"
+
+
+def _canonical_readiness_unavailable_evidence(
+    discovery: CycleDiscovery,
+    candidate: SchedulerCandidate,
+    *,
+    forecast_hours: Sequence[int],
+    policy_identity: Mapping[str, Any],
+    source_object_identity: Mapping[str, Any],
+    reason: str,
+    dependency: str,
+    retryable: bool,
+    error: Exception | None = None,
+) -> dict[str, Any]:
+    failure: dict[str, Any] = {
+        "classifier": "dependency_unavailable" if "absent" in reason or "unavailable" in reason else "query_failed",
+        "reason_code": _reason_code(reason),
+        "dependency": dependency,
+        "retryable": retryable,
+        "permanent": not retryable,
+    }
+    if error is not None:
+        failure["error_type"] = type(error).__name__
+        failure["error_message_redacted"] = True
+    return _evidence_safe(
+        {
+            "source": discovery.source_id,
+            "source_id": discovery.source_id,
+            "cycle_id": discovery.cycle_id,
+            "cycle_time": _format_utc(discovery.cycle_time),
+            "status": "canonical_unavailable",
+            "ready": False,
+            "reason": reason,
+            "canonical_product_id": _candidate_canonical_product_id(candidate),
+            "model_id": candidate.model_id,
+            "basin_id": candidate.basin_id,
+            "expected_leads": list(forecast_hours),
+            "accepted_horizon": _accepted_horizon_from_hours(forecast_hours),
+            "policy_identity": dict(policy_identity),
+            "source_object_identity": dict(source_object_identity),
+            "policy_identity_matched": False,
+            "source_object_identity_matched": False,
+            "dependency": {
+                "name": dependency,
+                "status": "unavailable",
+                "retryable": retryable,
+            },
+            "failure": failure,
+        }
+    )
 
 
 def _duplicate_cycle_evidence(discovery: CycleDiscovery, *, reason: str) -> dict[str, Any]:
@@ -6895,13 +7133,23 @@ class _MetStoreCanonicalReadinessProvider:
         ).evidence
 
 
-def _canonical_readiness_provider_from_env() -> CanonicalReadinessProvider | None:
-    from packages.common.met_store import MetStoreError, PsycopgMetStore
-
+def _canonical_readiness_provider_from_env() -> CanonicalReadinessProvider:
     try:
+        from packages.common.met_store import PsycopgMetStore
+
         return _MetStoreCanonicalReadinessProvider(PsycopgMetStore.from_env())
-    except MetStoreError:
-        return None
+    except ImportError:
+        return _UnavailableCanonicalReadinessProvider(
+            reason="canonical_readiness_dependency_unavailable",
+            dependency="canonical_readiness_provider",
+            retryable=True,
+        )
+    except Exception:
+        return _UnavailableCanonicalReadinessProvider(
+            reason="canonical_readiness_provider_unavailable",
+            dependency="canonical_readiness_provider",
+            retryable=True,
+        )
 
 
 def _active_repository_from_env() -> ActiveCandidateRepository:
@@ -7350,6 +7598,13 @@ def _scheduler_pass_status_from_execution(execution_evidence: Sequence[Mapping[s
     if any(str(item.get("status")) in {"blocked", "failed"} for item in execution_evidence):
         return "preflight_blocked"
     return str(execution_evidence[-1].get("status") or "planned")
+
+
+def _blocked_pass_status(blocked_candidates: Sequence[SchedulerCandidate]) -> str:
+    reasons = {str(candidate.reason or "") for candidate in blocked_candidates}
+    if any("unavailable" in reason for reason in reasons):
+        return "unavailable"
+    return "blocked"
 
 
 def _scheduler_partial_count_from_execution(execution_evidence: Sequence[Mapping[str, Any]]) -> int:

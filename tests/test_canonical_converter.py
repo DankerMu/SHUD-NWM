@@ -198,6 +198,7 @@ def test_canonical_readiness_accepts_complete_gfs_exact_required_variables() -> 
     assert result.evidence["accepted_horizon"]["last_lead_hour"] == 3
     assert result.evidence["missing_variables"] == []
     assert result.evidence["missing_leads"] == []
+    assert result.evidence["reused_existing_ready"] is True
 
 
 def test_canonical_readiness_uses_ifs_surface_pressure_and_shortwave_contract() -> None:
@@ -348,6 +349,35 @@ def test_canonical_readiness_blocks_mismatched_source_object_identity() -> None:
     assert result.evidence["reason"] == "canonical_identity_mismatch"
     assert result.evidence["source_object_identity_matched"] is False
     assert result.evidence["identity_rejected_row_count"] == len(GFS_REQUIRED_STANDARD_VARIABLES) * 2
+
+
+def test_canonical_readiness_blocks_legacy_rows_missing_required_lineage() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {
+        "source": "gfs",
+        "manifest_digest": "manifest-sha",
+        "raw_entry_digest": "entry-sha",
+    }
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            variables=GFS_REQUIRED_STANDARD_VARIABLES,
+            forecast_hours=(0, 3),
+        ),
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is False
+    assert result.evidence["reason"] == "canonical_lineage_missing"
+    assert result.evidence["missing_required_lineage_row_count"] == len(GFS_REQUIRED_STANDARD_VARIABLES) * 2
+    assert result.evidence["source_object_identity_matched"] is False
 
 
 def test_unit_conversion_boundaries() -> None:
