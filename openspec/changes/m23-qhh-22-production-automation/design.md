@@ -320,6 +320,97 @@ Regression rows:
 - Bootstrapped QHH model -> `plan-production --plan --model-id <qhh_model_id>` includes the model without `not_shud_model`, `not_runnable`, or `incomplete_model_metadata`.
 - Unchanged #253 no-flag scheduler root behavior and #252 identity/URI helpers -> remain compatible.
 
+## Issue #255 Fixture
+
+Issue type: feature/ingestion
+Project profile: NHMS, with external hydro-met provider and forcing-window surfaces
+Blast radius: high
+Fixture level: expanded
+Repair intensity: high
+
+Change surface:
+
+- Forecast source discovery and adapter policy for GFS/IFS cycle lookback, lag, horizon, forbidden/unavailable responses, and operator source/model/basin filters.
+- Canonical conversion/store readiness checks for QHH-required source-specific variable ids and per-valid-time lead coverage.
+- Production scheduler candidate evidence that records source availability, reduced-scope filters, canonical completeness, retryable/permanent/policy-blocked states, and no downstream forcing/SHUD readiness when incomplete.
+- Focused adapter/canonical tests plus `tests/test_production_scheduler.py` and `tests/test_orchestration_chain.py`.
+
+Must preserve:
+
+- #252 production identity/status/URI contract and #253 scheduler root/no-mutation dry-run behavior.
+- #254 active QHH model/package/station/output identity semantics; #255 may consume those identities but must not mutate model bootstrap state.
+- No station forcing interpolation, no `met.forcing_version` or `met.forcing_station_timeseries` production, no SHUD/Slurm submission, no parse/publish, and no frontend display behavior in #255.
+- Existing deterministic/mock tests must not claim live business readiness when source availability or canonical coverage is synthetic, incomplete, reduced-scope, or blocked.
+
+Must add/change:
+
+- Source-specific GFS/IFS discovery policy with auditable defaults or config values for lookback, lag, accepted horizon, max cycles, and operator filters.
+- Typed evidence for unavailable/forbidden/stale/source-blocked cycles, including the probed source/cycle identity and whether the condition is retryable, unavailable, permanent, or policy-blocked.
+- Exact canonical completeness gates:
+  - GFS requires `prcp_rate_or_amount`, `air_temperature_2m`, `relative_humidity_2m`, `wind_u_10m`, `wind_v_10m`, `pressure_surface`, and `shortwave_down`.
+  - IFS requires `prcp_rate_or_amount`, `air_temperature_2m`, `relative_humidity_2m`, `wind_u_10m`, `wind_v_10m`, `surface_pressure`, and `shortwave_down`.
+- Per-valid-time lead coverage checks before a canonical product can feed future forcing generation, with safe missing variable/lead details.
+- Idempotent reuse of completed canonical products for the same source/cycle/object/policy identity, and no duplicate rows unless source identity or policy changes.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - scheduler discovery and plan evidence are public operational entrypoints for source readiness.
+- Config / project setup: selected - source filters, lookback, lag, horizon, retry policy, and provider enablement must be configurable and auditable.
+- File IO / path safety / overwrite: selected - forecast download/cache/object references and evidence files must remain bounded and safe even when providers return partial data.
+- Schema / columns / units / field names: selected - canonical variable ids, valid-time/lead coverage, forecast cycle status, and evidence payload fields become downstream contracts.
+- Auth / permissions / secrets: selected - provider credentials or restricted endpoints must not leak when 403/forbidden/source-unavailable evidence is recorded.
+- Concurrency / shared state / ordering: selected - repeated scheduler scans must reuse complete canonical products and avoid duplicate/inconsistent readiness state.
+- Resource limits / large input / discovery: selected - cycle discovery, lead enumeration, retry loops, and provider probes must be bounded by policy.
+- Legacy compatibility / examples: selected - existing scheduler/orchestration tests and accepted canonical fixtures must remain compatible.
+- Error handling / rollback / partial outputs: selected - incomplete canonical coverage must block downstream forcing/SHUD without partial readiness.
+- Release / packaging / dependency compatibility: selected - adapter or canonical-store changes must not require unavailable provider libraries in default CI.
+- Documentation / migration notes: selected - run/evidence semantics must distinguish live unavailable/BLOCKED from deterministic reduced-scope checks.
+
+Domain risk packs:
+
+- Geospatial / CRS / basin geometry: not selected - #255 handles forecast source/canonical readiness only; spatial station interpolation is #256.
+- Hydro-met time series / forcing windows: selected - valid-time/lead coverage and source-specific horizons are the core gate.
+- SHUD numerical runtime / conservation / NaN: not selected - no SHUD execution or hydro output in #255.
+- PostGIS / TimescaleDB domain behavior: selected - forecast cycle and canonical product readiness rows may be persisted or queried for downstream stages.
+- Slurm production lifecycle / mock-vs-real parity: not selected - Slurm preflight/submission is #257/#258.
+- External hydro-met providers / snapshot reproducibility: selected - GFS/IFS discovery, forbidden/unavailable handling, object identity, and retry semantics are provider-bound.
+- Run manifest / QC provenance: selected - canonical readiness evidence must bind to source/cycle/object/policy identity.
+- Published NHMS artifacts / display identity: not selected - no display artifact publication in #255.
+
+Boundary-surface checklist:
+
+- Shared helper roots: forecast discovery policy helpers, canonical readiness helpers, scheduler candidate evidence builders.
+- Public entrypoints: `nhms-pipeline plan-production --plan` and scheduler source/model/basin filter inputs.
+- Read surfaces: provider probes, cached/downloaded forecast object references, canonical product metadata, configured policy values, QHH active model identity.
+- Write/delete/overwrite surfaces: forecast cycle/canonical readiness status and bounded evidence/cache metadata only; no station forcing, SHUD, hydro, parse, or publish mutation.
+- Staging/publish/rollback surfaces: no display publish; partial download/canonical artifacts must not be promoted to canonical-ready.
+- Producer/consumer evidence boundaries: source adapters, canonical converter/store, scheduler candidate evidence, future forcing producer.
+- Stale-state/idempotency boundaries: repeated scans, completed canonical reuse, transient retry state, policy changes, source/object identity changes.
+- Unchanged downstream consumers: #254 bootstrap model discovery, #256 forcing producer contract, SHUD/Slurm/parser/publisher stages, node-27 readonly display.
+
+Invariant Matrix
+
+Governing invariant: A QHH forecast cycle may become canonical-ready for future forcing only when the selected source/cycle/policy identity has exact source-specific variable ids and complete per-valid-time lead coverage; otherwise the scheduler must record typed blocked/unavailable/retryable evidence and submit no downstream forcing, SHUD, parse, or publish work.
+Source-of-truth identity/contract: `source`, `cycle_time`, source object/checksum or cache identity, configured lookback/lag/horizon policy, operator filters, canonical variable id set, valid-time/lead coverage matrix, `canonical_product_id`, and QHH `model_id`/`basin_id`.
+Surfaces:
+
+- Producers: GFS/IFS discovery adapters, download/canonical conversion orchestration, canonical product writer or fixture.
+- Validators/preflight: source policy validators, canonical variable-id exact-set checker, valid-time/lead coverage checker, retry/permanent/policy-block classifier.
+- Storage/cache/query: `met.forecast_cycle`, `met.canonical_met_product`, object/cache references, scheduler pass evidence.
+- Public routes/entrypoints: scheduler CLI/source filters and plan-production evidence; no frontend/API route change expected.
+- Frontend/downstream consumers: future forcing producer reads only canonical-ready complete products; node-27 remains unchanged.
+- Failure paths/rollback/stale state: 403/forbidden, unavailable/stale cycle, transient download failure, incomplete variables/leads, repeated scan reuse, policy change invalidation.
+- Evidence/audit/readiness: scheduler evidence, canonical readiness fixtures, adapter/canonical tests, orchestration-chain tests.
+Regression rows:
+
+- Available GFS cycle with all required GFS variables and complete lead/valid-time coverage -> canonical-ready evidence with source/cycle/policy identity and downstream forcing may proceed later.
+- Available IFS cycle with all required IFS variables and configured shorter horizon coverage -> canonical-ready or reduced-scope evidence according to IFS policy, with accepted horizon recorded.
+- Missing required variable or lead time -> canonical blocked/incomplete evidence with safe missing-variable/lead details; no forcing/SHUD candidate is submitted.
+- Provider 403, unavailable, stale, unsupported, or policy-filtered cycle -> typed unavailable/policy-blocked/permanent evidence with no fabricated canonical-ready state.
+- Transient download failure -> retryable evidence with attempt/next-retry behavior and no downstream mutation.
+- Repeated scan for identical completed canonical product identity -> reuse existing canonical product without duplicate rows or redownload; changed source object or policy identity does not falsely reuse stale readiness.
+- Existing #254 bootstrapped QHH model discovery and #252/#253 no-mutation scheduler evidence -> remain compatible.
+
 ## Risks / Trade-offs
 
 - Forecast source 403/lag or partial variables can block a cycle. Mitigation: source availability and canonical completeness are recorded as blocked/unavailable without marking readiness true.

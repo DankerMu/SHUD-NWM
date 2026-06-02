@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.redaction import redact_payload
 
 from .base import (
     CycleDiscovery,
@@ -93,6 +94,10 @@ class IFSAdapterError(RuntimeError):
 
 class FileUnavailableError(IFSAdapterError):
     error_code = "HTTP_404"
+
+
+class ForbiddenSourceError(IFSAdapterError):
+    error_code = "HTTP_403"
 
 
 class NetworkDownloadError(IFSAdapterError):
@@ -285,9 +290,28 @@ class IFSAdapter(DataSourceAdapter):
                 remote_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0])
                 try:
                     available = self.availability_checker(remote_url)
-                except Exception:
-                    LOGGER.exception("Failed to check IFS availability for %s", remote_url)
+                    status = "discovered" if available else "unavailable"
+                    reason = None if available else "source_cycle_unavailable"
+                    classifier = None if available else "unavailable"
+                    retryable = None if available else True
+                except ForbiddenSourceError:
+                    LOGGER.warning(
+                        "IFS availability check was forbidden for %s",
+                        self._safe_text(remote_url),
+                        exc_info=True,
+                    )
                     available = False
+                    status = "forbidden"
+                    reason = "source_cycle_forbidden"
+                    classifier = "forbidden"
+                    retryable = False
+                except Exception:
+                    LOGGER.exception("Failed to check IFS availability for %s", self._safe_text(remote_url))
+                    available = False
+                    status = "unavailable"
+                    reason = "source_cycle_unavailable"
+                    classifier = "unavailable"
+                    retryable = True
 
                 discovery = CycleDiscovery(
                     cycle_id=cycle_id,
@@ -295,7 +319,20 @@ class IFSAdapter(DataSourceAdapter):
                     cycle_time=cycle_time,
                     cycle_hour=cycle_hour,
                     available=available,
-                    status="discovered" if available else "unavailable",
+                    status=status,
+                    reason=reason,
+                    classifier=classifier,
+                    retryable=retryable,
+                    probe_uri=self._safe_text(remote_url),
+                    evidence={
+                        "source": self.config.source_id,
+                        "probe": {
+                            "uri": self._safe_text(remote_url),
+                            "forecast_hour": 0,
+                            "variable": self.config.variables[0],
+                            "preferred_source": self.config.preferred_source,
+                        },
+                    },
                 )
                 discoveries.append(discovery)
 
@@ -365,6 +402,8 @@ class IFSAdapter(DataSourceAdapter):
             "last_forecast_hour": max(hours) if hours else None,
             "forecast_hours": list(hours),
             "max_lead_hours": max_lead_hours,
+            "source_policy": self.source_policy_identity(parsed_cycle_time, hours),
+            "source_object_identity": self.source_object_identity(parsed_cycle_time, hours),
             "variable_count": len(self.config.variables),
             "total_file_count": len(entries),
             "preferred_source": self.config.preferred_source,
@@ -644,6 +683,9 @@ class IFSAdapter(DataSourceAdapter):
                     total_retries += max(0, error.attempts - 1)
                     saw_unavailable = True
                     continue
+                except ForbiddenSourceError:
+                    self._delete_partial(entry.local_key)
+                    raise
                 except RateLimitedError as error:
                     total_retries += error.attempts
                     saw_rate_limit = True
@@ -737,17 +779,22 @@ class IFSAdapter(DataSourceAdapter):
         for attempt in range(1, max_attempts + 1):
             try:
                 return self._normalize_payload(self.downloader(remote_url)), attempt - 1
-            except (FileUnavailableError, RateLimitedError, FileTooLargeError):
+            except (FileUnavailableError, ForbiddenSourceError, RateLimitedError, FileTooLargeError):
                 raise
             except HTTPError as error:
                 if error.code == 404:
                     raise FileUnavailableError(
-                        f"Remote IFS file is unavailable: {remote_url}",
+                        f"Remote IFS file is unavailable: {self._safe_text(remote_url)}",
+                        attempts=attempt,
+                    ) from error
+                if error.code == 403:
+                    raise ForbiddenSourceError(
+                        f"Remote IFS file is forbidden: {self._safe_text(remote_url)}",
                         attempts=attempt,
                     ) from error
                 if error.code == 429:
                     raise RateLimitedError(
-                        f"IFS source rate limited while downloading {remote_url}",
+                        f"IFS source rate limited while downloading {self._safe_text(remote_url)}",
                         retry_after_seconds=_retry_after_seconds(error.headers.get("Retry-After")),
                         attempts=attempt - 1,
                     ) from error
@@ -760,7 +807,8 @@ class IFSAdapter(DataSourceAdapter):
             self.sleeper(self._backoff_for(attempt))
 
         raise NetworkDownloadError(
-            f"Failed to download {remote_url} after {max_attempts} attempts: {last_error}",
+            f"Failed to download {self._safe_text(remote_url)} after {max_attempts} attempts: "
+            f"{self._safe_text(str(last_error))}",
             attempts=max_attempts - 1,
         )
 
@@ -816,22 +864,37 @@ class IFSAdapter(DataSourceAdapter):
                 payload = Path(target.name).read_bytes()
             except HTTPError as error:
                 if error.code == 404:
-                    raise FileUnavailableError(f"Remote IFS file is unavailable: {remote_url}", attempts=1) from error
+                    raise FileUnavailableError(
+                        f"Remote IFS file is unavailable: {self._safe_text(remote_url)}",
+                        attempts=1,
+                    ) from error
+                if error.code == 403:
+                    raise ForbiddenSourceError(
+                        f"Remote IFS file is forbidden: {self._safe_text(remote_url)}",
+                        attempts=1,
+                    ) from error
                 if error.code == 429:
                     raise RateLimitedError(
-                        f"IFS source rate limited while downloading {remote_url}",
+                        f"IFS source rate limited while downloading {self._safe_text(remote_url)}",
                         retry_after_seconds=_retry_after_seconds(error.headers.get("Retry-After")),
                         attempts=0,
                     ) from error
-                raise NetworkDownloadError(f"HTTP {error.code} while downloading {remote_url}: {error}") from error
+                raise NetworkDownloadError(
+                    f"HTTP {error.code} while downloading {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
+                ) from error
             except (URLError, TimeoutError, OSError) as error:
-                raise NetworkDownloadError(f"Network error while downloading {remote_url}: {error}") from error
+                raise NetworkDownloadError(
+                    f"Network error while downloading {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
+                ) from error
             except Exception as error:
-                raise NetworkDownloadError(f"Failed to retrieve IFS Open Data {remote_url}: {error}") from error
+                raise NetworkDownloadError(
+                    f"Failed to retrieve IFS Open Data {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
+                ) from error
 
         if len(payload) > self.config.max_file_size_bytes:
             raise FileTooLargeError(
-                f"Remote IFS file {remote_url} exceeded maximum size {self.config.max_file_size_bytes} bytes"
+                f"Remote IFS file {self._safe_text(remote_url)} exceeded maximum size "
+                f"{self.config.max_file_size_bytes} bytes"
             )
         checksum = hashlib.sha256(payload).hexdigest()
         return DownloadedPayload(content=payload, checksum=checksum, bytes_written=len(payload))
@@ -843,10 +906,12 @@ class IFSAdapter(DataSourceAdapter):
         except FileUnavailableError:
             return False
         except RateLimitedError:
-            LOGGER.warning("IFS availability check was rate limited for %s", remote_url)
+            LOGGER.warning("IFS availability check was rate limited for %s", self._safe_text(remote_url))
             return False
+        except ForbiddenSourceError:
+            raise
         except IFSAdapterError:
-            LOGGER.warning("IFS availability check failed for %s", remote_url, exc_info=True)
+            LOGGER.warning("IFS availability check failed for %s", self._safe_text(remote_url), exc_info=True)
             return False
 
     def _client_for_source(self, source: str) -> Any:
@@ -868,8 +933,54 @@ class IFSAdapter(DataSourceAdapter):
             status="failed_download",
             retry_count=retry_count,
             error_code=error_code,
-            error_message=error_message,
+            error_message=self._safe_text(error_message),
         )
+
+    def source_policy_identity(
+        self,
+        cycle_time: str | datetime,
+        forecast_hours: list[int] | None = None,
+    ) -> dict[str, Any]:
+        parsed_cycle_time = parse_cycle_time(cycle_time)
+        hours = list(
+            forecast_hours if forecast_hours is not None else self.config.forecast_hours_for_cycle(parsed_cycle_time)
+        )
+        return {
+            "source": self.config.source_id,
+            "cycle_hours_utc": list(self.config.cycle_hours_utc),
+            "forecast_start_hour": self.config.forecast_start_hour,
+            "forecast_end_hour": self.config.forecast_end_hour_for_cycle(parsed_cycle_time.hour),
+            "forecast_step_hours": self.config.forecast_step_hours,
+            "forecast_hours": hours,
+            "variables": list(self.config.variables),
+            "preferred_source": self.config.preferred_source,
+            "fallback_sources": list(self.config.fallback_sources),
+            "max_retries": self.config.max_retries,
+            "max_wait_seconds": self.config.max_wait_seconds,
+        }
+
+    def source_object_identity(
+        self,
+        cycle_time: str | datetime,
+        forecast_hours: list[int] | None = None,
+    ) -> dict[str, Any]:
+        parsed_cycle_time = parse_cycle_time(cycle_time)
+        hours = list(
+            forecast_hours if forecast_hours is not None else self.config.forecast_hours_for_cycle(parsed_cycle_time)
+        )
+        return {
+            "source": self.config.source_id,
+            "cycle_time": parsed_cycle_time.isoformat(),
+            "preferred_source": self.config.preferred_source,
+            "first_forecast_hour": min(hours) if hours else None,
+            "last_forecast_hour": max(hours) if hours else None,
+            "forecast_hour_count": len(hours),
+            "variable_count": len(self.config.variables),
+            "manifest_object_key": f"raw/{self.config.source_id}/{format_cycle_time(parsed_cycle_time)}/manifest.json",
+        }
+
+    def _safe_text(self, value: object) -> str:
+        return str(redact_payload(str(value)))
 
     def _get_cycle(self, cycle_time: datetime) -> dict[str, Any] | None:
         if self.repository is None:

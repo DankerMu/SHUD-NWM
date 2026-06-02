@@ -41,6 +41,7 @@ from services.orchestrator.retry import classify_failure
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from services.slurm_gateway.gateway import ConfigurationError
 from services.slurm_gateway.resource_validation import ResourceProfileValidationError, validate_resource_profile
+from workers.canonical_converter.converter import evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 
 DEFAULT_PRODUCTION_SOURCES = ("gfs", "IFS")
@@ -239,6 +240,22 @@ class ActiveCandidateRepository(Protocol):
         forcing_version_id: str,
         candidate_id: str,
     ) -> Mapping[str, Any] | None:
+        raise NotImplementedError
+
+
+class CanonicalReadinessProvider(Protocol):
+    def canonical_readiness(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        forecast_hours: Sequence[int],
+        policy_identity: Mapping[str, Any],
+        source_object_identity: Mapping[str, Any],
+        canonical_product_id: str,
+        model_id: str,
+        basin_id: str,
+    ) -> Mapping[str, Any]:
         raise NotImplementedError
 
 
@@ -611,6 +628,7 @@ class ProductionScheduler:
         registry: ModelRegistryReader | None = None,
         adapters: Mapping[str, CycleDiscoveryAdapter] | None = None,
         active_repository: ActiveCandidateRepository | None = None,
+        canonical_readiness_provider: CanonicalReadinessProvider | None = None,
         orchestrator_factory: ProductionOrchestratorFactory | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
@@ -618,6 +636,7 @@ class ProductionScheduler:
         self.registry = registry if registry is not None else PsycopgModelRegistryStore.from_env()
         self.adapters = dict(adapters if adapters is not None else _default_adapters())
         self.active_repository = active_repository
+        self.canonical_readiness_provider = canonical_readiness_provider
         self.orchestrator_factory = orchestrator_factory
         self.sleep = sleep or _sleep
 
@@ -631,6 +650,7 @@ class ProductionScheduler:
         return cls(
             config=config,
             active_repository=_active_repository_from_env(),
+            canonical_readiness_provider=_canonical_readiness_provider_from_env(),
         )
 
     def run_once(self) -> SchedulerPassResult:
@@ -1627,6 +1647,39 @@ class ProductionScheduler:
             current_date += timedelta(days=1)
         return discoveries
 
+    def _canonical_readiness_for_candidate(
+        self,
+        candidate: SchedulerCandidate,
+        cycle: SchedulerSourceCycle,
+    ) -> dict[str, Any] | None:
+        provider = self.canonical_readiness_provider
+        if provider is None:
+            return None
+        adapter = self.adapters.get(cycle.discovery.source_id)
+        forecast_hours = _source_forecast_hours(cycle.discovery, adapter, cycle.horizon)
+        policy_identity = _source_policy_identity(cycle.discovery, adapter, forecast_hours)
+        source_object_identity = _source_object_identity(cycle.discovery, adapter, forecast_hours)
+        readiness = provider.canonical_readiness(
+            source_id=cycle.discovery.source_id,
+            cycle_time=cycle.discovery.cycle_time,
+            forecast_hours=forecast_hours,
+            policy_identity=policy_identity,
+            source_object_identity=source_object_identity,
+            canonical_product_id=_candidate_canonical_product_id(candidate),
+            model_id=candidate.model_id,
+            basin_id=candidate.basin_id,
+        )
+        evidence = dict(readiness)
+        evidence.setdefault("source", cycle.discovery.source_id)
+        evidence.setdefault("cycle_time", _format_utc(cycle.discovery.cycle_time))
+        evidence.setdefault("canonical_product_id", _candidate_canonical_product_id(candidate))
+        evidence.setdefault("model_id", candidate.model_id)
+        evidence.setdefault("basin_id", candidate.basin_id)
+        evidence.setdefault("policy_identity", policy_identity)
+        evidence.setdefault("source_object_identity", source_object_identity)
+        evidence.setdefault("accepted_horizon", _accepted_horizon_from_hours(forecast_hours))
+        return _evidence_safe(evidence)
+
     def _build_candidates(
         self,
         *,
@@ -1699,6 +1752,21 @@ class ProductionScheduler:
                         )
                     )
                     continue
+                canonical_readiness = self._canonical_readiness_for_candidate(candidate, cycle)
+                if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
+                    blocked.append(
+                        _blocked_candidate(
+                            candidate,
+                            str(canonical_readiness.get("reason") or "canonical_incomplete"),
+                            state_evidence={"canonical_readiness": canonical_readiness},
+                        )
+                    )
+                    continue
+                if canonical_readiness is not None:
+                    candidate = _candidate_with_state_evidence(
+                        candidate,
+                        {"canonical_readiness": canonical_readiness},
+                    )
                 state_decision = (
                     _candidate_state_decision(
                         candidate,
@@ -2425,7 +2493,7 @@ def _filter_expression(model_ids: Sequence[str], basin_ids: Sequence[str]) -> st
 
 def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, Any]) -> dict[str, Any]:
     available = bool(discovery.available)
-    return {
+    evidence = {
         "source_id": discovery.source_id,
         "cycle_id": discovery.cycle_id,
         "cycle_time_utc": _format_utc(discovery.cycle_time),
@@ -2433,10 +2501,18 @@ def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, A
         "horizon": dict(horizon),
         "available": available,
         "status": discovery.status or ("discovered" if available else "unavailable"),
-        "reason": None if available else "source_cycle_unavailable",
+        "reason": (
+            discovery.reason if discovery.reason is not None else (None if available else "source_cycle_unavailable")
+        ),
+        "classifier": discovery.classifier,
+        "retryable": discovery.retryable,
+        "probe_uri": discovery.probe_uri,
         "db_cycle_status_written": None,
         "cycle_status_candidate": "discovered" if available else "unavailable",
     }
+    if discovery.evidence:
+        evidence["discovery_evidence"] = _evidence_safe(discovery.evidence)
+    return evidence
 
 
 def _source_unavailable_retry_evidence(candidate: SchedulerCandidate) -> dict[str, Any]:
@@ -6789,6 +6865,45 @@ def _default_adapters() -> Mapping[str, CycleDiscoveryAdapter]:
     }
 
 
+class _MetStoreCanonicalReadinessProvider:
+    def __init__(self, store: Any) -> None:
+        self.store = store
+
+    def canonical_readiness(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        forecast_hours: Sequence[int],
+        policy_identity: Mapping[str, Any],
+        source_object_identity: Mapping[str, Any],
+        canonical_product_id: str,
+        model_id: str,
+        basin_id: str,
+    ) -> Mapping[str, Any]:
+        products = self.store.list_canonical_products(source_id=source_id, cycle_time=cycle_time)
+        return evaluate_canonical_readiness(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            products=products,
+            forecast_hours=forecast_hours,
+            policy_identity=policy_identity,
+            source_object_identity=source_object_identity,
+            canonical_product_id=canonical_product_id,
+            model_id=model_id,
+            basin_id=basin_id,
+        ).evidence
+
+
+def _canonical_readiness_provider_from_env() -> CanonicalReadinessProvider | None:
+    from packages.common.met_store import MetStoreError, PsycopgMetStore
+
+    try:
+        return _MetStoreCanonicalReadinessProvider(PsycopgMetStore.from_env())
+    except MetStoreError:
+        return None
+
+
 def _active_repository_from_env() -> ActiveCandidateRepository:
     from services.orchestrator.chain import PsycopgOrchestratorRepository
 
@@ -7598,6 +7713,8 @@ def _source_horizon_metadata(discovery: CycleDiscovery, adapter: CycleDiscoveryA
     cycle_time = _ensure_utc(discovery.cycle_time)
     config = getattr(adapter, "config", None)
     max_lead_hours: int | None = None
+    forecast_step_hours: int | None = None
+    forecast_start_hour = 0
     if config is not None and hasattr(config, "forecast_end_hour_for_cycle"):
         max_lead_hours = int(config.forecast_end_hour_for_cycle(cycle_time.hour))
     elif config is not None and hasattr(config, "forecast_end_hour"):
@@ -7606,10 +7723,77 @@ def _source_horizon_metadata(discovery: CycleDiscovery, adapter: CycleDiscoveryA
         max_lead_hours = 144 if cycle_time.hour in {6, 18} else 168
     elif source_id == "gfs":
         max_lead_hours = 168
+    if config is not None and hasattr(config, "forecast_step_hours"):
+        forecast_step_hours = int(getattr(config, "forecast_step_hours"))
+    if config is not None and hasattr(config, "forecast_start_hour"):
+        forecast_start_hour = int(getattr(config, "forecast_start_hour"))
     return {
         "max_lead_hours": max_lead_hours,
         "forecast_horizon_hours": max_lead_hours,
+        "forecast_start_hour": forecast_start_hour,
+        "forecast_step_hours": forecast_step_hours,
         "policy": "source_cycle",
+    }
+
+
+def _source_forecast_hours(
+    discovery: CycleDiscovery,
+    adapter: CycleDiscoveryAdapter | None,
+    horizon: Mapping[str, Any],
+) -> list[int]:
+    config = getattr(adapter, "config", None)
+    if config is not None and hasattr(config, "forecast_hours_for_cycle"):
+        return list(config.forecast_hours_for_cycle(discovery.cycle_time))
+    if config is not None and hasattr(config, "forecast_hours"):
+        return list(config.forecast_hours())
+    max_lead_hours = horizon.get("max_lead_hours")
+    step_hours = horizon.get("forecast_step_hours") or 3
+    start_hour = horizon.get("forecast_start_hour") or 0
+    if max_lead_hours is None:
+        max_lead_hours = (
+            144 if normalize_source_id(discovery.source_id) == "IFS" and discovery.cycle_hour in {6, 18} else 168
+        )
+    return list(range(int(start_hour), int(max_lead_hours) + 1, int(step_hours)))
+
+
+def _source_policy_identity(
+    discovery: CycleDiscovery,
+    adapter: CycleDiscoveryAdapter | None,
+    forecast_hours: Sequence[int],
+) -> dict[str, Any]:
+    if adapter is not None and hasattr(adapter, "source_policy_identity"):
+        try:
+            return dict(adapter.source_policy_identity(discovery.cycle_time, list(forecast_hours)))
+        except TypeError:
+            return dict(adapter.source_policy_identity(list(forecast_hours)))
+    return {
+        "source": discovery.source_id,
+        "cycle_hour": discovery.cycle_hour,
+        "forecast_hours": list(forecast_hours),
+    }
+
+
+def _source_object_identity(
+    discovery: CycleDiscovery,
+    adapter: CycleDiscoveryAdapter | None,
+    forecast_hours: Sequence[int],
+) -> dict[str, Any]:
+    if adapter is not None and hasattr(adapter, "source_object_identity"):
+        return dict(adapter.source_object_identity(discovery.cycle_time, list(forecast_hours)))
+    return {
+        "source": discovery.source_id,
+        "cycle_time": _format_utc(discovery.cycle_time),
+        "cycle_id": discovery.cycle_id,
+        "forecast_hour_count": len(forecast_hours),
+    }
+
+
+def _accepted_horizon_from_hours(forecast_hours: Sequence[int]) -> dict[str, Any]:
+    hours = sorted(int(hour) for hour in forecast_hours)
+    return {
+        "first_lead_hour": min(hours) if hours else None,
+        "last_lead_hour": max(hours) if hours else None,
+        "lead_count": len(hours),
     }
 
 

@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.redaction import redact_payload
 
 from .base import (
     CycleDiscovery,
@@ -101,6 +102,10 @@ class GFSAdapterError(RuntimeError):
 
 class FileUnavailableError(GFSAdapterError):
     error_code = "HTTP_404"
+
+
+class ForbiddenSourceError(GFSAdapterError):
+    error_code = "HTTP_403"
 
 
 class NetworkDownloadError(GFSAdapterError):
@@ -249,9 +254,28 @@ class GFSAdapter(DataSourceAdapter):
             remote_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0])
             try:
                 available = self.availability_checker(remote_url)
-            except Exception:
-                LOGGER.exception("Failed to check GFS availability for %s", remote_url)
+                status = "discovered" if available else "unavailable"
+                reason = None if available else "source_cycle_unavailable"
+                classifier = None if available else "unavailable"
+                retryable = None if available else True
+            except ForbiddenSourceError:
+                LOGGER.warning(
+                    "GFS availability check was forbidden for %s",
+                    self._safe_text(remote_url),
+                    exc_info=True,
+                )
                 available = False
+                status = "forbidden"
+                reason = "source_cycle_forbidden"
+                classifier = "forbidden"
+                retryable = False
+            except Exception:
+                LOGGER.exception("Failed to check GFS availability for %s", self._safe_text(remote_url))
+                available = False
+                status = "unavailable"
+                reason = "source_cycle_unavailable"
+                classifier = "unavailable"
+                retryable = True
 
             discovery = CycleDiscovery(
                 cycle_id=cycle_id,
@@ -259,6 +283,19 @@ class GFSAdapter(DataSourceAdapter):
                 cycle_time=cycle_time,
                 cycle_hour=cycle_hour,
                 available=available,
+                status=status,
+                reason=reason,
+                classifier=classifier,
+                retryable=retryable,
+                probe_uri=self._safe_text(remote_url),
+                evidence={
+                    "source": self.config.source_id,
+                    "probe": {
+                        "uri": self._safe_text(remote_url),
+                        "forecast_hour": 0,
+                        "variable": self.config.variables[0],
+                    },
+                },
             )
             discoveries.append(discovery)
 
@@ -315,6 +352,9 @@ class GFSAdapter(DataSourceAdapter):
             "cycle_time": parsed_cycle_time.isoformat(),
             "first_forecast_hour": min(hours) if hours else None,
             "last_forecast_hour": max(hours) if hours else None,
+            "forecast_hours": list(hours),
+            "source_policy": self.source_policy_identity(hours),
+            "source_object_identity": self.source_object_identity(parsed_cycle_time, hours),
             "variable_count": len(self.config.variables),
             "total_file_count": len(entries),
         }
@@ -560,11 +600,11 @@ class GFSAdapter(DataSourceAdapter):
                 total_retries += max(0, error.attempts - 1)
                 if self.clock() >= deadline:
                     raise PollingTimeoutError(
-                        f"Timed out waiting for {entry.remote_url}",
+                        f"Timed out waiting for {self._safe_text(entry.remote_url)}",
                         attempts=total_retries,
                     ) from error
                 self.sleeper(self.config.poll_interval_seconds)
-            except (NetworkDownloadError, ChecksumMismatchError, FileTooLargeError):
+            except (ForbiddenSourceError, NetworkDownloadError, ChecksumMismatchError, FileTooLargeError):
                 self._delete_partial(entry.local_key)
                 raise
             except (OSError, ObjectStoreError, ValueError) as error:
@@ -577,7 +617,7 @@ class GFSAdapter(DataSourceAdapter):
         for attempt in range(1, max_attempts + 1):
             try:
                 return self._normalize_payload(self.downloader(remote_url)), attempt - 1
-            except (FileUnavailableError, FileTooLargeError):
+            except (FileUnavailableError, ForbiddenSourceError, FileTooLargeError):
                 raise
             except Exception as error:
                 last_error = error
@@ -587,7 +627,8 @@ class GFSAdapter(DataSourceAdapter):
                 self.sleeper(backoff)
 
         raise NetworkDownloadError(
-            f"Failed to download {remote_url} after {max_attempts} attempts: {last_error}",
+            f"Failed to download {self._safe_text(remote_url)} after {max_attempts} attempts: "
+            f"{self._safe_text(str(last_error))}",
             attempts=max_attempts - 1,
         )
 
@@ -627,14 +668,19 @@ class GFSAdapter(DataSourceAdapter):
             with urlopen(request, timeout=self.config.request_timeout_seconds) as response:
                 status = getattr(response, "status", 200)
                 if status == 404:
-                    raise FileUnavailableError(f"Remote file is unavailable: {remote_url}", attempts=1)
+                    raise FileUnavailableError(f"Remote file is unavailable: {self._safe_text(remote_url)}", attempts=1)
+                if status == 403:
+                    raise ForbiddenSourceError(f"Remote file is forbidden: {self._safe_text(remote_url)}", attempts=1)
                 if status >= 400:
-                    raise NetworkDownloadError(f"HTTP {status} while downloading {remote_url}", attempts=1)
+                    raise NetworkDownloadError(
+                        f"HTTP {status} while downloading {self._safe_text(remote_url)}",
+                        attempts=1,
+                    )
                 content_length = response.headers.get("Content-Length")
                 if content_length is not None and int(content_length) > self.config.max_file_size_bytes:
                     raise FileTooLargeError(
                         (
-                            f"Remote file {remote_url} is {content_length} bytes; "
+                            f"Remote file {self._safe_text(remote_url)} is {content_length} bytes; "
                             f"maximum allowed is {self.config.max_file_size_bytes}"
                         )
                     )
@@ -650,7 +696,10 @@ class GFSAdapter(DataSourceAdapter):
                     total_bytes += len(chunk)
                     if total_bytes > self.config.max_file_size_bytes:
                         raise FileTooLargeError(
-                            (f"Remote file {remote_url} exceeded maximum size {self.config.max_file_size_bytes} bytes")
+                            (
+                                f"Remote file {self._safe_text(remote_url)} exceeded maximum size "
+                                f"{self.config.max_file_size_bytes} bytes"
+                            )
                         )
                     checksum.update(chunk)
                     content.extend(chunk)
@@ -662,10 +711,22 @@ class GFSAdapter(DataSourceAdapter):
                 )
         except HTTPError as error:
             if error.code == 404:
-                raise FileUnavailableError(f"Remote file is unavailable: {remote_url}", attempts=1) from error
-            raise NetworkDownloadError(f"HTTP {error.code} while downloading {remote_url}: {error}") from error
+                raise FileUnavailableError(
+                    f"Remote file is unavailable: {self._safe_text(remote_url)}",
+                    attempts=1,
+                ) from error
+            if error.code == 403:
+                raise ForbiddenSourceError(
+                    f"Remote file is forbidden: {self._safe_text(remote_url)}",
+                    attempts=1,
+                ) from error
+            raise NetworkDownloadError(
+                f"HTTP {error.code} while downloading {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
+            ) from error
         except (URLError, TimeoutError, OSError) as error:
-            raise NetworkDownloadError(f"Network error while downloading {remote_url}: {error}") from error
+            raise NetworkDownloadError(
+                f"Network error while downloading {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
+            ) from error
 
     def _url_exists(self, remote_url: str) -> bool:
         request = Request(remote_url, method="HEAD")
@@ -676,10 +737,15 @@ class GFSAdapter(DataSourceAdapter):
         except HTTPError as error:
             if error.code == 404:
                 return False
-            LOGGER.warning("HEAD %s returned HTTP %s", remote_url, error.code)
+            if error.code == 403:
+                raise ForbiddenSourceError(
+                    f"Remote file is forbidden: {self._safe_text(remote_url)}",
+                    attempts=1,
+                ) from error
+            LOGGER.warning("HEAD %s returned HTTP %s", self._safe_text(remote_url), error.code)
             return False
         except (URLError, TimeoutError, OSError):
-            LOGGER.warning("HEAD %s failed", remote_url, exc_info=True)
+            LOGGER.warning("HEAD %s failed", self._safe_text(remote_url), exc_info=True)
             return False
 
     def _record_download_failure(
@@ -694,8 +760,43 @@ class GFSAdapter(DataSourceAdapter):
             status="failed_download",
             retry_count=retry_count,
             error_code=error_code,
-            error_message=error_message,
+            error_message=self._safe_text(error_message),
         )
+
+    def source_policy_identity(self, forecast_hours: list[int] | None = None) -> dict[str, Any]:
+        hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
+        return {
+            "source": self.config.source_id,
+            "cycle_hours_utc": list(self.config.cycle_hours_utc),
+            "forecast_start_hour": self.config.forecast_start_hour,
+            "forecast_end_hour": self.config.forecast_end_hour,
+            "forecast_step_hours": self.config.forecast_step_hours,
+            "forecast_hours": hours,
+            "variables": list(self.config.variables),
+            "max_retries": self.config.max_retries,
+            "max_wait_seconds": self.config.max_wait_seconds,
+        }
+
+    def source_object_identity(
+        self,
+        cycle_time: str | datetime,
+        forecast_hours: list[int] | None = None,
+    ) -> dict[str, Any]:
+        parsed_cycle_time = parse_cycle_time(cycle_time)
+        hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
+        return {
+            "source": self.config.source_id,
+            "cycle_time": parsed_cycle_time.isoformat(),
+            "base_url": self._safe_text(self.config.base_url),
+            "first_forecast_hour": min(hours) if hours else None,
+            "last_forecast_hour": max(hours) if hours else None,
+            "forecast_hour_count": len(hours),
+            "variable_count": len(self.config.variables),
+            "manifest_object_key": f"raw/{self.config.source_id}/{format_cycle_time(parsed_cycle_time)}/manifest.json",
+        }
+
+    def _safe_text(self, value: object) -> str:
+        return str(redact_payload(str(value)))
 
     def _get_cycle(self, cycle_time: datetime) -> dict[str, Any] | None:
         if self.repository is None:

@@ -89,6 +89,11 @@ class CycleDiscovery:
     cycle_hour: int
     available: bool
     status: str | None = None
+    reason: str | None = None
+    classifier: str | None = None
+    retryable: bool | None = None
+    probe_uri: str | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -98,6 +103,11 @@ class CycleDiscovery:
             "cycle_hour": self.cycle_hour,
             "available": self.available,
             "status": self.status,
+            "reason": self.reason,
+            "classifier": self.classifier,
+            "retryable": self.retryable,
+            "probe_uri": self.probe_uri,
+            "evidence": self.evidence,
         }
 
 

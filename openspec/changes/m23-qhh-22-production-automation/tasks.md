@@ -73,6 +73,28 @@
 - [ ] 3.3 Add idempotency and retry tests for completed canonical reuse, transient download failure, source unavailable, incomplete variables, source-specific horizon handling, and reduced-scope source filters.
 - [ ] 3.4 Verify with focused adapter/canonical tests, `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py`, `uv run ruff check .`, and a dry-run evidence sample that cannot proceed to forcing when canonical coverage is incomplete.
 
+### Issue #255 Evidence Floor
+
+- GFS complete fixture: available source/cycle with `prcp_rate_or_amount`, `air_temperature_2m`, `relative_humidity_2m`, `wind_u_10m`, `wind_v_10m`, `pressure_surface`, and `shortwave_down` plus complete per-valid-time lead coverage -> canonical-ready evidence records `source`, `cycle_time`, policy identity, accepted horizon, variable set, per-valid-time lead counts, status, object/cache identity, and no false reduced-scope marker.
+- IFS complete or shorter-horizon fixture: available source/cycle with `prcp_rate_or_amount`, `air_temperature_2m`, `relative_humidity_2m`, `wind_u_10m`, `wind_v_10m`, `surface_pressure`, and `shortwave_down` over the configured IFS horizon -> canonical-ready or reduced-scope evidence records accepted horizon and policy identity without applying the GFS pressure variable contract.
+- Missing variable fixture -> canonical blocked/incomplete evidence lists safe missing variable ids, keeps `met.canonical_met_product` or scheduler query out of canonical-ready state, and submits no forcing/SHUD candidate.
+- Missing lead/valid-time fixture -> canonical blocked/incomplete evidence lists safe missing lead/valid-time counts, keeps downstream forcing/SHUD unsubmitted, and does not fabricate full-scope readiness.
+- Provider unavailable/forbidden/stale/policy-filter fixture -> evidence records typed `unavailable`, `forbidden`, `stale`, `unsupported`, or `policy_blocked` classifier with source/cycle/probe identity and no canonical-ready product.
+- Provider secret-redaction fixture: credential-bearing URL/header/env mock or signed URL returning 403/forbidden -> evidence records only safe typed reason and source/cycle/probe identity; it must not include tokens, signed URL query strings, authorization headers, credential env var names, or credential values.
+- Transient download failure fixture -> retryable evidence records attempt count and next eligible retry behavior, does not submit forcing/SHUD, and does not turn deterministic/mock fallback into live business readiness.
+- Operator filter fixture: source/model/basin/lookback/lag/max-cycle filters -> scheduler evidence records filters and distinguishes reduced-scope runs from full default automation.
+- Cache/object/path safety fixtures: out-of-root cache path, traversal object reference, existing canonical object collision, and partial download artifact -> typed blocker or quarantined incomplete state; no overwrite of ready canonical products and no write outside approved cache/evidence roots.
+- Persistence/idempotency fixture: repeated scan for the same `source + cycle_time + object identity + policy identity` -> reuse the existing completed `met.forecast_cycle` / `met.canonical_met_product` readiness without duplicate ready rows; changed source object or policy identity must not reuse stale readiness.
+- Downstream query fixture: incomplete, unavailable, retryable, policy-blocked, or reduced-scope-disallowed state -> production scheduler/forcing query cannot treat the product as canonical-ready and submits no forcing, SHUD, parse, or publish work.
+- Release/dependency fixture: default CI and focused mock adapter/canonical tests do not require live ECMWF/CDS credentials, real provider access, or optional unavailable GRIB/provider libraries; missing optional provider dependency yields skip/BLOCKED evidence or typed unavailable state rather than import-time failure.
+- Non-goal evidence: #255 must not create station forcing interpolation output, `met.forcing_version`, `met.forcing_station_timeseries`, SHUD/Slurm jobs, hydro results, parser output, published display artifacts, or frontend behavior.
+- Required commands:
+  - focused adapter/canonical tests introduced by the PR
+  - `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py`
+  - `uv run ruff check .`
+  - `openspec validate m23-qhh-22-production-automation --strict --no-interactive`
+  - dry-run scheduler evidence sample showing PASS only for complete canonical coverage or BLOCKED/UNAVAILABLE with exact dependency when coverage/provider state is incomplete.
+
 ## 4. Fixed-Station Forcing Production
 
 - [ ] 4.1 Wire production scheduler candidates to `workers/forcing_producer` using active QHH model/basin metadata and fixed forcing-grid stations.

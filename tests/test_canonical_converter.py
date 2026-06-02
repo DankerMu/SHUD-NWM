@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import importlib
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +17,14 @@ converter_module = importlib.import_module("workers.canonical_converter.converte
 CanonicalConversionError = converter_module.CanonicalConversionError
 CanonicalConverter = converter_module.CanonicalConverter
 CanonicalConverterConfig = converter_module.CanonicalConverterConfig
+GFS_REQUIRED_STANDARD_VARIABLES = converter_module.GFS_REQUIRED_STANDARD_VARIABLES
+IFS_REQUIRED_STANDARD_VARIABLES = converter_module.IFS_REQUIRED_STANDARD_VARIABLES
 VARIABLE_MAPPING = converter_module.VARIABLE_MAPPING
 compute_time_axis = converter_module.compute_time_axis
 convert_units = converter_module.convert_units
 convert_units_with_metadata = converter_module.convert_units_with_metadata
 convert_era5_precipitation_with_metadata = converter_module.convert_era5_precipitation_with_metadata
+evaluate_canonical_readiness = converter_module.evaluate_canonical_readiness
 map_variable = converter_module.map_variable
 parse_cycle_time = converter_module.parse_cycle_time
 
@@ -35,6 +38,13 @@ class FakeCanonicalRepository:
     def get_canonical_product(self, *, canonical_product_id: str) -> dict[str, Any] | None:
         product = self.products.get(canonical_product_id)
         return dict(product) if product is not None else None
+
+    def list_canonical_products(self, *, source_id: str, cycle_time: datetime) -> list[dict[str, Any]]:
+        return [
+            dict(product)
+            for product in self.products.values()
+            if product.get("source_id") == source_id and product.get("cycle_time") == cycle_time
+        ]
 
     def upsert_canonical_product(self, record: dict[str, Any]) -> dict[str, Any]:
         self.upsert_count += 1
@@ -102,6 +112,42 @@ def build_converter(tmp_path: Path, repository: FakeCanonicalRepository | None =
     )
 
 
+def canonical_rows(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    variables: tuple[str, ...],
+    forecast_hours: tuple[int, ...],
+    policy_identity: dict[str, Any] | None = None,
+    source_object_identity: dict[str, Any] | None = None,
+    omit_pairs: set[tuple[str, int]] | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    omit_pairs = omit_pairs or set()
+    for forecast_hour in forecast_hours:
+        for variable in variables:
+            if (variable, forecast_hour) in omit_pairs:
+                continue
+            rows.append(
+                {
+                    "canonical_product_id": f"{source_id}_{cycle_time:%Y%m%d%H}_{variable}_f{forecast_hour:03d}",
+                    "source_id": source_id,
+                    "cycle_time": cycle_time,
+                    "valid_time": cycle_time + timedelta(hours=forecast_hour),
+                    "lead_time_hours": forecast_hour,
+                    "variable": variable,
+                    "object_uri": f"canonical/{source_id}/{variable}/f{forecast_hour:03d}.nc",
+                    "checksum": f"sha256:{variable}:{forecast_hour}",
+                    "quality_flag": "ok",
+                    "lineage_json": {
+                        "policy_identity": dict(policy_identity or {}),
+                        "source_object_identity": dict(source_object_identity or {}),
+                    },
+                }
+            )
+    return rows
+
+
 def _netcdf_dataset_bytes(dataset: Any) -> bytes:
     import tempfile
 
@@ -120,6 +166,188 @@ def test_variable_mapping_covers_required_gfs_variables() -> None:
     assert map_variable("pressfc") == "pressure_surface"
     assert map_variable("dswrf") == "shortwave_down"
     assert map_variable("unexpected") is None
+
+
+def test_canonical_readiness_accepts_complete_gfs_exact_required_variables() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3], "horizon": 3}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026050700/manifest.json"}
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            variables=GFS_REQUIRED_STANDARD_VARIABLES,
+            forecast_hours=(0, 3),
+            policy_identity=policy,
+            source_object_identity=source_object,
+        ),
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+        canonical_product_id="canon_gfs_2026050700",
+        model_id="qhh",
+        basin_id="QHH",
+    )
+
+    assert result.ready is True
+    assert result.evidence["status"] == "canonical_ready"
+    assert result.evidence["required_variables"] == list(GFS_REQUIRED_STANDARD_VARIABLES)
+    assert result.evidence["accepted_horizon"]["last_lead_hour"] == 3
+    assert result.evidence["missing_variables"] == []
+    assert result.evidence["missing_leads"] == []
+
+
+def test_canonical_readiness_uses_ifs_surface_pressure_and_shortwave_contract() -> None:
+    cycle_time = parse_cycle_time("2026050706")
+    policy = {"source": "IFS", "forecast_hours": [0, 3], "horizon": 3}
+    source_object = {"source": "IFS", "manifest_object_key": "raw/IFS/2026050706/manifest.json"}
+
+    result = evaluate_canonical_readiness(
+        source_id="IFS",
+        cycle_time=cycle_time,
+        products=canonical_rows(
+            source_id="IFS",
+            cycle_time=cycle_time,
+            variables=IFS_REQUIRED_STANDARD_VARIABLES,
+            forecast_hours=(0, 3),
+            policy_identity=policy,
+            source_object_identity=source_object,
+        )
+        + canonical_rows(
+            source_id="IFS",
+            cycle_time=cycle_time,
+            variables=("net_radiation",),
+            forecast_hours=(0, 3),
+            policy_identity=policy,
+            source_object_identity=source_object,
+        ),
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is True
+    assert "surface_pressure" in result.evidence["required_variables"]
+    assert "pressure_surface" not in result.evidence["required_variables"]
+    assert result.evidence["accepted_horizon"]["lead_count"] == 2
+
+
+def test_canonical_readiness_blocks_missing_variable_and_missing_lead() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026050700/manifest.json"}
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            variables=GFS_REQUIRED_STANDARD_VARIABLES,
+            forecast_hours=(0, 3),
+            policy_identity=policy,
+            source_object_identity=source_object,
+            omit_pairs={("shortwave_down", 3), ("pressure_surface", 0), ("pressure_surface", 3)},
+        ),
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is False
+    assert result.evidence["status"] == "canonical_incomplete"
+    assert result.evidence["missing_variables"] == ["pressure_surface"]
+    assert result.evidence["missing_leads"][0]["missing_variables"] == ["pressure_surface"]
+    assert result.evidence["missing_leads"][1]["missing_variables"] == ["pressure_surface", "shortwave_down"]
+
+
+def test_canonical_readiness_does_not_reuse_when_policy_or_object_identity_changes() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    old_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    new_policy = {"source": "gfs", "forecast_hours": [0, 3, 6]}
+    source_object = {"source": "gfs", "checksum": "old"}
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            variables=GFS_REQUIRED_STANDARD_VARIABLES,
+            forecast_hours=(0, 3),
+            policy_identity=old_policy,
+            source_object_identity=source_object,
+        ),
+        forecast_hours=(0, 3),
+        policy_identity=new_policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is False
+    assert result.evidence["reason"] == "canonical_identity_mismatch"
+    assert result.evidence["policy_identity_matched"] is False
+
+
+def test_canonical_readiness_requires_identity_on_every_counted_row() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026050700/manifest.json"}
+    rows = canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        variables=GFS_REQUIRED_STANDARD_VARIABLES,
+        forecast_hours=(0, 3),
+    )
+    rows[0]["lineage_json"] = {
+        "policy_identity": dict(policy),
+        "source_object_identity": dict(source_object),
+    }
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=rows,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is False
+    assert result.evidence["status"] == "canonical_incomplete"
+    assert result.evidence["reason"] == "canonical_identity_mismatch"
+    assert result.evidence["identity_rejected_row_count"] == len(rows) - 1
+    assert result.evidence["missing_leads"]
+
+
+def test_canonical_readiness_blocks_mismatched_source_object_identity() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    expected_source_object = {"source": "gfs", "checksum": "expected"}
+    stale_source_object = {"source": "gfs", "checksum": "stale"}
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            variables=GFS_REQUIRED_STANDARD_VARIABLES,
+            forecast_hours=(0, 3),
+            policy_identity=policy,
+            source_object_identity=stale_source_object,
+        ),
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=expected_source_object,
+    )
+
+    assert result.ready is False
+    assert result.evidence["reason"] == "canonical_identity_mismatch"
+    assert result.evidence["source_object_identity_matched"] is False
+    assert result.evidence["identity_rejected_row_count"] == len(GFS_REQUIRED_STANDARD_VARIABLES) * 2
 
 
 def test_unit_conversion_boundaries() -> None:

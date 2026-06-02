@@ -5,7 +5,7 @@ import os
 import shutil
 import stat
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +43,7 @@ from services.orchestrator.scheduler import (
     SchedulerPassResult,
 )
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
+from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES, evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
 from workers.shud_runtime import runtime as shud_runtime_module
 
@@ -121,6 +122,58 @@ def test_production_contract_matrix_is_exposed_in_scheduler_pass_evidence(tmp_pa
     }
     assert candidate["canonical_product_id"] == "canon_gfs_2026052106"
     assert candidate["published_manifest_id"] == "manifest_fcst_gfs_2026052106_model_a"
+
+
+def test_canonical_incomplete_readiness_blocks_forcing_candidate_submission(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    readiness = FakeCanonicalReadinessProvider(
+        {
+            ("gfs", cycle_time): evaluate_canonical_readiness(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                products=_canonical_rows(
+                    source_id="gfs",
+                    cycle_time=cycle_time,
+                    variables=GFS_REQUIRED_STANDARD_VARIABLES,
+                    forecast_hours=(0, 3),
+                    policy_identity=policy,
+                    source_object_identity=source_object,
+                    omit_pairs={("shortwave_down", 3)},
+                ),
+                forecast_hours=(0, 3),
+                policy_identity=policy,
+                source_object_identity=source_object,
+                canonical_product_id="canon_gfs_2026052106",
+                model_id="model_a",
+                basin_id="basin_a",
+            ).evidence
+        }
+    )
+    adapter = FakeAdapter(
+        "gfs",
+        [("2026-05-21T06:00:00Z", True)],
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": adapter},
+        canonical_readiness_provider=readiness,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "missing_canonical_leads"
+    canonical = blocked["state_evidence"]["canonical_readiness"]
+    assert canonical["status"] == "canonical_incomplete"
+    assert canonical["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
+    assert adapter.download_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -8626,10 +8679,19 @@ class PublicOnlyRedactingRegistry(RedactingRegistry):
 
 
 class FakeAdapter:
-    def __init__(self, source_id: str, cycles: list[tuple[str, bool]]) -> None:
+    def __init__(
+        self,
+        source_id: str,
+        cycles: list[tuple[str, bool]],
+        *,
+        policy_identity: dict[str, Any] | None = None,
+        source_object_identity: dict[str, Any] | None = None,
+    ) -> None:
         self.source_id = source_id
         self.cycles = cycles
         self.download_calls = 0
+        self._policy_identity = policy_identity
+        self._source_object_identity = source_object_identity
 
     def discover_cycles(self, cycle_date: Any, end_date: Any = None) -> list[CycleDiscovery]:
         del end_date
@@ -8650,6 +8712,21 @@ class FakeAdapter:
     def download_plan(self, *_args: Any, **_kwargs: Any) -> None:
         self.download_calls += 1
         raise AssertionError("dry-run scheduler must not download")
+
+    def source_policy_identity(self, *_args: Any) -> dict[str, Any]:
+        return dict(self._policy_identity or {"source": self.source_id, "forecast_hours": [0, 3]})
+
+    def source_object_identity(self, *_args: Any) -> dict[str, Any]:
+        return dict(self._source_object_identity or {"source": self.source_id, "object": "fake"})
+
+
+class FakeCanonicalReadinessProvider:
+    def __init__(self, readiness_by_cycle: Mapping[tuple[str, datetime], Mapping[str, Any]]) -> None:
+        self.readiness_by_cycle = dict(readiness_by_cycle)
+
+    def canonical_readiness(self, **kwargs: Any) -> Mapping[str, Any]:
+        key = (kwargs["source_id"], kwargs["cycle_time"])
+        return dict(self.readiness_by_cycle[key])
 
 
 class OverLimitAdapter:
@@ -9170,6 +9247,44 @@ def _model(model_id: str, basin_id: str, *, resource_profile: dict[str, Any] | N
         "lifecycle_state": "active",
         "resource_profile": profile,
     }
+
+
+def _canonical_rows(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    variables: Sequence[str],
+    forecast_hours: Sequence[int],
+    policy_identity: Mapping[str, Any],
+    source_object_identity: Mapping[str, Any],
+    omit_pairs: set[tuple[str, int]] | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    omitted = omit_pairs or set()
+    for forecast_hour in forecast_hours:
+        for variable in variables:
+            if (variable, forecast_hour) in omitted:
+                continue
+            rows.append(
+                {
+                    "canonical_product_id": (
+                        f"{source_id}_{format_cycle_time(cycle_time)}_{variable}_f{forecast_hour:03d}"
+                    ),
+                    "source_id": source_id,
+                    "cycle_time": cycle_time,
+                    "valid_time": cycle_time + timedelta(hours=forecast_hour),
+                    "lead_time_hours": forecast_hour,
+                    "variable": variable,
+                    "object_uri": f"canonical/{source_id}/{variable}/f{forecast_hour:03d}.nc",
+                    "checksum": f"sha256:{variable}:{forecast_hour}",
+                    "quality_flag": "ok",
+                    "lineage_json": {
+                        "policy_identity": dict(policy_identity),
+                        "source_object_identity": dict(source_object_identity),
+                    },
+                }
+            )
+    return rows
 
 
 def _production_identity_fixture() -> dict[str, str]:
