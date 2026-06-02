@@ -3,10 +3,11 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import os
 import stat
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -166,6 +167,8 @@ def bootstrap_qhh_production(
     shud_code_version: str = DEFAULT_QHH_SHUD_CODE_VERSION,
     resource_profile_overrides: dict[str, Any] | None = None,
     fail_after_model_metadata: bool = False,
+    fail_during_station_seed: bool = False,
+    fail_during_output_segment_seed: bool = False,
     trusted_internal: bool = True,
 ) -> dict[str, Any]:
     resolved_database_url = database_url or os.getenv("DATABASE_URL", "").strip()
@@ -253,6 +256,8 @@ def bootstrap_qhh_production(
             resolved_database_url,
             resource_profile_overrides=resource_profile_overrides or {},
             fail_after_model_metadata=fail_after_model_metadata,
+            fail_during_station_seed=fail_during_station_seed,
+            fail_during_output_segment_seed=fail_during_output_segment_seed,
             trusted_internal=trusted_internal,
         )
         database_succeeded = True
@@ -354,6 +359,9 @@ def read_qhh_tsd_forc(
             z = float(parts[5])
         except ValueError:
             malformed_rows.append({"line_number": line_number, "reason": "non_numeric_column"})
+            continue
+        if not math.isfinite(x) or not math.isfinite(y) or not math.isfinite(z):
+            malformed_rows.append({"line_number": line_number, "reason": "non_finite_xyz"})
             continue
         if forcing_index < 1:
             malformed_rows.append({"line_number": line_number, "reason": "invalid_forcing_index"})
@@ -663,7 +671,45 @@ def _bounded_discovery_preflight(root: Path, *, model_id: str, qhh_source_root: 
                 },
             )
         try:
-            names = os.listdir(directory)
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    entry_count += 1
+                    if entry_count > MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES:
+                        raise QhhProductionBootstrapError(
+                            "QHH_BOOTSTRAP_DISCOVERY_ENTRY_LIMIT_EXCEEDED",
+                            "QHH bootstrap discovery exceeded the allowed entry count.",
+                            model_id=model_id,
+                            path=str(root),
+                            details={
+                                "max_entries": MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES,
+                                "observed_entries": entry_count,
+                                "no_mutation_expected": True,
+                            },
+                        )
+                    child = directory / entry.name
+                    try:
+                        child_stat = stat_no_follow(child, containment_root=root)
+                    except FileNotFoundError:
+                        continue
+                    except SafeFilesystemError as error:
+                        raise QhhProductionBootstrapError(
+                            "QHH_BOOTSTRAP_PACKAGE_PATH_UNSAFE",
+                            "QHH bootstrap discovery encountered an unsafe path.",
+                            model_id=model_id,
+                            path=str(child),
+                            details={"reason": error.kind, "no_mutation_expected": True},
+                        ) from error
+                    if not stat.S_ISDIR(child_stat.st_mode):
+                        continue
+                    try:
+                        if child.resolve() == qhh_source_root:
+                            qhh_seen = True
+                    except OSError:
+                        pass
+                    if depth < MAX_QHH_BOOTSTRAP_DISCOVERY_DEPTH:
+                        stack.append((child, depth + 1))
+        except QhhProductionBootstrapError:
+            raise
         except OSError as error:
             raise QhhProductionBootstrapError(
                 "QHH_BOOTSTRAP_DISCOVERY_UNREADABLE",
@@ -672,42 +718,6 @@ def _bounded_discovery_preflight(root: Path, *, model_id: str, qhh_source_root: 
                 path=str(directory),
                 details={"no_mutation_expected": True},
             ) from error
-        entry_count += len(names)
-        if entry_count > MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES:
-            raise QhhProductionBootstrapError(
-                "QHH_BOOTSTRAP_DISCOVERY_ENTRY_LIMIT_EXCEEDED",
-                "QHH bootstrap discovery exceeded the allowed entry count.",
-                model_id=model_id,
-                path=str(root),
-                details={
-                    "max_entries": MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES,
-                    "observed_entries": entry_count,
-                    "no_mutation_expected": True,
-                },
-            )
-        for name in names:
-            child = directory / name
-            try:
-                child_stat = stat_no_follow(child, containment_root=root)
-            except FileNotFoundError:
-                continue
-            except SafeFilesystemError as error:
-                raise QhhProductionBootstrapError(
-                    "QHH_BOOTSTRAP_PACKAGE_PATH_UNSAFE",
-                    "QHH bootstrap discovery encountered an unsafe path.",
-                    model_id=model_id,
-                    path=str(child),
-                    details={"reason": error.kind, "no_mutation_expected": True},
-                ) from error
-            if not stat.S_ISDIR(child_stat.st_mode):
-                continue
-            try:
-                if child.resolve() == qhh_source_root:
-                    qhh_seen = True
-            except OSError:
-                pass
-            if depth < MAX_QHH_BOOTSTRAP_DISCOVERY_DEPTH:
-                stack.append((child, depth + 1))
     if not qhh_seen:
         raise QhhProductionBootstrapError(
             "QHH_BOOTSTRAP_PACKAGE_NOT_FOUND",
@@ -798,6 +808,8 @@ def _bootstrap_database(
     *,
     resource_profile_overrides: dict[str, Any],
     fail_after_model_metadata: bool,
+    fail_during_station_seed: bool,
+    fail_during_output_segment_seed: bool,
     trusted_internal: bool,
 ) -> dict[str, Any]:
     sources = context.sources
@@ -835,6 +847,13 @@ def _bootstrap_database(
                 model_id=model_id,
                 details={"rollback_expected": True},
             )
+        if fail_during_station_seed:
+            raise QhhProductionBootstrapError(
+                "QHH_BOOTSTRAP_PARTIAL_BOOTSTRAP_ROLLBACK",
+                "Injected failure at station seeding for rollback verification.",
+                model_id=model_id,
+                details={"rollback_expected": True, "failure_point": "station_seed"},
+            )
         station_counts = _seed_station_rows(
             cursor,
             model=_fetch_model_identity(cursor, model_id),
@@ -843,6 +862,13 @@ def _bootstrap_database(
             tsd_forc_path=context.paths.tsd_forc_path,
             tsd_forc_checksum=context.tsd_forc_checksum,
         )
+        if fail_during_output_segment_seed:
+            raise QhhProductionBootstrapError(
+                "QHH_BOOTSTRAP_PARTIAL_BOOTSTRAP_ROLLBACK",
+                "Injected failure at output identity seeding for rollback verification.",
+                model_id=model_id,
+                details={"rollback_expected": True, "failure_point": "output_segment_seed"},
+            )
         output_counts = _seed_output_segment_rows(
             cursor,
             model=_fetch_model_identity(cursor, model_id),
@@ -1123,7 +1149,7 @@ def _seed_station_rows(
                 active_flag = EXCLUDED.active_flag,
                 properties_json = EXCLUDED.properties_json
             """,
-            [row[:8] for row in rows],
+            [row[:9] for row in rows],
             template="(%s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4490), %s, %s, %s, %s)",
             page_size=1000,
         )
@@ -1145,19 +1171,13 @@ def _seed_output_segment_rows(
     rows = []
     for index in range(1, output_segment_count + 1):
         segment_order = order_offset + index
-        properties = {
-            "seed": "qhh_production_bootstrap",
-            "model_id": model["model_id"],
-            "basin_id": model["basin_id"],
-            "basin_version_id": model["basin_version_id"],
-            "shud_output_river": True,
-            "shud_riv_index": index,
-            "source": f"{project_name}.sp.riv",
-            "source_file": str(sp_riv_path),
-            "source_sha256": sp_riv_checksum,
-            "geometry_source": "gis_rivseg_iRiv",
-            "output_identity": f"{project_name}.sp.riv:{index}",
-        }
+        properties = _output_segment_expected_properties(
+            model=model,
+            project_name=project_name,
+            index=index,
+            sp_riv_path=sp_riv_path,
+            sp_riv_checksum=sp_riv_checksum,
+        )
         rows.append(
             (
                 f"{model['model_id']}_shud_riv_{index:06d}",
@@ -1171,7 +1191,12 @@ def _seed_output_segment_rows(
                 ),
             )
         )
-    existing = _existing_output_segment_digests(cursor, model["river_network_version_id"], [row[0] for row in rows])
+    existing = _existing_output_segment_digests(
+        cursor,
+        model["river_network_version_id"],
+        [row[0] for row in rows],
+        expected_properties_by_id={row[0]: _json_dict(row[3]) for row in rows},
+    )
     created = sum(1 for row in rows if row[0] not in existing)
     unchanged = sum(1 for row in rows if existing.get(row[0]) == row[4])
     updated = len(rows) - created - unchanged
@@ -1196,6 +1221,29 @@ def _seed_output_segment_rows(
         )
         _backfill_output_segment_geometry(cursor, model["river_network_version_id"])
     return {"created": created, "updated": updated, "unchanged": unchanged}
+
+
+def _output_segment_expected_properties(
+    *,
+    model: dict[str, Any],
+    project_name: str,
+    index: int,
+    sp_riv_path: Path,
+    sp_riv_checksum: str,
+) -> dict[str, Any]:
+    return {
+        "seed": "qhh_production_bootstrap",
+        "model_id": model["model_id"],
+        "basin_id": model["basin_id"],
+        "basin_version_id": model["basin_version_id"],
+        "shud_output_river": True,
+        "shud_riv_index": index,
+        "source": f"{project_name}.sp.riv",
+        "source_file": str(sp_riv_path),
+        "source_sha256": sp_riv_checksum,
+        "geometry_source": "gis_rivseg_iRiv",
+        "output_identity": f"{project_name}.sp.riv:{index}",
+    }
 
 
 def _output_segment_order_offset(cursor: Any, river_network_version_id: str) -> int:
@@ -1451,6 +1499,8 @@ def _existing_output_segment_digests(
     cursor: Any,
     river_network_version_id: str,
     river_segment_ids: Sequence[str],
+    *,
+    expected_properties_by_id: Mapping[str, dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     if not river_segment_ids:
         return {}
@@ -1466,14 +1516,27 @@ def _existing_output_segment_digests(
         """,
         (river_network_version_id, list(river_segment_ids)),
     )
-    return {
-        str(row["river_segment_id"]): _output_segment_digest(
+    digests: dict[str, str] = {}
+    expected_properties_by_id = expected_properties_by_id or {}
+    for row in cursor.fetchall():
+        river_segment_id = str(row["river_segment_id"])
+        properties_json = _json_dict(row["properties_json"])
+        expected_properties = expected_properties_by_id.get(river_segment_id)
+        if expected_properties is not None:
+            properties_json = _output_segment_idempotency_properties(properties_json, expected_properties)
+        digests[river_segment_id] = _output_segment_digest(
             river_network_version_id=row["river_network_version_id"],
             segment_order=row["segment_order"],
-            properties_json=_json_dict(row["properties_json"]),
+            properties_json=properties_json,
         )
-        for row in cursor.fetchall()
-    }
+    return digests
+
+
+def _output_segment_idempotency_properties(
+    stored_properties: dict[str, Any],
+    expected_properties: dict[str, Any],
+) -> dict[str, Any]:
+    return {key: stored_properties[key] for key in expected_properties if key in stored_properties}
 
 
 def _station_digest(

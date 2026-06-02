@@ -14,7 +14,7 @@ import pytest
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
-from services.orchestrator.chain import M3_STAGES, PipelineResult, StageRunResult
+from services.orchestrator.chain import M3_STAGES, PipelineResult, StageRunResult, build_model_run_assembly
 from services.orchestrator.production_contract import (
     PRODUCTION_STAGE_TAXONOMY,
     PRODUCTION_STATUS_TAXONOMY,
@@ -44,6 +44,7 @@ from services.orchestrator.scheduler import (
 )
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
+from workers.shud_runtime import runtime as shud_runtime_module
 
 
 def test_all_active_models_and_gfs_ifs_window_produce_stable_candidate_ids(tmp_path: Path) -> None:
@@ -328,6 +329,7 @@ def test_scheduler_candidate_state_legacy_rows_without_m23_identity_remain_compa
             basin_version_id="basin_a_v1",
             river_network_version_id="basin_a_rivnet_v1",
             segment_count=3,
+            output_segment_count=3,
             model_package_uri="s3://nhms/models/model_a/package/",
             shud_code_version="2.0",
             resource_profile={},
@@ -2529,6 +2531,108 @@ def test_bootstrapped_qhh_model_is_scheduler_ready_without_metadata_exclusions(t
     excluded_reasons = {item["reason"] for item in result.evidence["model_discovery"]["exclusions"]}
     assert "basins_qhh_shud" in {item["model_id"] for item in result.evidence["candidates"]}
     assert not {"not_shud_model", "not_runnable", "incomplete_model_metadata"} & excluded_reasons
+
+
+def test_qhh_output_segment_count_propagates_separately_from_gis_segment_count(tmp_path: Path) -> None:
+    model = {
+        "model_id": "basins_qhh_shud",
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "segment_count": 5,
+        "model_package_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/package/",
+        "shud_code_version": "basins-shud",
+        "active_flag": True,
+        "lifecycle_state": "active",
+        "resource_profile": {
+            "runnable": True,
+            "lineage": "qhh_production_bootstrap",
+            "project_name": "qhh",
+            "station_count": 2,
+            "output_segment_count": 2,
+            "display_capabilities": {"q_down": True, "tiles": True},
+            "frequency_capabilities": {"return_periods": False},
+        },
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, model_ids=("basins_qhh_shud",)),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    candidate = result.evidence["candidates"][0]
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    model_evidence = result.evidence["model_run_evidence"][0]
+    assert candidate["segment_count"] == 5
+    assert candidate["output_segment_count"] == 2
+    assert submitted_basin["segment_count"] == 5
+    assert submitted_basin["output_segment_count"] == 2
+    assert submitted_basin["output_river"]["segment_count"] == 2
+    assert submitted_basin["output_river"]["output_segment_count"] == 2
+    assert submitted_basin["output_river"]["gis_segment_count"] == 5
+    assert model_evidence["segment_count"] == 5
+    assert model_evidence["output_segment_count"] == 2
+    assert model_evidence["outputs"]["segment_count"] == 2
+    assert model_evidence["outputs"]["output_segment_count"] == 2
+    assert model_evidence["outputs"]["gis_segment_count"] == 5
+    assert model_evidence["quality_states"]["output_river"]["segment_count"] == 2
+
+
+def test_runtime_manifest_assembly_uses_shud_output_count_not_gis_segment_count(tmp_path: Path) -> None:
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    basin = {
+        "candidate_id": "gfs:2026-05-21T06:00:00Z:basins_qhh_shud:forecast_gfs_deterministic",
+        "model_id": "basins_qhh_shud",
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "segment_count": 5,
+        "output_segment_count": 2,
+        "model_package_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/package/",
+        "model_package_manifest_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/manifest.json",
+        "run_id": "fcst_gfs_2026052106_basins_qhh_shud",
+        "forcing_version_id": "forc_gfs_2026052106_basins_qhh_shud",
+        "forcing_uri": "s3://nhms/forcing/gfs/2026052106/basins_qhh_vbasins/basins_qhh_shud/",
+        "station_count": 2,
+        "display_capabilities": {"tiles": True},
+        "frequency_capabilities": {"return_periods": False},
+    }
+
+    assembly = build_model_run_assembly(
+        basin,
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        cycle_time=_dt("2026-05-21T06:00:00Z"),
+        scenario_id="forecast_gfs_deterministic",
+        workspace_root=tmp_path / "workspace",
+        object_store=object_store,
+        default_forecast_horizon_hours=168,
+    )
+    manifest = {
+        "identity": dict(assembly.identity),
+        "model": {
+            "model_id": "basins_qhh_shud",
+            "basin_version_id": "basins_qhh_vbasins",
+            "river_network_version_id": "basins_qhh_rivnet_vbasins",
+            "model_package_uri": basin["model_package_uri"],
+            "segment_count": basin["segment_count"],
+            "output_segment_count": assembly.identity["segment_count"],
+        },
+        "runtime": dict(assembly.runtime),
+        "outputs": dict(assembly.outputs),
+    }
+
+    assert assembly.identity["segment_count"] == 2
+    assert assembly.runtime["output_river"]["segment_count"] == 2
+    assert assembly.runtime["output_river"]["output_segment_count"] == 2
+    assert assembly.runtime["output_river"]["gis_segment_count"] == 5
+    assert assembly.outputs["output_segment_count"] == 2
+    assert assembly.outputs["gis_segment_count"] == 5
+    assert shud_runtime_module._segment_count(manifest) == 2
 
 
 def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) -> None:
@@ -8903,6 +9007,7 @@ def _scheduler_candidate_fixture() -> scheduler_module.SchedulerCandidate:
             basin_version_id="basin_a_v1",
             river_network_version_id="basin_a_rivnet_v1",
             segment_count=3,
+            output_segment_count=3,
             model_package_uri="s3://nhms/models/model_a/package/",
             shud_code_version="2.0",
             resource_profile={},

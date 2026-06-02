@@ -1532,7 +1532,13 @@ def _output_interval_minutes(manifest: dict[str, Any], default_interval_minutes:
 
 def _segment_count(manifest: dict[str, Any]) -> int:
     value = (
-        manifest.get("segment_count")
+        manifest.get("output_segment_count")
+        or manifest.get("shud_output_segment_count")
+        or manifest.get("model", {}).get("output_segment_count")
+        or manifest.get("outputs", {}).get("output_segment_count")
+        or manifest.get("runtime", {}).get("output_river", {}).get("output_segment_count")
+        or manifest.get("runtime", {}).get("output_river", {}).get("segment_count")
+        or manifest.get("segment_count")
         or manifest.get("model", {}).get("segment_count")
         or manifest.get("model", {}).get("river_segment_count")
         or manifest.get("outputs", {}).get("segment_count")

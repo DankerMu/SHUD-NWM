@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
+from typing import Any
 
 import pytest
 from psycopg2.extras import Json
@@ -72,6 +74,31 @@ def test_read_qhh_tsd_forc_rejects_mismatch_and_malformed(
     assert exc_info.value.details["no_mutation_expected"] is True
 
 
+@pytest.mark.parametrize("xyz", [("nan", "2", "3"), ("1", "inf", "3"), ("1", "2", "-inf")])
+def test_read_qhh_tsd_forc_rejects_non_finite_xyz_metadata(
+    tmp_path: Path,
+    xyz: tuple[str, str, str],
+) -> None:
+    input_dir = tmp_path / "qhh"
+    input_dir.mkdir()
+    x, y, z = xyz
+    tsd_forc = input_dir / "qhh.tsd.forc"
+    tsd_forc.write_text(
+        "1 6\n"
+        "/forcing\n"
+        "ID Lon Lat X Y Z Filename\n"
+        f"1 100 30 {x} {y} {z} X000001.csv\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        read_qhh_tsd_forc(tsd_forc, input_dir)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_TSD_FORC_MALFORMED"
+    assert exc_info.value.details["malformed_rows"][0]["reason"] == "non_finite_xyz"
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
 def test_read_qhh_tsd_forc_rejects_oversized_input(tmp_path: Path) -> None:
     input_dir = tmp_path / "qhh"
     input_dir.mkdir()
@@ -110,6 +137,43 @@ def test_read_qhh_tsd_forc_rejects_non_regular_file(tmp_path: Path) -> None:
         read_qhh_tsd_forc(tsd_forc, input_dir)
 
     assert exc_info.value.error_code == "QHH_BOOTSTRAP_PROJECT_FILE_UNSAFE"
+
+
+def test_bootstrap_reports_missing_qhh_project_file_before_database(tmp_path: Path) -> None:
+    root, input_dir, inventory_path, manifest_path, _model_id = _qhh_registry_fixture(tmp_path)
+    input_dir.joinpath("qhh.tsd.forc").unlink()
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        bootstrap_qhh_production(
+            database_url="postgresql://nhms:nhms@localhost:1/nhms",
+            basins_root=root,
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+        )
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_PROJECT_FILE_MISSING"
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
+def test_bootstrap_rejects_symlink_qhh_source_ancestor_before_database(tmp_path: Path) -> None:
+    target_root, _input_dir, inventory_path, manifest_path, _model_id = _qhh_registry_fixture(tmp_path / "target")
+    root = tmp_path / "basins"
+    root.mkdir()
+    try:
+        (root / "qhh").symlink_to(target_root / "qhh", target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink support unavailable: {error}")
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        bootstrap_qhh_production(
+            database_url="postgresql://nhms:nhms@localhost:1/nhms",
+            basins_root=root,
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+        )
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_PACKAGE_PATH_UNSAFE"
+    assert exc_info.value.details["no_mutation_expected"] is True
 
 
 def test_read_qhh_output_segment_count_rejects_out_of_range_positive_count(tmp_path: Path) -> None:
@@ -158,6 +222,67 @@ def test_bootstrap_rejects_discovery_entry_overflow(tmp_path: Path, monkeypatch:
 
     assert exc_info.value.error_code == "QHH_BOOTSTRAP_DISCOVERY_ENTRY_LIMIT_EXCEEDED"
     assert exc_info.value.details["max_entries"] == MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES
+
+
+def test_bounded_discovery_entry_limit_streams_without_materializing_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "basins"
+    qhh_source_root = root / "qhh"
+    qhh_source_root.mkdir(parents=True)
+    consumed = 0
+
+    class FakeDirEntry:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class FakeScandir:
+        def __enter__(self) -> FakeScandir:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def __iter__(self) -> FakeScandir:
+            return self
+
+        def __next__(self) -> FakeDirEntry:
+            nonlocal consumed
+            consumed += 1
+            if consumed > MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES + 100:
+                raise AssertionError("bounded discovery consumed beyond the configured limit")
+            return FakeDirEntry(f"entry-{consumed}")
+
+    def fake_scandir(path: Path) -> FakeScandir:
+        assert Path(path) == root
+        return FakeScandir()
+
+    def fake_stat_no_follow(path: Path, containment_root: Path | None = None) -> Any:
+        del containment_root
+        mode = stat.S_IFDIR if Path(path) == root else stat.S_IFREG
+        return type("FakeStat", (), {"st_mode": mode})()
+
+    monkeypatch.setattr(qhh_bootstrap.os, "scandir", fake_scandir)
+    monkeypatch.setattr(qhh_bootstrap, "stat_no_follow", fake_stat_no_follow)
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        qhh_bootstrap._bounded_discovery_preflight(root, model_id="basins_qhh_shud", qhh_source_root=qhh_source_root)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_DISCOVERY_ENTRY_LIMIT_EXCEEDED"
+    assert consumed == MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES + 1
+
+
+def test_bounded_discovery_depth_cap_reports_package_not_found_for_too_deep_qhh_root(tmp_path: Path) -> None:
+    root = tmp_path / "basins"
+    qhh_source_root = root / "a" / "b" / "c" / "d" / "qhh"
+    qhh_source_root.mkdir(parents=True)
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        qhh_bootstrap._bounded_discovery_preflight(root, model_id="basins_qhh_shud", qhh_source_root=qhh_source_root)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_PACKAGE_NOT_FOUND"
+    assert exc_info.value.details["no_mutation_expected"] is True
 
 
 def test_bootstrap_rejects_evidence_no_clobber_before_database(tmp_path: Path) -> None:
@@ -248,6 +373,22 @@ def test_bootstrap_rejects_malformed_manifest_json(tmp_path: Path) -> None:
     assert exc_info.value.error_code == "QHH_BOOTSTRAP_PACKAGE_MANIFEST_INVALID"
 
 
+def test_bootstrap_rejects_oversized_package_manifest_before_database(tmp_path: Path) -> None:
+    root, _input_dir, inventory_path, manifest_path, _model_id = _qhh_registry_fixture(tmp_path)
+    manifest_path.write_bytes(b"{" + b'"x":' + b'"' + (b"a" * (qhh_bootstrap.MAX_QHH_JSON_BYTES + 1)) + b'"}')
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        bootstrap_qhh_production(
+            database_url="postgresql://nhms:nhms@localhost:1/nhms",
+            basins_root=root,
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+        )
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_PACKAGE_MANIFEST_INVALID_OVERSIZED"
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
 def test_bootstrap_rejects_precomputed_sources_from_different_physical_qhh_root(tmp_path: Path) -> None:
     source_root, source_input_dir, inventory_path, manifest_path, _model_id = _qhh_registry_fixture(
         tmp_path / "source"
@@ -292,6 +433,109 @@ def test_bootstrap_rejects_manifest_digest_mismatch(tmp_path: Path) -> None:
         )
 
     assert exc_info.value.error_code == "QHH_BOOTSTRAP_MANIFEST_DIGEST_MISMATCH"
+
+
+def test_bootstrap_rejects_oversized_checksum_sidecar_before_database(tmp_path: Path) -> None:
+    root, _input_dir, inventory_path, manifest_path, _model_id = _qhh_registry_fixture(tmp_path)
+    manifest_path.with_suffix(manifest_path.suffix + ".sha256").write_bytes(
+        b"0" * (qhh_bootstrap.MAX_QHH_CHECKSUM_BYTES + 1)
+    )
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        bootstrap_qhh_production(
+            database_url="postgresql://nhms:nhms@localhost:1/nhms",
+            basins_root=root,
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+        )
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_CHECKSUM_OVERSIZED"
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
+def test_seed_station_rows_passes_properties_without_digest_to_insert(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_execute_values(
+        cursor: Any,
+        sql: str,
+        argslist: list[tuple[Any, ...]],
+        *,
+        template: str,
+        page_size: int,
+    ) -> None:
+        del cursor, sql, page_size
+        calls.append({"argslist": argslist, "template": template})
+
+    class FakeCursor:
+        def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+            del sql, params
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return []
+
+    station = qhh_bootstrap.QhhForcingStation(
+        station_id="qhh_forc_001",
+        station_name="QHH forcing station 001",
+        forcing_index=1,
+        longitude=100.1,
+        latitude=30.1,
+        x=1.0,
+        y=2.0,
+        z=-9999.0,
+        elevation_m=0.0,
+        forcing_filename="X000001.csv",
+        original_id="1",
+    )
+    monkeypatch.setattr(qhh_bootstrap, "execute_values", fake_execute_values, raising=False)
+    monkeypatch.setattr("psycopg2.extras.execute_values", fake_execute_values)
+
+    qhh_bootstrap._seed_station_rows(
+        FakeCursor(),
+        model={
+            "model_id": "basins_qhh_shud",
+            "basin_id": "qhh",
+            "basin_version_id": "qhh_v1",
+        },
+        stations=[station],
+        project_name="qhh",
+        tsd_forc_path=tmp_path / "qhh.tsd.forc",
+        tsd_forc_checksum="sha",
+    )
+
+    assert calls
+    argslist = calls[0]["argslist"]
+    assert len(argslist[0]) == 9
+    assert calls[0]["template"].count("%s") == 9
+    assert isinstance(argslist[0][8], Json)
+
+
+def test_existing_output_segment_digest_ignores_deterministic_geometry_backfill_properties() -> None:
+    expected = {
+        "seed": "qhh_production_bootstrap",
+        "model_id": "basins_qhh_shud",
+        "basin_id": "qhh",
+        "basin_version_id": "qhh_v1",
+        "shud_output_river": True,
+        "shud_riv_index": 1,
+        "source": "qhh.sp.riv",
+        "source_file": "/input/qhh.sp.riv",
+        "source_sha256": "sha",
+        "geometry_source": "gis_rivseg_iRiv",
+        "output_identity": "qhh.sp.riv:1",
+    }
+    enriched = {
+        **expected,
+        "geometry_source_segment_count": 2,
+        "geometry_source_length_m": 123.4,
+    }
+
+    normalized = qhh_bootstrap._output_segment_idempotency_properties(enriched, expected)
+
+    assert normalized == expected
 
 
 def test_bootstrap_cli_outputs_typed_blocker_for_missing_database_url(
@@ -348,10 +592,27 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     assert first["scheduler_readiness"]["ready"] is True
     assert first["station_row_counts"] == {"created": 2, "updated": 0, "unchanged": 0}
     assert first["output_segment_row_counts"] == {"created": 2, "updated": 0, "unchanged": 0}
+    assert first["output_segment_count"] == 2
+    assert first["package_identity"]["manifest_uri"] == json.loads(manifest_path.read_text(encoding="utf-8"))[
+        "manifest_uri"
+    ]
+    assert first["package_identity"]["model_package_uri"] == first["model_package_uri"]
+    assert first["package_identity"]["package_checksum"]
+    assert first["package_identity"]["manifest_sha256"]
+    assert first["source_files"]["qhh_tsd_forc"]["station_count"] == 2
+    assert first["source_files"]["qhh_sp_riv"]["output_segment_count"] == 2
     assert first["non_goal_proof"]["forcing_version_rows_created"] == 0
     assert first["non_goal_proof"]["forcing_station_timeseries_rows_created"] == 0
+    assert first["non_goal_proof"] == {
+        "forcing_version_rows_created": 0,
+        "forcing_station_timeseries_rows_created": 0,
+        "shud_runtime_executed": False,
+        "slurm_submitted": False,
+        "published_display_artifacts": False,
+    }
     assert second["station_row_counts"] == {"created": 0, "updated": 0, "unchanged": 2}
     assert second["output_segment_row_counts"] == {"created": 0, "updated": 0, "unchanged": 2}
+    assert second["package_identity"] == first["package_identity"]
     assert json.loads((evidence_dir / "first.json").read_text(encoding="utf-8"))["model_id"] == model_id
 
     with psycopg_connection(integration_database_url) as connection:
@@ -400,6 +661,12 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     assert model["shud_code_version"] == "basins-shud"
     assert model["resource_profile"]["runnable"] is True
     assert model["resource_profile"]["station_count"] == 2
+    assert model["resource_profile"]["output_segment_count"] == 2
+    assert model["resource_profile"]["qhh_tsd_forc_sha256"] == first["source_files"]["qhh_tsd_forc"]["sha256"]
+    assert model["resource_profile"]["qhh_sp_riv_sha256"] == first["source_files"]["qhh_sp_riv"]["sha256"]
+    assert "forcing_uri" not in model["resource_profile"]
+    assert "forecast_cycle" not in model["resource_profile"]
+    assert "publish_uri" not in model["resource_profile"]
     assert station_count == 2
     assert output_count == 2
     assert forcing_count == 0
@@ -411,7 +678,9 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     )
     result = scheduler.run_once()
     reasons = {item["reason"] for item in result.evidence["model_discovery"]["exclusions"]}
-    assert model_id in {item["model_id"] for item in result.evidence["candidates"]}
+    scheduler_candidate = next(item for item in result.evidence["candidates"] if item["model_id"] == model_id)
+    assert scheduler_candidate["output_segment_count"] == 2
+    assert scheduler_candidate["resource_profile"]["output_segment_count"] == 2
     assert not {"not_shud_model", "not_runnable", "incomplete_model_metadata"} & reasons
 
 
@@ -447,6 +716,76 @@ def test_bootstrap_station_failure_rolls_back_model_readiness(
             station_count = int(cursor.fetchone()["count"])
     assert active_count == 0
     assert station_count == 0
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("failure_flag", "failure_point"),
+    [
+        ("fail_during_station_seed", "station_seed"),
+        ("fail_during_output_segment_seed", "output_segment_seed"),
+    ],
+)
+def test_bootstrap_seed_failures_roll_back_rows_and_scheduler_visibility(
+    tmp_path: Path,
+    integration_database_url: str,
+    failure_flag: str,
+    failure_point: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path)
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        bootstrap_qhh_production(
+            database_url=integration_database_url,
+            basins_root=root,
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+            **{failure_flag: True},
+        )
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_PARTIAL_BOOTSTRAP_ROLLBACK"
+    assert exc_info.value.details["failure_point"] == failure_point
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM core.model_instance
+                WHERE model_id = %s
+                  AND active_flag = true
+                  AND COALESCE(lifecycle_state, 'active') = 'active'
+                """,
+                (model_id,),
+            )
+            active_count = int(cursor.fetchone()["count"])
+            cursor.execute(
+                "SELECT COUNT(*) AS count FROM met.met_station WHERE properties_json->>'model_id' = %s",
+                (model_id,),
+            )
+            station_count = int(cursor.fetchone()["count"])
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM core.river_segment
+                WHERE COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
+                  AND properties_json->>'model_id' = %s
+                """,
+                (model_id,),
+            )
+            output_count = int(cursor.fetchone()["count"])
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(workspace_root=tmp_path / f"workspace-{failure_point}", model_ids=(model_id,)),
+        registry=PsycopgModelRegistryStore(integration_database_url),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    result = scheduler.run_once()
+
+    assert active_count == 0
+    assert station_count == 0
+    assert output_count == 0
+    assert model_id not in {item["model_id"] for item in result.evidence["candidates"]}
 
 
 @pytest.mark.integration

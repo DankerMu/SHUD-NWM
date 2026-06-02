@@ -485,6 +485,7 @@ class RegisteredSchedulerModel:
     basin_version_id: str
     river_network_version_id: str
     segment_count: int | None
+    output_segment_count: int | None
     model_package_uri: str
     shud_code_version: str
     resource_profile: Mapping[str, Any]
@@ -499,6 +500,7 @@ class RegisteredSchedulerModel:
             "basin_version_id": self.basin_version_id,
             "river_network_version_id": self.river_network_version_id,
             "segment_count": self.segment_count,
+            "output_segment_count": self.output_segment_count,
             "model_package_uri": _redact_secret_manifest_for_evidence(self.model_package_uri, "model_package_uri"),
             "shud_code_version": self.shud_code_version,
             "resource_profile": _resource_profile_evidence(self.resource_profile_summary),
@@ -518,6 +520,7 @@ class SchedulerCandidate:
     basin_version_id: str
     river_network_version_id: str
     segment_count: int | None
+    output_segment_count: int | None
     model_package_uri: str
     resource_profile: Mapping[str, Any]
     display_capabilities: Mapping[str, Any]
@@ -545,6 +548,7 @@ class SchedulerCandidate:
             "basin_version_id": self.basin_version_id,
             "river_network_version_id": self.river_network_version_id,
             "segment_count": self.segment_count,
+            "output_segment_count": self.output_segment_count,
             "model_package_uri": _redact_secret_manifest_for_evidence(self.model_package_uri, "model_package_uri"),
             "resource_profile": _resource_profile_evidence(self.resource_profile),
             "display_capabilities": dict(self.display_capabilities),
@@ -2234,12 +2238,14 @@ def _coerce_registered_model(row: Mapping[str, Any]) -> RegisteredSchedulerModel
         return {**_model_exclusion(row, "incomplete_model_metadata"), "missing_fields": missing}
 
     segment_count = row.get("segment_count")
+    output_segment_count = _coerce_output_segment_count(resource_profile, fallback=segment_count)
     return RegisteredSchedulerModel(
         model_id=str(required["model_id"]),
         basin_id=str(required["basin_id"]),
         basin_version_id=str(required["basin_version_id"]),
         river_network_version_id=str(required["river_network_version_id"]),
         segment_count=int(segment_count) if segment_count not in (None, "") else None,
+        output_segment_count=output_segment_count,
         model_package_uri=str(required["model_package_uri"]),
         shud_code_version=str(required["shud_code_version"]),
         resource_profile=dict(resource_profile),
@@ -2261,11 +2267,39 @@ def _resource_profile_summary(resource_profile: Mapping[str, Any]) -> dict[str, 
         "station_ids",
         "forcing_station_metadata",
         "manifest_uri",
+        "output_segment_count",
         "output_uri",
         "display_capabilities",
         "frequency_capabilities",
     )
     return {key: resource_profile[key] for key in keys if key in resource_profile}
+
+
+def _coerce_output_segment_count(resource_profile: Mapping[str, Any], *, fallback: Any = None) -> int | None:
+    output_river = resource_profile.get("output_river")
+    candidates: list[Any] = [
+        resource_profile.get("output_segment_count"),
+        resource_profile.get("shud_output_segment_count"),
+        resource_profile.get("shud_output_river_count"),
+    ]
+    if isinstance(output_river, Mapping):
+        candidates.extend(
+            [
+                output_river.get("output_segment_count"),
+                output_river.get("segment_count"),
+            ]
+        )
+    candidates.append(fallback)
+    for value in candidates:
+        if value in (None, ""):
+            continue
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count >= 0:
+            return count
+    return None
 
 
 def _mapping_value(value: Any) -> Mapping[str, Any]:
@@ -4298,6 +4332,7 @@ def _candidate_for(
         basin_version_id=model.basin_version_id,
         river_network_version_id=model.river_network_version_id,
         segment_count=model.segment_count,
+        output_segment_count=model.output_segment_count,
         model_package_uri=model.model_package_uri,
         resource_profile=model.resource_profile,
         display_capabilities=model.display_capabilities,
@@ -4362,6 +4397,7 @@ def _candidate_basin_manifest(
         "basin_version_id": candidate.basin_version_id,
         "river_network_version_id": candidate.river_network_version_id,
         "segment_count": candidate.segment_count,
+        "output_segment_count": candidate.output_segment_count,
         "model_package_uri": candidate.model_package_uri,
         "model_package_manifest_uri": _model_package_manifest_uri(candidate),
         "resource_profile": dict(candidate.resource_profile),
@@ -4385,6 +4421,7 @@ def _candidate_basin_manifest(
         ),
         "warning_thresholds_available": _nested_bool(candidate.frequency_capabilities, "warning_thresholds_available"),
         "optional_weather_available": _nested_bool(candidate.display_capabilities, "optional_weather_available"),
+        "output_river": _candidate_output_river_manifest(candidate),
         "output_key": _candidate_output_key(candidate),
         "output_uri": output_uri,
     }
@@ -4567,6 +4604,7 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
         "basin_version_id": candidate.basin_version_id,
         "river_network_version_id": candidate.river_network_version_id,
         "segment_count": candidate.segment_count,
+        "output_segment_count": candidate.output_segment_count,
         "output_key": _candidate_output_key(candidate),
     }
     if contract_identity.get("pipeline_job_id") not in (None, ""):
@@ -5349,9 +5387,15 @@ def _candidate_output_evidence(
         "canonical_product_count",
         "output_row_count",
     )
-    segment_count = _first_present_int(outcome, candidate.resource_profile, "segment_count")
-    if segment_count is None:
-        segment_count = candidate.segment_count
+    output_segment_count = _first_present_int(
+        outcome,
+        candidate.resource_profile,
+        "output_segment_count",
+        "shud_output_segment_count",
+        "shud_output_river_count",
+    )
+    if output_segment_count is None:
+        output_segment_count = candidate.output_segment_count
     payload = {
         "output_uri": _redact_secret_manifest_for_evidence(
             resolved_output_uri,
@@ -5365,7 +5409,9 @@ def _candidate_output_evidence(
             "shud_output_uri",
         ),
         "parsed_row_count": parsed_row_count,
-        "segment_count": segment_count,
+        "segment_count": output_segment_count,
+        "output_segment_count": output_segment_count,
+        "gis_segment_count": candidate.segment_count,
         "canonical_product_counts": _candidate_product_counts(candidate, outcome=outcome),
     }
     return _evidence_safe(payload)
@@ -5491,7 +5537,10 @@ def _candidate_product_counts(candidate: SchedulerCandidate, *, outcome: Mapping
     if parsed is not None:
         counts["parsed_rows"] = parsed
     if candidate.segment_count is not None:
-        counts["river_segments"] = candidate.segment_count
+        counts["gis_river_segments"] = candidate.segment_count
+    if candidate.output_segment_count is not None:
+        counts["river_segments"] = candidate.output_segment_count
+        counts["shud_output_segments"] = candidate.output_segment_count
     station_count = _candidate_station_count(candidate)
     if station_count is not None:
         counts["forcing_stations"] = station_count
@@ -5538,6 +5587,31 @@ def _candidate_contract_pipeline_job_id(candidate: SchedulerCandidate) -> str | 
     if explicit not in (None, ""):
         return str(explicit)
     return None
+
+
+def _candidate_output_river_manifest(candidate: SchedulerCandidate) -> dict[str, Any]:
+    explicit = candidate.resource_profile.get("output_river")
+    if isinstance(explicit, Mapping):
+        payload = dict(explicit)
+    else:
+        payload = {}
+    output_segment_count = _coerce_output_segment_count(
+        candidate.resource_profile,
+        fallback=candidate.output_segment_count,
+    )
+    if output_segment_count is None:
+        output_segment_count = candidate.segment_count
+    payload.setdefault("state", "ready" if output_segment_count and output_segment_count > 0 else "unavailable")
+    payload.setdefault("river_network_version_id", candidate.river_network_version_id)
+    payload.setdefault("segment_count", output_segment_count)
+    payload.setdefault("output_segment_count", output_segment_count)
+    payload.setdefault("gis_segment_count", candidate.segment_count)
+    payload.setdefault("identity_source", "resource_profile.output_segment_count")
+    payload.setdefault(
+        "quality_flag",
+        "ok" if output_segment_count and output_segment_count > 0 else "output_river_unavailable",
+    )
+    return _evidence_safe(payload)
 
 
 def _first_present_value(
