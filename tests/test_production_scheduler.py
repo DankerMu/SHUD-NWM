@@ -7046,13 +7046,16 @@ def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    (roots["workspace_root"] / "scheduler" / "evidence").mkdir(parents=True)
+    log_root = roots["runtime_root"] / "slurm-logs"
+    log_root.mkdir()
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "1")
-    monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
-    monkeypatch.setenv("SLURM_SHARED_LOG_ROOT", str(roots["log_root"]))
-    monkeypatch.setenv("NHMS_RUNTIME_ROOT", str(roots["runtime_root"]))
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setenv("SLURM_SHARED_LOG_ROOT", str(log_root))
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setattr(
         "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
@@ -7090,6 +7093,8 @@ def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
 
     assert payload["status"] == "preflight_blocked"
     assert payload["counts"]["submitted_count"] == 0
+    assert payload["runtime_config"]["require_runtime_roots"] is True
+    assert payload["root_preflight"]["status"] == "ready"
     assert payload["model_run_evidence"][0]["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
 
 
@@ -7263,6 +7268,60 @@ def test_no_flag_missing_allowed_roots_blocks_before_registry_adapter_or_submit(
     assert "SCHEDULER_ROOT_ALLOWED_ROOTS_MISSING" in {
         blocker["code"] for blocker in payload["root_preflight"]["blockers"]
     }
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_explicit_workspace_submit_missing_allowed_roots_blocks_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    (roots["workspace_root"] / "scheduler" / "evidence").mkdir(parents=True)
+    monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("explicit-root submit root preflight must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=False,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=str(roots["workspace_root"]),
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["runtime_config"]["dry_run"] is False
+    assert payload["runtime_config"]["require_runtime_roots"] is True
+    assert payload["root_preflight"]["checks"]["allowed_roots_policy"] == {
+        "env": "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "configured": False,
+        "non_empty": False,
+        "allowed_roots": [],
+        "independent_policy_required": True,
+    }
+    assert "SCHEDULER_ROOT_ALLOWED_ROOTS_MISSING" in {
+        blocker["code"] for blocker in payload["root_preflight"]["blockers"]
+    }
+    assert payload["counts"]["submitted_count"] == 0
     assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
     assert Path(payload["artifact_path"]).is_file()
 

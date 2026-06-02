@@ -383,7 +383,7 @@ sudo systemctl reset-failed nhms-compute-scheduler.service
 - `met` canonical/forcing 元数据存在。
 - `met.forcing_station_timeseries` 覆盖 `PRCP/TEMP/RH/wind/Rn/Press`。
 - `hydro.river_timeseries` 覆盖 `q_down`。
-- `ops.pipeline_jobs` 有完整 stage/job 状态。
+- `ops.pipeline_job` / `ops.pipeline_event` 有完整 job/stage 状态。
 - `log_uri` 指向 27 可读取的发布日志位置。
 
 通过条件：
@@ -657,7 +657,7 @@ run_id: <22 pipeline run_id>
 22 plan-production receipt
   -> Slurm/Gateway job receipt
   -> compute node stdout/stderr
-  -> DB pipeline_jobs/stages
+  -> DB ops.pipeline_job / ops.pipeline_event
   -> met forcing station series
   -> hydro q_down river_timeseries
   -> latest-product API

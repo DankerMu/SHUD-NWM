@@ -18,11 +18,18 @@ PRODUCTION_AUTH_MODES = frozenset({"production", "live", "live_idp"})
 LIVE_AUTH_BACKENDS = frozenset({"live", "live_idp", "oidc", "saml"})
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off"})
+_DISPLAY_FORBIDDEN_SCHEDULER_ROOT_ENVS = (
+    "NHMS_SCHEDULER_LOCK_ROOT",
+    "NHMS_SCHEDULER_EVIDENCE_ROOT",
+    "NHMS_SCHEDULER_RUNTIME_ROOT",
+    "NHMS_SCHEDULER_TEMP_ROOT",
+)
 _DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS = (
     "WORKSPACE_ROOT",
     "RUN_WORKSPACE_ROOT",
     "SHARED_LOG_ROOT",
     "OBJECT_STORE_ROOT",
+    *_DISPLAY_FORBIDDEN_SCHEDULER_ROOT_ENVS,
     "NHMS_BASINS_ROOT",
     "NHMS_MODEL_ASSET_ROOT",
     "SLURM_GATEWAY_TEMPLATE_DIR",

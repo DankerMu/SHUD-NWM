@@ -144,7 +144,7 @@ def _plan_production(
         raise ValueError(
             "plan-production requires WORKSPACE_ROOT when --workspace-root is omitted"
         )
-    require_runtime_roots = workspace_root is None
+    require_runtime_roots = workspace_root is None or not dry_run
     resolved_sources = tuple(sources) if sources else _split_env_csv("NHMS_SCHEDULER_SOURCES") or ("gfs", "IFS")
     resolved_model_ids = tuple(model_ids) if model_ids else _split_env_csv("NHMS_SCHEDULER_MODEL_IDS")
     resolved_basin_ids = tuple(basin_ids) if basin_ids else _split_env_csv("NHMS_SCHEDULER_BASIN_IDS")

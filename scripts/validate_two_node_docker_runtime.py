@@ -122,6 +122,14 @@ _REQUIRED_MOUNT_ENV_IDENTITY_PATTERN = re.compile(
     r"^(?:\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<operator>:\?|\?)[^}]*)?\}|\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*))$"
 )
 
+DISPLAY_FORBIDDEN_SCHEDULER_ROOT_ENV_KEYS = frozenset(
+    {
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
+    }
+)
 DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
     {
         "SLURM_GATEWAY_URL",
@@ -132,6 +140,7 @@ DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
         "RUN_WORKSPACE_ROOT",
         "SHARED_LOG_ROOT",
         "OBJECT_STORE_ROOT",
+        *DISPLAY_FORBIDDEN_SCHEDULER_ROOT_ENV_KEYS,
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
         "SHUD_EXECUTABLE",

@@ -308,9 +308,13 @@ def _scheduler_evidence_payload(
         or {
             "adapter_download_called": False,
             "slurm_submit_called": False,
+            "slurm_status_sync_called": False,
+            "slurm_cancellation_called": False,
             "shud_runtime_called": False,
             "hydro_result_table_writes": False,
             "met_result_table_writes": False,
+            "pipeline_status_writes": False,
+            "pipeline_event_writes": False,
         },
         "readiness": {
             "deterministic_fixture": True,
@@ -1211,6 +1215,47 @@ def test_scheduler_slurm_status_synced_evidence_is_review_only_not_live_binding(
     errors = live_item["details"]["acceptance_errors"]["errors"]
     assert "scheduler_execution_mode_not_live_eligible" in errors
     assert "scheduler_status_not_live_eligible" in errors
+    assert summary["final_production_readiness_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("proof_field", "proof_value"),
+    [
+        ("pipeline_status_writes", True),
+        ("pipeline_event_writes", True),
+        ("pipeline_status_writes", "unknown_after_attempt"),
+        ("pipeline_event_writes", "unknown_after_attempt"),
+    ],
+)
+def test_scheduler_dry_run_blocks_pipeline_write_no_mutation_proof_drift(
+    tmp_path: Path,
+    proof_field: str,
+    proof_value: bool | str,
+) -> None:
+    no_mutation_proof: dict[str, bool | str] = {
+        "adapter_download_called": False,
+        "slurm_submit_called": False,
+        "slurm_status_sync_called": False,
+        "slurm_cancellation_called": False,
+        "shud_runtime_called": False,
+        "hydro_result_table_writes": False,
+        "met_result_table_writes": False,
+        "pipeline_status_writes": False,
+        "pipeline_event_writes": False,
+    }
+    no_mutation_proof[proof_field] = proof_value
+    payload = _scheduler_evidence_payload(
+        status="planned",
+        execution_mode="dry_run",
+        no_mutation_proof=no_mutation_proof,
+    )
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert "dry_run_no_mutation_proof_missing" in scheduler_item["details"]["acceptance_errors"]
+    assert live_item["status"] == "release_blocked"
+    assert "missing_scheduler_evidence_binding" in live_item["details"]["acceptance_errors"]["errors"]
     assert summary["final_production_readiness_claimed"] is False
 
 

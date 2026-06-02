@@ -177,6 +177,17 @@ SCHEDULER_REVIEW_BLOCKED_STATUSES = frozenset(
         "partially_failed",
     }
 )
+SCHEDULER_DRY_RUN_NO_MUTATION_FALSE_FIELDS = (
+    "adapter_download_called",
+    "slurm_submit_called",
+    "slurm_status_sync_called",
+    "slurm_cancellation_called",
+    "shud_runtime_called",
+    "hydro_result_table_writes",
+    "met_result_table_writes",
+    "pipeline_status_writes",
+    "pipeline_event_writes",
+)
 SCHEDULER_PARTIAL_MODEL_RUN_STATUSES = frozenset(
     {
         "partial",
@@ -2533,14 +2544,7 @@ def _dry_run_no_mutation_proven(payload: Mapping[str, Any]) -> bool:
     proof = payload.get("no_mutation_proof")
     if not isinstance(proof, Mapping):
         return False
-    required_false = (
-        "adapter_download_called",
-        "slurm_submit_called",
-        "shud_runtime_called",
-        "hydro_result_table_writes",
-        "met_result_table_writes",
-    )
-    return all(proof.get(key) is False for key in required_false)
+    return all(proof.get(key) is False for key in SCHEDULER_DRY_RUN_NO_MUTATION_FALSE_FIELDS)
 
 
 def _has_unsafe_scheduler_identity(payload: Mapping[str, Any]) -> bool:
