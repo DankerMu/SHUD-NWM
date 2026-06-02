@@ -6,7 +6,7 @@ import math
 import os
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -160,7 +160,7 @@ class CanonicalRepository(Protocol):
         *,
         source_id: str,
         cycle_time: datetime,
-    ) -> Sequence[Mapping[str, Any]]: ...
+    ) -> Sequence[Any]: ...
 
     def update_forecast_cycle(
         self,
@@ -323,7 +323,7 @@ def evaluate_canonical_readiness(
     *,
     source_id: str,
     cycle_time: str | datetime,
-    products: Sequence[Mapping[str, Any]],
+    products: Sequence[Any],
     forecast_hours: Sequence[int] | None = None,
     policy_identity: Mapping[str, Any] | None = None,
     source_object_identity: Mapping[str, Any] | None = None,
@@ -340,7 +340,7 @@ def evaluate_canonical_readiness(
     checksum_missing_row_count = 0
     checksum_missing_samples: list[dict[str, Any]] = []
     for product in products:
-        row = dict(product)
+        row = _canonical_readiness_row(product, default_cycle_time=parsed_cycle_time)
         if str(row.get("source_id") or normalized_source) != normalized_source:
             continue
         if parse_cycle_time(row.get("cycle_time", parsed_cycle_time)) != parsed_cycle_time:
@@ -491,6 +491,34 @@ def evaluate_canonical_readiness(
     elif not expected_hours:
         evidence["reason"] = "no_expected_leads"
     return CanonicalReadinessResult(status=status, ready=ready, evidence=evidence)
+
+
+def _canonical_readiness_row(product: Any, *, default_cycle_time: datetime) -> dict[str, Any]:
+    if isinstance(product, Mapping):
+        return dict(product)
+    if is_dataclass(product) and not isinstance(product, type):
+        row = {dataclass_field.name: getattr(product, dataclass_field.name) for dataclass_field in fields(product)}
+    else:
+        row = {}
+        for key in (
+            "canonical_product_id",
+            "source_id",
+            "cycle_time",
+            "valid_time",
+            "lead_time_hours",
+            "variable",
+            "object_uri",
+            "checksum",
+            "quality_flag",
+            "lineage_json",
+        ):
+            if hasattr(product, key):
+                row[key] = getattr(product, key)
+    if row.get("lead_time_hours") is None and row.get("valid_time") is not None:
+        cycle_time = parse_cycle_time(row.get("cycle_time", default_cycle_time))
+        valid_time = parse_cycle_time(row["valid_time"])
+        row["lead_time_hours"] = int((valid_time - cycle_time).total_seconds() // 3600)
+    return row
 
 
 def _readiness_rejected_row_sample(row: Mapping[str, Any], *, reason: str) -> dict[str, Any]:

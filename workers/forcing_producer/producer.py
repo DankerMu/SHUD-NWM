@@ -133,6 +133,7 @@ class CanonicalProduct:
     native_spatial_resolution: str | None = None
     quality_flag: str = "ok"
     lead_time_hours: int | None = None
+    lineage_json: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

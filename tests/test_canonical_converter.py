@@ -201,6 +201,54 @@ def test_canonical_readiness_accepts_complete_gfs_exact_required_variables() -> 
     assert result.evidence["reused_existing_ready"] is True
 
 
+def test_canonical_readiness_accepts_forcing_canonical_product_dataclasses() -> None:
+    from workers.forcing_producer.producer import CanonicalProduct
+
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026050700/manifest.json"}
+    products = tuple(
+        CanonicalProduct(
+            canonical_product_id=str(row["canonical_product_id"]),
+            source_id=str(row["source_id"]),
+            cycle_time=row["cycle_time"],
+            valid_time=row["valid_time"],
+            lead_time_hours=int(row["lead_time_hours"]),
+            variable=str(row["variable"]),
+            unit="fixture",
+            grid_id="gfs_0p25",
+            object_uri=str(row["object_uri"]),
+            checksum=str(row["checksum"]),
+            quality_flag=str(row["quality_flag"]),
+            lineage_json=row["lineage_json"],
+        )
+        for row in canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            variables=GFS_REQUIRED_STANDARD_VARIABLES,
+            forecast_hours=(0, 3),
+            policy_identity=policy,
+            source_object_identity=source_object,
+        )
+    )
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=products,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is True
+    assert result.evidence["status"] == "canonical_ready"
+    assert result.evidence["candidate_row_count"] == len(products)
+    assert result.evidence["row_count"] == len(products)
+    assert result.evidence["missing_variables"] == []
+    assert result.evidence["missing_leads"] == []
+
+
 def test_canonical_readiness_uses_ifs_surface_pressure_and_shortwave_contract() -> None:
     cycle_time = parse_cycle_time("2026050706")
     policy = {"source": "IFS", "forecast_hours": [0, 3], "horizon": 3}

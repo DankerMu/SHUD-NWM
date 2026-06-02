@@ -121,6 +121,8 @@ class E2ERepository:
                 object_uri=str(row["object_uri"]),
                 checksum=str(row["checksum"]),
                 quality_flag=str(row.get("quality_flag") or "ok"),
+                lead_time_hours=row.get("lead_time_hours"),
+                lineage_json=row.get("lineage_json") or {},
             )
             for row in self.canonical_products.values()
             if row["source_id"] == source_id and _utc(row["cycle_time"]) == _utc(cycle_time)
@@ -160,6 +162,8 @@ class E2ERepository:
                 object_uri=str(row["object_uri"]),
                 checksum=str(row["checksum"]),
                 quality_flag=str(row.get("quality_flag") or "ok"),
+                lead_time_hours=row.get("lead_time_hours"),
+                lineage_json=row.get("lineage_json") or {},
             )
             for row in self.canonical_products.values()
             if row["source_id"] == source_id
