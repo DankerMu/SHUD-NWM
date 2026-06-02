@@ -1016,6 +1016,10 @@ completed runs, explicit operator filters, and source/model
 exclusions. These are scheduler evidence states, not fabricated `met.*` enum
 values.
 
+Use `--plan` only as a planning-only alias for `--dry-run`; it is reserved for
+dry-run/no-mutation smoke or business validation evidence and must not be used
+for real production submission.
+
 Evidence layout:
 
 - Lock: `<workspace_root>/scheduler/production-scheduler.lock`.
@@ -1038,7 +1042,7 @@ Evidence layout:
   production readiness proof.
 
 Production submission uses the same backend scheduler entrypoint with dry-run
-disabled. The current CLI flag for that is `--plan`, so run it only after the
+disabled. The current CLI flag for that is `--submit`, so run it only after the
 Slurm/database/storage preflight values point at the target environment:
 
 ```bash
@@ -1050,7 +1054,7 @@ export SLURM_SHARED_LOG_ROOT=/scratch/frd_muziyao/nhms-production/slurm-logs
 export NHMS_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
 
 uv run nhms-pipeline plan-production \
-  --plan \
+  --submit \
   --source gfs \
   --source IFS \
   --lookback-hours 24 \

@@ -39,8 +39,11 @@ uv run nhms-pipeline plan-production \
 - no pipeline state mutation：`pipeline_status_writes=false` 且
   `pipeline_event_writes=false`，不写 pipeline status/event。
 
+`--plan` 只是 `--dry-run` 的规划别名，只保留给 dry-run/no-mutation smoke 或
+业务验证证据；真实生产提交必须使用 `--submit`。
+
 生产提交路径使用同一个 backend scheduler，在 Slurm/database/storage preflight
-通过后关闭 dry-run：
+通过后用 `--submit` 关闭 dry-run：
 
 ```bash
 export DATABASE_URL=postgresql://nhms:<strong-password>@pg.cluster.example:5432/nhms
@@ -51,7 +54,7 @@ export SLURM_SHARED_LOG_ROOT=/scratch/frd_muziyao/nhms-production/slurm-logs
 export NHMS_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
 
 uv run nhms-pipeline plan-production \
-  --plan \
+  --submit \
   --source gfs \
   --source IFS \
   --lookback-hours 24 \

@@ -397,6 +397,9 @@ where bv.basin_id = 'qhh';
 
 使用正式 scheduler 的 dry-run 模式先发现候选周期，不产生下载、Slurm 或结果写入：
 
+`--plan` 只保留给 dry-run/no-mutation smoke 或业务验证证据；真实生产提交必须在
+10.1 使用 `--submit`。
+
 ```bash
 uv run nhms-pipeline plan-production \
   --dry-run \
@@ -549,11 +552,11 @@ order by source_id, variable;
 
 ### 10.1 生产模式 plan-production
 
-仅在前序检查通过后执行：
+仅在前序检查通过后执行真实提交；该路径必须使用 `--submit`：
 
 ```bash
 uv run nhms-pipeline plan-production \
-  --plan \
+  --submit \
   --source gfs \
   --source IFS \
   --lookback-hours 24 \

@@ -7190,6 +7190,68 @@ def test_plan_production_plan_flag_is_no_mutation_alias(monkeypatch: Any, tmp_pa
     assert captured["config"].require_runtime_roots is True
 
 
+def test_plan_production_submit_flag_enables_mutation_path(monkeypatch: Any, tmp_path: Path) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            self.config = config
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned", "dry_run": self.config.dry_run})
+
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setenv("NHMS_SCHEDULER_SOURCES", "gfs")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production", "--submit"])
+
+    assert rc == 0
+    assert captured["config"].dry_run is False
+    assert captured["config"].require_runtime_roots is True
+
+
+def test_docs_reserve_plan_for_no_mutation_and_use_submit_for_production_submission() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    production_sections = {
+        "docs/VALIDATION.md": (
+            "Production submission uses the same backend scheduler entrypoint",
+            "Slurm mode rejects missing or localhost-only",
+        ),
+        "docs/runbooks/qhh-continuous.md": (
+            "生产提交路径使用同一个 backend scheduler",
+            "该生产路径负责所有 active runnable 注册模型",
+        ),
+        "docs/runbooks/qhh-mvp-production-like-e2e-checklist.md": (
+            "### 10.1 生产模式 plan-production",
+            "### 10.2 pipeline job 持久化",
+        ),
+    }
+
+    for relative_path, (start_marker, end_marker) in production_sections.items():
+        text = (repo_root / relative_path).read_text(encoding="utf-8")
+        start = text.index(start_marker)
+        end = text.index(end_marker, start)
+        section = text[start:end]
+
+        assert "--submit" in section, relative_path
+        assert "--plan" not in section, relative_path
+
+    reservation_text = "\n".join(
+        (repo_root / relative_path).read_text(encoding="utf-8")
+        for relative_path in production_sections
+    )
+    assert "--plan" in reservation_text
+    assert "dry-run/no-mutation" in reservation_text
+
+
 def test_plan_production_missing_workspace_root_no_flag_errors_without_app_workspace(
     monkeypatch: Any,
     tmp_path: Path,
