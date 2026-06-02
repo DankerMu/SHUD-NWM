@@ -122,6 +122,14 @@ _REQUIRED_MOUNT_ENV_IDENTITY_PATTERN = re.compile(
     r"^(?:\$\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)(?:(?P<operator>:\?|\?)[^}]*)?\}|\$(?P<plain>[A-Za-z_][A-Za-z0-9_]*))$"
 )
 
+DISPLAY_FORBIDDEN_SCHEDULER_ROOT_ENV_KEYS = frozenset(
+    {
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
+    }
+)
 DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
     {
         "SLURM_GATEWAY_URL",
@@ -132,6 +140,7 @@ DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
         "RUN_WORKSPACE_ROOT",
         "SHARED_LOG_ROOT",
         "OBJECT_STORE_ROOT",
+        *DISPLAY_FORBIDDEN_SCHEDULER_ROOT_ENV_KEYS,
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
         "SHUD_EXECUTABLE",
@@ -151,6 +160,34 @@ COMPUTE_REQUIRED_ENV = {
     "NHMS_SERVICE_ROLE": "compute_control",
     "NHMS_REQUIRE_SERVICE_ROLE": "true",
 }
+COMPUTE_SCHEDULER_ENV = frozenset(
+    {
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
+        "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "NHMS_SCHEDULER_SOURCES",
+        "NHMS_SCHEDULER_MODEL_IDS",
+        "NHMS_SCHEDULER_BASIN_IDS",
+        "NHMS_SCHEDULER_INTERVAL_SECONDS",
+        "NHMS_SCHEDULER_MAX_PASSES",
+        "NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE",
+    }
+)
+COMPUTE_SCHEDULER_REQUIRED_ENV = frozenset(
+    {
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
+        "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "NHMS_SCHEDULER_SOURCES",
+        "NHMS_SCHEDULER_INTERVAL_SECONDS",
+        "NHMS_SCHEDULER_MAX_PASSES",
+        "NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE",
+    }
+)
 CANONICAL_PUBLISHED_ENV = frozenset(
     {
         "NHMS_PUBLISHED_ARTIFACT_ROOT",
@@ -173,6 +210,7 @@ COMPUTE_REQUIRED_RUNTIME_ENV = frozenset(
         "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
         "NHMS_PUBLISHED_ARTIFACT_S3_BUCKET",
         "NHMS_PUBLISHED_ARTIFACT_S3_PREFIX",
+        *COMPUTE_SCHEDULER_REQUIRED_ENV,
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
         "SLURM_GATEWAY_TEMPLATE_DIR",
@@ -212,6 +250,7 @@ NONEMPTY_RUNTIME_ENV = frozenset(
         "NHMS_MODEL_ASSET_ROOT",
         "SLURM_GATEWAY_TEMPLATE_DIR",
         "SLURM_GATEWAY_WORKSPACE_DIR",
+        "NHMS_SCHEDULER_ALLOWED_ROOTS",
         "NHMS_LOG_TAIL_MAX_BYTES",
         "NHMS_ARTIFACT_BACKEND",
     }
@@ -224,6 +263,10 @@ COMPUTE_ONLY_PATH_ENV_KEYS = frozenset(
         "OBJECT_STORE_ROOT",
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
         "SLURM_GATEWAY_TEMPLATE_DIR",
         "SLURM_GATEWAY_WORKSPACE_DIR",
         "MUNGE_SOCKET",
@@ -325,6 +368,10 @@ COMPUTE_AUDITED_INTERPOLATION_ENV = frozenset(
         "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
         "NHMS_PUBLISHED_ARTIFACT_S3_BUCKET",
         "NHMS_PUBLISHED_ARTIFACT_S3_PREFIX",
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
         "SHUD_EXECUTABLE",
@@ -332,6 +379,7 @@ COMPUTE_AUDITED_INTERPOLATION_ENV = frozenset(
         "SLURM_GATEWAY_BACKEND",
         "SLURM_GATEWAY_TEMPLATE_DIR",
         "SLURM_GATEWAY_WORKSPACE_DIR",
+        *COMPUTE_SCHEDULER_ENV,
         "GFS_NOMADS_BASE_URL",
         "IFS_OPEN_DATA_SOURCE",
     }
@@ -357,6 +405,7 @@ COMPUTE_AUDITED_RUNTIME_ENV = frozenset(
         "SLURM_GATEWAY_BACKEND",
         "SLURM_GATEWAY_TEMPLATE_DIR",
         "SLURM_GATEWAY_WORKSPACE_DIR",
+        *COMPUTE_SCHEDULER_ENV,
         "GFS_NOMADS_BASE_URL",
         "IFS_OPEN_DATA_SOURCE",
     }
@@ -1954,7 +2003,13 @@ def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list
             )
         )
     if role == "compute":
-        for key in ("WORKSPACE_ROOT", "DATABASE_URL", "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
+        for key in (
+            "WORKSPACE_ROOT",
+            "OBJECT_STORE_ROOT",
+            "DATABASE_URL",
+            "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT",
+            *sorted(COMPUTE_SCHEDULER_REQUIRED_ENV),
+        ):
             if not env.get(key, "").strip():
                 findings.append(
                     Finding(
@@ -2270,6 +2325,36 @@ def _compute_mount_findings(
             readonly_code="COMPUTE_OBJECT_STORE_MOUNT_READONLY",
             type_code="COMPUTE_OBJECT_STORE_MOUNT_TYPE_INVALID",
             identity_code="COMPUTE_OBJECT_STORE_MOUNT_IDENTITY_INVALID",
+        )
+    )
+    findings.extend(
+        _require_mount(
+            volumes,
+            path=path,
+            service=service_name,
+            env=env,
+            source_key="NHMS_SCHEDULER_RUNTIME_ROOT",
+            target_key="NHMS_SCHEDULER_RUNTIME_ROOT",
+            read_only=False,
+            missing_code="COMPUTE_SCHEDULER_RUNTIME_MOUNT_MISSING",
+            readonly_code="COMPUTE_SCHEDULER_RUNTIME_MOUNT_READONLY",
+            type_code="COMPUTE_SCHEDULER_RUNTIME_MOUNT_TYPE_INVALID",
+            identity_code="COMPUTE_SCHEDULER_RUNTIME_MOUNT_IDENTITY_INVALID",
+        )
+    )
+    findings.extend(
+        _require_mount(
+            volumes,
+            path=path,
+            service=service_name,
+            env=env,
+            source_key="NHMS_SCHEDULER_TEMP_ROOT",
+            target_key="NHMS_SCHEDULER_TEMP_ROOT",
+            read_only=False,
+            missing_code="COMPUTE_SCHEDULER_TEMP_MOUNT_MISSING",
+            readonly_code="COMPUTE_SCHEDULER_TEMP_MOUNT_READONLY",
+            type_code="COMPUTE_SCHEDULER_TEMP_MOUNT_TYPE_INVALID",
+            identity_code="COMPUTE_SCHEDULER_TEMP_MOUNT_IDENTITY_INVALID",
         )
     )
     findings.extend(

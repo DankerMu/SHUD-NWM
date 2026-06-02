@@ -998,18 +998,27 @@ The JSON response includes `status`, `pass_id`, `artifact_path`, `counts`,
 {
   "adapter_download_called": false,
   "slurm_submit_called": false,
+  "slurm_status_sync_called": false,
+  "slurm_cancellation_called": false,
   "shud_runtime_called": false,
   "hydro_result_table_writes": false,
-  "met_result_table_writes": false
+  "met_result_table_writes": false,
+  "pipeline_status_writes": false,
+  "pipeline_event_writes": false
 }
 ```
 
-That means no download, no Slurm submit, no SHUD run, and no hydro/met result
-mutation. Dry-run output can still include blocked or skipped candidates, for
-example unavailable IFS cycles, duplicate active model identities, active Slurm
-jobs, terminal completed runs, explicit operator filters, and source/model
+That means no download, no Slurm submit/status sync/cancellation, no SHUD run,
+no hydro/met result mutation, and no pipeline status/event writes. Dry-run
+output can still include blocked or skipped candidates, for example unavailable
+IFS cycles, duplicate active model identities, active Slurm jobs, terminal
+completed runs, explicit operator filters, and source/model
 exclusions. These are scheduler evidence states, not fabricated `met.*` enum
 values.
+
+Use `--plan` only as a planning-only alias for `--dry-run`; it is reserved for
+dry-run/no-mutation smoke or business validation evidence and must not be used
+for real production submission.
 
 Evidence layout:
 
@@ -1033,7 +1042,7 @@ Evidence layout:
   production readiness proof.
 
 Production submission uses the same backend scheduler entrypoint with dry-run
-disabled. The current CLI flag for that is `--plan`, so run it only after the
+disabled. The current CLI flag for that is `--submit`, so run it only after the
 Slurm/database/storage preflight values point at the target environment:
 
 ```bash
@@ -1045,7 +1054,7 @@ export SLURM_SHARED_LOG_ROOT=/scratch/frd_muziyao/nhms-production/slurm-logs
 export NHMS_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
 
 uv run nhms-pipeline plan-production \
-  --plan \
+  --submit \
   --source gfs \
   --source IFS \
   --lookback-hours 24 \

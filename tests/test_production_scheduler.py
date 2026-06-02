@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Sequence
+import shutil
+import stat
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1507,13 +1509,7 @@ def test_dry_run_is_non_mutating_and_does_not_call_execution_clients(tmp_path: P
     assert result.evidence["execution_mode"] == "dry_run"
     assert result.evidence["source_cycles"][0]["db_cycle_status_written"] is None
     assert result.evidence["source_cycles"][0]["cycle_status_candidate"] == "discovered"
-    assert result.evidence["no_mutation_proof"] == {
-        "adapter_download_called": False,
-        "slurm_submit_called": False,
-        "shud_runtime_called": False,
-        "hydro_result_table_writes": False,
-        "met_result_table_writes": False,
-    }
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
 def test_unavailable_ifs_cycle_is_evidence_only_not_db_enum_mutation(tmp_path: Path) -> None:
@@ -1577,7 +1573,41 @@ def test_fresh_default_workspace_runtime_paths_are_created_safely(
     assert (workspace_root / "scheduler" / "production-scheduler.lock.guard").is_file()
 
 
-def test_plan_production_cli_uses_fresh_default_workspace_path(
+def test_plan_production_cli_uses_workspace_root_env_without_explicit_flag(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            self.config = config
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned"})
+
+    workspace_root = tmp_path / "configured-workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_INTERVAL_SECONDS", "17.5")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production"])
+
+    assert rc == 0
+    assert captured["config"].workspace_root == workspace_root.resolve()
+    assert Path(captured["config"].lock_path) == workspace_root.resolve() / "scheduler" / "production-scheduler.lock"
+    assert Path(captured["config"].evidence_dir) == workspace_root.resolve() / "scheduler" / "evidence"
+    assert captured["config"].interval_seconds == 17.5
+    assert captured["config"].require_runtime_roots is True
+
+
+def test_plan_production_explicit_workspace_ignores_ambient_scheduler_lock_and_evidence_roots(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -1594,16 +1624,221 @@ def test_plan_production_cli_uses_fresh_default_workspace_path(
         def run_once(self) -> SimpleResult:
             return SimpleResult({"status": "planned"})
 
-    monkeypatch.chdir(tmp_path)
+    explicit_workspace = tmp_path / "diagnostic-workspace"
+    ambient_workspace = tmp_path / "ambient-production-workspace"
+    explicit_workspace.mkdir()
+    (ambient_workspace / "locks").mkdir(parents=True)
+    (ambient_workspace / "evidence").mkdir()
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(ambient_workspace / "locks"))
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(ambient_workspace / "evidence"))
     monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
 
-    rc = cli.main(["plan-production"])
+    rc = cli.main(["plan-production", "--workspace-root", str(explicit_workspace)])
 
-    workspace_root = tmp_path / ".nhms-workspace"
     assert rc == 0
-    assert captured["config"].workspace_root == workspace_root.resolve()
-    assert Path(captured["config"].lock_path) == workspace_root.resolve() / "scheduler" / "production-scheduler.lock"
-    assert Path(captured["config"].evidence_dir) == workspace_root.resolve() / "scheduler" / "evidence"
+    assert captured["config"].require_runtime_roots is False
+    assert Path(captured["config"].lock_path) == (
+        explicit_workspace.resolve() / "scheduler" / "production-scheduler.lock"
+    )
+    assert Path(captured["config"].evidence_dir) == explicit_workspace.resolve() / "scheduler" / "evidence"
+
+
+def test_plan_production_blank_workspace_root_shared_helper_rejected_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank workspace flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    with pytest.raises(ValueError, match="--workspace-root must not be blank"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root="",
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+
+def test_plan_production_click_blank_workspace_root_exits_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank workspace flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    try:
+        cli._click_main(["plan-production", "--workspace-root", ""])
+    except SystemExit as error:
+        rc = int(error.code or 0)
+    else:
+        rc = 0
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "plan-production --workspace-root must not be blank\n"
+
+
+def test_plan_production_argparse_blank_workspace_root_exits_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank workspace flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    rc = cli._argparse_main(["plan-production", "--workspace-root", ""])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "plan-production --workspace-root must not be blank\n"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "option_name"),
+    [
+        ("lock_path", "--lock-path"),
+        ("evidence_dir", "--evidence-dir"),
+    ],
+)
+def test_plan_production_blank_lock_and_evidence_shared_helper_rejected_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    field_name: str,
+    option_name: str,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank scheduler path flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+    kwargs = {
+        "sources": ("gfs",),
+        "lookback_hours": 24,
+        "cycle_lag_hours": 0,
+        "max_cycles_per_source": 1,
+        "model_ids": (),
+        "basin_ids": (),
+        "dry_run": True,
+        "continuous": False,
+        "interval_seconds": 300.0,
+        "max_passes": None,
+        "workspace_root": None,
+        "lock_path": None,
+        "evidence_dir": None,
+    }
+    kwargs[field_name] = ""
+
+    with pytest.raises(ValueError, match=f"{option_name} must not be blank"):
+        cli._plan_production(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("args", "option_name"),
+    [
+        (["--lock-path", ""], "--lock-path"),
+        (["--evidence-dir", ""], "--evidence-dir"),
+    ],
+)
+def test_plan_production_click_blank_lock_and_evidence_exits_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    args: list[str],
+    option_name: str,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank scheduler path flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    try:
+        cli._click_main(["plan-production", *args])
+    except SystemExit as error:
+        rc = int(error.code or 0)
+    else:
+        rc = 0
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == f"plan-production {option_name} must not be blank\n"
+
+
+@pytest.mark.parametrize(
+    ("args", "option_name"),
+    [
+        (["--lock-path", ""], "--lock-path"),
+        (["--evidence-dir", ""], "--evidence-dir"),
+    ],
+)
+def test_plan_production_argparse_blank_lock_and_evidence_exits_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    args: list[str],
+    option_name: str,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank scheduler path flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    rc = cli._argparse_main(["plan-production", *args])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == f"plan-production {option_name} must not be blank\n"
+
+
+@pytest.mark.parametrize("field_name", ["workspace_root", "lock_path", "evidence_dir"])
+def test_production_scheduler_config_rejects_blank_scheduler_paths(tmp_path: Path, field_name: str) -> None:
+    kwargs: dict[str, Any] = {"workspace_root": tmp_path}
+    kwargs[field_name] = ""
+
+    with pytest.raises(ValueError, match=f"{field_name} must not be blank"):
+        ProductionSchedulerConfig(**kwargs)
 
 
 def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
@@ -1668,6 +1903,123 @@ def test_evidence_existing_artifact_file_is_not_overwritten(tmp_path: Path) -> N
     assert error.value.reason == "evidence_artifact_exists"
     assert artifact_path.read_text(encoding="utf-8") == "existing"
     assert evidence == {"pass_id": pass_id, "status": "planned"}
+
+
+def test_non_dry_run_blocks_before_candidate_execution_when_evidence_reservation_fails(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    orchestrator = FakeProductionOrchestrator()
+    original_write_new_regular_file = scheduler_module._write_new_regular_file
+
+    def fail_pre_execution_artifact(
+        artifact_name: str,
+        serialized: str,
+        *,
+        dir_fd: int,
+        artifact_path: Path,
+    ) -> None:
+        if artifact_name.endswith(".pre_execution.json"):
+            raise SchedulerEvidenceWriteError(
+                "forced_pre_execution_evidence_failure",
+                {"artifact_path": str(artifact_path)},
+            )
+        original_write_new_regular_file(
+            artifact_name,
+            serialized,
+            dir_fd=dir_fd,
+            artifact_path=artifact_path,
+        )
+
+    monkeypatch.setattr(scheduler_module, "_write_new_regular_file", fail_pre_execution_artifact)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert orchestrator.calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "evidence_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert result.evidence["evidence_pre_execution"]["status"] == "blocked"
+    assert result.evidence["evidence_pre_execution"]["reason"] == "forced_pre_execution_evidence_failure"
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+
+
+def test_non_dry_run_blocks_before_candidate_execution_when_final_evidence_artifact_exists(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    orchestrator = FakeProductionOrchestrator()
+    fixed_pass_started_at = _dt("2026-05-21T12:00:00Z")
+
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": "abcdef1234567890"})())
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=fixed_pass_started_at, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    pass_id = "scheduler_2026052112_abcdef123456"
+    evidence_dir = Path(scheduler.config.evidence_dir)
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{pass_id}.json").write_text("existing\n", encoding="utf-8")
+
+    result = scheduler.run_once()
+
+    assert orchestrator.calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "evidence_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+
+
+def test_cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    fixed_pass_started_at = _dt("2026-05-21T12:00:00Z")
+    orchestrator = FakeProductionOrchestrator()
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": "abcdef1234567890"})())
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=fixed_pass_started_at, dry_run=False, cancel_active_slurm=True),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeSlurmActiveRepository(
+            active_jobs=[
+                {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
+            ]
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    pass_id = "scheduler_2026052112_abcdef123456"
+    evidence_dir = Path(scheduler.config.evidence_dir)
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{pass_id}.json").write_text("existing\n", encoding="utf-8")
+
+    result = scheduler.run_once()
+
+    cancellation = result.evidence["slurm_cancellation_evidence"][0]
+    assert orchestrator.cancel_calls == []
+    assert orchestrator.calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "evidence_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
+    assert result.evidence["model_run_evidence"] == []
+    assert cancellation["status"] == "preflight_blocked"
+    assert cancellation["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+    assert cancellation["cancel_attempted"] is False
+    assert cancellation["mutation_occurred"] is False
 
 
 def test_stale_unowned_lock_is_not_unlinked(tmp_path: Path) -> None:
@@ -1915,6 +2267,195 @@ def test_evidence_size_fallback_status_agrees_across_result_artifact_and_cli(
 
     assert payload["status"] == "resource_limit_blocked"
     assert payload["passes"][0]["status"] == "resource_limit_blocked"
+
+
+def test_bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 900)
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
+        lambda: FakeRegistry([_model("model_a", "basin_a")]),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=False),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+
+    assert payload["status"] == "resource_limit_blocked"
+    assert persisted["status"] == "resource_limit_blocked"
+    for evidence in (payload, persisted):
+        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(roots["workspace_root"].resolve())
+        assert evidence["resolved_runtime_roots"]["evidence_root"]["path"] == str(roots["evidence_root"].resolve())
+        assert evidence["runtime_config"]["require_runtime_roots"] is True
+        assert evidence["runtime_config"]["service_role"] == "compute_control"
+        assert evidence["root_preflight"]["status"] == "ready"
+        assert evidence["root_preflight"]["checks"]["allowed_roots_policy"]["non_empty"] is True
+
+
+def test_no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.delenv("NHMS_SCHEDULER_MODEL_IDS")
+    monkeypatch.delenv("NHMS_SCHEDULER_BASIN_IDS")
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
+        lambda: FakeRegistry([_model(f"model_{index:05d}", "basin_a") for index in range(626)]),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {
+            "gfs": FakeAdapter(
+                "gfs",
+                [(f"2026-05-21T{hour:02d}:00:00Z", True) for hour in range(16)],
+            )
+        },
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=False),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T18:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=16,
+        model_ids=(),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+
+    assert payload["status"] == "resource_limit_blocked"
+    assert payload["limit"]["reason"] == "candidate_limit_exceeded"
+    for evidence in (payload, persisted):
+        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(roots["workspace_root"].resolve())
+        assert evidence["resolved_runtime_roots"]["evidence_root"]["path"] == str(roots["evidence_root"].resolve())
+        assert evidence["runtime_config"]["require_runtime_roots"] is True
+        assert evidence["runtime_config"]["service_role"] == "compute_control"
+        assert evidence["root_preflight"]["status"] == "ready"
+        assert evidence["root_preflight"]["checks"]["allowed_roots_policy"]["non_empty"] is True
+
+
+def test_bounded_evidence_preserves_pre_execution_reservation_proof(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 1200)
+
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            self.synced = False
+            super().__init__(
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
+
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            if self.synced:
+                return {
+                    "pipeline_status": "failed",
+                    "failed_stage": "forcing",
+                    "error_code": "NODE_FAILURE",
+                    "retry_count": 0,
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": kwargs["run_id"],
+                            "status": "failed",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                            "error_code": "NODE_FAILURE",
+                        }
+                    ],
+                }
+            return super().candidate_state(**kwargs)
+
+        def active_slurm_jobs(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [] if self.synced else super().active_slurm_jobs(**kwargs)
+
+    repository = SyncingRepository()
+
+    class SyncingOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            repository.synced = True
+            return [{"job_id": "job_forcing", "cycle_id": cycle_id, "slurm_job_id": "7777", "status": "failed"}]
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: SyncingOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert result.status == "resource_limit_blocked"
+    assert persisted["status"] == "resource_limit_blocked"
+    for evidence in (result.evidence, persisted):
+        assert evidence["evidence_pre_execution"]["status"] == "reserved"
+        assert evidence["evidence_pre_execution"]["proof"] == (
+            "scheduler_evidence_directory_write_before_production_mutation"
+        )
+        assert evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
+        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(tmp_path.resolve())
+        assert evidence["runtime_config"]["dry_run"] is False
 
 
 def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path) -> None:
@@ -2586,6 +3127,7 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     roots = _slurm_roots(tmp_path)
     constructed: list[dict[str, Any]] = []
     cancel_calls: list[tuple[str, str]] = []
+    reservation_seen_before_cancel: list[bool] = []
 
     class DefaultPathCancelOrchestrator:
         stages = M3_STAGES
@@ -2594,6 +3136,7 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
             constructed.append({"config": config, "repository": repository, "state_manager": state_manager})
 
         def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
+            reservation_seen_before_cancel.append(bool(list(roots["workspace_root"].glob("scheduler/evidence/*.pre_execution.json"))))
             cancel_calls.append((cycle_id, reason))
             return [
                 {
@@ -2639,15 +3182,89 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     assert skipped["replacement_submitted"] is False
     assert cancellation["status"] == "cancelled"
     assert cancellation["replacement_submitted"] is False
+    assert cancellation["mutation_occurred"] is True
+    assert cancellation["cancel_attempted"] is True
     assert cancellation["cancelled_jobs"][0]["slurm_job_id"] == "7777"
     assert cancellation["cancelled_jobs"][0]["replacement_submitted"] is False
+    assert result.status == "slurm_cancelled"
+    assert result.evidence["status"] == "slurm_cancelled"
+    assert result.evidence["execution_boundary"] == "slurm_cancellation"
+    assert result.evidence["counts"]["slurm_cancelled_count"] == 1
+    assert result.evidence["counts"]["slurm_cancellation_blocked_count"] == 0
+    assert result.evidence["slurm_cancellation_proof"]["cancel_called"] is True
+    assert result.evidence["slurm_cancellation_proof"]["mutation_occurred"] is True
+    assert result.evidence["slurm_cancellation_proof"]["protected_by_pre_execution_evidence"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
     assert cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
+    assert reservation_seen_before_cancel == [True]
+    assert result.evidence["evidence_pre_execution"]["status"] == "reserved"
     assert len(constructed) == 1
     assert constructed[0]["repository"] == "repository-from-env"
     assert constructed[0]["state_manager"] is None
     assert constructed[0]["config"].source_id == "gfs"
     assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
     assert constructed[0]["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
+
+
+def test_cancel_active_slurm_exception_after_attempt_uses_unknown_mutation_outcome(
+    tmp_path: Path,
+) -> None:
+    class CancelError(Exception):
+        error_code = "PIPELINE_EVENT_WRITE_FAILED"
+        message = "Cancellation event write failed."
+
+    class RaisingCancelOrchestrator(FakeProductionOrchestrator):
+        def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
+            self.cancel_calls.append((cycle_id, reason))
+            raise CancelError("event failed after cancellation attempt")
+
+    orchestrator = RaisingCancelOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, cancel_active_slurm=True),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeSlurmActiveRepository(
+            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}],
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert orchestrator.cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
+    assert result.status == "slurm_cancellation_blocked"
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "slurm_cancellation_blocked"
+        assert evidence["execution_boundary"] == "slurm_cancellation"
+        assert evidence["evidence_pre_execution"]["status"] == "reserved"
+        assert evidence["evidence_pre_execution"]["proof"] == (
+            "scheduler_evidence_directory_write_before_production_mutation"
+        )
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["slurm_cancelled_count"] == 0
+        assert evidence["counts"]["slurm_cancellation_blocked_count"] == 1
+        assert evidence["counts"]["slurm_cancellation_unknown_count"] == 1
+        cancellation = evidence["slurm_cancellation_evidence"][0]
+        assert cancellation["status"] == "failed"
+        assert cancellation["cancel_attempted"] is True
+        assert "mutation_occurred" not in cancellation
+        assert cancellation["mutation_outcome"] == "unknown_after_attempt"
+        assert cancellation["error_code"] == "PIPELINE_EVENT_WRITE_FAILED"
+        proof = evidence["slurm_cancellation_proof"]
+        assert proof["status"] == "slurm_cancellation_blocked"
+        assert proof["cancel_called"] is True
+        assert proof["protected_by_pre_execution_evidence"] is True
+        assert proof["mutation_outcome"] == "unknown_after_attempt"
+        assert proof["mutation_occurred"] == "unknown_after_attempt"
+        assert proof["slurm_cancellation_proven_absent"] is False
+        assert proof["pipeline_status_writes_proven_absent"] is False
+        assert proof["pipeline_event_writes_proven_absent"] is False
+        assert evidence["no_mutation_proof"]["slurm_cancellation_called"] is True
+        assert evidence["no_mutation_proof"]["pipeline_status_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["pipeline_event_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["slurm_submit_called"] is False
 
 
 def test_filtered_cancel_active_slurm_finds_cycle_level_array_job_with_different_stored_model(
@@ -2856,6 +3473,27 @@ def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
     assert cancellation["error_code"] == "SLURM_CANCELLATION_GAP"
     assert cancellation["cancellation_proven"] is False
     assert cancellation["replacement_submitted"] is False
+    assert cancellation["cancel_attempted"] is True
+    assert cancellation["mutation_occurred"] is False
+    assert cancellation["pipeline_event_write"] is True
+    assert "pipeline_status_write" not in cancellation
+    assert result.status == "slurm_cancellation_blocked"
+    assert result.evidence["status"] == "slurm_cancellation_blocked"
+    assert result.evidence["execution_boundary"] == "slurm_cancellation"
+    assert result.evidence["counts"]["slurm_cancelled_count"] == 0
+    assert result.evidence["counts"]["slurm_cancellation_blocked_count"] == 1
+    assert result.evidence["slurm_cancellation_proof"]["cancel_called"] is True
+    assert result.evidence["slurm_cancellation_proof"]["mutation_occurred"] is True
+    assert result.evidence["slurm_cancellation_proof"]["cancelled_job_count"] == 0
+    assert result.evidence["slurm_cancellation_proof"]["pipeline_status_write_count"] == 0
+    assert result.evidence["slurm_cancellation_proof"]["pipeline_event_write_count"] == 1
+    assert result.evidence["slurm_cancellation_proof"]["pipeline_status_writes_proven_absent"] is True
+    assert result.evidence["slurm_cancellation_proof"]["pipeline_event_writes_proven_absent"] is False
+    assert result.evidence["slurm_cancellation_proof"]["protected_by_pre_execution_evidence"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert result.evidence["no_mutation_proof"]["pipeline_status_writes"] is False
+    assert result.evidence["no_mutation_proof"]["pipeline_event_writes"] is True
 
 
 def test_active_cycle_orchestration_without_hydro_state_skips_all_candidates(
@@ -4561,13 +5199,188 @@ def test_orchestrator_exception_evidence_and_artifact_redact_secret_text(tmp_pat
     result = scheduler.run_once()
 
     artifact_text = Path(result.artifact_path or "").read_text(encoding="utf-8")
+    persisted = json.loads(artifact_text)
     evidence_text = json.dumps(result.evidence, sort_keys=True)
-    assert result.evidence["model_run_evidence"][0]["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+    assert orchestrator.calls
+    assert result.status == "submission_failed"
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "submission_failed"
+        assert evidence["execution_boundary"] == "production_orchestration"
+        assert evidence["evidence_pre_execution"]["status"] == "reserved"
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["failed_count"] == 1
+        assert evidence["counts"]["partial_count"] == 1
+        model_run = evidence["model_run_evidence"][0]
+        assert model_run["error_code"] == "PRODUCTION_ORCHESTRATION_FAILED"
+        assert model_run["submitted"] is False
+        assert model_run["execution_attempted"] is True
+        assert model_run["mutation_outcome"] == "unknown_after_attempt"
+        assert model_run["mutation_occurred"] == "unknown_after_attempt"
+        assert model_run["pipeline_status_writes_proven_absent"] is False
+        assert model_run["pipeline_event_writes_proven_absent"] is False
+        proof = evidence["execution_write_proof"]
+        assert proof["orchestration_called"] is True
+        assert proof["protected_by_pre_execution_evidence"] is True
+        assert proof["mutation_outcome"] == "unknown_after_attempt"
+        assert proof["mutation_occurred"] == "unknown_after_attempt"
+        assert proof["unknown_execution_count"] == 1
+        assert proof["pipeline_status_writes_proven_absent"] is False
+        assert proof["pipeline_event_writes_proven_absent"] is False
+        assert evidence["no_mutation_proof"]["slurm_submit_called"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["hydro_result_table_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["met_result_table_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["pipeline_status_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["pipeline_event_writes"] == "unknown_after_attempt"
     for raw_secret in ("user:pass", "sig123", "tok123", "pass123", "signature=sig123", "token=tok123"):
         assert raw_secret not in evidence_text
         assert raw_secret not in artifact_text
     assert "[redacted]" in evidence_text
     assert "[redacted]" in artifact_text
+
+
+@pytest.mark.parametrize("result_status", ["failed", "submission_failed"])
+def test_returned_failed_pipeline_without_slurm_id_keeps_pipeline_write_proof(
+    tmp_path: Path,
+    result_status: str,
+) -> None:
+    class ReturnedFailureNoSlurmOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            basin = basins[0]
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status=result_status,
+                stages=(
+                    StageRunResult(
+                        stage="forcing",
+                        job_type="produce_forcing_array",
+                        pipeline_job_id="job_forcing",
+                        slurm_job_id="",
+                        status="submission_failed",
+                        error_code="SBATCH_SUBMISSION_FAILED",
+                    ),
+                ),
+                candidate_outcomes=(
+                    {
+                        "candidate_id": basin["candidate_id"],
+                        "run_id": basin["run_id"],
+                        "model_id": basin["model_id"],
+                        "status": "submission_failed",
+                        "stage": "forcing",
+                        "reason": "sbatch_submission_failed",
+                        "pipeline_status_write": True,
+                        "pipeline_event_write": True,
+                        "slurm_job_id": "",
+                    },
+                ),
+            )
+
+    orchestrator = ReturnedFailureNoSlurmOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert orchestrator.calls
+    assert result.status == "submission_failed"
+    for evidence in (result.evidence, persisted):
+        model_run = evidence["model_run_evidence"][0]
+        proof = evidence["execution_write_proof"]
+        no_mutation = evidence["no_mutation_proof"]
+
+        assert model_run["submitted"] is False
+        assert model_run["slurm_submit_called"] is False
+        assert model_run["execution_attempted"] is True
+        assert model_run["pipeline_status_write"] is True
+        assert model_run["pipeline_event_write"] is True
+        assert model_run["pipeline_status_writes_proven_absent"] is False
+        assert model_run["pipeline_event_writes_proven_absent"] is False
+        assert model_run["mutation_occurred"] is True
+
+        assert proof["orchestration_called"] is True
+        assert proof["slurm_submit_count"] == 0
+        assert proof["slurm_submit_proven_absent"] is True
+        assert proof["slurm_submit_called"] is False
+        assert proof["hydro_result_table_writes"] is False
+        assert proof["met_result_table_writes"] is False
+        assert proof["pipeline_status_writes"] is True
+        assert proof["pipeline_event_writes"] is True
+        assert proof["pipeline_status_write_count"] == 1
+        assert proof["pipeline_event_write_count"] == 1
+        assert proof["pipeline_status_writes_proven_absent"] is False
+        assert proof["pipeline_event_writes_proven_absent"] is False
+
+        assert no_mutation["slurm_submit_called"] is False
+        assert no_mutation["pipeline_status_writes"] is True
+        assert no_mutation["pipeline_event_writes"] is True
+
+
+def test_returned_pipeline_with_slurm_id_without_pipeline_write_proof_keeps_pipeline_writes_unknown(
+    tmp_path: Path,
+) -> None:
+    class ReturnedSlurmWithoutPipelineWriteOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=(
+                    StageRunResult(
+                        stage="forcing",
+                        job_type="produce_forcing_array",
+                        pipeline_job_id="",
+                        slurm_job_id="slurm_forcing_123",
+                        status="succeeded",
+                    ),
+                ),
+            )
+
+    orchestrator = ReturnedSlurmWithoutPipelineWriteOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert orchestrator.calls
+    for evidence in (result.evidence, persisted):
+        model_run = evidence["model_run_evidence"][0]
+        proof = evidence["execution_write_proof"]
+        no_mutation = evidence["no_mutation_proof"]
+
+        assert model_run["slurm_submit_called"] is True
+        assert model_run["submitted"] is True
+        assert model_run["pipeline_status_write"] == "unknown_after_attempt"
+        assert model_run["pipeline_event_write"] == "unknown_after_attempt"
+
+        assert proof["slurm_submit_called"] is True
+        assert proof["pipeline_status_writes"] == "unknown_after_attempt"
+        assert proof["pipeline_event_writes"] == "unknown_after_attempt"
+
+        assert no_mutation["slurm_submit_called"] is True
+        assert no_mutation["pipeline_status_writes"] == "unknown_after_attempt"
+        assert no_mutation["pipeline_event_writes"] == "unknown_after_attempt"
 
 
 def test_active_db_job_cancel_requested_calls_cancel_before_active_skip(tmp_path: Path) -> None:
@@ -4676,6 +5489,321 @@ def test_stale_active_db_job_terminal_slurm_sync_does_not_skip_forever(tmp_path:
     assert state["slurm_state_sync"]["terminal_updates"][0]["status"] == "failed"
     assert result.evidence["skipped_candidates"] == []
     assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_sync_cycle_statuses_blocks_before_sync_when_pre_execution_reservation_fails(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class SyncingRepository(CandidateAndActiveRepository):
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            return {
+                **super().candidate_state(**kwargs),
+                "pipeline_status": "running",
+                "pipeline_jobs": [
+                    {
+                        "job_id": "job_forcing",
+                        "run_id": kwargs["run_id"],
+                        "status": "running",
+                        "stage": "forcing",
+                        "slurm_job_id": "7777",
+                    }
+                ],
+            }
+
+    class SyncMustNotRunOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            del cycle_id
+            raise AssertionError("sync_cycle_statuses must not run before evidence reservation")
+
+    now = _dt("2026-05-21T12:00:00Z")
+    fixed_suffix = "reservation0"
+    pass_id = f"scheduler_{format_cycle_time(now)}_{fixed_suffix}"
+    evidence_dir = tmp_path / "scheduler" / "evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{pass_id}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUuid", (), {"hex": fixed_suffix})())
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=SyncingRepository(
+            {
+                "pipeline_status": "running",
+                "pipeline_jobs": [
+                    {
+                        "job_id": "job_forcing",
+                        "status": "running",
+                        "stage": "forcing",
+                        "slurm_job_id": "7777",
+                    }
+                ],
+            },
+            [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+        ),
+        orchestrator_factory=lambda _source_id: SyncMustNotRunOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "evidence_preflight_blocked"
+    assert result.evidence["evidence_pre_execution"]["status"] == "blocked"
+    assert result.evidence["slurm_status_sync_proof"]["status"] == "preflight_blocked"
+    assert result.evidence["slurm_status_sync_proof"]["sync_called"] is False
+    assert result.evidence["no_mutation_proof"]["slurm_status_sync_called"] is False
+    assert result.evidence["no_mutation_proof"]["pipeline_status_writes"] is False
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+    assert result.evidence["model_run_evidence"][0]["sync_attempted"] is False
+
+
+def test_sync_cycle_statuses_sees_pre_execution_reservation_before_mutating(tmp_path: Path) -> None:
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            self.synced = False
+            super().__init__(
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
+
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            if self.synced:
+                return {
+                    "pipeline_status": "failed",
+                    "failed_stage": "forcing",
+                    "error_code": "NODE_FAILURE",
+                    "retry_count": 0,
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": kwargs["run_id"],
+                            "status": "failed",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                            "error_code": "NODE_FAILURE",
+                        }
+                    ],
+                }
+            return super().candidate_state(**kwargs)
+
+        def active_slurm_jobs(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [] if self.synced else super().active_slurm_jobs(**kwargs)
+
+    repository = SyncingRepository()
+    reservation_seen_before_sync: list[bool] = []
+
+    class SyncingOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            reservation_seen_before_sync.append(bool(list(tmp_path.glob("scheduler/evidence/*.pre_execution.json"))))
+            repository.synced = True
+            return [
+                {
+                    "job_id": "job_forcing",
+                    "cycle_id": cycle_id,
+                    "slurm_job_id": "7777",
+                    "status": "failed",
+                }
+            ]
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: SyncingOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert reservation_seen_before_sync == [True]
+    assert result.evidence["slurm_status_sync_proof"]["status"] == "synced"
+    assert result.evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
+    assert result.evidence["slurm_status_sync_proof"]["sync_called"] is True
+    assert result.evidence["slurm_status_sync_proof"]["mutation_occurred"] is True
+    assert result.evidence["counts"]["slurm_status_sync_count"] == 1
+    assert result.evidence["no_mutation_proof"]["slurm_status_sync_called"] is True
+    assert result.evidence["no_mutation_proof"]["pipeline_event_writes"] is True
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_sync_cycle_statuses_exception_after_attempt_persists_conservative_final_evidence(
+    tmp_path: Path,
+) -> None:
+    class SyncError(Exception):
+        error_code = "PUBLISHED_LOG_WRITE_FAILED"
+        message = "Failed to publish gateway logs."
+
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            super().__init__(
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": "fcst_gfs_2026052106_model_a",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
+
+    reservation_seen_before_sync: list[bool] = []
+    sync_calls: list[str] = []
+
+    class RaisingSyncOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            reservation_seen_before_sync.append(bool(list(tmp_path.glob("scheduler/evidence/*.pre_execution.json"))))
+            sync_calls.append(cycle_id)
+            raise SyncError("publish failed after durable sync")
+
+    orchestrator = RaisingSyncOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=SyncingRepository(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert reservation_seen_before_sync == [True]
+    assert sync_calls == ["gfs_2026052106"]
+    assert orchestrator.calls == []
+    assert result.status == "slurm_status_sync_failed"
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "slurm_status_sync_failed"
+        assert evidence["execution_boundary"] == "slurm_status_sync"
+        assert evidence["evidence_pre_execution"]["status"] == "reserved"
+        assert evidence["evidence_pre_execution"]["proof"] == (
+            "scheduler_evidence_directory_write_before_production_mutation"
+        )
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["slurm_status_sync_count"] == 0
+        assert evidence["counts"]["slurm_status_sync_unknown_count"] == 1
+        assert evidence["model_run_evidence"] == []
+        assert evidence["skipped_candidates"][0]["reason"] == "active_slurm_status_sync_failed"
+        assert evidence["skipped_candidates"][0]["sync_attempted"] is True
+        assert evidence["skipped_candidates"][0]["mutation_outcome"] == "unknown_after_attempt"
+        proof = evidence["slurm_status_sync_proof"]
+        assert proof["status"] == "failed"
+        assert proof["sync_called"] is True
+        assert proof["protected_by_pre_execution_evidence"] is True
+        assert proof["mutation_outcome"] == "unknown_after_attempt"
+        assert proof["mutation_occurred"] == "unknown_after_attempt"
+        assert proof["pipeline_status_writes_proven_absent"] is False
+        assert proof["pipeline_event_writes_proven_absent"] is False
+        assert proof["error_code"] == "PUBLISHED_LOG_WRITE_FAILED"
+        assert evidence["no_mutation_proof"]["slurm_status_sync_called"] is True
+        assert evidence["no_mutation_proof"]["pipeline_status_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["pipeline_event_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["slurm_submit_called"] is False
+        assert evidence["no_mutation_proof"]["slurm_cancellation_called"] is False
+
+
+def test_sync_cycle_statuses_terminal_skip_promotes_sync_only_scheduler_status(tmp_path: Path) -> None:
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            self.synced = False
+            super().__init__(
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": "fcst_gfs_2026052106_model_a",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
+
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            if self.synced:
+                return {
+                    "pipeline_status": "succeeded",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": kwargs["run_id"],
+                            "model_id": kwargs["model_id"],
+                            "status": "succeeded",
+                            "stage": "publish",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                }
+            return super().candidate_state(**kwargs)
+
+        def active_slurm_jobs(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [] if self.synced else super().active_slurm_jobs(**kwargs)
+
+    repository = SyncingRepository()
+
+    class SyncingOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            repository.synced = True
+            return [
+                {
+                    "job_id": "job_forcing",
+                    "cycle_id": cycle_id,
+                    "slurm_job_id": "7777",
+                    "status": "succeeded",
+                }
+            ]
+
+    orchestrator = SyncingOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert orchestrator.calls == []
+    assert result.status == "slurm_status_synced"
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "slurm_status_synced"
+        assert evidence["execution_boundary"] == "slurm_status_sync"
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["slurm_status_sync_count"] == 1
+        assert evidence["model_run_evidence"] == []
+        assert evidence["slurm_cancellation_evidence"] == []
+        assert evidence["slurm_status_sync_proof"]["status"] == "synced"
+        assert evidence["slurm_status_sync_proof"]["sync_called"] is True
+        assert evidence["slurm_status_sync_proof"]["mutation_occurred"] is True
+        assert evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
+        assert evidence["slurm_status_sync_proof"]["terminal_update_count"] == 1
+        assert evidence["no_mutation_proof"]["slurm_status_sync_called"] is True
+        assert evidence["no_mutation_proof"]["pipeline_status_writes"] is True
+        assert evidence["no_mutation_proof"]["pipeline_event_writes"] is True
+        assert evidence["no_mutation_proof"]["slurm_submit_called"] is False
+        assert evidence["no_mutation_proof"]["slurm_cancellation_called"] is False
+        assert evidence["skipped_candidates"][0]["reason"] == "terminal_pipeline_success"
+        sync = evidence["skipped_candidates"][0]["state_evidence"]["slurm_state_sync"]
+        assert sync["terminal_updates"][0]["status"] == "succeeded"
 
 
 @pytest.mark.parametrize(
@@ -4789,13 +5917,7 @@ def test_default_non_dry_run_blocks_before_mutation_without_safe_preflight(tmp_p
     assert result.evidence["execution_mode"] == "production_orchestration"
     assert result.evidence["execution_boundary"] == "preflight_blocked"
     assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["no_mutation_proof"] == {
-        "adapter_download_called": False,
-        "slurm_submit_called": False,
-        "shud_runtime_called": False,
-        "hydro_result_table_writes": False,
-        "met_result_table_writes": False,
-    }
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
     evidence = result.evidence["model_run_evidence"][0]
     assert evidence["status"] == "preflight_blocked"
     assert evidence["submitted"] is False
@@ -5527,7 +6649,7 @@ def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_pat
     assert len(result.evidence["candidates"]) == 1
     assert result.evidence["blocked_candidates"] == []
     assert result.evidence["skipped_candidates"] == []
-    assert result.evidence["counts"] == {
+    expected_counts = {
         "candidate_count": 1,
         "blocked_candidate_count": 0,
         "skipped_candidate_count": 0,
@@ -5537,18 +6659,17 @@ def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_pat
         "failed_count": 0,
         "partial_count": 0,
     }
+    counts = result.evidence["counts"]
+    assert {name: counts[name] for name in expected_counts} == expected_counts
+    assert counts["slurm_status_sync_count"] == 0
+    assert counts["slurm_cancelled_count"] == 0
+    assert counts["slurm_cancellation_blocked_count"] == 0
     assert result.evidence["filters"] == result.evidence["operator_filters"]
     assert result.evidence["candidates"][0]["source_id"] == "gfs"
     assert result.evidence["candidates"][0]["cycle_id"] == "gfs_2026052106"
     assert result.evidence["candidates"][0]["model_id"] == "model_a"
     assert result.evidence["artifact_path"] == str(result.artifact_path)
-    assert result.evidence["no_mutation_proof"] == {
-        "adapter_download_called": False,
-        "slurm_submit_called": False,
-        "shud_runtime_called": False,
-        "hydro_result_table_writes": False,
-        "met_result_table_writes": False,
-    }
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
     assert adapter.download_calls == 0
     assert persisted["schema_version"] == result.evidence["schema_version"]
     assert persisted["readiness"]["final_production_readiness_claimed"] is False
@@ -5925,13 +7046,16 @@ def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    roots = _slurm_roots(tmp_path)
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    (roots["workspace_root"] / "scheduler" / "evidence").mkdir(parents=True)
+    log_root = roots["runtime_root"] / "slurm-logs"
+    log_root.mkdir()
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("PIPELINE_DATABASE_URL", "postgresql://nhms:secret@db.prod.example/nhms")
     monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ENABLED", "1")
-    monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
-    monkeypatch.setenv("SLURM_SHARED_LOG_ROOT", str(roots["log_root"]))
-    monkeypatch.setenv("NHMS_RUNTIME_ROOT", str(roots["runtime_root"]))
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setenv("SLURM_SHARED_LOG_ROOT", str(log_root))
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setattr(
         "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
@@ -5952,6 +7076,285 @@ def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
     )
 
     payload = cli._plan_production(
+        sources=(),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=(),
+        basin_ids=(),
+        dry_run=False,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=str(roots["workspace_root"]),
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["runtime_config"]["require_runtime_roots"] is True
+    assert payload["root_preflight"]["status"] == "ready"
+    assert payload["model_run_evidence"][0]["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
+
+
+def test_plan_production_no_flag_uses_env_roots_and_records_runtime_evidence(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
+        lambda: FakeRegistry([_model("model_a", "basin_a")]),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=False),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    resolved_roots = payload["resolved_runtime_roots"]
+    runtime_config = payload["runtime_config"]
+    assert payload["status"] == "planned"
+    assert payload["dry_run"] is True
+    assert payload["execution_mode"] == "dry_run"
+    assert payload["root_preflight"]["status"] == "ready"
+    assert resolved_roots["workspace_root"]["path"] == str(roots["workspace_root"].resolve())
+    assert resolved_roots["object_store_root"]["path"] == str(roots["object_store_root"].resolve())
+    assert resolved_roots["published_artifact_root"]["path"] == str(roots["published_root"].resolve())
+    assert resolved_roots["lock_root"]["path"] == str(roots["lock_root"].resolve())
+    assert resolved_roots["evidence_root"]["path"] == str(roots["evidence_root"].resolve())
+    assert resolved_roots["runtime_root"]["path"] == str(roots["runtime_root"].resolve())
+    assert resolved_roots["temp_root"]["path"] == str(roots["temp_root"].resolve())
+    assert runtime_config["service_role"] == "compute_control"
+    assert runtime_config["require_runtime_roots"] is True
+    assert runtime_config["dry_run"] is True
+    assert runtime_config["sources"] == ["gfs"]
+    assert runtime_config["model_ids"] == ["model_a"]
+    assert runtime_config["basin_ids"] == ["basin_a"]
+    assert payload["counts"]["submitted_count"] == 0
+    assert not (tmp_path / ".nhms-workspace").exists()
+
+
+def test_plan_production_plan_flag_is_no_mutation_alias(monkeypatch: Any, tmp_path: Path) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            self.config = config
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned", "dry_run": self.config.dry_run})
+
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setenv("NHMS_SCHEDULER_SOURCES", "gfs")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production", "--plan"])
+
+    assert rc == 0
+    assert captured["config"].dry_run is True
+    assert captured["config"].require_runtime_roots is True
+
+
+def test_plan_production_submit_flag_enables_mutation_path(monkeypatch: Any, tmp_path: Path) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            self.config = config
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned", "dry_run": self.config.dry_run})
+
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setenv("NHMS_SCHEDULER_SOURCES", "gfs")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production", "--submit"])
+
+    assert rc == 0
+    assert captured["config"].dry_run is False
+    assert captured["config"].require_runtime_roots is True
+
+
+def test_docs_reserve_plan_for_no_mutation_and_use_submit_for_production_submission() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    production_sections = {
+        "docs/VALIDATION.md": (
+            "Production submission uses the same backend scheduler entrypoint",
+            "Slurm mode rejects missing or localhost-only",
+        ),
+        "docs/runbooks/qhh-continuous.md": (
+            "生产提交路径使用同一个 backend scheduler",
+            "该生产路径负责所有 active runnable 注册模型",
+        ),
+        "docs/runbooks/qhh-mvp-production-like-e2e-checklist.md": (
+            "### 10.1 生产模式 plan-production",
+            "### 10.2 pipeline job 持久化",
+        ),
+    }
+
+    for relative_path, (start_marker, end_marker) in production_sections.items():
+        text = (repo_root / relative_path).read_text(encoding="utf-8")
+        start = text.index(start_marker)
+        end = text.index(end_marker, start)
+        section = text[start:end]
+
+        assert "--submit" in section, relative_path
+        assert "--plan" not in section, relative_path
+
+    reservation_text = "\n".join(
+        (repo_root / relative_path).read_text(encoding="utf-8")
+        for relative_path in production_sections
+    )
+    assert "--plan" in reservation_text
+    assert "dry-run/no-mutation" in reservation_text
+
+
+def test_plan_production_missing_workspace_root_no_flag_errors_without_app_workspace(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr("services.orchestrator.scheduler.FileSchedulerLease.acquire", _unexpected_lock_acquire)
+
+    with pytest.raises(ValueError, match="WORKSPACE_ROOT"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root=None,
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+    assert not (tmp_path / ".nhms-workspace").exists()
+    assert not (tmp_path / "scheduler").exists()
+
+
+def test_no_flag_missing_allowed_roots_blocks_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("missing scheduler allowlist must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["root_preflight"]["checks"]["allowed_roots_policy"] == {
+        "env": "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "configured": False,
+        "non_empty": False,
+        "allowed_roots": [],
+        "independent_policy_required": True,
+    }
+    assert "SCHEDULER_ROOT_ALLOWED_ROOTS_MISSING" in {
+        blocker["code"] for blocker in payload["root_preflight"]["blockers"]
+    }
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert Path(payload["artifact_path"]).is_file()
+
+
+def test_explicit_workspace_submit_missing_allowed_roots_blocks_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    (roots["workspace_root"] / "scheduler" / "evidence").mkdir(parents=True)
+    monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("explicit-root submit root preflight must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
         sources=("gfs",),
         lookback_hours=24,
         cycle_lag_hours=0,
@@ -5968,8 +7371,416 @@ def test_plan_production_public_slurm_path_rejects_pipeline_database_url_only(
     )
 
     assert payload["status"] == "preflight_blocked"
+    assert payload["runtime_config"]["dry_run"] is False
+    assert payload["runtime_config"]["require_runtime_roots"] is True
+    assert payload["root_preflight"]["checks"]["allowed_roots_policy"] == {
+        "env": "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "configured": False,
+        "non_empty": False,
+        "allowed_roots": [],
+        "independent_policy_required": True,
+    }
+    assert "SCHEDULER_ROOT_ALLOWED_ROOTS_MISSING" in {
+        blocker["code"] for blocker in payload["root_preflight"]["blockers"]
+    }
     assert payload["counts"]["submitted_count"] == 0
-    assert payload["model_run_evidence"][0]["error_code"] == "SLURM_PREFLIGHT_DATABASE_URL_MISSING"
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert Path(payload["artifact_path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("broken_root", "expected_code"),
+    [
+        ("workspace_root", "SCHEDULER_ROOT_WORKSPACE_ROOT_NOT_FOUND"),
+        ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_NOT_FOUND"),
+        ("published_root", "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_NOT_FOUND"),
+        ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_NOT_FOUND"),
+        ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_NOT_FOUND"),
+        ("lock_root", "SCHEDULER_ROOT_LOCK_ROOT_NOT_FOUND"),
+        ("evidence_root", "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_FOUND"),
+    ],
+)
+def test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+    broken_root: str,
+    expected_code: str,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    broken_path = roots[broken_root]
+    shutil.rmtree(broken_path)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("blocked scheduler root preflight must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
+    if broken_root in {"workspace_root", "evidence_root"}:
+        assert "artifact_path" not in payload
+    else:
+        assert Path(payload["artifact_path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("root_key", "env_key", "expected_code", "safe_evidence"),
+    [
+        (
+            "object_store_root",
+            "OBJECT_STORE_ROOT",
+            "SCHEDULER_ROOT_OBJECT_STORE_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+        (
+            "published_root",
+            "NHMS_PUBLISHED_ARTIFACT_ROOT",
+            "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+        (
+            "runtime_root",
+            "NHMS_SCHEDULER_RUNTIME_ROOT",
+            "SCHEDULER_ROOT_RUNTIME_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+        (
+            "temp_root",
+            "NHMS_SCHEDULER_TEMP_ROOT",
+            "SCHEDULER_ROOT_TEMP_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+        (
+            "workspace_root",
+            "WORKSPACE_ROOT",
+            "SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+    ],
+)
+def test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+    root_key: str,
+    env_key: str,
+    expected_code: str,
+    safe_evidence: bool,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path / "approved")
+    _set_scheduler_root_env(monkeypatch, roots)
+    outside = tmp_path / "outside" / root_key
+    outside.mkdir(parents=True)
+    monkeypatch.setenv(env_key, str(outside))
+    if root_key == "workspace_root":
+        lock_root = outside / "locks"
+        evidence_root = outside / "evidence"
+        lock_root.mkdir()
+        evidence_root.mkdir()
+        monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(lock_root))
+        monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(evidence_root))
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("out-of-approved scheduler root must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    if safe_evidence:
+        assert Path(payload["artifact_path"]).is_file()
+    else:
+        assert "artifact_path" not in payload
+
+
+@pytest.mark.parametrize(
+    ("root_key", "expected_code", "safe_evidence"),
+    [
+        ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_NOT_DIRECTORY", True),
+        ("published_root", "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_NOT_DIRECTORY", True),
+        ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_NOT_DIRECTORY", True),
+        ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_NOT_DIRECTORY", True),
+        ("lock_root", "SCHEDULER_ROOT_LOCK_ROOT_NOT_DIRECTORY", True),
+        ("evidence_root", "evidence_dir must be a directory", False),
+        ("workspace_root", "evidence_dir must be a safe directory", False),
+    ],
+)
+def test_no_flag_file_roots_block_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+    root_key: str,
+    expected_code: str,
+    safe_evidence: bool,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    target = roots[root_key]
+    shutil.rmtree(target)
+    target.write_text("not a directory\n", encoding="utf-8")
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("file scheduler root must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    if root_key in {"evidence_root", "workspace_root"}:
+        with pytest.raises(ValueError, match=expected_code):
+            cli._plan_production(
+                sources=("gfs",),
+                lookback_hours=24,
+                cycle_lag_hours=0,
+                max_cycles_per_source=1,
+                model_ids=("model_a",),
+                basin_ids=(),
+                dry_run=True,
+                continuous=False,
+                interval_seconds=300.0,
+                max_passes=None,
+                workspace_root=None,
+                lock_path=None,
+                evidence_dir=None,
+            )
+        return
+
+    payload = _run_no_flag_plan()
+    assert payload["status"] == "preflight_blocked"
+    assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    if safe_evidence:
+        assert Path(payload["artifact_path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("root_key", "expected_code", "safe_evidence"),
+    [
+        ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_SYMLINK", True),
+        ("published_root", "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_SYMLINK", True),
+        ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_SYMLINK", True),
+        ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_SYMLINK", True),
+        ("evidence_root", "evidence_dir must be under workspace_root", False),
+        ("workspace_root", "SCHEDULER_ROOT_WORKSPACE_ROOT_SYMLINK", False),
+    ],
+)
+def test_no_flag_symlink_final_component_blocks_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+    root_key: str,
+    expected_code: str,
+    safe_evidence: bool,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    target = roots[root_key]
+    replacement_target = tmp_path / f"{root_key}-symlink-target"
+    replacement_target.mkdir()
+    shutil.rmtree(target)
+    target.symlink_to(replacement_target, target_is_directory=True)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("symlink scheduler root must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    if root_key == "evidence_root":
+        with pytest.raises(ValueError, match=expected_code):
+            cli._plan_production(
+                sources=("gfs",),
+                lookback_hours=24,
+                cycle_lag_hours=0,
+                max_cycles_per_source=1,
+                model_ids=("model_a",),
+                basin_ids=(),
+                dry_run=True,
+                continuous=False,
+                interval_seconds=300.0,
+                max_passes=None,
+                workspace_root=None,
+                lock_path=None,
+                evidence_dir=None,
+            )
+        return
+
+    payload = _run_no_flag_plan()
+    assert payload["status"] == "preflight_blocked"
+    assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    if safe_evidence:
+        assert Path(payload["artifact_path"]).is_file()
+    else:
+        assert "artifact_path" not in payload
+
+
+@pytest.mark.parametrize(
+    ("root_key", "expected_code", "safe_evidence"),
+    [
+        ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_NOT_WRITABLE", True),
+        ("published_root", "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_NOT_WRITABLE", True),
+        ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_NOT_WRITABLE", True),
+        ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_NOT_WRITABLE", True),
+        ("lock_root", "SCHEDULER_ROOT_LOCK_ROOT_NOT_WRITABLE", True),
+        ("evidence_root", "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_WRITABLE", False),
+        ("workspace_root", "evidence_dir must be a safe directory", False),
+    ],
+)
+def test_no_flag_no_execute_or_not_writable_roots_block_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+    root_key: str,
+    expected_code: str,
+    safe_evidence: bool,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    target = roots[root_key]
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+    target.chmod(0o600)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("unusable scheduler root must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    try:
+        if root_key == "workspace_root":
+            with pytest.raises(ValueError, match=expected_code):
+                cli._plan_production(
+                    sources=("gfs",),
+                    lookback_hours=24,
+                    cycle_lag_hours=0,
+                    max_cycles_per_source=1,
+                    model_ids=("model_a",),
+                    basin_ids=(),
+                    dry_run=True,
+                    continuous=False,
+                    interval_seconds=300.0,
+                    max_passes=None,
+                    workspace_root=None,
+                    lock_path=None,
+                    evidence_dir=None,
+                )
+            return
+        payload = cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=("model_a",),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root=None,
+            lock_path=None,
+            evidence_dir=None,
+        )
+    finally:
+        target.chmod(original_mode)
+
+    assert payload["status"] == "preflight_blocked"
+    assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    if safe_evidence:
+        assert Path(payload["artifact_path"]).is_file()
+    else:
+        assert "artifact_path" not in payload
+
+
+def test_no_flag_out_of_bound_lock_and_evidence_roots_are_rejected_at_config(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(tmp_path / "outside-locks"))
+    (tmp_path / "outside-locks").mkdir()
+
+    with pytest.raises(ValueError, match="lock_path must be under workspace_root"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root=None,
+            lock_path=None,
+            evidence_dir=None,
+        )
 
 
 def test_public_from_env_wires_active_repository(monkeypatch: Any, tmp_path: Path) -> None:
@@ -6139,6 +7950,178 @@ def test_run_continuous_rejects_excessive_finite_passes(tmp_path: Path) -> None:
     assert scheduler.pass_count == 0
 
 
+def test_run_continuous_rejects_zero_finite_passes(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
+    scheduler = CountingScheduler(config, stop_after=10)
+
+    with pytest.raises(ValueError, match="max_passes must be at least 1"):
+        scheduler.run_continuous(max_passes=0)
+
+    assert scheduler.pass_count == 0
+
+
+def test_plan_production_cli_uses_scheduler_env_interval_and_max_passes_for_no_flag_continuous(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            self.config = config
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_continuous(self, *, max_passes: int | None = None) -> list[SimpleResult]:
+            captured["max_passes"] = max_passes
+            return [SimpleResult({"status": "planned", "pass": index + 1}) for index in range(max_passes or 0)]
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_INTERVAL_SECONDS", "12.5")
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_PASSES", "2")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production", "--continuous"])
+
+    assert rc == 0
+    assert captured["config"].interval_seconds == 12.5
+    assert captured["max_passes"] == 2
+
+
+def test_plan_production_cli_uses_scheduler_env_max_cycles_when_omitted(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned"})
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", "2")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production"])
+
+    assert rc == 0
+    assert captured["config"].max_cycles_per_source == 2
+
+
+def test_plan_production_cli_explicit_max_cycles_one_overrides_scheduler_env(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned"})
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", "2")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production", "--max-cycles-per-source", "1"])
+
+    assert rc == 0
+    assert captured["config"].max_cycles_per_source == 1
+
+
+def test_plan_production_cli_rejects_non_positive_explicit_max_cycles(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("non-positive max cycles flag must not construct scheduler")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    try:
+        cli._click_main(["plan-production", "--max-cycles-per-source", "0"])
+    except SystemExit as error:
+        rc = int(error.code or 0)
+    else:
+        rc = 0
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "plan-production max_cycles_per_source must be at least 1\n"
+
+
+def test_plan_production_cli_explicit_interval_and_max_passes_override_scheduler_env(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            self.config = config
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_continuous(self, *, max_passes: int | None = None) -> list[SimpleResult]:
+            captured["max_passes"] = max_passes
+            return [SimpleResult({"status": "planned", "pass": index + 1}) for index in range(max_passes or 0)]
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_INTERVAL_SECONDS", "12.5")
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_PASSES", "2")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(
+        [
+            "plan-production",
+            "--continuous",
+            "--interval-seconds",
+            "33",
+            "--max-passes",
+            "4",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["config"].interval_seconds == 33.0
+    assert captured["max_passes"] == 4
+
+
 def test_cli_rejects_unbounded_json_continuous_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="--continuous JSON output requires --max-passes"):
         cli._plan_production(
@@ -6152,6 +8135,25 @@ def test_cli_rejects_unbounded_json_continuous_mode(tmp_path: Path) -> None:
             continuous=True,
             interval_seconds=300.0,
             max_passes=None,
+            workspace_root=str(tmp_path),
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+
+def test_cli_rejects_zero_continuous_json_passes(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_passes must be at least 1"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=True,
+            interval_seconds=300.0,
+            max_passes=0,
             workspace_root=str(tmp_path),
             lock_path=None,
             evidence_dir=None,
@@ -6181,6 +8183,77 @@ def test_cli_rejects_excessive_continuous_json_passes(monkeypatch: Any, tmp_path
             lock_path=None,
             evidence_dir=None,
         )
+
+
+def test_cli_rejects_invalid_scheduler_max_cycles_env_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class FailingScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            raise AssertionError("scheduler must not be constructed for invalid max cycles env")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", "not-an-int")
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    with pytest.raises(ValueError, match="NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE must be an integer"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=None,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root=str(workspace_root),
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+
+def test_cli_rejects_non_positive_scheduler_max_cycles_env_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("non-positive max cycles env must not construct scheduler")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", "0")
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    with pytest.raises(ValueError, match="max_cycles_per_source must be at least 1"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=None,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root=str(workspace_root),
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+
+def test_production_scheduler_config_rejects_non_positive_max_cycles(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_cycles_per_source must be at least 1"):
+        _config(tmp_path, max_cycles_per_source=0)
 
 
 class SimpleResult:
@@ -6662,12 +8735,82 @@ def _slurm_roots(root: Path) -> dict[str, Path]:
     roots = {
         "workspace_root": root / "workspace",
         "object_store_root": root / "object-store",
+        "published_root": root / "published",
         "log_root": root / "logs",
         "runtime_root": root / "runtime",
+        "temp_root": root / "tmp",
     }
     for path in roots.values():
         path.mkdir(parents=True, exist_ok=True)
     return roots
+
+
+def _scheduler_env_roots(root: Path) -> dict[str, Path]:
+    workspace_root = root / "workspace"
+    roots = {
+        "workspace_root": workspace_root,
+        "object_store_root": root / "object-store",
+        "published_root": root / "published",
+        "runtime_root": root / "runtime",
+        "temp_root": root / "tmp",
+        "lock_root": workspace_root / "locks",
+        "evidence_root": workspace_root / "evidence",
+    }
+    for path in roots.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return roots
+
+
+def _set_scheduler_root_env(monkeypatch: Any, roots: Mapping[str, Path]) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(roots["workspace_root"]))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(roots["published_root"]))
+    monkeypatch.setenv("NHMS_SCHEDULER_RUNTIME_ROOT", str(roots["runtime_root"]))
+    monkeypatch.setenv("NHMS_SCHEDULER_TEMP_ROOT", str(roots["temp_root"]))
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(roots["lock_root"]))
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(roots["evidence_root"]))
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        os.pathsep.join(
+            str(roots[key])
+            for key in ("workspace_root", "object_store_root", "published_root", "runtime_root", "temp_root")
+        ),
+    )
+    monkeypatch.setenv("NHMS_SCHEDULER_SOURCES", "gfs")
+    monkeypatch.setenv("NHMS_SCHEDULER_MODEL_IDS", "model_a")
+    monkeypatch.setenv("NHMS_SCHEDULER_BASIN_IDS", "basin_a")
+
+
+def _run_no_flag_plan() -> dict[str, Any]:
+    return cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+
+def _expected_no_mutation_proof() -> dict[str, bool]:
+    return {
+        "adapter_download_called": False,
+        "slurm_submit_called": False,
+        "slurm_status_sync_called": False,
+        "slurm_cancellation_called": False,
+        "shud_runtime_called": False,
+        "hydro_result_table_writes": False,
+        "met_result_table_writes": False,
+        "pipeline_status_writes": False,
+        "pipeline_event_writes": False,
+    }
 
 
 def _model(model_id: str, basin_id: str, *, resource_profile: dict[str, Any] | None = None) -> dict[str, Any]:

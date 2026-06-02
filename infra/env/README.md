@@ -39,8 +39,23 @@ Compute role, node 22:
 
 - Required: `NHMS_SERVICE_ROLE=compute_control`,
   `NHMS_REQUIRE_SERVICE_ROLE=true`, writer-capable `DATABASE_URL`,
-  `WORKSPACE_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`, and
+  `WORKSPACE_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`, and
   `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`.
+- Scheduler no-flag business validation requires `NHMS_SCHEDULER_LOCK_ROOT`,
+  `NHMS_SCHEDULER_EVIDENCE_ROOT`, `NHMS_SCHEDULER_RUNTIME_ROOT`,
+  `NHMS_SCHEDULER_TEMP_ROOT`, non-empty `NHMS_SCHEDULER_ALLOWED_ROOTS`, and
+  source/model filter envs such as `NHMS_SCHEDULER_SOURCES`,
+  `NHMS_SCHEDULER_MODEL_IDS`, `NHMS_SCHEDULER_BASIN_IDS`,
+  `NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE`, `NHMS_SCHEDULER_INTERVAL_SECONDS`,
+  and `NHMS_SCHEDULER_MAX_PASSES`. `NHMS_SCHEDULER_ALLOWED_ROOTS` is an
+  independent approved-root policy separated by `:`; do not derive it from the
+  candidate runtime roots at execution time. `WORKSPACE_ROOT`,
+  `OBJECT_STORE_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`,
+  `NHMS_SCHEDULER_RUNTIME_ROOT`, and `NHMS_SCHEDULER_TEMP_ROOT` must be under
+  one of those approved roots. Lock and evidence roots must be under
+  `WORKSPACE_ROOT`; explicit
+  `--workspace-root`, `--lock-path`, and `--evidence-dir` are diagnostic
+  compatibility, not the compute scheduler-once proof path.
 - Allowed only on compute: Slurm gateway settings, writable workspace,
   Basins/model asset paths, and `SHUD_EXECUTABLE`.
 - The compute compose has no published host port by default. Keep any future
@@ -58,9 +73,10 @@ Display role, node 27:
   `scripts/validate_two_node_docker_runtime.py`: `SLURM_GATEWAY_URL`,
   `SLURM_GATEWAY_BACKEND`, `SLURM_GATEWAY_TEMPLATE_DIR`,
   `SLURM_GATEWAY_WORKSPACE_DIR`, `WORKSPACE_ROOT`, `RUN_WORKSPACE_ROOT`,
-  `SHARED_LOG_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_BASINS_ROOT`,
-  `NHMS_MODEL_ASSET_ROOT`, `SHUD_EXECUTABLE`, `MUNGE_SOCKET`, `MUNGE_KEY`, and
-  `DOCKER_HOST`.
+  `SHARED_LOG_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_SCHEDULER_LOCK_ROOT`,
+  `NHMS_SCHEDULER_EVIDENCE_ROOT`, `NHMS_SCHEDULER_RUNTIME_ROOT`,
+  `NHMS_SCHEDULER_TEMP_ROOT`, `NHMS_BASINS_ROOT`, `NHMS_MODEL_ASSET_ROOT`,
+  `SHUD_EXECUTABLE`, `MUNGE_SOCKET`, `MUNGE_KEY`, and `DOCKER_HOST`.
 - Forbidden container/host surfaces: `/etc/slurm`, `/run/munge`,
   `/var/run/munge`, `/etc/munge`, `munge.key`, `.nhms-runs`,
   `/run/docker.sock`, `/var/run/docker.sock`, and 22 private `/scratch` mounts.

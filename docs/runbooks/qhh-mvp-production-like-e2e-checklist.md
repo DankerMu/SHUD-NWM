@@ -397,6 +397,9 @@ where bv.basin_id = 'qhh';
 
 使用正式 scheduler 的 dry-run 模式先发现候选周期，不产生下载、Slurm 或结果写入：
 
+`--plan` 只保留给 dry-run/no-mutation smoke 或业务验证证据；真实生产提交必须在
+10.1 使用 `--submit`。
+
 ```bash
 uv run nhms-pipeline plan-production \
   --dry-run \
@@ -417,9 +420,13 @@ uv run nhms-pipeline plan-production \
 - [ ] 输出包含 IFS 或明确的 IFS 阻塞原因。
 - [ ] `adapter_download_called=false`。
 - [ ] `slurm_submit_called=false`。
+- [ ] `slurm_status_sync_called=false`。
+- [ ] `slurm_cancellation_called=false`。
 - [ ] `shud_runtime_called=false`。
 - [ ] `hydro_result_table_writes=false`。
 - [ ] `met_result_table_writes=false`。
+- [ ] `pipeline_status_writes=false`。
+- [ ] `pipeline_event_writes=false`。
 
 ### 8.2 GFS 下载和完整性
 
@@ -545,11 +552,11 @@ order by source_id, variable;
 
 ### 10.1 生产模式 plan-production
 
-仅在前序检查通过后执行：
+仅在前序检查通过后执行真实提交；该路径必须使用 `--submit`：
 
 ```bash
 uv run nhms-pipeline plan-production \
-  --plan \
+  --submit \
   --source gfs \
   --source IFS \
   --lookback-hours 24 \

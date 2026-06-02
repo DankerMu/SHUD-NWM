@@ -151,6 +151,88 @@ Regression rows:
 - Workspace-only, scratch-only, Slurm-private, traversal, or non-allowlisted local path -> rejected as display-readable artifact/log evidence.
 - Existing M22 readonly DB/published artifact consumer -> remains compatible and is not required to mount node-22 private workspace paths.
 
+## Issue #253 Fixture
+
+Issue type: feature/config
+Project profile: other, with production scheduler CLI and deployment config surfaces
+Blast radius: high
+Fixture level: expanded
+Repair intensity: high
+
+Change surface:
+
+- `services/orchestrator/cli.py` `nhms-pipeline plan-production` option/default handling.
+- `services/orchestrator/scheduler.py` runtime root resolution, root preflight, lock/evidence root safety, and pass evidence.
+- `infra/compose.compute.yml`, `infra/env/compute.example`, and deployment/systemd/runbook docs for one-shot and continuous scheduler modes.
+- `tests/test_production_scheduler.py` and `tests/test_production_slurm_validation.py` focused config/root tests.
+
+Must preserve:
+
+- #252 production identity/status/URI contract and scheduler evidence compatibility.
+- Dry-run/no-mutation semantics: deterministic `--plan` evidence must not claim live readiness or call download/Slurm/SHUD/hydro/met mutation.
+- Existing path containment protections for scheduler locks and evidence artifacts.
+- Explicit `--workspace-root`, `--lock-path`, and `--evidence-dir` diagnostic compatibility when those flags are provided and safely contained.
+- Existing M22 node-27 readonly published artifact boundary.
+
+Must add/change:
+
+- `nhms-pipeline plan-production` without `--workspace-root` must use documented environment/config roots, especially `WORKSPACE_ROOT`, instead of app-local `.nhms-workspace`.
+- Object-store, published root, lock root, evidence root, and temporary/runtime roots must resolve from approved env/config defaults and be included in redacted scheduler evidence.
+- Invalid, missing, unwritable, unsafe, or uncontained runtime roots must produce pre-mutation blockers before download, Slurm, SHUD, hydro, met, parse, or publish mutation.
+- Compute compose/env/docs must make no-flag `scheduler-once` the business validation lane and describe explicit `--workspace-root` as diagnostic compatibility.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - `nhms-pipeline plan-production` and Docker scheduler-once are public operational entrypoints.
+- Config / project setup: selected - runtime roots, service role, source/model filters, lock/evidence locations, and scheduler loop settings come from env/config.
+- File IO / path safety / overwrite: selected - workspace, lock, evidence, object-store, temp, and published roots are user/config controlled and must not escape approved roots or overwrite unsafe lanes.
+- Schema / columns / units / field names: selected - scheduler pass evidence gains/uses root/preflight fields that downstream evidence and docs consume.
+- Resource limits / large input / discovery: selected - continuous/timer mode, max passes, intervals, source/model filters, and evidence writes must stay bounded.
+- Legacy compatibility / examples: selected - existing explicit-root test and M22/M23 runbooks must remain valid while changing the business default.
+- Error handling / rollback / partial outputs: selected - invalid roots must block before mutation and still write safe evidence when possible.
+- Documentation / migration notes: selected - compute compose/env/systemd/runbooks define the accepted operational path.
+
+Risk packs considered:
+
+- Geospatial / CRS / shapefile sidecars: not selected - no station/segment geometry changes in #253.
+- Time series / forcing / temporal boundaries: not selected - scheduler window parameters are retained, but no forcing values or temporal science processing changes.
+- Numerical stability / conservation / NaN: not selected - no solver or numerical output changes.
+- Solver runtime / performance / threading: not selected - SHUD execution and Slurm runtime behavior are later issues; #253 only blocks before mutation.
+- Release / packaging / dependency compatibility: not selected - no package/runtime dependency changes expected.
+
+Boundary-surface checklist:
+
+- Shared helper roots: `ProductionSchedulerConfig`, scheduler root/preflight helpers, CLI option handling.
+- Public entrypoints: `nhms-pipeline plan-production`, compute `scheduler-once`, documented continuous/timer mode.
+- Read surfaces: env vars, compose env files, systemd/runbook instructions, scheduler evidence.
+- Write/delete/overwrite surfaces: scheduler lock file, evidence JSON, temp/runtime root preflight; no live product mutation in #253.
+- Staging/publish/rollback surfaces: published root availability/writability preflight only; no parser/publisher implementation.
+- Producer/consumer evidence boundaries: scheduler pass evidence consumed by PR evidence, E2E docs, and later M23 issues.
+- Stale-state/idempotency boundaries: scheduler lock/lease and no duplicate pass behavior remain bounded.
+- Unchanged downstream consumers: #252 production contract helpers, M22 readonly display, `/ops` strict identity endpoints.
+
+Invariant Matrix
+
+Governing invariant: A no-flag production scheduler run on node 22 must resolve all runtime roots from approved deployment configuration, prove them in redacted evidence, and block before any mutation if a required root is missing, unsafe, uncontained, or unwritable.
+Source-of-truth identity/contract: documented env/config fields `WORKSPACE_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`, scheduler lock/evidence root env or defaults, runtime/temp root env, service role, source/model filters, and dry-run/continuous mode flags.
+Surfaces:
+
+- Producers: CLI config construction, `ProductionSchedulerConfig`, compute compose/env/systemd/runbook examples.
+- Validators/preflight: scheduler root/path safety helpers, pre-mutation root checks, lock/evidence directory open/write guards.
+- Storage/cache/query: scheduler evidence JSON, lock file, object-store root and published root preflight metadata.
+- Public routes/entrypoints: `nhms-pipeline plan-production` and compute `scheduler-once` command; no API route change.
+- Frontend/downstream consumers: E2E evidence and docs; node-27 display remains read-only and unchanged.
+- Failure paths/rollback/stale state: invalid/unwritable roots, lock contention, evidence-write failure, continuous max-pass bounds.
+- Evidence/audit/readiness: OpenSpec fixture, scheduler pass evidence, docs/runbook command snippets, CI/mock tests, optional Docker smoke BLOCKED/PASS evidence.
+Regression rows:
+
+- Env-only no-flag CLI with `WORKSPACE_ROOT`, object-store, published, lock/evidence/temp roots -> scheduler config uses env roots and evidence records redacted resolved roots.
+- Missing `WORKSPACE_ROOT` in production/no-flag mode -> stable config/preflight blocker or CLI error; it must not create `.nhms-workspace` under `/app`.
+- Invalid/unwritable/out-of-bound workspace/object-store/published/lock/evidence/temp root -> blocker before mutation with no download/Slurm/SHUD/hydro/met writes.
+- Explicit safe `--workspace-root` diagnostic command -> still works and keeps lock/evidence under that workspace.
+- Compute `scheduler-once` compose command -> runs `nhms-pipeline plan-production --plan` without manual root flags using env roots.
+- Existing M22 readonly display and #252 contract tests -> remain compatible.
+
 ## Risks / Trade-offs
 
 - Forecast source 403/lag or partial variables can block a cycle. Mitigation: source availability and canonical completeness are recorded as blocked/unavailable without marking readiness true.

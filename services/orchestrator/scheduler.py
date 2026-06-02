@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
-from errno import EEXIST, EISDIR, ELOOP, ENOTDIR
+from errno import EACCES, EEXIST, EISDIR, ELOOP, ENOTDIR, EPERM
 from ipaddress import IPv4Address, ip_address
 from pathlib import Path
 from typing import Any, Protocol
@@ -160,6 +160,7 @@ TRANSIENT_RETRY_REASON_CODES = {
     "SOURCE_UNAVAILABLE",
     "ADAPTER_UNAVAILABLE",
 }
+UNKNOWN_AFTER_ATTEMPT = "unknown_after_attempt"
 
 
 class SchedulerResourceLimitError(ValueError):
@@ -247,14 +248,29 @@ class ProductionOrchestratorFactory(Protocol):
 class ProductionSchedulerConfig:
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
     object_store_root: Path | str | None = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT"))
+    published_artifact_root: Path | str | None = field(
+        default_factory=lambda: os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT")
+    )
     log_root: Path | str | None = field(
         default_factory=lambda: os.getenv("SLURM_SHARED_LOG_ROOT") or os.getenv("LOG_ROOT")
     )
     runtime_root: Path | str | None = field(
-        default_factory=lambda: os.getenv("NHMS_RUNTIME_ROOT")
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_RUNTIME_ROOT")
+        or os.getenv("NHMS_RUNTIME_ROOT")
         or os.getenv("RUN_WORKSPACE_ROOT")
         or os.getenv("SHUD_RUNTIME_ROOT")
     )
+    temp_root: Path | str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_TEMP_ROOT")
+        or os.getenv("NHMS_TEMP_ROOT")
+        or os.getenv("TMPDIR")
+    )
+    scheduler_lock_root: Path | str | None = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_LOCK_ROOT"))
+    scheduler_evidence_root: Path | str | None = field(
+        default_factory=lambda: os.getenv("NHMS_SCHEDULER_EVIDENCE_ROOT")
+    )
+    service_role: str | None = field(default_factory=lambda: os.getenv("NHMS_SERVICE_ROLE"))
+    require_runtime_roots: bool = field(default_factory=lambda: _env_flag("NHMS_SCHEDULER_REQUIRE_ROOTS"))
     database_url: str | None = field(
         default_factory=lambda: os.getenv("DATABASE_URL")
     )
@@ -262,7 +278,9 @@ class ProductionSchedulerConfig:
         default_factory=lambda: _env_flag("NHMS_PRODUCTION_SLURM_ENABLED")
         or _env_flag("SLURM_EXECUTION_ENABLED")
     )
-    allowed_storage_roots: tuple[Path | str, ...] = ()
+    allowed_storage_roots: tuple[Path | str, ...] = field(
+        default_factory=lambda: _env_path_list("NHMS_SCHEDULER_ALLOWED_ROOTS")
+    )
     slurm_job_type_templates: Mapping[str, str] | None = None
     slurm_env: Mapping[str, str] = field(default_factory=dict)
     cancel_active_slurm: bool = False
@@ -287,13 +305,80 @@ class ProductionSchedulerConfig:
     lock_ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS
     now: datetime | None = None
     source_exclusions: tuple[dict[str, Any], ...] = field(init=False, default=())
+    _workspace_root_preflight_path: Path = field(init=False, repr=False, compare=False)
+    _object_store_root_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _published_artifact_root_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _runtime_root_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _temp_root_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _lock_root_preflight_path: Path = field(init=False, repr=False, compare=False)
+    _evidence_root_preflight_path: Path = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        workspace_root = Path(self.workspace_root).expanduser().resolve()
+        _reject_blank_config_path(self.workspace_root, "workspace_root")
+        _reject_blank_config_path(self.lock_path, "lock_path")
+        _reject_blank_config_path(self.evidence_dir, "evidence_dir")
+        workspace_root_preflight_path = _config_path_preserve_final_component(self.workspace_root)
+        workspace_root = workspace_root_preflight_path.resolve()
+        object.__setattr__(self, "_workspace_root_preflight_path", workspace_root_preflight_path)
         object.__setattr__(self, "workspace_root", workspace_root)
-        object.__setattr__(self, "object_store_root", _optional_config_path(self.object_store_root))
-        object.__setattr__(self, "log_root", _optional_config_path(self.log_root))
-        object.__setattr__(self, "runtime_root", _optional_config_path(self.runtime_root))
+        object_store_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.object_store_root,
+            workspace_root,
+        )
+        object.__setattr__(
+            self,
+            "object_store_root",
+            _resolve_optional_config_path(object_store_root_preflight_path),
+        )
+        object.__setattr__(
+            self,
+            "_object_store_root_preflight_path",
+            object_store_root_preflight_path,
+        )
+        published_artifact_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.published_artifact_root,
+            workspace_root,
+        )
+        object.__setattr__(
+            self,
+            "published_artifact_root",
+            _resolve_optional_config_path(published_artifact_root_preflight_path),
+        )
+        object.__setattr__(
+            self,
+            "_published_artifact_root_preflight_path",
+            published_artifact_root_preflight_path,
+        )
+        log_root_preflight_path = _optional_config_path_relative_to_preserve_final(self.log_root, workspace_root)
+        object.__setattr__(self, "log_root", _resolve_optional_config_path(log_root_preflight_path))
+        runtime_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.runtime_root,
+            workspace_root,
+        )
+        object.__setattr__(self, "runtime_root", _resolve_optional_config_path(runtime_root_preflight_path))
+        object.__setattr__(self, "_runtime_root_preflight_path", runtime_root_preflight_path)
+        temp_root_preflight_path = _optional_config_path_relative_to_preserve_final(self.temp_root, workspace_root)
+        object.__setattr__(self, "temp_root", _resolve_optional_config_path(temp_root_preflight_path))
+        object.__setattr__(self, "_temp_root_preflight_path", temp_root_preflight_path)
+        scheduler_lock_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.scheduler_lock_root,
+            workspace_root,
+        )
+        object.__setattr__(
+            self,
+            "scheduler_lock_root",
+            _resolve_optional_config_path(scheduler_lock_root_preflight_path),
+        )
+        scheduler_evidence_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.scheduler_evidence_root,
+            workspace_root,
+        )
+        object.__setattr__(
+            self,
+            "scheduler_evidence_root",
+            _resolve_optional_config_path(scheduler_evidence_root_preflight_path),
+        )
+        object.__setattr__(self, "service_role", str(self.service_role).strip() if self.service_role else None)
         object.__setattr__(self, "database_url", str(self.database_url).strip() if self.database_url else None)
         allowed_roots = tuple(_optional_config_path(root) for root in self.allowed_storage_roots if root)
         object.__setattr__(self, "allowed_storage_roots", allowed_roots)
@@ -312,7 +397,9 @@ class ProductionSchedulerConfig:
             raise ValueError(f"production scheduler lookback_hours exceeds limit {MAX_LOOKBACK_HOURS}")
         object.__setattr__(self, "lookback_hours", lookback_hours)
         object.__setattr__(self, "cycle_lag_hours", max(int(self.cycle_lag_hours), 0))
-        max_cycles_per_source = max(int(self.max_cycles_per_source), 1)
+        max_cycles_per_source = int(self.max_cycles_per_source)
+        if max_cycles_per_source < 1:
+            raise ValueError("production scheduler max_cycles_per_source must be at least 1")
         if max_cycles_per_source > MAX_CYCLES_PER_SOURCE:
             raise ValueError(f"production scheduler max_cycles_per_source exceeds limit {MAX_CYCLES_PER_SOURCE}")
         object.__setattr__(self, "max_cycles_per_source", max_cycles_per_source)
@@ -324,28 +411,54 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
         object.__setattr__(self, "lock_ttl_seconds", max(int(self.lock_ttl_seconds), 1))
         if self.lock_path is None:
+            lock_root = (
+                Path(self.scheduler_lock_root)
+                if self.scheduler_lock_root is not None
+                else workspace_root / "scheduler"
+            )
+            lock_root_preflight_path = (
+                scheduler_lock_root_preflight_path
+                if scheduler_lock_root_preflight_path is not None
+                else workspace_root / "scheduler"
+            )
             lock_path = _confined_path(
-                workspace_root / "scheduler" / "production-scheduler.lock",
+                lock_root / "production-scheduler.lock",
                 workspace_root,
                 "lock_path",
             )
+            object.__setattr__(self, "_lock_root_preflight_path", lock_root_preflight_path)
             object.__setattr__(self, "lock_path", lock_path)
         else:
+            lock_path_preflight_path = _config_path_relative_to_preserve_final(self.lock_path, workspace_root)
             lock_path = _confined_path(self.lock_path, workspace_root, "lock_path")
             _require_under_workspace(lock_path, workspace_root, "lock_path")
+            object.__setattr__(self, "_lock_root_preflight_path", lock_path_preflight_path.parent)
             object.__setattr__(self, "lock_path", lock_path)
         if self.evidence_dir is None:
+            evidence_root = (
+                Path(self.scheduler_evidence_root)
+                if self.scheduler_evidence_root is not None
+                else workspace_root / "scheduler" / "evidence"
+            )
+            evidence_root_preflight_path = (
+                scheduler_evidence_root_preflight_path
+                if scheduler_evidence_root_preflight_path is not None
+                else workspace_root / "scheduler" / "evidence"
+            )
             evidence_dir = _confined_path(
-                workspace_root / "scheduler" / "evidence",
+                evidence_root,
                 workspace_root,
                 "evidence_dir",
             )
             _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            object.__setattr__(self, "_evidence_root_preflight_path", evidence_root_preflight_path)
             object.__setattr__(self, "evidence_dir", evidence_dir)
         else:
+            evidence_dir_preflight_path = _config_path_relative_to_preserve_final(self.evidence_dir, workspace_root)
             evidence_dir = _confined_path(self.evidence_dir, workspace_root, "evidence_dir")
             _require_under_workspace(evidence_dir, workspace_root, "evidence_dir")
             _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            object.__setattr__(self, "_evidence_root_preflight_path", evidence_dir_preflight_path)
             object.__setattr__(self, "evidence_dir", evidence_dir)
         if self.now is not None:
             object.__setattr__(self, "now", _ensure_utc(self.now))
@@ -466,6 +579,23 @@ class SchedulerSourceCycle:
     horizon: Mapping[str, Any]
 
 
+class _BlockedModelRegistry:
+    def list_models(
+        self,
+        *,
+        basin_version_id: str | None,
+        active: bool | None,
+        limit: int,
+        offset: int,
+    ) -> Mapping[str, Any]:
+        del basin_version_id, active, limit, offset
+        raise RuntimeError("blocked scheduler root preflight must not query model registry")
+
+    def get_model(self, model_id: str) -> Mapping[str, Any]:
+        del model_id
+        raise RuntimeError("blocked scheduler root preflight must not query model registry")
+
+
 class ProductionScheduler:
     def __init__(
         self,
@@ -478,22 +608,61 @@ class ProductionScheduler:
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.config = config or ProductionSchedulerConfig()
-        self.registry = registry or PsycopgModelRegistryStore.from_env()
-        self.adapters = dict(adapters or _default_adapters())
+        self.registry = registry if registry is not None else PsycopgModelRegistryStore.from_env()
+        self.adapters = dict(adapters if adapters is not None else _default_adapters())
         self.active_repository = active_repository
         self.orchestrator_factory = orchestrator_factory
         self.sleep = sleep or _sleep
 
     @classmethod
     def from_env(cls, config: ProductionSchedulerConfig | None = None) -> ProductionScheduler:
+        config = config or ProductionSchedulerConfig()
+        if config.require_runtime_roots and _scheduler_lock_evidence_root_preflight(config)["status"] == "blocked":
+            return cls(config=config, registry=_BlockedModelRegistry(), adapters={}, active_repository=None)
+        if config.require_runtime_roots and _scheduler_runtime_root_preflight(config)["status"] == "blocked":
+            return cls(config=config, registry=_BlockedModelRegistry(), adapters={}, active_repository=None)
         return cls(
-            config=config or ProductionSchedulerConfig(),
+            config=config,
             active_repository=_active_repository_from_env(),
         )
 
     def run_once(self) -> SchedulerPassResult:
         started_at = _now(self.config)
         pass_id = f"scheduler_{format_cycle_time(started_at)}_{uuid4().hex[:12]}"
+        root_preflight = _scheduler_lock_evidence_root_preflight(self.config)
+        if root_preflight["status"] == "blocked":
+            evidence = self._base_evidence(pass_id, started_at)
+            evidence.update(
+                {
+                    "status": "preflight_blocked",
+                    "finished_at": _format_utc(_now(self.config)),
+                    "lock": {
+                        "acquired": False,
+                        "contention": False,
+                        "lock_path": str(self.config.lock_path),
+                        "reason": "scheduler_root_preflight_blocked",
+                    },
+                    "root_preflight": root_preflight,
+                    "counts": _empty_counts(),
+                    "candidates": [],
+                    "blocked_candidates": [],
+                    "skipped_candidates": [],
+                    "duplicate_exclusions": list(self.config.source_exclusions),
+                    "model_discovery": _empty_model_discovery(),
+                    "source_cycles": [],
+                    "model_run_evidence": [],
+                    "slurm_cancellation_evidence": [],
+                    "no_mutation_proof": _no_mutation_proof(),
+                    "execution_boundary": "scheduler_root_preflight_blocked",
+                }
+            )
+            artifact_path = self._write_prelock_blocked_evidence(pass_id, evidence, root_preflight)
+            return SchedulerPassResult(
+                pass_id=pass_id,
+                status="preflight_blocked",
+                evidence=evidence,
+                artifact_path=artifact_path,
+            )
         lock = FileSchedulerLease(
             Path(self.config.lock_path),
             ttl_seconds=self.config.lock_ttl_seconds,
@@ -524,19 +693,57 @@ class ProductionScheduler:
             )
 
         try:
+            root_preflight = _scheduler_runtime_root_preflight(self.config)
+            if root_preflight["status"] == "blocked":
+                finished_at = _now(self.config)
+                evidence = self._base_evidence(pass_id, started_at)
+                evidence.update(
+                    {
+                        "status": "preflight_blocked",
+                        "finished_at": _format_utc(finished_at),
+                        "lock": lock_result,
+                        "root_preflight": root_preflight,
+                        "counts": _empty_counts(),
+                        "candidates": [],
+                        "blocked_candidates": [],
+                        "skipped_candidates": [],
+                        "duplicate_exclusions": list(self.config.source_exclusions),
+                        "model_discovery": _empty_model_discovery(),
+                        "source_cycles": [],
+                        "model_run_evidence": [],
+                        "slurm_cancellation_evidence": [],
+                        "no_mutation_proof": _no_mutation_proof(),
+                        "execution_boundary": "scheduler_root_preflight_blocked",
+                    }
+                )
+                artifact_path = self._write_evidence(pass_id, evidence)
+                status = _evidence_status(evidence, "preflight_blocked")
+                return SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                )
             models, model_evidence = self._discover_models()
             cycles, source_cycle_evidence = self._discover_cycles(started_at)
-            candidates, blocked_candidates, skipped_candidates, candidate_duplicate_exclusions = self._build_candidates(
-                models=models,
-                cycles=cycles,
-            )
+            (
+                candidates,
+                blocked_candidates,
+                skipped_candidates,
+                candidate_duplicate_exclusions,
+                slurm_status_sync_evidence,
+            ) = self._build_candidates(models=models, cycles=cycles)
             cancellation_evidence: list[dict[str, Any]] = []
-            if (
+            pending_cancel_candidates = [
+                candidate
+                for candidate in skipped_candidates
+                if candidate.get("reason") == "cancel_requested_active_slurm"
+            ]
+            cancel_active_slurm_requested = (
                 self.config.cancel_active_slurm
                 and not self.config.dry_run
-                and any(candidate.get("reason") == "cancel_requested_active_slurm" for candidate in skipped_candidates)
-            ):
-                cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
+                and bool(pending_cancel_candidates)
+            )
             execution_evidence: list[dict[str, Any]] = []
             submitted_count = 0
             failed_count = 0
@@ -544,40 +751,162 @@ class ProductionScheduler:
             execution_boundary = "planning_only"
             pass_status = "planned"
             no_mutation_proof = _no_mutation_proof()
+            execution_write_proof = _execution_write_proof()
             slurm_preflight_evidence: dict[str, Any] | None = None
-            if not self.config.dry_run and candidates:
-                slurm_preflight = _slurm_preflight(self.config)
-                if slurm_preflight["status"] != "not_required":
-                    slurm_preflight_evidence = redact_payload(slurm_preflight)
-                if slurm_preflight["status"] == "blocked":
+            evidence_reservation: dict[str, Any] = {"status": "not_required"}
+            pending_status_sync_candidates = [
+                candidate
+                for candidate in skipped_candidates
+                if candidate.get("reason") == "active_slurm_status_sync_deferred"
+            ]
+            slurm_status_sync_proof = _slurm_status_sync_proof(sync_required=bool(pending_status_sync_candidates))
+            slurm_cancellation_proof = _slurm_cancellation_proof()
+            mutation_candidate_count = len(candidates) + len(pending_cancel_candidates) + len(
+                pending_status_sync_candidates
+            )
+            if not self.config.dry_run and mutation_candidate_count:
+                evidence_reservation = self._reserve_pre_execution_evidence(
+                    pass_id,
+                    started_at,
+                    mutation_candidate_count,
+                )
+                if evidence_reservation["status"] == "blocked":
                     execution_evidence = [
-                        _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                        _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
                         for candidate in candidates
                     ]
-                    execution_boundary = "slurm_preflight_blocked"
-                    pass_status = "preflight_blocked"
-                elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
-                    execution_evidence = [
-                        _candidate_preflight_blocked_evidence(candidate, config=self.config) for candidate in candidates
-                    ]
-                    execution_boundary = "preflight_blocked"
-                    pass_status = "preflight_blocked"
-                    no_mutation_proof = _no_mutation_proof()
-                else:
-                    execution_evidence = self._execute_candidates(candidates)
-                    submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
-                    execution_boundary = (
-                        "slurm_gateway_orchestration"
-                        if self.config.slurm_execution_enabled
-                        else "production_orchestration"
+                    execution_write_proof = _execution_write_proof_from_evidence(
+                        execution_evidence,
+                        reservation=evidence_reservation,
                     )
-                pass_status = _scheduler_pass_status_from_execution(execution_evidence)
+                    execution_evidence.extend(
+                        _sync_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
+                        for candidate in pending_status_sync_candidates
+                    )
+                    cancellation_evidence = [
+                        _cancel_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
+                        for candidate in pending_cancel_candidates
+                    ]
+                    execution_boundary = "evidence_preflight_blocked"
+                    pass_status = "preflight_blocked"
+                    slurm_status_sync_proof = _slurm_status_sync_proof(
+                        sync_required=bool(pending_status_sync_candidates),
+                        reservation=evidence_reservation,
+                        blocked=True,
+                    )
+                    slurm_cancellation_proof = _slurm_cancellation_proof(
+                        cancellation_required=bool(pending_cancel_candidates),
+                        reservation=evidence_reservation,
+                        blocked=True,
+                    )
+                else:
+                    if pending_status_sync_candidates:
+                        (
+                            candidates,
+                            blocked_candidates,
+                            skipped_candidates,
+                            candidate_duplicate_exclusions,
+                            slurm_status_sync_evidence,
+                        ) = self._build_candidates(
+                            models=models,
+                            cycles=cycles,
+                            allow_slurm_status_sync=True,
+                        )
+                        pending_cancel_candidates = [
+                            candidate
+                            for candidate in skipped_candidates
+                            if candidate.get("reason") == "cancel_requested_active_slurm"
+                        ]
+                        cancel_active_slurm_requested = (
+                            self.config.cancel_active_slurm
+                            and not self.config.dry_run
+                            and bool(pending_cancel_candidates)
+                        )
+                    slurm_status_sync_proof = _slurm_status_sync_proof_from_candidates(
+                        slurm_status_sync_evidence,
+                        reservation=evidence_reservation,
+                    )
+                    if _slurm_status_sync_failed(slurm_status_sync_proof):
+                        pass_status = "slurm_status_sync_failed"
+                        execution_boundary = "slurm_status_sync"
+                    else:
+                        if cancel_active_slurm_requested:
+                            cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
+                            slurm_cancellation_proof = _slurm_cancellation_proof_from_evidence(
+                                cancellation_evidence,
+                                reservation=evidence_reservation,
+                            )
+                        if candidates:
+                            slurm_preflight = _slurm_preflight(self.config)
+                            if slurm_preflight["status"] != "not_required":
+                                slurm_preflight_evidence = redact_payload(slurm_preflight)
+                            if slurm_preflight["status"] == "blocked":
+                                execution_evidence = [
+                                    _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                                    for candidate in candidates
+                                ]
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=evidence_reservation,
+                                )
+                                execution_boundary = "slurm_preflight_blocked"
+                                pass_status = "preflight_blocked"
+                            elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
+                                execution_evidence = [
+                                    _candidate_preflight_blocked_evidence(candidate, config=self.config)
+                                    for candidate in candidates
+                                ]
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=evidence_reservation,
+                                )
+                                execution_boundary = "preflight_blocked"
+                                pass_status = "preflight_blocked"
+                                no_mutation_proof = _no_mutation_proof()
+                            else:
+                                execution_evidence = self._execute_candidates(candidates)
+                                execution_write_proof = _execution_write_proof_from_evidence(
+                                    execution_evidence,
+                                    reservation=evidence_reservation,
+                                )
+                                submitted_count = sum(
+                                    1 for item in execution_evidence if item.get("submitted") is True
+                                )
+                                execution_boundary = (
+                                    "slurm_gateway_orchestration"
+                                    if self.config.slurm_execution_enabled
+                                    else "production_orchestration"
+                                )
+                if execution_evidence:
+                    pass_status = _scheduler_pass_status_from_execution(execution_evidence)
+                if cancellation_evidence and not execution_evidence:
+                    pass_status = _scheduler_pass_status_from_cancellation(cancellation_evidence)
+                    execution_boundary = _scheduler_execution_boundary_from_cancellation(cancellation_evidence)
+                elif cancellation_evidence and pass_status == "planned":
+                    pass_status = _scheduler_pass_status_from_cancellation(cancellation_evidence)
+                    execution_boundary = _scheduler_execution_boundary_from_cancellation(cancellation_evidence)
+                if (
+                    pass_status == "planned"
+                    and execution_boundary == "planning_only"
+                    and _slurm_status_sync_mutated(slurm_status_sync_proof)
+                ):
+                    pass_status = "slurm_status_synced"
+                    execution_boundary = "slurm_status_sync"
+                scheduler_mutation_proof = _scheduler_mutation_proof(
+                    execution_write_proof=execution_write_proof,
+                    slurm_status_sync_proof=slurm_status_sync_proof,
+                    slurm_cancellation_proof=slurm_cancellation_proof,
+                )
                 no_mutation_proof = {
                     "adapter_download_called": False,
-                    "slurm_submit_called": submitted_count > 0,
+                    "slurm_submit_called": scheduler_mutation_proof["slurm_submit_called"],
+                    "slurm_status_sync_called": slurm_status_sync_proof.get("sync_called") is True,
+                    "slurm_cancellation_called": slurm_cancellation_proof.get("cancel_called") is True,
                     "shud_runtime_called": False,
-                    "hydro_result_table_writes": submitted_count > 0,
-                    "met_result_table_writes": submitted_count > 0,
+                    "hydro_result_table_writes": scheduler_mutation_proof["hydro_result_table_writes"],
+                    "met_result_table_writes": scheduler_mutation_proof["met_result_table_writes"],
+                    "pipeline_status_writes": scheduler_mutation_proof["pipeline_status_writes"],
+                    "pipeline_event_writes": scheduler_mutation_proof["pipeline_event_writes"],
                 }
                 failed_count = _scheduler_failed_count_from_execution(execution_evidence)
                 partial_count = _scheduler_partial_count_from_execution(execution_evidence)
@@ -611,16 +940,44 @@ class ProductionScheduler:
                         "submitted_count": submitted_count,
                         "failed_count": failed_count,
                         "partial_count": partial_count,
+                        "slurm_status_sync_count": _slurm_status_sync_count(slurm_status_sync_proof),
+                        "slurm_status_sync_unknown_count": _slurm_status_sync_unknown_count(
+                            slurm_status_sync_proof,
+                        ),
+                        "slurm_cancelled_count": _slurm_cancelled_count(cancellation_evidence),
+                        "slurm_cancellation_blocked_count": _slurm_cancellation_blocked_count(
+                            cancellation_evidence,
+                        ),
+                        "slurm_cancellation_unknown_count": _slurm_cancellation_unknown_count(
+                            slurm_cancellation_proof,
+                        ),
                     },
                     "model_run_evidence": execution_evidence,
+                    "execution_write_proof": execution_write_proof,
                     "slurm_cancellation_evidence": cancellation_evidence,
+                    "slurm_status_sync_proof": slurm_status_sync_proof,
+                    "slurm_cancellation_proof": slurm_cancellation_proof,
                     "no_mutation_proof": no_mutation_proof,
                     "execution_boundary": execution_boundary,
                 }
             )
             if slurm_preflight_evidence is not None:
                 evidence["slurm_preflight"] = slurm_preflight_evidence
-            artifact_path = self._write_evidence(pass_id, evidence)
+            if (
+                not self.config.dry_run
+                and mutation_candidate_count
+                and evidence_reservation["status"] != "not_required"
+            ):
+                evidence["evidence_pre_execution"] = evidence_reservation
+            if root_preflight["status"] != "not_required":
+                evidence["root_preflight"] = root_preflight
+            try:
+                artifact_path = self._write_evidence(pass_id, evidence)
+            except (OSError, SchedulerEvidenceWriteError) as error:
+                if evidence_reservation.get("status") != "blocked":
+                    raise
+                evidence["evidence_write_error"] = _evidence_write_error_payload(error)
+                artifact_path = None
             status = _evidence_status(evidence, pass_status)
             return SchedulerPassResult(
                 pass_id=pass_id,
@@ -644,16 +1001,12 @@ class ProductionScheduler:
                     "duplicate_exclusions": list(self.config.source_exclusions),
                     "model_discovery": _empty_model_discovery(),
                     "source_cycles": [],
-                    "no_mutation_proof": {
-                        "adapter_download_called": False,
-                        "slurm_submit_called": False,
-                        "shud_runtime_called": False,
-                        "hydro_result_table_writes": False,
-                        "met_result_table_writes": False,
-                    },
+                    "no_mutation_proof": _no_mutation_proof(),
                     "execution_boundary": "planning_only",
                 }
             )
+            if root_preflight["status"] != "not_required":
+                evidence["root_preflight"] = root_preflight
             artifact_path = self._write_evidence(pass_id, evidence)
             status = _evidence_status(evidence, "resource_limit_blocked")
             return SchedulerPassResult(
@@ -665,9 +1018,86 @@ class ProductionScheduler:
         finally:
             lock.release(pass_id=pass_id)
 
+    def _write_prelock_blocked_evidence(
+        self,
+        pass_id: str,
+        evidence: dict[str, Any],
+        root_preflight: Mapping[str, Any],
+    ) -> Path | None:
+        checks = root_preflight.get("checks")
+        evidence_check = checks.get("evidence_root") if isinstance(checks, Mapping) else None
+        if not isinstance(evidence_check, Mapping) or evidence_check.get("writable") is not True:
+            return None
+        try:
+            return self._write_evidence(pass_id, evidence)
+        except SchedulerEvidenceWriteError as error:
+            evidence["evidence_write_error"] = {"reason": error.reason, **error.details}
+            return None
+        except OSError as error:
+            evidence["evidence_write_error"] = {"reason": "evidence_write_failed", "error": str(error)}
+            return None
+
+    def _reserve_pre_execution_evidence(
+        self,
+        pass_id: str,
+        started_at: datetime,
+        candidate_count: int,
+    ) -> dict[str, Any]:
+        evidence_dir = Path(self.config.evidence_dir)
+        workspace_root = Path(self.config.workspace_root)
+        artifact_name = f"{pass_id}.pre_execution.json"
+        artifact_path = evidence_dir / artifact_name
+        payload = {
+            "schema_version": "nhms.production_scheduler.pre_execution_evidence_reservation.v1",
+            "pass_id": pass_id,
+            "started_at": _format_utc(started_at),
+            "reserved_at": _format_utc(_now(self.config)),
+            "status": "reserved",
+            "candidate_count": candidate_count,
+            "artifact_path": str(artifact_path),
+            "final_evidence_artifact": str(evidence_dir / f"{pass_id}.json"),
+            "proof": "scheduler_evidence_directory_write_before_production_mutation",
+        }
+        try:
+            _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            _require_under_workspace(artifact_path.parent.resolve(), workspace_root, "evidence_dir")
+            serialized = json.dumps(_evidence_safe(payload), indent=2, sort_keys=True)
+            evidence_dir_fd = _open_evidence_directory(evidence_dir, workspace_root)
+            try:
+                _require_evidence_artifact_available(
+                    f"{pass_id}.json",
+                    dir_fd=evidence_dir_fd,
+                    artifact_path=evidence_dir / f"{pass_id}.json",
+                )
+                _write_new_regular_file(
+                    artifact_name,
+                    serialized,
+                    dir_fd=evidence_dir_fd,
+                    artifact_path=artifact_path,
+                )
+            finally:
+                os.close(evidence_dir_fd)
+        except SchedulerEvidenceWriteError as error:
+            return _evidence_reservation_blocked_payload(
+                pass_id=pass_id,
+                artifact_path=artifact_path,
+                reason=error.reason,
+                details=error.details,
+            )
+        except OSError as error:
+            return _evidence_reservation_blocked_payload(
+                pass_id=pass_id,
+                artifact_path=artifact_path,
+                reason="evidence_write_failed",
+                details={"error": str(error)},
+            )
+        return payload
+
     def run_continuous(self, *, max_passes: int | None = None) -> list[SchedulerPassResult]:
         if max_passes is not None:
             max_passes = int(max_passes)
+            if max_passes < 1:
+                raise ValueError("production scheduler max_passes must be at least 1")
             if max_passes > MAX_CONTINUOUS_JSON_PASSES:
                 raise ValueError(
                     "production scheduler max_passes exceeds finite JSON output limit "
@@ -817,26 +1247,45 @@ class ProductionScheduler:
             result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
         except Exception as error:
             safe_error_message = _evidence_safe(getattr(error, "message", str(error)))
+            error_code = str(getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"))
             for candidate in submitted_candidates:
                 output_uri = candidate_output_uris.get(candidate.candidate_id)
                 evidence.append(
                     {
                         **_candidate_identity_evidence(candidate, output_uri=output_uri),
-                        "status": "blocked",
+                        "status": "submission_failed",
                         "submitted": False,
-                        "mutation_occurred": False,
+                        "slurm_submit_called": UNKNOWN_AFTER_ATTEMPT,
+                        "execution_attempted": True,
+                        "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
+                        "mutation_occurred": UNKNOWN_AFTER_ATTEMPT,
                         "cycle_id": cycle_id,
-                        "error_code": getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"),
+                        "error_code": error_code,
                         "error_message": safe_error_message,
                         **_candidate_model_run_review_evidence(
                             candidate,
                             output_uri=output_uri,
                             outcome=None,
-                            status="blocked",
+                            status="submission_failed",
                             stage_statuses=[],
                         ),
                         "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
                         "qhh_script_invoked": False,
+                        "pipeline_status_write": UNKNOWN_AFTER_ATTEMPT,
+                        "pipeline_event_write": UNKNOWN_AFTER_ATTEMPT,
+                        "pipeline_status_writes_proven_absent": False,
+                        "pipeline_event_writes_proven_absent": False,
+                        "residual_blockers": [
+                            {
+                                "code": error_code,
+                                "state": "blocked",
+                                "quality_flag": "production_orchestration_failed",
+                                "residual_risk": (
+                                    "Production orchestration raised after the downstream orchestration method "
+                                    "was called; production write outcome is unknown."
+                                ),
+                            }
+                        ],
                     }
                 )
             return evidence
@@ -874,6 +1323,8 @@ class ProductionScheduler:
                         "cycle_time_utc": cycle_time_text,
                         "status": "blocked",
                         "error_code": "SLURM_CANCEL_UNSUPPORTED",
+                        "cancel_attempted": False,
+                        "mutation_occurred": False,
                         "replacement_submitted": False,
                     }
                 )
@@ -892,8 +1343,21 @@ class ProductionScheduler:
                         "status": "failed",
                         "error_code": getattr(error, "error_code", "SLURM_CANCEL_FAILED"),
                         "error_message": _evidence_safe(getattr(error, "message", str(error))),
+                        "cancel_attempted": True,
+                        "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
                         "replacement_submitted": False,
                         "active_slurm_jobs": _evidence_safe(skipped.get("active_slurm_jobs", [])),
+                        "residual_blockers": [
+                            {
+                                "code": getattr(error, "error_code", "SLURM_CANCEL_FAILED"),
+                                "state": "blocked",
+                                "quality_flag": "slurm_cancellation_failed",
+                                "residual_risk": (
+                                    "Slurm cancellation raised after the downstream cancellation method was called; "
+                                    "mutation outcome is unknown."
+                                ),
+                            }
+                        ],
                     }
                 )
                 continue
@@ -904,9 +1368,17 @@ class ProductionScheduler:
                 "cycle_time_utc": cycle_time_text,
                 "status": cancellation_status,
                 "cancelled_jobs": _evidence_safe(cancelled),
+                "cancel_attempted": True,
+                "mutation_occurred": cancellation_status in {"cancelled", "partially_cancelled"},
                 "replacement_submitted": False,
                 "active_slurm_jobs": _evidence_safe(skipped.get("active_slurm_jobs", [])),
             }
+            pipeline_status_write = any(_cancelled_job_pipeline_status_write(item) for item in cancelled)
+            pipeline_event_write = any(_cancelled_job_pipeline_event_write(item) for item in cancelled)
+            if pipeline_status_write:
+                cancellation_item["pipeline_status_write"] = True
+            if pipeline_event_write:
+                cancellation_item["pipeline_event_write"] = True
             if cancellation_status != "cancelled":
                 cancellation_item["error_code"] = "SLURM_CANCELLATION_GAP"
                 cancellation_item["cancellation_proven"] = False
@@ -1010,6 +1482,8 @@ class ProductionScheduler:
                 "can_claim_final_production_readiness": False,
                 "reason": "scheduler evidence requires accepted live proof receipts for final readiness",
             },
+            "resolved_runtime_roots": _scheduler_resolved_runtime_roots(self.config),
+            "runtime_config": _scheduler_runtime_config_evidence(self.config),
         }
 
     def _discover_models(self) -> tuple[list[RegisteredSchedulerModel], dict[str, Any]]:
@@ -1153,11 +1627,19 @@ class ProductionScheduler:
         *,
         models: Sequence[RegisteredSchedulerModel],
         cycles: Sequence[SchedulerSourceCycle],
-    ) -> tuple[list[SchedulerCandidate], list[SchedulerCandidate], list[dict[str, Any]], list[dict[str, Any]]]:
+        allow_slurm_status_sync: bool = False,
+    ) -> tuple[
+        list[SchedulerCandidate],
+        list[SchedulerCandidate],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
         candidates: list[SchedulerCandidate] = []
         blocked: list[SchedulerCandidate] = []
         skipped: list[dict[str, Any]] = []
         duplicate_exclusions: list[dict[str, Any]] = []
+        slurm_status_sync_evidence: list[dict[str, Any]] = []
         seen_candidate_ids: set[str] = set()
         active_orchestration_provider = (
             getattr(self.active_repository, "has_active_orchestration", None)
@@ -1279,23 +1761,47 @@ class ProductionScheduler:
                 slurm_state_sync: dict[str, Any] | None = None
                 if active_slurm_jobs and not self.config.cancel_active_slurm and not self.config.dry_run:
                     cycle_id = cycle_id_for(discovery.source_id, discovery.cycle_time)
-                    sync = getattr(self._orchestrator_for(discovery.source_id), "sync_cycle_statuses", None)
-                    if callable(sync):
-                        synced_updates = _bounded_active_slurm_jobs(
-                            [dict(item) for item in sync(cycle_id)],
-                            max_jobs=self.config.candidate_state_job_limit,
-                        )
+                    sync = None
+                    if allow_slurm_status_sync:
+                        sync = getattr(self._orchestrator_for(discovery.source_id), "sync_cycle_statuses", None)
+                    if allow_slurm_status_sync and callable(sync):
+                        try:
+                            synced_updates = _bounded_active_slurm_jobs(
+                                [dict(item) for item in sync(cycle_id)],
+                                max_jobs=self.config.candidate_state_job_limit,
+                            )
+                        except Exception as error:
+                            slurm_state_sync = _slurm_status_sync_failed_evidence(
+                                candidate,
+                                cycle_id=cycle_id,
+                                active_slurm_jobs=active_slurm_jobs,
+                                error=error,
+                            )
+                            slurm_status_sync_evidence.append(slurm_state_sync)
+                            skipped.append(
+                                {
+                                    **candidate.to_dict(),
+                                    "reason": "active_slurm_status_sync_failed",
+                                    "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                                    "sync_required": True,
+                                    "sync_attempted": True,
+                                    "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
+                                    "state_evidence": {"slurm_state_sync": slurm_state_sync},
+                                }
+                            )
+                            continue
+                        slurm_state_sync = {
+                            "cycle_id": cycle_id,
+                            "status": "synced",
+                            "updates": synced_updates,
+                            "terminal_updates": [
+                                item
+                                for item in synced_updates
+                                if str(item.get("status") or "") in TERMINAL_PIPELINE_STATUSES
+                            ],
+                        }
+                        slurm_status_sync_evidence.append(slurm_state_sync)
                         if synced_updates:
-                            slurm_state_sync = {
-                                "cycle_id": cycle_id,
-                                "status": "synced",
-                                "updates": synced_updates,
-                                "terminal_updates": [
-                                    item
-                                    for item in synced_updates
-                                    if str(item.get("status") or "") in TERMINAL_PIPELINE_STATUSES
-                                ],
-                            }
                             state_decision = (
                                 _candidate_state_decision(
                                     candidate,
@@ -1315,6 +1821,15 @@ class ProductionScheduler:
                                 if callable(state_provider)
                                 else state_decision
                             )
+                            if state_decision is not None:
+                                state_decision = CandidateStateDecision(
+                                    action=state_decision.action,
+                                    reason=state_decision.reason,
+                                    evidence={
+                                        **dict(state_decision.evidence),
+                                        "slurm_state_sync": slurm_state_sync,
+                                    },
+                                )
                             if state_decision is not None and _candidate_state_has_identity_mismatch(
                                 state_decision.evidence,
                             ):
@@ -1342,10 +1857,26 @@ class ProductionScheduler:
                                 if callable(active_slurm_jobs_provider)
                                 else []
                             )
-                            if state_decision is not None and isinstance(state_decision.evidence, dict):
-                                state_decision.evidence["slurm_state_sync"] = slurm_state_sync
                             if state_decision is not None and state_decision.action == "retry":
                                 candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
+                            elif state_decision is None:
+                                candidate = _candidate_with_state_evidence(
+                                    candidate,
+                                    {"slurm_state_sync": slurm_state_sync},
+                                )
+                    elif not allow_slurm_status_sync:
+                        skipped.append(
+                            {
+                                **candidate.to_dict(),
+                                "reason": "active_slurm_status_sync_deferred",
+                                "cycle_id": cycle_id,
+                                "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                                "sync_required": True,
+                                "sync_attempted": False,
+                                "mutation_occurred": False,
+                            }
+                        )
+                        continue
                 if state_decision is not None and state_decision.action == "blocked":
                     blocked.append(
                         _blocked_candidate(
@@ -1379,23 +1910,25 @@ class ProductionScheduler:
                     skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                     continue
                 if active_slurm_jobs:
+                    active_slurm_skip: dict[str, Any]
                     if self.config.cancel_active_slurm:
-                        skipped.append(
-                            {
-                                **candidate.to_dict(),
-                                "reason": "cancel_requested_active_slurm",
-                                "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
-                                "replacement_submitted": False,
-                            }
-                        )
+                        active_slurm_skip = {
+                            **candidate.to_dict(),
+                            "reason": "cancel_requested_active_slurm",
+                            "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                            "replacement_submitted": False,
+                        }
                     else:
-                        skipped.append(
-                            {
-                                **candidate.to_dict(),
-                                "reason": "active_slurm_job",
-                                "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
-                            }
-                        )
+                        active_slurm_skip = {
+                            **candidate.to_dict(),
+                            "reason": "active_slurm_job",
+                            "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                        }
+                    if slurm_state_sync is not None:
+                        skip_evidence = dict(active_slurm_skip.get("state_evidence") or {})
+                        skip_evidence["slurm_state_sync"] = slurm_state_sync
+                        active_slurm_skip["state_evidence"] = _evidence_safe(skip_evidence)
+                    skipped.append(active_slurm_skip)
                     continue
                 if state_decision is not None and state_decision.action == "skip":
                     skip_evidence = dict(state_decision.evidence)
@@ -1424,7 +1957,7 @@ class ProductionScheduler:
                     skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                     continue
                 candidates.append(candidate)
-        return candidates, blocked, skipped, duplicate_exclusions
+        return candidates, blocked, skipped, duplicate_exclusions, slurm_status_sync_evidence
 
     def _write_evidence(self, pass_id: str, evidence: Mapping[str, Any]) -> Path | None:
         evidence_dir = Path(self.config.evidence_dir)
@@ -3889,6 +4422,126 @@ def _candidate_execution_attempted(outcome: Mapping[str, Any] | None, submitted:
     )
 
 
+def _pipeline_result_slurm_submit_called(result: PipelineResult) -> bool:
+    for stage in result.stages:
+        if _nonempty_evidence_value(getattr(stage, "slurm_job_id", None)):
+            return True
+        task_results = getattr(stage, "task_results", ()) or ()
+        for task in task_results:
+            if isinstance(task, Mapping) and _nonempty_evidence_value(task.get("slurm_job_id")):
+                return True
+    return any(
+        _nonempty_evidence_value(outcome.get("slurm_job_id"))
+        for outcome in getattr(result, "candidate_outcomes", ()) or ()
+        if isinstance(outcome, Mapping)
+    )
+
+
+def _pipeline_result_pipeline_status_write(result: PipelineResult) -> bool | str:
+    return _pipeline_result_pipeline_write_value(
+        result,
+        write_field="pipeline_status_write",
+        absent_field="pipeline_status_writes_proven_absent",
+    )
+
+
+def _pipeline_result_pipeline_event_write(result: PipelineResult) -> bool | str:
+    return _pipeline_result_pipeline_write_value(
+        result,
+        write_field="pipeline_event_write",
+        absent_field="pipeline_event_writes_proven_absent",
+    )
+
+
+def _pipeline_result_pipeline_write_value(
+    result: PipelineResult,
+    *,
+    write_field: str,
+    absent_field: str,
+) -> bool | str:
+    outcome_values = [
+        _candidate_pipeline_write_value(outcome, write_field, fallback=None)
+        for outcome in getattr(result, "candidate_outcomes", ()) or ()
+        if isinstance(outcome, Mapping)
+    ]
+    if any(value is True for value in outcome_values):
+        return True
+    if any(value == UNKNOWN_AFTER_ATTEMPT for value in outcome_values):
+        return UNKNOWN_AFTER_ATTEMPT
+    if _pipeline_result_has_pipeline_job_evidence(result):
+        return True
+    if outcome_values and all(value is False for value in outcome_values):
+        return False
+    if _pipeline_result_write_absence_proven(result, absent_field):
+        return False
+    return UNKNOWN_AFTER_ATTEMPT
+
+
+def _pipeline_result_has_pipeline_job_evidence(result: PipelineResult) -> bool:
+    for stage in result.stages:
+        if _nonempty_evidence_value(getattr(stage, "pipeline_job_id", None)):
+            return True
+        task_results = getattr(stage, "task_results", ()) or ()
+        for task in task_results:
+            if isinstance(task, Mapping) and _nonempty_evidence_value(task.get("pipeline_job_id")):
+                return True
+    return any(
+        _nonempty_evidence_value(outcome.get("pipeline_job_id"))
+        for outcome in getattr(result, "candidate_outcomes", ()) or ()
+        if isinstance(outcome, Mapping)
+    )
+
+
+def _pipeline_result_write_absence_proven(result: PipelineResult, absent_field: str) -> bool:
+    outcomes = [
+        outcome
+        for outcome in getattr(result, "candidate_outcomes", ()) or ()
+        if isinstance(outcome, Mapping)
+    ]
+    if outcomes and all(outcome.get(absent_field) is True for outcome in outcomes):
+        return True
+    return False
+
+
+def _candidate_slurm_submit_called(outcome: Mapping[str, Any] | None, fallback: bool) -> bool:
+    if outcome and _nonempty_evidence_value(outcome.get("slurm_job_id")):
+        return True
+    return fallback
+
+
+def _candidate_pipeline_write_value(
+    outcome: Mapping[str, Any] | None,
+    write_field: str,
+    *,
+    fallback: bool | str | None,
+) -> bool | str | None:
+    if outcome:
+        value = outcome.get(write_field)
+        if value == UNKNOWN_AFTER_ATTEMPT:
+            return UNKNOWN_AFTER_ATTEMPT
+        coerced = _nested_bool(outcome, write_field)
+        if coerced is True:
+            return True
+        absent_field = f"{write_field}s_proven_absent"
+        if outcome.get(absent_field) is True:
+            return False
+    return fallback
+
+
+def _execution_mutation_value(*values: bool | str | None) -> bool | str:
+    if any(value == UNKNOWN_AFTER_ATTEMPT for value in values):
+        return UNKNOWN_AFTER_ATTEMPT
+    return any(value is True for value in values)
+
+
+def _nonempty_evidence_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
 def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: str | None = None) -> dict[str, Any]:
     contract_identity = _candidate_production_identity(candidate)
     evidence = {
@@ -4003,6 +4656,105 @@ def _candidate_slurm_preflight_blocked_evidence(
             for blocker in blockers
         ],
     }
+
+
+def _candidate_evidence_write_blocked_evidence(
+    candidate: SchedulerCandidate,
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    blocker = {
+        "code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "state": "blocked",
+        "quality_flag": "evidence_preflight_blocked",
+        "residual_risk": "Scheduler evidence write proof failed before production mutation.",
+    }
+    reason = reservation.get("reason")
+    if reason not in (None, ""):
+        blocker["reason"] = str(reason)
+    return {
+        **_candidate_model_run_review_evidence(
+            candidate,
+            output_uri=None,
+            outcome=None,
+            status="preflight_blocked",
+            stage_statuses=[],
+        ),
+        **_candidate_identity_evidence(candidate),
+        "status": "preflight_blocked",
+        "submitted": False,
+        "mutation_occurred": False,
+        "execution_mode": "evidence_preflight",
+        "evidence_pre_execution": _evidence_safe(dict(reservation)),
+        "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "error_message": "Scheduler evidence write proof failed before production mutation.",
+        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+        "qhh_script_invoked": False,
+        "residual_blockers": [blocker],
+    }
+
+
+def _cancel_candidate_evidence_write_blocked_evidence(
+    candidate: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    reason = reservation.get("reason")
+    blocker = {
+        "code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "state": "blocked",
+        "quality_flag": "evidence_preflight_blocked",
+        "residual_risk": "Scheduler evidence write proof failed before Slurm cancellation mutation.",
+    }
+    if reason not in (None, ""):
+        blocker["reason"] = str(reason)
+    source_id = str(candidate.get("source_id") or "")
+    cycle_time_text = str(candidate.get("cycle_time_utc") or "")
+    item: dict[str, Any] = {
+        "source_id": source_id,
+        "cycle_time_utc": cycle_time_text,
+        "status": "preflight_blocked",
+        "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "error_message": "Scheduler evidence write proof failed before Slurm cancellation mutation.",
+        "replacement_submitted": False,
+        "mutation_occurred": False,
+        "cancel_attempted": False,
+        "evidence_pre_execution": _evidence_safe(dict(reservation)),
+        "active_slurm_jobs": _evidence_safe(candidate.get("active_slurm_jobs", [])),
+        "residual_blockers": [blocker],
+    }
+    if source_id and cycle_time_text:
+        cycle_time = _ensure_utc(datetime.fromisoformat(cycle_time_text.replace("Z", "+00:00")))
+        item["cycle_id"] = cycle_id_for(source_id, cycle_time)
+    return item
+
+
+def _sync_candidate_evidence_write_blocked_evidence(
+    candidate: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    reason = reservation.get("reason")
+    blocker = {
+        "code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "state": "blocked",
+        "quality_flag": "evidence_preflight_blocked",
+        "residual_risk": "Scheduler evidence write proof failed before Slurm status sync mutation.",
+    }
+    if reason not in (None, ""):
+        blocker["reason"] = str(reason)
+    item = {
+        **dict(candidate),
+        "status": "preflight_blocked",
+        "submitted": False,
+        "mutation_occurred": False,
+        "execution_mode": "evidence_preflight",
+        "evidence_pre_execution": _evidence_safe(dict(reservation)),
+        "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "error_message": "Scheduler evidence write proof failed before Slurm status sync mutation.",
+        "sync_attempted": False,
+        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+        "qhh_script_invoked": False,
+        "residual_blockers": [blocker],
+    }
+    return _evidence_safe(item)
 
 
 def _candidate_secret_manifest_blocked_evidence(
@@ -4125,7 +4877,9 @@ def _candidate_execution_evidence(
         _stage_run_evidence(stage)
         for stage in result.stages
     ]
-    submitted = any(stage.slurm_job_id for stage in result.stages)
+    slurm_submit_called = _pipeline_result_slurm_submit_called(result)
+    pipeline_status_write = _pipeline_result_pipeline_status_write(result)
+    pipeline_event_write = _pipeline_result_pipeline_event_write(result)
     outcomes_by_candidate = {
         str(outcome.get("candidate_id")): dict(outcome)
         for outcome in getattr(result, "candidate_outcomes", ()) or ()
@@ -4137,7 +4891,9 @@ def _candidate_execution_evidence(
             candidate,
             output_uri=(output_uris or {}).get(candidate.candidate_id),
             outcome=outcomes_by_candidate.get(candidate.candidate_id),
-            submitted=submitted,
+            slurm_submit_called=slurm_submit_called,
+            pipeline_status_write=pipeline_status_write,
+            pipeline_event_write=pipeline_event_write,
             stage_names=stage_names,
             stage_statuses=stage_statuses,
         )
@@ -4151,23 +4907,39 @@ def _candidate_execution_evidence_item(
     *,
     output_uri: str | None,
     outcome: Mapping[str, Any] | None,
-    submitted: bool,
+    slurm_submit_called: bool,
+    pipeline_status_write: bool | str,
+    pipeline_event_write: bool | str,
     stage_names: Sequence[str],
     stage_statuses: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     if outcome is None:
         status = result.status
-        candidate_submitted = submitted
-        mutation_occurred = submitted
+        candidate_submitted = slurm_submit_called
         candidate_outcome: dict[str, Any] | None = None
-        execution_attempted = submitted
+        execution_attempted = True
     else:
         outcome_status = str(outcome.get("status") or "")
         status = _candidate_status_from_outcome(result.status, outcome_status)
-        execution_attempted = _candidate_execution_attempted(outcome, submitted)
-        candidate_submitted = submitted and (outcome_status == "active" or execution_attempted)
-        mutation_occurred = candidate_submitted
+        execution_attempted = True
+        candidate_slurm_submit_called = _candidate_slurm_submit_called(outcome, slurm_submit_called)
+        candidate_submitted = candidate_slurm_submit_called and (outcome_status == "active" or execution_attempted)
         candidate_outcome = dict(outcome)
+    candidate_pipeline_status_write = _candidate_pipeline_write_value(
+        outcome,
+        "pipeline_status_write",
+        fallback=pipeline_status_write,
+    )
+    candidate_pipeline_event_write = _candidate_pipeline_write_value(
+        outcome,
+        "pipeline_event_write",
+        fallback=pipeline_event_write,
+    )
+    mutation_occurred = _execution_mutation_value(
+        candidate_submitted,
+        candidate_pipeline_status_write,
+        candidate_pipeline_event_write,
+    )
     review_evidence = _candidate_model_run_review_evidence(
         candidate,
         output_uri=output_uri,
@@ -4179,6 +4951,7 @@ def _candidate_execution_evidence_item(
         **review_evidence,
         "status": status,
         "submitted": candidate_submitted,
+        "slurm_submit_called": candidate_submitted,
         "execution_attempted": execution_attempted,
         "final_candidate_success": (
             status == result.status and not _is_non_submitted_terminal_or_unavailable_status(status)
@@ -4188,6 +4961,24 @@ def _candidate_execution_evidence_item(
         "standard_chain_shape": stage_names,
         "qhh_script_invoked": False,
     }
+    if candidate_pipeline_status_write is True:
+        item["pipeline_status_write"] = True
+        item["pipeline_status_writes_proven_absent"] = False
+    elif candidate_pipeline_status_write == UNKNOWN_AFTER_ATTEMPT:
+        item["pipeline_status_write"] = UNKNOWN_AFTER_ATTEMPT
+        item["pipeline_status_writes_proven_absent"] = False
+    else:
+        item["pipeline_status_writes_proven_absent"] = True
+    if candidate_pipeline_event_write is True:
+        item["pipeline_event_write"] = True
+        item["pipeline_event_writes_proven_absent"] = False
+    elif candidate_pipeline_event_write == UNKNOWN_AFTER_ATTEMPT:
+        item["pipeline_event_write"] = UNKNOWN_AFTER_ATTEMPT
+        item["pipeline_event_writes_proven_absent"] = False
+    else:
+        item["pipeline_event_writes_proven_absent"] = True
+    if mutation_occurred == UNKNOWN_AFTER_ATTEMPT:
+        item["mutation_outcome"] = UNKNOWN_AFTER_ATTEMPT
     if candidate_outcome is not None:
         candidate_outcome = _evidence_safe(candidate_outcome)
         item["candidate_outcome"] = candidate_outcome
@@ -5254,6 +6045,521 @@ def _scheduler_cancellation_status(cancelled_jobs: Sequence[Mapping[str, Any]]) 
     return "blocked"
 
 
+def _cancelled_job_pipeline_status_write(job: Mapping[str, Any]) -> bool:
+    status = str(job.get("status") or "").lower()
+    return status == "cancelled" and job.get("cancellation_proven") is not False and not job.get("error_code")
+
+
+def _cancelled_job_pipeline_event_write(job: Mapping[str, Any]) -> bool:
+    if _cancelled_job_pipeline_status_write(job):
+        return True
+    return (
+        job.get("cancellation_proven") is False
+        and str(job.get("error_code") or "") == "JOB_ALREADY_TERMINAL"
+    )
+
+
+def _scheduler_pass_status_from_cancellation(cancellation_evidence: Sequence[Mapping[str, Any]]) -> str:
+    if not cancellation_evidence:
+        return "planned"
+    statuses = {str(item.get("status") or "") for item in cancellation_evidence}
+    if statuses == {"cancelled"}:
+        return "slurm_cancelled"
+    if "cancelled" in statuses or "partially_cancelled" in statuses:
+        return "slurm_partially_cancelled"
+    if statuses == {"preflight_blocked"}:
+        return "preflight_blocked"
+    return "slurm_cancellation_blocked"
+
+
+def _slurm_status_sync_failed_evidence(
+    candidate: SchedulerCandidate,
+    *,
+    cycle_id: str,
+    active_slurm_jobs: Sequence[Mapping[str, Any]],
+    error: Exception,
+) -> dict[str, Any]:
+    error_code = str(getattr(error, "error_code", "SLURM_STATUS_SYNC_FAILED") or "SLURM_STATUS_SYNC_FAILED")
+    return {
+        "cycle_id": cycle_id,
+        "source_id": candidate.source_id,
+        "cycle_time_utc": _format_utc(candidate.cycle_time_utc),
+        "candidate_id": candidate.candidate_id,
+        "model_id": candidate.model_id,
+        "scenario_id": candidate.scenario_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "status": "failed",
+        "sync_required": True,
+        "sync_called": True,
+        "sync_attempted": True,
+        "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
+        "error_code": error_code,
+        "error_message": _evidence_safe(getattr(error, "message", str(error))),
+        "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+        "residual_blockers": [
+            {
+                "code": error_code,
+                "state": "blocked",
+                "quality_flag": "slurm_status_sync_failed",
+                "residual_risk": (
+                    "Slurm status sync raised after the downstream sync method was called; "
+                    "pipeline status/event mutation outcome is unknown."
+                ),
+            }
+        ],
+    }
+
+
+def _scheduler_execution_boundary_from_cancellation(cancellation_evidence: Sequence[Mapping[str, Any]]) -> str:
+    if not cancellation_evidence:
+        return "planning_only"
+    if all(str(item.get("status") or "") == "preflight_blocked" for item in cancellation_evidence):
+        return "evidence_preflight_blocked"
+    return "slurm_cancellation"
+
+
+def _slurm_status_sync_proof(
+    *,
+    sync_required: bool = False,
+    reservation: Mapping[str, Any] | None = None,
+    blocked: bool = False,
+) -> dict[str, Any]:
+    proof: dict[str, Any] = {
+        "sync_required": sync_required,
+        "sync_called": False,
+        "mutation_occurred": False,
+        "protected_by_pre_execution_evidence": False,
+    }
+    if blocked:
+        proof["status"] = "preflight_blocked"
+    elif sync_required:
+        proof["status"] = "pending_reservation"
+    else:
+        proof["status"] = "not_required"
+    if reservation is not None:
+        proof["evidence_pre_execution_status"] = reservation.get("status")
+        proof["protected_by_pre_execution_evidence"] = reservation.get("status") == "reserved"
+        if reservation.get("status") == "blocked":
+            proof["block_reason"] = reservation.get("reason")
+    return proof
+
+
+def _slurm_status_sync_proof_from_candidates(
+    slurm_status_sync_evidence: Sequence[Mapping[str, Any]],
+    *,
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    sync_payloads = list(slurm_status_sync_evidence)
+    failed_payloads = [item for item in sync_payloads if str(item.get("status") or "") == "failed"]
+    update_count = sum(len(item.get("updates") or []) for item in sync_payloads)
+    terminal_update_count = sum(len(item.get("terminal_updates") or []) for item in sync_payloads)
+    unknown_after_attempt = any(item.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT for item in failed_payloads)
+    status = "failed" if failed_payloads else ("synced" if sync_payloads else "not_required")
+    proof: dict[str, Any] = {
+        "status": status,
+        "sync_required": bool(sync_payloads),
+        "sync_called": bool(sync_payloads),
+        "mutation_occurred": update_count > 0,
+        "protected_by_pre_execution_evidence": reservation.get("status") == "reserved",
+        "evidence_pre_execution_status": reservation.get("status"),
+        "synced_cycle_count": len({str(item.get("cycle_id") or "") for item in sync_payloads if item.get("cycle_id")}),
+        "updated_job_count": update_count,
+        "terminal_update_count": terminal_update_count,
+    }
+    if failed_payloads:
+        proof.update(
+            {
+                "failed_sync_count": len(failed_payloads),
+                "error_code": failed_payloads[0].get("error_code"),
+                "error_message": failed_payloads[0].get("error_message"),
+            }
+        )
+    if unknown_after_attempt:
+        proof["mutation_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["mutation_occurred"] = UNKNOWN_AFTER_ATTEMPT
+        proof["pipeline_status_writes_proven_absent"] = False
+        proof["pipeline_event_writes_proven_absent"] = False
+    return proof
+
+
+def _execution_write_proof(
+    *,
+    reservation: Mapping[str, Any] | None = None,
+    execution_required: bool = False,
+    blocked: bool = False,
+) -> dict[str, Any]:
+    proof: dict[str, Any] = {
+        "execution_required": execution_required,
+        "orchestration_called": False,
+        "mutation_occurred": False,
+        "protected_by_pre_execution_evidence": False,
+    }
+    if blocked:
+        proof["status"] = "preflight_blocked"
+    elif execution_required:
+        proof["status"] = "pending_reservation"
+    else:
+        proof["status"] = "not_required"
+    if reservation is not None:
+        proof["evidence_pre_execution_status"] = reservation.get("status")
+        proof["protected_by_pre_execution_evidence"] = reservation.get("status") == "reserved"
+        if reservation.get("status") == "blocked":
+            proof["block_reason"] = reservation.get("reason")
+    return proof
+
+
+def _execution_write_proof_from_evidence(
+    execution_evidence: Sequence[Mapping[str, Any]],
+    *,
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    execution_payloads = list(execution_evidence)
+    orchestration_called = any(item.get("execution_attempted") is True for item in execution_payloads)
+    submitted_count = sum(1 for item in execution_payloads if item.get("submitted") is True)
+    slurm_submit_count = sum(1 for item in execution_payloads if item.get("slurm_submit_called") is True)
+    unknown_slurm_submit_count = sum(
+        1 for item in execution_payloads if item.get("slurm_submit_called") == UNKNOWN_AFTER_ATTEMPT
+    )
+    pipeline_status_write_count = sum(
+        1 for item in execution_payloads if item.get("pipeline_status_write") is True
+    )
+    pipeline_event_write_count = sum(1 for item in execution_payloads if item.get("pipeline_event_write") is True)
+    unknown_pipeline_status_write_count = sum(
+        1 for item in execution_payloads if item.get("pipeline_status_write") == UNKNOWN_AFTER_ATTEMPT
+    )
+    unknown_pipeline_event_write_count = sum(
+        1 for item in execution_payloads if item.get("pipeline_event_write") == UNKNOWN_AFTER_ATTEMPT
+    )
+    unknown_after_attempt_count = sum(
+        1 for item in execution_payloads if item.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT
+    )
+    preflight_blocked = bool(execution_payloads) and all(
+        str(item.get("status") or "") == "preflight_blocked" for item in execution_payloads
+    )
+    if unknown_after_attempt_count:
+        status = UNKNOWN_AFTER_ATTEMPT
+    elif submitted_count:
+        status = "submitted"
+    elif preflight_blocked:
+        status = "preflight_blocked"
+    elif execution_payloads:
+        status = "completed_no_submit"
+    else:
+        status = "not_required"
+    slurm_submit_value: bool | str
+    if unknown_slurm_submit_count:
+        slurm_submit_value = UNKNOWN_AFTER_ATTEMPT
+    else:
+        slurm_submit_value = slurm_submit_count > 0
+    hydro_result_table_write: bool | str = slurm_submit_value
+    met_result_table_write: bool | str = slurm_submit_value
+    pipeline_status_write: bool | str
+    if unknown_pipeline_status_write_count:
+        pipeline_status_write = UNKNOWN_AFTER_ATTEMPT
+    else:
+        pipeline_status_write = pipeline_status_write_count > 0
+    pipeline_event_write: bool | str
+    if unknown_pipeline_event_write_count:
+        pipeline_event_write = UNKNOWN_AFTER_ATTEMPT
+    else:
+        pipeline_event_write = pipeline_event_write_count > 0
+    proof: dict[str, Any] = {
+        "status": status,
+        "execution_required": bool(execution_payloads),
+        "orchestration_called": orchestration_called,
+        "mutation_occurred": _execution_mutation_value(
+            slurm_submit_value,
+            pipeline_status_write,
+            pipeline_event_write,
+        ),
+        "protected_by_pre_execution_evidence": reservation.get("status") == "reserved",
+        "evidence_pre_execution_status": reservation.get("status"),
+        "submitted_count": submitted_count,
+        "slurm_submit_called": slurm_submit_value,
+        "slurm_submit_count": slurm_submit_count,
+        "hydro_result_table_writes": hydro_result_table_write,
+        "met_result_table_writes": met_result_table_write,
+        "pipeline_status_writes": pipeline_status_write,
+        "pipeline_event_writes": pipeline_event_write,
+        "pipeline_status_write_count": pipeline_status_write_count,
+        "pipeline_event_write_count": pipeline_event_write_count,
+    }
+    if unknown_slurm_submit_count:
+        proof["slurm_submit_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_slurm_submit_count"] = unknown_slurm_submit_count
+        proof["slurm_submit_proven_absent"] = False
+    else:
+        proof["slurm_submit_proven_absent"] = slurm_submit_count == 0
+    proof["hydro_result_table_writes_proven_absent"] = hydro_result_table_write is False
+    proof["met_result_table_writes_proven_absent"] = met_result_table_write is False
+    if unknown_pipeline_status_write_count:
+        proof["pipeline_status_write_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_pipeline_status_write_count"] = unknown_pipeline_status_write_count
+        proof["pipeline_status_writes_proven_absent"] = False
+    else:
+        proof["pipeline_status_writes_proven_absent"] = pipeline_status_write_count == 0
+    if unknown_pipeline_event_write_count:
+        proof["pipeline_event_write_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_pipeline_event_write_count"] = unknown_pipeline_event_write_count
+        proof["pipeline_event_writes_proven_absent"] = False
+    else:
+        proof["pipeline_event_writes_proven_absent"] = pipeline_event_write_count == 0
+    if unknown_after_attempt_count:
+        proof["mutation_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["mutation_occurred"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_execution_count"] = unknown_after_attempt_count
+        if hydro_result_table_write == UNKNOWN_AFTER_ATTEMPT:
+            proof["hydro_result_table_writes_proven_absent"] = False
+        if met_result_table_write == UNKNOWN_AFTER_ATTEMPT:
+            proof["met_result_table_writes_proven_absent"] = False
+        if unknown_pipeline_status_write_count or pipeline_status_write_count:
+            proof["pipeline_status_writes_proven_absent"] = False
+        if unknown_pipeline_event_write_count or pipeline_event_write_count:
+            proof["pipeline_event_writes_proven_absent"] = False
+    return proof
+
+
+def _slurm_cancellation_proof(
+    *,
+    cancellation_required: bool = False,
+    reservation: Mapping[str, Any] | None = None,
+    blocked: bool = False,
+) -> dict[str, Any]:
+    proof: dict[str, Any] = {
+        "cancellation_required": cancellation_required,
+        "cancel_called": False,
+        "mutation_occurred": False,
+        "protected_by_pre_execution_evidence": False,
+    }
+    if blocked:
+        proof["status"] = "preflight_blocked"
+    elif cancellation_required:
+        proof["status"] = "pending_reservation"
+    else:
+        proof["status"] = "not_required"
+    if reservation is not None:
+        proof["evidence_pre_execution_status"] = reservation.get("status")
+        proof["protected_by_pre_execution_evidence"] = reservation.get("status") == "reserved"
+        if reservation.get("status") == "blocked":
+            proof["block_reason"] = reservation.get("reason")
+    return proof
+
+
+def _slurm_cancellation_proof_from_evidence(
+    cancellation_evidence: Sequence[Mapping[str, Any]],
+    *,
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    cancel_called = any(item.get("cancel_attempted") is True for item in cancellation_evidence)
+    cancelled_count = _slurm_cancelled_count(cancellation_evidence)
+    blocked_count = _slurm_cancellation_blocked_count(cancellation_evidence)
+    unknown_after_attempt_count = sum(
+        1 for item in cancellation_evidence if item.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT
+    )
+    pipeline_status_write_count = sum(1 for item in cancellation_evidence if item.get("pipeline_status_write") is True)
+    pipeline_event_write_count = sum(1 for item in cancellation_evidence if item.get("pipeline_event_write") is True)
+    proof: dict[str, Any] = {
+        "status": _scheduler_pass_status_from_cancellation(cancellation_evidence),
+        "cancellation_required": bool(cancellation_evidence),
+        "cancel_called": cancel_called,
+        "mutation_occurred": cancelled_count > 0,
+        "protected_by_pre_execution_evidence": reservation.get("status") == "reserved",
+        "evidence_pre_execution_status": reservation.get("status"),
+        "cancelled_job_count": cancelled_count,
+        "blocked_cancellation_count": blocked_count,
+        "pipeline_status_write_count": pipeline_status_write_count,
+        "pipeline_event_write_count": pipeline_event_write_count,
+    }
+    if pipeline_status_write_count or pipeline_event_write_count:
+        proof["mutation_occurred"] = True
+    if unknown_after_attempt_count:
+        proof["mutation_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["mutation_occurred"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_cancellation_count"] = unknown_after_attempt_count
+        proof["slurm_cancellation_proven_absent"] = False
+        proof["pipeline_status_writes_proven_absent"] = False
+        proof["pipeline_event_writes_proven_absent"] = False
+    else:
+        proof["pipeline_status_writes_proven_absent"] = pipeline_status_write_count == 0
+        proof["pipeline_event_writes_proven_absent"] = pipeline_event_write_count == 0
+    return proof
+
+
+def _slurm_status_sync_count(proof: Mapping[str, Any]) -> int:
+    value = proof.get("updated_job_count")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _slurm_status_sync_unknown_count(proof: Mapping[str, Any]) -> int:
+    value = proof.get("failed_sync_count")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _slurm_status_sync_mutated(proof: Mapping[str, Any]) -> bool:
+    return proof.get("mutation_occurred") is True
+
+
+def _slurm_status_sync_failed(proof: Mapping[str, Any]) -> bool:
+    return str(proof.get("status") or "") == "failed" and proof.get("sync_called") is True
+
+
+def _slurm_cancelled_count(cancellation_evidence: Sequence[Mapping[str, Any]]) -> int:
+    total = 0
+    for item in cancellation_evidence:
+        for job in item.get("cancelled_jobs") or []:
+            if isinstance(job, Mapping) and str(job.get("status") or "").lower() == "cancelled":
+                total += 1
+    return total
+
+
+def _slurm_cancellation_blocked_count(cancellation_evidence: Sequence[Mapping[str, Any]]) -> int:
+    return sum(1 for item in cancellation_evidence if str(item.get("status") or "") != "cancelled")
+
+
+def _slurm_cancellation_unknown_count(proof: Mapping[str, Any]) -> int:
+    value = proof.get("unknown_cancellation_count")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return 1 if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT else 0
+
+
+def _scheduler_mutation_proof(
+    *,
+    execution_write_proof: Mapping[str, Any],
+    slurm_status_sync_proof: Mapping[str, Any],
+    slurm_cancellation_proof: Mapping[str, Any],
+) -> dict[str, bool | str]:
+    execution_slurm_submit = _slurm_submit_proof_value(execution_write_proof)
+    hydro_result_table_write = _named_proof_value(
+        execution_write_proof,
+        "hydro_result_table_writes",
+        "hydro_result_table_writes_proven_absent",
+    )
+    met_result_table_write = _named_proof_value(
+        execution_write_proof,
+        "met_result_table_writes",
+        "met_result_table_writes_proven_absent",
+    )
+    sync_mutation = _proof_mutation_value(slurm_status_sync_proof)
+    cancellation_mutation = _proof_mutation_value(slurm_cancellation_proof)
+    pipeline_status_write = _merge_proof_values(
+        _pipeline_status_write_proof_value(execution_write_proof),
+        sync_mutation,
+        _pipeline_status_write_proof_value(slurm_cancellation_proof),
+    )
+    pipeline_event_write = _merge_proof_values(
+        _pipeline_event_write_proof_value(execution_write_proof),
+        sync_mutation,
+        _pipeline_event_write_proof_value(slurm_cancellation_proof),
+    )
+    return {
+        "slurm_submit_called": execution_slurm_submit,
+        "hydro_result_table_writes": hydro_result_table_write,
+        "met_result_table_writes": met_result_table_write,
+        "pipeline_status_writes": pipeline_status_write,
+        "pipeline_event_writes": pipeline_event_write,
+        "slurm_status_sync_writes": sync_mutation,
+        "slurm_cancellation_writes": cancellation_mutation,
+    }
+
+
+def _proof_mutation_value(proof: Mapping[str, Any]) -> bool | str:
+    if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if proof.get("mutation_occurred") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    return proof.get("mutation_occurred") is True
+
+
+def _named_proof_value(proof: Mapping[str, Any], write_field: str, absent_field: str) -> bool | str:
+    value = proof.get(write_field)
+    if value == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if proof.get(absent_field) is True:
+        return False
+    if proof.get(absent_field) is False and proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    return _proof_mutation_value(proof)
+
+
+def _slurm_submit_proof_value(proof: Mapping[str, Any]) -> bool | str:
+    value = proof.get("slurm_submit_called")
+    if value == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if proof.get("slurm_submit_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if _positive_count(proof.get("slurm_submit_count")):
+        return True
+    if proof.get("slurm_submit_proven_absent") is True:
+        return False
+    if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if proof.get("mutation_occurred") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    return proof.get("mutation_occurred") is True
+
+
+def _pipeline_status_write_proof_value(proof: Mapping[str, Any]) -> bool | str:
+    value = proof.get("pipeline_status_writes")
+    if value == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if proof.get("pipeline_status_write_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if "pipeline_status_write_count" in proof:
+        return _positive_count(proof.get("pipeline_status_write_count"))
+    if proof.get("pipeline_status_writes_proven_absent") is True:
+        return False
+    if proof.get("mutation_occurred") is True:
+        return True
+    return False
+
+
+def _pipeline_event_write_proof_value(proof: Mapping[str, Any]) -> bool | str:
+    value = proof.get("pipeline_event_writes")
+    if value == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if value is True:
+        return True
+    if value is False:
+        return False
+    if proof.get("pipeline_event_write_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if proof.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT:
+        return UNKNOWN_AFTER_ATTEMPT
+    if "pipeline_event_write_count" in proof:
+        return _positive_count(proof.get("pipeline_event_write_count"))
+    if proof.get("pipeline_event_writes_proven_absent") is True:
+        return False
+    if proof.get("mutation_occurred") is True:
+        return True
+    return False
+
+
+def _merge_proof_values(*values: bool | str) -> bool | str:
+    if any(value == UNKNOWN_AFTER_ATTEMPT for value in values):
+        return UNKNOWN_AFTER_ATTEMPT
+    return any(value is True for value in values)
+
+
+def _positive_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def _nested_bool(mapping: Mapping[str, Any], key: str, *, fallback: bool | None = None) -> bool | None:
     value = mapping.get(key)
     if isinstance(value, bool):
@@ -5299,6 +6605,11 @@ def _empty_counts() -> dict[str, int]:
         "submitted_count": 0,
         "failed_count": 0,
         "partial_count": 0,
+        "slurm_status_sync_count": 0,
+        "slurm_status_sync_unknown_count": 0,
+        "slurm_cancelled_count": 0,
+        "slurm_cancellation_blocked_count": 0,
+        "slurm_cancellation_unknown_count": 0,
     }
 
 
@@ -5306,9 +6617,403 @@ def _no_mutation_proof() -> dict[str, bool]:
     return {
         "adapter_download_called": False,
         "slurm_submit_called": False,
+        "slurm_status_sync_called": False,
+        "slurm_cancellation_called": False,
         "shud_runtime_called": False,
         "hydro_result_table_writes": False,
         "met_result_table_writes": False,
+        "pipeline_status_writes": False,
+        "pipeline_event_writes": False,
+    }
+
+
+def _scheduler_lock_evidence_root_preflight(config: ProductionSchedulerConfig) -> dict[str, Any]:
+    if not config.require_runtime_roots:
+        return _scheduler_root_preflight_not_required(config)
+    allowed_roots = _scheduler_allowed_roots(config)
+    allowed_roots_check, allowed_roots_blocker = _scheduler_allowed_roots_policy_check(config, allowed_roots)
+    enforce_approved_roots = allowed_roots_blocker is None
+    checks: dict[str, Any] = {}
+    checks["allowed_roots_policy"] = allowed_roots_check
+    blockers: list[dict[str, Any]] = []
+    if allowed_roots_blocker is not None:
+        blockers.append(allowed_roots_blocker)
+    for field_name, path in (
+        ("workspace_root", config._workspace_root_preflight_path),
+        ("lock_root", config._lock_root_preflight_path),
+        ("evidence_root", config._evidence_root_preflight_path),
+    ):
+        check, blocker = _scheduler_root_check(
+            field_name,
+            path,
+            allowed_roots,
+            required=True,
+            must_exist=True,
+            allow_create=False,
+            require_approved_root=enforce_approved_roots and field_name == "workspace_root",
+            require_under_workspace=field_name in {"lock_root", "evidence_root"},
+            workspace_root=config._workspace_root_preflight_path.resolve(strict=False),
+        )
+        checks[field_name] = check
+        if blocker is not None:
+            blockers.append(blocker)
+    return _scheduler_root_preflight_payload(config, checks, blockers)
+
+
+def _scheduler_runtime_root_preflight(config: ProductionSchedulerConfig) -> dict[str, Any]:
+    if not config.require_runtime_roots:
+        return _scheduler_root_preflight_not_required(config)
+    allowed_roots = _scheduler_allowed_roots(config)
+    allowed_roots_check, allowed_roots_blocker = _scheduler_allowed_roots_policy_check(config, allowed_roots)
+    enforce_approved_roots = allowed_roots_blocker is None
+    checks: dict[str, Any] = {}
+    checks["allowed_roots_policy"] = allowed_roots_check
+    blockers: list[dict[str, Any]] = []
+    if allowed_roots_blocker is not None:
+        blockers.append(allowed_roots_blocker)
+    for field_name, path in (
+        ("workspace_root", config._workspace_root_preflight_path),
+        ("object_store_root", config._object_store_root_preflight_path),
+        ("published_artifact_root", config._published_artifact_root_preflight_path),
+        ("runtime_root", config._runtime_root_preflight_path),
+        ("temp_root", config._temp_root_preflight_path),
+        ("lock_root", config._lock_root_preflight_path),
+        ("evidence_root", config._evidence_root_preflight_path),
+    ):
+        check, blocker = _scheduler_root_check(
+            field_name,
+            path,
+            allowed_roots,
+            required=True,
+            must_exist=True,
+            allow_create=False,
+            require_approved_root=enforce_approved_roots and field_name not in {"lock_root", "evidence_root"},
+            require_under_workspace=field_name in {"lock_root", "evidence_root"},
+            workspace_root=config._workspace_root_preflight_path.resolve(strict=False),
+        )
+        checks[field_name] = check
+        if blocker is not None:
+            blockers.append(blocker)
+    service_role_check, service_role_blocker = _scheduler_service_role_check(config.service_role)
+    checks["service_role"] = service_role_check
+    if service_role_blocker is not None:
+        blockers.append(service_role_blocker)
+    return _scheduler_root_preflight_payload(config, checks, blockers)
+
+
+def _scheduler_root_preflight_not_required(config: ProductionSchedulerConfig) -> dict[str, Any]:
+    return {
+        "status": "not_required",
+        "required": False,
+        "blockers": [],
+        "checks": {},
+        "allowed_roots": [str(root) for root in _scheduler_allowed_roots(config)],
+    }
+
+
+def _scheduler_root_preflight_payload(
+    config: ProductionSchedulerConfig,
+    checks: Mapping[str, Any],
+    blockers: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "status": "blocked" if blockers else "ready",
+        "required": True,
+        "blockers": [dict(blocker) for blocker in blockers],
+        "checks": dict(checks),
+        "allowed_roots": [str(root) for root in _scheduler_allowed_roots(config)],
+    }
+
+
+def _scheduler_root_check(
+    field_name: str,
+    value: Path | str | None,
+    allowed_roots: Sequence[Path],
+    *,
+    required: bool,
+    must_exist: bool,
+    allow_create: bool,
+    require_approved_root: bool = True,
+    require_under_workspace: bool = False,
+    workspace_root: Path | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if value in (None, ""):
+        check = {
+            "configured": False,
+            "path": None,
+            "exists": False,
+            "is_dir": False,
+            "contained": False,
+            "approved_root_required": require_approved_root,
+            "writable": False,
+        }
+        if required:
+            return check, _scheduler_root_blocker(field_name, "MISSING", None)
+        return check, None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        check = {
+            "configured": True,
+            "path": str(path),
+            "exists": False,
+            "is_dir": False,
+            "contained": False,
+            "approved_root_required": require_approved_root,
+            "writable": False,
+        }
+        return check, _scheduler_root_blocker(field_name, "RELATIVE", str(path))
+    resolved = path.resolve(strict=False)
+    exists = False
+    is_dir = False
+    is_symlink = False
+    writable = False
+    unsafe_reason: str | None = None
+    try:
+        path_stat = path.lstat()
+        exists = True
+        is_symlink = stat.S_ISLNK(path_stat.st_mode)
+        is_dir = stat.S_ISDIR(path_stat.st_mode)
+        if is_dir and not is_symlink:
+            writable = _directory_is_writable(path)
+    except FileNotFoundError:
+        exists = False
+        if allow_create:
+            parent = path.parent
+            try:
+                parent_stat = parent.lstat()
+                parent_is_dir = stat.S_ISDIR(parent_stat.st_mode)
+                parent_is_symlink = stat.S_ISLNK(parent_stat.st_mode)
+                writable = parent_is_dir and not parent_is_symlink and _directory_is_writable(parent)
+            except FileNotFoundError:
+                writable = False
+            except OSError as error:
+                unsafe_reason = _scheduler_root_os_error_reason(error)
+    except OSError as error:
+        unsafe_reason = _scheduler_root_os_error_reason(error)
+    contained = _path_is_under_any(resolved, allowed_roots) if require_approved_root else True
+    under_workspace = True
+    if require_under_workspace:
+        if workspace_root is None:
+            under_workspace = False
+        else:
+            try:
+                resolved.relative_to(workspace_root)
+            except ValueError:
+                under_workspace = False
+    check = {
+        "configured": True,
+        "path": str(resolved),
+        "exists": exists,
+        "is_dir": is_dir,
+        "symlink": is_symlink,
+        "contained": contained,
+        "approved_root_required": require_approved_root,
+        "writable": writable,
+        "allow_create": allow_create,
+    }
+    if require_under_workspace:
+        check["under_workspace"] = under_workspace
+    if unsafe_reason is not None:
+        check["unsafe_reason"] = unsafe_reason
+        return check, _scheduler_root_blocker(field_name, unsafe_reason, str(resolved))
+    if require_under_workspace and not under_workspace:
+        return check, _scheduler_root_blocker(field_name, "OUT_OF_WORKSPACE", str(resolved))
+    if is_symlink:
+        return check, _scheduler_root_blocker(field_name, "SYMLINK", str(resolved))
+    if require_approved_root and not contained:
+        return check, _scheduler_root_blocker(field_name, "OUT_OF_APPROVED_ROOT", str(resolved))
+    if must_exist and not exists:
+        return check, _scheduler_root_blocker(field_name, "NOT_FOUND", str(resolved))
+    if exists and not is_dir:
+        return check, _scheduler_root_blocker(field_name, "NOT_DIRECTORY", str(resolved))
+    if not writable:
+        return check, _scheduler_root_blocker(field_name, "NOT_WRITABLE", str(resolved))
+    return check, None
+
+
+def _scheduler_root_blocker(field_name: str, reason: str, path: str | None) -> dict[str, Any]:
+    code = f"SCHEDULER_ROOT_{field_name.upper()}_{reason}"
+    blocker = {
+        "code": code,
+        "field": field_name,
+        "reason": reason.lower(),
+        "message": f"Production scheduler {field_name} is not a safe writable runtime root.",
+    }
+    if path is not None:
+        blocker["path"] = path
+    return blocker
+
+
+def _scheduler_root_os_error_reason(error: OSError) -> str:
+    if error.errno in {ELOOP, ENOTDIR}:
+        return "UNSAFE_PATH"
+    if error.errno in {EACCES, EPERM}:
+        return "NOT_WRITABLE"
+    return "UNAVAILABLE"
+
+
+def _directory_is_writable(path: Path) -> bool:
+    try:
+        path_stat = path.lstat()
+        if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISDIR(path_stat.st_mode):
+            return False
+        if path_stat.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) == 0:
+            return False
+        if path_stat.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH) == 0:
+            return False
+        return os.access(path, os.W_OK | os.X_OK)
+    except OSError:
+        return False
+
+
+def _evidence_reservation_blocked_payload(
+    *,
+    pass_id: str,
+    artifact_path: Path,
+    reason: str,
+    details: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": "nhms.production_scheduler.pre_execution_evidence_reservation.v1",
+        "pass_id": pass_id,
+        "status": "blocked",
+        "artifact_path": str(artifact_path),
+        "reason": reason,
+        "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "message": "Scheduler evidence write proof failed before production mutation.",
+    }
+    payload.update(dict(details or {}))
+    return _evidence_safe(payload)
+
+
+def _evidence_write_error_payload(error: OSError) -> dict[str, Any]:
+    if isinstance(error, SchedulerEvidenceWriteError):
+        return {"reason": error.reason, **error.details}
+    return {"reason": "evidence_write_failed", "error": str(error)}
+
+
+def _scheduler_service_role_check(service_role: str | None) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    role = (service_role or "").strip()
+    check = {"configured": bool(role), "value": role or None, "compute_control": role == "compute_control"}
+    if role != "compute_control":
+        return (
+            check,
+            {
+                "code": "SCHEDULER_ROOT_SERVICE_ROLE_NOT_COMPUTE_CONTROL",
+                "field": "NHMS_SERVICE_ROLE",
+                "message": "Production scheduler no-flag business validation must run as compute_control.",
+            },
+        )
+    return check, None
+
+
+def _scheduler_allowed_roots_policy_check(
+    config: ProductionSchedulerConfig,
+    allowed_roots: Sequence[Path],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    configured_roots = tuple(root for root in config.allowed_storage_roots if root not in (None, ""))
+    check = {
+        "env": "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "configured": bool(configured_roots),
+        "non_empty": bool(allowed_roots),
+        "allowed_roots": [str(root) for root in allowed_roots],
+        "independent_policy_required": True,
+    }
+    if not allowed_roots:
+        return check, _scheduler_root_blocker("allowed_roots", "MISSING", None)
+    return check, None
+
+
+def _scheduler_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    for value in config.allowed_storage_roots:
+        if value in (None, ""):
+            continue
+        root = Path(value).expanduser().resolve(strict=False)
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
+def _scheduler_resolved_runtime_roots(config: ProductionSchedulerConfig) -> dict[str, Any]:
+    return {
+        "workspace_root": _root_evidence_item(
+            config.workspace_root,
+            env="WORKSPACE_ROOT",
+            required=config.require_runtime_roots,
+        ),
+        "object_store_root": _root_evidence_item(
+            config.object_store_root,
+            env="OBJECT_STORE_ROOT",
+            required=config.require_runtime_roots,
+        ),
+        "published_artifact_root": _root_evidence_item(
+            config.published_artifact_root,
+            env="NHMS_PUBLISHED_ARTIFACT_ROOT",
+            required=config.require_runtime_roots,
+        ),
+        "lock_root": _root_evidence_item(
+            Path(config.lock_path).parent,
+            env="NHMS_SCHEDULER_LOCK_ROOT",
+            fallback="WORKSPACE_ROOT/scheduler",
+            required=config.require_runtime_roots,
+        ),
+        "lock_path": _root_evidence_item(
+            config.lock_path,
+            env="NHMS_SCHEDULER_LOCK_ROOT",
+            fallback="WORKSPACE_ROOT/scheduler/production-scheduler.lock",
+            required=config.require_runtime_roots,
+        ),
+        "evidence_root": _root_evidence_item(
+            config.evidence_dir,
+            env="NHMS_SCHEDULER_EVIDENCE_ROOT",
+            fallback="WORKSPACE_ROOT/scheduler/evidence",
+            required=config.require_runtime_roots,
+        ),
+        "runtime_root": _root_evidence_item(
+            config.runtime_root,
+            env="NHMS_SCHEDULER_RUNTIME_ROOT|NHMS_RUNTIME_ROOT|RUN_WORKSPACE_ROOT|SHUD_RUNTIME_ROOT",
+            required=config.require_runtime_roots,
+        ),
+        "temp_root": _root_evidence_item(
+            config.temp_root,
+            env="NHMS_SCHEDULER_TEMP_ROOT|NHMS_TEMP_ROOT|TMPDIR",
+            required=config.require_runtime_roots,
+        ),
+    }
+
+
+def _root_evidence_item(
+    value: Path | str | None,
+    *,
+    env: str,
+    required: bool,
+    fallback: str | None = None,
+) -> dict[str, Any]:
+    path = None if value in (None, "") else str(Path(value).expanduser().resolve(strict=False))
+    payload = {
+        "path": path,
+        "configured": path is not None,
+        "env": env,
+        "required": required,
+    }
+    if fallback is not None:
+        payload["fallback"] = fallback
+    return payload
+
+
+def _scheduler_runtime_config_evidence(config: ProductionSchedulerConfig) -> dict[str, Any]:
+    return {
+        "service_role": config.service_role,
+        "require_runtime_roots": config.require_runtime_roots,
+        "dry_run": config.dry_run,
+        "continuous": config.continuous,
+        "interval_seconds": config.interval_seconds,
+        "sources": list(config.sources),
+        "model_ids": list(config.model_ids),
+        "basin_ids": list(config.basin_ids),
+        "max_cycles_per_source": config.max_cycles_per_source,
+        "retry_limit": config.retry_limit,
     }
 
 
@@ -5426,10 +7131,50 @@ def _confined_path(value: Path | str, workspace_root: Path, field_name: str) -> 
     return candidate
 
 
+def _reject_blank_config_path(value: Path | str | None, field_name: str) -> None:
+    if isinstance(value, str) and value.strip() == "":
+        raise ValueError(f"production scheduler {field_name} must not be blank")
+
+
 def _optional_config_path(value: Path | str | None) -> Path | None:
     if value in (None, ""):
         return None
     return Path(value).expanduser().resolve()
+
+
+def _config_path_preserve_final_component(value: Path | str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.parent.resolve(strict=False) / path.name
+
+
+def _config_path_relative_to_preserve_final(value: Path | str, base: Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    return path.parent.resolve(strict=False) / path.name
+
+
+def _optional_config_path_relative_to_preserve_final(value: Path | str | None, base: Path) -> Path | None:
+    if value in (None, ""):
+        return None
+    return _config_path_relative_to_preserve_final(value, base)
+
+
+def _resolve_optional_config_path(value: Path | None) -> Path | None:
+    if value is None:
+        return None
+    return value.resolve()
+
+
+def _optional_config_path_relative_to(value: Path | str | None, base: Path) -> Path | None:
+    if value in (None, ""):
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    return path.resolve()
 
 
 def _env_flag(name: str) -> bool:
@@ -5449,6 +7194,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_path_list(name: str) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return ()
+    return tuple(item.strip() for item in str(value).split(os.pathsep) if item.strip())
+
+
 def _require_under_workspace(path: Path, workspace_root: Path, field_name: str) -> None:
     try:
         path.relative_to(workspace_root)
@@ -5462,6 +7214,8 @@ def _require_safe_directory_final_component(path: Path, workspace_root: Path, fi
         path_stat = path.lstat()
     except FileNotFoundError:
         return
+    except OSError as error:
+        raise ValueError(f"production scheduler {field_name} must be a safe directory") from error
     if stat.S_ISLNK(path_stat.st_mode):
         resolved = path.resolve(strict=False)
         _require_under_workspace(resolved, workspace_root, field_name)
@@ -5587,6 +7341,27 @@ def _write_new_regular_file(
         handle.write(serialized)
 
 
+def _require_evidence_artifact_available(
+    artifact_name: str,
+    *,
+    dir_fd: int,
+    artifact_path: Path,
+) -> None:
+    try:
+        artifact_stat = os.stat(artifact_name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        if error.errno in {EISDIR, ELOOP, ENOTDIR}:
+            raise SchedulerEvidenceWriteError(
+                "unsafe_evidence_artifact",
+                {"artifact_path": str(artifact_path)},
+            ) from error
+        raise
+    reason = "evidence_artifact_exists" if stat.S_ISREG(artifact_stat.st_mode) else "unsafe_evidence_artifact"
+    raise SchedulerEvidenceWriteError(reason, {"artifact_path": str(artifact_path)})
+
+
 def _open_regular_guard_file(guard_name: str, *, dir_fd: int) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -5663,6 +7438,10 @@ def _bounded_evidence_payload(payload: Mapping[str, Any], *, reason: str) -> dic
         ),
         "limit": {"reason": reason, "max_evidence_bytes": MAX_EVIDENCE_BYTES},
         "counts": payload.get("counts", _empty_counts()),
+        "resolved_runtime_roots": payload.get("resolved_runtime_roots"),
+        "runtime_config": payload.get("runtime_config"),
+        "root_preflight": payload.get("root_preflight"),
+        "evidence_pre_execution": payload.get("evidence_pre_execution"),
         "candidates": [],
         "blocked_candidates": [],
         "skipped_candidates": [],
@@ -5671,16 +7450,10 @@ def _bounded_evidence_payload(payload: Mapping[str, Any], *, reason: str) -> dic
         "model_discovery": _empty_model_discovery(),
         "artifact_path": payload.get("artifact_path"),
         "execution_boundary": payload.get("execution_boundary", "planning_only"),
-        "no_mutation_proof": payload.get(
-            "no_mutation_proof",
-            {
-                "adapter_download_called": False,
-                "slurm_submit_called": False,
-                "shud_runtime_called": False,
-                "hydro_result_table_writes": False,
-                "met_result_table_writes": False,
-            },
-        ),
+        "execution_write_proof": payload.get("execution_write_proof"),
+        "slurm_status_sync_proof": payload.get("slurm_status_sync_proof"),
+        "slurm_cancellation_proof": payload.get("slurm_cancellation_proof"),
+        "no_mutation_proof": payload.get("no_mutation_proof", _no_mutation_proof()),
     }
 
 

@@ -15,7 +15,8 @@ The production scheduler CLI SHALL use configured runtime roots and evidence pat
 
 #### Scenario: Evidence and lock roots are configured
 - **WHEN** scheduler runs from Docker or systemd
-- **THEN** evidence, locks, temporary files, and generated manifests are written under configured workspace, repo artifact, or approved `/scratch/frd_muziyao` roots according to the documented contract
+- **THEN** scheduler lock and evidence roots are written under `WORKSPACE_ROOT`
+- **AND** object-store, published-artifact, runtime, and temporary roots are within the independently configured approved roots
 - **AND** the command does not write large temporary products to the system disk by default.
 
 #### Scenario: Published root required before mutation

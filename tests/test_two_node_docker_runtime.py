@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from scripts import validate_two_node_docker_runtime as docker_runtime
+from services.production_closure import two_node_e2e_evidence as e2e_evidence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -323,6 +324,35 @@ def test_static_checker_rejects_forbidden_display_env(tmp_path: Path) -> None:
 
     assert result.status == "FAIL"
     assert _codes(result) >= {"DISPLAY_FORBIDDEN_ENV"}
+
+
+@pytest.mark.parametrize(
+    "env_key",
+    [
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
+    ],
+)
+def test_static_checker_rejects_display_env_file_scheduler_roots(tmp_path: Path, env_key: str) -> None:
+    display_env = tmp_path / "display.example"
+    display_env.write_text(
+        (REPO_ROOT / "infra/env/display.example").read_text(encoding="utf-8")
+        + f"\n{env_key}=/scratch/private/scheduler-root\n",
+        encoding="utf-8",
+    )
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=display_env,
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert "DISPLAY_FORBIDDEN_ENV" in _codes(result)
 
 
 def test_static_checker_rejects_display_hostconfig_and_mount_hazards(tmp_path: Path) -> None:
@@ -1206,6 +1236,9 @@ def test_static_checker_rejects_display_env_file_object_store_root(tmp_path: Pat
         {"OBJECT_STORE_ROOT": "/scratch/private/object-store"},
         ["OBJECT_STORE_ROOT=/scratch/private/object-store"],
         ["${EXTRA_ENV:-OBJECT_STORE_ROOT=/scratch/private/object-store}"],
+        {"NHMS_SCHEDULER_RUNTIME_ROOT": "/scratch/private/scheduler-runtime"},
+        ["NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/private/scheduler-runtime"],
+        ["${EXTRA_ENV:-NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/private/scheduler-runtime}"],
     ],
 )
 def test_static_checker_rejects_display_service_object_store_root(
@@ -1215,7 +1248,7 @@ def test_static_checker_rejects_display_service_object_store_root(
     compose = _safe_display_compose()
     service = compose["services"]["display-api"]
     if isinstance(environment_entry, dict):
-        service["environment"]["OBJECT_STORE_ROOT"] = environment_entry["OBJECT_STORE_ROOT"]
+        service["environment"].update(environment_entry)
     else:
         service["environment"] = _environment_dict_to_list(service["environment"])
         service["environment"].extend(environment_entry)
@@ -1225,6 +1258,46 @@ def test_static_checker_rejects_display_service_object_store_root(
 
     assert result.status == "FAIL"
     assert "DISPLAY_FORBIDDEN_ENV" in _codes(result)
+
+
+@pytest.mark.parametrize(
+    ("env_key", "value"),
+    [
+        ("NHMS_SCHEDULER_LOCK_ROOT", "/scratch/private/scheduler-locks"),
+        ("NHMS_SCHEDULER_LOCK_ROOT", ""),
+        ("NHMS_SCHEDULER_EVIDENCE_ROOT", "/scratch/private/scheduler-evidence"),
+        ("NHMS_SCHEDULER_EVIDENCE_ROOT", ""),
+        ("NHMS_SCHEDULER_RUNTIME_ROOT", "/scratch/private/scheduler-runtime"),
+        ("NHMS_SCHEDULER_RUNTIME_ROOT", ""),
+        ("NHMS_SCHEDULER_TEMP_ROOT", "/scratch/private/scheduler-temp"),
+        ("NHMS_SCHEDULER_TEMP_ROOT", ""),
+    ],
+)
+def test_two_node_e2e_evidence_rejects_display_scheduler_root_env(
+    env_key: str,
+    value: str,
+) -> None:
+    payload = {
+        "display_container_inspect": [
+            {
+                "Config": {
+                    "Env": [
+                        "NHMS_SERVICE_ROLE=display_readonly",
+                        f"{env_key}={value}",
+                    ]
+                }
+            }
+        ]
+    }
+
+    proofs = e2e_evidence._docker_display_security_proofs(payload)
+    findings = e2e_evidence._docker_proof_findings(proofs)
+
+    assert proofs["forbidden_env_hazard"] is True
+    assert {
+        (finding["code"], finding.get("capability"))
+        for finding in findings
+    } >= {("TWO_NODE_E2E_DOCKER_DISPLAY_FORBIDDEN_CAPABILITY", "forbidden_env_hazard")}
 
 
 def test_static_checker_rejects_display_hard_coded_compute_roots(tmp_path: Path) -> None:
@@ -2720,6 +2793,32 @@ def test_static_checker_requires_compute_host_gateway_extra_host(tmp_path: Path)
     }
 
 
+def test_static_checker_rejects_empty_compute_scheduler_allowed_roots(tmp_path: Path) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"]["NHMS_SCHEDULER_ALLOWED_ROOTS"] = ""
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    findings = {
+        (finding.service, finding.details.get("key"))
+        for finding in result.findings
+        if finding.code == "COMPUTE_RUNTIME_ENV_EMPTY"
+    }
+    assert findings >= {
+        ("compute-api", "NHMS_SCHEDULER_ALLOWED_ROOTS"),
+        ("scheduler-once", "NHMS_SCHEDULER_ALLOWED_ROOTS"),
+    }
+
+
 def test_static_checker_requires_literal_uv_cache_dir_for_non_root_runtime(tmp_path: Path) -> None:
     compute = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
     for service in compute["services"].values():
@@ -3232,6 +3331,10 @@ def test_entrypoint_rejects_reserved_slurm_gateway_role() -> None:
         ("RUN_WORKSPACE_ROOT", "/workspace/runs"),
         ("SHARED_LOG_ROOT", "/workspace/logs"),
         ("OBJECT_STORE_ROOT", "/object-store"),
+        ("NHMS_SCHEDULER_LOCK_ROOT", "/workspace/scheduler/locks"),
+        ("NHMS_SCHEDULER_EVIDENCE_ROOT", "/workspace/scheduler/evidence"),
+        ("NHMS_SCHEDULER_RUNTIME_ROOT", "/workspace/runtime"),
+        ("NHMS_SCHEDULER_TEMP_ROOT", "/workspace/tmp"),
         ("NHMS_BASINS_ROOT", "/data/Basins"),
         ("NHMS_MODEL_ASSET_ROOT", "/data/model-assets"),
         ("SLURM_GATEWAY_TEMPLATE_DIR", "/app/infra/sbatch"),
@@ -3271,7 +3374,15 @@ def test_entrypoint_trims_display_readonly_role_before_boundary_validation() -> 
 
 
 def test_entrypoint_rejects_display_forbidden_env_even_when_value_is_empty() -> None:
-    for env_key in ("SLURM_GATEWAY_URL", "SLURM_GATEWAY_BACKEND", "WORKSPACE_ROOT"):
+    for env_key in (
+        "SLURM_GATEWAY_URL",
+        "SLURM_GATEWAY_BACKEND",
+        "WORKSPACE_ROOT",
+        "NHMS_SCHEDULER_LOCK_ROOT",
+        "NHMS_SCHEDULER_EVIDENCE_ROOT",
+        "NHMS_SCHEDULER_RUNTIME_ROOT",
+        "NHMS_SCHEDULER_TEMP_ROOT",
+    ):
         completed = _run_entrypoint(
             ["true"],
             {

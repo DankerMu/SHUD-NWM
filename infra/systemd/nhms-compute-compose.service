@@ -3,7 +3,8 @@
 # Operator edits required before install:
 # - Replace /opt/SHUD-NWM with the absolute repository checkout path on node 22.
 # - Create infra/env/compute.env from infra/env/compute.example with real
-#   writer DB credentials, workspace paths, Basins/model paths, and image tag.
+#   writer DB credentials, workspace/object-store/published/scheduler roots,
+#   Basins/model paths, source/model filters, and image tag.
 # - Ensure the docker compose plugin is installed at /usr/bin/docker or update
 #   ExecStart/ExecStop/ExecReload to the local docker binary path.
 # - Before enable/start/reload/restart, run
@@ -11,6 +12,25 @@
 #   checkout root and record its docker-security evidence. It must pass before
 #   systemd consumes WorkingDirectory, compose, env, or unit sources. Docker
 #   access is root-equivalent.
+# - Business scheduler validation is the manual scheduler-once compose lane:
+#   docker compose --env-file env/compute.env -f compose.compute.yml run --rm scheduler-once
+#   It runs nhms-pipeline plan-production --plan without --workspace-root,
+#   --lock-path, or --evidence-dir. Those roots must come from compute.env;
+#   explicit root flags are diagnostic compatibility only.
+# - Optional bounded scheduler timer lane uses the same compute.env roots and
+#   filters. Example companion units:
+#     nhms-compute-scheduler.service:
+#       Type=oneshot
+#       WorkingDirectory=/opt/SHUD-NWM/infra
+#       ExecStart=/usr/bin/docker compose --env-file env/compute.env -f compose.compute.yml run --rm scheduler-once uv run nhms-pipeline plan-production --continuous --interval-seconds ${NHMS_SCHEDULER_INTERVAL_SECONDS} --max-passes ${NHMS_SCHEDULER_MAX_PASSES} --max-cycles-per-source ${NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE} --source gfs --model-id basins_qhh_shud --basin-id basins_qhh --plan
+#     nhms-compute-scheduler.timer:
+#       OnBootSec=2min
+#       OnUnitActiveSec=5min
+#       Persistent=false
+#       Unit=nhms-compute-scheduler.service
+#   Disable with:
+#     systemctl disable --now nhms-compute-scheduler.timer
+#     systemctl reset-failed nhms-compute-scheduler.service
 
 [Unit]
 Description=NHMS node 22 compute/control compose

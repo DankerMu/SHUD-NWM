@@ -140,8 +140,10 @@ SCHEDULER_REVIEW_EXECUTION_MODES = frozenset(
         "planning_only",
         "production_like",
         "production_orchestration",
+        "slurm_cancellation",
         "slurm_gateway_orchestration",
         "slurm_preflight",
+        "slurm_status_sync",
         "simulated",
     }
 )
@@ -152,6 +154,8 @@ SCHEDULER_REVIEW_PASSED_STATUSES = frozenset(
         "ready",
         "passed",
         "submitted",
+        "slurm_cancelled",
+        "slurm_status_synced",
         "completed",
         "succeeded",
     }
@@ -164,11 +168,25 @@ SCHEDULER_REVIEW_BLOCKED_STATUSES = frozenset(
         "permanently_failed",
         "preflight_blocked",
         "resource_limit_blocked",
+        "slurm_cancellation_blocked",
+        "slurm_partially_cancelled",
+        "slurm_status_sync_failed",
         "submission_failed",
         "submitted_partial",
         "partial",
         "partially_failed",
     }
+)
+SCHEDULER_DRY_RUN_NO_MUTATION_FALSE_FIELDS = (
+    "adapter_download_called",
+    "slurm_submit_called",
+    "slurm_status_sync_called",
+    "slurm_cancellation_called",
+    "shud_runtime_called",
+    "hydro_result_table_writes",
+    "met_result_table_writes",
+    "pipeline_status_writes",
+    "pipeline_event_writes",
 )
 SCHEDULER_PARTIAL_MODEL_RUN_STATUSES = frozenset(
     {
@@ -2526,14 +2544,7 @@ def _dry_run_no_mutation_proven(payload: Mapping[str, Any]) -> bool:
     proof = payload.get("no_mutation_proof")
     if not isinstance(proof, Mapping):
         return False
-    required_false = (
-        "adapter_download_called",
-        "slurm_submit_called",
-        "shud_runtime_called",
-        "hydro_result_table_writes",
-        "met_result_table_writes",
-    )
-    return all(proof.get(key) is False for key in required_false)
+    return all(proof.get(key) is False for key in SCHEDULER_DRY_RUN_NO_MUTATION_FALSE_FIELDS)
 
 
 def _has_unsafe_scheduler_identity(payload: Mapping[str, Any]) -> bool:
