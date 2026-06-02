@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+from collections.abc import Callable, Iterator
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,10 @@ from workers.model_registry.qhh_production_bootstrap import (
     read_qhh_output_segment_count,
     read_qhh_tsd_forc,
 )
+
+_QHH_SCHEDULER_SOURCE_ID = "gfs"
+_QHH_SCHEDULER_SOURCE_VERSION = "qhh-scheduler-readiness-fixture"
+_QHH_SCHEDULER_SOURCE_NAME = "GFS QHH scheduler readiness fixture"
 
 
 def test_read_qhh_tsd_forc_reports_created_station_identity(tmp_path: Path) -> None:
@@ -1081,6 +1086,7 @@ def test_bootstrap_cli_outputs_typed_blocker_for_missing_database_url(
 def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     tmp_path: Path,
     integration_database_url: str,
+    qhh_scheduler_canonical_readiness: Callable[[str], Any],
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
     basin_slug = "qhh-success"
@@ -1199,7 +1205,7 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     assert output_count == 2
     assert forcing_count == 0
 
-    readiness_provider = _seed_qhh_scheduler_canonical_readiness(integration_database_url, model_id=model_id)
+    readiness_provider = qhh_scheduler_canonical_readiness(model_id)
     scheduler = ProductionScheduler(
         ProductionSchedulerConfig(
             workspace_root=tmp_path / "workspace",
@@ -1564,6 +1570,7 @@ def test_bootstrap_blocks_unmarked_same_basin_active_forcing_grid_and_removes_sc
 def test_bootstrap_replaces_stale_run_scoped_resource_profile_and_scheduler_derives_current_identity(
     tmp_path: Path,
     integration_database_url: str,
+    qhh_scheduler_canonical_readiness: Callable[[str], Any],
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
     basin_slug = "qhh-stale-profile"
@@ -1609,7 +1616,7 @@ def test_bootstrap_replaces_stale_run_scoped_resource_profile_and_scheduler_deri
         package_manifest_path=manifest_path,
     )
 
-    readiness_provider = _seed_qhh_scheduler_canonical_readiness(integration_database_url, model_id=model_id)
+    readiness_provider = qhh_scheduler_canonical_readiness(model_id)
     scheduler = ProductionScheduler(
         ProductionSchedulerConfig(
             workspace_root=tmp_path / "workspace-stale-profile",
@@ -1813,6 +1820,76 @@ def _qhh_registry_fixture(tmp_path: Path, *, basin_slug: str = "qhh") -> tuple[P
     return root, input_dir, inventory_path, manifest_path, model_id
 
 
+@pytest.fixture
+def qhh_scheduler_canonical_readiness(integration_database_url: str) -> Iterator[Callable[[str], Any]]:
+    seeded = False
+
+    def seed(model_id: str) -> Any:
+        nonlocal seeded
+        _clear_qhh_scheduler_canonical_readiness(integration_database_url)
+        seeded = True
+        return _seed_qhh_scheduler_canonical_readiness(integration_database_url, model_id=model_id)
+
+    try:
+        yield seed
+    finally:
+        if seeded:
+            _clear_qhh_scheduler_canonical_readiness(integration_database_url)
+
+
+def _clear_qhh_scheduler_canonical_readiness(database_url: str) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    with psycopg_connection(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM met.forcing_version_component
+                WHERE canonical_product_id IN (
+                    SELECT canonical_product_id
+                    FROM met.canonical_met_product
+                    WHERE source_id = %s
+                      AND cycle_time = %s
+                      AND source_version = %s
+                      AND lineage_json->'policy_identity' = %s::jsonb
+                      AND lineage_json->'source_object_identity' = %s::jsonb
+                )
+                """,
+                (
+                    _QHH_SCHEDULER_SOURCE_ID,
+                    cycle_time,
+                    _QHH_SCHEDULER_SOURCE_VERSION,
+                    json.dumps(_qhh_scheduler_policy_identity(), sort_keys=True),
+                    json.dumps(_qhh_scheduler_source_object_identity(), sort_keys=True),
+                ),
+            )
+            cursor.execute(
+                """
+                DELETE FROM met.canonical_met_product
+                WHERE source_id = %s
+                  AND cycle_time = %s
+                  AND source_version = %s
+                  AND lineage_json->'policy_identity' = %s::jsonb
+                  AND lineage_json->'source_object_identity' = %s::jsonb
+                """,
+                (
+                    _QHH_SCHEDULER_SOURCE_ID,
+                    cycle_time,
+                    _QHH_SCHEDULER_SOURCE_VERSION,
+                    json.dumps(_qhh_scheduler_policy_identity(), sort_keys=True),
+                    json.dumps(_qhh_scheduler_source_object_identity(), sort_keys=True),
+                ),
+            )
+            cursor.execute(
+                """
+                DELETE FROM met.data_source
+                WHERE source_id = %s
+                  AND source_name = %s
+                  AND config_json->>'qhh_scheduler_readiness_fixture' = 'true'
+                """,
+                (_QHH_SCHEDULER_SOURCE_ID, _QHH_SCHEDULER_SOURCE_NAME),
+            )
+
+
 def _seed_qhh_scheduler_canonical_readiness(database_url: str, *, model_id: str) -> Any:
     cycle_time = _dt("2026-05-21T06:00:00Z")
     forecast_hours = _qhh_scheduler_forecast_hours()
@@ -1825,7 +1902,7 @@ def _seed_qhh_scheduler_canonical_readiness(database_url: str, *, model_id: str)
                 INSERT INTO met.data_source (
                     source_id, source_name, source_type, status, native_format, adapter_name, config_json
                 )
-                VALUES ('gfs', 'GFS QHH scheduler readiness fixture', 'forecast', 'mock', 'netcdf', 'gfs', %s)
+                VALUES (%s, %s, 'forecast', 'mock', 'netcdf', 'gfs', %s)
                 ON CONFLICT (source_id) DO UPDATE SET
                     source_name = EXCLUDED.source_name,
                     source_type = EXCLUDED.source_type,
@@ -1834,7 +1911,17 @@ def _seed_qhh_scheduler_canonical_readiness(database_url: str, *, model_id: str)
                     adapter_name = EXCLUDED.adapter_name,
                     config_json = EXCLUDED.config_json
                 """,
-                (Json({"integration": True, "model_id": model_id}),),
+                (
+                    _QHH_SCHEDULER_SOURCE_ID,
+                    _QHH_SCHEDULER_SOURCE_NAME,
+                    Json(
+                        {
+                            "integration": True,
+                            "model_id": model_id,
+                            "qhh_scheduler_readiness_fixture": True,
+                        }
+                    ),
+                ),
             )
 
     store = PsycopgMetStore(database_url)
@@ -1862,11 +1949,11 @@ def _qhh_scheduler_forecast_hours() -> tuple[int, ...]:
 
 
 def _qhh_scheduler_policy_identity() -> dict[str, Any]:
-    return {"source": "gfs", "forecast_hours": list(_qhh_scheduler_forecast_hours())}
+    return {"source": _QHH_SCHEDULER_SOURCE_ID, "forecast_hours": list(_qhh_scheduler_forecast_hours())}
 
 
 def _qhh_scheduler_source_object_identity() -> dict[str, Any]:
-    return {"source": "gfs", "object": "fake"}
+    return {"source": _QHH_SCHEDULER_SOURCE_ID, "object": "fake"}
 
 
 def _qhh_scheduler_canonical_rows(
@@ -1882,8 +1969,8 @@ def _qhh_scheduler_canonical_rows(
             rows.append(
                 {
                     "canonical_product_id": f"gfs_{cycle_time:%Y%m%d%H}_{variable}_f{forecast_hour:03d}",
-                    "source_id": "gfs",
-                    "source_version": "qhh-scheduler-readiness-fixture",
+                    "source_id": _QHH_SCHEDULER_SOURCE_ID,
+                    "source_version": _QHH_SCHEDULER_SOURCE_VERSION,
                     "cycle_time": cycle_time,
                     "valid_time": cycle_time + timedelta(hours=forecast_hour),
                     "lead_time_hours": forecast_hour,
