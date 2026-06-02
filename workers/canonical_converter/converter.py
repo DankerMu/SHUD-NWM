@@ -2346,6 +2346,22 @@ class IFSCanonicalConverter(CanonicalConverter):
         covered: set[tuple[str, int]],
     ) -> tuple[MissingForecastVariable, ...]:
         pairs = list(super()._missing_required_pairs_from_covered(manifest, entries, covered))
+        seen_pairs = {(pair.native_variable, pair.standard_variable, pair.forecast_hour) for pair in pairs}
+        for forecast_hour in self._configured_forecast_hours(manifest, entries):
+            for native_variable in ("ssr", "str"):
+                if (native_variable, forecast_hour) in covered:
+                    continue
+                pair_key = (native_variable, "net_radiation", forecast_hour)
+                if pair_key in seen_pairs:
+                    continue
+                pairs.append(
+                    MissingForecastVariable(
+                        native_variable=native_variable,
+                        standard_variable="net_radiation",
+                        forecast_hour=forecast_hour,
+                    )
+                )
+                seen_pairs.add(pair_key)
         return self._add_shortwave_missing_pairs(pairs)
 
     def _add_shortwave_missing_pairs(

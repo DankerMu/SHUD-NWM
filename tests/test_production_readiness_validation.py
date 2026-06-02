@@ -59,6 +59,23 @@ DEPENDENCY_CONTRACTS = {
 }
 
 
+class ReadyCanonicalReadinessProvider:
+    def canonical_readiness(self, **kwargs: object) -> dict[str, object]:
+        return {
+            "status": "canonical_ready",
+            "ready": True,
+            "reason": None,
+            "source_id": kwargs["source_id"],
+            "cycle_time": kwargs["cycle_time"],
+            "forecast_hours": list(kwargs["forecast_hours"]),
+            "policy_identity": dict(kwargs["policy_identity"]),
+            "source_object_identity": dict(kwargs["source_object_identity"]),
+            "canonical_product_id": kwargs["canonical_product_id"],
+            "model_id": kwargs["model_id"],
+            "basin_id": kwargs["basin_id"],
+        }
+
+
 def _summary(root: Path, run_id: str = "m19") -> dict[str, object]:
     return json.loads((root / run_id / "readiness" / "summary.json").read_text(encoding="utf-8"))
 
@@ -1776,6 +1793,7 @@ def _scheduler_output_uri_unavailable_sibling_artifact(tmp_path: Path) -> Path:
         _scheduler_config(tmp_path / "scheduler-workspace", now=_scheduler_dt("2026-05-21T12:00:00Z"), dry_run=False),
         registry=FakeRegistry([submitted_model, _scheduler_model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        canonical_readiness_provider=ReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -1826,6 +1844,7 @@ def _scheduler_failed_alias_sibling_artifact(tmp_path: Path, *, outcome_status: 
         ),
         registry=FakeRegistry([_scheduler_model("model_a", "basin_a"), _scheduler_model("model_b", "basin_b")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        canonical_readiness_provider=ReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
@@ -1892,6 +1911,7 @@ def _scheduler_no_submission_failed_artifact(tmp_path: Path) -> Path:
         ),
         registry=FakeRegistry([_scheduler_model("model_a", "basin_a")]),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        canonical_readiness_provider=ReadyCanonicalReadinessProvider(),
         orchestrator_factory=lambda _source_id: orchestrator,
     )
 
