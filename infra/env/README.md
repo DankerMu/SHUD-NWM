@@ -73,9 +73,10 @@ Display role, node 27:
   `scripts/validate_two_node_docker_runtime.py`: `SLURM_GATEWAY_URL`,
   `SLURM_GATEWAY_BACKEND`, `SLURM_GATEWAY_TEMPLATE_DIR`,
   `SLURM_GATEWAY_WORKSPACE_DIR`, `WORKSPACE_ROOT`, `RUN_WORKSPACE_ROOT`,
-  `SHARED_LOG_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_BASINS_ROOT`,
-  `NHMS_MODEL_ASSET_ROOT`, `SHUD_EXECUTABLE`, `MUNGE_SOCKET`, `MUNGE_KEY`, and
-  `DOCKER_HOST`.
+  `SHARED_LOG_ROOT`, `OBJECT_STORE_ROOT`, `NHMS_SCHEDULER_LOCK_ROOT`,
+  `NHMS_SCHEDULER_EVIDENCE_ROOT`, `NHMS_SCHEDULER_RUNTIME_ROOT`,
+  `NHMS_SCHEDULER_TEMP_ROOT`, `NHMS_BASINS_ROOT`, `NHMS_MODEL_ASSET_ROOT`,
+  `SHUD_EXECUTABLE`, `MUNGE_SOCKET`, `MUNGE_KEY`, and `DOCKER_HOST`.
 - Forbidden container/host surfaces: `/etc/slurm`, `/run/munge`,
   `/var/run/munge`, `/etc/munge`, `munge.key`, `.nhms-runs`,
   `/run/docker.sock`, `/var/run/docker.sock`, and 22 private `/scratch` mounts.

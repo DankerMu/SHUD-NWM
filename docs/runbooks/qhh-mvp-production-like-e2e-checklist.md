@@ -417,9 +417,13 @@ uv run nhms-pipeline plan-production \
 - [ ] 输出包含 IFS 或明确的 IFS 阻塞原因。
 - [ ] `adapter_download_called=false`。
 - [ ] `slurm_submit_called=false`。
+- [ ] `slurm_status_sync_called=false`。
+- [ ] `slurm_cancellation_called=false`。
 - [ ] `shud_runtime_called=false`。
 - [ ] `hydro_result_table_writes=false`。
 - [ ] `met_result_table_writes=false`。
+- [ ] `pipeline_status_writes=false`。
+- [ ] `pipeline_event_writes=false`。
 
 ### 8.2 GFS 下载和完整性
 

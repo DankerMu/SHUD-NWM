@@ -29,10 +29,15 @@ uv run nhms-pipeline plan-production \
 `candidates`、`blocked_candidates`、`skipped_candidates`、`operator_filters` 和
 `no_mutation_proof`。dry-run 明确保证：
 
-- no download：不调用 GFS/IFS adapter 下载。
-- no Slurm submit：不提交 Slurm job。
-- no SHUD run：不运行 native SHUD。
-- no hydro/met result mutation：不写 `hydro.*` 结果表，也不写 `met.*` 结果表。
+- no download：`adapter_download_called=false`，不调用 GFS/IFS adapter 下载。
+- no Slurm submit：`slurm_submit_called=false`，不提交 Slurm job。
+- no Slurm status sync/cancel：`slurm_status_sync_called=false` 且
+  `slurm_cancellation_called=false`，不执行 Slurm 状态同步或取消。
+- no SHUD run：`shud_runtime_called=false`，不运行 native SHUD。
+- no hydro/met result mutation：`hydro_result_table_writes=false` 且
+  `met_result_table_writes=false`，不写 `hydro.*` 或 `met.*` 结果表。
+- no pipeline state mutation：`pipeline_status_writes=false` 且
+  `pipeline_event_writes=false`，不写 pipeline status/event。
 
 生产提交路径使用同一个 backend scheduler，在 Slurm/database/storage preflight
 通过后关闭 dry-run：
