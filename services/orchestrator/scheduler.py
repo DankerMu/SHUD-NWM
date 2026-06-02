@@ -1494,14 +1494,12 @@ class ProductionScheduler:
         rows = _fetch_active_model_details(self.registry)
         exclusions: list[dict[str, Any]] = []
         runnable: list[RegisteredSchedulerModel] = []
+        duplicate_exclusions = _active_model_duplicate_exclusions(rows)
 
-        model_counts = Counter(str(row.get("model_id") or "") for row in rows)
-        duplicate_model_ids = {model_id for model_id, count in model_counts.items() if model_id and count > 1}
-
-        for row in rows:
-            model_id = str(row.get("model_id") or "")
-            if model_id in duplicate_model_ids:
-                exclusions.append(_model_exclusion(row, "duplicate_active_model_identity"))
+        for index, row in enumerate(rows):
+            duplicate_exclusion = duplicate_exclusions.get(index)
+            if duplicate_exclusion is not None:
+                exclusions.append(duplicate_exclusion)
                 continue
             model = _coerce_registered_model(row)
             if isinstance(model, RegisteredSchedulerModel):
@@ -2253,6 +2251,84 @@ def _coerce_registered_model(row: Mapping[str, Any]) -> RegisteredSchedulerModel
         display_capabilities=_mapping_value(resource_profile.get("display_capabilities")),
         frequency_capabilities=_mapping_value(resource_profile.get("frequency_capabilities")),
     )
+
+
+def _active_model_duplicate_exclusions(rows: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, Any]]:
+    duplicate_groups: list[tuple[str, str, set[int]]] = []
+    for identity_field, groups in (
+        ("model_id", _active_model_identity_groups(rows, _active_model_model_id)),
+        ("model_package_uri", _active_model_identity_groups(rows, _active_model_package_uri)),
+        ("package_checksum", _active_model_identity_groups(rows, _active_model_package_checksum)),
+    ):
+        for value, indexes in groups.items():
+            if value and len(indexes) > 1:
+                duplicate_groups.append((identity_field, value, indexes))
+
+    exclusions: dict[int, dict[str, Any]] = {}
+    for identity_field, value, indexes in duplicate_groups:
+        duplicate_model_ids = sorted(
+            str(rows[index].get("model_id") or "") for index in indexes if rows[index].get("model_id") not in (None, "")
+        )
+        for index in indexes:
+            if index in exclusions:
+                continue
+            exclusions[index] = {
+                **_model_exclusion(rows[index], "duplicate_active_model_identity"),
+                "duplicate_identity_field": identity_field,
+                "duplicate_identity_value": _model_duplicate_identity_value_for_evidence(identity_field, value),
+                "duplicate_model_ids": duplicate_model_ids,
+                "duplicate_active_model_count": len(indexes),
+            }
+    return exclusions
+
+
+def _active_model_identity_groups(
+    rows: Sequence[Mapping[str, Any]],
+    value_getter: Callable[[Mapping[str, Any]], str | None],
+) -> dict[str, set[int]]:
+    groups: dict[str, set[int]] = {}
+    for index, row in enumerate(rows):
+        value = value_getter(row)
+        if value:
+            groups.setdefault(value, set()).add(index)
+    return groups
+
+
+def _active_model_model_id(row: Mapping[str, Any]) -> str | None:
+    value = row.get("model_id")
+    return str(value) if value not in (None, "") else None
+
+
+def _active_model_package_uri(row: Mapping[str, Any]) -> str | None:
+    value = row.get("model_package_uri")
+    return str(value) if value not in (None, "") else None
+
+
+def _active_model_package_checksum(row: Mapping[str, Any]) -> str | None:
+    resource_profile = row.get("resource_profile")
+    if not isinstance(resource_profile, Mapping):
+        return None
+    if not _has_package_specific_checksum_context(row, resource_profile):
+        return None
+    value = resource_profile.get("package_checksum")
+    return str(value) if value not in (None, "") else None
+
+
+def _has_package_specific_checksum_context(row: Mapping[str, Any], resource_profile: Mapping[str, Any]) -> bool:
+    if row.get("model_package_uri") not in (None, ""):
+        return True
+    for identity_field in ("model_package_uri", "manifest_uri", "model_package_manifest_uri", "package_uri"):
+        if resource_profile.get(identity_field) not in (None, ""):
+            return True
+    lineage = str(resource_profile.get("lineage") or "")
+    return lineage in {"basins_registry_import", "qhh_production_bootstrap"}
+
+
+def _model_duplicate_identity_value_for_evidence(field: str, value: str) -> str:
+    if field == "model_package_uri":
+        redacted = _redact_secret_manifest_for_evidence(value, "model_package_uri")
+        return str(redacted)
+    return value
 
 
 def _resource_profile_summary(resource_profile: Mapping[str, Any]) -> dict[str, Any]:

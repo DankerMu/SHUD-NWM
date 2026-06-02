@@ -1423,10 +1423,9 @@ def _active_qhh_identity_rows(cursor: Any, sources: ImportSources, *, model_id: 
                  WHEN mi.river_network_version_id = %s THEN 'river_network_version_id'
                  WHEN mi.model_package_uri = %s THEN 'model_package_uri'
                  WHEN mi.resource_profile->>'package_checksum' = %s THEN 'package_checksum'
-                 WHEN mi.resource_profile->>'source_inventory_checksum' = %s THEN 'source_inventory_checksum'
-                 WHEN mi.resource_profile->>'basin_slug' = %s THEN 'basin_slug'
-                 WHEN mi.resource_profile->>'project_name' = %s THEN 'project_name'
-                 WHEN mi.resource_profile->>'shud_input_name' = %s THEN 'shud_input_name'
+                 WHEN mi.resource_profile->>'basin_slug' = %s
+                      AND COALESCE(mi.resource_profile->>'project_name', mi.resource_profile->>'shud_input_name') = %s
+                   THEN 'basin_project_identity'
                  ELSE 'unknown'
                END AS duplicate_reason
         FROM core.model_instance mi
@@ -1441,10 +1440,10 @@ def _active_qhh_identity_rows(cursor: Any, sources: ImportSources, *, model_id: 
             OR mi.river_network_version_id = %s
             OR mi.model_package_uri = %s
             OR mi.resource_profile->>'package_checksum' = %s
-            OR mi.resource_profile->>'source_inventory_checksum' = %s
-            OR mi.resource_profile->>'basin_slug' = %s
-            OR mi.resource_profile->>'project_name' = %s
-            OR mi.resource_profile->>'shud_input_name' = %s
+            OR (
+              mi.resource_profile->>'basin_slug' = %s
+              AND COALESCE(mi.resource_profile->>'project_name', mi.resource_profile->>'shud_input_name') = %s
+            )
           )
         ORDER BY mi.model_id
         """,
@@ -1455,9 +1454,7 @@ def _active_qhh_identity_rows(cursor: Any, sources: ImportSources, *, model_id: 
             sources.ids["river_network_version_id"],
             sources.manifest["model_package_uri"],
             sources.manifest.get("package_checksum"),
-            sources.manifest.get("source_inventory_checksum"),
             sources.model["basin_slug"],
-            sources.model["shud_input_name"],
             sources.model["shud_input_name"],
             model_id,
             sources.ids["basin_id"],
@@ -1465,9 +1462,7 @@ def _active_qhh_identity_rows(cursor: Any, sources: ImportSources, *, model_id: 
             sources.ids["river_network_version_id"],
             sources.manifest["model_package_uri"],
             sources.manifest.get("package_checksum"),
-            sources.manifest.get("source_inventory_checksum"),
             sources.model["basin_slug"],
-            sources.model["shud_input_name"],
             sources.model["shud_input_name"],
         ),
     )

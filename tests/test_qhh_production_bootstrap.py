@@ -858,10 +858,42 @@ def test_duplicate_active_preflight_matches_same_package_identity_without_qhh_fl
     ]
     assert "mi.model_package_uri = %s" in executed["sql"]
     assert "mi.resource_profile->>'package_checksum' = %s" in executed["sql"]
-    assert "mi.resource_profile->>'source_inventory_checksum' = %s" in executed["sql"]
+    assert "source_inventory_checksum" not in executed["sql"]
     assert "s3://pkg/package/" in executed["params"]
     assert "package-sha" in executed["params"]
-    assert "inventory-sha" in executed["params"]
+
+
+def test_duplicate_active_preflight_does_not_match_source_inventory_checksum_only() -> None:
+    executed: dict[str, Any] = {}
+
+    class FakeCursor:
+        def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+            executed["sql"] = sql
+            executed["params"] = params
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return []
+
+    sources = SimpleNamespace(
+        manifest={
+            "model_package_uri": "s3://pkg/qhh/package/",
+            "package_checksum": "qhh-package-sha",
+            "source_inventory_checksum": "shared-inventory-sha",
+        },
+        model={"basin_slug": "qhh", "shud_input_name": "qhh"},
+        ids={
+            "model_id": "basins_qhh_shud",
+            "basin_id": "qhh",
+            "basin_version_id": "qhh_vbasins",
+            "river_network_version_id": "qhh_rivnet_vbasins",
+        },
+    )
+
+    rows = qhh_bootstrap._active_qhh_identity_rows(FakeCursor(), sources, model_id="basins_qhh_shud")
+
+    assert rows == []
+    assert "source_inventory_checksum" not in executed["sql"]
+    assert "shared-inventory-sha" not in executed["params"]
 
 
 def test_bootstrap_cli_outputs_typed_blocker_for_missing_database_url(
@@ -895,13 +927,16 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     integration_database_url: str,
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path)
+    basin_slug = "qhh-success"
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path, basin_slug=basin_slug)
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
 
     first = bootstrap_qhh_production(
         database_url=integration_database_url,
         basins_root=root,
+        qhh_basin_slug=basin_slug,
+        model_id=model_id,
         inventory_path=inventory_path,
         package_manifest_path=manifest_path,
         evidence_dir=evidence_dir,
@@ -910,6 +945,8 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     second = bootstrap_qhh_production(
         database_url=integration_database_url,
         basins_root=root,
+        qhh_basin_slug=basin_slug,
+        model_id=model_id,
         inventory_path=inventory_path,
         package_manifest_path=manifest_path,
     )
@@ -1026,12 +1063,15 @@ def test_bootstrap_station_failure_rolls_back_model_readiness(
     integration_database_url: str,
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path)
+    basin_slug = "qhh-rollback-model"
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path, basin_slug=basin_slug)
 
     with pytest.raises(QhhProductionBootstrapError) as exc_info:
         bootstrap_qhh_production(
             database_url=integration_database_url,
             basins_root=root,
+            qhh_basin_slug=basin_slug,
+            model_id=model_id,
             inventory_path=inventory_path,
             package_manifest_path=manifest_path,
             fail_after_model_metadata=True,
@@ -1069,12 +1109,15 @@ def test_bootstrap_seed_failures_roll_back_rows_and_scheduler_visibility(
     failure_point: str,
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path)
+    basin_slug = f"qhh-rollback-{failure_point.replace('_', '-')}"
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path, basin_slug=basin_slug)
 
     with pytest.raises(QhhProductionBootstrapError) as exc_info:
         bootstrap_qhh_production(
             database_url=integration_database_url,
             basins_root=root,
+            qhh_basin_slug=basin_slug,
+            model_id=model_id,
             inventory_path=inventory_path,
             package_manifest_path=manifest_path,
             **{failure_flag: True},
@@ -1130,10 +1173,13 @@ def test_bootstrap_duplicate_active_model_blocks_before_station_writes(
     integration_database_url: str,
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path)
+    basin_slug = "qhh-duplicate-active"
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path, basin_slug=basin_slug)
     bootstrap_qhh_production(
         database_url=integration_database_url,
         basins_root=root,
+        qhh_basin_slug=basin_slug,
+        model_id=model_id,
         inventory_path=inventory_path,
         package_manifest_path=manifest_path,
     )
@@ -1227,6 +1273,8 @@ def test_bootstrap_duplicate_active_model_blocks_before_station_writes(
         bootstrap_qhh_production(
             database_url=integration_database_url,
             basins_root=root,
+            qhh_basin_slug=basin_slug,
+            model_id=model_id,
             inventory_path=inventory_path,
             package_manifest_path=manifest_path,
         )
@@ -1260,17 +1308,22 @@ def test_registry_import_ignores_bootstrap_output_identity_rows_on_rerun(
     integration_database_url: str,
 ) -> None:
     apply_migrations_from_zero(integration_database_url)
-    root, _input_dir, inventory_path, manifest_path, _model_id = _qhh_registry_fixture(tmp_path)
+    basin_slug = "qhh-registry-rerun"
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path, basin_slug=basin_slug)
 
     first = bootstrap_qhh_production(
         database_url=integration_database_url,
         basins_root=root,
+        qhh_basin_slug=basin_slug,
+        model_id=model_id,
         inventory_path=inventory_path,
         package_manifest_path=manifest_path,
     )
     second = bootstrap_qhh_production(
         database_url=integration_database_url,
         basins_root=root,
+        qhh_basin_slug=basin_slug,
+        model_id=model_id,
         inventory_path=inventory_path,
         package_manifest_path=manifest_path,
     )
@@ -1280,10 +1333,10 @@ def test_registry_import_ignores_bootstrap_output_identity_rows_on_rerun(
     assert second["status"] == "bootstrapped"
 
 
-def _qhh_registry_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path, str]:
+def _qhh_registry_fixture(tmp_path: Path, *, basin_slug: str = "qhh") -> tuple[Path, Path, Path, Path, str]:
     root, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(
         tmp_path,
-        basin_slug="qhh",
+        basin_slug=basin_slug,
         sp_segment_count=2,
     )
     input_dir = _rename_fixture_input_to_qhh(input_dir)
@@ -1325,6 +1378,7 @@ def _refresh_inventory_and_manifest(
     write_inventory(inventory, inventory_path)
     model = inventory["models"][0]
     manifest = _package_manifest_for_model(model, model["model_id"], inventory=inventory)
+    manifest["package_checksum"] = f"package-sha-{model['model_id']}"
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

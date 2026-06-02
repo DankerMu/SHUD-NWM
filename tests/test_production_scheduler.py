@@ -2476,6 +2476,44 @@ def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path:
     }
 
 
+@pytest.mark.parametrize("duplicate_field", ["model_package_uri", "package_checksum"])
+def test_duplicate_active_package_identity_is_rejected_before_candidates_and_submission(
+    tmp_path: Path,
+    duplicate_field: str,
+) -> None:
+    package_uri_a = "s3://nhms/models/shared/package/"
+    package_uri_b = package_uri_a if duplicate_field == "model_package_uri" else "s3://nhms/models/other/package/"
+    checksum_a = "shared-package-sha"
+    checksum_b = checksum_a if duplicate_field == "package_checksum" else "other-package-sha"
+    model_a = _model(
+        "model_a",
+        "basin_a",
+        resource_profile={"runnable": True, "package_checksum": checksum_a, "lineage": "basins_registry_import"},
+    )
+    model_b = _model(
+        "model_b",
+        "basin_b",
+        resource_profile={"runnable": True, "package_checksum": checksum_b, "lineage": "basins_registry_import"},
+    )
+    model_a["model_package_uri"] = package_uri_a
+    model_b["model_package_uri"] = package_uri_b
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([model_a, model_b]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    exclusions = result.evidence["model_discovery"]["exclusions"]
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert {item["reason"] for item in exclusions} == {"duplicate_active_model_identity"}
+    assert {item["duplicate_identity_field"] for item in exclusions} == {duplicate_field}
+    assert {tuple(item["duplicate_model_ids"]) for item in exclusions} == {("model_a", "model_b")}
+
+
 @pytest.mark.parametrize("missing_field", ["basin_version_id", "river_network_version_id", "model_package_uri"])
 def test_incomplete_production_model_metadata_is_blocked_before_candidates(
     tmp_path: Path,
