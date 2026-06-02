@@ -93,6 +93,12 @@ def _env_float(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a float") from error
 
 
+def _non_blank_path(value: str | None, option_name: str) -> str | None:
+    if value is not None and value.strip() == "":
+        raise ValueError(f"plan-production {option_name} must not be blank")
+    return value
+
+
 def _plan_production(
     *,
     sources: Sequence[str],
@@ -109,6 +115,9 @@ def _plan_production(
     lock_path: str | None,
     evidence_dir: str | None,
 ) -> dict[str, object]:
+    workspace_root = _non_blank_path(workspace_root, "--workspace-root")
+    lock_path = _non_blank_path(lock_path, "--lock-path")
+    evidence_dir = _non_blank_path(evidence_dir, "--evidence-dir")
     resolved_interval_seconds = (
         interval_seconds
         if interval_seconds is not None
@@ -144,6 +153,8 @@ def _plan_production(
         if max_cycles_per_source is not None
         else _env_int("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", 1)
     )
+    if resolved_max_cycles < 1:
+        raise ValueError("plan-production max_cycles_per_source must be at least 1")
     config_kwargs: dict[str, object] = {
         "workspace_root": resolved_workspace_root,
         "sources": resolved_sources,

@@ -1649,6 +1649,86 @@ def test_plan_production_explicit_workspace_ignores_ambient_scheduler_lock_and_e
     assert Path(captured["config"].evidence_dir) == explicit_workspace.resolve() / "scheduler" / "evidence"
 
 
+def test_plan_production_blank_workspace_root_shared_helper_rejected_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank workspace flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    with pytest.raises(ValueError, match="--workspace-root must not be blank"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root="",
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+
+def test_plan_production_click_blank_workspace_root_exits_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank workspace flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    try:
+        cli._click_main(["plan-production", "--workspace-root", ""])
+    except SystemExit as error:
+        rc = int(error.code or 0)
+    else:
+        rc = 0
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "plan-production --workspace-root must not be blank\n"
+
+
+def test_plan_production_argparse_blank_workspace_root_exits_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank workspace flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    rc = cli._argparse_main(["plan-production", "--workspace-root", ""])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "plan-production --workspace-root must not be blank\n"
+
+
 def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside-evidence"
     outside.mkdir()
@@ -1788,6 +1868,46 @@ def test_non_dry_run_blocks_before_candidate_execution_when_final_evidence_artif
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
     assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+
+
+def test_cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    fixed_pass_started_at = _dt("2026-05-21T12:00:00Z")
+    orchestrator = FakeProductionOrchestrator()
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": "abcdef1234567890"})())
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=fixed_pass_started_at, dry_run=False, cancel_active_slurm=True),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeSlurmActiveRepository(
+            active_jobs=[
+                {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
+            ]
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    pass_id = "scheduler_2026052112_abcdef123456"
+    evidence_dir = Path(scheduler.config.evidence_dir)
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{pass_id}.json").write_text("existing\n", encoding="utf-8")
+
+    result = scheduler.run_once()
+
+    cancellation = result.evidence["slurm_cancellation_evidence"][0]
+    assert orchestrator.cancel_calls == []
+    assert orchestrator.calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "evidence_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
+    assert result.evidence["model_run_evidence"] == []
+    assert cancellation["status"] == "preflight_blocked"
+    assert cancellation["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+    assert cancellation["cancel_attempted"] is False
+    assert cancellation["mutation_occurred"] is False
 
 
 def test_stale_unowned_lock_is_not_unlinked(tmp_path: Path) -> None:
@@ -2706,6 +2826,7 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     roots = _slurm_roots(tmp_path)
     constructed: list[dict[str, Any]] = []
     cancel_calls: list[tuple[str, str]] = []
+    reservation_seen_before_cancel: list[bool] = []
 
     class DefaultPathCancelOrchestrator:
         stages = M3_STAGES
@@ -2714,6 +2835,7 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
             constructed.append({"config": config, "repository": repository, "state_manager": state_manager})
 
         def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
+            reservation_seen_before_cancel.append(bool(list(roots["workspace_root"].glob("scheduler/evidence/*.pre_execution.json"))))
             cancel_calls.append((cycle_id, reason))
             return [
                 {
@@ -2762,6 +2884,8 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     assert cancellation["cancelled_jobs"][0]["slurm_job_id"] == "7777"
     assert cancellation["cancelled_jobs"][0]["replacement_submitted"] is False
     assert cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
+    assert reservation_seen_before_cancel == [True]
+    assert result.evidence["evidence_pre_execution"]["status"] == "reserved"
     assert len(constructed) == 1
     assert constructed[0]["repository"] == "repository-from-env"
     assert constructed[0]["state_manager"] is None
@@ -6935,6 +7059,35 @@ def test_plan_production_cli_explicit_max_cycles_one_overrides_scheduler_env(
     assert captured["config"].max_cycles_per_source == 1
 
 
+def test_plan_production_cli_rejects_non_positive_explicit_max_cycles(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("non-positive max cycles flag must not construct scheduler")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    try:
+        cli._click_main(["plan-production", "--max-cycles-per-source", "0"])
+    except SystemExit as error:
+        rc = int(error.code or 0)
+    else:
+        rc = 0
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == "plan-production max_cycles_per_source must be at least 1\n"
+
+
 def test_plan_production_cli_explicit_interval_and_max_passes_override_scheduler_env(
     monkeypatch: Any,
     tmp_path: Path,
@@ -7070,6 +7223,45 @@ def test_cli_rejects_invalid_scheduler_max_cycles_env_before_scheduler_construct
             lock_path=None,
             evidence_dir=None,
         )
+
+
+def test_cli_rejects_non_positive_scheduler_max_cycles_env_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("non-positive max cycles env must not construct scheduler")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", "0")
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    with pytest.raises(ValueError, match="max_cycles_per_source must be at least 1"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=None,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root=str(workspace_root),
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+
+def test_production_scheduler_config_rejects_non_positive_max_cycles(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_cycles_per_source must be at least 1"):
+        _config(tmp_path, max_cycles_per_source=0)
 
 
 class SimpleResult:

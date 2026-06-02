@@ -313,6 +313,9 @@ class ProductionSchedulerConfig:
     _evidence_root_preflight_path: Path = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        _reject_blank_config_path(self.workspace_root, "workspace_root")
+        _reject_blank_config_path(self.lock_path, "lock_path")
+        _reject_blank_config_path(self.evidence_dir, "evidence_dir")
         workspace_root_preflight_path = _config_path_preserve_final_component(self.workspace_root)
         workspace_root = workspace_root_preflight_path.resolve()
         object.__setattr__(self, "_workspace_root_preflight_path", workspace_root_preflight_path)
@@ -393,7 +396,9 @@ class ProductionSchedulerConfig:
             raise ValueError(f"production scheduler lookback_hours exceeds limit {MAX_LOOKBACK_HOURS}")
         object.__setattr__(self, "lookback_hours", lookback_hours)
         object.__setattr__(self, "cycle_lag_hours", max(int(self.cycle_lag_hours), 0))
-        max_cycles_per_source = max(int(self.max_cycles_per_source), 1)
+        max_cycles_per_source = int(self.max_cycles_per_source)
+        if max_cycles_per_source < 1:
+            raise ValueError("production scheduler max_cycles_per_source must be at least 1")
         if max_cycles_per_source > MAX_CYCLES_PER_SOURCE:
             raise ValueError(f"production scheduler max_cycles_per_source exceeds limit {MAX_CYCLES_PER_SOURCE}")
         object.__setattr__(self, "max_cycles_per_source", max_cycles_per_source)
@@ -725,12 +730,16 @@ class ProductionScheduler:
                 cycles=cycles,
             )
             cancellation_evidence: list[dict[str, Any]] = []
-            if (
+            pending_cancel_candidates = [
+                candidate
+                for candidate in skipped_candidates
+                if candidate.get("reason") == "cancel_requested_active_slurm"
+            ]
+            cancel_active_slurm_requested = (
                 self.config.cancel_active_slurm
                 and not self.config.dry_run
-                and any(candidate.get("reason") == "cancel_requested_active_slurm" for candidate in skipped_candidates)
-            ):
-                cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
+                and bool(pending_cancel_candidates)
+            )
             execution_evidence: list[dict[str, Any]] = []
             submitted_count = 0
             failed_count = 0
@@ -740,43 +749,56 @@ class ProductionScheduler:
             no_mutation_proof = _no_mutation_proof()
             slurm_preflight_evidence: dict[str, Any] | None = None
             evidence_reservation: dict[str, Any] = {"status": "not_required"}
-            if not self.config.dry_run and candidates:
-                evidence_reservation = self._reserve_pre_execution_evidence(pass_id, started_at, len(candidates))
+            mutation_candidate_count = len(candidates) + len(pending_cancel_candidates)
+            if not self.config.dry_run and mutation_candidate_count:
+                evidence_reservation = self._reserve_pre_execution_evidence(
+                    pass_id,
+                    started_at,
+                    mutation_candidate_count,
+                )
                 if evidence_reservation["status"] == "blocked":
                     execution_evidence = [
                         _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
                         for candidate in candidates
                     ]
+                    cancellation_evidence = [
+                        _cancel_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
+                        for candidate in pending_cancel_candidates
+                    ]
                     execution_boundary = "evidence_preflight_blocked"
                     pass_status = "preflight_blocked"
                 else:
-                    slurm_preflight = _slurm_preflight(self.config)
-                    if slurm_preflight["status"] != "not_required":
-                        slurm_preflight_evidence = redact_payload(slurm_preflight)
-                    if slurm_preflight["status"] == "blocked":
-                        execution_evidence = [
-                            _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
-                            for candidate in candidates
-                        ]
-                        execution_boundary = "slurm_preflight_blocked"
-                        pass_status = "preflight_blocked"
-                    elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
-                        execution_evidence = [
-                            _candidate_preflight_blocked_evidence(candidate, config=self.config)
-                            for candidate in candidates
-                        ]
-                        execution_boundary = "preflight_blocked"
-                        pass_status = "preflight_blocked"
-                        no_mutation_proof = _no_mutation_proof()
-                    else:
-                        execution_evidence = self._execute_candidates(candidates)
-                        submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
-                        execution_boundary = (
-                            "slurm_gateway_orchestration"
-                            if self.config.slurm_execution_enabled
-                            else "production_orchestration"
-                        )
-                pass_status = _scheduler_pass_status_from_execution(execution_evidence)
+                    if cancel_active_slurm_requested:
+                        cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
+                    if candidates:
+                        slurm_preflight = _slurm_preflight(self.config)
+                        if slurm_preflight["status"] != "not_required":
+                            slurm_preflight_evidence = redact_payload(slurm_preflight)
+                        if slurm_preflight["status"] == "blocked":
+                            execution_evidence = [
+                                _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                                for candidate in candidates
+                            ]
+                            execution_boundary = "slurm_preflight_blocked"
+                            pass_status = "preflight_blocked"
+                        elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
+                            execution_evidence = [
+                                _candidate_preflight_blocked_evidence(candidate, config=self.config)
+                                for candidate in candidates
+                            ]
+                            execution_boundary = "preflight_blocked"
+                            pass_status = "preflight_blocked"
+                            no_mutation_proof = _no_mutation_proof()
+                        else:
+                            execution_evidence = self._execute_candidates(candidates)
+                            submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
+                            execution_boundary = (
+                                "slurm_gateway_orchestration"
+                                if self.config.slurm_execution_enabled
+                                else "production_orchestration"
+                            )
+                if execution_evidence:
+                    pass_status = _scheduler_pass_status_from_execution(execution_evidence)
                 no_mutation_proof = {
                     "adapter_download_called": False,
                     "slurm_submit_called": submitted_count > 0,
@@ -825,7 +847,11 @@ class ProductionScheduler:
             )
             if slurm_preflight_evidence is not None:
                 evidence["slurm_preflight"] = slurm_preflight_evidence
-            if not self.config.dry_run and candidates and evidence_reservation["status"] != "not_required":
+            if (
+                not self.config.dry_run
+                and mutation_candidate_count
+                and evidence_reservation["status"] != "not_required"
+            ):
                 evidence["evidence_pre_execution"] = evidence_reservation
             if root_preflight["status"] != "not_required":
                 evidence["root_preflight"] = root_preflight
@@ -4334,6 +4360,40 @@ def _candidate_evidence_write_blocked_evidence(
     }
 
 
+def _cancel_candidate_evidence_write_blocked_evidence(
+    candidate: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    reason = reservation.get("reason")
+    blocker = {
+        "code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "state": "blocked",
+        "quality_flag": "evidence_preflight_blocked",
+        "residual_risk": "Scheduler evidence write proof failed before Slurm cancellation mutation.",
+    }
+    if reason not in (None, ""):
+        blocker["reason"] = str(reason)
+    source_id = str(candidate.get("source_id") or "")
+    cycle_time_text = str(candidate.get("cycle_time_utc") or "")
+    item: dict[str, Any] = {
+        "source_id": source_id,
+        "cycle_time_utc": cycle_time_text,
+        "status": "preflight_blocked",
+        "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "error_message": "Scheduler evidence write proof failed before Slurm cancellation mutation.",
+        "replacement_submitted": False,
+        "mutation_occurred": False,
+        "cancel_attempted": False,
+        "evidence_pre_execution": _evidence_safe(dict(reservation)),
+        "active_slurm_jobs": _evidence_safe(candidate.get("active_slurm_jobs", [])),
+        "residual_blockers": [blocker],
+    }
+    if source_id and cycle_time_text:
+        cycle_time = _ensure_utc(datetime.fromisoformat(cycle_time_text.replace("Z", "+00:00")))
+        item["cycle_id"] = cycle_id_for(source_id, cycle_time)
+    return item
+
+
 def _candidate_secret_manifest_blocked_evidence(
     candidate: SchedulerCandidate,
     *,
@@ -6143,6 +6203,11 @@ def _confined_path(value: Path | str, workspace_root: Path, field_name: str) -> 
     candidate = resolved_parent / path.name
     _require_under_workspace(resolved_parent, workspace_root, field_name)
     return candidate
+
+
+def _reject_blank_config_path(value: Path | str | None, field_name: str) -> None:
+    if isinstance(value, str) and value.strip() == "":
+        raise ValueError(f"production scheduler {field_name} must not be blank")
 
 
 def _optional_config_path(value: Path | str | None) -> Path | None:
