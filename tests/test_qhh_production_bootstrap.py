@@ -14,7 +14,7 @@ from packages.common.model_registry import PsycopgModelRegistryStore
 from services.orchestrator.scheduler import ProductionScheduler, ProductionSchedulerConfig
 from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
 from tests.test_basins_registry_import import _write_registry_fixture
-from tests.test_production_scheduler import FakeAdapter
+from tests.test_production_scheduler import FakeAdapter, _dt
 from workers.model_registry.cli import _argparse_main
 from workers.model_registry.qhh_production_bootstrap import (
     MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES,
@@ -793,6 +793,111 @@ def test_scheduler_ready_profile_overrides_cannot_replace_canonical_identity(tmp
     assert profile["partition"] == "debug"
 
 
+def test_scheduler_ready_profile_rebuild_strips_existing_run_scoped_identity(tmp_path: Path) -> None:
+    root, input_dir, inventory_path, manifest_path, _model_id = _qhh_registry_fixture(tmp_path)
+    paths = qhh_bootstrap._prepare_bootstrap_paths(
+        basins_root=root,
+        qhh_basin_slug="qhh",
+        qhh_project_name="qhh",
+        model_id="basins_qhh_shud",
+        package_version="vbasins-qhh-production",
+        inventory_path=inventory_path,
+        package_manifest_path=manifest_path,
+        work_dir=tmp_path / "work",
+    )
+    preflight_sources = qhh_bootstrap._prepare_preflight_sources_from_bounded_json(
+        paths.inventory_path,
+        paths.package_manifest_path,
+        model_id="basins_qhh_shud",
+    )
+    sources = qhh_bootstrap._prepare_sources_from_preflight(preflight_sources, model_id="basins_qhh_shud")
+    stations, tsd_checksum = read_qhh_tsd_forc(input_dir / "qhh.tsd.forc", input_dir)
+    output_count, sp_checksum = read_qhh_output_segment_count(input_dir / "qhh.sp.riv", input_dir)
+    expected = qhh_bootstrap._scheduler_ready_resource_profile(
+        qhh_bootstrap.QhhBootstrapContext(
+            sources=sources,
+            paths=paths,
+            stations=stations,
+            output_segment_count=output_count,
+            tsd_forc_checksum=tsd_checksum,
+            sp_riv_checksum=sp_checksum,
+            shud_code_version="basins-shud",
+        ),
+        resource_profile_overrides={},
+    )
+
+    merged = qhh_bootstrap._canonical_scheduler_ready_resource_profile(
+        {
+            "partition": "debug",
+            "canonical_product_id": "stale-canon",
+            "published_manifest_id": "stale-manifest",
+            "pipeline_job_id": "stale-job",
+            "output_uri": "s3://nhms/runs/stale/output/",
+            "custom_unowned": "preserve-me-not",
+        },
+        expected,
+        resource_profile_overrides={"memory_gb": 12, "output_uri": "s3://evil/stale/"},
+    )
+
+    assert merged["partition"] == "standard"
+    assert merged["memory_gb"] == 12
+    assert merged["package_checksum"] == sources.manifest["package_checksum"]
+    assert merged["model_package_uri"] == sources.manifest["model_package_uri"]
+    assert not {
+        "canonical_product_id",
+        "published_manifest_id",
+        "pipeline_job_id",
+        "output_uri",
+        "custom_unowned",
+    } & set(merged)
+
+
+def test_generated_qhh_inventory_enforces_budget_during_discovery_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _input_dir, _inventory_path, _manifest_path, model_id = _qhh_registry_fixture(tmp_path)
+    qhh_source_root = root / "qhh"
+    calls: list[Any] = []
+
+    def fake_preflight(root_arg: Path, *, model_id: str, qhh_source_root: Path) -> None:
+        calls.append(("preflight", root_arg, model_id, qhh_source_root))
+
+    def fake_discover(root_arg: Path, *, budget: Any = None) -> dict[str, Any]:
+        calls.append(("discover", root_arg, budget.max_entries if budget is not None else None))
+        raise qhh_bootstrap.BasinsDiscoveryError(
+            "QHH_BOOTSTRAP_DISCOVERY_ENTRY_LIMIT_EXCEEDED",
+            "budget exhausted",
+            path=str(root_arg),
+        )
+
+    monkeypatch.setattr(qhh_bootstrap, "_bounded_discovery_preflight", fake_preflight)
+    monkeypatch.setattr(qhh_bootstrap, "discover_basins_inventory", fake_discover)
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        qhh_bootstrap._discover_qhh_inventory(root, model_id=model_id, qhh_source_root=qhh_source_root)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_DISCOVERY_ENTRY_LIMIT_EXCEEDED"
+    assert calls[0][0] == "preflight"
+    assert calls[1] == ("discover", root, MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES)
+
+
+def test_generated_qhh_inventory_blocks_deep_calib_descendants_after_preflight(
+    tmp_path: Path,
+) -> None:
+    root, _input_dir, _inventory_path, _manifest_path, model_id = _qhh_registry_fixture(tmp_path)
+    qhh_source_root = root / "qhh"
+    deep = qhh_source_root / "CALIB" / "d1" / "d2" / "d3" / "d4" / "d5" / "d6"
+    deep.mkdir(parents=True)
+    (deep / "calib.txt").write_text("calibration\n", encoding="utf-8")
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        qhh_bootstrap._discover_qhh_inventory(root, model_id=model_id, qhh_source_root=qhh_source_root)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_DISCOVERY_DEPTH_EXCEEDED"
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
 def test_duplicate_active_preflight_matches_same_package_identity_without_qhh_flags() -> None:
     executed: dict[str, Any] = {}
 
@@ -1044,7 +1149,11 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     assert forcing_count == 0
 
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(workspace_root=tmp_path / "workspace", model_ids=(model_id,)),
+        ProductionSchedulerConfig(
+            workspace_root=tmp_path / "workspace",
+            model_ids=(model_id,),
+            now=_dt("2026-05-21T12:00:00Z"),
+        ),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
     )
@@ -1155,7 +1264,11 @@ def test_bootstrap_seed_failures_roll_back_rows_and_scheduler_visibility(
             output_count = int(cursor.fetchone()["count"])
 
     scheduler = ProductionScheduler(
-        ProductionSchedulerConfig(workspace_root=tmp_path / f"workspace-{failure_point}", model_ids=(model_id,)),
+        ProductionSchedulerConfig(
+            workspace_root=tmp_path / f"workspace-{failure_point}",
+            model_ids=(model_id,),
+            now=_dt("2026-05-21T12:00:00Z"),
+        ),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
     )
@@ -1165,6 +1278,224 @@ def test_bootstrap_seed_failures_roll_back_rows_and_scheduler_visibility(
     assert station_count == 0
     assert output_count == 0
     assert model_id not in {item["model_id"] for item in result.evidence["candidates"]}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("stale_kind", "error_code"),
+    [
+        ("station", "QHH_BOOTSTRAP_STALE_STATION_IDENTITY"),
+        ("output", "QHH_BOOTSTRAP_STALE_OUTPUT_SEGMENT_IDENTITY"),
+    ],
+)
+def test_bootstrap_blocks_stale_qhh_sibling_rows_before_scheduler_visibility(
+    tmp_path: Path,
+    integration_database_url: str,
+    stale_kind: str,
+    error_code: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    basin_slug = f"qhh-stale-{stale_kind}"
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path, basin_slug=basin_slug)
+    first = bootstrap_qhh_production(
+        database_url=integration_database_url,
+        basins_root=root,
+        qhh_basin_slug=basin_slug,
+        model_id=model_id,
+        inventory_path=inventory_path,
+        package_manifest_path=manifest_path,
+    )
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE core.model_instance
+                SET active_flag = false,
+                    lifecycle_state = 'inactive'
+                WHERE model_id = %s
+                """,
+                (model_id,),
+            )
+            if stale_kind == "station":
+                cursor.execute(
+                    """
+                    INSERT INTO met.met_station (
+                        station_id,
+                        basin_version_id,
+                        station_name,
+                        geom,
+                        elevation_m,
+                        station_role,
+                        active_flag,
+                        properties_json
+                    )
+                    VALUES (
+                        'qhh_forc_999',
+                        %s,
+                        'Stale QHH forcing station',
+                        ST_SetSRID(ST_MakePoint(100.9, 30.9), 4490),
+                        0,
+                        'forcing_grid',
+                        true,
+                        %s
+                    )
+                    """,
+                    (
+                        first["basin_version_id"],
+                        Json(
+                            {
+                                "seed": "qhh_production_bootstrap",
+                                "model_id": model_id,
+                                "basin_version_id": first["basin_version_id"],
+                                "source": "qhh.tsd.forc",
+                            }
+                        ),
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO core.river_segment (
+                        river_segment_id,
+                        river_network_version_id,
+                        segment_order,
+                        properties_json
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        999,
+                        %s
+                    )
+                    """,
+                    (
+                        f"{model_id}_shud_riv_999999",
+                        first["river_network_version_id"],
+                        Json(
+                            {
+                                "seed": "qhh_production_bootstrap",
+                                "model_id": model_id,
+                                "basin_version_id": first["basin_version_id"],
+                                "shud_output_river": True,
+                            }
+                        ),
+                    ),
+                )
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        bootstrap_qhh_production(
+            database_url=integration_database_url,
+            basins_root=root,
+            qhh_basin_slug=basin_slug,
+            model_id=model_id,
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+        )
+
+    assert exc_info.value.error_code == error_code
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            workspace_root=tmp_path / f"workspace-{stale_kind}",
+            model_ids=(model_id,),
+            now=_dt("2026-05-21T12:00:00Z"),
+        ),
+        registry=PsycopgModelRegistryStore(integration_database_url),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    result = scheduler.run_once()
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT active_flag,
+                       COALESCE(lifecycle_state, CASE WHEN active_flag THEN 'active' ELSE 'inactive' END)
+                         AS lifecycle_state
+                FROM core.model_instance
+                WHERE model_id = %s
+                """,
+                (model_id,),
+            )
+            model = cursor.fetchone()
+            cursor.execute("SELECT COUNT(*) AS count FROM met.forcing_version WHERE model_id = %s", (model_id,))
+            forcing_count = int(cursor.fetchone()["count"])
+
+    assert model["active_flag"] is False
+    assert model["lifecycle_state"] == "inactive"
+    assert forcing_count == 0
+    assert model_id not in {item["model_id"] for item in result.evidence["candidates"]}
+
+
+@pytest.mark.integration
+def test_bootstrap_replaces_stale_run_scoped_resource_profile_and_scheduler_derives_current_identity(
+    tmp_path: Path,
+    integration_database_url: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    basin_slug = "qhh-stale-profile"
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path, basin_slug=basin_slug)
+    first = bootstrap_qhh_production(
+        database_url=integration_database_url,
+        basins_root=root,
+        qhh_basin_slug=basin_slug,
+        model_id=model_id,
+        inventory_path=inventory_path,
+        package_manifest_path=manifest_path,
+    )
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE core.model_instance
+                SET active_flag = false,
+                    lifecycle_state = 'inactive',
+                    resource_profile = resource_profile || %s
+                WHERE model_id = %s
+                """,
+                (
+                    Json(
+                        {
+                            "canonical_product_id": "stale-canon",
+                            "published_manifest_id": "stale-manifest",
+                            "pipeline_job_id": "stale-job",
+                            "output_uri": "s3://nhms/runs/stale/output/",
+                            "partition": "debug",
+                        }
+                    ),
+                    model_id,
+                ),
+            )
+
+    second = bootstrap_qhh_production(
+        database_url=integration_database_url,
+        basins_root=root,
+        qhh_basin_slug=basin_slug,
+        model_id=model_id,
+        inventory_path=inventory_path,
+        package_manifest_path=manifest_path,
+    )
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            workspace_root=tmp_path / "workspace-stale-profile",
+            model_ids=(model_id,),
+            now=_dt("2026-05-21T12:00:00Z"),
+        ),
+        registry=PsycopgModelRegistryStore(integration_database_url),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    result = scheduler.run_once()
+    candidate = next(item for item in result.evidence["candidates"] if item["model_id"] == model_id)
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT resource_profile FROM core.model_instance WHERE model_id = %s", (model_id,))
+            profile = cursor.fetchone()["resource_profile"]
+
+    assert second["package_identity"] == first["package_identity"]
+    assert not {"canonical_product_id", "published_manifest_id", "pipeline_job_id", "output_uri"} & set(profile)
+    assert profile["partition"] == "standard"
+    assert candidate["canonical_product_id"] == "canon_gfs_2026052106"
+    assert candidate["published_manifest_id"] == f"manifest_fcst_gfs_2026052106_{model_id}"
+    assert "pipeline_job_id" not in candidate["production_identity_contract"]["identity"]
 
 
 @pytest.mark.integration

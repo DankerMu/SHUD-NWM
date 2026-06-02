@@ -71,6 +71,30 @@ class DiscoveryWarning:
         return payload
 
 
+@dataclass
+class DiscoveryBudget:
+    max_depth: int
+    max_entries: int
+    error_code_prefix: str = "BASINS"
+    root: Path | None = None
+    entries_seen: int = 0
+
+    def enter(self, path: Path, *, depth: int | None = None) -> None:
+        if depth is not None and depth > self.max_depth:
+            raise BasinsDiscoveryError(
+                f"{self.error_code_prefix}_DISCOVERY_DEPTH_EXCEEDED",
+                "Basins discovery exceeded the allowed directory depth.",
+                path=str(path),
+            )
+        self.entries_seen += 1
+        if self.entries_seen > self.max_entries:
+            raise BasinsDiscoveryError(
+                f"{self.error_code_prefix}_DISCOVERY_ENTRY_LIMIT_EXCEEDED",
+                "Basins discovery exceeded the allowed entry count.",
+                path=str(self.root or path),
+            )
+
+
 def resolve_basins_root(cli_root: str | None) -> Path:
     if cli_root:
         return Path(cli_root).expanduser()
@@ -80,7 +104,7 @@ def resolve_basins_root(cli_root: str | None) -> Path:
     return DEFAULT_BASINS_ROOT
 
 
-def discover_basins_inventory(basins_root: str | Path) -> dict[str, Any]:
+def discover_basins_inventory(basins_root: str | Path, *, budget: DiscoveryBudget | None = None) -> dict[str, Any]:
     root = Path(basins_root).expanduser()
     if not root.exists():
         raise BasinsDiscoveryError("BASINS_ROOT_NOT_FOUND", f"Basins root does not exist: {root}", path=str(root))
@@ -89,10 +113,14 @@ def discover_basins_inventory(basins_root: str | Path) -> dict[str, Any]:
     _ensure_readable_directory(root, "BASINS_ROOT_UNREADABLE")
 
     resolved_root = root.resolve()
+    if budget is not None and budget.root is None:
+        budget.root = root
+    if budget is not None:
+        budget.enter(root, depth=0)
     warnings: list[DiscoveryWarning] = []
     models = [
-        _inventory_for_model(candidate, root, resolved_root, warnings)
-        for candidate in _find_model_dirs(root, resolved_root, warnings)
+        _inventory_for_model(candidate, root, resolved_root, warnings, budget=budget)
+        for candidate in _find_model_dirs(root, resolved_root, warnings, budget=budget)
     ]
     models.sort(key=lambda record: record["model_id"])
     has_blocking_warnings = any(warning.code in BLOCKING_WARNING_CODES for warning in warnings)
@@ -117,9 +145,15 @@ def write_inventory(inventory: dict[str, Any], output_path: str | Path) -> None:
     output.write_text(json.dumps(inventory, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _find_model_dirs(root: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> list[Path]:
+def _find_model_dirs(
+    root: Path,
+    resolved_root: Path,
+    warnings: list[DiscoveryWarning],
+    *,
+    budget: DiscoveryBudget | None = None,
+) -> list[Path]:
     candidates: list[Path] = []
-    for entry in _iter_child_dirs(root):
+    for entry in _iter_child_dirs(root, budget=budget, depth=1):
         if _is_ignored_path(entry):
             continue
         resolved_entry = _safe_resolve_under_root(entry, resolved_root, warnings)
@@ -129,7 +163,7 @@ def _find_model_dirs(root: Path, resolved_root: Path, warnings: list[DiscoveryWa
         if _has_child_dir(entry, "input", resolved_root, warnings):
             candidates.append(entry)
             continue
-        for nested in _iter_child_dirs(entry):
+        for nested in _iter_child_dirs(entry, budget=budget, depth=2):
             if _is_ignored_path(nested):
                 continue
             resolved_nested = _safe_resolve_under_root(nested, resolved_root, warnings)
@@ -146,12 +180,14 @@ def _inventory_for_model(
     root: Path,
     resolved_root: Path,
     warnings: list[DiscoveryWarning],
+    *,
+    budget: DiscoveryBudget | None = None,
 ) -> dict[str, Any]:
     warning_start = len(warnings)
     basin_slug = model_dir.relative_to(root).as_posix()
     model_id = f"basins_{_slug_id(basin_slug)}_shud"
     quirks: list[str] = []
-    sidecar_count = _count_sidecars(model_dir)
+    sidecar_count = _count_sidecars(model_dir, budget=budget, depth=_relative_depth(root, model_dir))
     if sidecar_count:
         quirks.append("generated_sidecars_ignored")
 
@@ -161,7 +197,7 @@ def _inventory_for_model(
     input_dirs = sorted(
         (
             path
-            for path in _iter_child_dirs(input_parent)
+            for path in _iter_child_dirs(input_parent, budget=budget, depth=_relative_depth(root, input_parent) + 1)
             if not _is_ignored_path(path) and _safe_resolve_under_root(path, resolved_root, warnings) is not None
         ),
         key=lambda path: path.name.lower(),
@@ -180,10 +216,23 @@ def _inventory_for_model(
     gis_dir = input_dir / "gis"
     required_files, missing_required_files = _match_required_files(input_dir, gis_dir, resolved_root, warnings)
     checksums = _checksums_for_required_files(input_dir, required_files, resolved_root, warnings)
-    calibration_count = _count_files(model_dir / "CALIB", resolved_root, warnings)
+    calibration_count = _count_files(
+        model_dir / "CALIB",
+        resolved_root,
+        warnings,
+        budget=budget,
+        depth=_relative_depth(root, model_dir / "CALIB"),
+    )
     forcing_info = _forcing_info(model_dir, quirks, warnings, resolved_root)
     if forcing_info["forcing_dir"] is not None:
-        forcing_count = _count_csv_files(Path(forcing_info["forcing_dir"]), resolved_root, warnings)
+        forcing_dir = Path(forcing_info["forcing_dir"])
+        forcing_count = _count_csv_files(
+            forcing_dir,
+            resolved_root,
+            warnings,
+            budget=budget,
+            depth=_relative_depth(root, forcing_dir),
+        )
     else:
         forcing_count = 0
 
@@ -325,41 +374,72 @@ def _glob_non_sidecar_files(
     return sorted(matches, key=lambda path: path.name.lower())
 
 
-def _count_csv_files(root: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> int:
-    return sum(1 for path in _walk_files(root, resolved_root, warnings) if path.suffix.lower() == ".csv")
+def _count_csv_files(
+    root: Path,
+    resolved_root: Path,
+    warnings: list[DiscoveryWarning],
+    *,
+    budget: DiscoveryBudget | None = None,
+    depth: int = 0,
+) -> int:
+    return sum(
+        1
+        for path in _walk_files(root, resolved_root, warnings, budget=budget, start_depth=depth)
+        if path.suffix.lower() == ".csv"
+    )
 
 
-def _count_files(root: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> int:
+def _count_files(
+    root: Path,
+    resolved_root: Path,
+    warnings: list[DiscoveryWarning],
+    *,
+    budget: DiscoveryBudget | None = None,
+    depth: int = 0,
+) -> int:
     if not _is_safe_directory(root, resolved_root, warnings):
         return 0
-    return sum(1 for _ in _walk_files(root, resolved_root, warnings))
+    return sum(1 for _ in _walk_files(root, resolved_root, warnings, budget=budget, start_depth=depth))
 
 
-def _count_sidecars(root: Path) -> int:
+def _count_sidecars(root: Path, *, budget: DiscoveryBudget | None = None, depth: int = 0) -> int:
     count = 0
-    stack = [root]
+    stack: list[tuple[Path, int]] = [(root, depth)]
     while stack:
-        directory = stack.pop()
+        directory, directory_depth = stack.pop()
+        if budget is not None:
+            budget.enter(directory, depth=directory_depth)
         try:
             with os.scandir(directory) as entries:
                 for entry in entries:
                     entry_path = Path(entry.path)
+                    if budget is not None:
+                        budget.enter(entry_path, depth=directory_depth + 1)
                     if _is_sidecar_name(entry.name):
                         count += 1
                         continue
                     if entry.is_dir(follow_symlinks=False):
-                        stack.append(entry_path)
+                        stack.append((entry_path, directory_depth + 1))
         except OSError:
             continue
     return count
 
 
-def _walk_files(root: Path, resolved_root: Path, warnings: list[DiscoveryWarning]) -> Iterator[Path]:
+def _walk_files(
+    root: Path,
+    resolved_root: Path,
+    warnings: list[DiscoveryWarning],
+    *,
+    budget: DiscoveryBudget | None = None,
+    start_depth: int = 0,
+) -> Iterator[Path]:
     if not _is_safe_directory(root, resolved_root, warnings):
         return
-    stack = [root]
+    stack: list[tuple[Path, int]] = [(root, start_depth)]
     while stack:
-        directory = stack.pop()
+        directory, depth = stack.pop()
+        if budget is not None:
+            budget.enter(directory, depth=depth)
         if _safe_resolve_under_root(directory, resolved_root, warnings) is None:
             continue
         _ensure_readable_directory(directory, "BASINS_DIRECTORY_UNREADABLE")
@@ -367,12 +447,14 @@ def _walk_files(root: Path, resolved_root: Path, warnings: list[DiscoveryWarning
             with os.scandir(directory) as entries:
                 for entry in entries:
                     path = Path(entry.path)
+                    if budget is not None:
+                        budget.enter(path, depth=depth + 1)
                     if _is_sidecar_name(entry.name):
                         continue
                     if _safe_resolve_under_root(path, resolved_root, warnings) is None:
                         continue
                     if entry.is_dir(follow_symlinks=False):
-                        stack.append(path)
+                        stack.append((path, depth + 1))
                     elif entry.is_file(follow_symlinks=False):
                         yield path
         except PermissionError as error:
@@ -389,13 +471,17 @@ def _walk_files(root: Path, resolved_root: Path, warnings: list[DiscoveryWarning
             ) from error
 
 
-def _iter_child_dirs(root: Path) -> list[Path]:
+def _iter_child_dirs(root: Path, *, budget: DiscoveryBudget | None = None, depth: int = 0) -> list[Path]:
     try:
         with os.scandir(root) as entries:
-            return sorted(
-                (Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False) or entry.is_symlink()),
-                key=lambda path: path.name.lower(),
-            )
+            paths: list[Path] = []
+            for entry in entries:
+                path = Path(entry.path)
+                if budget is not None:
+                    budget.enter(path, depth=depth)
+                if entry.is_dir(follow_symlinks=False) or entry.is_symlink():
+                    paths.append(path)
+            return sorted(paths, key=lambda path: path.name.lower())
     except PermissionError as error:
         raise BasinsDiscoveryError(
             "BASINS_DIRECTORY_UNREADABLE",
@@ -487,3 +573,10 @@ def _sha256(path: Path) -> str:
 def _slug_id(value: str) -> str:
     normalized = re.sub(r"[^0-9a-zA-Z]+", "_", value).strip("_").lower()
     return normalized or "unknown"
+
+
+def _relative_depth(root: Path, path: Path) -> int:
+    try:
+        return len(path.relative_to(root).parts)
+    except ValueError:
+        return 0

@@ -22,7 +22,7 @@ from packages.common.safe_fs import (
     verify_directory_no_follow,
 )
 
-from .basins_discovery import BasinsDiscoveryError, discover_basins_inventory, resolve_basins_root
+from .basins_discovery import BasinsDiscoveryError, DiscoveryBudget, discover_basins_inventory, resolve_basins_root
 from .basins_geometry import BasinsGeometryError, TrustedBasinsRoot, trusted_basins_root
 from .basins_package import BasinsPackageError, publish_basins_package
 from .basins_registry_import import (
@@ -53,6 +53,7 @@ DEFAULT_QHH_BASIN_SLUG = "qhh"
 DEFAULT_QHH_PACKAGE_VERSION = "vbasins-qhh-production"
 DEFAULT_QHH_SHUD_CODE_VERSION = "basins-shud"
 MAX_QHH_BOOTSTRAP_DISCOVERY_DEPTH = 3
+MAX_QHH_BOOTSTRAP_DISCOVERY_FILE_DEPTH = MAX_QHH_BOOTSTRAP_DISCOVERY_DEPTH + 3
 MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES = 2048
 MAX_QHH_TSD_FORC_BYTES = 8 * 1024 * 1024
 MAX_QHH_TSD_FORC_STATIONS = 250_000
@@ -169,6 +170,26 @@ QHH_RESOURCE_PROFILE_OVERRIDE_ALLOWED_FIELDS = frozenset(
         "display_capabilities",
         "frequency_capabilities",
         "resource_profile_id",
+    }
+)
+QHH_RESOURCE_PROFILE_PRESERVED_OPERATIONAL_FIELDS = QHH_RESOURCE_PROFILE_OVERRIDE_ALLOWED_FIELDS
+QHH_RESOURCE_PROFILE_RUN_SCOPED_FIELDS = frozenset(
+    {
+        "canonical_product_id",
+        "published_manifest_id",
+        "pipeline_job_id",
+        "output_uri",
+        "durable_output_uri",
+        "shud_output_uri",
+        "run_id",
+        "hydro_run_id",
+        "forcing_version_id",
+        "forecast_cycle",
+        "cycle_id",
+        "cycle_time",
+        "source_id",
+        "publish_uri",
+        "forcing_uri",
     }
 )
 
@@ -660,7 +681,15 @@ def _prepare_bootstrap_paths(
 def _discover_qhh_inventory(root: Path, *, model_id: str, qhh_source_root: Path) -> dict[str, Any]:
     _bounded_discovery_preflight(root, model_id=model_id, qhh_source_root=qhh_source_root)
     try:
-        inventory = discover_basins_inventory(root)
+        inventory = discover_basins_inventory(
+            root,
+            budget=DiscoveryBudget(
+                max_depth=MAX_QHH_BOOTSTRAP_DISCOVERY_FILE_DEPTH,
+                max_entries=MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES,
+                error_code_prefix="QHH_BOOTSTRAP",
+                root=root,
+            ),
+        )
     except BasinsDiscoveryError as error:
         raise QhhProductionBootstrapError(
             _qhh_code(error.error_code),
@@ -928,6 +957,8 @@ def _bootstrap_database(
             sp_riv_path=context.paths.qhh_input_dir.path / f"{sources.model['shud_input_name']}.sp.riv",
             sp_riv_checksum=context.sp_riv_checksum,
         )
+        _assert_exact_qhh_station_set(cursor, context)
+        _assert_exact_qhh_output_segment_set(cursor, context)
         forcing_after = _dynamic_forcing_counts(cursor, model_id)
         _assert_dynamic_forcing_unchanged(model_id, before=forcing_before, after=forcing_after)
         _activate_qhh_model(cursor, model_id)
@@ -1028,7 +1059,11 @@ def _upsert_scheduler_ready_model(
             model_id=ids["model_id"],
         )
     existing_profile = _json_dict(existing["resource_profile"])
-    merged_profile = {**existing_profile, **expected_profile}
+    merged_profile = _canonical_scheduler_ready_resource_profile(
+        existing_profile,
+        expected_profile,
+        resource_profile_overrides=resource_profile_overrides,
+    )
     updates: list[str] = []
     params: list[Any] = []
     if existing["shud_code_version"] != context.shud_code_version:
@@ -1114,8 +1149,104 @@ def _scheduler_ready_resource_profile(
     return profile
 
 
+def _canonical_scheduler_ready_resource_profile(
+    existing_profile: Mapping[str, Any],
+    expected_profile: Mapping[str, Any],
+    *,
+    resource_profile_overrides: Mapping[str, Any],
+) -> dict[str, Any]:
+    preserved = {
+        key: value
+        for key, value in dict(existing_profile).items()
+        if key in QHH_RESOURCE_PROFILE_PRESERVED_OPERATIONAL_FIELDS
+        and key not in QHH_RESOURCE_PROFILE_RUN_SCOPED_FIELDS
+        and key not in expected_profile
+    }
+    return {
+        **preserved,
+        **dict(expected_profile),
+        **_safe_resource_profile_overrides(resource_profile_overrides),
+    }
+
+
 def _safe_resource_profile_overrides(overrides: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in dict(overrides).items() if key in QHH_RESOURCE_PROFILE_OVERRIDE_ALLOWED_FIELDS}
+    return {
+        key: value
+        for key, value in dict(overrides).items()
+        if key in QHH_RESOURCE_PROFILE_OVERRIDE_ALLOWED_FIELDS and key not in QHH_RESOURCE_PROFILE_RUN_SCOPED_FIELDS
+    }
+
+
+def _assert_exact_qhh_station_set(cursor: Any, context: QhhBootstrapContext) -> None:
+    expected_ids = {station.station_id for station in context.stations}
+    basin_version_id = context.sources.ids["basin_version_id"]
+    cursor.execute(
+        """
+        SELECT station_id
+        FROM met.met_station
+        WHERE basin_version_id = %s
+          AND station_role = 'forcing_grid'
+          AND active_flag = true
+          AND (
+            station_id LIKE %s
+            OR
+            properties_json->>'model_id' = %s
+            OR properties_json->>'basin_version_id' = %s
+            OR properties_json->>'seed' = 'qhh_production_bootstrap'
+            OR properties_json->>'source' = 'qhh.tsd.forc'
+          )
+        ORDER BY station_id
+        """,
+        (basin_version_id, "qhh_forc_%", context.sources.ids["model_id"], basin_version_id),
+    )
+    observed_ids = {str(row["station_id"]) for row in cursor.fetchall()}
+    extras = sorted(observed_ids - expected_ids)
+    missing = sorted(expected_ids - observed_ids)
+    if extras or missing:
+        raise QhhProductionBootstrapError(
+            "QHH_BOOTSTRAP_STALE_STATION_IDENTITY",
+            "Active QHH forcing-grid stations must match the validated qhh.tsd.forc exact set before activation.",
+            model_id=context.sources.ids["model_id"],
+            details={
+                "basin_version_id": basin_version_id,
+                "extra_station_ids": extras,
+                "missing_station_ids": missing,
+                "no_scheduler_ready_model": True,
+                "rollback_expected": True,
+            },
+        )
+
+
+def _assert_exact_qhh_output_segment_set(cursor: Any, context: QhhBootstrapContext) -> None:
+    model_id = context.sources.ids["model_id"]
+    river_network_version_id = context.sources.ids["river_network_version_id"]
+    expected_ids = {f"{model_id}_shud_riv_{index:06d}" for index in range(1, context.output_segment_count + 1)}
+    cursor.execute(
+        """
+        SELECT river_segment_id
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
+        ORDER BY river_segment_id
+        """,
+        (river_network_version_id,),
+    )
+    observed_ids = {str(row["river_segment_id"]) for row in cursor.fetchall()}
+    extras = sorted(observed_ids - expected_ids)
+    missing = sorted(expected_ids - observed_ids)
+    if extras or missing:
+        raise QhhProductionBootstrapError(
+            "QHH_BOOTSTRAP_STALE_OUTPUT_SEGMENT_IDENTITY",
+            "Active QHH output river segments must match the validated qhh.sp.riv exact set before activation.",
+            model_id=model_id,
+            details={
+                "river_network_version_id": river_network_version_id,
+                "extra_river_segment_ids": extras,
+                "missing_river_segment_ids": missing,
+                "no_scheduler_ready_model": True,
+                "rollback_expected": True,
+            },
+        )
 
 
 def _seed_station_rows(

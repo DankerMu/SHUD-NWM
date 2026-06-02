@@ -197,6 +197,9 @@ class ModelRegistryReader(Protocol):
     def get_model(self, model_id: str) -> Mapping[str, Any]:
         raise NotImplementedError
 
+    def get_model_internal(self, model_id: str) -> Mapping[str, Any]:
+        raise NotImplementedError
+
 
 class CycleDiscoveryAdapter(Protocol):
     def discover_cycles(
@@ -2204,12 +2207,19 @@ def _fetch_active_model_details(registry: ModelRegistryReader) -> list[Mapping[s
                     {"max_discovered_models": MAX_DISCOVERED_MODELS, "model_count": len(rows)},
                 )
             model_id = str(item.get("model_id") or "")
-            rows.append(registry.get_model(model_id) if model_id else item)
+            rows.append(_fetch_scheduler_model_detail(registry, model_id) if model_id else item)
         total = int(page.get("total") or len(rows))
         offset += len(items)
         if len(items) == 0 or offset >= total:
             break
     return rows
+
+
+def _fetch_scheduler_model_detail(registry: ModelRegistryReader, model_id: str) -> Mapping[str, Any]:
+    internal_getter = getattr(registry, "get_model_internal", None)
+    if callable(internal_getter):
+        return internal_getter(model_id)
+    return registry.get_model(model_id)
 
 
 def _coerce_registered_model(row: Mapping[str, Any]) -> RegisteredSchedulerModel | dict[str, Any]:
@@ -2328,6 +2338,8 @@ def _model_duplicate_identity_value_for_evidence(field: str, value: str) -> str:
     if field == "model_package_uri":
         redacted = _redact_secret_manifest_for_evidence(value, "model_package_uri")
         return str(redacted)
+    if field == "package_checksum":
+        return "[redacted]"
     return value
 
 
@@ -4987,6 +4999,7 @@ def _redact_secret_manifest_for_evidence(value: Any, path: str = "manifest") -> 
 
 def _resource_profile_evidence(resource_profile: Mapping[str, Any]) -> dict[str, Any]:
     redacted = _redact_secret_manifest_for_evidence(dict(resource_profile), "resource_profile")
+    redacted = _redact_digest_keys_for_evidence(redacted)
     if not isinstance(redacted, Mapping):
         return {}
     evidence = dict(redacted)
@@ -4999,6 +5012,28 @@ def _resource_profile_evidence(resource_profile: Mapping[str, Any]) -> dict[str,
         if field_name in evidence:
             evidence[field_name] = "[unsafe]"
     return evidence
+
+
+def _redact_digest_keys_for_evidence(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for key, nested in value.items():
+            key_text = str(key)
+            if _is_digest_evidence_key(key_text):
+                redacted[key_text] = "[redacted]"
+            else:
+                redacted[key_text] = _redact_digest_keys_for_evidence(nested)
+        return redacted
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_redact_digest_keys_for_evidence(item) for item in value]
+    return value
+
+
+def _is_digest_evidence_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    if any(token in normalized for token in ("checksum", "digest", "hash")):
+        return True
+    return any(token == normalized or normalized.endswith(f"_{token}") for token in ("sha", "sha1", "sha256", "sha512"))
 
 
 def _candidate_execution_evidence(

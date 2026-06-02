@@ -2514,6 +2514,77 @@ def test_duplicate_active_package_identity_is_rejected_before_candidates_and_sub
     assert {tuple(item["duplicate_model_ids"]) for item in exclusions} == {("model_a", "model_b")}
 
 
+def test_duplicate_active_package_checksum_uses_internal_projection_without_public_leak(
+    tmp_path: Path,
+) -> None:
+    model_a = _model(
+        "model_a",
+        "basin_a",
+        resource_profile={
+            "runnable": True,
+            "package_checksum": "shared-package-sha",
+            "lineage": "basins_registry_import",
+        },
+    )
+    model_b = _model(
+        "model_b",
+        "basin_b",
+        resource_profile={
+            "runnable": True,
+            "package_checksum": "shared-package-sha",
+            "lineage": "basins_registry_import",
+        },
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=RedactingRegistry([model_a, model_b]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    evidence_json = json.dumps(result.evidence, sort_keys=True)
+    exclusions = result.evidence["model_discovery"]["exclusions"]
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert {item["duplicate_identity_field"] for item in exclusions} == {"package_checksum"}
+    assert {item["duplicate_identity_value"] for item in exclusions} == {"[redacted]"}
+    assert "shared-package-sha" not in evidence_json
+
+
+def test_public_only_redacted_projection_cannot_checksum_dedupe_without_internal_path(
+    tmp_path: Path,
+) -> None:
+    model_a = _model(
+        "model_a",
+        "basin_a",
+        resource_profile={
+            "runnable": True,
+            "package_checksum": "shared-package-sha",
+            "lineage": "basins_registry_import",
+        },
+    )
+    model_b = _model(
+        "model_b",
+        "basin_b",
+        resource_profile={
+            "runnable": True,
+            "package_checksum": "shared-package-sha",
+            "lineage": "basins_registry_import",
+        },
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=PublicOnlyRedactingRegistry([model_a, model_b]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    assert {item["model_id"] for item in result.evidence["candidates"]} == {"model_a", "model_b"}
+
+
 @pytest.mark.parametrize("missing_field", ["basin_version_id", "river_network_version_id", "model_package_uri"])
 def test_incomplete_production_model_metadata_is_blocked_before_candidates(
     tmp_path: Path,
@@ -2630,6 +2701,10 @@ def test_qhh_project_name_propagates_from_resource_profile_to_runtime_manifest(t
     assert submitted_basin["shud_input_name"] == "qhh"
     assert submitted_basin["package_checksum"] == "package-sha"
     assert submitted_basin["source_inventory_checksum"] == "inventory-sha"
+    assert "package-sha" not in json.dumps(result.evidence["candidates"])
+    assert "inventory-sha" not in json.dumps(result.evidence["candidates"])
+    assert result.evidence["candidates"][0]["resource_profile"]["package_checksum"] == "[redacted]"
+    assert result.evidence["candidates"][0]["resource_profile"]["source_inventory_checksum"] == "[redacted]"
     assert assembly.runtime["project_name"] == "qhh"
     assert shud_runtime_module._project_name(manifest) == "qhh"
 
@@ -8529,6 +8604,25 @@ class FakeRegistry:
         if not matches:
             raise KeyError(model_id)
         return dict(matches.pop(0))
+
+
+class RedactingRegistry(FakeRegistry):
+    def get_model(self, model_id: str) -> dict[str, Any]:
+        model = super().get_model(model_id)
+        profile = dict(model.get("resource_profile") or {})
+        if "package_checksum" in profile:
+            profile["package_checksum"] = None
+        model["resource_profile"] = profile
+        model["package_checksum"] = None
+        model["source_inventory_checksum"] = None
+        return model
+
+    def get_model_internal(self, model_id: str) -> dict[str, Any]:
+        return super().get_model(model_id)
+
+
+class PublicOnlyRedactingRegistry(RedactingRegistry):
+    get_model_internal = None
 
 
 class FakeAdapter:
