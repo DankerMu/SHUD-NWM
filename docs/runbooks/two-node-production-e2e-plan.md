@@ -68,6 +68,7 @@ NHMS_SCHEDULER_LOCK_ROOT=$WORKSPACE_ROOT/scheduler/locks
 NHMS_SCHEDULER_EVIDENCE_ROOT=$WORKSPACE_ROOT/scheduler/evidence
 NHMS_SCHEDULER_RUNTIME_ROOT=...
 NHMS_SCHEDULER_TEMP_ROOT=...
+NHMS_SCHEDULER_ALLOWED_ROOTS=$WORKSPACE_ROOT:$OBJECT_STORE_ROOT:$NHMS_SCHEDULER_RUNTIME_ROOT:$NHMS_SCHEDULER_TEMP_ROOT:$NHMS_PUBLISHED_ARTIFACT_ROOT
 NHMS_SCHEDULER_SOURCES=gfs,IFS
 NHMS_SCHEDULER_MODEL_IDS=basins_qhh_shud
 NHMS_SCHEDULER_BASIN_IDS=basins_qhh
@@ -328,6 +329,33 @@ docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml run
 `compute.env` 解析 roots、locks、evidence、service role 和 source/model filters。它是 #253 的
 PASS/BLOCKED smoke，不等同于 Task 7 live E2E。需要真实提交时必须另行使用明确授权的 submit/timer lane，
 并保留同一套 root preflight 证据。
+
+`NHMS_SCHEDULER_ALLOWED_ROOTS` 必须是非空、独立审批的 `:` 分隔 allowlist。`WORKSPACE_ROOT`、
+`OBJECT_STORE_ROOT`、`NHMS_PUBLISHED_ARTIFACT_ROOT`、`NHMS_SCHEDULER_RUNTIME_ROOT` 和
+`NHMS_SCHEDULER_TEMP_ROOT` 必须落在该 allowlist 内；`NHMS_SCHEDULER_LOCK_ROOT` 和
+`NHMS_SCHEDULER_EVIDENCE_ROOT` 必须在 `WORKSPACE_ROOT` 内。
+
+有界连续/定时 lane 示例：
+
+```bash
+docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml run --rm scheduler-once \
+  uv run nhms-pipeline plan-production \
+    --continuous \
+    --interval-seconds "${NHMS_SCHEDULER_INTERVAL_SECONDS:-300}" \
+    --max-passes "${NHMS_SCHEDULER_MAX_PASSES:-1}" \
+    --max-cycles-per-source "${NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE:-1}" \
+    --source gfs \
+    --model-id basins_qhh_shud \
+    --basin-id basins_qhh \
+    --plan
+```
+
+禁用定时 lane 时，停用对应 timer/service，并保留 `scheduler-once` 手工 proof path：
+
+```bash
+sudo systemctl disable --now nhms-compute-scheduler.timer
+sudo systemctl reset-failed nhms-compute-scheduler.service
+```
 
 必须覆盖阶段：
 

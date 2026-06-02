@@ -69,8 +69,8 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         return int(str(value))
-    except ValueError:
-        return default
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
 
 
 def _env_optional_int(name: str) -> int | None:
@@ -123,6 +123,8 @@ def _plan_production(
                 "plan-production --continuous JSON output requires --max-passes "
                 "or NHMS_SCHEDULER_MAX_PASSES"
             )
+        if resolved_max_passes < 1:
+            raise ValueError("plan-production --continuous max_passes must be at least 1")
         if resolved_max_passes > MAX_CONTINUOUS_JSON_PASSES:
             raise ValueError(
                 "plan-production --continuous JSON output max_passes exceeds limit "
@@ -142,21 +144,26 @@ def _plan_production(
         if max_cycles_per_source is not None
         else _env_int("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", 1)
     )
-    config = ProductionSchedulerConfig(
-        workspace_root=resolved_workspace_root,
-        sources=resolved_sources,
-        lookback_hours=lookback_hours,
-        cycle_lag_hours=cycle_lag_hours,
-        max_cycles_per_source=resolved_max_cycles,
-        model_ids=resolved_model_ids,
-        basin_ids=resolved_basin_ids,
-        dry_run=dry_run,
-        continuous=continuous,
-        interval_seconds=resolved_interval_seconds,
-        lock_path=lock_path,
-        evidence_dir=evidence_dir,
-        require_runtime_roots=require_runtime_roots,
-    )
+    config_kwargs: dict[str, object] = {
+        "workspace_root": resolved_workspace_root,
+        "sources": resolved_sources,
+        "lookback_hours": lookback_hours,
+        "cycle_lag_hours": cycle_lag_hours,
+        "max_cycles_per_source": resolved_max_cycles,
+        "model_ids": resolved_model_ids,
+        "basin_ids": resolved_basin_ids,
+        "dry_run": dry_run,
+        "continuous": continuous,
+        "interval_seconds": resolved_interval_seconds,
+        "lock_path": lock_path,
+        "evidence_dir": evidence_dir,
+        "require_runtime_roots": require_runtime_roots,
+    }
+    if workspace_root is not None and lock_path is None:
+        config_kwargs["scheduler_lock_root"] = None
+    if workspace_root is not None and evidence_dir is None:
+        config_kwargs["scheduler_evidence_root"] = None
+    config = ProductionSchedulerConfig(**config_kwargs)
     scheduler = ProductionScheduler.from_env(config)
     if continuous:
         results = scheduler.run_continuous(max_passes=resolved_max_passes)

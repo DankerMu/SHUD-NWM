@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1612,6 +1613,42 @@ def test_plan_production_cli_uses_workspace_root_env_without_explicit_flag(
     assert captured["config"].require_runtime_roots is True
 
 
+def test_plan_production_explicit_workspace_ignores_ambient_scheduler_lock_and_evidence_roots(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned"})
+
+    explicit_workspace = tmp_path / "diagnostic-workspace"
+    ambient_workspace = tmp_path / "ambient-production-workspace"
+    explicit_workspace.mkdir()
+    (ambient_workspace / "locks").mkdir(parents=True)
+    (ambient_workspace / "evidence").mkdir()
+    monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(ambient_workspace / "locks"))
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(ambient_workspace / "evidence"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production", "--workspace-root", str(explicit_workspace)])
+
+    assert rc == 0
+    assert captured["config"].require_runtime_roots is False
+    assert Path(captured["config"].lock_path) == (
+        explicit_workspace.resolve() / "scheduler" / "production-scheduler.lock"
+    )
+    assert Path(captured["config"].evidence_dir) == explicit_workspace.resolve() / "scheduler" / "evidence"
+
+
 def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside-evidence"
     outside.mkdir()
@@ -1674,6 +1711,83 @@ def test_evidence_existing_artifact_file_is_not_overwritten(tmp_path: Path) -> N
     assert error.value.reason == "evidence_artifact_exists"
     assert artifact_path.read_text(encoding="utf-8") == "existing"
     assert evidence == {"pass_id": pass_id, "status": "planned"}
+
+
+def test_non_dry_run_blocks_before_candidate_execution_when_evidence_reservation_fails(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    orchestrator = FakeProductionOrchestrator()
+    original_write_new_regular_file = scheduler_module._write_new_regular_file
+
+    def fail_pre_execution_artifact(
+        artifact_name: str,
+        serialized: str,
+        *,
+        dir_fd: int,
+        artifact_path: Path,
+    ) -> None:
+        if artifact_name.endswith(".pre_execution.json"):
+            raise SchedulerEvidenceWriteError(
+                "forced_pre_execution_evidence_failure",
+                {"artifact_path": str(artifact_path)},
+            )
+        original_write_new_regular_file(
+            artifact_name,
+            serialized,
+            dir_fd=dir_fd,
+            artifact_path=artifact_path,
+        )
+
+    monkeypatch.setattr(scheduler_module, "_write_new_regular_file", fail_pre_execution_artifact)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert orchestrator.calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "evidence_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert result.evidence["evidence_pre_execution"]["status"] == "blocked"
+    assert result.evidence["evidence_pre_execution"]["reason"] == "forced_pre_execution_evidence_failure"
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+
+
+def test_non_dry_run_blocks_before_candidate_execution_when_final_evidence_artifact_exists(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    orchestrator = FakeProductionOrchestrator()
+    fixed_pass_started_at = _dt("2026-05-21T12:00:00Z")
+
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": "abcdef1234567890"})())
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=fixed_pass_started_at, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    pass_id = "scheduler_2026052112_abcdef123456"
+    evidence_dir = Path(scheduler.config.evidence_dir)
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{pass_id}.json").write_text("existing\n", encoding="utf-8")
+
+    result = scheduler.run_once()
+
+    assert orchestrator.calls == []
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "evidence_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
 
 
 def test_stale_unowned_lock_is_not_unlinked(tmp_path: Path) -> None:
@@ -6101,6 +6215,57 @@ def test_plan_production_missing_workspace_root_no_flag_errors_without_app_works
     assert not (tmp_path / "scheduler").exists()
 
 
+def test_no_flag_missing_allowed_roots_blocks_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("missing scheduler allowlist must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["root_preflight"]["checks"]["allowed_roots_policy"] == {
+        "env": "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "configured": False,
+        "non_empty": False,
+        "allowed_roots": [],
+        "independent_policy_required": True,
+    }
+    assert "SCHEDULER_ROOT_ALLOWED_ROOTS_MISSING" in {
+        blocker["code"] for blocker in payload["root_preflight"]["blockers"]
+    }
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert Path(payload["artifact_path"]).is_file()
+
+
 @pytest.mark.parametrize(
     ("broken_root", "expected_code"),
     [
@@ -6165,6 +6330,313 @@ def test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit(
         assert "artifact_path" not in payload
     else:
         assert Path(payload["artifact_path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("root_key", "env_key", "expected_code", "safe_evidence"),
+    [
+        (
+            "object_store_root",
+            "OBJECT_STORE_ROOT",
+            "SCHEDULER_ROOT_OBJECT_STORE_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+        (
+            "published_root",
+            "NHMS_PUBLISHED_ARTIFACT_ROOT",
+            "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+        (
+            "runtime_root",
+            "NHMS_SCHEDULER_RUNTIME_ROOT",
+            "SCHEDULER_ROOT_RUNTIME_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+        (
+            "temp_root",
+            "NHMS_SCHEDULER_TEMP_ROOT",
+            "SCHEDULER_ROOT_TEMP_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+        (
+            "workspace_root",
+            "WORKSPACE_ROOT",
+            "SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT",
+            True,
+        ),
+    ],
+)
+def test_no_flag_out_of_approved_roots_block_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+    root_key: str,
+    env_key: str,
+    expected_code: str,
+    safe_evidence: bool,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path / "approved")
+    _set_scheduler_root_env(monkeypatch, roots)
+    outside = tmp_path / "outside" / root_key
+    outside.mkdir(parents=True)
+    monkeypatch.setenv(env_key, str(outside))
+    if root_key == "workspace_root":
+        lock_root = outside / "locks"
+        evidence_root = outside / "evidence"
+        lock_root.mkdir()
+        evidence_root.mkdir()
+        monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(lock_root))
+        monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(evidence_root))
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("out-of-approved scheduler root must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    if safe_evidence:
+        assert Path(payload["artifact_path"]).is_file()
+    else:
+        assert "artifact_path" not in payload
+
+
+@pytest.mark.parametrize(
+    ("root_key", "expected_code", "safe_evidence"),
+    [
+        ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_NOT_DIRECTORY", True),
+        ("published_root", "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_NOT_DIRECTORY", True),
+        ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_NOT_DIRECTORY", True),
+        ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_NOT_DIRECTORY", True),
+        ("lock_root", "SCHEDULER_ROOT_LOCK_ROOT_NOT_DIRECTORY", True),
+        ("evidence_root", "evidence_dir must be a directory", False),
+        ("workspace_root", "evidence_dir must be a safe directory", False),
+    ],
+)
+def test_no_flag_file_roots_block_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+    root_key: str,
+    expected_code: str,
+    safe_evidence: bool,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    target = roots[root_key]
+    shutil.rmtree(target)
+    target.write_text("not a directory\n", encoding="utf-8")
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("file scheduler root must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    if root_key in {"evidence_root", "workspace_root"}:
+        with pytest.raises(ValueError, match=expected_code):
+            cli._plan_production(
+                sources=("gfs",),
+                lookback_hours=24,
+                cycle_lag_hours=0,
+                max_cycles_per_source=1,
+                model_ids=("model_a",),
+                basin_ids=(),
+                dry_run=True,
+                continuous=False,
+                interval_seconds=300.0,
+                max_passes=None,
+                workspace_root=None,
+                lock_path=None,
+                evidence_dir=None,
+            )
+        return
+
+    payload = _run_no_flag_plan()
+    assert payload["status"] == "preflight_blocked"
+    assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    if safe_evidence:
+        assert Path(payload["artifact_path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("root_key", "expected_code", "safe_evidence"),
+    [
+        ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_SYMLINK", True),
+        ("published_root", "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_SYMLINK", True),
+        ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_SYMLINK", True),
+        ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_SYMLINK", True),
+        ("evidence_root", "evidence_dir must be under workspace_root", False),
+        ("workspace_root", "SCHEDULER_ROOT_WORKSPACE_ROOT_SYMLINK", False),
+    ],
+)
+def test_no_flag_symlink_final_component_blocks_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+    root_key: str,
+    expected_code: str,
+    safe_evidence: bool,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    target = roots[root_key]
+    replacement_target = tmp_path / f"{root_key}-symlink-target"
+    replacement_target.mkdir()
+    shutil.rmtree(target)
+    target.symlink_to(replacement_target, target_is_directory=True)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("symlink scheduler root must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    if root_key == "evidence_root":
+        with pytest.raises(ValueError, match=expected_code):
+            cli._plan_production(
+                sources=("gfs",),
+                lookback_hours=24,
+                cycle_lag_hours=0,
+                max_cycles_per_source=1,
+                model_ids=("model_a",),
+                basin_ids=(),
+                dry_run=True,
+                continuous=False,
+                interval_seconds=300.0,
+                max_passes=None,
+                workspace_root=None,
+                lock_path=None,
+                evidence_dir=None,
+            )
+        return
+
+    payload = _run_no_flag_plan()
+    assert payload["status"] == "preflight_blocked"
+    assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    if safe_evidence:
+        assert Path(payload["artifact_path"]).is_file()
+    else:
+        assert "artifact_path" not in payload
+
+
+@pytest.mark.parametrize(
+    ("root_key", "expected_code", "safe_evidence"),
+    [
+        ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_NOT_WRITABLE", True),
+        ("published_root", "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_NOT_WRITABLE", True),
+        ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_NOT_WRITABLE", True),
+        ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_NOT_WRITABLE", True),
+        ("lock_root", "SCHEDULER_ROOT_LOCK_ROOT_NOT_WRITABLE", True),
+        ("evidence_root", "SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_WRITABLE", False),
+        ("workspace_root", "evidence_dir must be a safe directory", False),
+    ],
+)
+def test_no_flag_no_execute_or_not_writable_roots_block_before_registry_adapter_or_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+    root_key: str,
+    expected_code: str,
+    safe_evidence: bool,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    target = roots[root_key]
+    original_mode = stat.S_IMODE(target.stat().st_mode)
+    target.chmod(0o600)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", _unexpected_registry)
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", _unexpected_adapters)
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: pytest.fail("unusable scheduler root must not construct active repository"),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    try:
+        if root_key == "workspace_root":
+            with pytest.raises(ValueError, match=expected_code):
+                cli._plan_production(
+                    sources=("gfs",),
+                    lookback_hours=24,
+                    cycle_lag_hours=0,
+                    max_cycles_per_source=1,
+                    model_ids=("model_a",),
+                    basin_ids=(),
+                    dry_run=True,
+                    continuous=False,
+                    interval_seconds=300.0,
+                    max_passes=None,
+                    workspace_root=None,
+                    lock_path=None,
+                    evidence_dir=None,
+                )
+            return
+        payload = cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=("model_a",),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root=None,
+            lock_path=None,
+            evidence_dir=None,
+        )
+    finally:
+        target.chmod(original_mode)
+
+    assert payload["status"] == "preflight_blocked"
+    assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    if safe_evidence:
+        assert Path(payload["artifact_path"]).is_file()
+    else:
+        assert "artifact_path" not in payload
 
 
 def test_no_flag_out_of_bound_lock_and_evidence_roots_are_rejected_at_config(
@@ -6362,6 +6834,16 @@ def test_run_continuous_rejects_excessive_finite_passes(tmp_path: Path) -> None:
     assert scheduler.pass_count == 0
 
 
+def test_run_continuous_rejects_zero_finite_passes(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), interval_seconds=1)
+    scheduler = CountingScheduler(config, stop_after=10)
+
+    with pytest.raises(ValueError, match="max_passes must be at least 1"):
+        scheduler.run_continuous(max_passes=0)
+
+    assert scheduler.pass_count == 0
+
+
 def test_plan_production_cli_uses_scheduler_env_interval_and_max_passes_for_no_flag_continuous(
     monkeypatch: Any,
     tmp_path: Path,
@@ -6514,6 +6996,25 @@ def test_cli_rejects_unbounded_json_continuous_mode(tmp_path: Path) -> None:
         )
 
 
+def test_cli_rejects_zero_continuous_json_passes(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_passes must be at least 1"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=1,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=True,
+            interval_seconds=300.0,
+            max_passes=0,
+            workspace_root=str(tmp_path),
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+
 def test_cli_rejects_excessive_continuous_json_passes(monkeypatch: Any, tmp_path: Path) -> None:
     class FailingScheduler:
         def __init__(self, config: ProductionSchedulerConfig) -> None:
@@ -6534,6 +7035,38 @@ def test_cli_rejects_excessive_continuous_json_passes(monkeypatch: Any, tmp_path
             interval_seconds=300.0,
             max_passes=MAX_CONTINUOUS_JSON_PASSES + 1,
             workspace_root=str(tmp_path),
+            lock_path=None,
+            evidence_dir=None,
+        )
+
+
+def test_cli_rejects_invalid_scheduler_max_cycles_env_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class FailingScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            raise AssertionError("scheduler must not be constructed for invalid max cycles env")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE", "not-an-int")
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    with pytest.raises(ValueError, match="NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE must be an integer"):
+        cli._plan_production(
+            sources=("gfs",),
+            lookback_hours=24,
+            cycle_lag_hours=0,
+            max_cycles_per_source=None,
+            model_ids=(),
+            basin_ids=(),
+            dry_run=True,
+            continuous=False,
+            interval_seconds=300.0,
+            max_passes=None,
+            workspace_root=str(workspace_root),
             lock_path=None,
             evidence_dir=None,
         )
@@ -7052,9 +7585,44 @@ def _set_scheduler_root_env(monkeypatch: Any, roots: Mapping[str, Path]) -> None
     monkeypatch.setenv("NHMS_SCHEDULER_TEMP_ROOT", str(roots["temp_root"]))
     monkeypatch.setenv("NHMS_SCHEDULER_LOCK_ROOT", str(roots["lock_root"]))
     monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(roots["evidence_root"]))
+    monkeypatch.setenv(
+        "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        os.pathsep.join(
+            str(roots[key])
+            for key in ("workspace_root", "object_store_root", "published_root", "runtime_root", "temp_root")
+        ),
+    )
     monkeypatch.setenv("NHMS_SCHEDULER_SOURCES", "gfs")
     monkeypatch.setenv("NHMS_SCHEDULER_MODEL_IDS", "model_a")
     monkeypatch.setenv("NHMS_SCHEDULER_BASIN_IDS", "basin_a")
+
+
+def _run_no_flag_plan() -> dict[str, Any]:
+    return cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+
+
+def _expected_no_mutation_proof() -> dict[str, bool]:
+    return {
+        "adapter_download_called": False,
+        "slurm_submit_called": False,
+        "shud_runtime_called": False,
+        "hydro_result_table_writes": False,
+        "met_result_table_writes": False,
+    }
 
 
 def _model(model_id: str, basin_id: str, *, resource_profile: dict[str, Any] | None = None) -> dict[str, Any]:

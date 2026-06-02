@@ -43,11 +43,17 @@ Compute role, node 22:
   `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`.
 - Scheduler no-flag business validation requires `NHMS_SCHEDULER_LOCK_ROOT`,
   `NHMS_SCHEDULER_EVIDENCE_ROOT`, `NHMS_SCHEDULER_RUNTIME_ROOT`,
-  `NHMS_SCHEDULER_TEMP_ROOT`, and source/model filter envs such as
-  `NHMS_SCHEDULER_SOURCES`, `NHMS_SCHEDULER_MODEL_IDS`,
-  `NHMS_SCHEDULER_BASIN_IDS`, `NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE`,
-  `NHMS_SCHEDULER_INTERVAL_SECONDS`, and `NHMS_SCHEDULER_MAX_PASSES`.
-  Lock and evidence roots must be under `WORKSPACE_ROOT`; explicit
+  `NHMS_SCHEDULER_TEMP_ROOT`, non-empty `NHMS_SCHEDULER_ALLOWED_ROOTS`, and
+  source/model filter envs such as `NHMS_SCHEDULER_SOURCES`,
+  `NHMS_SCHEDULER_MODEL_IDS`, `NHMS_SCHEDULER_BASIN_IDS`,
+  `NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE`, `NHMS_SCHEDULER_INTERVAL_SECONDS`,
+  and `NHMS_SCHEDULER_MAX_PASSES`. `NHMS_SCHEDULER_ALLOWED_ROOTS` is an
+  independent approved-root policy separated by `:`; do not derive it from the
+  candidate runtime roots at execution time. `WORKSPACE_ROOT`,
+  `OBJECT_STORE_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`,
+  `NHMS_SCHEDULER_RUNTIME_ROOT`, and `NHMS_SCHEDULER_TEMP_ROOT` must be under
+  one of those approved roots. Lock and evidence roots must be under
+  `WORKSPACE_ROOT`; explicit
   `--workspace-root`, `--lock-path`, and `--evidence-dir` are diagnostic
   compatibility, not the compute scheduler-once proof path.
 - Allowed only on compute: Slurm gateway settings, writable workspace,

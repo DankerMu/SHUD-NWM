@@ -2720,6 +2720,32 @@ def test_static_checker_requires_compute_host_gateway_extra_host(tmp_path: Path)
     }
 
 
+def test_static_checker_rejects_empty_compute_scheduler_allowed_roots(tmp_path: Path) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"]["NHMS_SCHEDULER_ALLOWED_ROOTS"] = ""
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = docker_runtime.run_static_check(
+        compute_compose=compute_compose,
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=Path("infra/env/compute.example"),
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    findings = {
+        (finding.service, finding.details.get("key"))
+        for finding in result.findings
+        if finding.code == "COMPUTE_RUNTIME_ENV_EMPTY"
+    }
+    assert findings >= {
+        ("compute-api", "NHMS_SCHEDULER_ALLOWED_ROOTS"),
+        ("scheduler-once", "NHMS_SCHEDULER_ALLOWED_ROOTS"),
+    }
+
+
 def test_static_checker_requires_literal_uv_cache_dir_for_non_root_runtime(tmp_path: Path) -> None:
     compute = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
     for service in compute["services"].values():

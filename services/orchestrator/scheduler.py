@@ -304,32 +304,75 @@ class ProductionSchedulerConfig:
     lock_ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS
     now: datetime | None = None
     source_exclusions: tuple[dict[str, Any], ...] = field(init=False, default=())
+    _workspace_root_preflight_path: Path = field(init=False, repr=False, compare=False)
+    _object_store_root_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _published_artifact_root_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _runtime_root_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _temp_root_preflight_path: Path | None = field(init=False, repr=False, compare=False)
+    _lock_root_preflight_path: Path = field(init=False, repr=False, compare=False)
+    _evidence_root_preflight_path: Path = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        workspace_root = Path(self.workspace_root).expanduser().resolve()
+        workspace_root_preflight_path = _config_path_preserve_final_component(self.workspace_root)
+        workspace_root = workspace_root_preflight_path.resolve()
+        object.__setattr__(self, "_workspace_root_preflight_path", workspace_root_preflight_path)
         object.__setattr__(self, "workspace_root", workspace_root)
+        object_store_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.object_store_root,
+            workspace_root,
+        )
         object.__setattr__(
             self,
             "object_store_root",
-            _optional_config_path_relative_to(self.object_store_root, workspace_root),
+            _resolve_optional_config_path(object_store_root_preflight_path),
+        )
+        object.__setattr__(
+            self,
+            "_object_store_root_preflight_path",
+            object_store_root_preflight_path,
+        )
+        published_artifact_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.published_artifact_root,
+            workspace_root,
         )
         object.__setattr__(
             self,
             "published_artifact_root",
-            _optional_config_path_relative_to(self.published_artifact_root, workspace_root),
+            _resolve_optional_config_path(published_artifact_root_preflight_path),
         )
-        object.__setattr__(self, "log_root", _optional_config_path_relative_to(self.log_root, workspace_root))
-        object.__setattr__(self, "runtime_root", _optional_config_path_relative_to(self.runtime_root, workspace_root))
-        object.__setattr__(self, "temp_root", _optional_config_path_relative_to(self.temp_root, workspace_root))
+        object.__setattr__(
+            self,
+            "_published_artifact_root_preflight_path",
+            published_artifact_root_preflight_path,
+        )
+        log_root_preflight_path = _optional_config_path_relative_to_preserve_final(self.log_root, workspace_root)
+        object.__setattr__(self, "log_root", _resolve_optional_config_path(log_root_preflight_path))
+        runtime_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.runtime_root,
+            workspace_root,
+        )
+        object.__setattr__(self, "runtime_root", _resolve_optional_config_path(runtime_root_preflight_path))
+        object.__setattr__(self, "_runtime_root_preflight_path", runtime_root_preflight_path)
+        temp_root_preflight_path = _optional_config_path_relative_to_preserve_final(self.temp_root, workspace_root)
+        object.__setattr__(self, "temp_root", _resolve_optional_config_path(temp_root_preflight_path))
+        object.__setattr__(self, "_temp_root_preflight_path", temp_root_preflight_path)
+        scheduler_lock_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.scheduler_lock_root,
+            workspace_root,
+        )
         object.__setattr__(
             self,
             "scheduler_lock_root",
-            _optional_config_path_relative_to(self.scheduler_lock_root, workspace_root),
+            _resolve_optional_config_path(scheduler_lock_root_preflight_path),
+        )
+        scheduler_evidence_root_preflight_path = _optional_config_path_relative_to_preserve_final(
+            self.scheduler_evidence_root,
+            workspace_root,
         )
         object.__setattr__(
             self,
             "scheduler_evidence_root",
-            _optional_config_path_relative_to(self.scheduler_evidence_root, workspace_root),
+            _resolve_optional_config_path(scheduler_evidence_root_preflight_path),
         )
         object.__setattr__(self, "service_role", str(self.service_role).strip() if self.service_role else None)
         object.__setattr__(self, "database_url", str(self.database_url).strip() if self.database_url else None)
@@ -367,20 +410,33 @@ class ProductionSchedulerConfig:
                 if self.scheduler_lock_root is not None
                 else workspace_root / "scheduler"
             )
+            lock_root_preflight_path = (
+                scheduler_lock_root_preflight_path
+                if scheduler_lock_root_preflight_path is not None
+                else workspace_root / "scheduler"
+            )
             lock_path = _confined_path(
                 lock_root / "production-scheduler.lock",
                 workspace_root,
                 "lock_path",
             )
+            object.__setattr__(self, "_lock_root_preflight_path", lock_root_preflight_path)
             object.__setattr__(self, "lock_path", lock_path)
         else:
+            lock_path_preflight_path = _config_path_relative_to_preserve_final(self.lock_path, workspace_root)
             lock_path = _confined_path(self.lock_path, workspace_root, "lock_path")
             _require_under_workspace(lock_path, workspace_root, "lock_path")
+            object.__setattr__(self, "_lock_root_preflight_path", lock_path_preflight_path.parent)
             object.__setattr__(self, "lock_path", lock_path)
         if self.evidence_dir is None:
             evidence_root = (
                 Path(self.scheduler_evidence_root)
                 if self.scheduler_evidence_root is not None
+                else workspace_root / "scheduler" / "evidence"
+            )
+            evidence_root_preflight_path = (
+                scheduler_evidence_root_preflight_path
+                if scheduler_evidence_root_preflight_path is not None
                 else workspace_root / "scheduler" / "evidence"
             )
             evidence_dir = _confined_path(
@@ -389,11 +445,14 @@ class ProductionSchedulerConfig:
                 "evidence_dir",
             )
             _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            object.__setattr__(self, "_evidence_root_preflight_path", evidence_root_preflight_path)
             object.__setattr__(self, "evidence_dir", evidence_dir)
         else:
+            evidence_dir_preflight_path = _config_path_relative_to_preserve_final(self.evidence_dir, workspace_root)
             evidence_dir = _confined_path(self.evidence_dir, workspace_root, "evidence_dir")
             _require_under_workspace(evidence_dir, workspace_root, "evidence_dir")
             _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            object.__setattr__(self, "_evidence_root_preflight_path", evidence_dir_preflight_path)
             object.__setattr__(self, "evidence_dir", evidence_dir)
         if self.now is not None:
             object.__setattr__(self, "now", _ensure_utc(self.now))
@@ -680,32 +739,43 @@ class ProductionScheduler:
             pass_status = "planned"
             no_mutation_proof = _no_mutation_proof()
             slurm_preflight_evidence: dict[str, Any] | None = None
+            evidence_reservation: dict[str, Any] = {"status": "not_required"}
             if not self.config.dry_run and candidates:
-                slurm_preflight = _slurm_preflight(self.config)
-                if slurm_preflight["status"] != "not_required":
-                    slurm_preflight_evidence = redact_payload(slurm_preflight)
-                if slurm_preflight["status"] == "blocked":
+                evidence_reservation = self._reserve_pre_execution_evidence(pass_id, started_at, len(candidates))
+                if evidence_reservation["status"] == "blocked":
                     execution_evidence = [
-                        _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                        _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
                         for candidate in candidates
                     ]
-                    execution_boundary = "slurm_preflight_blocked"
+                    execution_boundary = "evidence_preflight_blocked"
                     pass_status = "preflight_blocked"
-                elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
-                    execution_evidence = [
-                        _candidate_preflight_blocked_evidence(candidate, config=self.config) for candidate in candidates
-                    ]
-                    execution_boundary = "preflight_blocked"
-                    pass_status = "preflight_blocked"
-                    no_mutation_proof = _no_mutation_proof()
                 else:
-                    execution_evidence = self._execute_candidates(candidates)
-                    submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
-                    execution_boundary = (
-                        "slurm_gateway_orchestration"
-                        if self.config.slurm_execution_enabled
-                        else "production_orchestration"
-                    )
+                    slurm_preflight = _slurm_preflight(self.config)
+                    if slurm_preflight["status"] != "not_required":
+                        slurm_preflight_evidence = redact_payload(slurm_preflight)
+                    if slurm_preflight["status"] == "blocked":
+                        execution_evidence = [
+                            _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                            for candidate in candidates
+                        ]
+                        execution_boundary = "slurm_preflight_blocked"
+                        pass_status = "preflight_blocked"
+                    elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
+                        execution_evidence = [
+                            _candidate_preflight_blocked_evidence(candidate, config=self.config)
+                            for candidate in candidates
+                        ]
+                        execution_boundary = "preflight_blocked"
+                        pass_status = "preflight_blocked"
+                        no_mutation_proof = _no_mutation_proof()
+                    else:
+                        execution_evidence = self._execute_candidates(candidates)
+                        submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
+                        execution_boundary = (
+                            "slurm_gateway_orchestration"
+                            if self.config.slurm_execution_enabled
+                            else "production_orchestration"
+                        )
                 pass_status = _scheduler_pass_status_from_execution(execution_evidence)
                 no_mutation_proof = {
                     "adapter_download_called": False,
@@ -755,9 +825,17 @@ class ProductionScheduler:
             )
             if slurm_preflight_evidence is not None:
                 evidence["slurm_preflight"] = slurm_preflight_evidence
+            if not self.config.dry_run and candidates and evidence_reservation["status"] != "not_required":
+                evidence["evidence_pre_execution"] = evidence_reservation
             if root_preflight["status"] != "not_required":
                 evidence["root_preflight"] = root_preflight
-            artifact_path = self._write_evidence(pass_id, evidence)
+            try:
+                artifact_path = self._write_evidence(pass_id, evidence)
+            except (OSError, SchedulerEvidenceWriteError) as error:
+                if evidence_reservation.get("status") != "blocked":
+                    raise
+                evidence["evidence_write_error"] = _evidence_write_error_payload(error)
+                artifact_path = None
             status = _evidence_status(evidence, pass_status)
             return SchedulerPassResult(
                 pass_id=pass_id,
@@ -821,9 +899,67 @@ class ProductionScheduler:
             evidence["evidence_write_error"] = {"reason": "evidence_write_failed", "error": str(error)}
             return None
 
+    def _reserve_pre_execution_evidence(
+        self,
+        pass_id: str,
+        started_at: datetime,
+        candidate_count: int,
+    ) -> dict[str, Any]:
+        evidence_dir = Path(self.config.evidence_dir)
+        workspace_root = Path(self.config.workspace_root)
+        artifact_name = f"{pass_id}.pre_execution.json"
+        artifact_path = evidence_dir / artifact_name
+        payload = {
+            "schema_version": "nhms.production_scheduler.pre_execution_evidence_reservation.v1",
+            "pass_id": pass_id,
+            "started_at": _format_utc(started_at),
+            "reserved_at": _format_utc(_now(self.config)),
+            "status": "reserved",
+            "candidate_count": candidate_count,
+            "artifact_path": str(artifact_path),
+            "final_evidence_artifact": str(evidence_dir / f"{pass_id}.json"),
+            "proof": "scheduler_evidence_directory_write_before_production_mutation",
+        }
+        try:
+            _require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
+            _require_under_workspace(artifact_path.parent.resolve(), workspace_root, "evidence_dir")
+            serialized = json.dumps(_evidence_safe(payload), indent=2, sort_keys=True)
+            evidence_dir_fd = _open_evidence_directory(evidence_dir, workspace_root)
+            try:
+                _require_evidence_artifact_available(
+                    f"{pass_id}.json",
+                    dir_fd=evidence_dir_fd,
+                    artifact_path=evidence_dir / f"{pass_id}.json",
+                )
+                _write_new_regular_file(
+                    artifact_name,
+                    serialized,
+                    dir_fd=evidence_dir_fd,
+                    artifact_path=artifact_path,
+                )
+            finally:
+                os.close(evidence_dir_fd)
+        except SchedulerEvidenceWriteError as error:
+            return _evidence_reservation_blocked_payload(
+                pass_id=pass_id,
+                artifact_path=artifact_path,
+                reason=error.reason,
+                details=error.details,
+            )
+        except OSError as error:
+            return _evidence_reservation_blocked_payload(
+                pass_id=pass_id,
+                artifact_path=artifact_path,
+                reason="evidence_write_failed",
+                details={"error": str(error)},
+            )
+        return payload
+
     def run_continuous(self, *, max_passes: int | None = None) -> list[SchedulerPassResult]:
         if max_passes is not None:
             max_passes = int(max_passes)
+            if max_passes < 1:
+                raise ValueError("production scheduler max_passes must be at least 1")
             if max_passes > MAX_CONTINUOUS_JSON_PASSES:
                 raise ValueError(
                     "production scheduler max_passes exceeds finite JSON output limit "
@@ -4163,6 +4299,41 @@ def _candidate_slurm_preflight_blocked_evidence(
     }
 
 
+def _candidate_evidence_write_blocked_evidence(
+    candidate: SchedulerCandidate,
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    blocker = {
+        "code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "state": "blocked",
+        "quality_flag": "evidence_preflight_blocked",
+        "residual_risk": "Scheduler evidence write proof failed before production mutation.",
+    }
+    reason = reservation.get("reason")
+    if reason not in (None, ""):
+        blocker["reason"] = str(reason)
+    return {
+        **_candidate_model_run_review_evidence(
+            candidate,
+            output_uri=None,
+            outcome=None,
+            status="preflight_blocked",
+            stage_statuses=[],
+        ),
+        **_candidate_identity_evidence(candidate),
+        "status": "preflight_blocked",
+        "submitted": False,
+        "mutation_occurred": False,
+        "execution_mode": "evidence_preflight",
+        "evidence_pre_execution": _evidence_safe(dict(reservation)),
+        "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "error_message": "Scheduler evidence write proof failed before production mutation.",
+        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+        "qhh_script_invoked": False,
+        "residual_blockers": [blocker],
+    }
+
+
 def _candidate_secret_manifest_blocked_evidence(
     candidate: SchedulerCandidate,
     *,
@@ -5474,12 +5645,17 @@ def _scheduler_lock_evidence_root_preflight(config: ProductionSchedulerConfig) -
     if not config.require_runtime_roots:
         return _scheduler_root_preflight_not_required(config)
     allowed_roots = _scheduler_allowed_roots(config)
+    allowed_roots_check, allowed_roots_blocker = _scheduler_allowed_roots_policy_check(config, allowed_roots)
+    enforce_approved_roots = allowed_roots_blocker is None
     checks: dict[str, Any] = {}
+    checks["allowed_roots_policy"] = allowed_roots_check
     blockers: list[dict[str, Any]] = []
+    if allowed_roots_blocker is not None:
+        blockers.append(allowed_roots_blocker)
     for field_name, path in (
-        ("workspace_root", Path(config.workspace_root)),
-        ("lock_root", Path(config.lock_path).parent),
-        ("evidence_root", Path(config.evidence_dir)),
+        ("workspace_root", config._workspace_root_preflight_path),
+        ("lock_root", config._lock_root_preflight_path),
+        ("evidence_root", config._evidence_root_preflight_path),
     ):
         check, blocker = _scheduler_root_check(
             field_name,
@@ -5488,8 +5664,9 @@ def _scheduler_lock_evidence_root_preflight(config: ProductionSchedulerConfig) -
             required=True,
             must_exist=True,
             allow_create=False,
+            require_approved_root=enforce_approved_roots and field_name == "workspace_root",
             require_under_workspace=field_name in {"lock_root", "evidence_root"},
-            workspace_root=Path(config.workspace_root),
+            workspace_root=config._workspace_root_preflight_path.resolve(strict=False),
         )
         checks[field_name] = check
         if blocker is not None:
@@ -5501,16 +5678,21 @@ def _scheduler_runtime_root_preflight(config: ProductionSchedulerConfig) -> dict
     if not config.require_runtime_roots:
         return _scheduler_root_preflight_not_required(config)
     allowed_roots = _scheduler_allowed_roots(config)
+    allowed_roots_check, allowed_roots_blocker = _scheduler_allowed_roots_policy_check(config, allowed_roots)
+    enforce_approved_roots = allowed_roots_blocker is None
     checks: dict[str, Any] = {}
+    checks["allowed_roots_policy"] = allowed_roots_check
     blockers: list[dict[str, Any]] = []
+    if allowed_roots_blocker is not None:
+        blockers.append(allowed_roots_blocker)
     for field_name, path in (
-        ("workspace_root", config.workspace_root),
-        ("object_store_root", config.object_store_root),
-        ("published_artifact_root", config.published_artifact_root),
-        ("runtime_root", config.runtime_root),
-        ("temp_root", config.temp_root),
-        ("lock_root", Path(config.lock_path).parent),
-        ("evidence_root", config.evidence_dir),
+        ("workspace_root", config._workspace_root_preflight_path),
+        ("object_store_root", config._object_store_root_preflight_path),
+        ("published_artifact_root", config._published_artifact_root_preflight_path),
+        ("runtime_root", config._runtime_root_preflight_path),
+        ("temp_root", config._temp_root_preflight_path),
+        ("lock_root", config._lock_root_preflight_path),
+        ("evidence_root", config._evidence_root_preflight_path),
     ):
         check, blocker = _scheduler_root_check(
             field_name,
@@ -5519,8 +5701,9 @@ def _scheduler_runtime_root_preflight(config: ProductionSchedulerConfig) -> dict
             required=True,
             must_exist=True,
             allow_create=False,
+            require_approved_root=enforce_approved_roots and field_name not in {"lock_root", "evidence_root"},
             require_under_workspace=field_name in {"lock_root", "evidence_root"},
-            workspace_root=Path(config.workspace_root),
+            workspace_root=config._workspace_root_preflight_path.resolve(strict=False),
         )
         checks[field_name] = check
         if blocker is not None:
@@ -5564,6 +5747,7 @@ def _scheduler_root_check(
     required: bool,
     must_exist: bool,
     allow_create: bool,
+    require_approved_root: bool = True,
     require_under_workspace: bool = False,
     workspace_root: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -5574,6 +5758,7 @@ def _scheduler_root_check(
             "exists": False,
             "is_dir": False,
             "contained": False,
+            "approved_root_required": require_approved_root,
             "writable": False,
         }
         if required:
@@ -5587,6 +5772,7 @@ def _scheduler_root_check(
             "exists": False,
             "is_dir": False,
             "contained": False,
+            "approved_root_required": require_approved_root,
             "writable": False,
         }
         return check, _scheduler_root_blocker(field_name, "RELATIVE", str(path))
@@ -5618,7 +5804,7 @@ def _scheduler_root_check(
                 unsafe_reason = _scheduler_root_os_error_reason(error)
     except OSError as error:
         unsafe_reason = _scheduler_root_os_error_reason(error)
-    contained = _path_is_under_any(resolved, allowed_roots)
+    contained = _path_is_under_any(resolved, allowed_roots) if require_approved_root else True
     under_workspace = True
     if require_under_workspace:
         if workspace_root is None:
@@ -5635,6 +5821,7 @@ def _scheduler_root_check(
         "is_dir": is_dir,
         "symlink": is_symlink,
         "contained": contained,
+        "approved_root_required": require_approved_root,
         "writable": writable,
         "allow_create": allow_create,
     }
@@ -5643,12 +5830,12 @@ def _scheduler_root_check(
     if unsafe_reason is not None:
         check["unsafe_reason"] = unsafe_reason
         return check, _scheduler_root_blocker(field_name, unsafe_reason, str(resolved))
-    if not contained:
-        return check, _scheduler_root_blocker(field_name, "OUT_OF_APPROVED_ROOT", str(resolved))
     if require_under_workspace and not under_workspace:
         return check, _scheduler_root_blocker(field_name, "OUT_OF_WORKSPACE", str(resolved))
     if is_symlink:
         return check, _scheduler_root_blocker(field_name, "SYMLINK", str(resolved))
+    if require_approved_root and not contained:
+        return check, _scheduler_root_blocker(field_name, "OUT_OF_APPROVED_ROOT", str(resolved))
     if must_exist and not exists:
         return check, _scheduler_root_blocker(field_name, "NOT_FOUND", str(resolved))
     if exists and not is_dir:
@@ -5681,11 +5868,42 @@ def _scheduler_root_os_error_reason(error: OSError) -> str:
 
 def _directory_is_writable(path: Path) -> bool:
     try:
-        if not path.is_dir():
+        path_stat = path.lstat()
+        if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISDIR(path_stat.st_mode):
             return False
-        return os.access(path, os.W_OK)
+        if path_stat.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) == 0:
+            return False
+        if path_stat.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH) == 0:
+            return False
+        return os.access(path, os.W_OK | os.X_OK)
     except OSError:
         return False
+
+
+def _evidence_reservation_blocked_payload(
+    *,
+    pass_id: str,
+    artifact_path: Path,
+    reason: str,
+    details: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": "nhms.production_scheduler.pre_execution_evidence_reservation.v1",
+        "pass_id": pass_id,
+        "status": "blocked",
+        "artifact_path": str(artifact_path),
+        "reason": reason,
+        "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "message": "Scheduler evidence write proof failed before production mutation.",
+    }
+    payload.update(dict(details or {}))
+    return _evidence_safe(payload)
+
+
+def _evidence_write_error_payload(error: OSError) -> dict[str, Any]:
+    if isinstance(error, SchedulerEvidenceWriteError):
+        return {"reason": error.reason, **error.details}
+    return {"reason": "evidence_write_failed", "error": str(error)}
 
 
 def _scheduler_service_role_check(service_role: str | None) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -5703,18 +5921,26 @@ def _scheduler_service_role_check(service_role: str | None) -> tuple[dict[str, A
     return check, None
 
 
+def _scheduler_allowed_roots_policy_check(
+    config: ProductionSchedulerConfig,
+    allowed_roots: Sequence[Path],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    configured_roots = tuple(root for root in config.allowed_storage_roots if root not in (None, ""))
+    check = {
+        "env": "NHMS_SCHEDULER_ALLOWED_ROOTS",
+        "configured": bool(configured_roots),
+        "non_empty": bool(allowed_roots),
+        "allowed_roots": [str(root) for root in allowed_roots],
+        "independent_policy_required": True,
+    }
+    if not allowed_roots:
+        return check, _scheduler_root_blocker("allowed_roots", "MISSING", None)
+    return check, None
+
+
 def _scheduler_allowed_roots(config: ProductionSchedulerConfig) -> tuple[Path, ...]:
     roots: list[Path] = []
-    configured = list(config.allowed_storage_roots)
-    if not configured:
-        configured = [
-            config.workspace_root,
-            config.object_store_root,
-            config.published_artifact_root,
-            config.runtime_root,
-            config.temp_root,
-        ]
-    for value in configured:
+    for value in config.allowed_storage_roots:
         if value in (None, ""):
             continue
         root = Path(value).expanduser().resolve(strict=False)
@@ -5925,6 +6151,32 @@ def _optional_config_path(value: Path | str | None) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
+def _config_path_preserve_final_component(value: Path | str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.parent.resolve(strict=False) / path.name
+
+
+def _config_path_relative_to_preserve_final(value: Path | str, base: Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    return path.parent.resolve(strict=False) / path.name
+
+
+def _optional_config_path_relative_to_preserve_final(value: Path | str | None, base: Path) -> Path | None:
+    if value in (None, ""):
+        return None
+    return _config_path_relative_to_preserve_final(value, base)
+
+
+def _resolve_optional_config_path(value: Path | None) -> Path | None:
+    if value is None:
+        return None
+    return value.resolve()
+
+
 def _optional_config_path_relative_to(value: Path | str | None, base: Path) -> Path | None:
     if value in (None, ""):
         return None
@@ -5971,6 +6223,8 @@ def _require_safe_directory_final_component(path: Path, workspace_root: Path, fi
         path_stat = path.lstat()
     except FileNotFoundError:
         return
+    except OSError as error:
+        raise ValueError(f"production scheduler {field_name} must be a safe directory") from error
     if stat.S_ISLNK(path_stat.st_mode):
         resolved = path.resolve(strict=False)
         _require_under_workspace(resolved, workspace_root, field_name)
@@ -6094,6 +6348,27 @@ def _write_new_regular_file(
         raise
     with handle:
         handle.write(serialized)
+
+
+def _require_evidence_artifact_available(
+    artifact_name: str,
+    *,
+    dir_fd: int,
+    artifact_path: Path,
+) -> None:
+    try:
+        artifact_stat = os.stat(artifact_name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        if error.errno in {EISDIR, ELOOP, ENOTDIR}:
+            raise SchedulerEvidenceWriteError(
+                "unsafe_evidence_artifact",
+                {"artifact_path": str(artifact_path)},
+            ) from error
+        raise
+    reason = "evidence_artifact_exists" if stat.S_ISREG(artifact_stat.st_mode) else "unsafe_evidence_artifact"
+    raise SchedulerEvidenceWriteError(reason, {"artifact_path": str(artifact_path)})
 
 
 def _open_regular_guard_file(guard_name: str, *, dir_fd: int) -> int:
