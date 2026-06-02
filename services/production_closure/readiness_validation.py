@@ -140,8 +140,10 @@ SCHEDULER_REVIEW_EXECUTION_MODES = frozenset(
         "planning_only",
         "production_like",
         "production_orchestration",
+        "slurm_cancellation",
         "slurm_gateway_orchestration",
         "slurm_preflight",
+        "slurm_status_sync",
         "simulated",
     }
 )
@@ -152,6 +154,8 @@ SCHEDULER_REVIEW_PASSED_STATUSES = frozenset(
         "ready",
         "passed",
         "submitted",
+        "slurm_cancelled",
+        "slurm_status_synced",
         "completed",
         "succeeded",
     }
@@ -164,6 +168,9 @@ SCHEDULER_REVIEW_BLOCKED_STATUSES = frozenset(
         "permanently_failed",
         "preflight_blocked",
         "resource_limit_blocked",
+        "slurm_cancellation_blocked",
+        "slurm_partially_cancelled",
+        "slurm_status_sync_failed",
         "submission_failed",
         "submitted_partial",
         "partial",

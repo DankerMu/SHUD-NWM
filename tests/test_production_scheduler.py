@@ -1509,13 +1509,7 @@ def test_dry_run_is_non_mutating_and_does_not_call_execution_clients(tmp_path: P
     assert result.evidence["execution_mode"] == "dry_run"
     assert result.evidence["source_cycles"][0]["db_cycle_status_written"] is None
     assert result.evidence["source_cycles"][0]["cycle_status_candidate"] == "discovered"
-    assert result.evidence["no_mutation_proof"] == {
-        "adapter_download_called": False,
-        "slurm_submit_called": False,
-        "shud_runtime_called": False,
-        "hydro_result_table_writes": False,
-        "met_result_table_writes": False,
-    }
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
 
 
 def test_unavailable_ifs_cycle_is_evidence_only_not_db_enum_mutation(tmp_path: Path) -> None:
@@ -1727,6 +1721,124 @@ def test_plan_production_argparse_blank_workspace_root_exits_before_scheduler_co
     assert rc == 2
     assert captured.out == ""
     assert captured.err == "plan-production --workspace-root must not be blank\n"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "option_name"),
+    [
+        ("lock_path", "--lock-path"),
+        ("evidence_dir", "--evidence-dir"),
+    ],
+)
+def test_plan_production_blank_lock_and_evidence_shared_helper_rejected_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    field_name: str,
+    option_name: str,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank scheduler path flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+    kwargs = {
+        "sources": ("gfs",),
+        "lookback_hours": 24,
+        "cycle_lag_hours": 0,
+        "max_cycles_per_source": 1,
+        "model_ids": (),
+        "basin_ids": (),
+        "dry_run": True,
+        "continuous": False,
+        "interval_seconds": 300.0,
+        "max_passes": None,
+        "workspace_root": None,
+        "lock_path": None,
+        "evidence_dir": None,
+    }
+    kwargs[field_name] = ""
+
+    with pytest.raises(ValueError, match=f"{option_name} must not be blank"):
+        cli._plan_production(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("args", "option_name"),
+    [
+        (["--lock-path", ""], "--lock-path"),
+        (["--evidence-dir", ""], "--evidence-dir"),
+    ],
+)
+def test_plan_production_click_blank_lock_and_evidence_exits_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    args: list[str],
+    option_name: str,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank scheduler path flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    try:
+        cli._click_main(["plan-production", *args])
+    except SystemExit as error:
+        rc = int(error.code or 0)
+    else:
+        rc = 0
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == f"plan-production {option_name} must not be blank\n"
+
+
+@pytest.mark.parametrize(
+    ("args", "option_name"),
+    [
+        (["--lock-path", ""], "--lock-path"),
+        (["--evidence-dir", ""], "--evidence-dir"),
+    ],
+)
+def test_plan_production_argparse_blank_lock_and_evidence_exits_before_scheduler_construction(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    args: list[str],
+    option_name: str,
+) -> None:
+    class FailingScheduler:
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FailingScheduler:
+            del config
+            raise AssertionError("blank scheduler path flag must not construct scheduler")
+
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setattr(cli, "ProductionScheduler", FailingScheduler)
+
+    rc = cli._argparse_main(["plan-production", *args])
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert captured.out == ""
+    assert captured.err == f"plan-production {option_name} must not be blank\n"
+
+
+@pytest.mark.parametrize("field_name", ["workspace_root", "lock_path", "evidence_dir"])
+def test_production_scheduler_config_rejects_blank_scheduler_paths(tmp_path: Path, field_name: str) -> None:
+    kwargs: dict[str, Any] = {"workspace_root": tmp_path}
+    kwargs[field_name] = ""
+
+    with pytest.raises(ValueError, match=f"{field_name} must not be blank"):
+        ProductionSchedulerConfig(**kwargs)
 
 
 def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
@@ -2155,6 +2267,136 @@ def test_evidence_size_fallback_status_agrees_across_result_artifact_and_cli(
 
     assert payload["status"] == "resource_limit_blocked"
     assert payload["passes"][0]["status"] == "resource_limit_blocked"
+
+
+def test_bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 900)
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
+        lambda: FakeRegistry([_model("model_a", "basin_a")]),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=False),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = cli._plan_production(
+        sources=("gfs",),
+        lookback_hours=24,
+        cycle_lag_hours=0,
+        max_cycles_per_source=1,
+        model_ids=("model_a",),
+        basin_ids=(),
+        dry_run=True,
+        continuous=False,
+        interval_seconds=300.0,
+        max_passes=None,
+        workspace_root=None,
+        lock_path=None,
+        evidence_dir=None,
+    )
+    persisted = json.loads(Path(payload["artifact_path"]).read_text(encoding="utf-8"))
+
+    assert payload["status"] == "resource_limit_blocked"
+    assert persisted["status"] == "resource_limit_blocked"
+    for evidence in (payload, persisted):
+        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(roots["workspace_root"].resolve())
+        assert evidence["resolved_runtime_roots"]["evidence_root"]["path"] == str(roots["evidence_root"].resolve())
+        assert evidence["runtime_config"]["require_runtime_roots"] is True
+        assert evidence["runtime_config"]["service_role"] == "compute_control"
+        assert evidence["root_preflight"]["status"] == "ready"
+        assert evidence["root_preflight"]["checks"]["allowed_roots_policy"]["non_empty"] is True
+
+
+def test_bounded_evidence_preserves_pre_execution_reservation_proof(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 1200)
+
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            self.synced = False
+            super().__init__(
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
+
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            if self.synced:
+                return {
+                    "pipeline_status": "failed",
+                    "failed_stage": "forcing",
+                    "error_code": "NODE_FAILURE",
+                    "retry_count": 0,
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": kwargs["run_id"],
+                            "status": "failed",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                            "error_code": "NODE_FAILURE",
+                        }
+                    ],
+                }
+            return super().candidate_state(**kwargs)
+
+        def active_slurm_jobs(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [] if self.synced else super().active_slurm_jobs(**kwargs)
+
+    repository = SyncingRepository()
+
+    class SyncingOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            repository.synced = True
+            return [{"job_id": "job_forcing", "cycle_id": cycle_id, "slurm_job_id": "7777", "status": "failed"}]
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: SyncingOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert result.status == "resource_limit_blocked"
+    assert persisted["status"] == "resource_limit_blocked"
+    for evidence in (result.evidence, persisted):
+        assert evidence["evidence_pre_execution"]["status"] == "reserved"
+        assert evidence["evidence_pre_execution"]["proof"] == (
+            "scheduler_evidence_directory_write_before_production_mutation"
+        )
+        assert evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
+        assert evidence["resolved_runtime_roots"]["workspace_root"]["path"] == str(tmp_path.resolve())
+        assert evidence["runtime_config"]["dry_run"] is False
 
 
 def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path: Path) -> None:
@@ -2881,8 +3123,20 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     assert skipped["replacement_submitted"] is False
     assert cancellation["status"] == "cancelled"
     assert cancellation["replacement_submitted"] is False
+    assert cancellation["mutation_occurred"] is True
+    assert cancellation["cancel_attempted"] is True
     assert cancellation["cancelled_jobs"][0]["slurm_job_id"] == "7777"
     assert cancellation["cancelled_jobs"][0]["replacement_submitted"] is False
+    assert result.status == "slurm_cancelled"
+    assert result.evidence["status"] == "slurm_cancelled"
+    assert result.evidence["execution_boundary"] == "slurm_cancellation"
+    assert result.evidence["counts"]["slurm_cancelled_count"] == 1
+    assert result.evidence["counts"]["slurm_cancellation_blocked_count"] == 0
+    assert result.evidence["slurm_cancellation_proof"]["cancel_called"] is True
+    assert result.evidence["slurm_cancellation_proof"]["mutation_occurred"] is True
+    assert result.evidence["slurm_cancellation_proof"]["protected_by_pre_execution_evidence"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
     assert cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
     assert reservation_seen_before_cancel == [True]
     assert result.evidence["evidence_pre_execution"]["status"] == "reserved"
@@ -2892,6 +3146,66 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     assert constructed[0]["config"].source_id == "gfs"
     assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
     assert constructed[0]["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
+
+
+def test_cancel_active_slurm_exception_after_attempt_uses_unknown_mutation_outcome(
+    tmp_path: Path,
+) -> None:
+    class CancelError(Exception):
+        error_code = "PIPELINE_EVENT_WRITE_FAILED"
+        message = "Cancellation event write failed."
+
+    class RaisingCancelOrchestrator(FakeProductionOrchestrator):
+        def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
+            self.cancel_calls.append((cycle_id, reason))
+            raise CancelError("event failed after cancellation attempt")
+
+    orchestrator = RaisingCancelOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, cancel_active_slurm=True),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeSlurmActiveRepository(
+            active_jobs=[{"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}],
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert orchestrator.cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
+    assert result.status == "slurm_cancellation_blocked"
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "slurm_cancellation_blocked"
+        assert evidence["execution_boundary"] == "slurm_cancellation"
+        assert evidence["evidence_pre_execution"]["status"] == "reserved"
+        assert evidence["evidence_pre_execution"]["proof"] == (
+            "scheduler_evidence_directory_write_before_production_mutation"
+        )
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["slurm_cancelled_count"] == 0
+        assert evidence["counts"]["slurm_cancellation_blocked_count"] == 1
+        assert evidence["counts"]["slurm_cancellation_unknown_count"] == 1
+        cancellation = evidence["slurm_cancellation_evidence"][0]
+        assert cancellation["status"] == "failed"
+        assert cancellation["cancel_attempted"] is True
+        assert "mutation_occurred" not in cancellation
+        assert cancellation["mutation_outcome"] == "unknown_after_attempt"
+        assert cancellation["error_code"] == "PIPELINE_EVENT_WRITE_FAILED"
+        proof = evidence["slurm_cancellation_proof"]
+        assert proof["status"] == "slurm_cancellation_blocked"
+        assert proof["cancel_called"] is True
+        assert proof["protected_by_pre_execution_evidence"] is True
+        assert proof["mutation_outcome"] == "unknown_after_attempt"
+        assert proof["mutation_occurred"] == "unknown_after_attempt"
+        assert proof["slurm_cancellation_proven_absent"] is False
+        assert proof["pipeline_status_writes_proven_absent"] is False
+        assert proof["pipeline_event_writes_proven_absent"] is False
+        assert evidence["no_mutation_proof"]["slurm_cancellation_called"] is True
+        assert evidence["no_mutation_proof"]["pipeline_status_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["pipeline_event_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["slurm_submit_called"] is False
 
 
 def test_filtered_cancel_active_slurm_finds_cycle_level_array_job_with_different_stored_model(
@@ -3100,6 +3414,18 @@ def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
     assert cancellation["error_code"] == "SLURM_CANCELLATION_GAP"
     assert cancellation["cancellation_proven"] is False
     assert cancellation["replacement_submitted"] is False
+    assert cancellation["cancel_attempted"] is True
+    assert cancellation["mutation_occurred"] is False
+    assert result.status == "slurm_cancellation_blocked"
+    assert result.evidence["status"] == "slurm_cancellation_blocked"
+    assert result.evidence["execution_boundary"] == "slurm_cancellation"
+    assert result.evidence["counts"]["slurm_cancelled_count"] == 0
+    assert result.evidence["counts"]["slurm_cancellation_blocked_count"] == 1
+    assert result.evidence["slurm_cancellation_proof"]["cancel_called"] is True
+    assert result.evidence["slurm_cancellation_proof"]["mutation_occurred"] is False
+    assert result.evidence["slurm_cancellation_proof"]["protected_by_pre_execution_evidence"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_cancellation_called"] is True
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
 
 
 def test_active_cycle_orchestration_without_hydro_state_skips_all_candidates(
@@ -4922,6 +5248,321 @@ def test_stale_active_db_job_terminal_slurm_sync_does_not_skip_forever(tmp_path:
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
+def test_sync_cycle_statuses_blocks_before_sync_when_pre_execution_reservation_fails(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class SyncingRepository(CandidateAndActiveRepository):
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            return {
+                **super().candidate_state(**kwargs),
+                "pipeline_status": "running",
+                "pipeline_jobs": [
+                    {
+                        "job_id": "job_forcing",
+                        "run_id": kwargs["run_id"],
+                        "status": "running",
+                        "stage": "forcing",
+                        "slurm_job_id": "7777",
+                    }
+                ],
+            }
+
+    class SyncMustNotRunOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            del cycle_id
+            raise AssertionError("sync_cycle_statuses must not run before evidence reservation")
+
+    now = _dt("2026-05-21T12:00:00Z")
+    fixed_suffix = "reservation0"
+    pass_id = f"scheduler_{format_cycle_time(now)}_{fixed_suffix}"
+    evidence_dir = tmp_path / "scheduler" / "evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{pass_id}.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUuid", (), {"hex": fixed_suffix})())
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=SyncingRepository(
+            {
+                "pipeline_status": "running",
+                "pipeline_jobs": [
+                    {
+                        "job_id": "job_forcing",
+                        "status": "running",
+                        "stage": "forcing",
+                        "slurm_job_id": "7777",
+                    }
+                ],
+            },
+            [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+        ),
+        orchestrator_factory=lambda _source_id: SyncMustNotRunOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "evidence_preflight_blocked"
+    assert result.evidence["evidence_pre_execution"]["status"] == "blocked"
+    assert result.evidence["slurm_status_sync_proof"]["status"] == "preflight_blocked"
+    assert result.evidence["slurm_status_sync_proof"]["sync_called"] is False
+    assert result.evidence["no_mutation_proof"]["slurm_status_sync_called"] is False
+    assert result.evidence["no_mutation_proof"]["pipeline_status_writes"] is False
+    assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+    assert result.evidence["model_run_evidence"][0]["sync_attempted"] is False
+
+
+def test_sync_cycle_statuses_sees_pre_execution_reservation_before_mutating(tmp_path: Path) -> None:
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            self.synced = False
+            super().__init__(
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
+
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            if self.synced:
+                return {
+                    "pipeline_status": "failed",
+                    "failed_stage": "forcing",
+                    "error_code": "NODE_FAILURE",
+                    "retry_count": 0,
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": kwargs["run_id"],
+                            "status": "failed",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                            "error_code": "NODE_FAILURE",
+                        }
+                    ],
+                }
+            return super().candidate_state(**kwargs)
+
+        def active_slurm_jobs(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [] if self.synced else super().active_slurm_jobs(**kwargs)
+
+    repository = SyncingRepository()
+    reservation_seen_before_sync: list[bool] = []
+
+    class SyncingOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            reservation_seen_before_sync.append(bool(list(tmp_path.glob("scheduler/evidence/*.pre_execution.json"))))
+            repository.synced = True
+            return [
+                {
+                    "job_id": "job_forcing",
+                    "cycle_id": cycle_id,
+                    "slurm_job_id": "7777",
+                    "status": "failed",
+                }
+            ]
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: SyncingOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert reservation_seen_before_sync == [True]
+    assert result.evidence["slurm_status_sync_proof"]["status"] == "synced"
+    assert result.evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
+    assert result.evidence["slurm_status_sync_proof"]["sync_called"] is True
+    assert result.evidence["slurm_status_sync_proof"]["mutation_occurred"] is True
+    assert result.evidence["counts"]["slurm_status_sync_count"] == 1
+    assert result.evidence["no_mutation_proof"]["slurm_status_sync_called"] is True
+    assert result.evidence["no_mutation_proof"]["pipeline_event_writes"] is True
+    assert result.evidence["counts"]["submitted_count"] == 1
+
+
+def test_sync_cycle_statuses_exception_after_attempt_persists_conservative_final_evidence(
+    tmp_path: Path,
+) -> None:
+    class SyncError(Exception):
+        error_code = "PUBLISHED_LOG_WRITE_FAILED"
+        message = "Failed to publish gateway logs."
+
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            super().__init__(
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": "fcst_gfs_2026052106_model_a",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
+
+    reservation_seen_before_sync: list[bool] = []
+    sync_calls: list[str] = []
+
+    class RaisingSyncOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            reservation_seen_before_sync.append(bool(list(tmp_path.glob("scheduler/evidence/*.pre_execution.json"))))
+            sync_calls.append(cycle_id)
+            raise SyncError("publish failed after durable sync")
+
+    orchestrator = RaisingSyncOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=SyncingRepository(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert reservation_seen_before_sync == [True]
+    assert sync_calls == ["gfs_2026052106"]
+    assert orchestrator.calls == []
+    assert result.status == "slurm_status_sync_failed"
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "slurm_status_sync_failed"
+        assert evidence["execution_boundary"] == "slurm_status_sync"
+        assert evidence["evidence_pre_execution"]["status"] == "reserved"
+        assert evidence["evidence_pre_execution"]["proof"] == (
+            "scheduler_evidence_directory_write_before_production_mutation"
+        )
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["slurm_status_sync_count"] == 0
+        assert evidence["counts"]["slurm_status_sync_unknown_count"] == 1
+        assert evidence["model_run_evidence"] == []
+        assert evidence["skipped_candidates"][0]["reason"] == "active_slurm_status_sync_failed"
+        assert evidence["skipped_candidates"][0]["sync_attempted"] is True
+        assert evidence["skipped_candidates"][0]["mutation_outcome"] == "unknown_after_attempt"
+        proof = evidence["slurm_status_sync_proof"]
+        assert proof["status"] == "failed"
+        assert proof["sync_called"] is True
+        assert proof["protected_by_pre_execution_evidence"] is True
+        assert proof["mutation_outcome"] == "unknown_after_attempt"
+        assert proof["mutation_occurred"] == "unknown_after_attempt"
+        assert proof["pipeline_status_writes_proven_absent"] is False
+        assert proof["pipeline_event_writes_proven_absent"] is False
+        assert proof["error_code"] == "PUBLISHED_LOG_WRITE_FAILED"
+        assert evidence["no_mutation_proof"]["slurm_status_sync_called"] is True
+        assert evidence["no_mutation_proof"]["pipeline_status_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["pipeline_event_writes"] == "unknown_after_attempt"
+        assert evidence["no_mutation_proof"]["slurm_submit_called"] is False
+        assert evidence["no_mutation_proof"]["slurm_cancellation_called"] is False
+
+
+def test_sync_cycle_statuses_terminal_skip_promotes_sync_only_scheduler_status(tmp_path: Path) -> None:
+    class SyncingRepository(CandidateAndActiveRepository):
+        def __init__(self) -> None:
+            self.synced = False
+            super().__init__(
+                {
+                    "pipeline_status": "running",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": "fcst_gfs_2026052106_model_a",
+                            "status": "running",
+                            "stage": "forcing",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                },
+                [{"job_id": "job_forcing", "slurm_job_id": "7777", "status": "running", "stage": "forcing"}],
+            )
+
+        def candidate_state(self, **kwargs: Any) -> dict[str, Any]:
+            if self.synced:
+                return {
+                    "pipeline_status": "succeeded",
+                    "pipeline_jobs": [
+                        {
+                            "job_id": "job_forcing",
+                            "run_id": kwargs["run_id"],
+                            "model_id": kwargs["model_id"],
+                            "status": "succeeded",
+                            "stage": "publish",
+                            "slurm_job_id": "7777",
+                        }
+                    ],
+                }
+            return super().candidate_state(**kwargs)
+
+        def active_slurm_jobs(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [] if self.synced else super().active_slurm_jobs(**kwargs)
+
+    repository = SyncingRepository()
+
+    class SyncingOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            repository.synced = True
+            return [
+                {
+                    "job_id": "job_forcing",
+                    "cycle_id": cycle_id,
+                    "slurm_job_id": "7777",
+                    "status": "succeeded",
+                }
+            ]
+
+    orchestrator = SyncingOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert orchestrator.calls == []
+    assert result.status == "slurm_status_synced"
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "slurm_status_synced"
+        assert evidence["execution_boundary"] == "slurm_status_sync"
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["slurm_status_sync_count"] == 1
+        assert evidence["model_run_evidence"] == []
+        assert evidence["slurm_cancellation_evidence"] == []
+        assert evidence["slurm_status_sync_proof"]["status"] == "synced"
+        assert evidence["slurm_status_sync_proof"]["sync_called"] is True
+        assert evidence["slurm_status_sync_proof"]["mutation_occurred"] is True
+        assert evidence["slurm_status_sync_proof"]["protected_by_pre_execution_evidence"] is True
+        assert evidence["slurm_status_sync_proof"]["terminal_update_count"] == 1
+        assert evidence["no_mutation_proof"]["slurm_status_sync_called"] is True
+        assert evidence["no_mutation_proof"]["pipeline_status_writes"] is True
+        assert evidence["no_mutation_proof"]["pipeline_event_writes"] is True
+        assert evidence["no_mutation_proof"]["slurm_submit_called"] is False
+        assert evidence["no_mutation_proof"]["slurm_cancellation_called"] is False
+        assert evidence["skipped_candidates"][0]["reason"] == "terminal_pipeline_success"
+        sync = evidence["skipped_candidates"][0]["state_evidence"]["slurm_state_sync"]
+        assert sync["terminal_updates"][0]["status"] == "succeeded"
+
+
 @pytest.mark.parametrize(
     "hydro_status",
     ["failed", "cancelled", "submission_failed", "permanently_failed"],
@@ -5033,13 +5674,7 @@ def test_default_non_dry_run_blocks_before_mutation_without_safe_preflight(tmp_p
     assert result.evidence["execution_mode"] == "production_orchestration"
     assert result.evidence["execution_boundary"] == "preflight_blocked"
     assert result.evidence["counts"]["submitted_count"] == 0
-    assert result.evidence["no_mutation_proof"] == {
-        "adapter_download_called": False,
-        "slurm_submit_called": False,
-        "shud_runtime_called": False,
-        "hydro_result_table_writes": False,
-        "met_result_table_writes": False,
-    }
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
     evidence = result.evidence["model_run_evidence"][0]
     assert evidence["status"] == "preflight_blocked"
     assert evidence["submitted"] is False
@@ -5771,7 +6406,7 @@ def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_pat
     assert len(result.evidence["candidates"]) == 1
     assert result.evidence["blocked_candidates"] == []
     assert result.evidence["skipped_candidates"] == []
-    assert result.evidence["counts"] == {
+    expected_counts = {
         "candidate_count": 1,
         "blocked_candidate_count": 0,
         "skipped_candidate_count": 0,
@@ -5781,18 +6416,17 @@ def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_pat
         "failed_count": 0,
         "partial_count": 0,
     }
+    counts = result.evidence["counts"]
+    assert {name: counts[name] for name in expected_counts} == expected_counts
+    assert counts["slurm_status_sync_count"] == 0
+    assert counts["slurm_cancelled_count"] == 0
+    assert counts["slurm_cancellation_blocked_count"] == 0
     assert result.evidence["filters"] == result.evidence["operator_filters"]
     assert result.evidence["candidates"][0]["source_id"] == "gfs"
     assert result.evidence["candidates"][0]["cycle_id"] == "gfs_2026052106"
     assert result.evidence["candidates"][0]["model_id"] == "model_a"
     assert result.evidence["artifact_path"] == str(result.artifact_path)
-    assert result.evidence["no_mutation_proof"] == {
-        "adapter_download_called": False,
-        "slurm_submit_called": False,
-        "shud_runtime_called": False,
-        "hydro_result_table_writes": False,
-        "met_result_table_writes": False,
-    }
+    assert result.evidence["no_mutation_proof"] == _expected_no_mutation_proof()
     assert adapter.download_calls == 0
     assert persisted["schema_version"] == result.evidence["schema_version"]
     assert persisted["readiness"]["final_production_readiness_claimed"] is False
@@ -6442,13 +7076,7 @@ def test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit(
 
     assert payload["status"] == "preflight_blocked"
     assert payload["counts"]["submitted_count"] == 0
-    assert payload["no_mutation_proof"] == {
-        "adapter_download_called": False,
-        "slurm_submit_called": False,
-        "shud_runtime_called": False,
-        "hydro_result_table_writes": False,
-        "met_result_table_writes": False,
-    }
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
     assert expected_code in {blocker["code"] for blocker in payload["root_preflight"]["blockers"]}
     if broken_root in {"workspace_root", "evidence_root"}:
         assert "artifact_path" not in payload
@@ -7811,9 +8439,13 @@ def _expected_no_mutation_proof() -> dict[str, bool]:
     return {
         "adapter_download_called": False,
         "slurm_submit_called": False,
+        "slurm_status_sync_called": False,
+        "slurm_cancellation_called": False,
         "shud_runtime_called": False,
         "hydro_result_table_writes": False,
         "met_result_table_writes": False,
+        "pipeline_status_writes": False,
+        "pipeline_event_writes": False,
     }
 
 

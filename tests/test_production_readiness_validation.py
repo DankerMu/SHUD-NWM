@@ -1175,6 +1175,114 @@ def test_scheduler_planned_or_ready_production_evidence_cannot_accept_live_bindi
     assert summary["final_production_readiness_claimed"] is False
 
 
+def test_scheduler_slurm_status_synced_evidence_is_review_only_not_live_binding(tmp_path: Path) -> None:
+    payload = _scheduler_evidence_payload(
+        status="slurm_status_synced",
+        execution_mode="slurm_status_sync",
+        execution_boundary="slurm_status_sync",
+        slurm_status_sync_proof={
+            "status": "synced",
+            "sync_called": True,
+            "mutation_occurred": True,
+            "protected_by_pre_execution_evidence": True,
+            "updated_job_count": 1,
+            "terminal_update_count": 1,
+        },
+        no_mutation_proof={
+            "adapter_download_called": False,
+            "slurm_submit_called": False,
+            "slurm_status_sync_called": True,
+            "slurm_cancellation_called": False,
+            "shud_runtime_called": False,
+            "hydro_result_table_writes": False,
+            "met_result_table_writes": False,
+            "pipeline_status_writes": True,
+            "pipeline_event_writes": True,
+        },
+    )
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "passed"
+    assert scheduler_item["details"]["scheduler_status"] == "slurm_status_synced"
+    assert scheduler_item["details"]["execution_boundary"] == "slurm_status_sync"
+    assert scheduler_item["details"]["acceptance_errors"] == []
+    assert live_item["status"] == "release_blocked"
+    errors = live_item["details"]["acceptance_errors"]["errors"]
+    assert "scheduler_execution_mode_not_live_eligible" in errors
+    assert "scheduler_status_not_live_eligible" in errors
+    assert summary["final_production_readiness_claimed"] is False
+
+
+def test_scheduler_slurm_status_sync_failed_evidence_is_blocked_review_evidence(
+    tmp_path: Path,
+) -> None:
+    payload = _scheduler_evidence_payload(
+        status="slurm_status_sync_failed",
+        execution_mode="slurm_status_sync",
+        execution_boundary="slurm_status_sync",
+        candidates=[],
+        skipped_candidates=[
+            {
+                "candidate_id": "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+                "source_id": "gfs",
+                "cycle_time_utc": "2026-05-21T06:00:00Z",
+                "model_id": "model_a",
+                "scenario_id": "forecast_gfs_deterministic",
+                "run_id": "fcst_gfs_2026052106_model_a",
+                "forcing_version_id": "forc_gfs_2026052106_model_a",
+                "reason": "active_slurm_status_sync_failed",
+                "sync_attempted": True,
+                "mutation_outcome": "unknown_after_attempt",
+            }
+        ],
+        counts={
+            "candidate_count": 1,
+            "blocked_candidate_count": 0,
+            "skipped_candidate_count": 1,
+            "selected_model_count": 1,
+            "source_cycle_count": 1,
+            "submitted_count": 0,
+            "failed_count": 0,
+            "partial_count": 0,
+            "slurm_status_sync_count": 0,
+            "slurm_status_sync_unknown_count": 1,
+        },
+        slurm_status_sync_proof={
+            "status": "failed",
+            "sync_called": True,
+            "mutation_outcome": "unknown_after_attempt",
+            "mutation_occurred": "unknown_after_attempt",
+            "protected_by_pre_execution_evidence": True,
+            "failed_sync_count": 1,
+            "pipeline_status_writes_proven_absent": False,
+            "pipeline_event_writes_proven_absent": False,
+        },
+        no_mutation_proof={
+            "adapter_download_called": False,
+            "slurm_submit_called": False,
+            "slurm_status_sync_called": True,
+            "slurm_cancellation_called": False,
+            "shud_runtime_called": False,
+            "hydro_result_table_writes": False,
+            "met_result_table_writes": False,
+            "pipeline_status_writes": "unknown_after_attempt",
+            "pipeline_event_writes": "unknown_after_attempt",
+        },
+    )
+
+    summary, scheduler_item, live_item = _validate_scheduler_payload_with_matching_live_proof(tmp_path, payload)
+
+    assert scheduler_item["status"] == "blocked"
+    assert scheduler_item["details"]["scheduler_status"] == "slurm_status_sync_failed"
+    assert scheduler_item["details"]["execution_boundary"] == "slurm_status_sync"
+    assert scheduler_item["details"]["acceptance_errors"] == []
+    assert live_item["status"] == "release_blocked"
+    errors = live_item["details"]["acceptance_errors"]["errors"]
+    assert "missing_scheduler_evidence_binding" in errors
+    assert summary["final_production_readiness_claimed"] is False
+
+
 @pytest.mark.parametrize("status", ["completed", "succeeded"])
 def test_scheduler_completed_or_succeeded_noop_production_evidence_blocks_live_binding(
     tmp_path: Path,

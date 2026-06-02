@@ -725,10 +725,13 @@ class ProductionScheduler:
                 )
             models, model_evidence = self._discover_models()
             cycles, source_cycle_evidence = self._discover_cycles(started_at)
-            candidates, blocked_candidates, skipped_candidates, candidate_duplicate_exclusions = self._build_candidates(
-                models=models,
-                cycles=cycles,
-            )
+            (
+                candidates,
+                blocked_candidates,
+                skipped_candidates,
+                candidate_duplicate_exclusions,
+                slurm_status_sync_evidence,
+            ) = self._build_candidates(models=models, cycles=cycles)
             cancellation_evidence: list[dict[str, Any]] = []
             pending_cancel_candidates = [
                 candidate
@@ -749,7 +752,16 @@ class ProductionScheduler:
             no_mutation_proof = _no_mutation_proof()
             slurm_preflight_evidence: dict[str, Any] | None = None
             evidence_reservation: dict[str, Any] = {"status": "not_required"}
-            mutation_candidate_count = len(candidates) + len(pending_cancel_candidates)
+            pending_status_sync_candidates = [
+                candidate
+                for candidate in skipped_candidates
+                if candidate.get("reason") == "active_slurm_status_sync_deferred"
+            ]
+            slurm_status_sync_proof = _slurm_status_sync_proof(sync_required=bool(pending_status_sync_candidates))
+            slurm_cancellation_proof = _slurm_cancellation_proof()
+            mutation_candidate_count = len(candidates) + len(pending_cancel_candidates) + len(
+                pending_status_sync_candidates
+            )
             if not self.config.dry_run and mutation_candidate_count:
                 evidence_reservation = self._reserve_pre_execution_evidence(
                     pass_id,
@@ -761,50 +773,121 @@ class ProductionScheduler:
                         _candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
                         for candidate in candidates
                     ]
+                    execution_evidence.extend(
+                        _sync_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
+                        for candidate in pending_status_sync_candidates
+                    )
                     cancellation_evidence = [
                         _cancel_candidate_evidence_write_blocked_evidence(candidate, evidence_reservation)
                         for candidate in pending_cancel_candidates
                     ]
                     execution_boundary = "evidence_preflight_blocked"
                     pass_status = "preflight_blocked"
+                    slurm_status_sync_proof = _slurm_status_sync_proof(
+                        sync_required=bool(pending_status_sync_candidates),
+                        reservation=evidence_reservation,
+                        blocked=True,
+                    )
+                    slurm_cancellation_proof = _slurm_cancellation_proof(
+                        cancellation_required=bool(pending_cancel_candidates),
+                        reservation=evidence_reservation,
+                        blocked=True,
+                    )
                 else:
-                    if cancel_active_slurm_requested:
-                        cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
-                    if candidates:
-                        slurm_preflight = _slurm_preflight(self.config)
-                        if slurm_preflight["status"] != "not_required":
-                            slurm_preflight_evidence = redact_payload(slurm_preflight)
-                        if slurm_preflight["status"] == "blocked":
-                            execution_evidence = [
-                                _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
-                                for candidate in candidates
-                            ]
-                            execution_boundary = "slurm_preflight_blocked"
-                            pass_status = "preflight_blocked"
-                        elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
-                            execution_evidence = [
-                                _candidate_preflight_blocked_evidence(candidate, config=self.config)
-                                for candidate in candidates
-                            ]
-                            execution_boundary = "preflight_blocked"
-                            pass_status = "preflight_blocked"
-                            no_mutation_proof = _no_mutation_proof()
-                        else:
-                            execution_evidence = self._execute_candidates(candidates)
-                            submitted_count = sum(1 for item in execution_evidence if item.get("submitted") is True)
-                            execution_boundary = (
-                                "slurm_gateway_orchestration"
-                                if self.config.slurm_execution_enabled
-                                else "production_orchestration"
+                    if pending_status_sync_candidates:
+                        (
+                            candidates,
+                            blocked_candidates,
+                            skipped_candidates,
+                            candidate_duplicate_exclusions,
+                            slurm_status_sync_evidence,
+                        ) = self._build_candidates(
+                            models=models,
+                            cycles=cycles,
+                            allow_slurm_status_sync=True,
+                        )
+                        pending_cancel_candidates = [
+                            candidate
+                            for candidate in skipped_candidates
+                            if candidate.get("reason") == "cancel_requested_active_slurm"
+                        ]
+                        cancel_active_slurm_requested = (
+                            self.config.cancel_active_slurm
+                            and not self.config.dry_run
+                            and bool(pending_cancel_candidates)
+                        )
+                    slurm_status_sync_proof = _slurm_status_sync_proof_from_candidates(
+                        slurm_status_sync_evidence,
+                        reservation=evidence_reservation,
+                    )
+                    if _slurm_status_sync_failed(slurm_status_sync_proof):
+                        pass_status = "slurm_status_sync_failed"
+                        execution_boundary = "slurm_status_sync"
+                    else:
+                        if cancel_active_slurm_requested:
+                            cancellation_evidence = self._cancel_requested_active_slurm(skipped_candidates)
+                            slurm_cancellation_proof = _slurm_cancellation_proof_from_evidence(
+                                cancellation_evidence,
+                                reservation=evidence_reservation,
                             )
+                        if candidates:
+                            slurm_preflight = _slurm_preflight(self.config)
+                            if slurm_preflight["status"] != "not_required":
+                                slurm_preflight_evidence = redact_payload(slurm_preflight)
+                            if slurm_preflight["status"] == "blocked":
+                                execution_evidence = [
+                                    _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                                    for candidate in candidates
+                                ]
+                                execution_boundary = "slurm_preflight_blocked"
+                                pass_status = "preflight_blocked"
+                            elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
+                                execution_evidence = [
+                                    _candidate_preflight_blocked_evidence(candidate, config=self.config)
+                                    for candidate in candidates
+                                ]
+                                execution_boundary = "preflight_blocked"
+                                pass_status = "preflight_blocked"
+                                no_mutation_proof = _no_mutation_proof()
+                            else:
+                                execution_evidence = self._execute_candidates(candidates)
+                                submitted_count = sum(
+                                    1 for item in execution_evidence if item.get("submitted") is True
+                                )
+                                execution_boundary = (
+                                    "slurm_gateway_orchestration"
+                                    if self.config.slurm_execution_enabled
+                                    else "production_orchestration"
+                                )
                 if execution_evidence:
                     pass_status = _scheduler_pass_status_from_execution(execution_evidence)
+                if cancellation_evidence and not execution_evidence:
+                    pass_status = _scheduler_pass_status_from_cancellation(cancellation_evidence)
+                    execution_boundary = _scheduler_execution_boundary_from_cancellation(cancellation_evidence)
+                elif cancellation_evidence and pass_status == "planned":
+                    pass_status = _scheduler_pass_status_from_cancellation(cancellation_evidence)
+                    execution_boundary = _scheduler_execution_boundary_from_cancellation(cancellation_evidence)
+                if (
+                    pass_status == "planned"
+                    and execution_boundary == "planning_only"
+                    and _slurm_status_sync_mutated(slurm_status_sync_proof)
+                ):
+                    pass_status = "slurm_status_synced"
+                    execution_boundary = "slurm_status_sync"
+                pipeline_write_proof = _pipeline_write_proof_value(
+                    slurm_status_sync_proof,
+                    slurm_cancellation_proof,
+                )
                 no_mutation_proof = {
                     "adapter_download_called": False,
                     "slurm_submit_called": submitted_count > 0,
+                    "slurm_status_sync_called": slurm_status_sync_proof.get("sync_called") is True,
+                    "slurm_cancellation_called": slurm_cancellation_proof.get("cancel_called") is True,
                     "shud_runtime_called": False,
                     "hydro_result_table_writes": submitted_count > 0,
                     "met_result_table_writes": submitted_count > 0,
+                    "pipeline_status_writes": pipeline_write_proof,
+                    "pipeline_event_writes": pipeline_write_proof,
                 }
                 failed_count = _scheduler_failed_count_from_execution(execution_evidence)
                 partial_count = _scheduler_partial_count_from_execution(execution_evidence)
@@ -838,9 +921,22 @@ class ProductionScheduler:
                         "submitted_count": submitted_count,
                         "failed_count": failed_count,
                         "partial_count": partial_count,
+                        "slurm_status_sync_count": _slurm_status_sync_count(slurm_status_sync_proof),
+                        "slurm_status_sync_unknown_count": _slurm_status_sync_unknown_count(
+                            slurm_status_sync_proof,
+                        ),
+                        "slurm_cancelled_count": _slurm_cancelled_count(cancellation_evidence),
+                        "slurm_cancellation_blocked_count": _slurm_cancellation_blocked_count(
+                            cancellation_evidence,
+                        ),
+                        "slurm_cancellation_unknown_count": _slurm_cancellation_unknown_count(
+                            slurm_cancellation_proof,
+                        ),
                     },
                     "model_run_evidence": execution_evidence,
                     "slurm_cancellation_evidence": cancellation_evidence,
+                    "slurm_status_sync_proof": slurm_status_sync_proof,
+                    "slurm_cancellation_proof": slurm_cancellation_proof,
                     "no_mutation_proof": no_mutation_proof,
                     "execution_boundary": execution_boundary,
                 }
@@ -885,13 +981,7 @@ class ProductionScheduler:
                     "duplicate_exclusions": list(self.config.source_exclusions),
                     "model_discovery": _empty_model_discovery(),
                     "source_cycles": [],
-                    "no_mutation_proof": {
-                        "adapter_download_called": False,
-                        "slurm_submit_called": False,
-                        "shud_runtime_called": False,
-                        "hydro_result_table_writes": False,
-                        "met_result_table_writes": False,
-                    },
+                    "no_mutation_proof": _no_mutation_proof(),
                     "execution_boundary": "planning_only",
                 }
             )
@@ -1192,6 +1282,8 @@ class ProductionScheduler:
                         "cycle_time_utc": cycle_time_text,
                         "status": "blocked",
                         "error_code": "SLURM_CANCEL_UNSUPPORTED",
+                        "cancel_attempted": False,
+                        "mutation_occurred": False,
                         "replacement_submitted": False,
                     }
                 )
@@ -1202,6 +1294,7 @@ class ProductionScheduler:
                     max_jobs=self.config.candidate_state_job_limit,
                 )
             except Exception as error:
+                mutation_outcome = "unknown_after_attempt"
                 evidence.append(
                     {
                         "source_id": source_id,
@@ -1210,8 +1303,21 @@ class ProductionScheduler:
                         "status": "failed",
                         "error_code": getattr(error, "error_code", "SLURM_CANCEL_FAILED"),
                         "error_message": _evidence_safe(getattr(error, "message", str(error))),
+                        "cancel_attempted": True,
+                        "mutation_outcome": mutation_outcome,
                         "replacement_submitted": False,
                         "active_slurm_jobs": _evidence_safe(skipped.get("active_slurm_jobs", [])),
+                        "residual_blockers": [
+                            {
+                                "code": getattr(error, "error_code", "SLURM_CANCEL_FAILED"),
+                                "state": "blocked",
+                                "quality_flag": "slurm_cancellation_failed",
+                                "residual_risk": (
+                                    "Slurm cancellation raised after the downstream cancellation method was called; "
+                                    "mutation outcome is unknown."
+                                ),
+                            }
+                        ],
                     }
                 )
                 continue
@@ -1222,6 +1328,8 @@ class ProductionScheduler:
                 "cycle_time_utc": cycle_time_text,
                 "status": cancellation_status,
                 "cancelled_jobs": _evidence_safe(cancelled),
+                "cancel_attempted": True,
+                "mutation_occurred": cancellation_status in {"cancelled", "partially_cancelled"},
                 "replacement_submitted": False,
                 "active_slurm_jobs": _evidence_safe(skipped.get("active_slurm_jobs", [])),
             }
@@ -1473,11 +1581,19 @@ class ProductionScheduler:
         *,
         models: Sequence[RegisteredSchedulerModel],
         cycles: Sequence[SchedulerSourceCycle],
-    ) -> tuple[list[SchedulerCandidate], list[SchedulerCandidate], list[dict[str, Any]], list[dict[str, Any]]]:
+        allow_slurm_status_sync: bool = False,
+    ) -> tuple[
+        list[SchedulerCandidate],
+        list[SchedulerCandidate],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
         candidates: list[SchedulerCandidate] = []
         blocked: list[SchedulerCandidate] = []
         skipped: list[dict[str, Any]] = []
         duplicate_exclusions: list[dict[str, Any]] = []
+        slurm_status_sync_evidence: list[dict[str, Any]] = []
         seen_candidate_ids: set[str] = set()
         active_orchestration_provider = (
             getattr(self.active_repository, "has_active_orchestration", None)
@@ -1599,23 +1715,47 @@ class ProductionScheduler:
                 slurm_state_sync: dict[str, Any] | None = None
                 if active_slurm_jobs and not self.config.cancel_active_slurm and not self.config.dry_run:
                     cycle_id = cycle_id_for(discovery.source_id, discovery.cycle_time)
-                    sync = getattr(self._orchestrator_for(discovery.source_id), "sync_cycle_statuses", None)
-                    if callable(sync):
-                        synced_updates = _bounded_active_slurm_jobs(
-                            [dict(item) for item in sync(cycle_id)],
-                            max_jobs=self.config.candidate_state_job_limit,
-                        )
+                    sync = None
+                    if allow_slurm_status_sync:
+                        sync = getattr(self._orchestrator_for(discovery.source_id), "sync_cycle_statuses", None)
+                    if allow_slurm_status_sync and callable(sync):
+                        try:
+                            synced_updates = _bounded_active_slurm_jobs(
+                                [dict(item) for item in sync(cycle_id)],
+                                max_jobs=self.config.candidate_state_job_limit,
+                            )
+                        except Exception as error:
+                            slurm_state_sync = _slurm_status_sync_failed_evidence(
+                                candidate,
+                                cycle_id=cycle_id,
+                                active_slurm_jobs=active_slurm_jobs,
+                                error=error,
+                            )
+                            slurm_status_sync_evidence.append(slurm_state_sync)
+                            skipped.append(
+                                {
+                                    **candidate.to_dict(),
+                                    "reason": "active_slurm_status_sync_failed",
+                                    "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                                    "sync_required": True,
+                                    "sync_attempted": True,
+                                    "mutation_outcome": "unknown_after_attempt",
+                                    "state_evidence": {"slurm_state_sync": slurm_state_sync},
+                                }
+                            )
+                            continue
+                        slurm_state_sync = {
+                            "cycle_id": cycle_id,
+                            "status": "synced",
+                            "updates": synced_updates,
+                            "terminal_updates": [
+                                item
+                                for item in synced_updates
+                                if str(item.get("status") or "") in TERMINAL_PIPELINE_STATUSES
+                            ],
+                        }
+                        slurm_status_sync_evidence.append(slurm_state_sync)
                         if synced_updates:
-                            slurm_state_sync = {
-                                "cycle_id": cycle_id,
-                                "status": "synced",
-                                "updates": synced_updates,
-                                "terminal_updates": [
-                                    item
-                                    for item in synced_updates
-                                    if str(item.get("status") or "") in TERMINAL_PIPELINE_STATUSES
-                                ],
-                            }
                             state_decision = (
                                 _candidate_state_decision(
                                     candidate,
@@ -1635,6 +1775,15 @@ class ProductionScheduler:
                                 if callable(state_provider)
                                 else state_decision
                             )
+                            if state_decision is not None:
+                                state_decision = CandidateStateDecision(
+                                    action=state_decision.action,
+                                    reason=state_decision.reason,
+                                    evidence={
+                                        **dict(state_decision.evidence),
+                                        "slurm_state_sync": slurm_state_sync,
+                                    },
+                                )
                             if state_decision is not None and _candidate_state_has_identity_mismatch(
                                 state_decision.evidence,
                             ):
@@ -1662,10 +1811,26 @@ class ProductionScheduler:
                                 if callable(active_slurm_jobs_provider)
                                 else []
                             )
-                            if state_decision is not None and isinstance(state_decision.evidence, dict):
-                                state_decision.evidence["slurm_state_sync"] = slurm_state_sync
                             if state_decision is not None and state_decision.action == "retry":
                                 candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
+                            elif state_decision is None:
+                                candidate = _candidate_with_state_evidence(
+                                    candidate,
+                                    {"slurm_state_sync": slurm_state_sync},
+                                )
+                    elif not allow_slurm_status_sync:
+                        skipped.append(
+                            {
+                                **candidate.to_dict(),
+                                "reason": "active_slurm_status_sync_deferred",
+                                "cycle_id": cycle_id,
+                                "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                                "sync_required": True,
+                                "sync_attempted": False,
+                                "mutation_occurred": False,
+                            }
+                        )
+                        continue
                 if state_decision is not None and state_decision.action == "blocked":
                     blocked.append(
                         _blocked_candidate(
@@ -1699,23 +1864,25 @@ class ProductionScheduler:
                     skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                     continue
                 if active_slurm_jobs:
+                    active_slurm_skip: dict[str, Any]
                     if self.config.cancel_active_slurm:
-                        skipped.append(
-                            {
-                                **candidate.to_dict(),
-                                "reason": "cancel_requested_active_slurm",
-                                "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
-                                "replacement_submitted": False,
-                            }
-                        )
+                        active_slurm_skip = {
+                            **candidate.to_dict(),
+                            "reason": "cancel_requested_active_slurm",
+                            "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                            "replacement_submitted": False,
+                        }
                     else:
-                        skipped.append(
-                            {
-                                **candidate.to_dict(),
-                                "reason": "active_slurm_job",
-                                "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
-                            }
-                        )
+                        active_slurm_skip = {
+                            **candidate.to_dict(),
+                            "reason": "active_slurm_job",
+                            "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                        }
+                    if slurm_state_sync is not None:
+                        skip_evidence = dict(active_slurm_skip.get("state_evidence") or {})
+                        skip_evidence["slurm_state_sync"] = slurm_state_sync
+                        active_slurm_skip["state_evidence"] = _evidence_safe(skip_evidence)
+                    skipped.append(active_slurm_skip)
                     continue
                 if state_decision is not None and state_decision.action == "skip":
                     skip_evidence = dict(state_decision.evidence)
@@ -1744,7 +1911,7 @@ class ProductionScheduler:
                     skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                     continue
                 candidates.append(candidate)
-        return candidates, blocked, skipped, duplicate_exclusions
+        return candidates, blocked, skipped, duplicate_exclusions, slurm_status_sync_evidence
 
     def _write_evidence(self, pass_id: str, evidence: Mapping[str, Any]) -> Path | None:
         evidence_dir = Path(self.config.evidence_dir)
@@ -4394,6 +4561,36 @@ def _cancel_candidate_evidence_write_blocked_evidence(
     return item
 
 
+def _sync_candidate_evidence_write_blocked_evidence(
+    candidate: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    reason = reservation.get("reason")
+    blocker = {
+        "code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "state": "blocked",
+        "quality_flag": "evidence_preflight_blocked",
+        "residual_risk": "Scheduler evidence write proof failed before Slurm status sync mutation.",
+    }
+    if reason not in (None, ""):
+        blocker["reason"] = str(reason)
+    item = {
+        **dict(candidate),
+        "status": "preflight_blocked",
+        "submitted": False,
+        "mutation_occurred": False,
+        "execution_mode": "evidence_preflight",
+        "evidence_pre_execution": _evidence_safe(dict(reservation)),
+        "error_code": "EVIDENCE_WRITE_PRECHECK_FAILED",
+        "error_message": "Scheduler evidence write proof failed before Slurm status sync mutation.",
+        "sync_attempted": False,
+        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
+        "qhh_script_invoked": False,
+        "residual_blockers": [blocker],
+    }
+    return _evidence_safe(item)
+
+
 def _candidate_secret_manifest_blocked_evidence(
     candidate: SchedulerCandidate,
     *,
@@ -5643,6 +5840,240 @@ def _scheduler_cancellation_status(cancelled_jobs: Sequence[Mapping[str, Any]]) 
     return "blocked"
 
 
+def _scheduler_pass_status_from_cancellation(cancellation_evidence: Sequence[Mapping[str, Any]]) -> str:
+    if not cancellation_evidence:
+        return "planned"
+    statuses = {str(item.get("status") or "") for item in cancellation_evidence}
+    if statuses == {"cancelled"}:
+        return "slurm_cancelled"
+    if "cancelled" in statuses or "partially_cancelled" in statuses:
+        return "slurm_partially_cancelled"
+    if statuses == {"preflight_blocked"}:
+        return "preflight_blocked"
+    return "slurm_cancellation_blocked"
+
+
+def _slurm_status_sync_failed_evidence(
+    candidate: SchedulerCandidate,
+    *,
+    cycle_id: str,
+    active_slurm_jobs: Sequence[Mapping[str, Any]],
+    error: Exception,
+) -> dict[str, Any]:
+    error_code = str(getattr(error, "error_code", "SLURM_STATUS_SYNC_FAILED") or "SLURM_STATUS_SYNC_FAILED")
+    return {
+        "cycle_id": cycle_id,
+        "source_id": candidate.source_id,
+        "cycle_time_utc": _format_utc(candidate.cycle_time_utc),
+        "candidate_id": candidate.candidate_id,
+        "model_id": candidate.model_id,
+        "scenario_id": candidate.scenario_id,
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "status": "failed",
+        "sync_required": True,
+        "sync_called": True,
+        "sync_attempted": True,
+        "mutation_outcome": "unknown_after_attempt",
+        "error_code": error_code,
+        "error_message": _evidence_safe(getattr(error, "message", str(error))),
+        "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+        "residual_blockers": [
+            {
+                "code": error_code,
+                "state": "blocked",
+                "quality_flag": "slurm_status_sync_failed",
+                "residual_risk": (
+                    "Slurm status sync raised after the downstream sync method was called; "
+                    "pipeline status/event mutation outcome is unknown."
+                ),
+            }
+        ],
+    }
+
+
+def _scheduler_execution_boundary_from_cancellation(cancellation_evidence: Sequence[Mapping[str, Any]]) -> str:
+    if not cancellation_evidence:
+        return "planning_only"
+    if all(str(item.get("status") or "") == "preflight_blocked" for item in cancellation_evidence):
+        return "evidence_preflight_blocked"
+    return "slurm_cancellation"
+
+
+def _slurm_status_sync_proof(
+    *,
+    sync_required: bool = False,
+    reservation: Mapping[str, Any] | None = None,
+    blocked: bool = False,
+) -> dict[str, Any]:
+    proof: dict[str, Any] = {
+        "sync_required": sync_required,
+        "sync_called": False,
+        "mutation_occurred": False,
+        "protected_by_pre_execution_evidence": False,
+    }
+    if blocked:
+        proof["status"] = "preflight_blocked"
+    elif sync_required:
+        proof["status"] = "pending_reservation"
+    else:
+        proof["status"] = "not_required"
+    if reservation is not None:
+        proof["evidence_pre_execution_status"] = reservation.get("status")
+        proof["protected_by_pre_execution_evidence"] = reservation.get("status") == "reserved"
+        if reservation.get("status") == "blocked":
+            proof["block_reason"] = reservation.get("reason")
+    return proof
+
+
+def _slurm_status_sync_proof_from_candidates(
+    slurm_status_sync_evidence: Sequence[Mapping[str, Any]],
+    *,
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    sync_payloads = list(slurm_status_sync_evidence)
+    failed_payloads = [item for item in sync_payloads if str(item.get("status") or "") == "failed"]
+    update_count = sum(len(item.get("updates") or []) for item in sync_payloads)
+    terminal_update_count = sum(len(item.get("terminal_updates") or []) for item in sync_payloads)
+    unknown_after_attempt = any(item.get("mutation_outcome") == "unknown_after_attempt" for item in failed_payloads)
+    status = "failed" if failed_payloads else ("synced" if sync_payloads else "not_required")
+    proof: dict[str, Any] = {
+        "status": status,
+        "sync_required": bool(sync_payloads),
+        "sync_called": bool(sync_payloads),
+        "mutation_occurred": update_count > 0,
+        "protected_by_pre_execution_evidence": reservation.get("status") == "reserved",
+        "evidence_pre_execution_status": reservation.get("status"),
+        "synced_cycle_count": len({str(item.get("cycle_id") or "") for item in sync_payloads if item.get("cycle_id")}),
+        "updated_job_count": update_count,
+        "terminal_update_count": terminal_update_count,
+    }
+    if failed_payloads:
+        proof.update(
+            {
+                "failed_sync_count": len(failed_payloads),
+                "error_code": failed_payloads[0].get("error_code"),
+                "error_message": failed_payloads[0].get("error_message"),
+            }
+        )
+    if unknown_after_attempt:
+        proof["mutation_outcome"] = "unknown_after_attempt"
+        proof["mutation_occurred"] = "unknown_after_attempt"
+        proof["pipeline_status_writes_proven_absent"] = False
+        proof["pipeline_event_writes_proven_absent"] = False
+    return proof
+
+
+def _slurm_cancellation_proof(
+    *,
+    cancellation_required: bool = False,
+    reservation: Mapping[str, Any] | None = None,
+    blocked: bool = False,
+) -> dict[str, Any]:
+    proof: dict[str, Any] = {
+        "cancellation_required": cancellation_required,
+        "cancel_called": False,
+        "mutation_occurred": False,
+        "protected_by_pre_execution_evidence": False,
+    }
+    if blocked:
+        proof["status"] = "preflight_blocked"
+    elif cancellation_required:
+        proof["status"] = "pending_reservation"
+    else:
+        proof["status"] = "not_required"
+    if reservation is not None:
+        proof["evidence_pre_execution_status"] = reservation.get("status")
+        proof["protected_by_pre_execution_evidence"] = reservation.get("status") == "reserved"
+        if reservation.get("status") == "blocked":
+            proof["block_reason"] = reservation.get("reason")
+    return proof
+
+
+def _slurm_cancellation_proof_from_evidence(
+    cancellation_evidence: Sequence[Mapping[str, Any]],
+    *,
+    reservation: Mapping[str, Any],
+) -> dict[str, Any]:
+    cancel_called = any(item.get("cancel_attempted") is True for item in cancellation_evidence)
+    cancelled_count = _slurm_cancelled_count(cancellation_evidence)
+    blocked_count = _slurm_cancellation_blocked_count(cancellation_evidence)
+    unknown_after_attempt_count = sum(
+        1 for item in cancellation_evidence if item.get("mutation_outcome") == "unknown_after_attempt"
+    )
+    proof: dict[str, Any] = {
+        "status": _scheduler_pass_status_from_cancellation(cancellation_evidence),
+        "cancellation_required": bool(cancellation_evidence),
+        "cancel_called": cancel_called,
+        "mutation_occurred": cancelled_count > 0,
+        "protected_by_pre_execution_evidence": reservation.get("status") == "reserved",
+        "evidence_pre_execution_status": reservation.get("status"),
+        "cancelled_job_count": cancelled_count,
+        "blocked_cancellation_count": blocked_count,
+    }
+    if unknown_after_attempt_count:
+        proof["mutation_outcome"] = "unknown_after_attempt"
+        proof["mutation_occurred"] = "unknown_after_attempt"
+        proof["unknown_cancellation_count"] = unknown_after_attempt_count
+        proof["slurm_cancellation_proven_absent"] = False
+        proof["pipeline_status_writes_proven_absent"] = False
+        proof["pipeline_event_writes_proven_absent"] = False
+    return proof
+
+
+def _slurm_status_sync_count(proof: Mapping[str, Any]) -> int:
+    value = proof.get("updated_job_count")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _slurm_status_sync_unknown_count(proof: Mapping[str, Any]) -> int:
+    value = proof.get("failed_sync_count")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _slurm_status_sync_mutated(proof: Mapping[str, Any]) -> bool:
+    return proof.get("mutation_occurred") is True
+
+
+def _slurm_status_sync_failed(proof: Mapping[str, Any]) -> bool:
+    return str(proof.get("status") or "") == "failed" and proof.get("sync_called") is True
+
+
+def _slurm_cancelled_count(cancellation_evidence: Sequence[Mapping[str, Any]]) -> int:
+    total = 0
+    for item in cancellation_evidence:
+        for job in item.get("cancelled_jobs") or []:
+            if isinstance(job, Mapping) and str(job.get("status") or "").lower() == "cancelled":
+                total += 1
+    return total
+
+
+def _slurm_cancellation_blocked_count(cancellation_evidence: Sequence[Mapping[str, Any]]) -> int:
+    return sum(1 for item in cancellation_evidence if str(item.get("status") or "") != "cancelled")
+
+
+def _slurm_cancellation_unknown_count(proof: Mapping[str, Any]) -> int:
+    value = proof.get("unknown_cancellation_count")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return 1 if proof.get("mutation_outcome") == "unknown_after_attempt" else 0
+
+
+def _pipeline_write_proof_value(
+    slurm_status_sync_proof: Mapping[str, Any],
+    slurm_cancellation_proof: Mapping[str, Any],
+) -> bool | str:
+    if (
+        slurm_status_sync_proof.get("mutation_outcome") == "unknown_after_attempt"
+        or slurm_cancellation_proof.get("mutation_outcome") == "unknown_after_attempt"
+    ):
+        return "unknown_after_attempt"
+    return (
+        slurm_status_sync_proof.get("mutation_occurred") is True
+        or slurm_cancellation_proof.get("mutation_occurred") is True
+    )
+
+
 def _nested_bool(mapping: Mapping[str, Any], key: str, *, fallback: bool | None = None) -> bool | None:
     value = mapping.get(key)
     if isinstance(value, bool):
@@ -5688,6 +6119,11 @@ def _empty_counts() -> dict[str, int]:
         "submitted_count": 0,
         "failed_count": 0,
         "partial_count": 0,
+        "slurm_status_sync_count": 0,
+        "slurm_status_sync_unknown_count": 0,
+        "slurm_cancelled_count": 0,
+        "slurm_cancellation_blocked_count": 0,
+        "slurm_cancellation_unknown_count": 0,
     }
 
 
@@ -5695,9 +6131,13 @@ def _no_mutation_proof() -> dict[str, bool]:
     return {
         "adapter_download_called": False,
         "slurm_submit_called": False,
+        "slurm_status_sync_called": False,
+        "slurm_cancellation_called": False,
         "shud_runtime_called": False,
         "hydro_result_table_writes": False,
         "met_result_table_writes": False,
+        "pipeline_status_writes": False,
+        "pipeline_event_writes": False,
     }
 
 
@@ -6512,6 +6952,10 @@ def _bounded_evidence_payload(payload: Mapping[str, Any], *, reason: str) -> dic
         ),
         "limit": {"reason": reason, "max_evidence_bytes": MAX_EVIDENCE_BYTES},
         "counts": payload.get("counts", _empty_counts()),
+        "resolved_runtime_roots": payload.get("resolved_runtime_roots"),
+        "runtime_config": payload.get("runtime_config"),
+        "root_preflight": payload.get("root_preflight"),
+        "evidence_pre_execution": payload.get("evidence_pre_execution"),
         "candidates": [],
         "blocked_candidates": [],
         "skipped_candidates": [],
@@ -6520,16 +6964,9 @@ def _bounded_evidence_payload(payload: Mapping[str, Any], *, reason: str) -> dic
         "model_discovery": _empty_model_discovery(),
         "artifact_path": payload.get("artifact_path"),
         "execution_boundary": payload.get("execution_boundary", "planning_only"),
-        "no_mutation_proof": payload.get(
-            "no_mutation_proof",
-            {
-                "adapter_download_called": False,
-                "slurm_submit_called": False,
-                "shud_runtime_called": False,
-                "hydro_result_table_writes": False,
-                "met_result_table_writes": False,
-            },
-        ),
+        "slurm_status_sync_proof": payload.get("slurm_status_sync_proof"),
+        "slurm_cancellation_proof": payload.get("slurm_cancellation_proof"),
+        "no_mutation_proof": payload.get("no_mutation_proof", _no_mutation_proof()),
     }
 
 
