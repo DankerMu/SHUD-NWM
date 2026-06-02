@@ -4445,7 +4445,28 @@ def _candidate_basin_manifest(
     slurm_env = resource_profile.get("slurm_env")
     if isinstance(slurm_env, Mapping):
         manifest["slurm_env"] = {str(key): str(value) for key, value in slurm_env.items()}
+    project_identity = _resource_profile_project_identity(resource_profile)
+    if project_identity is not None:
+        manifest["project_name"] = project_identity["project_name"]
+        manifest["shud_input_name"] = project_identity["shud_input_name"]
+    package_checksum = resource_profile.get("package_checksum")
+    if package_checksum not in (None, ""):
+        manifest["package_checksum"] = str(package_checksum)
+        manifest.setdefault("model_package_checksum", str(package_checksum))
+    source_inventory_checksum = resource_profile.get("source_inventory_checksum")
+    if source_inventory_checksum not in (None, ""):
+        manifest["source_inventory_checksum"] = str(source_inventory_checksum)
     return manifest
+
+
+def _resource_profile_project_identity(resource_profile: Mapping[str, Any]) -> dict[str, str] | None:
+    project_name = resource_profile.get("project_name")
+    shud_input_name = resource_profile.get("shud_input_name")
+    project = str(project_name) if project_name not in (None, "") else None
+    shud_input = str(shud_input_name) if shud_input_name not in (None, "") else None
+    if project is None and shud_input is None:
+        return None
+    return {"project_name": project or shud_input or "", "shud_input_name": shud_input or project or ""}
 
 
 def _candidate_execution_attempted(outcome: Mapping[str, Any] | None, submitted: bool) -> bool:

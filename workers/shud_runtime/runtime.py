@@ -1163,8 +1163,11 @@ def _validate_manifest_path_components(manifest: dict[str, Any]) -> None:
         for key, value in section.items():
             if value is not None and key.endswith("_id"):
                 _safe_path_component(value)
-    if model.get("project_name") is not None:
-        _safe_path_component(model["project_name"])
+    runtime = manifest.get("runtime") or {}
+    for section in (model, runtime):
+        for key in ("project_name", "shud_input_name"):
+            if section.get(key) is not None:
+                _safe_path_component(section[key])
 
 
 def _runtime_command(
@@ -1549,7 +1552,16 @@ def _segment_count(manifest: dict[str, Any]) -> int:
 
 
 def _project_name(manifest: dict[str, Any]) -> str:
-    return _safe_path_component(str(manifest.get("model", {}).get("project_name") or manifest["model"]["model_id"]))
+    model = manifest.get("model") or {}
+    runtime = manifest.get("runtime") or {}
+    value = (
+        model.get("project_name")
+        or model.get("shud_input_name")
+        or runtime.get("project_name")
+        or runtime.get("shud_input_name")
+        or model["model_id"]
+    )
+    return _safe_path_component(str(value))
 
 
 def _initial_state_uri(manifest: dict[str, Any]) -> str | None:

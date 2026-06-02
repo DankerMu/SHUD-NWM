@@ -5491,7 +5491,7 @@ def build_model_run_assembly(
             or _nested_mapping(basin.get("runtime")).get("command_style")
             or "shud_project"
         ),
-        "project_name": _safe_project_name(str(basin.get("project_name") or model_id)),
+        "project_name": _project_name_for_basin(basin, fallback=model_id),
         "output_interval_minutes": int(
             basin.get("output_interval_minutes")
             or _nested_mapping(basin.get("runtime")).get("output_interval_minutes")
@@ -5954,6 +5954,23 @@ def _safe_project_name(value: str) -> str:
     if _SAFE_ID_RE.fullmatch(candidate):
         return candidate
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate).strip("._-") or "shud"
+
+
+def _project_name_for_basin(basin: Mapping[str, Any], *, fallback: str) -> str:
+    resource_profile = _nested_mapping(basin.get("resource_profile"))
+    runtime = _nested_mapping(basin.get("runtime"))
+    for value in (
+        basin.get("project_name"),
+        basin.get("shud_input_name"),
+        resource_profile.get("project_name"),
+        resource_profile.get("shud_input_name"),
+        runtime.get("project_name"),
+        runtime.get("shud_input_name"),
+        fallback,
+    ):
+        if value not in (None, ""):
+            return _safe_project_name(str(value))
+    return _safe_project_name(fallback)
 
 
 def _nested_value(value: Mapping[str, Any], path: Sequence[str]) -> Any:

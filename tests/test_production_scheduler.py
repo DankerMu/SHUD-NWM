@@ -2533,6 +2533,69 @@ def test_bootstrapped_qhh_model_is_scheduler_ready_without_metadata_exclusions(t
     assert not {"not_shud_model", "not_runnable", "incomplete_model_metadata"} & excluded_reasons
 
 
+def test_qhh_project_name_propagates_from_resource_profile_to_runtime_manifest(tmp_path: Path) -> None:
+    model = {
+        "model_id": "basins_qhh_shud",
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "segment_count": 5,
+        "model_package_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/package/",
+        "shud_code_version": "basins-shud",
+        "active_flag": True,
+        "lifecycle_state": "active",
+        "resource_profile": {
+            "runnable": True,
+            "lineage": "qhh_production_bootstrap",
+            "project_name": "qhh",
+            "shud_input_name": "qhh",
+            "station_count": 2,
+            "output_segment_count": 2,
+            "package_checksum": "package-sha",
+            "source_inventory_checksum": "inventory-sha",
+            "display_capabilities": {"q_down": True, "tiles": True},
+            "frequency_capabilities": {"return_periods": False},
+        },
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, model_ids=("basins_qhh_shud",)),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assembly = build_model_run_assembly(
+        submitted_basin,
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        cycle_time=_dt("2026-05-21T06:00:00Z"),
+        scenario_id="forecast_gfs_deterministic",
+        workspace_root=tmp_path / "workspace",
+        object_store=LocalObjectStore(tmp_path / "object-store", "s3://nhms"),
+        default_forecast_horizon_hours=168,
+    )
+    manifest = {
+        "model": {
+            "model_id": submitted_basin["model_id"],
+            "project_name": assembly.runtime["project_name"],
+            "shud_input_name": submitted_basin["shud_input_name"],
+        },
+        "runtime": dict(assembly.runtime),
+    }
+
+    assert result.status == "submitted"
+    assert submitted_basin["project_name"] == "qhh"
+    assert submitted_basin["shud_input_name"] == "qhh"
+    assert submitted_basin["package_checksum"] == "package-sha"
+    assert submitted_basin["source_inventory_checksum"] == "inventory-sha"
+    assert assembly.runtime["project_name"] == "qhh"
+    assert shud_runtime_module._project_name(manifest) == "qhh"
+
+
 def test_qhh_output_segment_count_propagates_separately_from_gis_segment_count(tmp_path: Path) -> None:
     model = {
         "model_id": "basins_qhh_shud",
@@ -2598,6 +2661,7 @@ def test_runtime_manifest_assembly_uses_shud_output_count_not_gis_segment_count(
         "forcing_version_id": "forc_gfs_2026052106_basins_qhh_shud",
         "forcing_uri": "s3://nhms/forcing/gfs/2026052106/basins_qhh_vbasins/basins_qhh_shud/",
         "station_count": 2,
+        "resource_profile": {"project_name": "qhh", "shud_input_name": "qhh"},
         "display_capabilities": {"tiles": True},
         "frequency_capabilities": {"return_periods": False},
     }
@@ -2627,12 +2691,14 @@ def test_runtime_manifest_assembly_uses_shud_output_count_not_gis_segment_count(
     }
 
     assert assembly.identity["segment_count"] == 2
+    assert assembly.runtime["project_name"] == "qhh"
     assert assembly.runtime["output_river"]["segment_count"] == 2
     assert assembly.runtime["output_river"]["output_segment_count"] == 2
     assert assembly.runtime["output_river"]["gis_segment_count"] == 5
     assert assembly.outputs["output_segment_count"] == 2
     assert assembly.outputs["gis_segment_count"] == 5
     assert shud_runtime_module._segment_count(manifest) == 2
+    assert shud_runtime_module._project_name(manifest) == "qhh"
 
 
 def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) -> None:

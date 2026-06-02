@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -96,6 +97,67 @@ def test_read_qhh_tsd_forc_rejects_non_finite_xyz_metadata(
 
     assert exc_info.value.error_code == "QHH_BOOTSTRAP_TSD_FORC_MALFORMED"
     assert exc_info.value.details["malformed_rows"][0]["reason"] == "non_finite_xyz"
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
+@pytest.mark.parametrize(
+    ("station_index", "reason"),
+    [
+        ("1.5", "invalid_forcing_index"),
+        ("nan", "invalid_forcing_index"),
+        ("inf", "invalid_forcing_index"),
+        ("250001", "invalid_forcing_index"),
+        ("999999999999999999999999999999", "invalid_forcing_index"),
+    ],
+)
+def test_read_qhh_tsd_forc_rejects_malformed_station_index_tokens(
+    tmp_path: Path,
+    station_index: str,
+    reason: str,
+) -> None:
+    input_dir = tmp_path / "qhh"
+    input_dir.mkdir()
+    tsd_forc = input_dir / "qhh.tsd.forc"
+    tsd_forc.write_text(
+        "1 6\n"
+        "/forcing\n"
+        "ID Lon Lat X Y Z Filename\n"
+        f"{station_index} 100 30 1 2 3 X000001.csv\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        read_qhh_tsd_forc(tsd_forc, input_dir)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_TSD_FORC_MALFORMED"
+    assert exc_info.value.details["malformed_rows"][0]["reason"] == reason
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["/tmp/X000001.csv", "nested/X000001.csv", "../X000001.csv", r"nested\\X000001.csv", ".", "..", "bad\x00.csv"],
+)
+def test_read_qhh_tsd_forc_rejects_raw_path_like_filename_tokens(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    input_dir = tmp_path / "qhh"
+    input_dir.mkdir()
+    tsd_forc = input_dir / "qhh.tsd.forc"
+    tsd_forc.write_text(
+        "1 6\n"
+        "/forcing\n"
+        "ID Lon Lat X Y Z Filename\n"
+        f"1 100 30 1 2 3 {filename}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        read_qhh_tsd_forc(tsd_forc, input_dir)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_TSD_FORC_MALFORMED"
+    assert exc_info.value.details["malformed_rows"][0]["reason"] == "invalid_forcing_filename"
     assert exc_info.value.details["no_mutation_expected"] is True
 
 
@@ -323,6 +385,28 @@ def test_bootstrap_rejects_evidence_path_outside_root(tmp_path: Path) -> None:
     assert exc_info.value.error_code == "QHH_BOOTSTRAP_EVIDENCE_PATH_UNSAFE"
 
 
+def test_bootstrap_rejects_regular_file_evidence_lane_before_database(tmp_path: Path) -> None:
+    root, _input_dir, inventory_path, manifest_path, _model_id = _qhh_registry_fixture(tmp_path)
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    lane = evidence_dir / "lane"
+    lane.write_text("unchanged\n", encoding="utf-8")
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        bootstrap_qhh_production(
+            database_url="postgresql://nhms:nhms@localhost:1/nhms",
+            basins_root=root,
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+            evidence_dir=evidence_dir,
+            evidence_path="lane/bootstrap.json",
+        )
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_EVIDENCE_PATH_UNSAFE"
+    assert exc_info.value.details["no_mutation_expected"] is True
+    assert lane.read_text(encoding="utf-8") == "unchanged\n"
+
+
 def test_bootstrap_removes_reserved_evidence_when_database_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -355,6 +439,65 @@ def test_bootstrap_removes_reserved_evidence_when_database_fails(
         )
 
     assert exc_info.value.error_code == "QHH_BOOTSTRAP_DATABASE_ERROR"
+    assert not evidence_path.exists()
+
+
+def test_bootstrap_cli_omits_final_evidence_write_failure_after_database_success(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path)
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    evidence_path = evidence_dir / "bootstrap.json"
+
+    def fake_database(*args: object, **kwargs: object) -> dict[str, object]:
+        del args, kwargs
+        assert evidence_path.exists()
+        return {
+            "schema_version": qhh_bootstrap.QHH_BOOTSTRAP_SCHEMA_VERSION,
+            "status": "bootstrapped",
+            "model_id": model_id,
+            "scheduler_readiness": {"ready": True},
+        }
+
+    def fail_final_write(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise QhhProductionBootstrapError(
+            "QHH_BOOTSTRAP_EVIDENCE_WRITE_FAILED",
+            "Injected final evidence write failure.",
+            model_id=model_id,
+            path=str(evidence_path),
+        )
+
+    monkeypatch.setattr(qhh_bootstrap, "_bootstrap_database", fake_database)
+    monkeypatch.setattr(qhh_bootstrap, "_write_reserved_evidence_path", fail_final_write)
+
+    exit_code = _argparse_main(
+        [
+            "bootstrap-qhh-production",
+            "--database-url",
+            "postgresql://nhms:nhms@localhost:1/nhms",
+            "--basins-root",
+            str(root),
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--evidence-dir",
+            str(evidence_dir),
+            "--evidence-path",
+            str(evidence_path),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["status"] == "bootstrapped"
+    assert payload["scheduler_readiness"]["ready"] is True
+    assert payload["evidence_write_omitted"] is True
+    assert payload["evidence_write_error"]["error_code"] == "QHH_BOOTSTRAP_EVIDENCE_WRITE_FAILED"
     assert not evidence_path.exists()
 
 
@@ -538,6 +681,189 @@ def test_existing_output_segment_digest_ignores_deterministic_geometry_backfill_
     assert normalized == expected
 
 
+def test_seed_output_segment_rows_reports_geometry_backfilled_rows_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sp_riv_path = Path("/input/qhh.sp.riv")
+    model = {
+        "model_id": "basins_qhh_shud",
+        "basin_id": "qhh",
+        "basin_version_id": "qhh_v1",
+        "river_network_version_id": "qhh_rivnet_v1",
+    }
+    expected = qhh_bootstrap._output_segment_expected_properties(
+        model=model,
+        project_name="qhh",
+        index=1,
+        sp_riv_path=sp_riv_path,
+        sp_riv_checksum="sha",
+    )
+    stored = {
+        **expected,
+        "geometry_source_segment_count": 2,
+        "geometry_source_length_m": 123.4,
+    }
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.sql = ""
+
+        def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+            del params
+            self.sql = sql
+
+        def fetchone(self) -> dict[str, Any]:
+            assert "order_offset" in self.sql
+            return {"order_offset": 0}
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            assert "FROM core.river_segment" in self.sql
+            return [
+                {
+                    "river_segment_id": "basins_qhh_shud_shud_riv_000001",
+                    "river_network_version_id": "qhh_rivnet_v1",
+                    "segment_order": 1,
+                    "properties_json": stored,
+                }
+            ]
+
+    monkeypatch.setattr("psycopg2.extras.execute_values", lambda *args, **kwargs: None)
+
+    counts = qhh_bootstrap._seed_output_segment_rows(
+        FakeCursor(),
+        model=model,
+        project_name="qhh",
+        output_segment_count=1,
+        sp_riv_path=sp_riv_path,
+        sp_riv_checksum="sha",
+    )
+
+    assert counts == {"created": 0, "updated": 0, "unchanged": 1}
+
+
+def test_scheduler_ready_profile_overrides_cannot_replace_canonical_identity(tmp_path: Path) -> None:
+    root, input_dir, inventory_path, manifest_path, _model_id = _qhh_registry_fixture(tmp_path)
+    paths = qhh_bootstrap._prepare_bootstrap_paths(
+        basins_root=root,
+        qhh_basin_slug="qhh",
+        qhh_project_name="qhh",
+        model_id="basins_qhh_shud",
+        package_version="vbasins-qhh-production",
+        inventory_path=inventory_path,
+        package_manifest_path=manifest_path,
+        work_dir=tmp_path / "work",
+    )
+    preflight_sources = qhh_bootstrap._prepare_preflight_sources_from_bounded_json(
+        paths.inventory_path,
+        paths.package_manifest_path,
+        model_id="basins_qhh_shud",
+    )
+    sources = qhh_bootstrap._prepare_sources_from_preflight(preflight_sources, model_id="basins_qhh_shud")
+    stations, tsd_checksum = read_qhh_tsd_forc(input_dir / "qhh.tsd.forc", input_dir)
+    output_count, sp_checksum = read_qhh_output_segment_count(input_dir / "qhh.sp.riv", input_dir)
+    profile = qhh_bootstrap._scheduler_ready_resource_profile(
+        qhh_bootstrap.QhhBootstrapContext(
+            sources=sources,
+            paths=paths,
+            stations=stations,
+            output_segment_count=output_count,
+            tsd_forc_checksum=tsd_checksum,
+            sp_riv_checksum=sp_checksum,
+            shud_code_version="basins-shud",
+        ),
+        resource_profile_overrides={
+            "model_id": "evil",
+            "project_name": "evil",
+            "station_count": 999,
+            "output_segment_count": 999,
+            "runnable": False,
+            "package_checksum": "evil",
+            "memory_gb": 16,
+            "partition": "debug",
+        },
+    )
+
+    assert profile["model_id"] == "basins_qhh_shud"
+    assert profile["project_name"] == "qhh"
+    assert profile["station_count"] == 2
+    assert profile["output_segment_count"] == 2
+    assert profile["runnable"] is True
+    assert profile["package_checksum"] == sources.manifest["package_checksum"]
+    assert profile["memory_gb"] == 16
+    assert profile["partition"] == "debug"
+
+
+def test_duplicate_active_preflight_matches_same_package_identity_without_qhh_flags() -> None:
+    executed: dict[str, Any] = {}
+
+    class FakeCursor:
+        def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+            executed["sql"] = sql
+            executed["params"] = params
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "model_id": "basins_qhh_shud",
+                    "basin_id": "qhh",
+                    "basin_version_id": "qhh_vbasins",
+                    "river_network_version_id": "qhh_rivnet_vbasins",
+                    "model_package_uri": "s3://pkg/package/",
+                    "resource_profile": {},
+                    "duplicate_reason": "model_id",
+                },
+                {
+                    "model_id": "other_model",
+                    "basin_id": "other_basin",
+                    "basin_version_id": "other_basin_v1",
+                    "river_network_version_id": "other_rivnet_v1",
+                    "model_package_uri": "s3://pkg/package/",
+                    "resource_profile": {},
+                    "duplicate_reason": "model_package_uri",
+                },
+            ]
+
+    sources = SimpleNamespace(
+        manifest={
+            "model_package_uri": "s3://pkg/package/",
+            "package_checksum": "package-sha",
+            "source_inventory_checksum": "inventory-sha",
+        },
+        model={"basin_slug": "qhh", "shud_input_name": "qhh"},
+        ids={
+            "model_id": "basins_qhh_shud",
+            "basin_id": "qhh",
+            "basin_version_id": "qhh_vbasins",
+            "river_network_version_id": "qhh_rivnet_vbasins",
+        },
+    )
+
+    rows = qhh_bootstrap._active_qhh_identity_rows(FakeCursor(), sources, model_id="basins_qhh_shud")
+
+    assert rows == [
+        {
+            "model_id": "basins_qhh_shud",
+            "basin_id": "qhh",
+            "basin_version_id": "qhh_vbasins",
+            "river_network_version_id": "qhh_rivnet_vbasins",
+            "duplicate_reason": "model_id",
+        },
+        {
+            "model_id": "other_model",
+            "basin_id": "other_basin",
+            "basin_version_id": "other_basin_v1",
+            "river_network_version_id": "other_rivnet_v1",
+            "duplicate_reason": "model_package_uri",
+        },
+    ]
+    assert "mi.model_package_uri = %s" in executed["sql"]
+    assert "mi.resource_profile->>'package_checksum' = %s" in executed["sql"]
+    assert "mi.resource_profile->>'source_inventory_checksum' = %s" in executed["sql"]
+    assert "s3://pkg/package/" in executed["params"]
+    assert "package-sha" in executed["params"]
+    assert "inventory-sha" in executed["params"]
+
+
 def test_bootstrap_cli_outputs_typed_blocker_for_missing_database_url(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -592,6 +918,7 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     assert first["scheduler_readiness"]["ready"] is True
     assert first["station_row_counts"] == {"created": 2, "updated": 0, "unchanged": 0}
     assert first["output_segment_row_counts"] == {"created": 2, "updated": 0, "unchanged": 0}
+    assert first["evidence_write_omitted"] is False
     assert first["output_segment_count"] == 2
     assert first["package_identity"]["manifest_uri"] == json.loads(manifest_path.read_text(encoding="utf-8"))[
         "manifest_uri"
@@ -660,6 +987,14 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     assert model["lifecycle_state"] == "active"
     assert model["shud_code_version"] == "basins-shud"
     assert model["resource_profile"]["runnable"] is True
+    assert model["resource_profile"]["project_name"] == "qhh"
+    assert model["resource_profile"]["shud_input_name"] == "qhh"
+    assert model["resource_profile"]["model_id"] == model_id
+    assert model["resource_profile"]["model_package_uri"] == first["model_package_uri"]
+    assert model["resource_profile"]["package_checksum"] == first["package_identity"]["package_checksum"]
+    assert model["resource_profile"]["source_inventory_checksum"] == first["package_identity"][
+        "source_inventory_checksum"
+    ]
     assert model["resource_profile"]["station_count"] == 2
     assert model["resource_profile"]["output_segment_count"] == 2
     assert model["resource_profile"]["qhh_tsd_forc_sha256"] == first["source_files"]["qhh_tsd_forc"]["sha256"]
@@ -681,6 +1016,7 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     scheduler_candidate = next(item for item in result.evidence["candidates"] if item["model_id"] == model_id)
     assert scheduler_candidate["output_segment_count"] == 2
     assert scheduler_candidate["resource_profile"]["output_segment_count"] == 2
+    assert scheduler_candidate["resource_profile"]["project_name"] == "qhh"
     assert not {"not_shud_model", "not_runnable", "incomplete_model_metadata"} & reasons
 
 
@@ -880,11 +1216,11 @@ def test_bootstrap_duplicate_active_model_blocks_before_station_writes(
                     model_package_uri,
                     true,
                     'active',
-                    resource_profile || %s
+                    %s
                 FROM core.model_instance
                 WHERE model_id = %s
                 """,
-                (Json({"project_name": "qhh", "basin_slug": "qhh"}), model_id),
+                (Json({}), model_id),
             )
 
     with pytest.raises(QhhProductionBootstrapError) as exc_info:
@@ -896,6 +1232,26 @@ def test_bootstrap_duplicate_active_model_blocks_before_station_writes(
         )
 
     assert exc_info.value.error_code == "QHH_BOOTSTRAP_DUPLICATE_ACTIVE_MODEL"
+    assert any(item["duplicate_reason"] == "model_package_uri" for item in exc_info.value.details["active_models"])
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) AS count FROM met.met_station WHERE properties_json->>'model_id' = %s",
+                ("basins_qhh_shud_duplicate",),
+            )
+            duplicate_station_count = int(cursor.fetchone()["count"])
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM core.river_segment
+                WHERE COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
+                  AND properties_json->>'model_id' = %s
+                """,
+                ("basins_qhh_shud_duplicate",),
+            )
+            duplicate_output_count = int(cursor.fetchone()["count"])
+    assert duplicate_station_count == 0
+    assert duplicate_output_count == 0
 
 
 @pytest.mark.integration

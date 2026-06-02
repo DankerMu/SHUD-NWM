@@ -9,7 +9,7 @@ import stat
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from packages.common.safe_fs import (
@@ -151,6 +151,28 @@ class QhhEvidenceReservation:
     closed: bool = False
 
 
+QHH_RESOURCE_PROFILE_OVERRIDE_ALLOWED_FIELDS = frozenset(
+    {
+        "scheduler",
+        "partition",
+        "account",
+        "nodes",
+        "ntasks",
+        "cpus_per_task",
+        "memory_mb",
+        "memory_gb",
+        "walltime",
+        "walltime_minutes",
+        "max_concurrent",
+        "shud_threads",
+        "slurm_env",
+        "display_capabilities",
+        "frequency_capabilities",
+        "resource_profile_id",
+    }
+)
+
+
 def bootstrap_qhh_production(
     *,
     database_url: str | None = None,
@@ -276,8 +298,7 @@ def bootstrap_qhh_production(
             _cleanup_reserved_evidence_path(evidence_reservation, model_id=model_id)
 
     if evidence_reservation is not None:
-        _write_reserved_evidence_path(evidence_reservation, report, model_id=model_id)
-        report = {**report, "evidence_path": str(evidence_reservation.target)}
+        report = _finalize_evidence_after_commit(evidence_reservation, report, model_id=model_id)
     return report
 
 
@@ -350,8 +371,15 @@ def read_qhh_tsd_forc(
         if len(parts) < 7:
             malformed_rows.append({"line_number": line_number, "reason": "too_few_columns"})
             continue
+        forcing_index = _parse_tsd_forc_station_index(parts[0])
+        forcing_filename = _parse_tsd_forc_filename(parts[6])
+        if forcing_index is None:
+            malformed_rows.append({"line_number": line_number, "reason": "invalid_forcing_index"})
+            continue
+        if forcing_filename is None:
+            malformed_rows.append({"line_number": line_number, "reason": "invalid_forcing_filename"})
+            continue
         try:
-            forcing_index = int(float(parts[0]))
             longitude = float(parts[1])
             latitude = float(parts[2])
             x = float(parts[3])
@@ -360,18 +388,17 @@ def read_qhh_tsd_forc(
         except ValueError:
             malformed_rows.append({"line_number": line_number, "reason": "non_numeric_column"})
             continue
-        if not math.isfinite(x) or not math.isfinite(y) or not math.isfinite(z):
+        if not (
+            math.isfinite(longitude)
+            and math.isfinite(latitude)
+            and math.isfinite(x)
+            and math.isfinite(y)
+            and math.isfinite(z)
+        ):
             malformed_rows.append({"line_number": line_number, "reason": "non_finite_xyz"})
-            continue
-        if forcing_index < 1:
-            malformed_rows.append({"line_number": line_number, "reason": "invalid_forcing_index"})
             continue
         if not (-180.0 <= longitude <= 180.0 and -90.0 <= latitude <= 90.0):
             malformed_rows.append({"line_number": line_number, "reason": "invalid_lon_lat"})
-            continue
-        forcing_filename = Path(parts[6]).name
-        if forcing_filename in {"", ".", ".."} or Path(forcing_filename).name != forcing_filename:
-            malformed_rows.append({"line_number": line_number, "reason": "invalid_forcing_filename"})
             continue
         station_id = f"qhh_forc_{forcing_index:03d}"
         stations.append(
@@ -421,6 +448,30 @@ def read_qhh_tsd_forc(
         )
     stations.sort(key=lambda item: item.forcing_index)
     return tuple(stations), checksum
+
+
+def _parse_tsd_forc_station_index(value: str) -> int | None:
+    if not value or not value.isascii() or not value.isdecimal():
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    if parsed < 1 or parsed > MAX_QHH_TSD_FORC_STATIONS:
+        return None
+    return parsed
+
+
+def _parse_tsd_forc_filename(value: str) -> str | None:
+    if not value or "\x00" in value or value in {".", ".."} or "\\" in value:
+        return None
+    candidate = PurePosixPath(value)
+    if candidate.is_absolute() or len(candidate.parts) != 1:
+        return None
+    part = candidate.parts[0]
+    if part in {"", ".", ".."}:
+        return None
+    return part
 
 
 def read_qhh_output_segment_count(
@@ -1059,8 +1110,12 @@ def _scheduler_ready_resource_profile(
         "qhh_tsd_forc_sha256": context.tsd_forc_checksum,
         "qhh_sp_riv_sha256": context.sp_riv_checksum,
     }
-    profile.update(resource_profile_overrides)
+    profile.update(_safe_resource_profile_overrides(resource_profile_overrides))
     return profile
+
+
+def _safe_resource_profile_overrides(overrides: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in dict(overrides).items() if key in QHH_RESOURCE_PROFILE_OVERRIDE_ALLOWED_FIELDS}
 
 
 def _seed_station_rows(
@@ -1189,13 +1244,14 @@ def _seed_output_segment_rows(
                     segment_order=segment_order,
                     properties_json=properties,
                 ),
+                properties,
             )
         )
     existing = _existing_output_segment_digests(
         cursor,
         model["river_network_version_id"],
         [row[0] for row in rows],
-        expected_properties_by_id={row[0]: _json_dict(row[3]) for row in rows},
+        expected_properties_by_id={row[0]: row[5] for row in rows},
     )
     created = sum(1 for row in rows if row[0] not in existing)
     unchanged = sum(1 for row in rows if existing.get(row[0]) == row[4])
@@ -1359,7 +1415,20 @@ def _active_qhh_identity_rows(cursor: Any, sources: ImportSources, *, model_id: 
                mi.basin_version_id,
                mi.river_network_version_id,
                mi.model_package_uri,
-               mi.resource_profile
+               mi.resource_profile,
+               CASE
+                 WHEN mi.model_id = %s THEN 'model_id'
+                 WHEN bv.basin_id = %s THEN 'basin_id'
+                 WHEN mi.basin_version_id = %s THEN 'basin_version_id'
+                 WHEN mi.river_network_version_id = %s THEN 'river_network_version_id'
+                 WHEN mi.model_package_uri = %s THEN 'model_package_uri'
+                 WHEN mi.resource_profile->>'package_checksum' = %s THEN 'package_checksum'
+                 WHEN mi.resource_profile->>'source_inventory_checksum' = %s THEN 'source_inventory_checksum'
+                 WHEN mi.resource_profile->>'basin_slug' = %s THEN 'basin_slug'
+                 WHEN mi.resource_profile->>'project_name' = %s THEN 'project_name'
+                 WHEN mi.resource_profile->>'shud_input_name' = %s THEN 'shud_input_name'
+                 ELSE 'unknown'
+               END AS duplicate_reason
         FROM core.model_instance mi
         JOIN core.basin_version bv
           ON bv.basin_version_id = mi.basin_version_id
@@ -1370,6 +1439,9 @@ def _active_qhh_identity_rows(cursor: Any, sources: ImportSources, *, model_id: 
             OR bv.basin_id = %s
             OR mi.basin_version_id = %s
             OR mi.river_network_version_id = %s
+            OR mi.model_package_uri = %s
+            OR mi.resource_profile->>'package_checksum' = %s
+            OR mi.resource_profile->>'source_inventory_checksum' = %s
             OR mi.resource_profile->>'basin_slug' = %s
             OR mi.resource_profile->>'project_name' = %s
             OR mi.resource_profile->>'shud_input_name' = %s
@@ -1381,6 +1453,19 @@ def _active_qhh_identity_rows(cursor: Any, sources: ImportSources, *, model_id: 
             sources.ids["basin_id"],
             sources.ids["basin_version_id"],
             sources.ids["river_network_version_id"],
+            sources.manifest["model_package_uri"],
+            sources.manifest.get("package_checksum"),
+            sources.manifest.get("source_inventory_checksum"),
+            sources.model["basin_slug"],
+            sources.model["shud_input_name"],
+            sources.model["shud_input_name"],
+            model_id,
+            sources.ids["basin_id"],
+            sources.ids["basin_version_id"],
+            sources.ids["river_network_version_id"],
+            sources.manifest["model_package_uri"],
+            sources.manifest.get("package_checksum"),
+            sources.manifest.get("source_inventory_checksum"),
             sources.model["basin_slug"],
             sources.model["shud_input_name"],
             sources.model["shud_input_name"],
@@ -1395,6 +1480,7 @@ def _active_qhh_identity_rows(cursor: Any, sources: ImportSources, *, model_id: 
             "basin_id": str(row["basin_id"]),
             "basin_version_id": str(row["basin_version_id"]),
             "river_network_version_id": str(row["river_network_version_id"]),
+            "duplicate_reason": str(row.get("duplicate_reason") or "unknown"),
         }
         for row in rows
     ]
@@ -2202,6 +2288,38 @@ def _write_reserved_evidence_path(
             model_id=model_id,
             path=str(reservation.target),
         ) from error
+
+
+def _finalize_evidence_after_commit(
+    reservation: QhhEvidenceReservation,
+    report: dict[str, Any],
+    *,
+    model_id: str,
+) -> dict[str, Any]:
+    try:
+        _write_reserved_evidence_path(reservation, report, model_id=model_id)
+    except QhhProductionBootstrapError as error:
+        _close_reserved_evidence_fd(reservation)
+        try:
+            _unlink_reserved_evidence_path(
+                reservation.target,
+                reservation.root,
+                model_id=model_id,
+                expected_identity=reservation.identity,
+            )
+        except QhhProductionBootstrapError as cleanup_error:
+            error.details["cleanup_error"] = cleanup_error.to_payload()
+        return {
+            **report,
+            "evidence_path": str(reservation.target),
+            "evidence_write_omitted": True,
+            "evidence_write_error": error.to_payload(),
+        }
+    return {
+        **report,
+        "evidence_path": str(reservation.target),
+        "evidence_write_omitted": False,
+    }
 
 
 def _cleanup_reserved_evidence_path(reservation: QhhEvidenceReservation, *, model_id: str) -> None:
