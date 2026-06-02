@@ -4230,6 +4230,91 @@ def test_terminal_candidate_state_is_recorded_before_not_ready_canonical_gate(tm
     assert "canonical_readiness" not in skipped["state_evidence"]
 
 
+def test_active_slurm_state_is_recorded_before_not_ready_canonical_gate(tmp_path: Path) -> None:
+    class NotReadyReadinessProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def canonical_readiness(self, **_kwargs: Any) -> Mapping[str, Any]:
+            self.calls += 1
+            return {"status": "canonical_unavailable", "ready": False, "reason": "canonical_missing"}
+
+    provider = NotReadyReadinessProvider()
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    active_repository = CandidateAndActiveRepository(
+        {
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_active",
+                    "slurm_job_id": "7777",
+                    "status": "running",
+                    "run_id": "fcst_gfs_2026052106_model_a",
+                    "model_id": "model_a",
+                }
+            ]
+        },
+        [{"slurm_job_id": "7777", "status": "running", "model_id": "model_a"}],
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        canonical_readiness_provider=provider,
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert provider.calls == 0
+    assert result.evidence["candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    skipped = result.evidence["skipped_candidates"][0]
+    assert skipped["reason"] == "active_slurm_job"
+    assert skipped["active_slurm_jobs"][0]["slurm_job_id"] == "7777"
+    assert skipped["state_evidence"]["replacement_submitted"] is False
+    assert active_repository.queries[0]["cycle_time"] == cycle_time
+
+
+def test_source_object_identity_is_reused_across_models_for_scheduler_pass(tmp_path: Path) -> None:
+    class CountingAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__("gfs", [("2026-05-21T06:00:00Z", True)])
+            self.identity_calls = 0
+
+        def source_object_identity(self, *_args: Any) -> dict[str, Any]:
+            self.identity_calls += 1
+            return {"source": "gfs", "object": "shared", "call": self.identity_calls}
+
+    class ReadyProvider:
+        def __init__(self) -> None:
+            self.identities: list[dict[str, Any]] = []
+
+        def canonical_readiness(self, **kwargs: Any) -> Mapping[str, Any]:
+            self.identities.append(dict(kwargs["source_object_identity"]))
+            return {"status": "canonical_ready", "ready": True}
+
+    adapter = CountingAdapter()
+    provider = ReadyProvider()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=True),
+        registry=FakeRegistry([_model("model_a", "basin_a"), _model("model_b", "basin_b")]),
+        adapters={"gfs": adapter},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=provider,
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["candidate_count"] == 2
+    assert adapter.identity_calls == 1
+    assert provider.identities == [
+        {"source": "gfs", "object": "shared", "call": 1},
+        {"source": "gfs", "object": "shared", "call": 1},
+    ]
+
+
 def test_candidate_state_parse_failure_after_shud_success_restarts_at_parse_without_native_rerun(
     tmp_path: Path,
 ) -> None:

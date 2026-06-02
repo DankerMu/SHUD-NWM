@@ -453,11 +453,31 @@ class IFSAdapter(DataSourceAdapter):
     def download_plan(self, manifest: DownloadManifest) -> DownloadPlanResult:
         cycle_time = manifest.cycle_time
         existing_cycle = self._get_cycle(cycle_time)
+        trusted_source_object_identity = self._trusted_prior_source_object_identity(manifest, existing_cycle)
         already_done_by_key: dict[str, DownloadFileResult] = {}
         needs_download = False
 
         for entry in manifest.entries:
-            already_done = self._already_done_result(entry)
+            try:
+                already_done = self._already_done_result(
+                    entry,
+                    trusted_source_object_identity=trusted_source_object_identity,
+                )
+            except FileTooLargeError as error:
+                self._record_download_failure(cycle_time, error.error_code, str(error), retry_count=0)
+                return DownloadPlanResult(
+                    status="failed_download",
+                    files=(
+                        DownloadFileResult(
+                            local_key=entry.local_key,
+                            status="failed",
+                            error_code=error.error_code,
+                            error_message=str(error),
+                        ),
+                    ),
+                    total_bytes_written=0,
+                    retry_count=0,
+                )
             if already_done is None:
                 needs_download = True
             else:
@@ -832,24 +852,46 @@ class IFSAdapter(DataSourceAdapter):
             )
         return DownloadedPayload(content=content, checksum=sha256_bytes(content), bytes_written=len(content))
 
-    def _entry_already_done(self, entry: ManifestEntry) -> bool:
+    def _entry_already_done(
+        self,
+        entry: ManifestEntry,
+        *,
+        trusted_source_object_identity: Mapping[str, Any] | None,
+    ) -> bool:
         try:
             if not self.object_store.exists(entry.local_key):
                 return False
-            if self.object_store.size(entry.local_key) == 0:
+            size_bytes = self.object_store.size(entry.local_key)
+            if size_bytes == 0:
                 return False
             minimum_size = entry.expected_size_bytes or self.config.min_file_size_bytes
-            if self.object_store.size(entry.local_key) < minimum_size:
+            if size_bytes < minimum_size:
                 return False
+            if size_bytes > self.config.max_file_size_bytes:
+                raise FileTooLargeError(
+                    f"Existing IFS raw object {entry.local_key} exceeds maximum size "
+                    f"{self.config.max_file_size_bytes} bytes"
+                )
             if entry.expected_checksum is None:
-                return True
+                return self._trusted_raw_observation_matches(
+                    entry.local_key,
+                    trusted_source_object_identity=trusted_source_object_identity,
+                    size_bytes=size_bytes,
+                )
             return self.object_store.checksum(entry.local_key) == entry.expected_checksum
+        except FileTooLargeError:
+            raise
         except (OSError, ObjectStoreError, ValueError):
             LOGGER.exception("Failed to check IFS idempotency for %s", entry.local_key)
             return False
 
-    def _already_done_result(self, entry: ManifestEntry) -> DownloadFileResult | None:
-        if not self._entry_already_done(entry):
+    def _already_done_result(
+        self,
+        entry: ManifestEntry,
+        *,
+        trusted_source_object_identity: Mapping[str, Any] | None,
+    ) -> DownloadFileResult | None:
+        if not self._entry_already_done(entry, trusted_source_object_identity=trusted_source_object_identity):
             return None
         try:
             checksum = self.object_store.checksum(entry.local_key)
@@ -871,7 +913,15 @@ class IFSAdapter(DataSourceAdapter):
                     param=parsed["variable"],
                     target=target.name,
                 )
+                payload_size = Path(target.name).stat().st_size
+                if payload_size > self.config.max_file_size_bytes:
+                    raise FileTooLargeError(
+                        f"Remote IFS file {self._safe_text(remote_url)} exceeded maximum size "
+                        f"{self.config.max_file_size_bytes} bytes"
+                    )
                 payload = Path(target.name).read_bytes()
+            except FileTooLargeError:
+                raise
             except HTTPError as error:
                 if error.code == 404:
                     raise FileUnavailableError(
@@ -1020,6 +1070,7 @@ class IFSAdapter(DataSourceAdapter):
             ),
             "raw_entry_count": len(entries),
             "raw_entry_digest": entry_digest,
+            "raw_entry_observation_digest_by_key": _entry_observation_digest_by_key(entries),
             "remote_identity_digest": _stable_digest([entry["remote_identity"] for entry in entries]),
             "raw_entry_samples": _entry_samples(entries),
         }
@@ -1060,10 +1111,18 @@ class IFSAdapter(DataSourceAdapter):
         try:
             if not self.object_store.exists(local_key):
                 return {"status": "missing", "checksum": None, "size_bytes": None}
+            size_bytes = self.object_store.size(local_key)
+            if size_bytes > self.config.max_file_size_bytes:
+                return {
+                    "status": "oversized",
+                    "checksum": None,
+                    "size_bytes": size_bytes,
+                    "max_size_bytes": self.config.max_file_size_bytes,
+                }
             return {
                 "status": "present",
                 "checksum": self.object_store.checksum(local_key),
-                "size_bytes": self.object_store.size(local_key),
+                "size_bytes": size_bytes,
             }
         except (OSError, ObjectStoreError, ValueError) as error:
             return {
@@ -1072,6 +1131,58 @@ class IFSAdapter(DataSourceAdapter):
                 "size_bytes": None,
                 "error_type": type(error).__name__,
             }
+
+    def _trusted_raw_observation_matches(
+        self,
+        local_key: str,
+        *,
+        trusted_source_object_identity: Mapping[str, Any] | None,
+        size_bytes: int,
+        expected_checksum: str | None = None,
+    ) -> bool:
+        trusted_observation = _trusted_observed_raw_object(
+            trusted_source_object_identity,
+            local_key=local_key,
+        )
+        if trusted_observation is None or trusted_observation.get("status") != "present":
+            return False
+        trusted_size = trusted_observation.get("size_bytes")
+        if trusted_size is None or int(trusted_size) != int(size_bytes):
+            return False
+        trusted_checksum = trusted_observation.get("checksum")
+        if not trusted_checksum:
+            return False
+        if expected_checksum is not None and trusted_checksum != expected_checksum:
+            return False
+        return self.object_store.checksum(local_key) == trusted_checksum
+
+    def _trusted_prior_source_object_identity(
+        self,
+        manifest: DownloadManifest,
+        existing_cycle: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if existing_cycle is None or existing_cycle.get("status") != "raw_complete":
+            return None
+        manifest_uri = existing_cycle.get("manifest_uri")
+        if not isinstance(manifest_uri, str) or not manifest_uri:
+            return None
+        try:
+            prior_manifest = self.load_manifest(manifest_uri)
+        except IFSAdapterError:
+            LOGGER.warning("Raw-complete IFS cycle has unreadable prior manifest %s", manifest_uri, exc_info=True)
+            return None
+        current_policy = manifest.metadata.get("source_policy")
+        prior_policy = prior_manifest.metadata.get("source_policy")
+        if _stable_digest(current_policy) != _stable_digest(prior_policy):
+            return None
+        prior_identity = prior_manifest.metadata.get("source_object_identity")
+        if not isinstance(prior_identity, Mapping):
+            return None
+        if prior_identity.get("source") != manifest.source_id:
+            return None
+        if str(prior_identity.get("cycle_time") or "") != manifest.cycle_time.isoformat():
+            return None
+        return dict(prior_identity)
 
     def _get_cycle(self, cycle_time: datetime) -> dict[str, Any] | None:
         if self.repository is None:
@@ -1148,6 +1259,46 @@ def _entry_samples(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(entries) <= 2:
         return [dict(entry) for entry in entries]
     return [dict(entries[0]), dict(entries[-1])]
+
+
+def _entry_observation_digest_by_key(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    observations: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        local_key = entry.get("local_key")
+        observed = entry.get("observed_raw_object")
+        if not isinstance(local_key, str) or not isinstance(observed, Mapping):
+            continue
+        observations[local_key] = {
+            "status": observed.get("status"),
+            "checksum": observed.get("checksum"),
+            "size_bytes": observed.get("size_bytes"),
+            "digest": _stable_digest(observed),
+        }
+    return observations
+
+
+def _trusted_observed_raw_object(
+    source_object_identity: Mapping[str, Any] | None,
+    *,
+    local_key: str,
+) -> Mapping[str, Any] | None:
+    if not isinstance(source_object_identity, Mapping):
+        return None
+    by_key = source_object_identity.get("raw_entry_observation_digest_by_key")
+    if isinstance(by_key, Mapping):
+        observed = by_key.get(local_key)
+        if isinstance(observed, Mapping):
+            return observed
+    samples = source_object_identity.get("raw_entry_samples")
+    if not isinstance(samples, list):
+        return None
+    for sample in samples:
+        if not isinstance(sample, Mapping) or sample.get("local_key") != local_key:
+            continue
+        observed = sample.get("observed_raw_object")
+        if isinstance(observed, Mapping):
+            return observed
+    return None
 
 
 def _parse_ifs_url(remote_url: str) -> dict[str, Any]:

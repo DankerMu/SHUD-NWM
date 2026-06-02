@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -290,6 +292,68 @@ def test_download_plan_raw_complete_idempotency_does_not_modify_cycle(tmp_path: 
     assert repository.cycles[("gfs", manifest.cycle_time)]["retry_count"] == 7
 
 
+def test_raw_complete_untrusted_existing_object_is_redownloaded_not_already_done(tmp_path: Path) -> None:
+    stale = b"GRIB stale collision bytes"
+    fresh = b"GRIB fresh source bytes"
+    downloads = 0
+
+    def downloader(_url: str) -> bytes:
+        nonlocal downloads
+        downloads += 1
+        return fresh
+
+    adapter, manifest = one_entry_manifest(tmp_path)
+    adapter.downloader = downloader
+    adapter.object_store.write_bytes_atomic(manifest.entries[0].local_key, stale)
+    adapter.repository.cycles[("gfs", manifest.cycle_time)] = {
+        "source_id": "gfs",
+        "cycle_time": manifest.cycle_time,
+        "status": "raw_complete",
+    }
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "raw_complete"
+    assert result.files[0].status == "downloaded"
+    assert result.files[0].checksum == sha256_bytes(fresh)
+    assert adapter.object_store.read_bytes(manifest.entries[0].local_key) == fresh
+    assert downloads == 1
+
+
+def test_raw_complete_trusted_existing_object_reuses_already_done(tmp_path: Path) -> None:
+    content = b"GRIB trusted existing bytes"
+    downloads = 0
+
+    def downloader(_url: str) -> bytes:
+        nonlocal downloads
+        downloads += 1
+        return b"GRIB should not download"
+
+    adapter, manifest = one_entry_manifest(tmp_path)
+    adapter.downloader = downloader
+    adapter.object_store.write_bytes_atomic(manifest.entries[0].local_key, content)
+    manifest.metadata["source_policy"] = adapter.source_policy_identity([0])
+    manifest.metadata["source_object_identity"] = adapter.source_object_identity(manifest.cycle_time, [0])
+    manifest = replace(manifest, manifest_uri="raw/gfs/2026050700/prior_manifest.json")
+    adapter.object_store.write_bytes_atomic(
+        manifest.manifest_uri,
+        json.dumps(manifest.as_dict(), sort_keys=True).encode("utf-8"),
+    )
+    adapter.repository.cycles[("gfs", manifest.cycle_time)] = {
+        "source_id": "gfs",
+        "cycle_time": manifest.cycle_time,
+        "status": "raw_complete",
+        "manifest_uri": manifest.manifest_uri,
+    }
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "already_done"
+    assert result.files[0].status == "already_done"
+    assert result.files[0].checksum == sha256_bytes(content)
+    assert downloads == 0
+
+
 def test_data_source_initialization_is_upserted_not_duplicated(tmp_path: Path) -> None:
     repository = FakeMetRepository()
     adapter = build_adapter(tmp_path, repository=repository)
@@ -420,6 +484,33 @@ def test_source_object_identity_changes_when_same_key_content_changes(tmp_path: 
     assert first["raw_entry_samples"][0]["observed_raw_object"]["checksum"] != (
         second["raw_entry_samples"][0]["observed_raw_object"]["checksum"]
     )
+
+
+def test_source_object_identity_blocks_oversized_raw_before_checksum(tmp_path: Path) -> None:
+    adapter = build_adapter(tmp_path, max_file_size_bytes=4)
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[0])
+    entry = manifest.entries[0]
+    adapter.object_store.write_bytes_atomic(entry.local_key, b"GRIB oversized raw payload")
+    original_store = adapter.object_store
+
+    class NoChecksumStore:
+        def exists(self, key_or_uri: str) -> bool:
+            return original_store.exists(key_or_uri)
+
+        def size(self, key_or_uri: str) -> int:
+            return original_store.size(key_or_uri)
+
+        def checksum(self, key_or_uri: str) -> str:
+            del key_or_uri
+            raise AssertionError("oversized raw object must block before checksum")
+
+    adapter.object_store = NoChecksumStore()  # type: ignore[assignment]
+
+    identity = adapter.source_object_identity(manifest.cycle_time, [0])
+    observation = identity["raw_entry_observation_digest_by_key"][entry.local_key]
+
+    assert observation["status"] == "oversized"
+    assert observation["checksum"] is None
 
 
 def test_downloaded_manifest_identity_feeds_gfs_canonical_readiness_and_blocks_stale_reuse(tmp_path: Path) -> None:

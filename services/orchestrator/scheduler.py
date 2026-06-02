@@ -713,6 +713,7 @@ class ProductionScheduler:
             self.canonical_readiness_provider = canonical_readiness_provider
         self.orchestrator_factory = orchestrator_factory
         self.sleep = sleep or _sleep
+        self._source_readiness_context_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     @classmethod
     def from_env(cls, config: ProductionSchedulerConfig | None = None) -> ProductionScheduler:
@@ -728,6 +729,7 @@ class ProductionScheduler:
         )
 
     def run_once(self) -> SchedulerPassResult:
+        self._source_readiness_context_cache.clear()
         started_at = _now(self.config)
         pass_id = f"scheduler_{format_cycle_time(started_at)}_{uuid4().hex[:12]}"
         root_preflight = _scheduler_lock_evidence_root_preflight(self.config)
@@ -1731,10 +1733,10 @@ class ProductionScheduler:
         provider = self.canonical_readiness_provider
         if provider is None:
             return None
-        adapter = self.adapters.get(cycle.discovery.source_id)
-        forecast_hours = _source_forecast_hours(cycle.discovery, adapter, cycle.horizon)
-        policy_identity = _source_policy_identity(cycle.discovery, adapter, forecast_hours)
-        source_object_identity = _source_object_identity(cycle.discovery, adapter, forecast_hours)
+        context = self._source_readiness_context(cycle)
+        forecast_hours = list(context["forecast_hours"])
+        policy_identity = dict(context["policy_identity"])
+        source_object_identity = dict(context["source_object_identity"])
         try:
             readiness = provider.canonical_readiness(
                 source_id=cycle.discovery.source_id,
@@ -1768,6 +1770,25 @@ class ProductionScheduler:
         evidence.setdefault("source_object_identity", source_object_identity)
         evidence.setdefault("accepted_horizon", _accepted_horizon_from_hours(forecast_hours))
         return _evidence_safe(evidence)
+
+    def _source_readiness_context(self, cycle: SchedulerSourceCycle) -> dict[str, Any]:
+        cache_key = (
+            cycle.discovery.source_id,
+            _ensure_utc(cycle.discovery.cycle_time).isoformat(),
+            json.dumps(_evidence_safe(cycle.horizon), sort_keys=True, default=str),
+        )
+        cached = self._source_readiness_context_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        adapter = self.adapters.get(cycle.discovery.source_id)
+        forecast_hours = _source_forecast_hours(cycle.discovery, adapter, cycle.horizon)
+        context = {
+            "forecast_hours": forecast_hours,
+            "policy_identity": _source_policy_identity(cycle.discovery, adapter, forecast_hours),
+            "source_object_identity": _source_object_identity(cycle.discovery, adapter, forecast_hours),
+        }
+        self._source_readiness_context_cache[cache_key] = context
+        return context
 
     def _build_candidates(
         self,
@@ -1925,6 +1946,178 @@ class ProductionScheduler:
                         }
                     )
                     continue
+                if (
+                    state_decision is not None
+                    and state_decision.action == "skip"
+                    and state_decision.reason == "active_slurm_job"
+                ):
+                    active_slurm_jobs = (
+                        list(
+                            _call_active_slurm_jobs_provider(
+                                active_slurm_jobs_provider,
+                                source_id=discovery.source_id,
+                                cycle_time=discovery.cycle_time,
+                                model_id=model.model_id,
+                                limit=self.config.candidate_state_job_limit,
+                            )
+                        )
+                        if callable(active_slurm_jobs_provider)
+                        else list(state_decision.evidence.get("active_slurm_jobs", []))
+                    )
+                    active_slurm_jobs = _bounded_active_slurm_jobs(
+                        active_slurm_jobs,
+                        max_jobs=self.config.candidate_state_job_limit,
+                    )
+                    if active_slurm_jobs and not self.config.cancel_active_slurm and not self.config.dry_run:
+                        cycle_id = cycle_id_for(discovery.source_id, discovery.cycle_time)
+                        sync = None
+                        if allow_slurm_status_sync:
+                            sync = getattr(self._orchestrator_for(discovery.source_id), "sync_cycle_statuses", None)
+                        if allow_slurm_status_sync and callable(sync):
+                            try:
+                                synced_updates = _bounded_active_slurm_jobs(
+                                    [dict(item) for item in sync(cycle_id)],
+                                    max_jobs=self.config.candidate_state_job_limit,
+                                )
+                            except Exception as error:
+                                slurm_state_sync = _slurm_status_sync_failed_evidence(
+                                    candidate,
+                                    cycle_id=cycle_id,
+                                    active_slurm_jobs=active_slurm_jobs,
+                                    error=error,
+                                )
+                                slurm_status_sync_evidence.append(slurm_state_sync)
+                                skipped.append(
+                                    {
+                                        **candidate.to_dict(),
+                                        "reason": "active_slurm_status_sync_failed",
+                                        "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                                        "sync_required": True,
+                                        "sync_attempted": True,
+                                        "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
+                                        "state_evidence": {"slurm_state_sync": slurm_state_sync},
+                                    }
+                                )
+                                continue
+                            slurm_state_sync = {
+                                "cycle_id": cycle_id,
+                                "status": "synced",
+                                "updates": synced_updates,
+                                "terminal_updates": [
+                                    item
+                                    for item in synced_updates
+                                    if str(item.get("status") or "") in TERMINAL_PIPELINE_STATUSES
+                                ],
+                            }
+                            slurm_status_sync_evidence.append(slurm_state_sync)
+                            if synced_updates:
+                                state_decision = (
+                                    _candidate_state_decision(
+                                        candidate,
+                                        _call_candidate_state_provider(
+                                            state_provider,
+                                            source_id=discovery.source_id,
+                                            cycle_time=discovery.cycle_time,
+                                            model_id=model.model_id,
+                                            run_id=candidate.run_id,
+                                            forcing_version_id=candidate.forcing_version_id,
+                                            candidate_id=candidate.candidate_id,
+                                            retry_limit=self.config.retry_limit,
+                                            job_limit=self.config.candidate_state_job_limit,
+                                            event_limit=self.config.candidate_state_event_limit,
+                                        ),
+                                    )
+                                    if callable(state_provider)
+                                    else state_decision
+                                )
+                                if state_decision is not None:
+                                    state_decision = CandidateStateDecision(
+                                        action=state_decision.action,
+                                        reason=state_decision.reason,
+                                        evidence={
+                                            **dict(state_decision.evidence),
+                                            "slurm_state_sync": slurm_state_sync,
+                                        },
+                                    )
+                                if state_decision is not None and _candidate_state_has_identity_mismatch(
+                                    state_decision.evidence,
+                                ):
+                                    blocked.append(
+                                        _blocked_candidate(
+                                            candidate,
+                                            "production_identity_mismatch",
+                                            state_evidence=state_decision.evidence,
+                                        )
+                                    )
+                                    continue
+                                active_slurm_jobs = (
+                                    _bounded_active_slurm_jobs(
+                                        list(
+                                            _call_active_slurm_jobs_provider(
+                                                active_slurm_jobs_provider,
+                                                source_id=discovery.source_id,
+                                                cycle_time=discovery.cycle_time,
+                                                model_id=model.model_id,
+                                                limit=self.config.candidate_state_job_limit,
+                                            )
+                                        ),
+                                        max_jobs=self.config.candidate_state_job_limit,
+                                    )
+                                    if callable(active_slurm_jobs_provider)
+                                    else []
+                                )
+                                if state_decision is not None and state_decision.action == "retry":
+                                    candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
+                                elif state_decision is None:
+                                    candidate = _candidate_with_state_evidence(
+                                        candidate,
+                                        {"slurm_state_sync": slurm_state_sync},
+                                    )
+                            if active_slurm_jobs:
+                                skip_evidence = dict(state_decision.evidence if state_decision is not None else {})
+                                skip_evidence["slurm_state_sync"] = slurm_state_sync
+                                skipped.append(
+                                    {
+                                        **candidate.to_dict(),
+                                        "reason": "active_slurm_job",
+                                        "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                                        "state_evidence": _evidence_safe(skip_evidence),
+                                    }
+                                )
+                                continue
+                        if not allow_slurm_status_sync:
+                            skipped.append(
+                                {
+                                    **candidate.to_dict(),
+                                    "reason": "active_slurm_status_sync_deferred",
+                                    "cycle_id": cycle_id,
+                                    "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                                    "sync_required": True,
+                                    "sync_attempted": False,
+                                    "mutation_occurred": False,
+                                }
+                            )
+                            continue
+                    if active_slurm_jobs:
+                        if self.config.cancel_active_slurm:
+                            skipped.append(
+                                {
+                                    **candidate.to_dict(),
+                                    "reason": "cancel_requested_active_slurm",
+                                    "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                                    "replacement_submitted": False,
+                                }
+                            )
+                        else:
+                            skipped.append(
+                                {
+                                    **candidate.to_dict(),
+                                    "reason": "active_slurm_job",
+                                    "active_slurm_jobs": _evidence_safe(active_slurm_jobs),
+                                    "state_evidence": _evidence_safe(state_decision.evidence),
+                                }
+                            )
+                        continue
                 canonical_readiness = self._canonical_readiness_for_candidate(candidate, cycle)
                 if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
                     state_evidence = {"canonical_readiness": canonical_readiness}

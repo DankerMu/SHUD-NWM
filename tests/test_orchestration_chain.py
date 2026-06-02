@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,8 @@ from services.orchestrator.chain import (
 from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
+from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES
+from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
 class FakeCycleSlurmClient:
@@ -4160,6 +4162,140 @@ def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Pat
     assert repository.cycle_statuses[-1] == "failed_publish"
 
 
+def test_trigger_ready_forecasts_rejects_stale_canonical_lineage_before_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    stale_object = {"source": "gfs", "object": "stale"}
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=stale_object,
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "skipped"
+    assert client.submissions == []
+    outcome = results[0].candidate_outcomes[0]
+    assert outcome["reason"] == "canonical_identity_mismatch"
+    evidence = outcome["state_evidence"]["canonical_readiness"]
+    assert evidence["ready"] is False
+    assert evidence["source_object_identity_matched"] is False
+
+
+def test_trigger_ready_forecasts_rejects_missing_required_lineage_before_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+            omit_source_object_identity=True,
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "skipped"
+    assert client.submissions == []
+    outcome = results[0].candidate_outcomes[0]
+    assert outcome["reason"] == "canonical_lineage_missing"
+    evidence = outcome["state_evidence"]["canonical_readiness"]
+    assert evidence["missing_source_object_identity_row_count"] > 0
+    assert evidence["ready"] is False
+
+
+def test_trigger_ready_forecasts_matching_lineage_preserves_submission_behavior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "complete"
+    assert [submission["stage"] for submission in client.submissions] == [
+        "produce_forcing",
+        "run_shud_forecast",
+        "parse_output",
+    ]
+    assert repository.hydro_runs["fcst_gfs_2026050100_model_0"]["status"] == "parsed"
+
+
+def test_trigger_ready_forecasts_provider_error_fails_closed_before_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity={"source": "gfs", "forecast_hours": [0, 3]},
+            source_object_identity={"source": "gfs", "object": "current"},
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+
+    def fail_policy(**_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("identity provider failed")
+
+    monkeypatch.setattr("services.orchestrator.chain._auto_trigger_source_policy_identity", fail_policy)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "skipped"
+    assert client.submissions == []
+    evidence = results[0].candidate_outcomes[0]["state_evidence"]["canonical_readiness"]
+    assert evidence["reason"] == "canonical_readiness_query_failed"
+    assert evidence["dependency"]["status"] == "unavailable"
+
+
 def _orchestrator(
     tmp_path: Path,
     repository: FakeCycleRepository,
@@ -4188,6 +4324,119 @@ def _orchestrator(
         slurm_client=client,
         object_store=object_store or LocalObjectStore(object_root, "s3://nhms"),
         retry_service=retry_service,
+    )
+
+
+class ReadyForecastRepository(FakeCycleRepository):
+    def __init__(
+        self,
+        *,
+        cycle_time: datetime,
+        canonical_products: Sequence[Mapping[str, Any]],
+        source_id: str = "gfs",
+    ) -> None:
+        super().__init__()
+        self.source_id = source_id
+        self.cycle_time = cycle_time
+        self.canonical_products = [dict(product) for product in canonical_products]
+
+    def list_canonical_ready_cycles(self, *, source_id: str | None, limit: int) -> list[dict[str, Any]]:
+        del limit
+        if source_id not in (None, self.source_id):
+            return []
+        return [
+            {
+                "source_id": self.source_id,
+                "cycle_time": self.cycle_time,
+                "cycle_id": cycle_id_for(self.source_id, self.cycle_time),
+                "max_lead_hours": 3,
+                "canonical_products": [dict(product) for product in self.canonical_products],
+            }
+        ]
+
+    def list_forecast_model_ids(self) -> list[str]:
+        return ["model_0"]
+
+    def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+        del source_id, cycle_time, model_id
+        return False
+
+    def load_model_context(self, model_id: str) -> ModelContext:
+        assert model_id == "model_0"
+        return ModelContext(
+            model_id=model_id,
+            basin_id="basin_0",
+            basin_version_id="basin_v0",
+            river_network_version_id="river_v0",
+            segment_count=1,
+            model_package_uri="s3://nhms/models/model_0/v1/package/",
+        )
+
+    def find_forcing_context(self, *, source_id: str, cycle_time: datetime, model_id: str) -> ForcingContext:
+        assert (source_id, cycle_time, model_id) == (self.source_id, self.cycle_time, "model_0")
+        return ForcingContext(
+            f"forc_{source_id}_{format_cycle_time(cycle_time)}_{model_id}",
+            f"s3://nhms/forcing/{source_id}/{format_cycle_time(cycle_time)}/{model_id}/",
+            max_lead_hours=3,
+        )
+
+    def create_hydro_run(self, context: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+        self.hydro_runs[context.run_id] = {
+            "run_id": context.run_id,
+            "status": "created",
+            "run_manifest": dict(manifest),
+        }
+        return dict(self.hydro_runs[context.run_id])
+
+
+def _canonical_rows(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    forecast_hours: Sequence[int],
+    policy_identity: Mapping[str, Any],
+    source_object_identity: Mapping[str, Any],
+    omit_source_object_identity: bool = False,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    compact_cycle = format_cycle_time(cycle_time)
+    for forecast_hour in forecast_hours:
+        for variable in GFS_REQUIRED_STANDARD_VARIABLES:
+            lineage = {
+                "policy_identity": dict(policy_identity),
+                "source_object_identity": dict(source_object_identity),
+                "source_cycle_id": f"{source_id}_{compact_cycle}",
+            }
+            if omit_source_object_identity:
+                lineage.pop("source_object_identity")
+            rows.append(
+                {
+                    "canonical_product_id": f"{source_id}_{compact_cycle}_{variable}_f{forecast_hour:03d}",
+                    "source_id": source_id,
+                    "cycle_time": cycle_time,
+                    "valid_time": cycle_time + timedelta(hours=forecast_hour),
+                    "lead_time_hours": forecast_hour,
+                    "variable": variable,
+                    "quality_flag": "ok",
+                    "lineage_json": lineage,
+                }
+            )
+    return rows
+
+
+def _patch_auto_trigger_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    policy: Mapping[str, Any],
+    source_object: Mapping[str, Any],
+) -> None:
+    monkeypatch.setattr(
+        "services.orchestrator.chain._auto_trigger_source_policy_identity",
+        lambda **_kwargs: dict(policy),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.chain._auto_trigger_source_object_identity",
+        lambda **_kwargs: dict(source_object),
     )
 
 

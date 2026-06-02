@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+from dataclasses import replace
 from datetime import datetime
 from email.message import Message
 from pathlib import Path
@@ -290,6 +292,68 @@ def test_download_plan_normal_idempotent_retry_and_mirror_switch(tmp_path: Path)
     assert "://aws/" in mirror_calls[2]
 
 
+def test_raw_complete_untrusted_existing_object_is_redownloaded_not_already_done(tmp_path: Path) -> None:
+    stale = b"GRIB IFS stale collision bytes"
+    fresh = b"GRIB IFS fresh source bytes"
+    downloads = 0
+
+    def downloader(_url: str) -> bytes:
+        nonlocal downloads
+        downloads += 1
+        return fresh
+
+    adapter, manifest = one_entry_manifest(tmp_path)
+    adapter.downloader = downloader
+    adapter.object_store.write_bytes_atomic(manifest.entries[0].local_key, stale)
+    adapter.repository.cycles[("IFS", manifest.cycle_time)] = {
+        "source_id": "IFS",
+        "cycle_time": manifest.cycle_time,
+        "status": "raw_complete",
+    }
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "raw_complete"
+    assert result.files[0].status == "downloaded"
+    assert result.files[0].checksum == sha256_bytes(fresh)
+    assert adapter.object_store.read_bytes(manifest.entries[0].local_key) == fresh
+    assert downloads == 1
+
+
+def test_raw_complete_trusted_existing_object_reuses_already_done(tmp_path: Path) -> None:
+    content = b"GRIB IFS trusted existing bytes"
+    downloads = 0
+
+    def downloader(_url: str) -> bytes:
+        nonlocal downloads
+        downloads += 1
+        return b"GRIB IFS should not download"
+
+    adapter, manifest = one_entry_manifest(tmp_path)
+    adapter.downloader = downloader
+    adapter.object_store.write_bytes_atomic(manifest.entries[0].local_key, content)
+    manifest.metadata["source_policy"] = adapter.source_policy_identity(manifest.cycle_time, [0])
+    manifest.metadata["source_object_identity"] = adapter.source_object_identity(manifest.cycle_time, [0])
+    manifest = replace(manifest, manifest_uri="raw/IFS/2026050100/prior_manifest.json")
+    adapter.object_store.write_bytes_atomic(
+        manifest.manifest_uri,
+        json.dumps(manifest.as_dict(), sort_keys=True).encode("utf-8"),
+    )
+    adapter.repository.cycles[("IFS", manifest.cycle_time)] = {
+        "source_id": "IFS",
+        "cycle_time": manifest.cycle_time,
+        "status": "raw_complete",
+        "manifest_uri": manifest.manifest_uri,
+    }
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "already_done"
+    assert result.files[0].status == "already_done"
+    assert result.files[0].checksum == sha256_bytes(content)
+    assert downloads == 0
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -310,6 +374,13 @@ def test_injected_payload_enforces_max_size_before_object_store_write(tmp_path: 
 
 
 def test_direct_client_retrieval_enforces_max_size_before_object_store_write(tmp_path: Path) -> None:
+    original_read_bytes = Path.read_bytes
+    read_calls: list[Path] = []
+
+    def tracking_read_bytes(self: Path) -> bytes:
+        read_calls.append(self)
+        return original_read_bytes(self)
+
     class OversizedClient:
         def retrieve(self, **kwargs: Any) -> None:
             Path(kwargs["target"]).write_bytes(b"GRIB oversized direct payload")
@@ -317,15 +388,22 @@ def test_direct_client_retrieval_enforces_max_size_before_object_store_write(tmp
     adapter = build_adapter(tmp_path, max_file_size_bytes=4)
     adapter.downloader = adapter._download_url
     adapter._client_for_source = lambda _source: OversizedClient()  # type: ignore[method-assign]
+    ifs_module.Path.read_bytes = tracking_read_bytes
     manifest = adapter.build_manifest("2026050100", forecast_hours=[0])
     entry = manifest.entries[0]
 
-    result = adapter.download_plan(DownloadManifest(source_id="IFS", cycle_time=manifest.cycle_time, entries=(entry,)))
+    try:
+        result = adapter.download_plan(
+            DownloadManifest(source_id="IFS", cycle_time=manifest.cycle_time, entries=(entry,))
+        )
+    finally:
+        ifs_module.Path.read_bytes = original_read_bytes
 
     assert result.status == "failed_download"
     assert result.files[0].error_code == "FILE_TOO_LARGE"
     assert "exceeded maximum size" in (result.files[0].error_message or "")
     assert not adapter.object_store.exists(entry.local_key)
+    assert read_calls == []
 
 
 def test_source_object_identity_changes_when_remote_or_policy_content_changes(tmp_path: Path) -> None:
@@ -366,6 +444,33 @@ def test_source_object_identity_changes_when_same_key_content_changes(tmp_path: 
     assert first["raw_entry_samples"][0]["observed_raw_object"]["checksum"] != (
         second["raw_entry_samples"][0]["observed_raw_object"]["checksum"]
     )
+
+
+def test_source_object_identity_blocks_oversized_raw_before_checksum(tmp_path: Path) -> None:
+    adapter = build_adapter(tmp_path, max_file_size_bytes=4)
+    manifest = adapter.build_manifest("2026050100", forecast_hours=[0])
+    entry = manifest.entries[0]
+    adapter.object_store.write_bytes_atomic(entry.local_key, b"GRIB IFS oversized raw payload")
+    original_store = adapter.object_store
+
+    class NoChecksumStore:
+        def exists(self, key_or_uri: str) -> bool:
+            return original_store.exists(key_or_uri)
+
+        def size(self, key_or_uri: str) -> int:
+            return original_store.size(key_or_uri)
+
+        def checksum(self, key_or_uri: str) -> str:
+            del key_or_uri
+            raise AssertionError("oversized raw object must block before checksum")
+
+    adapter.object_store = NoChecksumStore()  # type: ignore[assignment]
+
+    identity = adapter.source_object_identity(manifest.cycle_time, [0])
+    observation = identity["raw_entry_observation_digest_by_key"][entry.local_key]
+
+    assert observation["status"] == "oversized"
+    assert observation["checksum"] is None
 
 
 def test_downloaded_manifest_identity_feeds_ifs_canonical_readiness_and_blocks_stale_reuse(
