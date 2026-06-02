@@ -304,7 +304,8 @@ def bootstrap_qhh_production(
             trusted_internal=trusted_internal,
         )
         database_succeeded = True
-    except QhhProductionBootstrapError:
+    except QhhProductionBootstrapError as error:
+        _persist_inactive_on_exact_set_blocker(resolved_database_url, error, model_id=model_id)
         raise
     except BasinsRegistryImportError as error:
         raise _from_registry_error(error, model_id=model_id) from error
@@ -513,8 +514,19 @@ def read_qhh_output_segment_count(
     )
     checksum = hashlib.sha256(content).hexdigest()
     try:
-        first_line = next(line.strip() for line in content.decode("utf-8").splitlines() if line.strip())
-        count = int(first_line.split()[0])
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise QhhProductionBootstrapError(
+            "QHH_BOOTSTRAP_SP_RIV_MALFORMED",
+            "QHH SHUD river output identity file is not valid UTF-8 text.",
+            model_id=model_id,
+            path=str(source),
+            details={"no_mutation_expected": True},
+        ) from error
+    lines = [(line_number, line.strip()) for line_number, line in enumerate(text.splitlines(), start=1) if line.strip()]
+    try:
+        header_line_number, header = lines[0]
+        count = int(header.split()[0])
     except (StopIteration, UnicodeDecodeError, IndexError, ValueError) as error:
         raise QhhProductionBootstrapError(
             "QHH_BOOTSTRAP_SP_RIV_MALFORMED",
@@ -535,7 +547,85 @@ def read_qhh_output_segment_count(
                 "no_mutation_expected": True,
             },
         )
+    rows = lines[1:]
+    malformed_rows: list[dict[str, Any]] = []
+    segment_tokens: list[int] = []
+    for line_number, raw in rows:
+        parts = raw.split()
+        if len(parts) < 6:
+            malformed_rows.append({"line_number": line_number, "reason": "too_few_columns"})
+            continue
+        segment_token = _parse_sp_riv_segment_token(parts[0])
+        if segment_token is None:
+            malformed_rows.append({"line_number": line_number, "reason": "invalid_segment_token"})
+            continue
+        if not _sp_riv_numeric_columns_valid(parts[1:6]):
+            malformed_rows.append({"line_number": line_number, "reason": "non_numeric_column"})
+            continue
+        segment_tokens.append(segment_token)
+    if malformed_rows:
+        raise QhhProductionBootstrapError(
+            "QHH_BOOTSTRAP_SP_RIV_MALFORMED",
+            "QHH qhh.sp.riv contains malformed output river rows.",
+            model_id=model_id,
+            path=str(source),
+            details={"malformed_rows": malformed_rows[:20], "no_mutation_expected": True},
+        )
+    if len(rows) != count:
+        raise QhhProductionBootstrapError(
+            "QHH_BOOTSTRAP_OUTPUT_SEGMENT_COUNT_MISMATCH",
+            "QHH SHUD output river body row count does not match qhh.sp.riv header.",
+            model_id=model_id,
+            path=str(source),
+            details={
+                "expected_count": count,
+                "parsed_count": len(rows),
+                "header_line_number": header_line_number,
+                "no_mutation_expected": True,
+            },
+        )
+    expected_tokens = set(range(1, count + 1))
+    observed_tokens = set(segment_tokens)
+    duplicate_tokens = sorted(token for token, token_count in Counter(segment_tokens).items() if token_count > 1)
+    missing_tokens = sorted(expected_tokens - observed_tokens)
+    extra_tokens = sorted(observed_tokens - expected_tokens)
+    if duplicate_tokens or missing_tokens or extra_tokens:
+        raise QhhProductionBootstrapError(
+            "QHH_BOOTSTRAP_SP_RIV_MALFORMED",
+            "QHH qhh.sp.riv segment identity tokens must exactly match the declared output river count.",
+            model_id=model_id,
+            path=str(source),
+            details={
+                "duplicate_segment_tokens": duplicate_tokens[:20],
+                "missing_segment_tokens": missing_tokens[:20],
+                "extra_segment_tokens": extra_tokens[:20],
+                "no_mutation_expected": True,
+            },
+        )
     return count, checksum
+
+
+def _parse_sp_riv_segment_token(value: str) -> int | None:
+    if not value or not value.isascii() or not value.isdecimal():
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    if parsed < 1 or parsed > MAX_QHH_OUTPUT_SEGMENTS:
+        return None
+    return parsed
+
+
+def _sp_riv_numeric_columns_valid(values: Sequence[str]) -> bool:
+    for value in values:
+        try:
+            parsed = float(value)
+        except ValueError:
+            return False
+        if not math.isfinite(parsed):
+            return False
+    return True
 
 
 def seed_qhh_forcing_stations(
@@ -1187,17 +1277,9 @@ def _assert_exact_qhh_station_set(cursor: Any, context: QhhBootstrapContext) -> 
         WHERE basin_version_id = %s
           AND station_role = 'forcing_grid'
           AND active_flag = true
-          AND (
-            station_id LIKE %s
-            OR
-            properties_json->>'model_id' = %s
-            OR properties_json->>'basin_version_id' = %s
-            OR properties_json->>'seed' = 'qhh_production_bootstrap'
-            OR properties_json->>'source' = 'qhh.tsd.forc'
-          )
         ORDER BY station_id
         """,
-        (basin_version_id, "qhh_forc_%", context.sources.ids["model_id"], basin_version_id),
+        (basin_version_id,),
     )
     observed_ids = {str(row["station_id"]) for row in cursor.fetchall()}
     extras = sorted(observed_ids - expected_ids)
@@ -1523,6 +1605,79 @@ def _activate_qhh_model(cursor: Any, model_id: str) -> None:
         """,
         (model_id,),
     )
+
+
+def _persist_inactive_on_exact_set_blocker(
+    database_url: str,
+    error: QhhProductionBootstrapError,
+    *,
+    model_id: str,
+) -> None:
+    if error.error_code not in {
+        "QHH_BOOTSTRAP_STALE_STATION_IDENTITY",
+        "QHH_BOOTSTRAP_STALE_OUTPUT_SEGMENT_IDENTITY",
+    }:
+        return
+    if error.model_id is not None and error.model_id != model_id:
+        return
+    try:
+        removed = _persistently_mark_qhh_model_inactive(
+            database_url,
+            model_id=model_id,
+            blocker=error.to_payload(),
+        )
+    except Exception as inactive_error:
+        error.details["persistent_scheduler_visibility_removed"] = False
+        error.details["persistent_inactive_error"] = inactive_error.__class__.__name__
+        raise QhhProductionBootstrapError(
+            "QHH_BOOTSTRAP_STALE_MODEL_INACTIVATION_FAILED",
+            "QHH stale exact-set blocker was found, but the target model could not be persistently marked inactive.",
+            model_id=model_id,
+            details={
+                "stale_blocker": error.to_payload(),
+                "persistent_scheduler_visibility_removed": False,
+            },
+        ) from inactive_error
+    error.details["persistent_scheduler_visibility_removed"] = removed
+
+
+def _persistently_mark_qhh_model_inactive(
+    database_url: str,
+    *,
+    model_id: str,
+    blocker: Mapping[str, Any],
+) -> bool:
+    with _transaction(database_url) as cursor:
+        cursor.execute(
+            """
+            UPDATE core.model_instance
+            SET active_flag = false,
+                lifecycle_state = 'inactive',
+                resource_profile = COALESCE(resource_profile, '{}'::jsonb) || %s::jsonb
+            WHERE model_id = %s
+              AND active_flag = true
+              AND COALESCE(lifecycle_state, 'active') = 'active'
+            """,
+            (
+                _json(
+                    {
+                        "runnable": False,
+                        "qhh_scheduler_blocker": {
+                            "code": blocker.get("error_code"),
+                            "message": blocker.get("message"),
+                            "basin_version_id": blocker.get("basin_version_id"),
+                            "river_network_version_id": blocker.get("river_network_version_id"),
+                            "extra_station_ids": blocker.get("extra_station_ids", []),
+                            "missing_station_ids": blocker.get("missing_station_ids", []),
+                            "extra_river_segment_ids": blocker.get("extra_river_segment_ids", []),
+                            "missing_river_segment_ids": blocker.get("missing_river_segment_ids", []),
+                        },
+                    }
+                ),
+                model_id,
+            ),
+        )
+        return cursor.rowcount > 0
 
 
 def _lock_qhh_basin_scope(cursor: Any, basin_version_id: str) -> None:

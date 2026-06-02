@@ -253,6 +253,50 @@ def test_read_qhh_output_segment_count_rejects_out_of_range_positive_count(tmp_p
     assert exc_info.value.details["no_mutation_expected"] is True
 
 
+def test_read_qhh_output_segment_count_rejects_header_body_count_mismatch(tmp_path: Path) -> None:
+    input_dir = tmp_path / "qhh"
+    input_dir.mkdir()
+    sp_riv = input_dir / "qhh.sp.riv"
+    sp_riv.write_text("2 6\n1 0 0 0.01 100 0\n", encoding="utf-8")
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        read_qhh_output_segment_count(sp_riv, input_dir)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_OUTPUT_SEGMENT_COUNT_MISMATCH"
+    assert exc_info.value.details["expected_count"] == 2
+    assert exc_info.value.details["parsed_count"] == 1
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
+def test_read_qhh_output_segment_count_rejects_malformed_body_row(tmp_path: Path) -> None:
+    input_dir = tmp_path / "qhh"
+    input_dir.mkdir()
+    sp_riv = input_dir / "qhh.sp.riv"
+    sp_riv.write_text("1 6\nbad 0 0 0.01 100 0\n", encoding="utf-8")
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        read_qhh_output_segment_count(sp_riv, input_dir)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_SP_RIV_MALFORMED"
+    assert exc_info.value.details["malformed_rows"] == [{"line_number": 2, "reason": "invalid_segment_token"}]
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
+def test_read_qhh_output_segment_count_rejects_non_exact_segment_tokens(tmp_path: Path) -> None:
+    input_dir = tmp_path / "qhh"
+    input_dir.mkdir()
+    sp_riv = input_dir / "qhh.sp.riv"
+    sp_riv.write_text("2 6\n1 0 0 0.01 100 0\n3 0 0 0.01 100 0\n", encoding="utf-8")
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        read_qhh_output_segment_count(sp_riv, input_dir)
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_SP_RIV_MALFORMED"
+    assert exc_info.value.details["missing_segment_tokens"] == [2]
+    assert exc_info.value.details["extra_segment_tokens"] == [3]
+    assert exc_info.value.details["no_mutation_expected"] is True
+
+
 def test_bootstrap_rejects_relative_traversal_project_path(tmp_path: Path) -> None:
     root = tmp_path / "basins"
     root.mkdir()
@@ -1307,15 +1351,6 @@ def test_bootstrap_blocks_stale_qhh_sibling_rows_before_scheduler_visibility(
     )
     with psycopg_connection(integration_database_url) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE core.model_instance
-                SET active_flag = false,
-                    lifecycle_state = 'inactive'
-                WHERE model_id = %s
-                """,
-                (model_id,),
-            )
             if stale_kind == "station":
                 cursor.execute(
                     """
@@ -1393,6 +1428,7 @@ def test_bootstrap_blocks_stale_qhh_sibling_rows_before_scheduler_visibility(
         )
 
     assert exc_info.value.error_code == error_code
+    assert exc_info.value.details["persistent_scheduler_visibility_removed"] is True
     scheduler = ProductionScheduler(
         ProductionSchedulerConfig(
             workspace_root=tmp_path / f"workspace-{stale_kind}",
@@ -1422,6 +1458,96 @@ def test_bootstrap_blocks_stale_qhh_sibling_rows_before_scheduler_visibility(
     assert model["active_flag"] is False
     assert model["lifecycle_state"] == "inactive"
     assert forcing_count == 0
+    assert model_id not in {item["model_id"] for item in result.evidence["candidates"]}
+
+
+@pytest.mark.integration
+def test_bootstrap_blocks_unmarked_same_basin_active_forcing_grid_and_removes_scheduler_visibility(
+    tmp_path: Path,
+    integration_database_url: str,
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    basin_slug = "qhh-unmarked-station"
+    root, _input_dir, inventory_path, manifest_path, model_id = _qhh_registry_fixture(tmp_path, basin_slug=basin_slug)
+    first = bootstrap_qhh_production(
+        database_url=integration_database_url,
+        basins_root=root,
+        qhh_basin_slug=basin_slug,
+        model_id=model_id,
+        inventory_path=inventory_path,
+        package_manifest_path=manifest_path,
+    )
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO met.met_station (
+                    station_id,
+                    basin_version_id,
+                    station_name,
+                    geom,
+                    elevation_m,
+                    station_role,
+                    active_flag,
+                    properties_json
+                )
+                VALUES (
+                    'unmarked_same_basin_forcing',
+                    %s,
+                    'Unmarked same-basin forcing grid',
+                    ST_SetSRID(ST_MakePoint(100.95, 30.95), 4490),
+                    0,
+                    'forcing_grid',
+                    true,
+                    %s
+                )
+                """,
+                (first["basin_version_id"], Json({})),
+            )
+
+    with pytest.raises(QhhProductionBootstrapError) as exc_info:
+        bootstrap_qhh_production(
+            database_url=integration_database_url,
+            basins_root=root,
+            qhh_basin_slug=basin_slug,
+            model_id=model_id,
+            inventory_path=inventory_path,
+            package_manifest_path=manifest_path,
+        )
+
+    assert exc_info.value.error_code == "QHH_BOOTSTRAP_STALE_STATION_IDENTITY"
+    assert exc_info.value.details["extra_station_ids"] == ["unmarked_same_basin_forcing"]
+    assert exc_info.value.details["persistent_scheduler_visibility_removed"] is True
+
+    scheduler = ProductionScheduler(
+        ProductionSchedulerConfig(
+            workspace_root=tmp_path / "workspace-unmarked-station",
+            model_ids=(model_id,),
+            now=_dt("2026-05-21T12:00:00Z"),
+        ),
+        registry=PsycopgModelRegistryStore(integration_database_url),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+    result = scheduler.run_once()
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT active_flag,
+                       COALESCE(lifecycle_state, CASE WHEN active_flag THEN 'active' ELSE 'inactive' END)
+                         AS lifecycle_state,
+                       resource_profile
+                FROM core.model_instance
+                WHERE model_id = %s
+                """,
+                (model_id,),
+            )
+            model = cursor.fetchone()
+
+    assert model["active_flag"] is False
+    assert model["lifecycle_state"] == "inactive"
+    assert model["resource_profile"]["runnable"] is False
+    assert model["resource_profile"]["qhh_scheduler_blocker"]["code"] == "QHH_BOOTSTRAP_STALE_STATION_IDENTITY"
     assert model_id not in {item["model_id"] for item in result.evidence["candidates"]}
 
 

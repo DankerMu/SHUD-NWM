@@ -1748,7 +1748,8 @@ def _make_valid_model(
     ):
         (input_dir / f"{input_name}.{suffix}").write_text(f"{suffix}\n", encoding="utf-8")
     river_count = sp_segment_count if sp_river_count is None else sp_river_count
-    (input_dir / f"{input_name}.sp.riv").write_text(f"{river_count} 6\n1 0 0 0.01 100 0\n", encoding="utf-8")
+    sp_riv_rows = "".join(f"{index} 0 0 0.01 100 0\n" for index in range(1, river_count + 1))
+    (input_dir / f"{input_name}.sp.riv").write_text(f"{river_count} 6\n{sp_riv_rows}", encoding="utf-8")
     (input_dir / f"{input_name}.sp.rivseg").write_text(
         f"{sp_segment_count} 4\n1 1 1 100\n",
         encoding="utf-8",
