@@ -450,7 +450,12 @@ def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
     ids = sources.ids
     existing = _fetch_optional(
         cursor,
-        "SELECT COUNT(*) AS count FROM core.river_segment WHERE river_network_version_id = %s",
+        """
+        SELECT COUNT(*) AS count
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
+        """,
         (ids["river_network_version_id"],),
     )
     existing_count = int(existing["count"]) if existing is not None else 0
@@ -657,6 +662,7 @@ def _existing_river_segment_digest(cursor: Any, river_network_version_id: str) -
                properties_json
         FROM core.river_segment
         WHERE river_network_version_id = %s
+          AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
         ORDER BY COALESCE(segment_order, 2147483647), river_segment_id
         """,
         (river_network_version_id,),

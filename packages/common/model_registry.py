@@ -1047,6 +1047,12 @@ class PsycopgModelRegistryStore:
         return {"total": total, "items": items, "limit": limit, "offset": offset}
 
     def get_model(self, model_id: str) -> dict[str, Any]:
+        row = self.get_model_internal(model_id)
+        if row is None:
+            raise MissingResourceError(f"model_id not found: {model_id}")
+        return _model_asset_detail(row)
+
+    def get_model_internal(self, model_id: str) -> dict[str, Any]:
         with self._transaction() as cursor:
             row = self._fetch_optional(
                 cursor,
@@ -1074,7 +1080,7 @@ class PsycopgModelRegistryStore:
             )
         if row is None:
             raise MissingResourceError(f"model_id not found: {model_id}")
-        return _model_asset_detail(row)
+        return dict(row)
 
     def create_crosswalk_entries(
         self,

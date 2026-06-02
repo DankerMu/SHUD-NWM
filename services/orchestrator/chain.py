@@ -276,6 +276,7 @@ class ModelContext:
     river_network_version_id: str
     segment_count: int
     model_package_uri: str
+    output_segment_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -323,6 +324,7 @@ class ForecastRunContext:
     init_state_valid_time: datetime | None = None
     init_state_checksum: str | None = None
     init_state_quality: str = "cold_start_no_state"
+    output_segment_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -347,6 +349,7 @@ class AnalysisRunContext:
     init_state_id: str | None = None
     init_state_uri: str | None = None
     init_state_valid_time: datetime | None = None
+    output_segment_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2515,6 +2518,7 @@ class ForecastOrchestrator:
                     "basin_version_id": basin.basin_version_id,
                     "river_network_version_id": basin.river_network_version_id,
                     "segment_count": basin.segment_count,
+                    "output_segment_count": basin.output_segment_count,
                     "model_package_uri": basin.model_package_uri,
                 }
             else:
@@ -3560,6 +3564,7 @@ class ForecastOrchestrator:
             init_state_valid_time=selected_state.valid_time,
             init_state_checksum=selected_state.checksum,
             init_state_quality=selected_state.quality,
+            output_segment_count=model.output_segment_count,
         )
 
     def _forecast_scenario_id(self, source_id: str) -> str:
@@ -3583,6 +3588,11 @@ class ForecastOrchestrator:
                 "river_network_version_id": context.river_network_version_id,
                 "model_package_uri": context.model_package_uri,
                 "segment_count": context.segment_count,
+                "output_segment_count": (
+                    context.output_segment_count
+                    if context.output_segment_count is not None
+                    else context.segment_count
+                ),
             },
             "forcing": {
                 "forcing_version_id": context.forcing_version_id,
@@ -3603,6 +3613,12 @@ class ForecastOrchestrator:
                 "run_manifest_uri": context.run_manifest_uri,
                 "output_uri": context.output_uri,
                 "log_uri": context.log_uri,
+                "output_segment_count": (
+                    context.output_segment_count
+                    if context.output_segment_count is not None
+                    else context.segment_count
+                ),
+                "gis_segment_count": context.segment_count,
             },
         }
 
@@ -3786,6 +3802,7 @@ class AnalysisOrchestrator(ForecastOrchestrator):
             init_state_id=init_state.state_id if init_state is not None else None,
             init_state_uri=init_state.state_uri if init_state is not None else None,
             init_state_valid_time=init_state.valid_time if init_state is not None else None,
+            output_segment_count=model.output_segment_count,
         )
 
     def _build_run_manifest(self, context: AnalysisRunContext) -> dict[str, Any]:
@@ -3803,6 +3820,11 @@ class AnalysisOrchestrator(ForecastOrchestrator):
                 "river_network_version_id": context.river_network_version_id,
                 "model_package_uri": context.model_package_uri,
                 "segment_count": context.segment_count,
+                "output_segment_count": (
+                    context.output_segment_count
+                    if context.output_segment_count is not None
+                    else context.segment_count
+                ),
             },
             "initial_state": {
                 "state_id": context.init_state_id,
@@ -3821,6 +3843,12 @@ class AnalysisOrchestrator(ForecastOrchestrator):
                 "run_manifest_uri": context.run_manifest_uri,
                 "output_uri": context.output_uri,
                 "log_uri": context.log_uri,
+                "output_segment_count": (
+                    context.output_segment_count
+                    if context.output_segment_count is not None
+                    else context.segment_count
+                ),
+                "gis_segment_count": context.segment_count,
             },
         }
 
@@ -4385,6 +4413,7 @@ class PsycopgOrchestratorRepository:
                 mi.basin_version_id,
                 mi.river_network_version_id,
                 rn.segment_count,
+                mi.resource_profile,
                 mi.model_package_uri
             FROM core.model_instance mi
             JOIN core.basin_version bv ON bv.basin_version_id = mi.basin_version_id
@@ -4402,6 +4431,10 @@ class PsycopgOrchestratorRepository:
             river_network_version_id=str(row["river_network_version_id"]),
             segment_count=int(row["segment_count"]),
             model_package_uri=str(row["model_package_uri"]),
+            output_segment_count=_first_optional_int(
+                _nested_mapping(row.get("resource_profile")).get("output_segment_count"),
+                row["segment_count"],
+            ),
         )
 
     def find_forcing_context(self, *, source_id: str, cycle_time: datetime, model_id: str) -> ForcingContext:
@@ -5458,7 +5491,7 @@ def build_model_run_assembly(
             or _nested_mapping(basin.get("runtime")).get("command_style")
             or "shud_project"
         ),
-        "project_name": _safe_project_name(str(basin.get("project_name") or model_id)),
+        "project_name": _project_name_for_basin(basin, fallback=model_id),
         "output_interval_minutes": int(
             basin.get("output_interval_minutes")
             or _nested_mapping(basin.get("runtime")).get("output_interval_minutes")
@@ -5517,6 +5550,8 @@ def build_model_run_assembly(
         "output_uri": output_uri,
         "log_uri": log_uri,
         "reuse_policy": "deterministic_run_uri",
+        "output_segment_count": int(output_river.get("segment_count") or 0),
+        "gis_segment_count": _optional_int(basin.get("segment_count")),
     }
     return ModelRunAssembly(
         identity=identity,
@@ -5621,12 +5656,32 @@ def _station_metadata_for_basin(basin: Mapping[str, Any]) -> dict[str, Any]:
 
 def _output_river_contract(basin: Mapping[str, Any]) -> dict[str, Any]:
     explicit = _nested_mapping(basin.get("output_river") or basin.get("shud_output_river"))
-    segment_count = _optional_int(basin.get("segment_count"))
+    resource_profile = _nested_mapping(basin.get("resource_profile"))
+    gis_segment_count = _optional_int(basin.get("segment_count"))
+    profile_output_river = _nested_mapping(resource_profile.get("output_river"))
+    output_segment_count = _first_optional_int(
+        basin.get("output_segment_count"),
+        basin.get("shud_output_segment_count"),
+        basin.get("shud_output_river_count"),
+        resource_profile.get("output_segment_count"),
+        resource_profile.get("shud_output_segment_count"),
+        resource_profile.get("shud_output_river_count"),
+        profile_output_river.get("output_segment_count"),
+        profile_output_river.get("segment_count"),
+    )
     if explicit:
         state = str(explicit.get("state") or "ready")
         segment_ids = [str(item) for item in explicit.get("river_segment_ids") or explicit.get("segment_ids") or []]
-        explicit_segment_count = _optional_int(explicit.get("segment_count"))
-        resolved_segment_count = explicit_segment_count or len(segment_ids) or segment_count
+        explicit_segment_count = _first_optional_int(
+            explicit.get("output_segment_count"),
+            explicit.get("segment_count"),
+        )
+        resolved_segment_count = _first_optional_int(
+            explicit_segment_count,
+            output_segment_count,
+            len(segment_ids) if segment_ids else None,
+            gis_segment_count,
+        )
         if resolved_segment_count is None:
             state = "unavailable"
             resolved_segment_count = 0
@@ -5634,28 +5689,37 @@ def _output_river_contract(basin: Mapping[str, Any]) -> dict[str, Any]:
             "state": state,
             "river_network_version_id": str(basin["river_network_version_id"]),
             "segment_count": resolved_segment_count,
+            "output_segment_count": resolved_segment_count,
+            "gis_segment_count": gis_segment_count,
             "river_segment_ids": segment_ids,
             "identity_source": str(explicit.get("identity_source") or "registry_package_metadata"),
             "quality_flag": str(
                 explicit.get("quality_flag") or ("ok" if state == "ready" else "output_river_unavailable")
             ),
         }
-    if segment_count is None:
+    if output_segment_count is None and gis_segment_count is None:
         return {
             "state": "unavailable",
             "river_network_version_id": str(basin["river_network_version_id"]),
             "segment_count": 0,
+            "output_segment_count": 0,
+            "gis_segment_count": None,
             "river_segment_ids": [],
             "identity_source": "registry_package_metadata",
             "quality_flag": "output_river_unavailable",
         }
+    resolved_segment_count = output_segment_count if output_segment_count is not None else gis_segment_count
     return {
-        "state": "ready" if segment_count > 0 else "unavailable",
+        "state": "ready" if resolved_segment_count > 0 else "unavailable",
         "river_network_version_id": str(basin["river_network_version_id"]),
-        "segment_count": segment_count,
+        "segment_count": resolved_segment_count,
+        "output_segment_count": resolved_segment_count,
+        "gis_segment_count": gis_segment_count,
         "river_segment_ids": [],
-        "identity_source": "registry_package_metadata",
-        "quality_flag": "ok" if segment_count > 0 else "output_river_unavailable",
+        "identity_source": (
+            "resource_profile.output_segment_count" if output_segment_count is not None else "registry_package_metadata"
+        ),
+        "quality_flag": "ok" if resolved_segment_count > 0 else "output_river_unavailable",
     }
 
 
@@ -5890,6 +5954,23 @@ def _safe_project_name(value: str) -> str:
     if _SAFE_ID_RE.fullmatch(candidate):
         return candidate
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate).strip("._-") or "shud"
+
+
+def _project_name_for_basin(basin: Mapping[str, Any], *, fallback: str) -> str:
+    resource_profile = _nested_mapping(basin.get("resource_profile"))
+    runtime = _nested_mapping(basin.get("runtime"))
+    for value in (
+        basin.get("project_name"),
+        basin.get("shud_input_name"),
+        resource_profile.get("project_name"),
+        resource_profile.get("shud_input_name"),
+        runtime.get("project_name"),
+        runtime.get("shud_input_name"),
+        fallback,
+    ):
+        if value not in (None, ""):
+            return _safe_project_name(str(value))
+    return _safe_project_name(fallback)
 
 
 def _nested_value(value: Mapping[str, Any], path: Sequence[str]) -> Any:
@@ -6258,6 +6339,14 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _first_optional_int(*values: Any) -> int | None:
+    for value in values:
+        coerced = _optional_int(value)
+        if coerced is not None:
+            return coerced
+    return None
 
 
 def _max_lead_hours_from_lineage(value: Any) -> int | None:

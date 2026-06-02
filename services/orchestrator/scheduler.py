@@ -197,6 +197,9 @@ class ModelRegistryReader(Protocol):
     def get_model(self, model_id: str) -> Mapping[str, Any]:
         raise NotImplementedError
 
+    def get_model_internal(self, model_id: str) -> Mapping[str, Any]:
+        raise NotImplementedError
+
 
 class CycleDiscoveryAdapter(Protocol):
     def discover_cycles(
@@ -485,6 +488,7 @@ class RegisteredSchedulerModel:
     basin_version_id: str
     river_network_version_id: str
     segment_count: int | None
+    output_segment_count: int | None
     model_package_uri: str
     shud_code_version: str
     resource_profile: Mapping[str, Any]
@@ -499,6 +503,7 @@ class RegisteredSchedulerModel:
             "basin_version_id": self.basin_version_id,
             "river_network_version_id": self.river_network_version_id,
             "segment_count": self.segment_count,
+            "output_segment_count": self.output_segment_count,
             "model_package_uri": _redact_secret_manifest_for_evidence(self.model_package_uri, "model_package_uri"),
             "shud_code_version": self.shud_code_version,
             "resource_profile": _resource_profile_evidence(self.resource_profile_summary),
@@ -518,6 +523,7 @@ class SchedulerCandidate:
     basin_version_id: str
     river_network_version_id: str
     segment_count: int | None
+    output_segment_count: int | None
     model_package_uri: str
     resource_profile: Mapping[str, Any]
     display_capabilities: Mapping[str, Any]
@@ -545,6 +551,7 @@ class SchedulerCandidate:
             "basin_version_id": self.basin_version_id,
             "river_network_version_id": self.river_network_version_id,
             "segment_count": self.segment_count,
+            "output_segment_count": self.output_segment_count,
             "model_package_uri": _redact_secret_manifest_for_evidence(self.model_package_uri, "model_package_uri"),
             "resource_profile": _resource_profile_evidence(self.resource_profile),
             "display_capabilities": dict(self.display_capabilities),
@@ -1490,14 +1497,12 @@ class ProductionScheduler:
         rows = _fetch_active_model_details(self.registry)
         exclusions: list[dict[str, Any]] = []
         runnable: list[RegisteredSchedulerModel] = []
+        duplicate_exclusions = _active_model_duplicate_exclusions(rows)
 
-        model_counts = Counter(str(row.get("model_id") or "") for row in rows)
-        duplicate_model_ids = {model_id for model_id, count in model_counts.items() if model_id and count > 1}
-
-        for row in rows:
-            model_id = str(row.get("model_id") or "")
-            if model_id in duplicate_model_ids:
-                exclusions.append(_model_exclusion(row, "duplicate_active_model_identity"))
+        for index, row in enumerate(rows):
+            duplicate_exclusion = duplicate_exclusions.get(index)
+            if duplicate_exclusion is not None:
+                exclusions.append(duplicate_exclusion)
                 continue
             model = _coerce_registered_model(row)
             if isinstance(model, RegisteredSchedulerModel):
@@ -2202,12 +2207,19 @@ def _fetch_active_model_details(registry: ModelRegistryReader) -> list[Mapping[s
                     {"max_discovered_models": MAX_DISCOVERED_MODELS, "model_count": len(rows)},
                 )
             model_id = str(item.get("model_id") or "")
-            rows.append(registry.get_model(model_id) if model_id else item)
+            rows.append(_fetch_scheduler_model_detail(registry, model_id) if model_id else item)
         total = int(page.get("total") or len(rows))
         offset += len(items)
         if len(items) == 0 or offset >= total:
             break
     return rows
+
+
+def _fetch_scheduler_model_detail(registry: ModelRegistryReader, model_id: str) -> Mapping[str, Any]:
+    internal_getter = getattr(registry, "get_model_internal", None)
+    if callable(internal_getter):
+        return internal_getter(model_id)
+    return registry.get_model(model_id)
 
 
 def _coerce_registered_model(row: Mapping[str, Any]) -> RegisteredSchedulerModel | dict[str, Any]:
@@ -2234,12 +2246,14 @@ def _coerce_registered_model(row: Mapping[str, Any]) -> RegisteredSchedulerModel
         return {**_model_exclusion(row, "incomplete_model_metadata"), "missing_fields": missing}
 
     segment_count = row.get("segment_count")
+    output_segment_count = _coerce_output_segment_count(resource_profile, fallback=segment_count)
     return RegisteredSchedulerModel(
         model_id=str(required["model_id"]),
         basin_id=str(required["basin_id"]),
         basin_version_id=str(required["basin_version_id"]),
         river_network_version_id=str(required["river_network_version_id"]),
         segment_count=int(segment_count) if segment_count not in (None, "") else None,
+        output_segment_count=output_segment_count,
         model_package_uri=str(required["model_package_uri"]),
         shud_code_version=str(required["shud_code_version"]),
         resource_profile=dict(resource_profile),
@@ -2247,6 +2261,86 @@ def _coerce_registered_model(row: Mapping[str, Any]) -> RegisteredSchedulerModel
         display_capabilities=_mapping_value(resource_profile.get("display_capabilities")),
         frequency_capabilities=_mapping_value(resource_profile.get("frequency_capabilities")),
     )
+
+
+def _active_model_duplicate_exclusions(rows: Sequence[Mapping[str, Any]]) -> dict[int, dict[str, Any]]:
+    duplicate_groups: list[tuple[str, str, set[int]]] = []
+    for identity_field, groups in (
+        ("model_id", _active_model_identity_groups(rows, _active_model_model_id)),
+        ("model_package_uri", _active_model_identity_groups(rows, _active_model_package_uri)),
+        ("package_checksum", _active_model_identity_groups(rows, _active_model_package_checksum)),
+    ):
+        for value, indexes in groups.items():
+            if value and len(indexes) > 1:
+                duplicate_groups.append((identity_field, value, indexes))
+
+    exclusions: dict[int, dict[str, Any]] = {}
+    for identity_field, value, indexes in duplicate_groups:
+        duplicate_model_ids = sorted(
+            str(rows[index].get("model_id") or "") for index in indexes if rows[index].get("model_id") not in (None, "")
+        )
+        for index in indexes:
+            if index in exclusions:
+                continue
+            exclusions[index] = {
+                **_model_exclusion(rows[index], "duplicate_active_model_identity"),
+                "duplicate_identity_field": identity_field,
+                "duplicate_identity_value": _model_duplicate_identity_value_for_evidence(identity_field, value),
+                "duplicate_model_ids": duplicate_model_ids,
+                "duplicate_active_model_count": len(indexes),
+            }
+    return exclusions
+
+
+def _active_model_identity_groups(
+    rows: Sequence[Mapping[str, Any]],
+    value_getter: Callable[[Mapping[str, Any]], str | None],
+) -> dict[str, set[int]]:
+    groups: dict[str, set[int]] = {}
+    for index, row in enumerate(rows):
+        value = value_getter(row)
+        if value:
+            groups.setdefault(value, set()).add(index)
+    return groups
+
+
+def _active_model_model_id(row: Mapping[str, Any]) -> str | None:
+    value = row.get("model_id")
+    return str(value) if value not in (None, "") else None
+
+
+def _active_model_package_uri(row: Mapping[str, Any]) -> str | None:
+    value = row.get("model_package_uri")
+    return str(value) if value not in (None, "") else None
+
+
+def _active_model_package_checksum(row: Mapping[str, Any]) -> str | None:
+    resource_profile = row.get("resource_profile")
+    if not isinstance(resource_profile, Mapping):
+        return None
+    if not _has_package_specific_checksum_context(row, resource_profile):
+        return None
+    value = resource_profile.get("package_checksum")
+    return str(value) if value not in (None, "") else None
+
+
+def _has_package_specific_checksum_context(row: Mapping[str, Any], resource_profile: Mapping[str, Any]) -> bool:
+    if row.get("model_package_uri") not in (None, ""):
+        return True
+    for identity_field in ("model_package_uri", "manifest_uri", "model_package_manifest_uri", "package_uri"):
+        if resource_profile.get(identity_field) not in (None, ""):
+            return True
+    lineage = str(resource_profile.get("lineage") or "")
+    return lineage in {"basins_registry_import", "qhh_production_bootstrap"}
+
+
+def _model_duplicate_identity_value_for_evidence(field: str, value: str) -> str:
+    if field == "model_package_uri":
+        redacted = _redact_secret_manifest_for_evidence(value, "model_package_uri")
+        return str(redacted)
+    if field == "package_checksum":
+        return "[redacted]"
+    return value
 
 
 def _resource_profile_summary(resource_profile: Mapping[str, Any]) -> dict[str, Any]:
@@ -2261,11 +2355,39 @@ def _resource_profile_summary(resource_profile: Mapping[str, Any]) -> dict[str, 
         "station_ids",
         "forcing_station_metadata",
         "manifest_uri",
+        "output_segment_count",
         "output_uri",
         "display_capabilities",
         "frequency_capabilities",
     )
     return {key: resource_profile[key] for key in keys if key in resource_profile}
+
+
+def _coerce_output_segment_count(resource_profile: Mapping[str, Any], *, fallback: Any = None) -> int | None:
+    output_river = resource_profile.get("output_river")
+    candidates: list[Any] = [
+        resource_profile.get("output_segment_count"),
+        resource_profile.get("shud_output_segment_count"),
+        resource_profile.get("shud_output_river_count"),
+    ]
+    if isinstance(output_river, Mapping):
+        candidates.extend(
+            [
+                output_river.get("output_segment_count"),
+                output_river.get("segment_count"),
+            ]
+        )
+    candidates.append(fallback)
+    for value in candidates:
+        if value in (None, ""):
+            continue
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count >= 0:
+            return count
+    return None
 
 
 def _mapping_value(value: Any) -> Mapping[str, Any]:
@@ -4298,6 +4420,7 @@ def _candidate_for(
         basin_version_id=model.basin_version_id,
         river_network_version_id=model.river_network_version_id,
         segment_count=model.segment_count,
+        output_segment_count=model.output_segment_count,
         model_package_uri=model.model_package_uri,
         resource_profile=model.resource_profile,
         display_capabilities=model.display_capabilities,
@@ -4362,6 +4485,7 @@ def _candidate_basin_manifest(
         "basin_version_id": candidate.basin_version_id,
         "river_network_version_id": candidate.river_network_version_id,
         "segment_count": candidate.segment_count,
+        "output_segment_count": candidate.output_segment_count,
         "model_package_uri": candidate.model_package_uri,
         "model_package_manifest_uri": _model_package_manifest_uri(candidate),
         "resource_profile": dict(candidate.resource_profile),
@@ -4385,6 +4509,7 @@ def _candidate_basin_manifest(
         ),
         "warning_thresholds_available": _nested_bool(candidate.frequency_capabilities, "warning_thresholds_available"),
         "optional_weather_available": _nested_bool(candidate.display_capabilities, "optional_weather_available"),
+        "output_river": _candidate_output_river_manifest(candidate),
         "output_key": _candidate_output_key(candidate),
         "output_uri": output_uri,
     }
@@ -4408,7 +4533,28 @@ def _candidate_basin_manifest(
     slurm_env = resource_profile.get("slurm_env")
     if isinstance(slurm_env, Mapping):
         manifest["slurm_env"] = {str(key): str(value) for key, value in slurm_env.items()}
+    project_identity = _resource_profile_project_identity(resource_profile)
+    if project_identity is not None:
+        manifest["project_name"] = project_identity["project_name"]
+        manifest["shud_input_name"] = project_identity["shud_input_name"]
+    package_checksum = resource_profile.get("package_checksum")
+    if package_checksum not in (None, ""):
+        manifest["package_checksum"] = str(package_checksum)
+        manifest.setdefault("model_package_checksum", str(package_checksum))
+    source_inventory_checksum = resource_profile.get("source_inventory_checksum")
+    if source_inventory_checksum not in (None, ""):
+        manifest["source_inventory_checksum"] = str(source_inventory_checksum)
     return manifest
+
+
+def _resource_profile_project_identity(resource_profile: Mapping[str, Any]) -> dict[str, str] | None:
+    project_name = resource_profile.get("project_name")
+    shud_input_name = resource_profile.get("shud_input_name")
+    project = str(project_name) if project_name not in (None, "") else None
+    shud_input = str(shud_input_name) if shud_input_name not in (None, "") else None
+    if project is None and shud_input is None:
+        return None
+    return {"project_name": project or shud_input or "", "shud_input_name": shud_input or project or ""}
 
 
 def _candidate_execution_attempted(outcome: Mapping[str, Any] | None, submitted: bool) -> bool:
@@ -4567,6 +4713,7 @@ def _candidate_identity_evidence(candidate: SchedulerCandidate, *, output_uri: s
         "basin_version_id": candidate.basin_version_id,
         "river_network_version_id": candidate.river_network_version_id,
         "segment_count": candidate.segment_count,
+        "output_segment_count": candidate.output_segment_count,
         "output_key": _candidate_output_key(candidate),
     }
     if contract_identity.get("pipeline_job_id") not in (None, ""):
@@ -4852,6 +4999,7 @@ def _redact_secret_manifest_for_evidence(value: Any, path: str = "manifest") -> 
 
 def _resource_profile_evidence(resource_profile: Mapping[str, Any]) -> dict[str, Any]:
     redacted = _redact_secret_manifest_for_evidence(dict(resource_profile), "resource_profile")
+    redacted = _redact_digest_keys_for_evidence(redacted)
     if not isinstance(redacted, Mapping):
         return {}
     evidence = dict(redacted)
@@ -4864,6 +5012,28 @@ def _resource_profile_evidence(resource_profile: Mapping[str, Any]) -> dict[str,
         if field_name in evidence:
             evidence[field_name] = "[unsafe]"
     return evidence
+
+
+def _redact_digest_keys_for_evidence(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for key, nested in value.items():
+            key_text = str(key)
+            if _is_digest_evidence_key(key_text):
+                redacted[key_text] = "[redacted]"
+            else:
+                redacted[key_text] = _redact_digest_keys_for_evidence(nested)
+        return redacted
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_redact_digest_keys_for_evidence(item) for item in value]
+    return value
+
+
+def _is_digest_evidence_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    if any(token in normalized for token in ("checksum", "digest", "hash")):
+        return True
+    return any(token == normalized or normalized.endswith(f"_{token}") for token in ("sha", "sha1", "sha256", "sha512"))
 
 
 def _candidate_execution_evidence(
@@ -5349,9 +5519,15 @@ def _candidate_output_evidence(
         "canonical_product_count",
         "output_row_count",
     )
-    segment_count = _first_present_int(outcome, candidate.resource_profile, "segment_count")
-    if segment_count is None:
-        segment_count = candidate.segment_count
+    output_segment_count = _first_present_int(
+        outcome,
+        candidate.resource_profile,
+        "output_segment_count",
+        "shud_output_segment_count",
+        "shud_output_river_count",
+    )
+    if output_segment_count is None:
+        output_segment_count = candidate.output_segment_count
     payload = {
         "output_uri": _redact_secret_manifest_for_evidence(
             resolved_output_uri,
@@ -5365,7 +5541,9 @@ def _candidate_output_evidence(
             "shud_output_uri",
         ),
         "parsed_row_count": parsed_row_count,
-        "segment_count": segment_count,
+        "segment_count": output_segment_count,
+        "output_segment_count": output_segment_count,
+        "gis_segment_count": candidate.segment_count,
         "canonical_product_counts": _candidate_product_counts(candidate, outcome=outcome),
     }
     return _evidence_safe(payload)
@@ -5491,7 +5669,10 @@ def _candidate_product_counts(candidate: SchedulerCandidate, *, outcome: Mapping
     if parsed is not None:
         counts["parsed_rows"] = parsed
     if candidate.segment_count is not None:
-        counts["river_segments"] = candidate.segment_count
+        counts["gis_river_segments"] = candidate.segment_count
+    if candidate.output_segment_count is not None:
+        counts["river_segments"] = candidate.output_segment_count
+        counts["shud_output_segments"] = candidate.output_segment_count
     station_count = _candidate_station_count(candidate)
     if station_count is not None:
         counts["forcing_stations"] = station_count
@@ -5538,6 +5719,31 @@ def _candidate_contract_pipeline_job_id(candidate: SchedulerCandidate) -> str | 
     if explicit not in (None, ""):
         return str(explicit)
     return None
+
+
+def _candidate_output_river_manifest(candidate: SchedulerCandidate) -> dict[str, Any]:
+    explicit = candidate.resource_profile.get("output_river")
+    if isinstance(explicit, Mapping):
+        payload = dict(explicit)
+    else:
+        payload = {}
+    output_segment_count = _coerce_output_segment_count(
+        candidate.resource_profile,
+        fallback=candidate.output_segment_count,
+    )
+    if output_segment_count is None:
+        output_segment_count = candidate.segment_count
+    payload.setdefault("state", "ready" if output_segment_count and output_segment_count > 0 else "unavailable")
+    payload.setdefault("river_network_version_id", candidate.river_network_version_id)
+    payload.setdefault("segment_count", output_segment_count)
+    payload.setdefault("output_segment_count", output_segment_count)
+    payload.setdefault("gis_segment_count", candidate.segment_count)
+    payload.setdefault("identity_source", "resource_profile.output_segment_count")
+    payload.setdefault(
+        "quality_flag",
+        "ok" if output_segment_count and output_segment_count > 0 else "output_river_unavailable",
+    )
+    return _evidence_safe(payload)
 
 
 def _first_present_value(

@@ -39,12 +39,32 @@
 
 ## 2. QHH Model Bootstrap
 
-- [ ] 2.1 Add or harden an idempotent QHH bootstrap command that imports/publishes the processed Basins package, creates or activates `core.model_instance`, and records package/manifest identity.
-- [ ] 2.2 Ensure the active QHH model exposes scheduler-required `model_id`, `basin_id`, `basin_version_id`, `river_network_version_id`, `model_package_uri`, `shud_code_version`, and runnable `resource_profile` metadata.
-- [ ] 2.3 Extend station seeding to validate `qhh.tsd.forc`, enforce station count, populate `met.met_station` forcing-grid rows, and report created/updated/unchanged counts.
-- [ ] 2.4 Seed or validate QHH output river/segment identities required by the output parser and publisher.
-- [ ] 2.5 Add tests for missing package, station count mismatch, repeated bootstrap idempotency, active model discovery with no `not_shud_model`/`incomplete_model_metadata` exclusion, and duplicate active model rejection.
-- [ ] 2.6 Verify with focused bootstrap/registry tests, `uv run pytest -q tests/test_production_scheduler.py`, `uv run ruff check .`, and `nhms-pipeline plan-production --plan --model-id <qhh_model_id>` evidence.
+- [x] 2.1 Add or harden an idempotent QHH bootstrap command that imports/publishes the processed Basins package, creates or activates `core.model_instance`, and records package/manifest identity.
+- [x] 2.2 Ensure the active QHH model exposes scheduler-required `model_id`, `basin_id`, `basin_version_id`, `river_network_version_id`, `model_package_uri`, `shud_code_version`, and runnable `resource_profile` metadata.
+- [x] 2.3 Extend station seeding to validate `qhh.tsd.forc`, enforce station count, populate `met.met_station` forcing-grid rows, and report created/updated/unchanged counts.
+- [x] 2.4 Seed or validate QHH output river/segment identities required by the output parser and publisher.
+- [x] 2.5 Add tests for missing package, station count mismatch, repeated bootstrap idempotency, active model discovery with no `not_shud_model`/`incomplete_model_metadata` exclusion, and duplicate active model rejection.
+- [x] 2.6 Verify with focused bootstrap/registry tests, `uv run pytest -q tests/test_production_scheduler.py`, `uv run ruff check .`, and `nhms-pipeline plan-production --plan --model-id <qhh_model_id>` evidence.
+
+### Issue #254 Evidence Floor
+
+- Successful bootstrap fixture: valid processed QHH package with `qhh.tsd.forc` -> one active scheduler-ready model, station rows, output identities, package identity/manifest evidence, and created/updated/unchanged counts.
+- Idempotency fixture: repeated bootstrap with the same package identity -> no duplicate active model, station, or output identity rows; unchanged or updated counts are explicit.
+- Missing package/project file fixture -> typed blocker and no scheduler-ready active QHH model.
+- Station-count mismatch or malformed `qhh.tsd.forc` fixture -> typed station-count blocker and no future-cycle `met.forcing_version` / `met.forcing_station_timeseries` rows.
+- Unsafe package path fixtures: relative/traversal QHH project path, out-of-root package path, symlink leaf or symlink ancestor, and non-regular `qhh.tsd.forc` -> typed path/file blocker, no scheduler-ready active QHH model, no station/output/future-cycle writes.
+- Bounded discovery fixtures: broad unrelated `NHMS_BASINS_ROOT`, max-depth/max-entry package discovery overflow, oversized `qhh.tsd.forc`, oversized manifest/checksum file, malformed JSON manifest, or digest mismatch -> typed discovery/input blocker with bounded read evidence, no scheduler-ready active QHH model, and no unbounded directory or file read.
+- Evidence-write containment fixture: bootstrap report/evidence path outside the approved workspace/evidence root, existing regular-file evidence directory lane, or no-clobber collision -> stable evidence-path blocker or intentionally omitted evidence according to the command contract; no overwrite of unrelated files and no scheduler-ready active QHH model.
+- Partial-write rollback fixture: model/package metadata creation succeeds but station seeding or output identity seeding fails -> stable partial-bootstrap blocker, QHH not marked scheduler-ready, no duplicate or partial station/output identity rows visible to scheduler/parser/publisher, and failure evidence written or intentionally omitted according to the public command contract.
+- Duplicate active model fixture -> duplicate-active-model blocker and no downstream forecast/forcing/SHUD submission.
+- Scheduler discovery fixture: `plan-production --plan --model-id <qhh_model_id>` after bootstrap includes QHH without `not_shud_model`, `not_runnable`, or `incomplete_model_metadata` exclusion.
+- Non-goal evidence: #254 must not create dynamic forecast values, forcing versions/timeseries for future cycles, SHUD/Slurm jobs, hydro results, parser output, published display artifacts, or frontend behavior.
+- Required commands:
+  - `uv run pytest -q tests/test_production_scheduler.py`
+  - focused bootstrap/registry tests introduced by the PR
+  - `uv run ruff check .`
+  - `openspec validate m23-qhh-22-production-automation --strict --no-interactive`
+  - `uv run nhms-pipeline plan-production --plan --model-id <qhh_model_id>` evidence, or BLOCKED evidence if live package/DB is unavailable.
 
 ## 3. Fresh Forecast Ingestion
 

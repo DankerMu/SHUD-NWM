@@ -233,6 +233,93 @@ Regression rows:
 - Compute `scheduler-once` compose command -> runs `nhms-pipeline plan-production --plan` without manual root flags using env roots.
 - Existing M22 readonly display and #252 contract tests -> remain compatible.
 
+## Issue #254 Fixture
+
+Issue type: feature/bootstrap
+Project profile: NHMS, with AutoSHUD/SHUD contract surfaces
+Blast radius: high
+Fixture level: expanded
+Repair intensity: high
+
+Change surface:
+
+- QHH bootstrap command/script and registry import/publish helpers for the existing processed Basins/SHUD package.
+- `core.model_instance`, basin/package/version metadata, `met.met_station` forcing-grid station rows, and output river/segment identity rows needed by parser/publisher.
+- `services/orchestrator/scheduler.py` discovery behavior only where needed to prove the active QHH model is schedulable.
+- Focused bootstrap/registry tests plus `tests/test_production_scheduler.py`.
+
+Must preserve:
+
+- #252 production identity/status/URI contract and #253 scheduler env-root/pre-mutation safety.
+- No dynamic forecast values, `met.forcing_version`, `met.forcing_station_timeseries`, SHUD runtime execution, Slurm submission, parse, publish, or frontend behavior in #254.
+- Existing processed QHH basin package contract; bootstrap must not rebuild the watershed package or require rSHUD/AutoSHUD at runtime.
+- Existing scheduler dry-run/no-mutation semantics and node-27 readonly display boundary.
+
+Must add/change:
+
+- An idempotent QHH bootstrap command that validates the processed package, creates or activates exactly one scheduler-ready `core.model_instance`, and reports created/updated/unchanged/blocked counts.
+- Validation and seeding for fixed SHUD forcing stations from `qhh.tsd.forc`, including station role, SHUD forcing index, filename/source identity, coordinates, and elevation metadata.
+- Seeding or verification for output river/segment identities required by later SHUD output parsing and display publication.
+- Typed blockers for missing package/project files, station-count mismatch, incomplete model metadata, and duplicate active QHH model identities.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - bootstrap command/script becomes an operator entrypoint and scheduler precondition.
+- Config / project setup: selected - `NHMS_BASINS_ROOT`, QHH project path, model ids, package URI/root, and resource profile shape drive production discovery.
+- File IO / path safety / overwrite: selected - package roots, `qhh.tsd.forc`, manifest/checksum reads, and any generated evidence must stay bounded and under approved roots.
+- Schema / columns / units / field names: selected - `core.model_instance`, basin/version identity, `met.met_station`, station metadata, and output identity fields are DB contracts.
+- Auth / permissions / secrets: not selected - no new credential or permission model; DB access uses existing repository-managed configuration and must not log secrets.
+- Concurrency / shared state / ordering: selected - repeated bootstrap and duplicate active-model handling must be idempotent and deterministic.
+- Resource limits / large input / discovery: selected - package discovery and forcing/output file parsing must be bounded and scoped to QHH paths.
+- Legacy compatibility / examples: selected - existing QHH Basins package and existing scheduler model discovery behavior must remain compatible.
+- Error handling / rollback / partial outputs: selected - blocked bootstrap must not leave QHH marked scheduler-ready or create partial future-cycle data.
+- Release / packaging / dependency compatibility: not selected - no package/runtime dependency changes expected.
+- Documentation / migration notes: selected - bootstrap command and operator evidence must be clear enough for M23 follow-up issues.
+
+Domain risk packs:
+
+- Geospatial / CRS / basin geometry: selected - station coordinates/elevation and output segment identities are spatial/domain metadata consumed later.
+- Hydro-met time series / forcing windows: not selected - #254 seeds station identities only; per-cycle forcing values and time windows are #256.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver execution or numerical output in #254.
+- PostGIS / TimescaleDB domain behavior: selected - bootstrap writes production DB domain rows and must preserve uniqueness/active-state semantics.
+- Slurm production lifecycle / mock-vs-real parity: not selected - Slurm preflight/submission is #257/#258.
+- External hydro-met providers / snapshot reproducibility: not selected - fresh source discovery/canonical completeness is #255.
+- Run manifest / QC provenance: selected - package manifest/checksum/source-file identity must bind model bootstrap evidence.
+- Published NHMS artifacts / display identity: selected - output identities and package URIs become downstream display-readable publish inputs, without publishing artifacts in #254.
+
+Boundary-surface checklist:
+
+- Shared helper roots: bootstrap import/publish helpers, QHH package parser, station/output identity seeders.
+- Public entrypoints: bootstrap command/script; scheduler `plan-production --plan --model-id <qhh_model_id>` discovery only.
+- Read surfaces: `NHMS_BASINS_ROOT`, processed package files, `qhh.tsd.forc`, optional package manifest/checksum files, existing DB registry rows.
+- Write/delete/overwrite surfaces: model instance activation, station rows, output identity rows, bootstrap evidence; no deletes except scoped idempotent updates to compatible QHH rows.
+- Staging/publish/rollback surfaces: package URI/root identity only; no published display product creation.
+- Producer/consumer evidence boundaries: bootstrap report, scheduler candidate evidence, future forcing/parser/publisher consumers.
+- Stale-state/idempotency boundaries: repeated bootstrap, changed package identity, duplicate active model, partial station/output seed failure.
+- Unchanged downstream consumers: #253 scheduler root/evidence behavior, #252 identity/URI helpers, M22 node-27 readonly display, future forcing/runtime/parser tasks.
+
+Invariant Matrix
+
+Governing invariant: QHH can become scheduler-ready only when one active model instance, its processed package identity, fixed forcing stations, and output segment identities all bind to the same basin/model/package version, and bootstrap failures must block before any downstream forecast, forcing, SHUD, parse, or publish work.
+Source-of-truth identity/contract: `model_id`, `basin_id=qhh`, `basin_version_id`, `river_network_version_id`, `model_package_uri`, package root/digest, `shud_code_version`, project name, `resource_profile`, fixed forcing station index/file identity, and output river/segment identity mapping.
+Surfaces:
+
+- Producers: QHH bootstrap command/script, package import/publish helper, station seeder, output identity seeder.
+- Validators/preflight: package/file existence checks, `qhh.tsd.forc` parser/count validator, active model uniqueness validator, scheduler model eligibility checks.
+- Storage/cache/query: `core.model_instance`, basin/package/version records, `met.met_station`, output river/segment identity tables or registry fixtures.
+- Public routes/entrypoints: bootstrap command/script and `nhms-pipeline plan-production --plan --model-id <qhh_model_id>`.
+- Frontend/downstream consumers: future forcing producer, SHUD runtime, output parser/publisher, node-27 readonly display; no direct frontend change.
+- Failure paths/rollback/stale state: missing package, malformed/station-count mismatch, incomplete metadata, duplicate active model, repeated bootstrap, changed package identity.
+- Evidence/audit/readiness: bootstrap counts/report, scheduler candidate evidence, focused bootstrap tests, production scheduler dry-run evidence.
+Regression rows:
+
+- Existing QHH package with valid `qhh.tsd.forc` and no active model -> creates/activates one scheduler-ready model, seeds stations/output identities, and reports created counts.
+- Repeated bootstrap against the same package identity -> no duplicate active model/station/output rows; reports unchanged or updated counts.
+- Missing package/project file or malformed/station-count-mismatched `qhh.tsd.forc` -> typed blocker; no active scheduler-ready model and no future-cycle forcing rows.
+- Duplicate active QHH model identity -> typed duplicate-active-model blocker; scheduler submits no forecast/forcing/SHUD work.
+- Bootstrapped QHH model -> `plan-production --plan --model-id <qhh_model_id>` includes the model without `not_shud_model`, `not_runnable`, or `incomplete_model_metadata`.
+- Unchanged #253 no-flag scheduler root behavior and #252 identity/URI helpers -> remain compatible.
+
 ## Risks / Trade-offs
 
 - Forecast source 403/lag or partial variables can block a cycle. Mitigation: source availability and canonical completeness are recorded as blocked/unavailable without marking readiness true.

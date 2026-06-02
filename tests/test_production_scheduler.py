@@ -14,7 +14,7 @@ import pytest
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
-from services.orchestrator.chain import M3_STAGES, PipelineResult, StageRunResult
+from services.orchestrator.chain import M3_STAGES, PipelineResult, StageRunResult, build_model_run_assembly
 from services.orchestrator.production_contract import (
     PRODUCTION_STAGE_TAXONOMY,
     PRODUCTION_STATUS_TAXONOMY,
@@ -44,6 +44,7 @@ from services.orchestrator.scheduler import (
 )
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
+from workers.shud_runtime import runtime as shud_runtime_module
 
 
 def test_all_active_models_and_gfs_ifs_window_produce_stable_candidate_ids(tmp_path: Path) -> None:
@@ -328,6 +329,7 @@ def test_scheduler_candidate_state_legacy_rows_without_m23_identity_remain_compa
             basin_version_id="basin_a_v1",
             river_network_version_id="basin_a_rivnet_v1",
             segment_count=3,
+            output_segment_count=3,
             model_package_uri="s3://nhms/models/model_a/package/",
             shud_code_version="2.0",
             resource_profile={},
@@ -2474,6 +2476,115 @@ def test_duplicate_active_model_identity_is_rejected_before_candidates(tmp_path:
     }
 
 
+@pytest.mark.parametrize("duplicate_field", ["model_package_uri", "package_checksum"])
+def test_duplicate_active_package_identity_is_rejected_before_candidates_and_submission(
+    tmp_path: Path,
+    duplicate_field: str,
+) -> None:
+    package_uri_a = "s3://nhms/models/shared/package/"
+    package_uri_b = package_uri_a if duplicate_field == "model_package_uri" else "s3://nhms/models/other/package/"
+    checksum_a = "shared-package-sha"
+    checksum_b = checksum_a if duplicate_field == "package_checksum" else "other-package-sha"
+    model_a = _model(
+        "model_a",
+        "basin_a",
+        resource_profile={"runnable": True, "package_checksum": checksum_a, "lineage": "basins_registry_import"},
+    )
+    model_b = _model(
+        "model_b",
+        "basin_b",
+        resource_profile={"runnable": True, "package_checksum": checksum_b, "lineage": "basins_registry_import"},
+    )
+    model_a["model_package_uri"] = package_uri_a
+    model_b["model_package_uri"] = package_uri_b
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([model_a, model_b]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    exclusions = result.evidence["model_discovery"]["exclusions"]
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert {item["reason"] for item in exclusions} == {"duplicate_active_model_identity"}
+    assert {item["duplicate_identity_field"] for item in exclusions} == {duplicate_field}
+    assert {tuple(item["duplicate_model_ids"]) for item in exclusions} == {("model_a", "model_b")}
+
+
+def test_duplicate_active_package_checksum_uses_internal_projection_without_public_leak(
+    tmp_path: Path,
+) -> None:
+    model_a = _model(
+        "model_a",
+        "basin_a",
+        resource_profile={
+            "runnable": True,
+            "package_checksum": "shared-package-sha",
+            "lineage": "basins_registry_import",
+        },
+    )
+    model_b = _model(
+        "model_b",
+        "basin_b",
+        resource_profile={
+            "runnable": True,
+            "package_checksum": "shared-package-sha",
+            "lineage": "basins_registry_import",
+        },
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=RedactingRegistry([model_a, model_b]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: StrictNoSubmitOrchestrator(),
+    )
+
+    result = scheduler.run_once()
+
+    evidence_json = json.dumps(result.evidence, sort_keys=True)
+    exclusions = result.evidence["model_discovery"]["exclusions"]
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert {item["duplicate_identity_field"] for item in exclusions} == {"package_checksum"}
+    assert {item["duplicate_identity_value"] for item in exclusions} == {"[redacted]"}
+    assert "shared-package-sha" not in evidence_json
+
+
+def test_public_only_redacted_projection_cannot_checksum_dedupe_without_internal_path(
+    tmp_path: Path,
+) -> None:
+    model_a = _model(
+        "model_a",
+        "basin_a",
+        resource_profile={
+            "runnable": True,
+            "package_checksum": "shared-package-sha",
+            "lineage": "basins_registry_import",
+        },
+    )
+    model_b = _model(
+        "model_b",
+        "basin_b",
+        resource_profile={
+            "runnable": True,
+            "package_checksum": "shared-package-sha",
+            "lineage": "basins_registry_import",
+        },
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=PublicOnlyRedactingRegistry([model_a, model_b]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    assert {item["model_id"] for item in result.evidence["candidates"]} == {"model_a", "model_b"}
+
+
 @pytest.mark.parametrize("missing_field", ["basin_version_id", "river_network_version_id", "model_package_uri"])
 def test_incomplete_production_model_metadata_is_blocked_before_candidates(
     tmp_path: Path,
@@ -2495,6 +2606,212 @@ def test_incomplete_production_model_metadata_is_blocked_before_candidates(
     assert exclusion["reason"] == "incomplete_model_metadata"
     assert exclusion["missing_fields"] == [missing_field]
     assert result.evidence["counts"]["selected_model_count"] == 0
+
+
+def test_bootstrapped_qhh_model_is_scheduler_ready_without_metadata_exclusions(tmp_path: Path) -> None:
+    model = {
+        "model_id": "basins_qhh_shud",
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "segment_count": 2,
+        "model_package_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/package/",
+        "shud_code_version": "basins-shud",
+        "active_flag": True,
+        "lifecycle_state": "active",
+        "resource_profile": {
+            "runnable": True,
+            "lineage": "qhh_production_bootstrap",
+            "project_name": "qhh",
+            "station_count": 2,
+            "output_segment_count": 2,
+            "display_capabilities": {"q_down": True, "tiles": True},
+            "frequency_capabilities": {"return_periods": False},
+        },
+    }
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), model_ids=("basins_qhh_shud",)),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    excluded_reasons = {item["reason"] for item in result.evidence["model_discovery"]["exclusions"]}
+    assert "basins_qhh_shud" in {item["model_id"] for item in result.evidence["candidates"]}
+    assert not {"not_shud_model", "not_runnable", "incomplete_model_metadata"} & excluded_reasons
+
+
+def test_qhh_project_name_propagates_from_resource_profile_to_runtime_manifest(tmp_path: Path) -> None:
+    model = {
+        "model_id": "basins_qhh_shud",
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "segment_count": 5,
+        "model_package_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/package/",
+        "shud_code_version": "basins-shud",
+        "active_flag": True,
+        "lifecycle_state": "active",
+        "resource_profile": {
+            "runnable": True,
+            "lineage": "qhh_production_bootstrap",
+            "project_name": "qhh",
+            "shud_input_name": "qhh",
+            "station_count": 2,
+            "output_segment_count": 2,
+            "package_checksum": "package-sha",
+            "source_inventory_checksum": "inventory-sha",
+            "display_capabilities": {"q_down": True, "tiles": True},
+            "frequency_capabilities": {"return_periods": False},
+        },
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, model_ids=("basins_qhh_shud",)),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assembly = build_model_run_assembly(
+        submitted_basin,
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        cycle_time=_dt("2026-05-21T06:00:00Z"),
+        scenario_id="forecast_gfs_deterministic",
+        workspace_root=tmp_path / "workspace",
+        object_store=LocalObjectStore(tmp_path / "object-store", "s3://nhms"),
+        default_forecast_horizon_hours=168,
+    )
+    manifest = {
+        "model": {
+            "model_id": submitted_basin["model_id"],
+            "project_name": assembly.runtime["project_name"],
+            "shud_input_name": submitted_basin["shud_input_name"],
+        },
+        "runtime": dict(assembly.runtime),
+    }
+
+    assert result.status == "submitted"
+    assert submitted_basin["project_name"] == "qhh"
+    assert submitted_basin["shud_input_name"] == "qhh"
+    assert submitted_basin["package_checksum"] == "package-sha"
+    assert submitted_basin["source_inventory_checksum"] == "inventory-sha"
+    assert "package-sha" not in json.dumps(result.evidence["candidates"])
+    assert "inventory-sha" not in json.dumps(result.evidence["candidates"])
+    assert result.evidence["candidates"][0]["resource_profile"]["package_checksum"] == "[redacted]"
+    assert result.evidence["candidates"][0]["resource_profile"]["source_inventory_checksum"] == "[redacted]"
+    assert assembly.runtime["project_name"] == "qhh"
+    assert shud_runtime_module._project_name(manifest) == "qhh"
+
+
+def test_qhh_output_segment_count_propagates_separately_from_gis_segment_count(tmp_path: Path) -> None:
+    model = {
+        "model_id": "basins_qhh_shud",
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "segment_count": 5,
+        "model_package_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/package/",
+        "shud_code_version": "basins-shud",
+        "active_flag": True,
+        "lifecycle_state": "active",
+        "resource_profile": {
+            "runnable": True,
+            "lineage": "qhh_production_bootstrap",
+            "project_name": "qhh",
+            "station_count": 2,
+            "output_segment_count": 2,
+            "display_capabilities": {"q_down": True, "tiles": True},
+            "frequency_capabilities": {"return_periods": False},
+        },
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False, model_ids=("basins_qhh_shud",)),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    candidate = result.evidence["candidates"][0]
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    model_evidence = result.evidence["model_run_evidence"][0]
+    assert candidate["segment_count"] == 5
+    assert candidate["output_segment_count"] == 2
+    assert submitted_basin["segment_count"] == 5
+    assert submitted_basin["output_segment_count"] == 2
+    assert submitted_basin["output_river"]["segment_count"] == 2
+    assert submitted_basin["output_river"]["output_segment_count"] == 2
+    assert submitted_basin["output_river"]["gis_segment_count"] == 5
+    assert model_evidence["segment_count"] == 5
+    assert model_evidence["output_segment_count"] == 2
+    assert model_evidence["outputs"]["segment_count"] == 2
+    assert model_evidence["outputs"]["output_segment_count"] == 2
+    assert model_evidence["outputs"]["gis_segment_count"] == 5
+    assert model_evidence["quality_states"]["output_river"]["segment_count"] == 2
+
+
+def test_runtime_manifest_assembly_uses_shud_output_count_not_gis_segment_count(tmp_path: Path) -> None:
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    basin = {
+        "candidate_id": "gfs:2026-05-21T06:00:00Z:basins_qhh_shud:forecast_gfs_deterministic",
+        "model_id": "basins_qhh_shud",
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "segment_count": 5,
+        "output_segment_count": 2,
+        "model_package_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/package/",
+        "model_package_manifest_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/manifest.json",
+        "run_id": "fcst_gfs_2026052106_basins_qhh_shud",
+        "forcing_version_id": "forc_gfs_2026052106_basins_qhh_shud",
+        "forcing_uri": "s3://nhms/forcing/gfs/2026052106/basins_qhh_vbasins/basins_qhh_shud/",
+        "station_count": 2,
+        "resource_profile": {"project_name": "qhh", "shud_input_name": "qhh"},
+        "display_capabilities": {"tiles": True},
+        "frequency_capabilities": {"return_periods": False},
+    }
+
+    assembly = build_model_run_assembly(
+        basin,
+        source_id="gfs",
+        cycle_id="gfs_2026052106",
+        cycle_time=_dt("2026-05-21T06:00:00Z"),
+        scenario_id="forecast_gfs_deterministic",
+        workspace_root=tmp_path / "workspace",
+        object_store=object_store,
+        default_forecast_horizon_hours=168,
+    )
+    manifest = {
+        "identity": dict(assembly.identity),
+        "model": {
+            "model_id": "basins_qhh_shud",
+            "basin_version_id": "basins_qhh_vbasins",
+            "river_network_version_id": "basins_qhh_rivnet_vbasins",
+            "model_package_uri": basin["model_package_uri"],
+            "segment_count": basin["segment_count"],
+            "output_segment_count": assembly.identity["segment_count"],
+        },
+        "runtime": dict(assembly.runtime),
+        "outputs": dict(assembly.outputs),
+    }
+
+    assert assembly.identity["segment_count"] == 2
+    assert assembly.runtime["project_name"] == "qhh"
+    assert assembly.runtime["output_river"]["segment_count"] == 2
+    assert assembly.runtime["output_river"]["output_segment_count"] == 2
+    assert assembly.runtime["output_river"]["gis_segment_count"] == 5
+    assert assembly.outputs["output_segment_count"] == 2
+    assert assembly.outputs["gis_segment_count"] == 5
+    assert shud_runtime_module._segment_count(manifest) == 2
+    assert shud_runtime_module._project_name(manifest) == "qhh"
 
 
 def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) -> None:
@@ -8289,6 +8606,25 @@ class FakeRegistry:
         return dict(matches.pop(0))
 
 
+class RedactingRegistry(FakeRegistry):
+    def get_model(self, model_id: str) -> dict[str, Any]:
+        model = super().get_model(model_id)
+        profile = dict(model.get("resource_profile") or {})
+        if "package_checksum" in profile:
+            profile["package_checksum"] = None
+        model["resource_profile"] = profile
+        model["package_checksum"] = None
+        model["source_inventory_checksum"] = None
+        return model
+
+    def get_model_internal(self, model_id: str) -> dict[str, Any]:
+        return super().get_model(model_id)
+
+
+class PublicOnlyRedactingRegistry(RedactingRegistry):
+    get_model_internal = None
+
+
 class FakeAdapter:
     def __init__(self, source_id: str, cycles: list[tuple[str, bool]]) -> None:
         self.source_id = source_id
@@ -8869,6 +9205,7 @@ def _scheduler_candidate_fixture() -> scheduler_module.SchedulerCandidate:
             basin_version_id="basin_a_v1",
             river_network_version_id="basin_a_rivnet_v1",
             segment_count=3,
+            output_segment_count=3,
             model_package_uri="s3://nhms/models/model_a/package/",
             shud_code_version="2.0",
             resource_profile={},
