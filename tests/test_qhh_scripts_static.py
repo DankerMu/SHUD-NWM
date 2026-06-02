@@ -7,7 +7,7 @@ import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from scripts import create_qhh_shud_manifest as qhh_manifest
-from scripts import seed_qhh_shud_output_segments as seed_segments
+from workers.model_registry import qhh_production_bootstrap
 
 
 def test_backend_smoke_exports_package_version_before_seed_helpers() -> None:
@@ -157,7 +157,7 @@ def test_qhh_manifest_accepts_forcing_package_checksum_and_exports_file_evidence
 
 
 def test_seed_qhh_shud_output_segments_ignores_existing_output_rows_for_order_offset() -> None:
-    sql = Path(seed_segments.__file__).read_text(encoding="utf-8")
+    sql = Path(qhh_production_bootstrap.__file__).read_text(encoding="utf-8")
 
     assert "COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'" in sql
 

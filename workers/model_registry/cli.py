@@ -11,6 +11,7 @@ from apps.api.auth import PolicyDecision, cli_policy_decision_from_evidence
 from .basins_discovery import BasinsDiscoveryError, discover_basins_inventory, resolve_basins_root, write_inventory
 from .basins_package import BasinsPackageError, publish_basins_package, write_basins_migration_report
 from .basins_registry_import import BasinsRegistryImportError, import_basins_registry
+from .qhh_production_bootstrap import QhhProductionBootstrapError, bootstrap_qhh_production
 from .validator import ModelPackageValidationError, validate_model_package_path
 
 DEFAULT_BASINS_MIGRATION_SOURCE_URI = "/volume/data/nwm/Basins"
@@ -224,6 +225,63 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit(1) from error
         click.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
+    @cli.command("bootstrap-qhh-production")
+    @click.option("--database-url", default=None, help="PostgreSQL/PostGIS URL. Defaults to DATABASE_URL.")
+    @click.option("--basins-root", default=None, help="Basins root path. Overrides NHMS_BASINS_ROOT.")
+    @click.option("--project-name", default="qhh", show_default=True, help="QHH SHUD project/input name.")
+    @click.option("--basin-slug", default="qhh", show_default=True, help="QHH Basins source slug under root.")
+    @click.option("--model-id", default="basins_qhh_shud", show_default=True, help="QHH model_id to bootstrap.")
+    @click.option(
+        "--package-version",
+        default="vbasins-qhh-production",
+        show_default=True,
+        help="Package version to publish when --package-manifest is omitted.",
+    )
+    @click.option("--inventory", default=None, help="Optional precomputed Basins discovery inventory JSON.")
+    @click.option("--package-manifest", default=None, help="Optional precomputed Basins package manifest JSON.")
+    @click.option("--work-dir", default=None, help="Bootstrap work dir for generated inventory/manifest.")
+    @click.option("--evidence-dir", default=None, help="Approved evidence root for --evidence-path.")
+    @click.option("--evidence-path", default=None, help="No-clobber bootstrap evidence JSON path.")
+    @click.option(
+        "--shud-code-version",
+        default="basins-shud",
+        show_default=True,
+        help="SHUD code/runtime version recorded on the active model.",
+    )
+    def bootstrap_qhh_production_command(
+        database_url: str | None,
+        basins_root: str | None,
+        project_name: str,
+        basin_slug: str,
+        model_id: str,
+        package_version: str,
+        inventory: str | None,
+        package_manifest: str | None,
+        work_dir: str | None,
+        evidence_dir: str | None,
+        evidence_path: str | None,
+        shud_code_version: str,
+    ) -> None:
+        try:
+            result = bootstrap_qhh_production(
+                database_url=database_url,
+                basins_root=basins_root,
+                qhh_project_name=project_name,
+                qhh_basin_slug=basin_slug,
+                model_id=model_id,
+                package_version=package_version,
+                inventory_path=inventory,
+                package_manifest_path=package_manifest,
+                work_dir=work_dir,
+                evidence_dir=evidence_dir,
+                evidence_path=evidence_path,
+                shud_code_version=shud_code_version,
+            )
+        except QhhProductionBootstrapError as error:
+            click.echo(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), err=True)
+            raise SystemExit(1) from error
+        click.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -252,6 +310,19 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     import_parser.add_argument("--database-url", default=None)
     import_parser.add_argument("--output", default=None)
     _add_argparse_auth_options(import_parser)
+    qhh_parser = subparsers.add_parser("bootstrap-qhh-production")
+    qhh_parser.add_argument("--database-url", default=None)
+    qhh_parser.add_argument("--basins-root", default=None)
+    qhh_parser.add_argument("--project-name", default="qhh")
+    qhh_parser.add_argument("--basin-slug", default="qhh")
+    qhh_parser.add_argument("--model-id", default="basins_qhh_shud")
+    qhh_parser.add_argument("--package-version", default="vbasins-qhh-production")
+    qhh_parser.add_argument("--inventory", default=None)
+    qhh_parser.add_argument("--package-manifest", default=None)
+    qhh_parser.add_argument("--work-dir", default=None)
+    qhh_parser.add_argument("--evidence-dir", default=None)
+    qhh_parser.add_argument("--evidence-path", default=None)
+    qhh_parser.add_argument("--shud-code-version", default="basins-shud")
     args = parser.parse_args(argv)
 
     if args.command == "validate-package":
@@ -338,6 +409,27 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                 preflight_policy_decision=policy_decisions.preflight,
             )
         except BasinsRegistryImportError as error:
+            print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "bootstrap-qhh-production":
+        try:
+            result = bootstrap_qhh_production(
+                database_url=args.database_url,
+                basins_root=args.basins_root,
+                qhh_project_name=args.project_name,
+                qhh_basin_slug=args.basin_slug,
+                model_id=args.model_id,
+                package_version=args.package_version,
+                inventory_path=args.inventory,
+                package_manifest_path=args.package_manifest,
+                work_dir=args.work_dir,
+                evidence_dir=args.evidence_dir,
+                evidence_path=args.evidence_path,
+                shud_code_version=args.shud_code_version,
+            )
+        except QhhProductionBootstrapError as error:
             print(json.dumps(error.to_payload(), ensure_ascii=False, sort_keys=True), file=sys.stderr)
             return 1
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))

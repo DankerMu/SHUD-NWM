@@ -2497,6 +2497,40 @@ def test_incomplete_production_model_metadata_is_blocked_before_candidates(
     assert result.evidence["counts"]["selected_model_count"] == 0
 
 
+def test_bootstrapped_qhh_model_is_scheduler_ready_without_metadata_exclusions(tmp_path: Path) -> None:
+    model = {
+        "model_id": "basins_qhh_shud",
+        "basin_id": "basins_qhh",
+        "basin_version_id": "basins_qhh_vbasins",
+        "river_network_version_id": "basins_qhh_rivnet_vbasins",
+        "segment_count": 2,
+        "model_package_uri": "s3://nhms/models/basins_qhh_shud/vbasins-qhh-production/package/",
+        "shud_code_version": "basins-shud",
+        "active_flag": True,
+        "lifecycle_state": "active",
+        "resource_profile": {
+            "runnable": True,
+            "lineage": "qhh_production_bootstrap",
+            "project_name": "qhh",
+            "station_count": 2,
+            "output_segment_count": 2,
+            "display_capabilities": {"q_down": True, "tiles": True},
+            "frequency_capabilities": {"return_periods": False},
+        },
+    }
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), model_ids=("basins_qhh_shud",)),
+        registry=FakeRegistry([model]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    result = scheduler.run_once()
+
+    excluded_reasons = {item["reason"] for item in result.evidence["model_discovery"]["exclusions"]}
+    assert "basins_qhh_shud" in {item["model_id"] for item in result.evidence["candidates"]}
+    assert not {"not_shud_model", "not_runnable", "incomplete_model_metadata"} & excluded_reasons
+
+
 def test_active_duplicate_pipeline_is_skipped_before_submission(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     active_repository = FakeActiveRepository(active=True)
