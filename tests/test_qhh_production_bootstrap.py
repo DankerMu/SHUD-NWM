@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -10,11 +11,17 @@ import pytest
 from psycopg2.extras import Json
 
 import workers.model_registry.qhh_production_bootstrap as qhh_bootstrap
+from packages.common.met_store import PsycopgMetStore
 from packages.common.model_registry import PsycopgModelRegistryStore
-from services.orchestrator.scheduler import ProductionScheduler, ProductionSchedulerConfig
+from services.orchestrator.scheduler import (
+    ProductionScheduler,
+    ProductionSchedulerConfig,
+    _MetStoreCanonicalReadinessProvider,
+)
 from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
 from tests.test_basins_registry_import import _write_registry_fixture
 from tests.test_production_scheduler import FakeAdapter, _dt
+from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES
 from workers.model_registry.cli import _argparse_main
 from workers.model_registry.qhh_production_bootstrap import (
     MAX_QHH_BOOTSTRAP_DISCOVERY_ENTRIES,
@@ -1192,6 +1199,7 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
     assert output_count == 2
     assert forcing_count == 0
 
+    readiness_provider = _seed_qhh_scheduler_canonical_readiness(integration_database_url, model_id=model_id)
     scheduler = ProductionScheduler(
         ProductionSchedulerConfig(
             workspace_root=tmp_path / "workspace",
@@ -1199,7 +1207,8 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
             now=_dt("2026-05-21T12:00:00Z"),
         ),
         registry=PsycopgModelRegistryStore(integration_database_url),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        adapters={"gfs": _qhh_scheduler_ready_gfs_adapter()},
+        canonical_readiness_provider=readiness_provider,
     )
     result = scheduler.run_once()
     reasons = {item["reason"] for item in result.evidence["model_discovery"]["exclusions"]}
@@ -1600,6 +1609,7 @@ def test_bootstrap_replaces_stale_run_scoped_resource_profile_and_scheduler_deri
         package_manifest_path=manifest_path,
     )
 
+    readiness_provider = _seed_qhh_scheduler_canonical_readiness(integration_database_url, model_id=model_id)
     scheduler = ProductionScheduler(
         ProductionSchedulerConfig(
             workspace_root=tmp_path / "workspace-stale-profile",
@@ -1607,7 +1617,8 @@ def test_bootstrap_replaces_stale_run_scoped_resource_profile_and_scheduler_deri
             now=_dt("2026-05-21T12:00:00Z"),
         ),
         registry=PsycopgModelRegistryStore(integration_database_url),
-        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        adapters={"gfs": _qhh_scheduler_ready_gfs_adapter()},
+        canonical_readiness_provider=readiness_provider,
     )
     result = scheduler.run_once()
     candidate = next(item for item in result.evidence["candidates"] if item["model_id"] == model_id)
@@ -1800,6 +1811,98 @@ def _qhh_registry_fixture(tmp_path: Path, *, basin_slug: str = "qhh") -> tuple[P
     _write_valid_qhh_tsd_forc(input_dir)
     _refresh_inventory_and_manifest(tmp_path, root, inventory_path, manifest_path)
     return root, input_dir, inventory_path, manifest_path, model_id
+
+
+def _seed_qhh_scheduler_canonical_readiness(database_url: str, *, model_id: str) -> Any:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    forecast_hours = _qhh_scheduler_forecast_hours()
+    policy_identity = _qhh_scheduler_policy_identity()
+    source_object_identity = _qhh_scheduler_source_object_identity()
+    with psycopg_connection(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO met.data_source (
+                    source_id, source_name, source_type, status, native_format, adapter_name, config_json
+                )
+                VALUES ('gfs', 'GFS QHH scheduler readiness fixture', 'forecast', 'mock', 'netcdf', 'gfs', %s)
+                ON CONFLICT (source_id) DO UPDATE SET
+                    source_name = EXCLUDED.source_name,
+                    source_type = EXCLUDED.source_type,
+                    status = EXCLUDED.status,
+                    native_format = EXCLUDED.native_format,
+                    adapter_name = EXCLUDED.adapter_name,
+                    config_json = EXCLUDED.config_json
+                """,
+                (Json({"integration": True, "model_id": model_id}),),
+            )
+
+    store = PsycopgMetStore(database_url)
+    for row in _qhh_scheduler_canonical_rows(
+        cycle_time=cycle_time,
+        forecast_hours=forecast_hours,
+        policy_identity=policy_identity,
+        source_object_identity=source_object_identity,
+    ):
+        store.upsert_canonical_product(row)
+    return _MetStoreCanonicalReadinessProvider(store)
+
+
+def _qhh_scheduler_ready_gfs_adapter() -> FakeAdapter:
+    return FakeAdapter(
+        "gfs",
+        [("2026-05-21T06:00:00Z", True)],
+        policy_identity=_qhh_scheduler_policy_identity(),
+        source_object_identity=_qhh_scheduler_source_object_identity(),
+    )
+
+
+def _qhh_scheduler_forecast_hours() -> tuple[int, ...]:
+    return tuple(range(0, 169, 3))
+
+
+def _qhh_scheduler_policy_identity() -> dict[str, Any]:
+    return {"source": "gfs", "forecast_hours": list(_qhh_scheduler_forecast_hours())}
+
+
+def _qhh_scheduler_source_object_identity() -> dict[str, Any]:
+    return {"source": "gfs", "object": "fake"}
+
+
+def _qhh_scheduler_canonical_rows(
+    *,
+    cycle_time: Any,
+    forecast_hours: tuple[int, ...],
+    policy_identity: dict[str, Any],
+    source_object_identity: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for forecast_hour in forecast_hours:
+        for variable in GFS_REQUIRED_STANDARD_VARIABLES:
+            rows.append(
+                {
+                    "canonical_product_id": f"gfs_{cycle_time:%Y%m%d%H}_{variable}_f{forecast_hour:03d}",
+                    "source_id": "gfs",
+                    "source_version": "qhh-scheduler-readiness-fixture",
+                    "cycle_time": cycle_time,
+                    "valid_time": cycle_time + timedelta(hours=forecast_hour),
+                    "lead_time_hours": forecast_hour,
+                    "variable": variable,
+                    "unit": "1",
+                    "grid_id": "gfs_0p25",
+                    "grid_definition_uri": "canonical/gfs/grid/gfs_0p25/grid.json",
+                    "native_time_resolution": "3h",
+                    "native_spatial_resolution": "0.25deg",
+                    "object_uri": f"s3://nhms/canonical/gfs/2026052106/{variable}/f{forecast_hour:03d}.nc",
+                    "checksum": f"sha256:qhh:{variable}:{forecast_hour}",
+                    "quality_flag": "ok",
+                    "lineage_json": {
+                        "policy_identity": dict(policy_identity),
+                        "source_object_identity": dict(source_object_identity),
+                    },
+                }
+            )
+    return rows
 
 
 def _rename_fixture_input_to_qhh(input_dir: Path) -> Path:
