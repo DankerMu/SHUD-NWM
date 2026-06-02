@@ -29,6 +29,7 @@ from workers.forcing_producer import (
     parse_cycle_time,
 )
 from workers.forcing_producer.producer import ForcingComponent, ForcingTimeseriesRow
+from workers.forcing_producer.store import PsycopgForcingRepository
 
 
 def test_scenario_for_source_maps_forecast_sources() -> None:
@@ -73,6 +74,37 @@ def test_ifs_forcing_uses_surface_pressure_shortwave_and_precip_conversion(tmp_p
     assert _row_value(repository.timeseries, "PRCP", cycle_time + timedelta(hours=3)) == pytest.approx(16.0)
     assert _row_value(repository.timeseries, "Rn", cycle_time + timedelta(hours=3)) == pytest.approx(500.0)
     assert _row_value(repository.timeseries, "Press", cycle_time + timedelta(hours=3)) == pytest.approx(100000.0)
+
+
+def test_fallback_query_uses_stripped_nonblank_checksum_predicate() -> None:
+    class CapturingRepository(PsycopgForcingRepository):
+        def __init__(self) -> None:
+            super().__init__("postgresql://example")
+            self.statement = ""
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            self.statement = statement
+            assert parameters == (
+                "gfs",
+                parse_cycle_time("2026050700"),
+                parse_cycle_time("2026050703"),
+                ["shortwave_down"],
+            )
+            return []
+
+    repository = CapturingRepository()
+
+    assert (
+        repository.list_fallback_canonical_products(
+            source_id="gfs",
+            start_time=parse_cycle_time("2026050700"),
+            end_time=parse_cycle_time("2026050703"),
+            variables=["shortwave_down"],
+        )
+        == ()
+    )
+    assert "NULLIF(BTRIM(cmp.checksum), '') IS NOT NULL" in repository.statement
+    assert "cmp.checksum <> ''" not in repository.statement
 
 
 def test_ifs_max_lead_hours_limits_forcing_range(tmp_path: Path) -> None:
@@ -463,6 +495,7 @@ class FakeReadyRepository:
                         "valid_time": self.cycle_time + timedelta(hours=forecast_hour),
                         "lead_time_hours": forecast_hour,
                         "variable": variable,
+                        "checksum": f"sha256:{variable}:{forecast_hour}",
                         "quality_flag": "ok",
                         "lineage_json": {
                             "policy_identity": policy_identity,

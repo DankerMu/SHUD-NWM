@@ -159,8 +159,8 @@ class PsycopgForcingRepository:
                   AND cmp.valid_time >= %s
                   AND cmp.valid_time <= %s
                   AND cmp.variable = ANY(%s)
-                  AND cmp.quality_flag <> 'fail'
-                  AND cmp.checksum <> ''
+                  AND cmp.quality_flag = 'ok'
+                  AND NULLIF(BTRIM(cmp.checksum), '') IS NOT NULL
             )
             SELECT
                 canonical_product_id,

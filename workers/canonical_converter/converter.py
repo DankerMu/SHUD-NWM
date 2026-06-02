@@ -84,8 +84,18 @@ IFS_REQUIRED_STANDARD_VARIABLES: tuple[str, ...] = (
     "surface_pressure",
     "shortwave_down",
 )
+ERA5_REQUIRED_STANDARD_VARIABLES: tuple[str, ...] = (
+    "prcp_rate_or_amount",
+    "air_temperature_2m",
+    "relative_humidity_2m",
+    "wind_u_10m",
+    "wind_v_10m",
+    "pressure_surface",
+    "net_radiation",
+)
 REQUIRED_STANDARD_VARIABLES_BY_SOURCE: dict[str, tuple[str, ...]] = {
     "gfs": GFS_REQUIRED_STANDARD_VARIABLES,
+    "ERA5": ERA5_REQUIRED_STANDARD_VARIABLES,
     "IFS": IFS_REQUIRED_STANDARD_VARIABLES,
 }
 CONVERSION_PARAMS: dict[str, str] = {
@@ -268,6 +278,10 @@ class CanonicalReadinessResult:
     evidence: dict[str, Any]
 
 
+def canonical_product_is_forcing_usable(product: Mapping[str, Any]) -> bool:
+    return str(product.get("quality_flag") or "ok") == "ok" and bool(str(product.get("checksum") or "").strip())
+
+
 def ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -301,6 +315,10 @@ def required_standard_variables_for_source(source_id: str) -> tuple[str, ...]:
         raise CanonicalConversionError(f"Unsupported canonical readiness source: {source_id}") from error
 
 
+def canonical_readiness_source_is_supported(source_id: str) -> bool:
+    return normalize_source_id(source_id) in REQUIRED_STANDARD_VARIABLES_BY_SOURCE
+
+
 def evaluate_canonical_readiness(
     *,
     source_id: str,
@@ -316,13 +334,29 @@ def evaluate_canonical_readiness(
     normalized_source = normalize_source_id(source_id)
     parsed_cycle_time = parse_cycle_time(cycle_time)
     required_variables = required_standard_variables_for_source(normalized_source)
-    usable_rows = [
-        dict(product)
-        for product in products
-        if str(product.get("source_id") or normalized_source) == normalized_source
-        and parse_cycle_time(product.get("cycle_time", parsed_cycle_time)) == parsed_cycle_time
-        and str(product.get("quality_flag") or "ok") != "fail"
-    ]
+    cycle_rows: list[dict[str, Any]] = []
+    rejected_quality_flags: dict[str, int] = {}
+    rejected_quality_samples: list[dict[str, Any]] = []
+    checksum_missing_row_count = 0
+    checksum_missing_samples: list[dict[str, Any]] = []
+    for product in products:
+        row = dict(product)
+        if str(row.get("source_id") or normalized_source) != normalized_source:
+            continue
+        if parse_cycle_time(row.get("cycle_time", parsed_cycle_time)) != parsed_cycle_time:
+            continue
+        cycle_rows.append(row)
+        quality_flag = str(row.get("quality_flag") or "ok")
+        checksum = str(row.get("checksum") or "").strip()
+        if quality_flag != "ok":
+            rejected_quality_flags[quality_flag] = rejected_quality_flags.get(quality_flag, 0) + 1
+            if len(rejected_quality_samples) < 10:
+                rejected_quality_samples.append(_readiness_rejected_row_sample(row, reason="quality_flag_not_ok"))
+        elif not checksum:
+            checksum_missing_row_count += 1
+            if len(checksum_missing_samples) < 10:
+                checksum_missing_samples.append(_readiness_rejected_row_sample(row, reason="checksum_missing"))
+    usable_rows = [row for row in cycle_rows if canonical_product_is_forcing_usable(row)]
     expected_hours = sorted(
         {int(hour) for hour in forecast_hours}
         if forecast_hours is not None
@@ -401,6 +435,7 @@ def evaluate_canonical_readiness(
     )
     ready = bool(expected_hours) and not missing_variables and not missing_leads and not identity_mismatch
     status = "canonical_ready" if ready else "canonical_incomplete"
+    unusable_required_row_count = sum(rejected_quality_flags.values()) + checksum_missing_row_count
     evidence = {
         "source": normalized_source,
         "source_id": normalized_source,
@@ -423,6 +458,11 @@ def evaluate_canonical_readiness(
         "per_valid_time_lead_counts": lead_counts_by_valid_time,
         "missing_leads": missing_leads,
         "row_count": len(usable_rows),
+        "candidate_row_count": len(cycle_rows),
+        "rejected_quality_flags": rejected_quality_flags,
+        "rejected_quality_samples": rejected_quality_samples,
+        "checksum_missing_row_count": checksum_missing_row_count,
+        "checksum_missing_samples": checksum_missing_samples,
         "policy_identity": dict(policy_identity or {}),
         "source_object_identity": dict(source_object_identity or {}),
         "policy_identity_matched": not expected_policy_id or bool(policy_identities),
@@ -434,10 +474,14 @@ def evaluate_canonical_readiness(
         "reused_existing_ready": ready,
     }
     if identity_mismatch:
-        if missing_required_lineage_row_count == identity_rejected_row_count and not (
-            policy_identities and object_identities
+        if (
+            identity_rejected_row_count > 0
+            and missing_required_lineage_row_count == identity_rejected_row_count
+            and not (policy_identities and object_identities)
         ):
             evidence["reason"] = "canonical_lineage_missing"
+        elif not usable_rows and unusable_required_row_count > 0:
+            evidence["reason"] = "missing_canonical_variables" if missing_variables else "missing_canonical_leads"
         else:
             evidence["reason"] = "canonical_identity_mismatch"
     elif missing_variables:
@@ -447,6 +491,61 @@ def evaluate_canonical_readiness(
     elif not expected_hours:
         evidence["reason"] = "no_expected_leads"
     return CanonicalReadinessResult(status=status, ready=ready, evidence=evidence)
+
+
+def _readiness_rejected_row_sample(row: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+    sample: dict[str, Any] = {
+        "reason": reason,
+        "variable": str(row.get("variable") or ""),
+        "quality_flag": str(row.get("quality_flag") or "ok"),
+    }
+    if row.get("lead_time_hours") is not None:
+        try:
+            sample["lead_time_hours"] = int(row["lead_time_hours"])
+        except (TypeError, ValueError):
+            sample["lead_time_hours"] = row.get("lead_time_hours")
+    if row.get("valid_time") is not None:
+        try:
+            sample["valid_time"] = parse_cycle_time(row["valid_time"]).isoformat()
+        except (TypeError, ValueError):
+            sample["valid_time"] = str(row.get("valid_time"))
+    return sample
+
+
+def _canonical_product_result_readiness_row(
+    product: CanonicalProductResult,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+) -> dict[str, Any]:
+    return {
+        "canonical_product_id": product.canonical_product_id,
+        "source_id": source_id,
+        "cycle_time": cycle_time,
+        "valid_time": product.valid_time,
+        "lead_time_hours": product.lead_time_hours,
+        "variable": product.variable,
+        "object_uri": product.object_uri,
+        "checksum": product.checksum,
+        "quality_flag": product.quality_flag,
+    }
+
+
+def _canonical_readiness_error_message(evidence: Mapping[str, Any]) -> str:
+    reason = str(evidence.get("reason") or "canonical_incomplete")
+    details: dict[str, Any] = {"reason": reason}
+    for key in (
+        "missing_variables",
+        "missing_leads",
+        "rejected_quality_flags",
+        "checksum_missing_row_count",
+        "identity_rejected_row_count",
+        "missing_required_lineage_row_count",
+    ):
+        value = evidence.get(key)
+        if value not in (None, [], {}, 0):
+            details[key] = value
+    return json.dumps(details, sort_keys=True, default=str)
 
 
 def _stable_identity(value: Mapping[str, Any] | None) -> str:
@@ -916,8 +1015,14 @@ class CanonicalConverter:
                     previous_source_file = record.source_file
                     previous_forecast_hour = record.forecast_hour
 
-            self._update_cycle_status(cycle_time, status="canonical_ready", error_code="", error_message="")
-            return ConversionResult(status="canonical_ready", products=tuple(products))
+            return self._complete_cycle_after_conversion(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                products=products,
+                forecast_hours=self._configured_forecast_hours(manifest, entries),
+                policy_identity=_mapping_value(manifest_metadata.get("source_policy")),
+                source_object_identity=_mapping_value(manifest_metadata.get("source_object_identity")),
+            )
         except Exception as error:
             self._update_cycle_status(
                 cycle_time,
@@ -969,6 +1074,44 @@ class CanonicalConverter:
             model_id=model_id,
             basin_id=basin_id,
         )
+
+    def _complete_cycle_after_conversion(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        products: Sequence[CanonicalProductResult],
+        forecast_hours: Sequence[int],
+        policy_identity: Mapping[str, Any] | None = None,
+        source_object_identity: Mapping[str, Any] | None = None,
+    ) -> ConversionResult:
+        list_products = getattr(self.repository, "list_canonical_products", None) if self.repository else None
+        rows = (
+            list_products(source_id=source_id, cycle_time=cycle_time)
+            if callable(list_products)
+            else [
+                _canonical_product_result_readiness_row(product, source_id=source_id, cycle_time=cycle_time)
+                for product in products
+            ]
+        )
+        readiness = evaluate_canonical_readiness(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            products=rows,
+            forecast_hours=forecast_hours,
+            policy_identity=policy_identity,
+            source_object_identity=source_object_identity,
+            canonical_product_id=f"canon_{normalize_source_id(source_id).lower()}_{format_cycle_time(cycle_time)}",
+        )
+        error_code = "" if readiness.ready else "CANONICAL_INCOMPLETE"
+        error_message = "" if readiness.ready else _canonical_readiness_error_message(readiness.evidence)
+        self._update_cycle_status(
+            cycle_time,
+            status=readiness.status,
+            error_code=error_code,
+            error_message=error_message,
+        )
+        return ConversionResult(status=readiness.status, products=tuple(products))
 
     def _read_records(self, entries: list[dict[str, Any]]) -> list[RawRecord]:
         records: list[RawRecord] = []
@@ -1497,6 +1640,9 @@ class ERA5CanonicalConverter(CanonicalConverter):
 
             entries_by_hour = self._entries_by_hour_and_variable(entries)
             forecast_hours = self._configured_forecast_hours(manifest, entries)
+            manifest_metadata = _manifest_metadata(manifest)
+            policy_identity = _mapping_value(manifest_metadata.get("source_policy"))
+            source_object_identity = _mapping_value(manifest_metadata.get("source_object_identity"))
             products: list[CanonicalProductResult] = []
             previous_precipitation: RawRecord | None = None
             previous_ssr: RawRecord | None = None
@@ -1529,6 +1675,8 @@ class ERA5CanonicalConverter(CanonicalConverter):
                         unit=self._unit_for_standard_variable("air_temperature_2m"),
                         source_files=[temperature.source_file],
                         conversion_params={"native_variable": temperature.native_variable, "operation": "K_to_C"},
+                        policy_identity=policy_identity,
+                        source_object_identity=source_object_identity,
                     )
                 )
                 products.append(
@@ -1544,6 +1692,8 @@ class ERA5CanonicalConverter(CanonicalConverter):
                             "native_variables": [temperature.native_variable, dewpoint.native_variable],
                             "operation": "dewpoint_magnus_rh",
                         },
+                        policy_identity=policy_identity,
+                        source_object_identity=source_object_identity,
                     )
                 )
                 products.append(
@@ -1556,6 +1706,8 @@ class ERA5CanonicalConverter(CanonicalConverter):
                         unit=self._unit_for_standard_variable("wind_u_10m"),
                         source_files=[wind_u.source_file],
                         conversion_params={"native_variable": wind_u.native_variable, "operation": "pass_through"},
+                        policy_identity=policy_identity,
+                        source_object_identity=source_object_identity,
                     )
                 )
                 products.append(
@@ -1568,6 +1720,8 @@ class ERA5CanonicalConverter(CanonicalConverter):
                         unit=self._unit_for_standard_variable("wind_v_10m"),
                         source_files=[wind_v.source_file],
                         conversion_params={"native_variable": wind_v.native_variable, "operation": "pass_through"},
+                        policy_identity=policy_identity,
+                        source_object_identity=source_object_identity,
                     )
                 )
                 products.append(
@@ -1583,6 +1737,8 @@ class ERA5CanonicalConverter(CanonicalConverter):
                             "native_variables": [wind_u.native_variable, wind_v.native_variable],
                             "operation": "vector_magnitude",
                         },
+                        policy_identity=policy_identity,
+                        source_object_identity=source_object_identity,
                     )
                 )
                 products.append(
@@ -1595,6 +1751,8 @@ class ERA5CanonicalConverter(CanonicalConverter):
                         unit=self._unit_for_standard_variable("pressure_surface"),
                         source_files=[pressure.source_file],
                         conversion_params={"native_variable": pressure.native_variable, "operation": "pass_through"},
+                        policy_identity=policy_identity,
+                        source_object_identity=source_object_identity,
                     )
                 )
 
@@ -1627,6 +1785,8 @@ class ERA5CanonicalConverter(CanonicalConverter):
                         source_files=precipitation_sources,
                         conversion_params=precipitation_params,
                         quality_flag=precipitation_conversion.quality_flag,
+                        policy_identity=policy_identity,
+                        source_object_identity=source_object_identity,
                     )
                 )
 
@@ -1661,6 +1821,8 @@ class ERA5CanonicalConverter(CanonicalConverter):
                             "accumulation_type": "since_midnight",
                         },
                         lineage_updates={"radiation_method": "direct_net"},
+                        policy_identity=policy_identity,
+                        source_object_identity=source_object_identity,
                     )
                 )
 
@@ -1668,8 +1830,14 @@ class ERA5CanonicalConverter(CanonicalConverter):
                 previous_ssr = ssr
                 previous_str = str_
 
-            self._update_cycle_status(cycle_time, status="canonical_ready", error_code="", error_message="")
-            return ConversionResult(status="canonical_ready", products=tuple(products))
+            return self._complete_cycle_after_conversion(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                products=products,
+                forecast_hours=self._configured_forecast_hours(manifest, entries),
+                policy_identity=policy_identity,
+                source_object_identity=source_object_identity,
+            )
         except Exception as error:
             self._update_cycle_status(
                 cycle_time,
@@ -2111,8 +2279,14 @@ class IFSCanonicalConverter(CanonicalConverter):
                 previous_ssr = ssr
                 previous_str = str_
 
-            self._update_cycle_status(cycle_time, status="canonical_ready", error_code="", error_message="")
-            return ConversionResult(status="canonical_ready", products=tuple(products))
+            return self._complete_cycle_after_conversion(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                products=products,
+                forecast_hours=forecast_hours,
+                policy_identity=policy_identity,
+                source_object_identity=source_object_identity,
+            )
         except Exception as error:
             self._update_cycle_status(
                 cycle_time,

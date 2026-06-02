@@ -265,6 +265,87 @@ def test_canonical_readiness_blocks_missing_variable_and_missing_lead() -> None:
     assert result.evidence["missing_leads"][1]["missing_variables"] == ["pressure_surface", "shortwave_down"]
 
 
+@pytest.mark.parametrize("quality_flag", ["warn", "error_precip_accumulation"])
+def test_canonical_readiness_rejects_non_ok_required_rows(quality_flag: str) -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026050700/manifest.json"}
+    rows = canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        variables=GFS_REQUIRED_STANDARD_VARIABLES,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    rejected = next(row for row in rows if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 3)
+    rejected["quality_flag"] = quality_flag
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=rows,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is False
+    assert result.evidence["status"] == "canonical_incomplete"
+    assert result.evidence["reason"] == "missing_canonical_leads"
+    assert result.evidence["rejected_quality_flags"] == {quality_flag: 1}
+    assert result.evidence["rejected_quality_samples"] == [
+        {
+            "reason": "quality_flag_not_ok",
+            "variable": "shortwave_down",
+            "quality_flag": quality_flag,
+            "lead_time_hours": 3,
+            "valid_time": "2026-05-07T03:00:00+00:00",
+        }
+    ]
+    assert result.evidence["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
+
+
+def test_canonical_readiness_rejects_missing_checksum_required_rows() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026050700/manifest.json"}
+    rows = canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        variables=GFS_REQUIRED_STANDARD_VARIABLES,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    rejected = next(row for row in rows if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 3)
+    rejected["checksum"] = ""
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=rows,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is False
+    assert result.evidence["status"] == "canonical_incomplete"
+    assert result.evidence["reason"] == "missing_canonical_leads"
+    assert result.evidence["checksum_missing_row_count"] == 1
+    assert result.evidence["checksum_missing_samples"] == [
+        {
+            "reason": "checksum_missing",
+            "variable": "shortwave_down",
+            "quality_flag": "ok",
+            "lead_time_hours": 3,
+            "valid_time": "2026-05-07T03:00:00+00:00",
+        }
+    ]
+    assert result.evidence["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
+
+
 def test_canonical_readiness_does_not_reuse_when_policy_or_object_identity_changes() -> None:
     cycle_time = parse_cycle_time("2026050700")
     old_policy = {"source": "gfs", "forecast_hours": [0, 3]}
@@ -542,6 +623,60 @@ def test_negative_apcp_delta_marks_product_warn(tmp_path: Path) -> None:
     conversion_params = prcp_f003["lineage_json"]["conversion_params"]
     assert conversion_params["negative_delta_forecast_hours"] == [3]
     assert conversion_params["anomalies"][0]["min_delta"] == -2.0
+
+
+def test_non_ok_required_product_marks_cycle_incomplete_not_ready(tmp_path: Path) -> None:
+    repository = FakeCanonicalRepository()
+    store, manifest = build_raw_manifest(tmp_path)
+    cycle_time = parse_cycle_time("2026050700")
+    compact_cycle = "2026050700"
+    for forecast_hour, value in ((0, 5.0), (3, 3.0)):
+        local_key = f"raw/gfs/{compact_cycle}/gfs.t00z.pgrb2.0p25.f{forecast_hour:03d}.apcp.grib2"
+        store.write_bytes_atomic(
+            local_key,
+            encode_test_netcdf4("apcp", forecast_hour, values=[value], cycle_time=cycle_time),
+        )
+    converter = build_converter(tmp_path, repository=repository)
+
+    result = converter.convert_manifest(manifest)
+
+    assert result.status == "canonical_incomplete"
+    cycle = repository.cycles[("gfs", cycle_time)]
+    assert cycle["status"] == "canonical_incomplete"
+    assert cycle["error_code"] == "CANONICAL_INCOMPLETE"
+    assert "missing_canonical_leads" in cycle["error_message"]
+    assert "rejected_quality_flags" in cycle["error_message"]
+    assert repository.products["gfs_2026050700_prcp_rate_or_amount_f003"]["quality_flag"] == "warn"
+
+
+def test_canonical_readiness_rejects_whitespace_checksum_required_rows() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026050700/manifest.json"}
+    rows = canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        variables=GFS_REQUIRED_STANDARD_VARIABLES,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    rejected = next(row for row in rows if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 3)
+    rejected["checksum"] = " \t "
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=rows,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is False
+    assert result.evidence["status"] == "canonical_incomplete"
+    assert result.evidence["checksum_missing_row_count"] == 1
+    assert result.evidence["checksum_missing_samples"][0]["variable"] == "shortwave_down"
 
 
 def test_gfs_apcp_rejects_nonfinite_accumulated_values() -> None:

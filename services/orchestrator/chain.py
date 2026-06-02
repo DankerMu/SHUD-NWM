@@ -4462,6 +4462,7 @@ class PsycopgOrchestratorRepository:
                             'lead_time_hours', cmp.lead_time_hours,
                             'variable', cmp.variable,
                             'quality_flag', cmp.quality_flag,
+                            'checksum', cmp.checksum,
                             'lineage_json', cmp.lineage_json
                         )
                         ORDER BY cmp.lead_time_hours, cmp.variable, cmp.canonical_product_id
@@ -4472,7 +4473,8 @@ class PsycopgOrchestratorRepository:
             LEFT JOIN met.canonical_met_product cmp
               ON cmp.source_id = fc.source_id
              AND cmp.cycle_time = fc.cycle_time
-             AND cmp.quality_flag <> 'fail'
+             AND cmp.quality_flag = 'ok'
+             AND NULLIF(BTRIM(cmp.checksum), '') IS NOT NULL
             WHERE fc.status = 'canonical_ready'
               {source_filter}
             GROUP BY fc.source_id, fc.cycle_time, fc.cycle_id

@@ -230,6 +230,118 @@ def test_canonical_incomplete_readiness_blocks_forcing_candidate_submission(tmp_
     assert adapter.download_calls == 0
 
 
+def test_non_ok_canonical_readiness_blocks_forcing_candidate_submission(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    rows = _canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        variables=GFS_REQUIRED_STANDARD_VARIABLES,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    rejected = next(row for row in rows if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 3)
+    rejected["quality_flag"] = "warn"
+    readiness = FakeCanonicalReadinessProvider(
+        {
+            ("gfs", cycle_time): evaluate_canonical_readiness(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                products=rows,
+                forecast_hours=(0, 3),
+                policy_identity=policy,
+                source_object_identity=source_object,
+                canonical_product_id="canon_gfs_2026052106",
+                model_id="model_a",
+                basin_id="basin_a",
+            ).evidence
+        }
+    )
+    adapter = FakeAdapter(
+        "gfs",
+        [("2026-05-21T06:00:00Z", True)],
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": adapter},
+        canonical_readiness_provider=readiness,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "missing_canonical_leads"
+    canonical = blocked["state_evidence"]["canonical_readiness"]
+    assert canonical["status"] == "canonical_incomplete"
+    assert canonical["rejected_quality_flags"] == {"warn": 1}
+    assert canonical["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
+    assert adapter.download_calls == 0
+
+
+def test_checksum_missing_canonical_readiness_blocks_forcing_candidate_submission(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    rows = _canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        variables=GFS_REQUIRED_STANDARD_VARIABLES,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    rejected = next(row for row in rows if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 3)
+    rejected["checksum"] = ""
+    readiness = FakeCanonicalReadinessProvider(
+        {
+            ("gfs", cycle_time): evaluate_canonical_readiness(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                products=rows,
+                forecast_hours=(0, 3),
+                policy_identity=policy,
+                source_object_identity=source_object,
+                canonical_product_id="canon_gfs_2026052106",
+                model_id="model_a",
+                basin_id="basin_a",
+            ).evidence
+        }
+    )
+    adapter = FakeAdapter(
+        "gfs",
+        [("2026-05-21T06:00:00Z", True)],
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": adapter},
+        canonical_readiness_provider=readiness,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "missing_canonical_leads"
+    canonical = blocked["state_evidence"]["canonical_readiness"]
+    assert canonical["status"] == "canonical_incomplete"
+    assert canonical["checksum_missing_row_count"] == 1
+    assert canonical["checksum_missing_samples"][0]["reason"] == "checksum_missing"
+    assert canonical["checksum_missing_samples"][0]["variable"] == "shortwave_down"
+    assert canonical["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
+    assert adapter.download_calls == 0
+
+
 def test_canonical_readiness_provider_absent_blocks_candidate_with_unavailable_evidence(tmp_path: Path) -> None:
     scheduler = ProductionScheduler(
         _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),

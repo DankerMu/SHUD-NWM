@@ -4263,6 +4263,102 @@ def test_trigger_ready_forecasts_matching_lineage_preserves_submission_behavior(
     assert repository.hydro_runs["fcst_gfs_2026050100_model_0"]["status"] == "parsed"
 
 
+def test_trigger_ready_forecasts_rejects_non_ok_canonical_row_before_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    canonical_products = _canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        forecast_hours=(0, 3),
+        policy_identity=current_policy,
+        source_object_identity=current_object,
+    )
+    rejected = next(
+        row
+        for row in canonical_products
+        if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 3
+    )
+    rejected["quality_flag"] = "warn"
+    repository = ReadyForecastRepository(cycle_time=cycle_time, canonical_products=canonical_products)
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "skipped"
+    assert client.submissions == []
+    outcome = results[0].candidate_outcomes[0]
+    assert outcome["reason"] == "missing_canonical_leads"
+    evidence = outcome["state_evidence"]["canonical_readiness"]
+    assert evidence["ready"] is False
+    assert evidence["rejected_quality_flags"] == {"warn": 1}
+    assert evidence["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
+
+
+def test_trigger_ready_forecasts_rejects_checksum_missing_canonical_row_before_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    canonical_products = _canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        forecast_hours=(0, 3),
+        policy_identity=current_policy,
+        source_object_identity=current_object,
+    )
+    rejected = next(
+        row
+        for row in canonical_products
+        if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 3
+    )
+    rejected["checksum"] = ""
+    repository = ReadyForecastRepository(cycle_time=cycle_time, canonical_products=canonical_products)
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "skipped"
+    assert client.submissions == []
+    outcome = results[0].candidate_outcomes[0]
+    assert outcome["reason"] == "missing_canonical_leads"
+    evidence = outcome["state_evidence"]["canonical_readiness"]
+    assert evidence["ready"] is False
+    assert evidence["checksum_missing_row_count"] == 1
+    assert evidence["checksum_missing_samples"][0]["reason"] == "checksum_missing"
+    assert evidence["checksum_missing_samples"][0]["variable"] == "shortwave_down"
+    assert evidence["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
+
+
+def test_ready_cycle_query_uses_stripped_nonblank_checksum_predicate() -> None:
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def __init__(self) -> None:
+            super().__init__("postgresql://example")
+            self.statement = ""
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            self.statement = statement
+            assert parameters == ("gfs", 5)
+            return []
+
+    repository = CapturingRepository()
+
+    assert repository.list_canonical_ready_cycles(source_id="gfs", limit=5) == []
+    assert "NULLIF(BTRIM(cmp.checksum), '') IS NOT NULL" in repository.statement
+    assert "cmp.checksum <> ''" not in repository.statement
+
+
 def test_trigger_ready_forecasts_provider_error_fails_closed_before_submission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4417,6 +4513,7 @@ def _canonical_rows(
                     "valid_time": cycle_time + timedelta(hours=forecast_hour),
                     "lead_time_hours": forecast_hour,
                     "variable": variable,
+                    "checksum": f"sha256:{variable}:{forecast_hour}",
                     "quality_flag": "ok",
                     "lineage_json": lineage,
                 }
