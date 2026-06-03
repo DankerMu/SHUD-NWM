@@ -42,8 +42,10 @@ def test_ifs_adapter_canonical_forcing_run_parse_e2e(tmp_path: Path) -> None:
 
     valid_time_f003 = cycle_time + timedelta(hours=3)
     precip_product = _canonical_product(repository, variable="prcp_rate_or_amount", valid_time=valid_time_f003)
-    assert precip_product["unit"] == "mm"
-    assert _netcdf_scalar(store, precip_product["object_uri"], "prcp_rate_or_amount") == pytest.approx(2.0)
+    assert precip_product["unit"] == "mm/day"
+    # canonical per-step 2.0 mm over a 3h step -> 2.0 * 24 / 3 = 16.0 mm/day
+    assert _netcdf_scalar(store, precip_product["object_uri"], "prcp_rate_or_amount") == pytest.approx(16.0)
+    # producer passes mm/day through unchanged
     assert _forcing_value(repository, forcing.forcing_version_id, "PRCP", valid_time_f003) == pytest.approx(16.0)
     assert _forcing_value(repository, forcing.forcing_version_id, "Rn", valid_time_f003) >= 0.0
 

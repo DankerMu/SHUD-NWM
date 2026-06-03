@@ -597,7 +597,9 @@ def _write_ifs_products(
     forecast_hours: Sequence[int],
 ) -> tuple[CanonicalProduct, ...]:
     values_by_variable = {
-        "prcp_rate_or_amount": ("mm", 2.0),
+        # Canonical IFS PRCP is now mm/day: the converter already applied 24 / step_hours
+        # (per-step 2.0 mm over a 3h step -> 16.0 mm/day). Producer passes it through.
+        "prcp_rate_or_amount": ("mm/day", 16.0),
         "air_temperature_2m": ("degC", 20.0),
         "relative_humidity_2m": ("0-1", 0.6),
         "wind_u_10m": ("m/s", 3.0),

@@ -204,24 +204,25 @@ def test_precipitation_cumulative_m_to_mm_per_step(tmp_path: Path) -> None:
     converter.convert_manifest(manifest)
 
     precipitation = repository.products["IFS_2026050100_prcp_rate_or_amount_f006"]
-    assert precipitation["unit"] == "mm"
+    assert precipitation["unit"] == "mm/day"
     assert precipitation["quality_flag"] == "ok"
-    assert read_product_values(store, precipitation, "prcp_rate_or_amount") == pytest.approx([3.0])
+    # per-step delta 3.0 mm over a 3h step -> 3.0 * 24 / 3 = 24.0 mm/day
+    assert read_product_values(store, precipitation, "prcp_rate_or_amount") == pytest.approx([24.0])
     lineage = precipitation["lineage_json"]["conversion_params"]
     assert lineage["accumulation_type"] == "since_cycle"
-    assert lineage["unit_conversion"] == "m_to_mm"
+    assert lineage["unit_conversion"] == "m_to_mm_day"
     assert lineage["step_hours"] == 3.0
 
 
-def test_ifs_canonical_prcp_unit_contract_is_per_step_mm(tmp_path: Path) -> None:
-    # Cross-layer contract: the producer's "IFS PRCP unchanged" branch assumes IFS canonical PRCP
-    # is per-step `mm`. If this unit drifts to mm/day upstream, the producer would pass it through
-    # (factor 1.0) and silently lose the 24/step (e.g. 16x) conversion. Pin the per-step `mm`
-    # contract both at the constant and at the actually-produced canonical product.
-    assert IFS_STANDARD_UNITS["prcp_rate_or_amount"] == "mm"
+def test_ifs_canonical_prcp_unit_contract_is_mm_day(tmp_path: Path) -> None:
+    # Cross-layer contract: IFS canonical PRCP is emitted in mm/day, aligned with ERA5. The
+    # converter rescales each per-step accumulation by its actual step (24 / step_hours) so the
+    # producer can pass it through (factor 1.0) without any further step-dependent conversion.
+    # Pin the mm/day contract both at the constant and at the actually-produced canonical product.
+    assert IFS_STANDARD_UNITS["prcp_rate_or_amount"] == "mm/day"
 
     repository = FakeCanonicalRepository()
-    _store, manifest = build_ifs_manifest(
+    store, manifest = build_ifs_manifest(
         tmp_path,
         forecast_hours=(3, 6),
         overrides={("tp", 3): [0.003], ("tp", 6): [0.006]},
@@ -230,8 +231,10 @@ def test_ifs_canonical_prcp_unit_contract_is_per_step_mm(tmp_path: Path) -> None
     converter.convert_manifest(manifest)
 
     precipitation = repository.products["IFS_2026050100_prcp_rate_or_amount_f006"]
-    assert precipitation["unit"] == "mm"
+    assert precipitation["unit"] == "mm/day"
     assert precipitation["unit"] == IFS_STANDARD_UNITS["prcp_rate_or_amount"]
+    # per-step delta 3.0 mm over a 3h step -> 24.0 mm/day
+    assert read_product_values(store, precipitation, "prcp_rate_or_amount") == pytest.approx([24.0])
 
 
 def test_negative_precipitation_handling_all_cases() -> None:
@@ -358,10 +361,10 @@ def test_lineage_json_structure_for_each_variable_type(tmp_path: Path) -> None:
     assert temperature["conversion_params"]["unit_conversion"] == "K_to_C"
     assert humidity["conversion_params"]["derived_from"] == ["2t", "2d"]
     assert humidity["method"] == "magnus_formula"
-    assert precipitation["conversion_params"]["operation"] == "cumulative_m_to_mm_step"
+    assert precipitation["conversion_params"]["operation"] == "cumulative_m_to_mm_day"
     assert precipitation["conversion_params"]["step_hours"] == 3.0
     assert radiation["conversion_params"]["components"] == ["ssr", "str"]
     assert wind["conversion_params"]["operation"] == "pass_through"
     assert pressure["conversion_params"]["native_variable"] == "sp"
     lineages = (temperature, humidity, precipitation, radiation, wind, pressure)
-    assert {lineage["converter_version"] for lineage in lineages} == {"m4.0"}
+    assert {lineage["converter_version"] for lineage in lineages} == {"m4.1"}
