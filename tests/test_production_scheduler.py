@@ -10180,3 +10180,145 @@ def test_scheduler_slurm_preflight_does_not_leak_library_secrets(
     assert library_blockers
     assert library_blockers[0]["library"] == "libqhh-token.so.2"
     assert "password" not in json.dumps(result.evidence)
+
+
+# --- M23-7 (#258): node-22 Slurm gateway preflight ---------------------------
+
+
+def _gateway_config(tmp_path: Path, **kwargs: Any) -> ProductionSchedulerConfig:
+    defaults = {
+        "slurm_execution_enabled": True,
+        "database_url": "postgresql://nhms:secret@db.prod.example/nhms",
+    }
+    defaults.update(kwargs)
+    return _config(tmp_path, **defaults)
+
+
+def _healthy_gateway_probe(_config: ProductionSchedulerConfig) -> dict[str, Any]:
+    return {
+        "mode": "real",
+        "backend": "slurm",
+        "version": "24.05",
+        "healthy": True,
+        "submit_capable": True,
+        "accounting_available": True,
+    }
+
+
+def test_slurm_gateway_check_healthy_records_mode_without_credentials(tmp_path: Path) -> None:
+    config = _gateway_config(tmp_path, slurm_gateway_url="https://user:pass@gw-node22.internal:8000")
+
+    checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
+
+    assert blockers == []
+    assert checks["mode"] == "real"
+    assert checks["endpoint"]["host"] == "gw-node22.internal"
+    # Credentials in the URL must never reach evidence.
+    serialized = json.dumps(checks)
+    assert "pass" not in serialized
+    assert "user" not in serialized
+
+
+def test_slurm_gateway_check_unavailable_blocks(tmp_path: Path) -> None:
+    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8000")
+
+    def unhealthy(_config: ProductionSchedulerConfig) -> dict[str, Any]:
+        return {"mode": "real", "healthy": False, "reason": "sinfo --version failed"}
+
+    checks, blockers = scheduler_module._slurm_gateway_check(config, probe=unhealthy)
+
+    codes = {b["code"] for b in blockers}
+    assert "SLURM_GATEWAY_UNAVAILABLE" in codes
+    assert checks["healthy"] is False
+
+
+def test_slurm_gateway_check_self_reference_blocks_with_real_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "real")
+    config = _gateway_config(tmp_path, slurm_gateway_url="http://localhost:8000", service_port=8000)
+
+    checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
+
+    codes = {b["code"] for b in blockers}
+    assert "SLURM_GATEWAY_SELF_REFERENCE" in codes
+    # Self-reference is decisive: the probe must not also be consulted.
+    assert checks["self_reference"] is True
+
+
+def test_slurm_gateway_check_does_not_flag_colocated_mock_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # never-break: the mock co-located dev convention (localhost:8000) is allowed.
+    monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "mock")
+    config = _gateway_config(tmp_path, slurm_gateway_url="http://localhost:8000", service_port=8000)
+
+    _checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
+
+    assert blockers == []
+
+
+def test_slurm_gateway_check_probe_exception_fails_safe(tmp_path: Path) -> None:
+    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8000")
+
+    def boom(_config: ProductionSchedulerConfig) -> dict[str, Any]:
+        raise RuntimeError("slurm cli missing")
+
+    checks, blockers = scheduler_module._slurm_gateway_check(config, probe=boom)
+
+    codes = {b["code"] for b in blockers}
+    assert "SLURM_GATEWAY_UNAVAILABLE" in codes
+    assert checks["healthy"] is False
+
+
+def test_slurm_preflight_ready_with_healthy_gateway_adds_no_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "ready"
+    gateway_blockers = [b for b in preflight["blockers"] if b["code"].startswith("SLURM_GATEWAY")]
+    assert gateway_blockers == []
+    assert preflight["checks"]["gateway"]["healthy"] is True
+
+
+def test_slurm_preflight_blocked_when_gateway_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+
+    def unhealthy(_config: ProductionSchedulerConfig) -> dict[str, Any]:
+        return {"mode": "real", "healthy": False, "reason": "gateway down"}
+
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", unhealthy)
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    codes = {b["code"] for b in preflight["blockers"]}
+    assert "SLURM_GATEWAY_UNAVAILABLE" in codes

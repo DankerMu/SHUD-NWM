@@ -125,9 +125,9 @@
 ## 5. Real SHUD and Slurm Execution
 
 - [x] 5.1 Add scheduler/orchestrator pre-submit runtime preflight that rejects `/bin/true` and other stub executables before Slurm submission and validates SHUD binary visibility, shared libraries, project inputs, and generated forcing files.
-- [ ] 5.2 Establish and document the node-22 Slurm path: gateway or host service health, allowed sbatch template, log root, account/partition/resource policy, and accounting availability.
-- [ ] 5.3 Persist Slurm submit/accounting receipts in pipeline job/event state, including job id, array task id when applicable, status, exit code, log URI, elapsed time, and resource metrics where available.
-- [ ] 5.4 Add tests for stub executable rejection before submit, missing shared libraries, invalid gateway/self-reference, Slurm unavailable blocker, submit receipt persistence, active-job duplicate prevention, and failed/missing SHUD outputs.
+- [x] 5.2 Establish and document the node-22 Slurm path: gateway or host service health, allowed sbatch template, log root, account/partition/resource policy, and accounting availability.
+- [x] 5.3 Persist Slurm submit/accounting receipts in pipeline job/event state, including job id, array task id when applicable, status, exit code, log URI, elapsed time, and resource metrics where available.
+- [x] 5.4 Add tests for stub executable rejection before submit, missing shared libraries, invalid gateway/self-reference, Slurm unavailable blocker, submit receipt persistence, active-job duplicate prevention, and failed/missing SHUD outputs.
 - [ ] 5.5 Verify with `uv run pytest -q tests/test_shud_runtime.py tests/test_production_slurm_validation.py tests/test_slurm_array_contract.py tests/test_production_scheduler.py`, `uv run ruff check .`, and opt-in live Slurm evidence that reports PASS or BLOCKED.
 
 ## 6. Parse, Publish, and Display Boundary

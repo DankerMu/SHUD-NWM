@@ -1440,6 +1440,7 @@ class ForecastOrchestrator:
         actual_manifest_index_path = submitted_manifest_index_path or (
             str(manifest_index_path) if manifest_index_path else ""
         )
+        submitted_array_task_id = _coerce_array_task_id(submitted.get("array_task_id"))
         self.repository.upsert_pipeline_job(
             {
                 "job_id": pipeline_job_id,
@@ -1447,6 +1448,7 @@ class ForecastOrchestrator:
                 "cycle_id": context.cycle_id,
                 "job_type": stage.job_type,
                 "slurm_job_id": slurm_job_id,
+                "array_task_id": submitted_array_task_id,
                 "model_id": _cycle_pipeline_job_model_id(context),
                 "status": submitted_status,
                 "stage": stage.stage,
@@ -1474,7 +1476,7 @@ class ForecastOrchestrator:
                     "slurm": {
                         "job_id": slurm_job_id,
                         "state": submitted_status,
-                        "array_task_id": None,
+                        "array_task_id": submitted_array_task_id,
                         "exit_code": submitted.get("exit_code"),
                         "log_uri": submitted_log_uri,
                     },
@@ -4820,6 +4822,7 @@ class PsycopgOrchestratorRepository:
                 cycle_id,
                 job_type,
                 slurm_job_id,
+                array_task_id,
                 model_id,
                 status,
                 stage,
@@ -4831,9 +4834,10 @@ class PsycopgOrchestratorRepository:
                 error_message,
                 log_uri
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (job_id) DO UPDATE SET
                 slurm_job_id = EXCLUDED.slurm_job_id,
+                array_task_id = EXCLUDED.array_task_id,
                 model_id = EXCLUDED.model_id,
                 status = EXCLUDED.status,
                 submitted_at = EXCLUDED.submitted_at,
@@ -4852,6 +4856,7 @@ class PsycopgOrchestratorRepository:
                 record["cycle_id"],
                 record["job_type"],
                 record["slurm_job_id"],
+                record.get("array_task_id"),
                 record.get("model_id"),
                 record["status"],
                 record["stage"],
@@ -6818,6 +6823,22 @@ def _skipped_ready_forecast_result(
             },
         ),
     )
+
+
+def _coerce_array_task_id(value: Any) -> int | None:
+    """Best-effort int coercion for a gateway-reported array task id.
+
+    ``ops.pipeline_job.array_task_id`` is an integer column; a master array job
+    has no single task id and yields ``None``. Non-integer junk is dropped rather
+    than raised so receipt persistence never breaks on an odd gateway payload.
+    """
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_gateway_time(value: Any) -> datetime | None:
