@@ -941,7 +941,7 @@ def _forcing_qc_payload(
 
 def package_manifest_unit(variable: str) -> str:
     return {
-        "PRCP": "mm",
+        "PRCP": "mm/day",
         "TEMP": "degC",
         "RH": "0-1",
         "wind": "m/s",

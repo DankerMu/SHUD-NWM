@@ -49,7 +49,7 @@ IFS_REQUIRED_CANONICAL_VARIABLES: tuple[str, ...] = (
 )
 FORCING_VARIABLES: tuple[str, ...] = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 OUTPUT_UNITS: dict[str, str] = {
-    "PRCP": "mm",
+    "PRCP": "mm/day",
     "TEMP": "degC",
     "RH": "0-1",
     "wind": "m/s",
@@ -278,7 +278,7 @@ class ForcingProducerConfig:
     idw_power: float = 2.0
     idw_neighbors: int = 4
     rn_shortwave_factor: float = 1.0
-    producer_version: str = "m1.0"
+    producer_version: str = "m2.0"
     forcing_filename: str = "forcing.tsd.forc"
     csv_filename: str = "forcing_debug.csv"
     package_manifest_filename: str = "forcing_package.json"
@@ -1190,26 +1190,30 @@ class ForcingProducer:
         return values
 
     def _precip_to_timestep_factor(self, source_id: str, precip_product: CanonicalProduct) -> float:
-        """Return the multiplier that converts canonical precip into per-timestep ``mm``.
+        """Return the multiplier that converts canonical precip into SHUD ``PRCP`` (mm/day).
 
-        Output unit for ``PRCP`` is per-timestep accumulated ``mm``. Conversion is unit-
-        and source-aware:
+        The authoritative SHUD runtime unit for ``PRCP`` read from ``qhh.tsd.forc`` is a
+        daily rate, ``mm/day`` (Decision A). Conversion is unit- and source-aware:
 
-        * ``mm`` (per-timestep amount, e.g. GFS) -> factor ``1.0``.
-        * ``mm/day`` (a daily rate, e.g. ERA5) -> scaled to the canonical timestep amount
-          via ``step_hours / 24``, where ``step_hours`` is the native time resolution.
-        * IFS keeps its dedicated per-step accumulation handling.
+        * ``mm/day`` (a daily rate, e.g. ERA5) -> factor ``1.0`` (passthrough).
+        * ``mm`` (per-step accumulated amount, e.g. GFS/IFS) -> daily rate via
+          ``24 / step_hours``, where ``step_hours`` is the native time resolution.
+          GFS requires a resolvable step; IFS falls back to the configured default.
 
-        A ``mm/day`` source with an unknown/zero step is rejected so we never silently
-        emit a physically wrong precip amount.
+        Any unit without a documented ``->mm/day`` conversion is rejected so we never
+        silently emit a physically wrong precip amount. A per-step ``mm`` source with an
+        unknown/zero/non-finite step is rejected by ``_precip_step_hours``.
         """
         unit = (precip_product.unit or "").strip().lower()
         if unit == "mm/day":
-            step_hours = _precip_step_hours(precip_product, default_hours=0.0)
-            return step_hours / 24.0
-        if _is_ifs_source(source_id):
-            return 24.0 / _precip_step_hours(precip_product, self.config.ifs_precip_step_hours)
-        return 1.0
+            return 1.0
+        if unit == "mm":
+            default = self.config.ifs_precip_step_hours if _is_ifs_source(source_id) else 0.0
+            return 24.0 / _precip_step_hours(precip_product, default)
+        raise ForcingProductionError(
+            f"Unsupported precipitation unit '{precip_product.unit}' for source {source_id}: "
+            "no documented PRCP->mm/day conversion."
+        )
 
     def _write_outputs_and_records(
         self,
@@ -1417,6 +1421,10 @@ class ForcingProducer:
                 lineage = {}
         if not isinstance(lineage, Mapping):
             lineage = {}
+        # Output transform semantics are versioned via producer_version; a mismatch means the
+        # stored bytes predate the current output unit/conversion contract and must be recomputed.
+        if str(lineage.get("producer_version") or "") != self.config.producer_version:
+            return False
         if _optional_int(lineage.get("min_lead_hours")) != lead_window.get("min_lead_hours"):
             return False
         if _optional_int(lineage.get("max_lead_hours")) != lead_window.get("max_lead_hours"):
@@ -1443,6 +1451,9 @@ class ForcingProducer:
                 return False
             manifest_lineage = manifest.get("lineage")
             if not isinstance(manifest_lineage, Mapping):
+                return False
+            # Manifests without producer_version predate output-semantics versioning -> stale.
+            if str(manifest_lineage.get("producer_version") or "") != self.config.producer_version:
                 return False
             if not _station_signature_matches(manifest_lineage.get("station_signature"), station_signature):
                 return False

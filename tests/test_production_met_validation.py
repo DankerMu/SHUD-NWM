@@ -8,17 +8,27 @@ import pytest
 from packages.common import safe_fs
 from services.production_closure import slurm_validation
 from services.production_closure.met_validation import (
+    REQUIRED_FORCING_VARIABLES,
     EvidenceWriter,
     ProductionMetConfig,
     ProductionMetValidationError,
     _forcing_qc_payload,
+    package_manifest_unit,
     validate_met,
 )
-from workers.forcing_producer.producer import ForcingTimeseriesRow
+from workers.forcing_producer.producer import OUTPUT_UNITS, ForcingTimeseriesRow
 
 
 def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("variable", REQUIRED_FORCING_VARIABLES)
+def test_package_manifest_unit_matches_producer_output_units(variable: str) -> None:
+    # met_validation.package_manifest_unit duplicates the producer's OUTPUT_UNITS map. A one-sided
+    # edit (as nearly happened in #266) would silently drift the manifest unit away from the
+    # produced bytes; this contract keeps both maps in lockstep under CI.
+    assert package_manifest_unit(variable) == OUTPUT_UNITS[variable]
 
 
 def test_validate_met_default_lane_writes_required_evidence_and_redacts(
@@ -124,14 +134,14 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     # Pin the Evidence Floor units payload to the package manifest units so a future change to
     # package_manifest_unit cannot silently drift the documented forcing variable units.
     assert qc["units"] == {
-        "PRCP": "mm",
+        "PRCP": "mm/day",
         "TEMP": "degC",
         "RH": "0-1",
         "wind": "m/s",
         "Rn": "W/m2",
         "Press": "Pa",
     }
-    assert qc["units"]["PRCP"] == "mm"
+    assert qc["units"]["PRCP"] == "mm/day"
 
     lineage = _read_json(lane_dir / "best_available_lineage.json")
     assert lineage["status"] == "ready"
