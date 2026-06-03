@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1341,6 +1343,21 @@ def test_cycle_orchestration_rejects_db_active_duplicate(tmp_path: Path) -> None
     assert client.submissions == []
 
 
+def test_repeated_scan_with_active_cycle_does_not_resubmit(tmp_path: Path) -> None:
+    # M23-7 (#258): re-scans while a cycle is already active must be rejected by
+    # the active guard and never produce a duplicate Slurm submission.
+    repository = FakeCycleRepository(active=True)
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    for _ in range(3):
+        with pytest.raises(OrchestratorError) as exc_info:
+            orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+        assert exc_info.value.error_code == "PIPELINE_ALREADY_ACTIVE"
+
+    assert client.submissions == []
+
+
 def test_trigger_forecast_rejects_candidate_scoped_active_restart(tmp_path: Path) -> None:
     class ActiveRestartRepository(FakeCycleRepository):
         def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
@@ -1724,6 +1741,68 @@ def test_partial_array_retry_persists_submission_under_retry_job_id_with_real_re
     assert result.stages[2].task_results[1]["model_id"] == "model_1"
     assert result.stages[2].task_results[1]["run_id"] == "run_1"
     assert result.stages[2].task_results[1]["status"] == "succeeded"
+
+
+class _ArrayTaskIdMasterSlurmClient(FakeCycleSlurmClient):
+    """Array client whose master submission reports a representative task id.
+
+    Real array masters usually have no single task id, but when a gateway does
+    surface one on the submission payload the orchestrator must persist it on the
+    pipeline_job receipt and submission event (M23-7 / #258).
+    """
+
+    def _submit(self, stage: str, run_id: str, model_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        job = super()._submit(stage, run_id, model_id, payload)
+        if "tasks" in payload:
+            job["array_task_id"] = 0
+        self.jobs[job["job_id"]]["array_task_id"] = job.get("array_task_id")
+        return job
+
+
+def test_array_submission_persists_slurm_receipt_with_array_task_id(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = _ArrayTaskIdMasterSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "complete"
+
+    forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
+    # Receipt fields persisted on pipeline_job.
+    assert forcing_job["array_task_id"] == 0
+    assert forcing_job["slurm_job_id"]
+    assert forcing_job["status"] in {"submitted", "running", "succeeded"}
+
+    # Submission event records the representative array task id (not hardcoded None).
+    submission_events = [
+        event
+        for event in repository.events
+        if event["entity_id"] == "job_cycle_gfs_2026050100_forcing"
+        and event["event_type"] == "submission"
+    ]
+    assert submission_events
+    assert submission_events[0]["details"]["slurm"]["array_task_id"] == 0
+    assert submission_events[0]["details"]["slurm"]["job_id"]
+
+    # Per-task receipt coverage: each array task id is captured in stage results.
+    forcing_stage = next(stage for stage in result.stages if stage.stage == "forcing")
+    task_results = forcing_stage.task_results
+    assert {task["array_task_id"] for task in task_results} == {0, 1}
+    assert all(task["log_uri"] for task in task_results)
+
+
+def test_array_master_without_task_id_persists_null_array_task_id(tmp_path: Path) -> None:
+    # never-break: a master that reports no task id must still persist cleanly.
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "complete"
+    forcing_job = repository.jobs["job_cycle_gfs_2026050100_forcing"]
+    assert forcing_job["array_task_id"] is None
 
 
 def test_restart_stage_parse_skips_durable_upstream_stages_without_existing_upstream_rows(tmp_path: Path) -> None:
@@ -4922,3 +5001,104 @@ class BoundedReadSequence(Sequence[Any]):
 
 def _fmt(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+class _CaptureCursor:
+    """Minimal psycopg2-style cursor that records the executed SQL/params."""
+
+    def __init__(self, captured: list[tuple[str, tuple[Any, ...]]]) -> None:
+        self._captured = captured
+        self.description = [type("Col", (), {"name": "job_id"})()]
+
+    def __enter__(self) -> _CaptureCursor:
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+    def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+        self._captured.append((statement, parameters))
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return [("captured-job",)]
+
+
+class _CaptureConnection:
+    def __init__(self, captured: list[tuple[str, tuple[Any, ...]]]) -> None:
+        self._captured = captured
+        self.autocommit = False
+
+    def cursor(self) -> _CaptureCursor:
+        return _CaptureCursor(self._captured)
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def test_psycopg_upsert_pipeline_job_sql_matches_params_for_array_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the real psycopg SQL: column/placeholder/param positions must line up.
+
+    All other tests exercise the fake dict repository, so the hand-edited
+    ``array_task_id`` column (15 -> 16) and its ON CONFLICT clause are never
+    validated. A miscounted ``%s`` or a shifted param would still pass those
+    tests but crash on the real Postgres at node-22. This captures the actual
+    SQL/params and asserts they are mutually consistent.
+    """
+
+    captured: list[tuple[str, tuple[Any, ...]]] = []
+
+    fake_psycopg2 = types.ModuleType("psycopg2")
+    fake_psycopg2.Error = Exception  # type: ignore[attr-defined]
+    fake_psycopg2.connect = lambda _url: _CaptureConnection(captured)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+
+    repository = PsycopgOrchestratorRepository("postgresql://capture/test")
+    record = {
+        "job_id": "job-1",
+        "run_id": "run-1",
+        "cycle_id": "cycle-1",
+        "job_type": "forecast",
+        "slurm_job_id": "12345",
+        "array_task_id": 7,
+        "model_id": "model-1",
+        "status": "submitted",
+        "stage": "forecast",
+        "submitted_at": None,
+        "started_at": None,
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": None,
+    }
+
+    repository.upsert_pipeline_job(record)
+
+    assert len(captured) == 1
+    statement, parameters = captured[0]
+
+    # (a) array_task_id is in the INSERT column list and the ON CONFLICT update.
+    assert "array_task_id" in statement
+    assert "array_task_id = EXCLUDED.array_task_id" in statement
+
+    # (b) placeholder count equals param count -> no off-by-one in the VALUES tuple.
+    insert_values = statement.split("VALUES", 1)[1].split("ON CONFLICT", 1)[0]
+    assert insert_values.count("%s") == len(parameters)
+
+    # The INSERT column list length must match the param/placeholder count too.
+    column_block = statement.split("INSERT INTO", 1)[1].split("VALUES", 1)[0]
+    column_list = column_block[column_block.index("(") + 1 : column_block.rindex(")")]
+    columns = [name.strip() for name in column_list.split(",") if name.strip()]
+    assert len(columns) == len(parameters)
+
+    # (c) array_task_id's value lands at the param slot matching its column index.
+    array_index = columns.index("array_task_id")
+    assert parameters[array_index] == 7

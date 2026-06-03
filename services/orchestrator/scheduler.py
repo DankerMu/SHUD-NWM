@@ -50,6 +50,10 @@ DEFAULT_LOOKBACK_HOURS = 24
 DEFAULT_CYCLE_LAG_HOURS = 0
 DEFAULT_MAX_CYCLES_PER_SOURCE = 1
 DEFAULT_LOCK_TTL_SECONDS = 3600
+# Default listen port of this service's own control API (uvicorn ... --port 8000).
+# Used by the Slurm gateway self-reference check to reject a gateway URL that
+# points back at the scheduler/orchestrator itself instead of a real gateway.
+DEFAULT_SERVICE_PORT = 8000
 MAX_LOOKBACK_HOURS = 168
 MAX_SOURCES = 4
 MAX_CYCLES_PER_SOURCE = 16
@@ -378,6 +382,10 @@ class ProductionSchedulerConfig:
         default_factory=lambda: _env_flag("NHMS_PRODUCTION_SLURM_ENABLED")
         or _env_flag("SLURM_EXECUTION_ENABLED")
     )
+    slurm_gateway_url: str = field(
+        default_factory=lambda: os.getenv("SLURM_GATEWAY_URL", "http://localhost:8000")
+    )
+    service_port: int = field(default_factory=lambda: _env_int("NHMS_SERVICE_PORT", DEFAULT_SERVICE_PORT))
     forcing_production_enabled: bool = field(
         default_factory=lambda: _env_flag("NHMS_PRODUCTION_FORCING_ENABLED")
     )
@@ -488,6 +496,8 @@ class ProductionSchedulerConfig:
         templates = dict(self.slurm_job_type_templates or DEFAULT_JOB_TYPE_TEMPLATES)
         object.__setattr__(self, "slurm_job_type_templates", templates)
         object.__setattr__(self, "slurm_env", {str(key): str(value) for key, value in dict(self.slurm_env).items()})
+        object.__setattr__(self, "slurm_gateway_url", str(self.slurm_gateway_url or "").strip())
+        object.__setattr__(self, "service_port", int(self.service_port))
         if len(self.sources) > MAX_SOURCES:
             raise ValueError(f"production scheduler source count exceeds limit {MAX_SOURCES}")
         sources, source_exclusions = _normalize_sources(self.sources)
@@ -6575,6 +6585,10 @@ def _slurm_preflight(config: ProductionSchedulerConfig) -> dict[str, Any]:
     checks["shud_executable"] = shud_check
     blockers.extend(shud_blockers)
 
+    gateway_check, gateway_blockers = _slurm_gateway_check(config)
+    checks["gateway"] = gateway_check
+    blockers.extend(gateway_blockers)
+
     return {
         "status": "blocked" if blockers else "ready",
         "enabled": True,
@@ -6620,6 +6634,213 @@ def _slurm_shud_executable_check(
         for blocker in result.blockers
     ]
     return redact_payload(dict(result.checks)), blockers
+
+
+# Hosts that, when a gateway URL points at them together with this service's own
+# listen port, mean the gateway is pointing back at the scheduler/orchestrator
+# itself rather than a real Slurm gateway.
+_GATEWAY_SELF_HOSTS = frozenset(
+    {"localhost", "localhost.localdomain", "127.0.0.1", "::1", "0.0.0.0", "::", "ip6-localhost", "ip6-loopback"}
+)
+
+
+def _gateway_endpoint(url: str) -> tuple[str | None, int | None]:
+    """Return ``(host, port)`` for a gateway URL without leaking credentials.
+
+    Only the host and port are returned; any ``user:pass@`` userinfo is dropped
+    so it never reaches evidence.
+    """
+
+    candidate = (url or "").strip()
+    if not candidate:
+        return None, None
+    try:
+        parsed = urlparse(candidate)
+        # A bare ``host:port`` (e.g. ``localhost:8000``) has no ``//`` authority,
+        # so urlparse mis-reads the host as the scheme and yields hostname=None.
+        # Re-parse with an explicit ``//`` authority in that case. ``_has_uri_scheme``
+        # cannot distinguish ``localhost:`` from a real ``http:`` scheme, so rely on
+        # the parse result instead.
+        if parsed.hostname is None and "//" not in candidate:
+            parsed = urlparse(f"//{candidate}")
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None, None
+    return (host.lower() if host else None), port
+
+
+def _gateway_self_reference_blocker(
+    url: str, service_port: int, *, backend: str
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Pure config comparison (no network) for self-referential gateway URLs.
+
+    Rule: a gateway URL is an *invalid* self-reference when (a) a real Slurm
+    backend is configured, and (b) its host is a loopback / unspecified /
+    localhost name, and (c) its (defaulted) port equals this service's own
+    control-API listen port. That combination means the "gateway" points back at
+    the orchestrator's own API instead of a real Slurm gateway -> a guaranteed
+    loop that can never submit.
+
+    The mock / co-located dev gateway convention (``http://localhost:8000`` with
+    the mock backend) is intentionally NOT flagged, so this never fences a
+    submittable dev/test run (never-break-userspace).
+    """
+
+    host, port = _gateway_endpoint(url)
+    effective_port = port if port is not None else service_port
+    endpoint = {"host": host, "port": effective_port}
+    if host is None:
+        return None, endpoint
+    if backend not in {"real", "slurm"}:
+        return None, endpoint
+    is_loopback_name = host in _GATEWAY_SELF_HOSTS
+    if not is_loopback_name:
+        address = _database_host_ip_address(host)
+        is_loopback_name = address is not None and (address.is_loopback or address.is_unspecified)
+    if is_loopback_name and effective_port == service_port:
+        return (
+            {
+                "code": "SLURM_GATEWAY_SELF_REFERENCE",
+                "field": "SLURM_GATEWAY_URL",
+                "message": (
+                    "Slurm gateway URL resolves to this service's own listen address; "
+                    "configure a real node-22 Slurm gateway endpoint."
+                ),
+                "host": host,
+                "port": effective_port,
+            },
+            endpoint,
+        )
+    return None, endpoint
+
+
+def _slurm_gateway_backend() -> str:
+    """Resolve the configured Slurm gateway backend without touching the network."""
+
+    from services.slurm_gateway.config import SlurmGatewaySettings
+
+    try:
+        return str(SlurmGatewaySettings().backend or "").strip().lower()
+    except Exception:  # noqa: BLE001 - config read must not break the pass.
+        return ""
+
+
+def _default_gateway_probe(config: ProductionSchedulerConfig) -> dict[str, Any]:
+    """Bounded, fail-safe default gateway health/capability probe.
+
+    Builds a gateway from environment-backed :class:`SlurmGatewaySettings` and
+    reads its health. Any exception (missing Slurm CLI, unreachable host,
+    misconfiguration) is converted into ``healthy=False`` with a redacted reason
+    rather than raised, so the scheduler records a BLOCKED state instead of
+    crashing or faking a PASS.
+    """
+
+    from services.slurm_gateway.config import SlurmGatewaySettings
+    from services.slurm_gateway.gateway import create_gateway
+
+    settings = SlurmGatewaySettings()
+    mode = settings.backend
+    try:
+        gateway = create_gateway(settings)
+        health = gateway.health()
+        status = str(getattr(health, "status", "") or "").lower()
+        is_healthy = status in {"healthy", "ok"}
+        return {
+            "mode": mode,
+            "backend": str(getattr(health, "backend", mode) or mode),
+            "version": str(getattr(health, "version", "") or ""),
+            "healthy": is_healthy,
+            "submit_capable": is_healthy,
+            "accounting_available": is_healthy,
+            "reason": str(getattr(health, "error", "") or "") or None,
+        }
+    except Exception as error:  # noqa: BLE001 - probe must be fail-safe, never raise.
+        return {
+            "mode": mode,
+            "healthy": False,
+            "submit_capable": False,
+            "accounting_available": False,
+            "reason": str(redact_payload(str(error))),
+        }
+
+
+def _slurm_gateway_check(
+    config: ProductionSchedulerConfig,
+    *,
+    probe: Callable[[ProductionSchedulerConfig], Mapping[str, Any]] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Validate the node-22 Slurm gateway before any submission.
+
+    Two independent gates, both required by the spec:
+
+    1. **Self-reference (deterministic, no network):** reject a gateway URL that
+       points back at this service's own listen address.
+    2. **Health/availability (bounded, injectable, fail-safe):** probe gateway
+       health, submit capability, and accounting availability. ``probe`` is
+       injectable for tests (mirrors ``check_shud_executable``). An explicitly
+       unavailable / unhealthy gateway -> ``SLURM_GATEWAY_UNAVAILABLE``; a probe
+       that cannot determine state fails safe as BLOCKED rather than faking PASS.
+
+    Evidence records the gateway ``mode`` and ``host:port`` but never any
+    credential (userinfo is stripped, payload is redacted). When the gateway is
+    genuinely healthy and reachable this adds NO blocker, so it never wrongly
+    fences a submittable run (never-break-userspace).
+    """
+
+    checks: dict[str, Any] = {}
+    blockers: list[dict[str, Any]] = []
+
+    backend = _slurm_gateway_backend()
+    self_blocker, endpoint = _gateway_self_reference_blocker(
+        config.slurm_gateway_url, config.service_port, backend=backend
+    )
+    checks["endpoint"] = endpoint
+    checks["self_reference"] = self_blocker is not None
+    if self_blocker is not None:
+        # Self-reference is decisive: do not also probe a bogus endpoint.
+        blockers.append(self_blocker)
+        return redact_payload(checks), blockers
+
+    probe_fn = probe or _default_gateway_probe
+    try:
+        result = dict(probe_fn(config))
+    except Exception as error:  # noqa: BLE001 - injected probe must not break the pass.
+        result = {
+            "healthy": False,
+            "submit_capable": False,
+            "accounting_available": False,
+            "reason": str(redact_payload(str(error))),
+        }
+
+    checks["mode"] = result.get("mode")
+    if result.get("backend") is not None:
+        checks["backend"] = result.get("backend")
+    if result.get("version") is not None:
+        checks["version"] = result.get("version")
+    healthy = bool(result.get("healthy"))
+    submit_capable = bool(result.get("submit_capable", healthy))
+    accounting_available = bool(result.get("accounting_available", healthy))
+    checks["healthy"] = healthy
+    checks["submit_capable"] = submit_capable
+    checks["accounting_available"] = accounting_available
+
+    if not (healthy and submit_capable and accounting_available):
+        blockers.append(
+            {
+                "code": "SLURM_GATEWAY_UNAVAILABLE",
+                "field": "SLURM_GATEWAY_URL",
+                "message": (
+                    "Slurm gateway is unavailable, unhealthy, or cannot confirm "
+                    "submit/accounting capability before submission."
+                ),
+                "host": endpoint.get("host"),
+                "port": endpoint.get("port"),
+                **({"reason": str(result["reason"])} if result.get("reason") else {}),
+            }
+        )
+
+    return redact_payload(checks), blockers
 
 
 def _database_url_blocker(database_url: str | None) -> dict[str, Any] | None:
