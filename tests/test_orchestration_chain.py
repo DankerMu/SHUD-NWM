@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -4999,3 +5001,104 @@ class BoundedReadSequence(Sequence[Any]):
 
 def _fmt(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+class _CaptureCursor:
+    """Minimal psycopg2-style cursor that records the executed SQL/params."""
+
+    def __init__(self, captured: list[tuple[str, tuple[Any, ...]]]) -> None:
+        self._captured = captured
+        self.description = [type("Col", (), {"name": "job_id"})()]
+
+    def __enter__(self) -> _CaptureCursor:
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+    def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+        self._captured.append((statement, parameters))
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return [("captured-job",)]
+
+
+class _CaptureConnection:
+    def __init__(self, captured: list[tuple[str, tuple[Any, ...]]]) -> None:
+        self._captured = captured
+        self.autocommit = False
+
+    def cursor(self) -> _CaptureCursor:
+        return _CaptureCursor(self._captured)
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def test_psycopg_upsert_pipeline_job_sql_matches_params_for_array_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the real psycopg SQL: column/placeholder/param positions must line up.
+
+    All other tests exercise the fake dict repository, so the hand-edited
+    ``array_task_id`` column (15 -> 16) and its ON CONFLICT clause are never
+    validated. A miscounted ``%s`` or a shifted param would still pass those
+    tests but crash on the real Postgres at node-22. This captures the actual
+    SQL/params and asserts they are mutually consistent.
+    """
+
+    captured: list[tuple[str, tuple[Any, ...]]] = []
+
+    fake_psycopg2 = types.ModuleType("psycopg2")
+    fake_psycopg2.Error = Exception  # type: ignore[attr-defined]
+    fake_psycopg2.connect = lambda _url: _CaptureConnection(captured)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+
+    repository = PsycopgOrchestratorRepository("postgresql://capture/test")
+    record = {
+        "job_id": "job-1",
+        "run_id": "run-1",
+        "cycle_id": "cycle-1",
+        "job_type": "forecast",
+        "slurm_job_id": "12345",
+        "array_task_id": 7,
+        "model_id": "model-1",
+        "status": "submitted",
+        "stage": "forecast",
+        "submitted_at": None,
+        "started_at": None,
+        "finished_at": None,
+        "exit_code": None,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": None,
+    }
+
+    repository.upsert_pipeline_job(record)
+
+    assert len(captured) == 1
+    statement, parameters = captured[0]
+
+    # (a) array_task_id is in the INSERT column list and the ON CONFLICT update.
+    assert "array_task_id" in statement
+    assert "array_task_id = EXCLUDED.array_task_id" in statement
+
+    # (b) placeholder count equals param count -> no off-by-one in the VALUES tuple.
+    insert_values = statement.split("VALUES", 1)[1].split("ON CONFLICT", 1)[0]
+    assert insert_values.count("%s") == len(parameters)
+
+    # The INSERT column list length must match the param/placeholder count too.
+    column_block = statement.split("INSERT INTO", 1)[1].split("VALUES", 1)[0]
+    column_list = column_block[column_block.index("(") + 1 : column_block.rindex(")")]
+    columns = [name.strip() for name in column_list.split(",") if name.strip()]
+    assert len(columns) == len(parameters)
+
+    # (c) array_task_id's value lands at the param slot matching its column index.
+    array_index = columns.index("array_task_id")
+    assert parameters[array_index] == 7

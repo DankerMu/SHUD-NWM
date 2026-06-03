@@ -6654,10 +6654,15 @@ def _gateway_endpoint(url: str) -> tuple[str | None, int | None]:
     candidate = (url or "").strip()
     if not candidate:
         return None, None
-    if not _has_uri_scheme(candidate):
-        candidate = f"//{candidate}"
     try:
         parsed = urlparse(candidate)
+        # A bare ``host:port`` (e.g. ``localhost:8000``) has no ``//`` authority,
+        # so urlparse mis-reads the host as the scheme and yields hostname=None.
+        # Re-parse with an explicit ``//`` authority in that case. ``_has_uri_scheme``
+        # cannot distinguish ``localhost:`` from a real ``http:`` scheme, so rely on
+        # the parse result instead.
+        if parsed.hostname is None and "//" not in candidate:
+            parsed = urlparse(f"//{candidate}")
         host = parsed.hostname
         port = parsed.port
     except ValueError:
