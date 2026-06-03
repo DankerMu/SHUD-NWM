@@ -103,6 +103,25 @@
 - [ ] 4.4 Add tests for missing fixed stations, interpolation coverage gaps, idempotent rerun, SHUD package file generation, and no rSHUD runtime dependency.
 - [ ] 4.5 Verify with `uv run pytest -q tests/test_forcing_producer.py tests/test_orchestration_chain.py tests/test_production_scheduler.py`, `uv run ruff check .`, and forcing evidence containing station count, variable count, time range, and manifest checksum.
 
+### Issue #256 Evidence Floor
+
+- Complete forcing fixture: active QHH model plus fixed `forcing_grid` stations and complete canonical products -> one ready `met.forcing_version`, complete `met.forcing_station_timeseries` rows for every station/variable/valid time, `met.forcing_version_component` lineage, station count, variable set, units, valid time range, package URI, and manifest checksum.
+- Scheduler glue fixture: a scheduler/orchestration candidate with #255 canonical-ready evidence invokes forcing generation using the active QHH model/basin/source/cycle/canonical identity and records forcing-stage evidence; blocked/incomplete canonical candidates create no forcing rows or package files.
+- Missing station fixture: no active `forcing_grid` stations, missing SHUD forcing index, missing forcing filename, or station count mismatch -> typed missing-stations blocker, no ready forcing version, no station timeseries ready state, and no SHUD runtime submission.
+- Coverage/quality fixture: missing canonical value for a station/variable/time, non-finite value, unit mismatch, or reduced-scope coverage not permitted -> typed interpolation/coverage/quality blocker with safe station/variable/time evidence and no ready forcing version.
+- Idempotency fixture: repeated generation for identical model/source/cycle/canonical/station/grid identity -> no duplicate ready forcing versions, deterministic replacement/reuse behavior, stable checksum, and no duplicated station timeseries rows.
+- Stale identity fixture: changed canonical product/checksum/lineage, changed station set, changed grid definition, or changed forcing window under the same model/source/cycle -> stale forcing reuse is rejected and replacement or blocked evidence is recorded according to policy.
+- Partial-write rollback fixture: parent `met.forcing_version` creation succeeds but component/timeseries/package/manifest write fails -> parent remains incomplete/non-ready, child rows/files are absent or safely replaceable, and retry finalizes without duplicate ready versions.
+- SHUD package fixture: generated runtime package includes `qhh.tsd.forc` plus per-station forcing files with bootstrap station ordering, filenames, checksums, units, source/cycle identity, and time range in the runtime manifest.
+- rSHUD non-runtime fixture: forcing file generation follows the processed basin file contract but does not import/call rSHUD or AutoSHUD as a runtime solver/data generator.
+- Path/evidence fixture: package and manifest writes stay under approved workspace/object-store roots, reject traversal/out-of-root paths, and do not leak private compute paths as display-ready published artifacts.
+- Non-goal evidence: #256 must not execute SHUD, submit Slurm jobs, create `hydro.hydro_run` or `hydro.river_timeseries`, parse q_down output, publish display artifacts, or change frontend behavior.
+- Required commands:
+  - `uv run pytest -q tests/test_forcing_producer.py tests/test_orchestration_chain.py tests/test_production_scheduler.py`
+  - `uv run ruff check .`
+  - `openspec validate m23-qhh-22-production-automation --strict --no-interactive`
+  - forcing evidence sample containing station count, variable count, valid time range, units, package URI, and manifest checksum, or BLOCKED evidence with exact missing dependency.
+
 ## 5. Real SHUD and Slurm Execution
 
 - [ ] 5.1 Add scheduler/orchestrator pre-submit runtime preflight that rejects `/bin/true` and other stub executables before Slurm submission and validates SHUD binary visibility, shared libraries, project inputs, and generated forcing files.

@@ -411,6 +411,97 @@ Regression rows:
 - Repeated scan for identical completed canonical product identity -> reuse existing canonical product without duplicate rows or redownload; changed source object or policy identity does not falsely reuse stale readiness.
 - Existing #254 bootstrapped QHH model discovery and #252/#253 no-mutation scheduler evidence -> remain compatible.
 
+## Issue #256 Fixture
+
+Issue type: feature/forcing
+Project profile: NHMS, with SHUD fixed-station forcing and hydro-met time-series surfaces
+Blast radius: high
+Fixture level: expanded
+Repair intensity: high
+
+Change surface:
+
+- `workers/forcing_producer` production path that maps canonical GFS/IFS meteorology to fixed QHH forcing-grid stations.
+- `met.forcing_version`, `met.forcing_version_component`, and `met.forcing_station_timeseries` writes for one model/source/cycle/canonical identity.
+- SHUD forcing package materialization under the approved object/workspace root, including `qhh.tsd.forc`, per-station forcing files, checksums, units, and runtime manifest evidence.
+- Minimal scheduler/orchestration glue needed to call forcing generation only after #255 canonical readiness and #254 QHH station/model bootstrap are satisfied.
+- Focused tests in `tests/test_forcing_producer.py`, `tests/test_orchestration_chain.py`, and `tests/test_production_scheduler.py`.
+
+Must preserve:
+
+- #252 production identity/status/URI contract, #253 root/no-mutation safeguards, #254 active QHH model/station/output identity semantics, and #255 canonical readiness gate.
+- No SHUD binary execution, Slurm submission, hydro parse, q_down/frequency publish, frontend behavior, or node-27 display mutation in #256.
+- rSHUD/AutoSHUD remains a static file-contract reference only; production forcing generation must not call rSHUD as a runtime solver or data generator.
+- Existing deterministic/mock tests must not claim live business readiness unless forcing_version, station rows, files, checksums, and manifest evidence are all produced for the same identity.
+
+Must add/change:
+
+- Production scheduler candidates can invoke forcing generation with active QHH `model_id`, `basin_id`, `basin_version_id`, `river_network_version_id`, source/cycle, and canonical product identity.
+- Forcing producer loads active `met.met_station` rows with `station_role="forcing_grid"` and stable SHUD forcing index/filename metadata; missing or mismatched stations produce typed blockers before writes are marked ready.
+- One ready forcing version per model/source/cycle/canonical identity records station count, variable set, valid time window, units, quality flags, package URI, checksum, and lineage to canonical products.
+- Station timeseries rows are written with deterministic station/variable/time keys and idempotent replacement or reuse; duplicate ready identities are blocked or replaced according to one explicit policy.
+- SHUD package files and runtime manifest are materialized with bounded paths, station ordering, file checksums, units, time range, source/cycle identity, and no private path leakage.
+
+Selected risk packs:
+
+- Public API / CLI / script entry: selected - scheduler/orchestration entrypoints will drive forcing generation for production candidates.
+- Config / project setup: selected - object/workspace roots, QHH model resource profile, station metadata, and package file paths are runtime config inputs.
+- File IO / path safety / overwrite: selected - forcing package files, runtime manifests, checksums, and evidence must stay under approved roots and avoid unsafe overwrite.
+- Schema / columns / units / field names: selected - `met.forcing_version`, component rows, station timeseries columns, units, variables, quality flags, and lineage fields are DB contracts.
+- Concurrency / shared state / ordering: selected - repeated scheduler scans must not create duplicate ready forcing identities or leave partially finalized rows.
+- Resource limits / large input / discovery: selected - station count, time windows, file writes, and manifest serialization must be bounded.
+- Legacy compatibility / examples: selected - existing forcing producer tests, M21/M22 display contracts, and QHH bootstrap station metadata remain compatible.
+- Error handling / rollback / partial outputs: selected - missing stations, interpolation coverage gaps, child-write failures, checksum failures, and manifest write failures must not mark forcing ready.
+- Release / packaging / dependency compatibility: selected - default CI must not require live external providers or rSHUD runtime dependencies.
+- Documentation / migration notes: selected - PR evidence must distinguish #256 forcing readiness from later SHUD/Slurm/parse/publish readiness.
+
+Domain risk packs:
+
+- Geospatial / CRS / basin geometry: selected - station coordinates/elevation and grid-to-station mapping determine forcing validity.
+- Hydro-met time series / forcing windows: selected - canonical valid times, units, variables, and forcing window completeness define readiness.
+- SHUD numerical runtime / conservation / NaN: selected only for forcing file input quality - NaN/non-finite forcing values, unit drift, station ordering, and time coverage must block package readiness; no SHUD solve occurs.
+- PostGIS / TimescaleDB domain behavior: selected - forcing tables and time-series keys are production DB domain rows.
+- Slurm production lifecycle / mock-vs-real parity: not selected - SHUD runtime and Slurm submission are #257/#258.
+- External hydro-met providers / snapshot reproducibility: selected via #255 canonical products - #256 consumes canonical identity but must not re-probe providers.
+- Run manifest / QC provenance: selected - forcing version, file manifest, checksums, station count, variables, and canonical lineage are downstream runtime provenance.
+- Published NHMS artifacts / display identity: not selected - generated forcing package is runtime input, not q_down display output; display publication is #259/#260.
+
+Boundary-surface checklist:
+
+- Shared helper roots: forcing producer config, canonical input selection, station loader, package writer, runtime manifest builder.
+- Public entrypoints: scheduler/orchestration forcing stage and any existing forcing producer CLI/test harness used for production evidence.
+- Read surfaces: canonical products, `met.met_station` forcing-grid rows, QHH model resource profile/package metadata, approved object/workspace roots.
+- Write/delete/overwrite surfaces: `met.forcing_version`, `met.forcing_version_component`, `met.forcing_station_timeseries`, forcing package files, runtime manifests, checksum/evidence files.
+- Staging/publish/rollback surfaces: forcing package is staged as runtime input only; no SHUD job, hydro run, parser output, or display publish in #256.
+- Producer/consumer evidence boundaries: forcing producer output becomes input to #257/#258 runtime preflight and later parse/publish stages.
+- Stale-state/idempotency boundaries: repeated forcing for same canonical identity, changed canonical inputs, changed station set, changed grid definition, partial child writes, and pending/incomplete versions.
+- Unchanged downstream consumers: #255 canonical readiness, #257 runtime preflight, #258 Slurm receipt, #259 parse/publish, #260 E2E/runbook, node-27 readonly display.
+
+Invariant Matrix
+
+Governing invariant: A QHH forcing version may be marked ready only when every fixed forcing-grid station has complete, finite, unit-consistent values for every required variable and valid time derived from the same canonical source/cycle identity, and the SHUD package/manifest/checksum evidence binds to that exact forcing identity.
+Source-of-truth identity/contract: `forcing_version_id`, `model_id`, `basin_id`, `basin_version_id`, `river_network_version_id`, `source`, `cycle_time`, `canonical_product_id`, canonical lineage/checksum, station id/forcing index/forcing filename, valid-time window, variable set, package URI, runtime manifest checksum.
+Surfaces:
+
+- Producers: forcing producer, canonical input selector, station interpolator/extractor, package writer, scheduler/orchestration forcing stage.
+- Validators/preflight: station loader, coverage/finite/unit checks, idempotency/duplicate identity guard, path containment checks, manifest checksum verification.
+- Storage/cache/query: `met.forcing_version`, `met.forcing_version_component`, `met.forcing_station_timeseries`, object/workspace package files, runtime manifest.
+- Public routes/entrypoints: production scheduler/orchestration command and forcing producer CLI/test harness where present.
+- Frontend/downstream consumers: SHUD runtime preflight and later node-27 display contracts consume forcing identity only after downstream stages; no direct frontend change.
+- Failure paths/rollback/stale state: missing stations, station metadata mismatch, canonical coverage gaps, non-finite values, duplicate ready version, pending child rows, package write failure, manifest checksum mismatch.
+- Evidence/audit/readiness: forcing producer evidence, scheduler candidate/stage evidence, OpenSpec fixture, focused tests, CI/local PR evidence.
+
+Regression rows:
+
+- Complete canonical GFS/IFS cycle plus active QHH forcing-grid stations -> one ready forcing version, complete station timeseries rows, SHUD package files, runtime manifest, checksum, units, time window, and lineage evidence.
+- No active forcing-grid stations or station metadata missing SHUD forcing index/filename -> typed missing-stations blocker; no ready forcing version and no SHUD package readiness.
+- Canonical coverage gap for one station/variable/time, non-finite value, or unit mismatch -> typed coverage/quality blocker; partial rows/files do not mark forcing ready.
+- Repeated run for same model/source/cycle/canonical identity -> deterministic idempotent result with no duplicate ready forcing versions and stable manifest checksum unless inputs changed.
+- Changed canonical input identity, station set, or grid definition under same model/source/cycle -> stale forcing reuse is rejected and a replacement or blocked state is recorded according to policy.
+- Child-row write, package write, or manifest checksum failure after parent version creation -> parent remains incomplete/non-ready and retry can finalize the same identity without duplicate ready rows.
+- Generated SHUD package contains `qhh.tsd.forc` and per-station files with station ordering from bootstrap metadata; rSHUD/AutoSHUD is not invoked at runtime.
+- Scheduler/orchestration dry-run or blocked canonical candidate -> no forcing version, station timeseries, package file, SHUD job, hydro result, parse output, or publish artifact is created.
+
 ## Risks / Trade-offs
 
 - Forecast source 403/lag or partial variables can block a cycle. Mitigation: source availability and canonical completeness are recorded as blocked/unavailable without marking readiness true.
