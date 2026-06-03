@@ -56,13 +56,11 @@ uv run ruff check .
 openspec validate <change-name> --strict --no-interactive
 ```
 
-### 当前 Issue #256 验证命令
+### 当前活跃 issue 验证
 
-```bash
-uv run pytest -q tests/test_forcing_producer.py tests/test_orchestration_chain.py tests/test_production_scheduler.py tests/test_ifs_forecast_integration.py tests/test_production_met_validation.py
-uv run ruff check .
-openspec validate m23-qhh-22-production-automation --strict --no-interactive
-```
+当前 issue 的验证命令以其 GitHub issue body 的 `Verification:` 字段为准；
+完整双端动作流（派发 subagent 修/审 → 远端验证 → 有界评审循环 → merge）见
+项目 skill `dual-end-issue-workflow`（`.claude/skills/`，仅本机加载）。
 
 ## 文档更新要求
 
