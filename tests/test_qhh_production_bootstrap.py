@@ -1226,6 +1226,93 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
 
 
 @pytest.mark.integration
+def test_qhh_scheduler_canonical_readiness_preserves_existing_gfs_data_source(
+    integration_database_url: str,
+    qhh_scheduler_canonical_readiness: Callable[[str], Any],
+) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    model_id = "basins_qhh_shud_existing_gfs"
+    existing_config = {"owner": "shared-integration", "qhh_scheduler_readiness_fixture": False}
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO met.data_source (
+                    source_id, source_name, source_type, status, native_format, adapter_name, config_json
+                )
+                VALUES (%s, 'Shared GFS source', 'forecast', 'enabled', 'grib2', 'shared-gfs', %s)
+                ON CONFLICT (source_id) DO UPDATE SET
+                    source_name = EXCLUDED.source_name,
+                    source_type = EXCLUDED.source_type,
+                    status = EXCLUDED.status,
+                    native_format = EXCLUDED.native_format,
+                    adapter_name = EXCLUDED.adapter_name,
+                    config_json = EXCLUDED.config_json
+                """,
+                (_QHH_SCHEDULER_SOURCE_ID, Json(existing_config)),
+            )
+
+    qhh_scheduler_canonical_readiness(model_id)
+
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM met.canonical_met_product
+                WHERE source_id = %s
+                  AND source_version = %s
+                """,
+                (_QHH_SCHEDULER_SOURCE_ID, _QHH_SCHEDULER_SOURCE_VERSION),
+            )
+            seeded_canonical_count = int(cursor.fetchone()["count"])
+            cursor.execute(
+                """
+                SELECT source_name, source_type, status, native_format, adapter_name, config_json
+                FROM met.data_source
+                WHERE source_id = %s
+                """,
+                (_QHH_SCHEDULER_SOURCE_ID,),
+            )
+            data_source = cursor.fetchone()
+
+    assert seeded_canonical_count > 0
+    assert data_source == {
+        "source_name": "Shared GFS source",
+        "source_type": "forecast",
+        "status": "enabled",
+        "native_format": "grib2",
+        "adapter_name": "shared-gfs",
+        "config_json": existing_config,
+    }
+    _clear_qhh_scheduler_canonical_readiness(integration_database_url)
+    with psycopg_connection(integration_database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM met.canonical_met_product
+                WHERE source_id = %s
+                  AND source_version = %s
+                """,
+                (_QHH_SCHEDULER_SOURCE_ID, _QHH_SCHEDULER_SOURCE_VERSION),
+            )
+            cleaned_canonical_count = int(cursor.fetchone()["count"])
+            cursor.execute(
+                """
+                SELECT source_name, source_type, status, native_format, adapter_name, config_json
+                FROM met.data_source
+                WHERE source_id = %s
+                """,
+                (_QHH_SCHEDULER_SOURCE_ID,),
+            )
+            restored_data_source = cursor.fetchone()
+
+    assert cleaned_canonical_count == 0
+    assert restored_data_source == data_source
+
+
+@pytest.mark.integration
 def test_bootstrap_station_failure_rolls_back_model_readiness(
     tmp_path: Path,
     integration_database_url: str,
@@ -1823,21 +1910,30 @@ def _qhh_registry_fixture(tmp_path: Path, *, basin_slug: str = "qhh") -> tuple[P
 @pytest.fixture
 def qhh_scheduler_canonical_readiness(integration_database_url: str) -> Iterator[Callable[[str], Any]]:
     seeded = False
+    created_data_source = False
 
     def seed(model_id: str) -> Any:
-        nonlocal seeded
+        nonlocal created_data_source, seeded
         _clear_qhh_scheduler_canonical_readiness(integration_database_url)
         seeded = True
-        return _seed_qhh_scheduler_canonical_readiness(integration_database_url, model_id=model_id)
+        readiness_provider, seed_created_data_source = _seed_qhh_scheduler_canonical_readiness(
+            integration_database_url,
+            model_id=model_id,
+        )
+        created_data_source = created_data_source or seed_created_data_source
+        return readiness_provider
 
     try:
         yield seed
     finally:
         if seeded:
-            _clear_qhh_scheduler_canonical_readiness(integration_database_url)
+            _clear_qhh_scheduler_canonical_readiness(
+                integration_database_url,
+                delete_created_data_source=created_data_source,
+            )
 
 
-def _clear_qhh_scheduler_canonical_readiness(database_url: str) -> None:
+def _clear_qhh_scheduler_canonical_readiness(database_url: str, *, delete_created_data_source: bool = False) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
     with psycopg_connection(database_url) as connection:
         with connection.cursor() as cursor:
@@ -1879,22 +1975,24 @@ def _clear_qhh_scheduler_canonical_readiness(database_url: str) -> None:
                     json.dumps(_qhh_scheduler_source_object_identity(), sort_keys=True),
                 ),
             )
-            cursor.execute(
-                """
-                DELETE FROM met.data_source
-                WHERE source_id = %s
-                  AND source_name = %s
-                  AND config_json->>'qhh_scheduler_readiness_fixture' = 'true'
-                """,
-                (_QHH_SCHEDULER_SOURCE_ID, _QHH_SCHEDULER_SOURCE_NAME),
-            )
+            if delete_created_data_source:
+                cursor.execute(
+                    """
+                    DELETE FROM met.data_source
+                    WHERE source_id = %s
+                      AND source_name = %s
+                      AND config_json->>'qhh_scheduler_readiness_fixture' = 'true'
+                    """,
+                    (_QHH_SCHEDULER_SOURCE_ID, _QHH_SCHEDULER_SOURCE_NAME),
+                )
 
 
-def _seed_qhh_scheduler_canonical_readiness(database_url: str, *, model_id: str) -> Any:
+def _seed_qhh_scheduler_canonical_readiness(database_url: str, *, model_id: str) -> tuple[Any, bool]:
     cycle_time = _dt("2026-05-21T06:00:00Z")
     forecast_hours = _qhh_scheduler_forecast_hours()
     policy_identity = _qhh_scheduler_policy_identity()
     source_object_identity = _qhh_scheduler_source_object_identity()
+    created_data_source = False
     with psycopg_connection(database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -1903,13 +2001,8 @@ def _seed_qhh_scheduler_canonical_readiness(database_url: str, *, model_id: str)
                     source_id, source_name, source_type, status, native_format, adapter_name, config_json
                 )
                 VALUES (%s, %s, 'forecast', 'mock', 'netcdf', 'gfs', %s)
-                ON CONFLICT (source_id) DO UPDATE SET
-                    source_name = EXCLUDED.source_name,
-                    source_type = EXCLUDED.source_type,
-                    status = EXCLUDED.status,
-                    native_format = EXCLUDED.native_format,
-                    adapter_name = EXCLUDED.adapter_name,
-                    config_json = EXCLUDED.config_json
+                ON CONFLICT (source_id) DO NOTHING
+                RETURNING source_id
                 """,
                 (
                     _QHH_SCHEDULER_SOURCE_ID,
@@ -1923,6 +2016,7 @@ def _seed_qhh_scheduler_canonical_readiness(database_url: str, *, model_id: str)
                     ),
                 ),
             )
+            created_data_source = cursor.fetchone() is not None
 
     store = PsycopgMetStore(database_url)
     for row in _qhh_scheduler_canonical_rows(
@@ -1932,7 +2026,7 @@ def _seed_qhh_scheduler_canonical_readiness(database_url: str, *, model_id: str)
         source_object_identity=source_object_identity,
     ):
         store.upsert_canonical_product(row)
-    return _MetStoreCanonicalReadinessProvider(store)
+    return _MetStoreCanonicalReadinessProvider(store), created_data_source
 
 
 def _qhh_scheduler_ready_gfs_adapter() -> FakeAdapter:
