@@ -4376,12 +4376,50 @@ def test_trigger_ready_forecasts_mm_per_day_precip_unit_is_not_demoted(
     _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
     orchestrator = _orchestrator(tmp_path, repository, client)
 
-    orchestrator.trigger_ready_forecasts(source_id="gfs")
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
 
     assert "raw_complete" not in repository.cycle_statuses
     assert not [
         event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
     ]
+    # Positive lock: not just "undemoted" but actually advanced to submission, so a
+    # future bug that silently drops the cycle elsewhere cannot pass this test.
+    assert results[0].status == "complete"
+    assert client.submissions != []
+
+
+def test_trigger_ready_forecasts_uppercase_mm_per_day_precip_unit_is_not_demoted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Normalization lock: the unit criterion lower-cases/strips before comparison,
+    # so a "MM/DAY" (or padded) unit is the canonical contract and must NOT demote.
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+            converter_version=expected_converter_version("gfs"),
+            unit="  MM/DAY ",
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert "raw_complete" not in repository.cycle_statuses
+    assert not [
+        event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
+    ]
+    assert results[0].status == "complete"
 
 
 def test_trigger_ready_forecasts_missing_converter_version_is_not_demoted(
@@ -4409,12 +4447,48 @@ def test_trigger_ready_forecasts_missing_converter_version_is_not_demoted(
     _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
     orchestrator = _orchestrator(tmp_path, repository, client)
 
-    orchestrator.trigger_ready_forecasts(source_id="gfs")
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
 
     assert "raw_complete" not in repository.cycle_statuses
     assert not [
         event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
     ]
+    assert results[0].status == "complete"
+    assert client.submissions != []
+
+
+def test_trigger_ready_forecasts_non_precip_bad_unit_is_ignored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Variable-guard lock: the unit criterion only fires for prcp_rate_or_amount.
+    # A non-precip product carrying an off-contract unit must be ignored, not demoted.
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    canonical_products = _canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        forecast_hours=(0, 3),
+        policy_identity=current_policy,
+        source_object_identity=current_object,
+        converter_version=expected_converter_version("gfs"),
+    )
+    for row in canonical_products:
+        if row["variable"] != "prcp_rate_or_amount":
+            row["unit"] = "bogus-unit"
+    repository = ReadyForecastRepository(cycle_time=cycle_time, canonical_products=canonical_products)
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert "raw_complete" not in repository.cycle_statuses
+    assert not [
+        event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
+    ]
+    assert results[0].status == "complete"
 
 
 def test_trigger_ready_forecasts_era5_version_is_not_demoted(
@@ -4447,12 +4521,20 @@ def test_trigger_ready_forecasts_era5_version_is_not_demoted(
         _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
         orchestrator = _orchestrator(tmp_path, repository, client)
 
-        orchestrator.trigger_ready_forecasts(source_id="ERA5")
+        results = orchestrator.trigger_ready_forecasts(source_id="ERA5")
 
         assert "raw_complete" not in repository.cycle_statuses
         assert not [
             event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
         ]
+        # Positive lock: ERA5 reaches the pipeline and is never dropped *for staleness*
+        # (any other skip reason is out of scope for this cross-source isolation test).
+        assert results
+        assert all(
+            outcome["reason"] != "canonical_converter_version_stale"
+            for result in results
+            for outcome in result.candidate_outcomes
+        )
 
 
 def test_trigger_ready_forecasts_current_converter_version_is_not_demoted(
