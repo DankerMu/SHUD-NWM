@@ -77,6 +77,19 @@ openspec validate <change-name> --strict --no-interactive
 - PR body 包含: 变更摘要、测试证据、Evidence Floor 覆盖声明
 - 合并前必须通过 issue 指定的全部验证命令
 
+### CI 成本纪律（避免重复跑 / 单一终态推送）
+
+`.github/workflows/ci.yml` 触发于每次 push（`pull_request:` 全事件），每推一次都重跑全量
+7 个 job（含慢速 Unit Tests）。因此：
+
+- **文档/规格更新必须并入触发合并门 CI 的最后一次 push** —— worklog、`openspec/**`、
+  `*.md` 等随活儿一起 commit，或在最后一次代码推送之前推完。
+- **不得在等 CI 绿期间再补 docs-only 的尾随 commit**（如"补个 worklog"）——那会重置
+  合并门、白跑一遍全量 CI。
+- 一个 PR 的"最后一推"应已是完整终态；该推之后只等 CI 与 merge，不再追加任何 commit。
+- 注：openspec/ **不可** gitignore——它是规格源 + `openspec validate` 对象 + 双端同步内容，
+  忽略它会破坏 spec-driven 工作流（治错了病）。成本问题用上面的提交纪律解决。
+
 ## 技术栈速查
 
 | 组件 | 技术 | 备注 |
