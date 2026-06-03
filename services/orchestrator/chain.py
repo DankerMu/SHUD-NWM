@@ -6634,8 +6634,10 @@ def _stale_converter_versions_in_cycle(
     """Return canonical converter_versions in ``cycle`` that are not current.
 
     Each canonical product carries ``converter_version`` inside ``lineage_json``
-    (with a top-level fallback). Any value that differs from the source's
-    current expected version, or is missing entirely, is considered stale.
+    (with a top-level fallback). A value that is explicitly recorded and differs
+    from the source's current expected version is considered stale. A missing
+    version is NOT flagged here (the producer's canonical unit gate is the
+    backstop), so incomplete fixtures/seeds are not aggressively demoted.
     Returns an empty set when every product is current (or none exist).
     """
     products = cycle.get("canonical_products")
@@ -6664,7 +6666,10 @@ def _stale_converter_versions_in_cycle(
         else:
             raw = row.get("converter_version")
             version = str(raw) if raw is not None else None
-        if version != expected:
+        # Only an explicitly-recorded, different version is treated as stale here.
+        # A missing version (None) is left to the producer's canonical unit gate as
+        # the backstop, so incomplete fixtures/seeds are not aggressively demoted.
+        if version is not None and version != expected:
             stale.add(version)
     return stale
 
