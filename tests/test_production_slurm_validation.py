@@ -11,6 +11,22 @@ from packages.common import safe_fs
 from services.production_closure import slurm_validation
 
 
+@pytest.fixture(autouse=True)
+def _valid_shud_executable_env(tmp_path_factory: pytest.TempPathFactory, monkeypatch) -> None:
+    """Default to a valid SHUD executable so the #257 preflight does not add an
+    unrelated blocker to the existing Slurm validation/accounting tests.
+
+    Tests exercising stub/missing-executable behavior override SHUD_EXECUTABLE
+    explicitly via monkeypatch.setenv.
+    """
+
+    bin_dir = tmp_path_factory.mktemp("shud_bin")
+    executable = bin_dir / "shud_omp"
+    executable.write_text('#!/bin/sh\necho "SHUD v1.0.0"\n', encoding="utf-8")
+    executable.chmod(0o755)
+    monkeypatch.setenv("SHUD_EXECUTABLE", str(executable))
+
+
 def test_validate_slurm_fake_lane_writes_required_evidence_and_redacts(monkeypatch, tmp_path: Path, capsys) -> None:
     evidence_root = tmp_path / "artifacts"
     secret_uri = "s3://user:pass@example.invalid/models/qhh/package?X-Amz-Signature=abc&token=secret"
@@ -555,10 +571,11 @@ def test_validate_slurm_submit_uses_real_command_boundary_with_mocked_slurm(
     assert accounting["job_id"] == "7777"
     assert accounting["poll"]["attempts"] == 2
     assert accounting["records"][0]["state"] == "COMPLETED"
-    assert calls[0][:2] == ["sbatch", "--parsable"]
-    assert "--array=0-1%2" in calls[0]
-    assert "--account=friends" in calls[0]
-    assert any(call[0] == "sacct" and "-j" in call for call in calls)
+    sbatch_call = next(call for call in calls if Path(call[0]).name == "sbatch")
+    assert sbatch_call[:2] == ["sbatch", "--parsable"]
+    assert "--array=0-1%2" in sbatch_call
+    assert "--account=friends" in sbatch_call
+    assert any(Path(call[0]).name == "sacct" and "-j" in call for call in calls)
     assert {record["task_id"] for record in accounting["records"] if record["task_id"] is not None} == {0, 1}
     lane_dir = tmp_path / "artifacts" / "submit147" / "slurm"
     rendered = (lane_dir / "rendered_run_shud_forecast_array.sbatch").read_text(encoding="utf-8")
@@ -1945,3 +1962,96 @@ def test_sacct_evidence_parser_records_stable_fields_and_error_codes() -> None:
 
 def shutil_proxy():
     return slurm_validation.shutil
+
+
+# --- Issue #257 / M23-6: SHUD executable preflight blockers ------------------
+
+
+def _slurm_config_with_solver(monkeypatch, tmp_path: Path, solver: str, *, submit: bool, fake: bool):
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
+    monkeypatch.setenv("SHUD_EXECUTABLE", solver)
+    return slurm_validation.ProductionSlurmConfig.from_env(
+        evidence_root=tmp_path / "artifacts",
+        run_id="m10_257",
+        submit=submit,
+        fake_slurm=fake,
+    )
+
+
+@pytest.mark.parametrize("stub", ["/bin/true", "/bin/false", "true", "false", " "])
+def test_preflight_blockers_reject_stub_solver_in_fake_mode(monkeypatch, tmp_path: Path, stub: str) -> None:
+    config = _slurm_config_with_solver(monkeypatch, tmp_path, stub, submit=False, fake=True)
+
+    blockers = slurm_validation._preflight_blockers(config)
+
+    codes = {blocker["error_code"] for blocker in blockers}
+    assert codes & {"SHUD_EXECUTABLE_STUB_REJECTED", "SHUD_EXECUTABLE_NOT_CONFIGURED"}
+    assert "secret" not in json.dumps(blockers)
+
+
+def test_preflight_blockers_allow_default_solver_in_fake_mode(monkeypatch, tmp_path: Path) -> None:
+    config = _slurm_config_with_solver(monkeypatch, tmp_path, "shud_omp", submit=False, fake=True)
+
+    blockers = slurm_validation._preflight_blockers(config)
+
+    shud_codes = {b["error_code"] for b in blockers if b["error_code"].startswith("SHUD_EXECUTABLE")}
+    assert shud_codes == set()
+
+
+def test_validate_slurm_blocks_stub_solver_without_success_evidence(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_CLUSTER", "shudhpc")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_ACCOUNT", "friends")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_PARTITION", "CPU")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_MODEL_PACKAGE_URI", "s3://bucket/models/qhh/package")
+    monkeypatch.setenv("NHMS_PRODUCTION_SLURM_WORKSPACE_ROOT", str(tmp_path / "shared-workspace"))
+    monkeypatch.setenv("SHUD_EXECUTABLE", "/bin/true")
+
+    exit_code = slurm_validation.main(
+        ["validate-slurm", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "stubrun", "--fake-slurm"]
+    )
+
+    assert exit_code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["status"] == "blocked"
+    assert summary["live_slurm_executed"] is False
+    assert "SHUD_EXECUTABLE_STUB_REJECTED" in {b["error_code"] for b in summary["blockers"]}
+
+
+def test_preflight_blockers_reject_missing_library_for_live_submit(monkeypatch, tmp_path: Path) -> None:
+    binary = tmp_path / "shud_omp"
+    binary.write_text('#!/bin/sh\necho "SHUD"\n', encoding="utf-8")
+    binary.chmod(0o755)
+    config = _slurm_config_with_solver(monkeypatch, tmp_path, str(binary), submit=True, fake=False)
+
+    import packages.common.shud_preflight as preflight
+
+    monkeypatch.setattr(preflight, "_missing_shared_libraries", lambda _resolved: ["libsecret-token.so.1"])
+    monkeypatch.setattr(preflight, "_version_identity_signal", lambda _resolved: "present")
+
+    blockers = slurm_validation._preflight_blockers(config)
+
+    library_blockers = [b for b in blockers if b["error_code"] == "SHUD_EXECUTABLE_LIBRARY_MISSING"]
+    assert library_blockers
+    assert library_blockers[0]["library"] == "libsecret-token.so.1"
+    assert "password=" not in json.dumps(blockers)
+
+
+def test_preflight_blockers_pass_valid_solver_for_live_submit(monkeypatch, tmp_path: Path) -> None:
+    binary = tmp_path / "shud_omp"
+    binary.write_text('#!/bin/sh\necho "SHUD v1"\n', encoding="utf-8")
+    binary.chmod(0o755)
+    config = _slurm_config_with_solver(monkeypatch, tmp_path, str(binary), submit=True, fake=False)
+
+    import packages.common.shud_preflight as preflight
+
+    monkeypatch.setattr(preflight, "_missing_shared_libraries", lambda _resolved: [])
+    monkeypatch.setattr(preflight, "_version_identity_signal", lambda _resolved: "present")
+
+    blockers = slurm_validation._preflight_blockers(config)
+
+    shud_codes = {b["error_code"] for b in blockers if b["error_code"].startswith("SHUD_EXECUTABLE")}
+    assert shud_codes == set()

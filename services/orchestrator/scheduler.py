@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from packages.common.model_registry import PsycopgModelRegistryStore
 from packages.common.redaction import redact_payload
+from packages.common.shud_preflight import check_shud_executable
 from packages.common.slurm_env import (
     iter_secret_manifest_findings,
     reserved_slurm_env_reason,
@@ -6570,12 +6571,55 @@ def _slurm_preflight(config: ProductionSchedulerConfig) -> dict[str, Any]:
     checks["environment"] = env_check
     blockers.extend(env_blockers)
 
+    shud_check, shud_blockers = _slurm_shud_executable_check(config)
+    checks["shud_executable"] = shud_check
+    blockers.extend(shud_blockers)
+
     return {
         "status": "blocked" if blockers else "ready",
         "enabled": True,
         "blockers": blockers,
         "checks": checks,
     }
+
+
+def _scheduler_shud_executable(config: ProductionSchedulerConfig) -> str:
+    env_value = config.slurm_env.get("SHUD_EXECUTABLE") if isinstance(config.slurm_env, Mapping) else None
+    return str(env_value or os.getenv("SHUD_EXECUTABLE") or "").strip()
+
+
+def _slurm_shud_executable_check(
+    config: ProductionSchedulerConfig,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Validate the SHUD executable before any Slurm submission.
+
+    A stub or missing executable produces a typed, redacted blocker that gates
+    the pass at ``slurm_preflight_blocked`` so the scheduler never calls the
+    orchestrator / Slurm gateway, never marks an active job, and never records a
+    hydro success state.
+    """
+
+    executable = _scheduler_shud_executable(config)
+    result = check_shud_executable(executable)
+    blockers = [
+        {
+            "code": str(blocker.get("error_code") or "SHUD_EXECUTABLE_PREFLIGHT_FAILED"),
+            "field": "SHUD_EXECUTABLE",
+            "message": str(blocker.get("message") or "SHUD executable preflight failed."),
+            **(
+                {"library": blocker["library"]}
+                if blocker.get("library") is not None
+                else {}
+            ),
+            **(
+                {"executable": blocker["executable"]}
+                if blocker.get("executable") is not None
+                else {}
+            ),
+        }
+        for blocker in result.blockers
+    ]
+    return redact_payload(dict(result.checks)), blockers
 
 
 def _database_url_blocker(database_url: str | None) -> dict[str, Any] | None:

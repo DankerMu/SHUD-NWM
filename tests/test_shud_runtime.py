@@ -840,3 +840,167 @@ def test_create_run_conflict_only_resets_retriable_statuses(monkeypatch: pytest.
     assert exc_info.value.error_code == "HYDRO_RUN_NOT_RETRIABLE"
     retriable_conflict_clause = "WHERE hydro.hydro_run.status IN ('failed', 'cancelled', 'pending')"
     assert any(retriable_conflict_clause in statement for statement in cursor.statements)
+
+
+# --- Issue #257 / M23-6: SHUD executable + project-input preflight -----------
+
+
+def _run_shud_dirs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    workspace = tmp_path / "workspace"
+    output_dir = workspace / "output"
+    log_dir = workspace / "logs"
+    log_dir.mkdir(parents=True)
+    cfg_path = workspace / "input" / "demo.cfg.para"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text("START_TIME = 2026-05-01T00:00:00Z\n", encoding="utf-8")
+    return workspace, output_dir, log_dir, cfg_path
+
+
+@pytest.mark.parametrize("stub", ["/bin/true", "/bin/false", "true", "false"])
+def test_run_shud_rejects_stub_executable_before_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub: str,
+) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=Path(stub))
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+
+    def _fail_subprocess(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("stub executable must be rejected before invoking SHUD")
+
+    monkeypatch.setattr("workers.shud_runtime.runtime.subprocess.run", _fail_subprocess)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(_manifest(), cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "SHUD_EXECUTABLE_STUB_REJECTED"
+
+
+def test_run_shud_rejects_empty_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=Path(" "))
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    monkeypatch.setattr(
+        "workers.shud_runtime.runtime.subprocess.run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(_manifest(), cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "SHUD_EXECUTABLE_NOT_CONFIGURED"
+
+
+def test_run_shud_rejects_missing_compiled_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = FakeHydroRunRepository()
+    missing = tmp_path / "no_such_shud_binary"
+    runtime = _runtime(tmp_path, repository, shud_executable=missing)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    monkeypatch.setattr(
+        "workers.shud_runtime.runtime.subprocess.run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(_manifest(), cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "SHUD_EXECUTABLE_MISSING"
+
+
+def test_run_shud_rejects_non_executable_compiled_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = FakeHydroRunRepository()
+    binary = tmp_path / "shud_omp"
+    binary.write_text("SHUD\n", encoding="utf-8")
+    binary.chmod(0o644)
+    runtime = _runtime(tmp_path, repository, shud_executable=binary)
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    monkeypatch.setattr(
+        "workers.shud_runtime.runtime.subprocess.run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(_manifest(), cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "SHUD_EXECUTABLE_NOT_EXECUTABLE"
+
+
+def test_run_shud_missing_python_runtime_script_is_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository, shud_executable=tmp_path / "absent_engine.py")
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    monkeypatch.setattr(
+        "workers.shud_runtime.runtime.subprocess.run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.run_shud(_manifest(), cfg_path, workspace, output_dir, log_dir)
+
+    assert exc_info.value.error_code == "SHUD_EXECUTABLE_MISSING"
+
+
+def test_run_shud_allows_valid_python_runtime_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)  # tests/mock_shud_omp.py
+    workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
+    calls: list[list[str]] = []
+
+    def _ok(command: list[str], *_a: Any, **_k: Any) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("workers.shud_runtime.runtime.subprocess.run", _ok)
+
+    runtime.run_shud(_manifest(), cfg_path, workspace, output_dir, log_dir)
+
+    assert calls, "valid python runtime script must reach subprocess"
+
+
+def test_prepare_workspace_blocks_missing_project_inputs(tmp_path: Path) -> None:
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    input_dir = tmp_path / "workspace" / "runs" / "demo" / "input"
+    input_dir.mkdir(parents=True)
+    # Stage nothing -> required *.mesh/*.para/*.calib/*.tsd.forc are absent.
+    manifest = _manifest()
+    manifest["model"]["model_package_uri"] = "s3://nhms/models/absent/package/"
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code in {"ARTIFACT_NOT_FOUND", "WORKSPACE_INCOMPLETE"}
+
+
+def test_shared_preflight_passes_for_valid_binary_and_redacts(tmp_path: Path) -> None:
+    from packages.common.shud_preflight import check_shud_executable
+
+    binary = tmp_path / "shud_omp"
+    binary.write_text('#!/bin/sh\necho "SHUD v1.0.0"\n', encoding="utf-8")
+    binary.chmod(0o755)
+
+    result = check_shud_executable(str(binary))
+
+    assert result.ok is True
+    assert result.blockers == []
+
+
+def test_shared_preflight_reports_missing_libraries_safely(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import packages.common.shud_preflight as preflight
+
+    binary = tmp_path / "shud_omp"
+    binary.write_text('#!/bin/sh\necho "SHUD"\n', encoding="utf-8")
+    binary.chmod(0o755)
+
+    monkeypatch.setattr(preflight, "_missing_shared_libraries", lambda _resolved: ["libsecret-token.so.1"])
+
+    result = preflight.check_shud_executable(str(binary), probe_version=False)
+
+    assert result.ok is False
+    library_blockers = [b for b in result.blockers if b["error_code"] == "SHUD_EXECUTABLE_LIBRARY_MISSING"]
+    assert library_blockers
+    assert library_blockers[0]["library"] == "libsecret-token.so.1"
+    import json as _json
+
+    assert "password=" not in _json.dumps(result.blockers)
