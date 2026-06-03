@@ -1054,6 +1054,107 @@ def test_shared_preflight_no_arg_probe_runs_in_isolated_cwd(tmp_path: Path, monk
     assert all(cwd is not None and Path(cwd) != Path.cwd() for cwd in seen_cwds)
 
 
+# Variant binary: a no-argument call prints a non-empty banner that contains NONE
+# of the recognized SHUD identity tokens (no 'shud', no 'simulator for hydrologic',
+# no 'hydrologic unstructured domains'), exits 0; flags report "Unknown option".
+# This models a real/variant solver whose banner wording is simply not in the token
+# list -- it must NOT be falsely rejected (never-break-userspace).
+_UNRECOGNIZED_BANNER_SCRIPT = (
+    "#!/bin/sh\n"
+    'if [ "$#" -gt 0 ]; then\n'
+    '  echo "Unknown option: $1" >&2\n'
+    "  exit 1\n"
+    "fi\n"
+    'echo "Hydro Solver build 2024"\n'
+    "exit 0\n"
+)
+
+
+# Silent stub: no-argument call produces NO output and exits 0 (a renamed /bin/true).
+_SILENT_STUB_SCRIPT = "#!/bin/sh\nexit 0\n"
+
+
+def test_shared_preflight_tolerates_unrecognized_nonempty_banner(tmp_path: Path) -> None:
+    """never-break-userspace lock: a binary that runs and prints a non-empty banner
+    we simply do not recognize must be tolerated (inconclusive), never blocked.
+    """
+
+    import packages.common.shud_preflight as preflight
+
+    binary = tmp_path / "shud"
+    binary.write_text(_UNRECOGNIZED_BANNER_SCRIPT, encoding="utf-8")
+    binary.chmod(0o755)
+
+    result = preflight.check_shud_executable(str(binary), probe_libraries=False)
+
+    assert result.ok is True
+    assert result.checks["version_signal"] == "inconclusive"
+    assert result.blockers == []
+
+
+def test_shared_preflight_rejects_silent_stub(tmp_path: Path) -> None:
+    """A no-argument call that produces NO output (renamed /bin/true) is positive
+    stub evidence and must be blocked with SHUD_EXECUTABLE_SILENT_STUB.
+    """
+
+    import packages.common.shud_preflight as preflight
+
+    binary = tmp_path / "shud"
+    binary.write_text(_SILENT_STUB_SCRIPT, encoding="utf-8")
+    binary.chmod(0o755)
+
+    result = preflight.check_shud_executable(str(binary), probe_libraries=False)
+
+    assert result.ok is False
+    assert result.checks["version_signal"] == "silent"
+    assert any(b["error_code"] == "SHUD_EXECUTABLE_SILENT_STUB" for b in result.blockers)
+
+
+def test_shared_preflight_rejects_realpath_stub_symlink(tmp_path: Path) -> None:
+    """A symlink named ``shud`` pointing at /bin/true is rejected by the
+    basename/realpath stub branch (independent of the version probe).
+    """
+
+    import packages.common.shud_preflight as preflight
+
+    link = tmp_path / "shud"
+    try:
+        link.symlink_to("/bin/true")
+    except OSError as exc:  # pragma: no cover - platform without symlink support
+        pytest.skip(f"symlink creation is not supported: {exc}")
+
+    result = preflight.check_shud_executable(str(link))
+
+    assert result.ok is False
+    assert any(b["error_code"] == "SHUD_EXECUTABLE_STUB_REJECTED" for b in result.blockers)
+
+
+def test_shared_preflight_unknown_signal_when_probes_cannot_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If every subprocess probe errors, the signal is ``unknown`` and the
+    preflight does not fabricate a version blocker.
+    """
+
+    import packages.common.shud_preflight as preflight
+
+    binary = _write_real_shud_behavior_binary(tmp_path / "shud")
+
+    def _always_fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("probe cannot run")
+
+    monkeypatch.setattr(preflight.subprocess, "run", _always_fail)
+
+    result = preflight.check_shud_executable(str(binary), probe_libraries=False)
+
+    assert result.checks["version_signal"] == "unknown"
+    assert not any(
+        b["error_code"] in {"SHUD_EXECUTABLE_SILENT_STUB", "SHUD_EXECUTABLE_VERSION_SIGNAL_MISSING"}
+        for b in result.blockers
+    )
+    assert result.ok is True
+
+
 def test_shared_preflight_reports_missing_libraries_safely(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import packages.common.shud_preflight as preflight
 

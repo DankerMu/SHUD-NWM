@@ -217,15 +217,20 @@ def check_shud_executable(
     if probe_version:
         signal = _version_identity_signal(resolved)
         checks["version_signal"] = signal
-        if signal == "absent":
+        # never-break-userspace: only a probe that ran and produced NO output at all
+        # ("silent") is positive evidence of a stub/no-op. A non-empty but
+        # unrecognized banner ("inconclusive") is tolerated as a possible variant
+        # build, and a probe that could not run ("unknown") is not fabricated into
+        # a failure. "present" is the positive identity confirmation.
+        if signal == "silent":
             blockers.append(
                 {
-                    "error_code": "SHUD_EXECUTABLE_VERSION_SIGNAL_MISSING",
+                    "error_code": "SHUD_EXECUTABLE_SILENT_STUB",
                     "field": "SHUD_EXECUTABLE",
                     "executable": _redact(Path(resolved).name),
                     "message": (
-                        "SHUD_EXECUTABLE did not emit a recognizable SHUD version/help banner; "
-                        "it may be a non-SHUD stub."
+                        "SHUD_EXECUTABLE produced no output when invoked with no arguments; "
+                        "it appears to be a stub/no-op rather than a real SHUD solver."
                     ),
                 }
             )
@@ -273,15 +278,23 @@ def _version_identity_signal(resolved: str) -> str:
     project file and start a simulation; without a ``<project_name>`` SHUD only
     prints usage and exits 0 with no side effects.
 
-    Returns ``"present"`` when a SHUD banner is seen, ``"absent"`` when probes ran
-    but emitted no SHUD identity, and ``"unknown"`` when no probe could run (all
-    errored/timed out) so the caller does not fabricate a failure.
+    Returns one of four states so the caller can honour never-break-userspace and
+    only block on positive stub evidence:
+
+    - ``"present"``    -> a recognized SHUD identity token was seen (PASS confirm).
+    - ``"silent"``     -> a probe ran but produced NO output at all (positive stub
+                          evidence: this is how a renamed ``/bin/true`` behaves).
+    - ``"inconclusive"`` -> a probe ran and produced non-empty output that did not
+                          match a known token (tolerated as a possible variant).
+    - ``"unknown"``    -> no probe could run (all errored/timed out); not a failure.
     """
 
     ran_any = False
+    saw_output = False
 
-    no_arg_ran, no_arg_present = _no_argument_identity_probe(resolved)
+    no_arg_ran, no_arg_present, no_arg_output = _no_argument_identity_probe(resolved)
     ran_any = ran_any or no_arg_ran
+    saw_output = saw_output or no_arg_output
     if no_arg_present:
         return "present"
 
@@ -300,14 +313,20 @@ def _version_identity_signal(resolved: str) -> str:
         ran_any = True
         if _output_has_identity(completed.stdout, completed.stderr):
             return "present"
-    return "absent" if ran_any else "unknown"
+        if _output_is_non_empty(completed.stdout, completed.stderr):
+            saw_output = True
+
+    if not ran_any:
+        return "unknown"
+    return "inconclusive" if saw_output else "silent"
 
 
-def _no_argument_identity_probe(resolved: str) -> tuple[bool, bool]:
+def _no_argument_identity_probe(resolved: str) -> tuple[bool, bool, bool]:
     """Run ``resolved`` with no arguments in an isolated cwd, fail-safe.
 
-    Returns ``(ran, identity_present)``. A failure/timeout yields ``(False, False)``
-    so the caller treats it as "did not run" rather than a false negative.
+    Returns ``(ran, identity_present, saw_output)``. A failure/timeout yields
+    ``(False, False, False)`` so the caller treats it as "did not run" rather than
+    a false negative.
     """
 
     try:
@@ -322,10 +341,22 @@ def _no_argument_identity_probe(resolved: str) -> tuple[bool, bool]:
                 stdin=subprocess.DEVNULL,
             )
     except (OSError, subprocess.SubprocessError):
-        return False, False
-    return True, _output_has_identity(completed.stdout, completed.stderr)
+        return False, False, False
+    return (
+        True,
+        _output_has_identity(completed.stdout, completed.stderr),
+        _output_is_non_empty(completed.stdout, completed.stderr),
+    )
 
 
 def _output_has_identity(stdout: str | None, stderr: str | None) -> bool:
     combined = ((stdout or "") + " " + (stderr or ""))[:MAX_PROBE_OUTPUT_BYTES].lower()
     return any(token in combined for token in SHUD_IDENTITY_TOKENS)
+
+
+def _output_is_non_empty(stdout: str | None, stderr: str | None) -> bool:
+    """True when stdout or stderr has non-whitespace content (bounded)."""
+    return bool(
+        (stdout or "")[:MAX_PROBE_OUTPUT_BYTES].strip()
+        or (stderr or "")[:MAX_PROBE_OUTPUT_BYTES].strip()
+    )
