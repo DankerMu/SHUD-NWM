@@ -367,4 +367,4 @@ def test_lineage_json_structure_for_each_variable_type(tmp_path: Path) -> None:
     assert wind["conversion_params"]["operation"] == "pass_through"
     assert pressure["conversion_params"]["native_variable"] == "sp"
     lineages = (temperature, humidity, precipitation, radiation, wind, pressure)
-    assert {lineage["converter_version"] for lineage in lineages} == {"m4.0"}
+    assert {lineage["converter_version"] for lineage in lineages} == {"m4.1"}

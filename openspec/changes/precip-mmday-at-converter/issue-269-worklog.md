@@ -25,4 +25,12 @@
 ## 进度日志
 | 时间 | 阶段 | 动作 | 结果 |
 |---|---|---|---|
+| T3 | F | F1→follow-up #275；round-2 修复派发 | ⏳ |
+| T2 | D/E | 4-pack 评审+裁定：1 latent-HIGH(→#275)、CORR-F1、杂项 | - |
+| T1 | B/C | fix subagent 交付 + commit 7160a83 + PR #274 + 远端 150 passed | ✅ |
 | T0 | A | ground-truth #269 + 用户裁定 Option B | ✅ |
+
+## Phase 4.5 裁定 (round 1)
+- INV-F1 旧 GFS canonical_ready 硬失败: CONFIRMED-latent（E2E库/未上线非 active break；健壮修复=orchestrator canonical 失效，越界）→ #275 + 防御性 converter_version 入 currency check
+- CORR-F1 GFS 首帧非零起报 ×24: PLAUSIBLE-latent → round-2 GFS 本地化对齐 IFS
+- 杂项: CONVERSION_PARAMS["tp"] 标签 / 注释:685 / GFS canonical unit 断言 → round-2

@@ -10,6 +10,12 @@ The canonical converter SHALL convert source precipitation (GFS `apcp`, IFS `tp`
 - **THEN** the per-step accumulation delta (in `mm`) is rescaled by `24 / step_hours`, where `step_hours` is `_step_hours(forecast_hour, previous_forecast_hour)`
 - **AND** the canonical product unit is `mm/day`.
 
+#### Scenario: GFS APCP first frame with a non-zero forecast start hour
+
+- **WHEN** GFS `apcp` is converted for the first frame of a cycle (no previous forecast hour) and `forecast_hour > 0`
+- **THEN** `step_hours` is `forecast_hour` (the since-cycle accumulation spans `0 -> forecast_hour`), mirroring the IFS first-frame semantics, rather than the shared `_step_hours` default of `1.0`
+- **AND** the canonical product unit is `mm/day`.
+
 #### Scenario: IFS precipitation is converted to mm/day
 
 - **WHEN** IFS `tp` is converted between two forecast hours

@@ -522,6 +522,19 @@ def test_unit_conversion_boundaries() -> None:
     assert convert_units("u10m", [3.5]) == pytest.approx((3.5,))
 
 
+def test_gfs_apcp_first_frame_nonzero_start_uses_forecast_hour_step() -> None:
+    # GFS_FORECAST_START_HOUR != 0 -> first frame has fh>0 and previous=None. APCP is
+    # accumulated since cycle start (0->fh), so the step must be `forecast_hour`, not the
+    # shared _step_hours default of 1.0 (which would inflate the rate by 24x).
+    # delta = 24.0 mm over a 24h since-cycle accumulation -> 24.0 * 24 / 24 = 24.0 mm/day.
+    result = convert_units_with_metadata(
+        "apcp", [24.0], [0.0], forecast_hour=24, previous_forecast_hour=None
+    )
+    assert result.values == pytest.approx((24.0,))
+    # Sanity: without the first-frame guard this would be delta * 24 / 1 = 576.0 mm/day.
+    assert result.values[0] != pytest.approx(576.0)
+
+
 def test_time_axis_is_monotonic() -> None:
     axis = compute_time_axis("2026050700", [0, 3, 6, 9])
 
@@ -541,6 +554,9 @@ def test_conversion_writes_lineage_json_with_required_keys(tmp_path: Path) -> No
     assert result.status == "canonical_ready"
     assert len(repository.products) == 14
     prcp_f003 = repository.products["gfs_2026050700_prcp_rate_or_amount_f003"]
+    # GFS canonical PRCP is emitted in mm/day (converter applies 24 / step_hours),
+    # aligned with the IFS/ERA5 mm/day contract.
+    assert prcp_f003["unit"] == "mm/day"
     lineage = prcp_f003["lineage_json"]
     assert set(lineage) >= {"source_files", "source_cycle_id", "conversion_params", "converter_version"}
     assert len(lineage["source_files"]) == 2

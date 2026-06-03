@@ -34,7 +34,10 @@ from services.orchestrator.production_contract import (
 )
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.slurm_gateway.config import SlurmGatewaySettings
-from workers.canonical_converter.converter import evaluate_canonical_readiness
+from workers.canonical_converter.converter import (
+    evaluate_canonical_readiness,
+    expected_converter_version,
+)
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
@@ -177,6 +180,11 @@ M3_STAGES: tuple[StageDefinition, ...] = (
 )
 
 STAGES: tuple[StageDefinition, ...] = M3_STAGES
+
+# Cycle status the convert_canonical stage consumes as input. A canonical-ready
+# cycle is demoted back to this state when its converter_version is stale, so the
+# next tick re-runs conversion with the current converter_version.
+CANONICAL_DEMOTE_CYCLE_STATUS = "raw_complete"
 
 ANALYSIS_STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
@@ -2880,6 +2888,29 @@ class ForecastOrchestrator:
                 continue
             parsed_cycle_time = parse_cycle_time(cycle_time_value)
             max_lead_hours = _optional_int(cycle.get("max_lead_hours"))
+            stale_versions = _stale_converter_versions_in_cycle(cycle, source_id=cycle_source_id)
+            if stale_versions:
+                self._demote_stale_canonical_cycle(
+                    source_id=cycle_source_id,
+                    cycle_time=parsed_cycle_time,
+                    stale_versions=stale_versions,
+                )
+                for model_id in selected_model_ids:
+                    results.append(
+                        _skipped_ready_forecast_result(
+                            source_id=cycle_source_id,
+                            cycle_time=parsed_cycle_time,
+                            model_id=model_id,
+                            reason="canonical_converter_version_stale",
+                            canonical_readiness={
+                                "ready": False,
+                                "reason": "canonical_converter_version_stale",
+                                "expected_converter_version": expected_converter_version(cycle_source_id),
+                                "observed_converter_versions": sorted(stale_versions),
+                            },
+                        )
+                    )
+                continue
             readiness = self._validate_auto_trigger_canonical_readiness(
                 cycle,
                 source_id=cycle_source_id,
@@ -2916,6 +2947,46 @@ class ForecastOrchestrator:
                 except PipelineAlreadyActiveError:
                     continue
         return tuple(results)
+
+    def _demote_stale_canonical_cycle(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        stale_versions: set[str | None],
+    ) -> None:
+        """Roll a canonical-ready cycle back to ``raw_complete`` for re-conversion.
+
+        Products written by a stale/missing converter_version cannot be consumed
+        by the producer (it enforces mm/day canonical units post-#269). Demoting
+        to the convert-stage input state makes the next tick re-run
+        ``convert_canonical`` with the current converter_version. Only the status
+        is changed; canonical rows are left intact.
+        """
+        expected = expected_converter_version(source_id)
+        self.repository.update_forecast_cycle_status(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            status=CANONICAL_DEMOTE_CYCLE_STATUS,
+        )
+        self.repository.insert_pipeline_event(
+            entity_type="forecast_cycle",
+            entity_id=cycle_id_for(source_id, cycle_time),
+            event_type="canonical_converter_version_stale",
+            status_from="canonical_ready",
+            status_to=CANONICAL_DEMOTE_CYCLE_STATUS,
+            message="Canonical products written by a stale converter_version; demoting for re-conversion.",
+            details=_safe_pipeline_event_details(
+                {
+                    "source_id": source_id,
+                    "cycle_time": _format_time(cycle_time),
+                    "expected_converter_version": expected,
+                    "observed_converter_versions": sorted(
+                        "<missing>" if version is None else str(version) for version in stale_versions
+                    ),
+                }
+            ),
+        )
 
     def _validate_auto_trigger_canonical_readiness(
         self,
@@ -6553,6 +6624,49 @@ def _auto_trigger_source_identity_adapter(
             repository=None,
         )
     return None
+
+
+def _stale_converter_versions_in_cycle(
+    cycle: Mapping[str, Any],
+    *,
+    source_id: str,
+) -> set[str | None]:
+    """Return canonical converter_versions in ``cycle`` that are not current.
+
+    Each canonical product carries ``converter_version`` inside ``lineage_json``
+    (with a top-level fallback). Any value that differs from the source's
+    current expected version, or is missing entirely, is considered stale.
+    Returns an empty set when every product is current (or none exist).
+    """
+    products = cycle.get("canonical_products")
+    if isinstance(products, str):
+        try:
+            products = json.loads(products)
+        except json.JSONDecodeError:
+            products = []
+    if not isinstance(products, Sequence) or isinstance(products, (bytes, bytearray, str)):
+        return set()
+    expected = expected_converter_version(source_id)
+    stale: set[str | None] = set()
+    for row in products:
+        if not isinstance(row, Mapping):
+            continue
+        lineage = row.get("lineage_json")
+        if isinstance(lineage, str):
+            try:
+                lineage = json.loads(lineage)
+            except json.JSONDecodeError:
+                lineage = {}
+        version: str | None = None
+        if isinstance(lineage, Mapping):
+            raw = lineage.get("converter_version", row.get("converter_version"))
+            version = str(raw) if raw is not None else None
+        else:
+            raw = row.get("converter_version")
+            version = str(raw) if raw is not None else None
+        if version != expected:
+            stale.add(version)
+    return stale
 
 
 def _canonical_products_from_ready_cycle(

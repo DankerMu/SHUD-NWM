@@ -116,7 +116,7 @@ CONVERSION_PARAMS: dict[str, str] = {
     "surface_net_thermal_radiation": "cumulative_j_m2_to_w_m2",
     "2t": "K_to_C",
     "2d": "dewpoint_magnus_rh",
-    "tp": "cumulative_m_to_mm_step",
+    "tp": "cumulative_m_to_mm_day",  # IFS tp emits mm/day; this alias entry is unreachable for IFS
     "10u": "pass_through",
     "10v": "pass_through",
     "sp": "pass_through",
@@ -185,7 +185,7 @@ class CanonicalConverterConfig:
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
     object_store_root: Path | str = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT", ""))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
-    converter_version: str = "m1.0"
+    converter_version: str = "m1.1"
     grid_id: str = "gfs_0p25"
     grid_definition_uri: str = "canonical/gfs/grid/gfs_0p25/grid.json"
     native_time_resolution: str = "3h"
@@ -217,7 +217,7 @@ class ERA5CanonicalConverterConfig(CanonicalConverterConfig):
 @dataclass(frozen=True)
 class IFSCanonicalConverterConfig(CanonicalConverterConfig):
     source_id: str = "IFS"
-    converter_version: str = "m4.0"
+    converter_version: str = "m4.1"
     grid_id: str = "ifs_0p25"
     grid_definition_uri: str = "canonical/IFS/grid/ifs_0p25/grid.json"
     native_time_resolution: str = "3h"
@@ -317,6 +317,22 @@ def required_standard_variables_for_source(source_id: str) -> tuple[str, ...]:
 
 def canonical_readiness_source_is_supported(source_id: str) -> bool:
     return normalize_source_id(source_id) in REQUIRED_STANDARD_VARIABLES_BY_SOURCE
+
+
+def expected_converter_version(source_id: str) -> str:
+    """Return the current canonical converter_version for a source.
+
+    Used to detect canonical products written by a stale converter (older or
+    missing version) so callers can force a re-conversion before downstream
+    stages consume mismatched semantics (e.g. pre-#269 precipitation units).
+    """
+    sid = normalize_source_id(source_id)
+    versions = {
+        normalize_source_id("gfs"): CanonicalConverterConfig().converter_version,
+        normalize_source_id("ERA5"): ERA5CanonicalConverterConfig().converter_version,
+        normalize_source_id("IFS"): IFSCanonicalConverterConfig().converter_version,
+    }
+    return versions.get(sid, CanonicalConverterConfig().converter_version)
 
 
 def evaluate_canonical_readiness(
@@ -642,7 +658,15 @@ def convert_units_with_metadata(
                     "min_delta": min(negative_deltas),
                 },
             )
-        step_hours = _step_hours(forecast_hour, previous_forecast_hour)
+        # GFS APCP is accumulated since cycle start; on the first frame
+        # (previous=None) with a non-zero forecast hour the accumulation spans
+        # 0->fh, so the step is `forecast_hour` rather than the shared default
+        # of 1.0. Mirror the IFS first-frame semantics without touching the
+        # shared _step_hours (which ERA5 also relies on).
+        if previous_forecast_hour is None and forecast_hour and forecast_hour > 0:
+            step_hours = float(forecast_hour)
+        else:
+            step_hours = _step_hours(forecast_hour, previous_forecast_hour)
         mm_per_day = tuple(max(0.0, delta) * 24.0 / step_hours for delta in deltas)
         return UnitConversionResult(mm_per_day, quality_flag, anomalies)
     if native_variable == "total_precipitation":
@@ -1591,6 +1615,14 @@ class CanonicalConverter:
         checksum: str,
     ) -> bool:
         if existing is None or existing.get("quality_flag") == "fail":
+            return False
+        # Treat products written by a different (or missing, i.e. legacy)
+        # converter_version as stale so semantic changes force a re-conversion.
+        # converter_version is recorded inside lineage_json (not at top level),
+        # with a top-level fallback for forward compatibility.
+        existing_lineage = _mapping_value(existing.get("lineage_json"))
+        existing_version = existing_lineage.get("converter_version", existing.get("converter_version"))
+        if existing_version != self.config.converter_version:
             return False
         existing_checksum = str(existing.get("checksum", ""))
         if existing_checksum != checksum:

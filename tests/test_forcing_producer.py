@@ -682,7 +682,7 @@ def test_gfs_per_step_mm_unit_is_rejected_by_unit_gate(tmp_path: Path) -> None:
 
 
 def test_precipitation_mm_per_second_unit_is_rejected_before_records(tmp_path: Path) -> None:
-    # "mm/s" is outside EXPECTED_CANONICAL_UNITS["prcp_rate_or_amount"] = {"mm", "mm/day"}.
+    # "mm/s" is outside EXPECTED_CANONICAL_UNITS["prcp_rate_or_amount"] = {"mm/day"}.
     # The canonical unit gate rejects it before any forcing_version / station_timeseries is
     # written. Even if it reached _precip_to_timestep_factor there is no documented mm/s ->
     # mm/day conversion, so the factor would raise too; the unit gate is the first guard.

@@ -26,7 +26,10 @@ from services.orchestrator.chain import (
 from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
-from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES
+from workers.canonical_converter.converter import (
+    GFS_REQUIRED_STANDARD_VARIABLES,
+    expected_converter_version,
+)
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 
@@ -4263,6 +4266,81 @@ def test_trigger_ready_forecasts_matching_lineage_preserves_submission_behavior(
     assert repository.hydro_runs["fcst_gfs_2026050100_model_0"]["status"] == "parsed"
 
 
+def test_trigger_ready_forecasts_demotes_stale_converter_version_before_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+            converter_version="m1.0",
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "skipped"
+    assert client.submissions == []
+    assert repository.cycle_statuses == ["raw_complete"]
+    outcome = results[0].candidate_outcomes[0]
+    assert outcome["reason"] == "canonical_converter_version_stale"
+    evidence = outcome["state_evidence"]["canonical_readiness"]
+    assert evidence["expected_converter_version"] == expected_converter_version("gfs")
+    assert evidence["observed_converter_versions"] == ["m1.0"]
+    stale_events = [
+        event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
+    ]
+    assert len(stale_events) == 1
+    assert stale_events[0]["status_from"] == "canonical_ready"
+    assert stale_events[0]["status_to"] == "raw_complete"
+
+
+def test_trigger_ready_forecasts_current_converter_version_is_not_demoted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+            converter_version=expected_converter_version("gfs"),
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "complete"
+    assert "raw_complete" not in repository.cycle_statuses
+    assert [submission["stage"] for submission in client.submissions] == [
+        "produce_forcing",
+        "run_shud_forecast",
+        "parse_output",
+    ]
+
+
 def test_trigger_ready_forecasts_rejects_non_ok_canonical_row_before_submission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4493,15 +4571,20 @@ def _canonical_rows(
     policy_identity: Mapping[str, Any],
     source_object_identity: Mapping[str, Any],
     omit_source_object_identity: bool = False,
+    converter_version: str | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     compact_cycle = format_cycle_time(cycle_time)
+    resolved_converter_version = (
+        converter_version if converter_version is not None else expected_converter_version(source_id)
+    )
     for forecast_hour in forecast_hours:
         for variable in GFS_REQUIRED_STANDARD_VARIABLES:
             lineage = {
                 "policy_identity": dict(policy_identity),
                 "source_object_identity": dict(source_object_identity),
                 "source_cycle_id": f"{source_id}_{compact_cycle}",
+                "converter_version": resolved_converter_version,
             }
             if omit_source_object_identity:
                 lineage.pop("source_object_identity")
