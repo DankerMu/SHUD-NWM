@@ -241,7 +241,15 @@ def test_auto_trigger_skips_completed_ifs_cycle(tmp_path: Path) -> None:
 class FakeForcingRepository:
     def __init__(self, *, products: Sequence[CanonicalProduct]) -> None:
         self.products = tuple(products)
-        self.station = MetStation("station_1", "basin_v1", 0.0, 0.0, 10.0, "forcing_proxy")
+        self.station = MetStation(
+            "station_1",
+            "basin_v1",
+            0.0,
+            0.0,
+            10.0,
+            "forcing_grid",
+            properties_json={"shud_forcing_index": 1, "forcing_filename": "station_1.csv"},
+        )
         self.interp_weights: list[InterpolationWeight] = []
         self.forcing_versions: dict[str, dict[str, Any]] = {}
         self.components: list[ForcingComponent] = []
@@ -589,7 +597,7 @@ def _write_ifs_products(
     forecast_hours: Sequence[int],
 ) -> tuple[CanonicalProduct, ...]:
     values_by_variable = {
-        "prcp_rate_or_amount": ("mm/step", 2.0),
+        "prcp_rate_or_amount": ("mm", 2.0),
         "air_temperature_2m": ("degC", 20.0),
         "relative_humidity_2m": ("0-1", 0.6),
         "wind_u_10m": ("m/s", 3.0),
