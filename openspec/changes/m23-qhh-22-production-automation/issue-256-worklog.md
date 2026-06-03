@@ -117,7 +117,8 @@ openspec validate m23-qhh-22-production-automation --strict --no-interactive
 
 | 时间 | 阶段 | 动作 | 结果 |
 |------|------|------|------|
-| 2026-06-03 | Phase 6.6 | 派发 fix subagent：补 mm/s 守卫测试 + qc[units] 断言 + CLAUDE.md 验证命令 | 进行中 |
+| 2026-06-03 | Phase 8 | 发布中文工作总结 PR #265 comment；等 CI Unit Tests 转绿 → 预授权自动合并 | 进行中 |
+| 2026-06-03 | Phase 6.6 | fix subagent 完成：mm/s 守卫 + qc[units] 断言 + CLAUDE.md（`b762dfe`/`2b36024`）；本地+远端各 2 passed，ruff ✅ | 完成 |
 | 2026-06-03 | Phase 6 验证 | 远端目标验证集（8 文件 DB，含全部 13 回归）| **624 passed / 1 skipped / 0 failed**（8m31s）✅ |
 | 2026-06-03 | Phase 4.5 验证门 | 裁决 invariant 的 B1（seed/迁移 forcing_proxy）：核 bootstrap 证据→**降级 REFUTED**（生产走 bootstrap 写 forcing_grid，被引用三处是 smoke/demo/列默认）；F5（断言弱化）核 8a34480 tests diff 无 assert 删改→REFUTED | 完成 |
 | 2026-06-03 | Phase 6.5 | 6 reviewer pack 全部返回：**0 blocking**（B1 经验证降级）；收敛低成本改进 2 项（mm/s 守卫测试、qc[units]断言）；2 项 pre-existing 越界→follow-up | 完成 |
