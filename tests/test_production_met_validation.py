@@ -124,14 +124,14 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     # Pin the Evidence Floor units payload to the package manifest units so a future change to
     # package_manifest_unit cannot silently drift the documented forcing variable units.
     assert qc["units"] == {
-        "PRCP": "mm",
+        "PRCP": "mm/day",
         "TEMP": "degC",
         "RH": "0-1",
         "wind": "m/s",
         "Rn": "W/m2",
         "Press": "Pa",
     }
-    assert qc["units"]["PRCP"] == "mm"
+    assert qc["units"]["PRCP"] == "mm/day"
 
     lineage = _read_json(lane_dir / "best_available_lineage.json")
     assert lineage["status"] == "ready"

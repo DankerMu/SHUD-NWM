@@ -9701,7 +9701,7 @@ class FakeForcingProducer:
                     "timestep_count": 2,
                 },
                 "units": {
-                    "PRCP": "mm",
+                    "PRCP": "mm/day",
                     "TEMP": "degC",
                     "RH": "0-1",
                     "wind": "m/s",

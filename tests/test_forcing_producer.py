@@ -23,7 +23,12 @@ from workers.forcing_producer import (
     parse_cycle_time,
     wind_speed,
 )
-from workers.forcing_producer.producer import FORCING_VARIABLES, ForcingComponent, ForcingTimeseriesRow
+from workers.forcing_producer.producer import (
+    EXPECTED_CANONICAL_UNITS,
+    FORCING_VARIABLES,
+    ForcingComponent,
+    ForcingTimeseriesRow,
+)
 
 
 class FakeForcingRepository:
@@ -363,7 +368,7 @@ def test_produce_writes_standard_shud_forcing_package_for_all_stations(tmp_path:
     manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
     assert manifest["variable_set"] == list(FORCING_VARIABLES)
     assert manifest["units"] == {
-        "PRCP": "mm",
+        "PRCP": "mm/day",
         "TEMP": "degC",
         "RH": "0-1",
         "wind": "m/s",
@@ -571,8 +576,9 @@ def test_scheduler_canonical_identity_mismatch_blocks_sibling_rows(tmp_path: Pat
     assert repository.timeseries == []
 
 
-def test_era5_precipitation_mm_per_day_converts_to_timestep_amount(tmp_path: Path) -> None:
-    # Native time resolution in the fixture is 3h, so 24 mm/day must become 24 * 3/24 = 3.0 mm.
+def test_era5_precipitation_mm_per_day_passthrough_mm_per_day(tmp_path: Path) -> None:
+    # SHUD PRCP unit is mm/day (Decision A), so a mm/day canonical product passes through
+    # unchanged (factor 1.0) regardless of step: 24 mm/day -> 24.0 mm/day.
     store, repository = _build_repository(
         tmp_path,
         source_id="ERA5",
@@ -590,12 +596,13 @@ def test_era5_precipitation_mm_per_day_converts_to_timestep_amount(tmp_path: Pat
     assert result.status == "forcing_ready"
     prcp_rows = [row for row in repository.timeseries if row.variable == "PRCP"]
     assert prcp_rows
-    assert all(row.value == pytest.approx(3.0) for row in prcp_rows)
-    assert all(row.unit == "mm" for row in prcp_rows)
+    assert all(row.value == pytest.approx(24.0) for row in prcp_rows)
+    assert all(row.unit == "mm/day" for row in prcp_rows)
 
 
-def test_era5_precipitation_mm_per_day_uses_native_step_for_conversion(tmp_path: Path) -> None:
-    # An hourly canonical product (1h step) converts 48 mm/day to 48 * 1/24 = 2.0 mm.
+def test_era5_precipitation_mm_per_day_passthrough_is_step_independent(tmp_path: Path) -> None:
+    # mm/day is the SHUD unit, so an hourly (1h step) mm/day product still passes through
+    # unchanged: 48 mm/day -> 48.0 mm/day (step does not affect the passthrough factor).
     store, repository = _build_repository(
         tmp_path,
         source_id="ERA5",
@@ -615,18 +622,20 @@ def test_era5_precipitation_mm_per_day_uses_native_step_for_conversion(tmp_path:
     assert result.status == "forcing_ready"
     prcp_rows = [row for row in repository.timeseries if row.variable == "PRCP"]
     assert prcp_rows
-    assert all(row.value == pytest.approx(2.0) for row in prcp_rows)
+    assert all(row.value == pytest.approx(48.0) for row in prcp_rows)
 
 
-def test_era5_precipitation_mm_per_day_without_step_is_rejected(tmp_path: Path) -> None:
+def test_gfs_per_step_mm_without_step_is_rejected(tmp_path: Path) -> None:
+    # Per-step `mm` -> mm/day requires a resolvable step (24 / step_hours). A non-IFS source
+    # (GFS) without a native step has no default, so the rate conversion must be rejected
+    # before any station_timeseries is written rather than silently emitting a wrong rate.
     store, repository = _build_repository(
         tmp_path,
-        source_id="ERA5",
-        radiation_variable="net_radiation",
+        source_id="gfs",
         values_by_variable={"prcp_rate_or_amount": (24.0, 24.0, 24.0)},
     )
     repository.products = tuple(
-        _replace_product_unit(_replace_product_time_resolution(product, None), "mm/day")
+        _replace_product_time_resolution(product, None)
         if product.variable == "prcp_rate_or_amount"
         else product
         for product in repository.products
@@ -634,16 +643,16 @@ def test_era5_precipitation_mm_per_day_without_step_is_rejected(tmp_path: Path) 
     producer = _build_producer(tmp_path, repository, store)
 
     with pytest.raises(ForcingProductionError):
-        producer.produce(source_id="ERA5", cycle_time="2026050700", model_id="demo_model")
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
     assert not repository.timeseries
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
 
 
 def test_precipitation_mm_per_second_unit_is_rejected_before_records(tmp_path: Path) -> None:
     # "mm/s" is outside EXPECTED_CANONICAL_UNITS["prcp_rate_or_amount"] = {"mm", "mm/day"}.
-    # Accepting a rate unit would let _precip_to_timestep_factor fall back to 1.0 and silently
-    # treat the per-second rate as a per-step amount (off by ~3600x), so it must be rejected
-    # before any forcing_version / station_timeseries is written.
+    # The canonical unit gate rejects it before any forcing_version / station_timeseries is
+    # written. Even if it reached _precip_to_timestep_factor there is no documented mm/s ->
+    # mm/day conversion, so the factor would raise too; the unit gate is the first guard.
     store, repository = _build_repository(
         tmp_path,
         source_id="ERA5",
@@ -661,6 +670,130 @@ def test_precipitation_mm_per_second_unit_is_rejected_before_records(tmp_path: P
 
     assert repository.forcing_versions == {}
     assert repository.timeseries == []
+
+
+@pytest.mark.parametrize("step", ["1h", "3h", "6h"])
+def test_gfs_per_step_mm_amplitude_is_canonical_times_24_over_step(tmp_path: Path, step: str) -> None:
+    # GFS canonical PRCP is per-step `mm`; SHUD wants mm/day, so output = c * 24 / step_hours.
+    # All grid cells share value c, so the IDW-interpolated station value is exactly c.
+    canonical_value = 5.0
+    step_hours = float(step.removesuffix("h"))
+    store, repository = _build_repository(
+        tmp_path,
+        source_id="gfs",
+        values_by_variable={"prcp_rate_or_amount": (canonical_value,) * 3},
+    )
+    repository.products = tuple(
+        _replace_product_time_resolution(product, step)
+        if product.variable == "prcp_rate_or_amount"
+        else product
+        for product in repository.products
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    prcp_rows = [row for row in repository.timeseries if row.variable == "PRCP"]
+    assert prcp_rows
+    expected = canonical_value * 24.0 / step_hours
+    assert all(row.value == pytest.approx(expected) for row in prcp_rows)
+    assert all(row.unit == "mm/day" for row in prcp_rows)
+
+
+@pytest.mark.parametrize("step", ["1h", "3h", "6h"])
+def test_era5_mm_per_day_amplitude_is_step_independent_passthrough(tmp_path: Path, step: str) -> None:
+    # ERA5 canonical PRCP is already mm/day; output equals the canonical value at any step.
+    canonical_value = 7.0
+    store, repository = _build_repository(
+        tmp_path,
+        source_id="ERA5",
+        radiation_variable="net_radiation",
+        values_by_variable={"prcp_rate_or_amount": (canonical_value,) * 3},
+    )
+    repository.products = tuple(
+        _replace_product_unit(_replace_product_time_resolution(product, step), "mm/day")
+        if product.variable == "prcp_rate_or_amount"
+        else product
+        for product in repository.products
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="ERA5", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    prcp_rows = [row for row in repository.timeseries if row.variable == "PRCP"]
+    assert prcp_rows
+    assert all(row.value == pytest.approx(canonical_value) for row in prcp_rows)
+    assert all(row.unit == "mm/day" for row in prcp_rows)
+
+
+@pytest.mark.parametrize("step", ["1h", "3h", "6h"])
+def test_ifs_per_step_mm_factor_is_24_over_step(step: str) -> None:
+    # IFS canonical PRCP is per-step `mm` and routes through the _is_ifs_source branch;
+    # the factor converts to mm/day as 24 / step_hours.
+    step_hours = float(step.removesuffix("h"))
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=Path(".")),
+        repository=None,
+        object_store=None,
+    )
+    product = _make_precip_product(unit="mm", native_time_resolution=step)
+
+    factor = producer._precip_to_timestep_factor("IFS", product)
+
+    assert factor == pytest.approx(24.0 / step_hours)
+
+
+def test_ifs_per_step_mm_factor_falls_back_to_config_default_step() -> None:
+    # IFS with an unknown step uses the configured default (3h) -> 24 / 3 = 8.0.
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=Path("."), ifs_precip_step_hours=3.0),
+        repository=None,
+        object_store=None,
+    )
+    product = _make_precip_product(unit="mm", native_time_resolution=None)
+
+    assert producer._precip_to_timestep_factor("IFS", product) == pytest.approx(8.0)
+
+
+def test_precip_factor_maps_every_accepted_unit_to_one_conversion() -> None:
+    # Contract: each EXPECTED_CANONICAL_UNITS entry for precip has exactly one documented
+    # conversion to mm/day (mm/day -> 1.0; mm -> 24 / step), and a unit accepted nowhere in
+    # the documented branches raises.
+    producer = ForcingProducer(
+        config=ForcingProducerConfig(workspace_root=Path("."), ifs_precip_step_hours=3.0),
+        repository=None,
+        object_store=None,
+    )
+    accepted_units = EXPECTED_CANONICAL_UNITS["prcp_rate_or_amount"]
+    assert set(accepted_units) == {"mm", "mm/day"}
+
+    mm_day = _make_precip_product(unit="mm/day", native_time_resolution="3h")
+    assert producer._precip_to_timestep_factor("gfs", mm_day) == pytest.approx(1.0)
+
+    mm_step = _make_precip_product(unit="mm", native_time_resolution="6h")
+    assert producer._precip_to_timestep_factor("gfs", mm_step) == pytest.approx(4.0)
+
+    # A unit with no documented PRCP->mm/day branch must raise rather than silently convert.
+    undocumented = _make_precip_product(unit="mm/s", native_time_resolution="3h")
+    with pytest.raises(ForcingProductionError, match="no documented PRCP->mm/day conversion"):
+        producer._precip_to_timestep_factor("gfs", undocumented)
+
+
+def _make_precip_product(*, unit: str, native_time_resolution: str | None) -> CanonicalProduct:
+    return CanonicalProduct(
+        canonical_product_id="prcp_factor_probe",
+        source_id="probe",
+        cycle_time=parse_cycle_time("2026050700"),
+        valid_time=parse_cycle_time("2026050700"),
+        variable="prcp_rate_or_amount",
+        unit=unit,
+        grid_id="grid_a",
+        object_uri="memory://prcp_factor_probe",
+        checksum="sha256:probe",
+        native_time_resolution=native_time_resolution,
+    )
 
 
 def test_existing_forcing_version_not_reused_when_lead_window_changes(tmp_path: Path) -> None:
