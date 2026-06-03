@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, SHUDRuntimeError
 
 
@@ -343,11 +343,16 @@ _MMDAY_UNITS = {
 }
 
 
-def test_runtime_staging_rejects_non_mmday_prcp_unit(tmp_path: Path) -> None:
-    """#270: a package declaring PRCP in per-step ``mm`` must fail loudly at staging."""
+@pytest.mark.parametrize("prcp_unit", ["mm", " mm ", "MM", "kg/m2", "mm/hr"])
+def test_runtime_staging_rejects_non_mmday_prcp_unit(tmp_path: Path, prcp_unit: str) -> None:
+    """#270: an explicit non-mm/day PRCP unit must fail loudly at staging.
+
+    Covers case/whitespace variants to lock the ``.strip().lower()`` normalisation:
+    ``"MM"`` and ``" mm "`` are still per-step accumulations and must be rejected.
+    """
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
-    bad_units = {**_MMDAY_UNITS, "PRCP": "mm"}
+    bad_units = {**_MMDAY_UNITS, "PRCP": prcp_unit}
     checksums = _write_standard_shud_forcing(object_root, units=bad_units)
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
@@ -360,14 +365,16 @@ def test_runtime_staging_rejects_non_mmday_prcp_unit(tmp_path: Path) -> None:
 
     assert exc_info.value.error_code == "FORCING_PRCP_UNIT_MISMATCH"
     assert "mm/day" in exc_info.value.message
-    assert "mm" in exc_info.value.message
+    assert prcp_unit in exc_info.value.message
 
 
-def test_runtime_staging_accepts_mmday_prcp_unit(tmp_path: Path) -> None:
-    """#270: a package declaring PRCP in mm/day stages normally."""
+@pytest.mark.parametrize("prcp_unit", ["mm/day", "MM/DAY", " mm/day ", "Mm/Day"])
+def test_runtime_staging_accepts_mmday_prcp_unit(tmp_path: Path, prcp_unit: str) -> None:
+    """#270: a package declaring PRCP in mm/day (any case/whitespace) stages normally."""
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
-    checksums = _write_standard_shud_forcing(object_root, units=_MMDAY_UNITS)
+    units = {**_MMDAY_UNITS, "PRCP": prcp_unit}
+    checksums = _write_standard_shud_forcing(object_root, units=units)
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
     manifest = _shud_project_manifest_with_forcing_checksums(checksums)
@@ -384,6 +391,112 @@ def test_runtime_staging_tolerates_missing_unit_metadata(tmp_path: Path) -> None
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
     checksums = _write_standard_shud_forcing(object_root, units=None)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+def test_runtime_staging_tolerates_units_block_without_prcp_key(tmp_path: Path) -> None:
+    """#270: a units block lacking the PRCP key must not fail (best-effort skip)."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    units = {k: v for k, v in _MMDAY_UNITS.items() if k != "PRCP"}
+    checksums = _write_standard_shud_forcing(object_root, units=units)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+class _ReadLimitFailingObjectStore:
+    """Delegating object store whose ``read_bytes_limited`` fails for one URI.
+
+    Used to simulate an unreadable / over-read-cap package manifest while leaving
+    the separate ``checksum()`` verification intact (``LocalObjectStore`` is a
+    frozen dataclass, so a delegating wrapper is cleaner than monkeypatching).
+    """
+
+    def __init__(self, inner: LocalObjectStore, failing_uri: str) -> None:
+        self._inner = inner
+        self._failing_uri = failing_uri
+
+    def read_bytes_limited(self, key_or_uri: str, *, max_bytes: int) -> bytes:
+        if key_or_uri == self._failing_uri:
+            raise ObjectStoreError(f"Object {key_or_uri} exceeds read limit")
+        return self._inner.read_bytes_limited(key_or_uri, max_bytes=max_bytes)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def test_runtime_staging_tolerates_unreadable_package_manifest(tmp_path: Path) -> None:
+    """#270 (best-effort): an unreadable / over-size-cap package manifest must NOT
+    hard-fail the run. The unit peek is optional; a read failure (e.g. a multi-station
+    manifest exceeding the read cap, or a transient object-store error) tolerate-skips.
+    Content integrity is already guaranteed by the checksum verified before this call.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root, units=_MMDAY_UNITS)
+    repository = FakeHydroRunRepository()
+
+    config = SHUDRuntimeConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        shud_executable=str(Path("tests/mock_shud_omp.py").resolve()),
+        output_interval_minutes=1440,
+        timeout_seconds=30,
+    )
+    inner_store = LocalObjectStore(config.object_store_root, config.object_store_prefix)
+    failing_store = _ReadLimitFailingObjectStore(inner_store, checksums["manifest_uri"])
+    runtime = SHUDRuntime(config=config, repository=repository, object_store=failing_store)
+
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+def test_runtime_staging_tolerates_invalid_json_package_manifest(tmp_path: Path) -> None:
+    """#270 (best-effort): a package manifest that is not valid JSON must NOT hard-fail.
+
+    The checksum still matches the (malformed) bytes, so checksum verification passes;
+    the unit peek then fails to parse and tolerate-skips instead of breaking the run.
+    """
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root, units=_MMDAY_UNITS)
+
+    # Overwrite the on-disk package manifest with malformed JSON and re-point the
+    # manifest checksum at those bytes so checksum verification still succeeds.
+    bad_bytes = b"{ this is : not, valid json"
+    manifest_path = (
+        object_root
+        / "forcing"
+        / "gfs"
+        / "2026050100"
+        / "basin_v01"
+        / "demo_model"
+        / "forcing_package.json"
+    )
+    manifest_path.write_bytes(bad_bytes)
+    checksums["manifest_checksum"] = sha256_bytes(bad_bytes)
+
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)
     manifest = _shud_project_manifest_with_forcing_checksums(checksums)

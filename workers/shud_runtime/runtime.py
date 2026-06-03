@@ -39,9 +39,11 @@ class SHUDRuntimeError(RuntimeError):
 # Authoritative SHUD forcing PRCP unit (Decision A): SHUD reads precip from
 # ``qhh.tsd.forc`` as a daily rate in millimetres per day.
 EXPECTED_PRCP_UNIT = "mm/day"
-# Forcing package manifests are tiny JSON metadata; cap the read to guard against
-# pathological inputs while staging.
-MAX_PACKAGE_MANIFEST_BYTES = 1 * 1024 * 1024
+# Forcing package manifests are JSON metadata that grow with station count
+# (per-station ``shud_file_entries``). The PRCP unit check is best-effort, so cap
+# the read generously and tolerate-skip (never hard-fail) if a multi-station
+# manifest exceeds the cap.
+MAX_PACKAGE_MANIFEST_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -818,32 +820,37 @@ class SHUDRuntime:
                 )
 
     def _assert_forcing_prcp_unit(self, package_manifest_uri: str) -> None:
-        """Fail loudly if the forcing package declares a PRCP unit other than mm/day.
+        """Best-effort guard: fail loudly only on an explicit non-mm/day PRCP unit.
 
         This is the SHUD staging terminus guard for #270: SHUD reads PRCP from
         ``qhh.tsd.forc`` as a daily rate (``mm/day``, Decision A). If an upstream
         regression re-introduced a per-step ``mm`` accumulation, SHUD would silently
-        consume a physically wrong precip amount. We assert the unit here using the
-        package manifest already fetched/checksum-verified above (no extra network
-        fetch). Missing unit metadata is tolerated for backward compatibility (old
-        packages); only an explicit, non-mm/day PRCP unit is rejected.
+        consume a physically wrong precip amount; an explicitly declared non-mm/day
+        PRCP unit is therefore the one and only hard failure here.
+
+        Everything else is tolerated and the check is skipped, because this is an
+        optional hardening layer that must never break an otherwise-runnable run for
+        an incidental reason: a manifest that is unreadable / missing / over the size
+        cap, invalid JSON, or simply lacking unit metadata (old packages) all
+        tolerate-skip. The manifest's real content integrity is already covered by
+        the checksum verification performed before this call, so skipping the unit
+        peek here loses no safety guarantee.
         """
         try:
             content = self.object_store.read_bytes_limited(
                 package_manifest_uri, max_bytes=MAX_PACKAGE_MANIFEST_BYTES
             )
-        except Exception as error:
-            raise SHUDRuntimeError(
-                "FORCING_PACKAGE_MANIFEST_READ_FAILED",
-                f"Failed to read forcing package manifest {package_manifest_uri}: {error}",
-            ) from error
+        except Exception:
+            # Read failure / object missing / size-cap exceeded: tolerate-skip.
+            # A large multi-station manifest must not turn a runnable package into a
+            # hard failure just because the optional unit peek could not read it.
+            return
         try:
             package_manifest = json.loads(content.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise SHUDRuntimeError(
-                "FORCING_PACKAGE_MANIFEST_INVALID",
-                f"Forcing package manifest is not valid JSON: {package_manifest_uri}: {error}",
-            ) from error
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Malformed manifest: tolerate-skip. Content integrity is the checksum's
+            # job; the unit peek stays best-effort and does not fail the run.
+            return
 
         units = package_manifest.get("units")
         if not isinstance(units, Mapping):

@@ -48,9 +48,8 @@ is already correct; no numeric or output behavior changes.
 
 - `workers/shud_runtime/runtime.py` — new `_assert_forcing_prcp_unit`, invoked
   from `_verify_forcing_manifest_checksums`; new `EXPECTED_PRCP_UNIT` /
-  `MAX_PACKAGE_MANIFEST_BYTES` constants; `FORCING_PRCP_UNIT_MISMATCH` /
-  `FORCING_PACKAGE_MANIFEST_READ_FAILED` / `FORCING_PACKAGE_MANIFEST_INVALID`
-  error codes.
+  `MAX_PACKAGE_MANIFEST_BYTES` constants; single `FORCING_PRCP_UNIT_MISMATCH`
+  hard-failure error code (read/parse/size issues tolerate-skip, never fail).
 - Tests: `tests/test_shud_runtime.py`, `tests/test_forcing_producer.py`,
   `tests/test_production_met_validation.py`.
 

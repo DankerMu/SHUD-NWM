@@ -37,13 +37,22 @@ mismatch, tolerate missing metadata" stance.
 
 ## Failure modes and error codes
 
+The PRCP unit check is **best-effort**: it exists only to catch an upstream
+regression that re-declares PRCP in a non-`mm/day` unit. It MUST NOT turn an
+otherwise-runnable forcing package into a hard failure for any incidental reason
+(large multi-station manifest exceeding the read cap, transient read failure,
+malformed JSON, or absent metadata). Content integrity is already guaranteed by
+the package-manifest checksum verified immediately before this check, so skipping
+the unit peek loses no safety guarantee. The only hard failure is an explicitly
+declared non-`mm/day` PRCP unit.
+
 | Condition | Behavior |
 |-----------|----------|
-| `units["PRCP"] == "mm/day"` | stage normally |
+| `units["PRCP"] == "mm/day"` (case/whitespace-insensitive) | stage normally |
 | `units["PRCP"]` present, `!= "mm/day"` (e.g. `"mm"`) | raise `FORCING_PRCP_UNIT_MISMATCH` (message carries observed + expected) |
-| `units` block absent / `PRCP` key absent | tolerate, stage normally |
-| package manifest unreadable | `FORCING_PACKAGE_MANIFEST_READ_FAILED` |
-| package manifest not valid JSON | `FORCING_PACKAGE_MANIFEST_INVALID` |
+| `units` block absent / `PRCP` key absent / `PRCP` value `None` | tolerate-skip, stage normally |
+| package manifest unreadable / over read cap | tolerate-skip, stage normally |
+| package manifest not valid JSON | tolerate-skip, stage normally |
 
 ## Producer regression gate (#272)
 

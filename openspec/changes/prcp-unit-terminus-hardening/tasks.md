@@ -4,7 +4,7 @@
 - [x] 1.2 Add `_assert_forcing_prcp_unit(package_manifest_uri)` that rereads the already-checksum-verified package manifest, parses its `units` dict, and raises `SHUDRuntimeError("FORCING_PRCP_UNIT_MISMATCH", ...)` only when `units["PRCP"]` is explicitly present and `!= "mm/day"`.
 - [x] 1.3 Tolerate missing `units` block / missing `PRCP` key (legacy packages) — no failure (backward compatibility).
 - [x] 1.4 Invoke `_assert_forcing_prcp_unit` from `_verify_forcing_manifest_checksums` after the package checksum passes (no new network fetch).
-- [x] 1.5 Surface read/parse errors as `FORCING_PACKAGE_MANIFEST_READ_FAILED` / `FORCING_PACKAGE_MANIFEST_INVALID`.
+- [x] 1.5 Make the unit peek best-effort: read failure / over read-cap / invalid JSON all tolerate-skip (return, no raise); the only hard failure is an explicit non-`mm/day` PRCP unit.
 
 ## 2. Producer output-semantics regression gate (#272)
 
@@ -16,7 +16,10 @@
 
 - [x] 3.1 `tests/test_shud_runtime.py`: non-mm/day PRCP unit -> `FORCING_PRCP_UNIT_MISMATCH`.
 - [x] 3.2 `tests/test_shud_runtime.py`: `mm/day` PRCP unit -> stages normally.
-- [x] 3.3 `tests/test_shud_runtime.py`: missing unit metadata -> stages normally (backward compatibility).
+- [x] 3.3 `tests/test_shud_runtime.py`: missing unit metadata / missing PRCP key -> stages normally (backward compatibility).
+- [x] 3.3a `tests/test_shud_runtime.py`: case/whitespace variants (`MM/DAY`, ` mm/day ` accept; `MM`, ` mm ` reject) lock `.strip().lower()`.
+- [x] 3.3b `tests/test_shud_runtime.py`: unreadable / over-cap package manifest -> tolerate-skip, stages normally.
+- [x] 3.3c `tests/test_shud_runtime.py`: invalid-JSON package manifest -> tolerate-skip, stages normally.
 - [x] 3.4 `tests/test_forcing_producer.py`: fingerprint + precip-branch guards.
 - [x] 3.5 `tests/test_production_met_validation.py`: keyset-equality guard.
 
