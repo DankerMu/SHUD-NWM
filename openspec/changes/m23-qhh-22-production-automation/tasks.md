@@ -141,9 +141,9 @@
 
 ## 7. Node-22 E2E and Documentation
 
-- [ ] 7.1 Add a node-22 E2E command/test that runs or blocks truthfully through download, canonical conversion, forcing, SHUD Slurm execution, parse, publish, DB counts, pipeline evidence, and artifact/log URI checks.
-- [ ] 7.2 Add CI-safe deterministic tests for scheduler preflight, no-mutation dry-run, mocked source/gateway state transitions, artifact-root placement, and no false live readiness claim.
-- [ ] 7.3 Update the two-node deployment/runbook docs to distinguish no-flag scheduler-once business validation from explicit `--workspace-root` diagnostic compatibility commands.
-- [ ] 7.4 Fix runbook/table references so DB state uses `ops.pipeline_job` and `ops.pipeline_event`, while API payload field names are labeled separately.
-- [ ] 7.5 Update the two-node deployment/runbook docs to state that node 22 owns automation and node 27 reads readonly DB plus `/ghdc/data/nwm/published` artifacts only.
+- [x] 7.1 Add a node-22 E2E command/test that runs or blocks truthfully through download, canonical conversion, forcing, SHUD Slurm execution, parse, publish, DB counts, pipeline evidence, and artifact/log URI checks. (existing `e2e_validation.py` 9-stage harness + `test_two_node_22_e2e.py` live opt-in; publish stage exposed via new `publish-qdown` CLI entrypoint)
+- [x] 7.2 Add CI-safe deterministic tests for scheduler preflight, no-mutation dry-run, mocked source/gateway state transitions, artifact-root placement, and no false live readiness claim. (preflight/dry-run/storage existing; mocked gateway state transitions + no-false-readiness added in `test_cli_publish_qdown.py`)
+- [x] 7.3 Update the two-node deployment/runbook docs to distinguish no-flag scheduler-once business validation from explicit `--workspace-root` diagnostic compatibility commands.
+- [x] 7.4 Fix runbook/table references so DB state uses `ops.pipeline_job` and `ops.pipeline_event`, while API payload field names are labeled separately.
+- [x] 7.5 Update the two-node deployment/runbook docs to state that node 22 owns automation and node 27 reads readonly DB plus `/ghdc/data/nwm/published` artifacts only.
 - [ ] 7.6 Verify with `openspec validate m23-qhh-22-production-automation --strict --no-interactive`, focused backend tests, docs/static checks if present, and an opt-in node-22 live E2E command that reports PASS or BLOCKED with evidence under `artifacts/` or `/scratch/frd_muziyao`.
