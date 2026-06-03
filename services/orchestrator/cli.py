@@ -4,12 +4,14 @@ import argparse
 import json
 import os
 import sys
+from datetime import UTC, datetime
 from typing import Sequence
 
 from services.tile_publisher import PublishError, TilePublisher
 from services.tile_publisher.publisher import failure_payload
 
 from .chain import AnalysisOrchestrator, OrchestratorError
+from .retention import RetentionConfig, run_retention
 from .scheduler import MAX_CONTINUOUS_JSON_PASSES, ProductionScheduler, ProductionSchedulerConfig
 
 
@@ -54,6 +56,22 @@ def _publish_qdown(*, cycle_id: str) -> dict[str, object]:
         raise
     except (OSError, RuntimeError, ValueError) as error:
         raise PublishError("PUBLISH_QDOWN_FAILED", f"q_down publication failed: {error}") from error
+
+
+def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, object]:
+    base = RetentionConfig.from_env()
+    config = RetentionConfig(
+        enabled=True,
+        dry_run=dry_run,
+        retention_days=retention_days if retention_days is not None else base.retention_days,
+    )
+    result = run_retention(
+        object_store_root=os.getenv("OBJECT_STORE_ROOT"),
+        now=datetime.now(UTC),
+        config=config,
+        published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT"),
+    )
+    return result.to_dict()
 
 
 def _split_csv(values: Sequence[str] | None) -> tuple[str, ...]:
@@ -231,6 +249,19 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(json.dumps(failure_payload(cycle_id, error), sort_keys=True))
             raise SystemExit(1) from error
 
+    @cli.command("cleanup")
+    @click.option("--retention-days", default=None, type=int)
+    @click.option("--dry-run", "dry_run", flag_value=True, default=True, show_default=True)
+    @click.option("--execute", "dry_run", flag_value=False, help="Actually delete aged artifacts.")
+    def cleanup(retention_days: int | None, dry_run: bool) -> None:
+        try:
+            click.echo(
+                json.dumps(_run_cleanup(retention_days=retention_days, dry_run=dry_run), sort_keys=True)
+            )
+        except ValueError as error:
+            click.echo(str(error), err=True)
+            raise SystemExit(2) from error
+
     @cli.command("plan-production")
     @click.option(
         "--source",
@@ -319,6 +350,10 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     publish_tiles_parser.add_argument("--cycle-id", required=True)
     publish_qdown_parser = subparsers.add_parser("publish-qdown")
     publish_qdown_parser.add_argument("--cycle-id", required=True)
+    cleanup_parser = subparsers.add_parser("cleanup")
+    cleanup_parser.add_argument("--retention-days", type=int, default=None)
+    cleanup_parser.add_argument("--dry-run", action="store_true", default=True)
+    cleanup_parser.add_argument("--execute", action="store_false", dest="dry_run")
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
     plan_parser.add_argument("--lookback-hours", type=int, default=24)
@@ -358,6 +393,13 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         except PublishError as error:
             print(json.dumps(failure_payload(args.cycle_id, error), sort_keys=True))
             return 1
+    if args.command == "cleanup":
+        try:
+            print(json.dumps(_run_cleanup(retention_days=args.retention_days, dry_run=args.dry_run), sort_keys=True))
+            return 0
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 2
     if args.command == "plan-production":
         try:
             print(

@@ -6931,7 +6931,17 @@ def _template_export_lines(context: Mapping[str, Any]) -> list[str]:
         "SHUD_THREADS": context.get("shud_threads", ""),
         "OMP_NUM_THREADS": context.get("shud_threads", ""),
     }
-    return [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
+    lines = [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
+    grib_env_root = os.getenv("NHMS_GRIB_ENV_ROOT")
+    if grib_env_root:
+        # Compute nodes (cn01-24) lack cdo/libeccodes; inject the shared conda
+        # env's PATH/LD_LIBRARY_PATH so GRIB clip/read works on the node.
+        # Quote only the root segment; keep $PATH / ${LD_LIBRARY_PATH:-}
+        # outside the quotes so the shell expands them at runtime.
+        quoted_root = shlex.quote(grib_env_root)
+        lines.append(f"export PATH={quoted_root}/bin:$PATH")
+        lines.append(f"export LD_LIBRARY_PATH={quoted_root}/lib:${{LD_LIBRARY_PATH:-}}")
+    return lines
 
 
 def _response_json_or_text(response: httpx.Response) -> dict[str, Any] | str:

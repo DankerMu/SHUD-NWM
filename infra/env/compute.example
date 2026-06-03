@@ -48,3 +48,26 @@ SLURM_GATEWAY_WORKSPACE_DIR=/scratch/frd_muziyao/nhms-production/workspace
 
 GFS_NOMADS_BASE_URL=https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod
 IFS_OPEN_DATA_SOURCE=ecmwf
+
+# Download spatial clip bbox: China mainland (18-54N / 73-135E) + 10 degree buffer.
+# GFS clips server-side via NOMADS subregion; IFS clips locally via cdo (requires cdo).
+NHMS_DOWNLOAD_BBOX_SOUTH=8
+NHMS_DOWNLOAD_BBOX_NORTH=64
+NHMS_DOWNLOAD_BBOX_WEST=63
+NHMS_DOWNLOAD_BBOX_EAST=145
+
+# Shared conda env (cdo + libeccodes) for GRIB clip/read on compute nodes that
+# lack system cdo/libeccodes. Injected into each sbatch's PATH/LD_LIBRARY_PATH.
+# Path-configurable: currently a user dir; migrate to a project-level shared
+# path later by editing only this value (no code change). Leave empty to skip
+# injection (only valid where the system already provides cdo+libeccodes).
+NHMS_GRIB_ENV_ROOT=/scratch/frd_muziyao/nhms-grib
+
+# Forecast-data retention: each scheduler pass prunes raw + compute intermediates
+# whose cycle_time is older than NHMS_RETENTION_DAYS. Published artifacts and
+# static grids are always preserved. Opt-in by design; for first production runs
+# keep NHMS_RETENTION_DRY_RUN=true to inspect the plan, then set it false to
+# actually delete.
+NHMS_RETENTION_ENABLED=true
+NHMS_RETENTION_DRY_RUN=false
+NHMS_RETENTION_DAYS=14

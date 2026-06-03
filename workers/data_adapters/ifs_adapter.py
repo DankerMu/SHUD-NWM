@@ -4,6 +4,8 @@ import hashlib
 import json
 import logging
 import os
+import shutil
+import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -34,11 +36,13 @@ from .base import (
     valid_time_for,
     validate_forecast_hours,
 )
+from .region import GeoBBox, china_buffered_bbox_from_env
 
 LOGGER = logging.getLogger(__name__)
 
 IFS_VARIABLES: tuple[str, ...] = ("2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str")
 IFS_FALLBACK_SOURCES: tuple[str, ...] = ("aws", "azure", "google")
+CDO_CLIP_TIMEOUT_SECONDS = 300
 
 
 class ForecastCycleRepository(Protocol):
@@ -124,6 +128,14 @@ class FileTooLargeError(IFSAdapterError):
     error_code = "FILE_TOO_LARGE"
 
 
+class CdoMissingError(IFSAdapterError):
+    error_code = "CDO_MISSING"
+
+
+class CdoClipError(IFSAdapterError):
+    error_code = "CDO_CLIP_FAILED"
+
+
 @dataclass(frozen=True)
 class DownloadedPayload:
     content: bytes
@@ -160,6 +172,7 @@ class IFSAdapterConfig:
         default_factory=lambda: int(os.getenv("IFS_MAX_FILE_SIZE_BYTES", str(500 * 1024 * 1024)))
     )
     variables: tuple[str, ...] = IFS_VARIABLES
+    bbox: GeoBBox = field(default_factory=china_buffered_bbox_from_env)
 
     def __post_init__(self) -> None:
         if not str(self.object_store_root):
@@ -215,6 +228,7 @@ class IFSAdapterConfig:
             "max_retries": self.max_retries,
             "download_chunk_size_bytes": self.download_chunk_size_bytes,
             "max_file_size_bytes": self.max_file_size_bytes,
+            "bbox": self.bbox.as_dict(),
         }
 
 
@@ -802,7 +816,14 @@ class IFSAdapter(DataSourceAdapter):
         for attempt in range(1, max_attempts + 1):
             try:
                 return self._normalize_payload(self.downloader(remote_url)), attempt - 1
-            except (FileUnavailableError, ForbiddenSourceError, RateLimitedError, FileTooLargeError):
+            except (
+                FileUnavailableError,
+                ForbiddenSourceError,
+                RateLimitedError,
+                FileTooLargeError,
+                CdoMissingError,
+                CdoClipError,
+            ):
                 raise
             except HTTPError as error:
                 if error.code == 404:
@@ -900,7 +921,7 @@ class IFSAdapter(DataSourceAdapter):
             return None
         return DownloadFileResult(local_key=entry.local_key, status="already_done", checksum=checksum)
 
-    def _download_url(self, remote_url: str) -> DownloadedPayload:
+    def _download_url(self, remote_url: str, *, clip: bool = True) -> DownloadedPayload:
         parsed = _parse_ifs_url(remote_url)
         with tempfile.NamedTemporaryFile(suffix=".grib2") as target:
             try:
@@ -919,8 +940,13 @@ class IFSAdapter(DataSourceAdapter):
                         f"Remote IFS file {self._safe_text(remote_url)} exceeded maximum size "
                         f"{self.config.max_file_size_bytes} bytes"
                     )
-                payload = Path(target.name).read_bytes()
-            except FileTooLargeError:
+                # Availability probes (clip=False) only need to confirm the global
+                # file exists; clipping is a download/ingest concern that requires cdo.
+                if clip:
+                    payload = self._clip_grib_to_bbox(target.name, remote_url)
+                else:
+                    payload = Path(target.name).read_bytes()
+            except (FileTooLargeError, CdoMissingError, CdoClipError):
                 raise
             except HTTPError as error:
                 if error.code == 404:
@@ -959,9 +985,47 @@ class IFSAdapter(DataSourceAdapter):
         checksum = hashlib.sha256(payload).hexdigest()
         return DownloadedPayload(content=payload, checksum=checksum, bytes_written=len(payload))
 
+    def _clip_grib_to_bbox(self, global_path: str, remote_url: str) -> bytes:
+        """Clip a global GRIB2 file to the configured bbox via cdo, keeping GRIB2.
+
+        ecmwf-opendata has no server-side region clipping, so the global file is
+        retrieved first and clipped locally. cdo is mandatory: a missing binary or
+        a non-zero exit fails loud rather than degrading to the global payload.
+        """
+        cdo_binary = shutil.which("cdo")
+        if cdo_binary is None:
+            raise CdoMissingError(
+                f"cdo is required to clip IFS downloads to bbox but was not found "
+                f"while processing {self._safe_text(remote_url)}"
+            )
+        bbox = self.config.bbox
+        sellonlatbox = f"sellonlatbox,{bbox.west:g},{bbox.east:g},{bbox.south:g},{bbox.north:g}"
+        with tempfile.NamedTemporaryFile(suffix=".grib2") as clipped:
+            try:
+                result = subprocess.run(  # noqa: S603 - argv list, no shell
+                    [cdo_binary, "-f", "grb2", sellonlatbox, global_path, clipped.name],
+                    capture_output=True,
+                    timeout=CDO_CLIP_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as error:
+                stderr = error.stderr.decode("utf-8", errors="replace") if error.stderr else ""
+                raise CdoClipError(
+                    f"cdo timed out after {CDO_CLIP_TIMEOUT_SECONDS}s clipping IFS file "
+                    f"{self._safe_text(remote_url)}: {self._safe_text(stderr)}"
+                ) from error
+            if result.returncode != 0:
+                stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+                raise CdoClipError(
+                    f"cdo failed to clip IFS file {self._safe_text(remote_url)} "
+                    f"(exit {result.returncode}): {self._safe_text(stderr)}"
+                )
+            return Path(clipped.name).read_bytes()
+
     def _url_exists(self, remote_url: str) -> bool:
         try:
-            self._download_url(remote_url)
+            # Probe existence only: skip cdo clipping so discovery does not depend
+            # on (or get misled by) a missing/failed cdo binary.
+            self._download_url(remote_url, clip=False)
             return True
         except FileUnavailableError:
             return False
@@ -1037,6 +1101,7 @@ class IFSAdapter(DataSourceAdapter):
             "fallback_sources": list(self.config.fallback_sources),
             "max_retries": self.config.max_retries,
             "max_wait_seconds": self.config.max_wait_seconds,
+            "bbox": self.config.bbox.as_dict(),
         }
 
     def source_object_identity(
@@ -1055,6 +1120,7 @@ class IFSAdapter(DataSourceAdapter):
             "source": self.config.source_id,
             "cycle_time": parsed_cycle_time.isoformat(),
             "preferred_source": self.config.preferred_source,
+            "bbox": self.config.bbox.as_dict(),
             "first_forecast_hour": min(hours) if hours else None,
             "last_forecast_hour": max(hours) if hours else None,
             "forecast_hour_count": len(hours),

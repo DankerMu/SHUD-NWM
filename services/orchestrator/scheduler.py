@@ -38,6 +38,7 @@ from services.orchestrator.production_contract import (
     production_status_for,
     validate_compatible_production_identity,
 )
+from services.orchestrator.retention import RetentionConfig, run_retention
 from services.orchestrator.retry import classify_failure
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from services.slurm_gateway.gateway import ConfigurationError
@@ -1122,6 +1123,7 @@ class ProductionScheduler:
                 evidence["evidence_pre_execution"] = evidence_reservation
             if root_preflight["status"] != "not_required":
                 evidence["root_preflight"] = root_preflight
+            evidence["retention"] = self._run_retention(started_at)
             try:
                 artifact_path = self._write_evidence(pass_id, evidence)
             except (OSError, SchedulerEvidenceWriteError) as error:
@@ -1168,6 +1170,24 @@ class ProductionScheduler:
             )
         finally:
             lock.release(pass_id=pass_id)
+
+    def _run_retention(self, started_at: datetime) -> dict[str, Any]:
+        """Run forecast-data retention cleanup; never break the scheduling pass."""
+        retention_config = RetentionConfig.from_env()
+        if not retention_config.enabled:
+            return {"status": "disabled", "enabled": False}
+        try:
+            result = run_retention(
+                object_store_root=self.config.object_store_root,
+                now=started_at,
+                config=retention_config,
+                published_artifact_root=self.config.published_artifact_root,
+            )
+        except Exception as error:  # noqa: BLE001 - cleanup must never abort scheduling
+            return {"status": "error", "enabled": True, "error": str(error)}
+        payload = result.to_dict()
+        payload["status"] = "completed"
+        return payload
 
     def _write_prelock_blocked_evidence(
         self,

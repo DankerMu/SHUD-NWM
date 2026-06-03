@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 import types
 from collections.abc import Mapping, Sequence
@@ -5102,3 +5103,45 @@ def test_psycopg_upsert_pipeline_job_sql_matches_params_for_array_task_id(
     # (c) array_task_id's value lands at the param slot matching its column index.
     array_index = columns.index("array_task_id")
     assert parameters[array_index] == 7
+
+
+def test_template_export_lines_injects_grib_env_when_set(monkeypatch):
+    from services.orchestrator.chain import _template_export_lines
+
+    root = "/scratch/frd_muziyao/nhms-grib"
+    monkeypatch.setenv("NHMS_GRIB_ENV_ROOT", root)
+    lines = _template_export_lines({"workspace_dir": "/work"})
+
+    # $PATH / ${LD_LIBRARY_PATH:-} must survive literally (not swallowed by quotes).
+    # shlex.quote leaves a no-special-char path unquoted, so build the expected
+    # lines the same way the implementation does.
+    quoted = shlex.quote(root)
+    assert f"export PATH={quoted}/bin:$PATH" in lines
+    assert f"export LD_LIBRARY_PATH={quoted}/lib:${{LD_LIBRARY_PATH:-}}" in lines
+    # Injection lines come after the existing export_fields lines.
+    assert lines.index(f"export PATH={quoted}/bin:$PATH") > 0
+
+
+def test_template_export_lines_omits_grib_env_when_unset(monkeypatch):
+    from services.orchestrator.chain import _template_export_lines
+
+    monkeypatch.delenv("NHMS_GRIB_ENV_ROOT", raising=False)
+    lines = _template_export_lines({"workspace_dir": "/work"})
+
+    assert not any(line.startswith("export PATH=") for line in lines)
+    assert not any(line.startswith("export LD_LIBRARY_PATH=") for line in lines)
+
+
+def test_template_export_lines_quotes_grib_env_with_special_chars(monkeypatch):
+    from services.orchestrator.chain import _template_export_lines
+
+    root = "/scratch/with space/$(touch pwn)/grib"
+    monkeypatch.setenv("NHMS_GRIB_ENV_ROOT", root)
+    lines = _template_export_lines({"workspace_dir": "/work"})
+
+    quoted = shlex.quote(root)
+    assert f"export PATH={quoted}/bin:$PATH" in lines
+    assert f"export LD_LIBRARY_PATH={quoted}/lib:${{LD_LIBRARY_PATH:-}}" in lines
+    # The dangerous substitution must be inside single quotes (neutralized).
+    path_line = next(line for line in lines if line.startswith("export PATH="))
+    assert "$(touch pwn)" not in path_line.replace(quoted, "")
