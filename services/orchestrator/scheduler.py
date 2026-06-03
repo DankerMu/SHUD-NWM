@@ -6800,7 +6800,7 @@ def _slurm_gateway_check(
     if self_blocker is not None:
         # Self-reference is decisive: do not also probe a bogus endpoint.
         blockers.append(self_blocker)
-        return redact_payload(checks), blockers
+        return redact_payload(checks), redact_payload(blockers)
 
     probe_fn = probe or _default_gateway_probe
     try:
@@ -6840,7 +6840,7 @@ def _slurm_gateway_check(
             }
         )
 
-    return redact_payload(checks), blockers
+    return redact_payload(checks), redact_payload(blockers)
 
 
 def _database_url_blocker(database_url: str | None) -> dict[str, Any] | None:

@@ -166,6 +166,59 @@ def test_publish_qdown_failure_emits_no_false_live_readiness(
 
 
 # ---------------------------------------------------------------------------
+# Part 1 - publish-qdown via the click entry point (production default path)
+#
+# main() prefers _click_main when click is importable, so the argparse tests
+# above never exercise the code that actually runs in production. These cover
+# the click wiring and assert it stays behaviourally identical to argparse.
+# ---------------------------------------------------------------------------
+def test_publish_qdown_click_pass_prints_published_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cycle_id = "gfs_2026052112"
+    fake = _FakePublisher(result=_published_result(cycle_id))
+    monkeypatch.setattr(cli.TilePublisher, "from_env", classmethod(lambda cls: fake))
+
+    # argv is not None -> _click_main runs cli.main(standalone_mode=False),
+    # so the command's return value flows back instead of click sys.exit-ing.
+    rc = cli._click_main(["publish-qdown", "--cycle-id", cycle_id])
+
+    assert rc == 0
+    assert fake.calls == [cycle_id]
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["status"] == "published"
+    assert payload["cycle_id"] == cycle_id
+    assert payload["layers"][0]["layer_type"] == "q_down_timeseries"
+    assert payload["lineage"]["quality_state"] == "degraded"
+
+
+def test_publish_qdown_click_failure_reports_failure_payload_and_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cycle_id = "gfs_2026052112"
+    fake = _FakePublisher(
+        error=PublishError("NO_PUBLISHABLE_QDOWN_PRODUCTS", "nothing to publish", {"cycle_id": cycle_id})
+    )
+    monkeypatch.setattr(cli.TilePublisher, "from_env", classmethod(lambda cls: fake))
+
+    # The click command raises SystemExit(1); with standalone_mode=False click
+    # does not swallow it, so it propagates exactly like the argparse rc==1.
+    with pytest.raises(SystemExit) as excinfo:
+        cli._click_main(["publish-qdown", "--cycle-id", cycle_id])
+
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    payload = json.loads(out.strip())
+    # Failure is reported truthfully via failure_payload, never faked as success.
+    assert payload["status"] == "failed_publish"
+    assert payload["error_code"] == "NO_PUBLISHABLE_QDOWN_PRODUCTS"
+    assert payload["cycle_id"] == cycle_id
+    assert payload["layers"] == []
+    # No-false-readiness: failure output must not claim a published/success state.
+    assert '"status": "published"' not in out
+
+
+# ---------------------------------------------------------------------------
 # Part 2 - Slurm gateway deterministic state transitions (#258 semantics)
 # ---------------------------------------------------------------------------
 def _gateway_config(tmp_path: Path, *, url: str, service_port: int = 8000) -> ProductionSchedulerConfig:
@@ -264,3 +317,85 @@ def test_gateway_blocker_evidence_is_redacted_without_secrets(tmp_path: Path) ->
     serialized = json.dumps({"checks": checks, "blockers": blockers})
     assert "super-secret-token" not in serialized
     assert blockers[0]["host"] == "gateway.example.test"
+
+
+def test_gateway_probe_credential_in_checks_is_scrubbed_by_redact_payload(tmp_path: Path) -> None:
+    """Exercise the redact_payload main path on a field that lands in ``checks``.
+
+    Unlike the URL-only case above (where userinfo is stripped before it ever
+    reaches evidence), here a credential-shaped string is returned by the probe
+    in ``version``, flows into ``checks``, and must be scrubbed by the
+    ``redact_payload(checks)`` call at the end of ``_slurm_gateway_check``.
+    """
+    config = _gateway_config(tmp_path, url="http://gateway.example.test:9100")
+
+    def _probe_with_secret_version(_config: ProductionSchedulerConfig) -> dict[str, Any]:
+        return {
+            "mode": "slurm",
+            "backend": "slurm",
+            "version": "v1 token=super-secret-token password=hunter2",
+            "healthy": True,
+            "submit_capable": True,
+            "accounting_available": True,
+        }
+
+    checks, blockers = _slurm_gateway_check(config, probe=_probe_with_secret_version)
+
+    # A healthy gateway adds no blocker (never-break-userspace).
+    assert blockers == []
+    # redact_payload's SENSITIVE_ASSIGNMENT_RE rewrote the secret assignments.
+    assert "super-secret-token" not in json.dumps(checks)
+    assert "hunter2" not in json.dumps(checks)
+    assert checks["version"] == "v1 token=[redacted] password=[redacted]"
+
+
+def test_gateway_probe_raises_is_caught_and_blocked_with_redacted_reason(tmp_path: Path) -> None:
+    """A probe that raises must fail safe as BLOCKED, not crash the preflight.
+
+    The injected exception text carries a credential; the fail-safe branch
+    redacts the reason before it reaches the blocker evidence.
+    """
+    config = _gateway_config(tmp_path, url="http://gateway.example.test:9100")
+
+    def _probe_raises(_config: ProductionSchedulerConfig) -> dict[str, Any]:
+        raise RuntimeError("boom token=super-secret-token")
+
+    # Must not propagate the RuntimeError to the caller.
+    checks, blockers = _slurm_gateway_check(config, probe=_probe_raises)
+
+    codes = [blocker["code"] for blocker in blockers]
+    assert codes == ["SLURM_GATEWAY_UNAVAILABLE"]
+    assert checks["healthy"] is False
+    # The exception message is redacted everywhere it surfaces.
+    serialized = json.dumps({"checks": checks, "blockers": blockers})
+    assert "super-secret-token" not in serialized
+    assert blockers[0]["reason"] == "boom token=[redacted]"
+
+
+def test_gateway_probe_returned_reason_credential_is_redacted_in_blocker(tmp_path: Path) -> None:
+    """A probe that *returns* (not raises) an unhealthy result with a
+    credential-shaped ``reason`` must have that reason redacted before it lands
+    in the blocker evidence -- the normal-return branch was previously leaking
+    the raw reason into the un-redacted ``blockers`` list.
+    """
+    config = _gateway_config(tmp_path, url="http://gateway.example.test:9100")
+
+    def _probe_with_secret_reason(_config: ProductionSchedulerConfig) -> dict[str, Any]:
+        return {
+            "mode": "slurm",
+            "healthy": False,
+            "submit_capable": False,
+            "accounting_available": False,
+            "reason": "auth failed token=super-secret-token password=hunter2",
+        }
+
+    checks, blockers = _slurm_gateway_check(config, probe=_probe_with_secret_reason)
+
+    # Structure is preserved: the blocker code still identifies the failure.
+    codes = [blocker["code"] for blocker in blockers]
+    assert codes == ["SLURM_GATEWAY_UNAVAILABLE"]
+    # The credential-shaped reason is scrubbed before reaching evidence.
+    serialized = json.dumps({"checks": checks, "blockers": blockers})
+    assert "super-secret-token" not in serialized
+    assert "hunter2" not in serialized
+    assert blockers[0]["reason"] == "auth failed token=[redacted] password=[redacted]"
