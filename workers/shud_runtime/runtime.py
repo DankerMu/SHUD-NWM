@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from collections.abc import Mapping
 from dataclasses import InitVar, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -33,6 +34,16 @@ class SHUDRuntimeError(RuntimeError):
         super().__init__(message)
         self.error_code = error_code
         self.message = message
+
+
+# Authoritative SHUD forcing PRCP unit (Decision A): SHUD reads precip from
+# ``qhh.tsd.forc`` as a daily rate in millimetres per day.
+EXPECTED_PRCP_UNIT = "mm/day"
+# Forcing package manifests are JSON metadata that grow with station count
+# (per-station ``shud_file_entries``). The PRCP unit check is best-effort, so cap
+# the read generously and tolerate-skip (never hard-fail) if a multi-station
+# manifest exceeds the cap.
+MAX_PACKAGE_MANIFEST_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -796,6 +807,7 @@ class SHUDRuntime:
                     "Forcing package manifest checksum mismatch: "
                     f"expected {expected_package_checksum}, got {actual_checksum}.",
                 )
+            self._assert_forcing_prcp_unit(package_manifest_uri)
 
         for file_entry in _forcing_checksum_entries(manifest):
             uri = str(file_entry["uri"])
@@ -806,6 +818,55 @@ class SHUDRuntime:
                     "FORCING_FILE_CHECKSUM_MISMATCH",
                     f"Forcing file checksum mismatch for {uri}: expected {expected_checksum}, got {actual_checksum}.",
                 )
+
+    def _assert_forcing_prcp_unit(self, package_manifest_uri: str) -> None:
+        """Best-effort guard: fail loudly only on an explicit non-mm/day PRCP unit.
+
+        This is the SHUD staging terminus guard for #270: SHUD reads PRCP from
+        ``qhh.tsd.forc`` as a daily rate (``mm/day``, Decision A). If an upstream
+        regression re-introduced a per-step ``mm`` accumulation, SHUD would silently
+        consume a physically wrong precip amount; an explicitly declared non-mm/day
+        PRCP unit is therefore the one and only hard failure here.
+
+        Everything else is tolerated and the check is skipped, because this is an
+        optional hardening layer that must never break an otherwise-runnable run for
+        an incidental reason: a manifest that is unreadable / missing / over the size
+        cap, invalid JSON, or simply lacking unit metadata (old packages) all
+        tolerate-skip. The manifest's real content integrity is already covered by
+        the checksum verification performed before this call, so skipping the unit
+        peek here loses no safety guarantee.
+        """
+        try:
+            content = self.object_store.read_bytes_limited(
+                package_manifest_uri, max_bytes=MAX_PACKAGE_MANIFEST_BYTES
+            )
+        except Exception:
+            # Read failure / object missing / size-cap exceeded: tolerate-skip.
+            # A large multi-station manifest must not turn a runnable package into a
+            # hard failure just because the optional unit peek could not read it.
+            return
+        try:
+            package_manifest = json.loads(content.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Malformed manifest: tolerate-skip. Content integrity is the checksum's
+            # job; the unit peek stays best-effort and does not fail the run.
+            return
+
+        units = package_manifest.get("units")
+        if not isinstance(units, Mapping):
+            # Backward compatibility: packages without a units block predate this
+            # metadata; do not fail the run on missing unit information.
+            return
+        observed = units.get("PRCP")
+        if observed is None:
+            return
+        if str(observed).strip().lower() != EXPECTED_PRCP_UNIT:
+            raise SHUDRuntimeError(
+                "FORCING_PRCP_UNIT_MISMATCH",
+                "Forcing package PRCP unit mismatch: "
+                f"expected '{EXPECTED_PRCP_UNIT}', observed '{observed}'. "
+                "SHUD requires PRCP in mm/day; refusing to stage forcing.",
+            )
 
     def _verify_staged_forcing_checksums(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
         forcing_root = _object_key(manifest["forcing"]["forcing_uri"], self.config.object_store_prefix).rstrip("/")
