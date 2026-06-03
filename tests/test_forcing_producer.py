@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import tempfile
 from collections.abc import Mapping
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ from workers.forcing_producer import (
 from workers.forcing_producer.producer import (
     EXPECTED_CANONICAL_UNITS,
     FORCING_VARIABLES,
+    OUTPUT_UNITS,
     ForcingComponent,
     ForcingTimeseriesRow,
 )
@@ -1755,3 +1757,89 @@ def _netcdf_bytes(
 def _lead_time_sort_key(product: CanonicalProduct) -> tuple[int, Any, str]:
     lead_time = product.lead_time_hours if product.lead_time_hours is not None else 10**9
     return lead_time, product.cycle_time, product.canonical_product_id
+
+
+# --- #272 output-semantics regression guards ---------------------------------
+
+# Pinned fingerprint of the producer's output semantics (OUTPUT_UNITS, precip
+# conversion branch behavior, and rn_shortwave_factor default). See
+# test_output_semantics_fingerprint_pins_producer_version for the contract.
+EXPECTED_OUTPUT_SEMANTICS_FINGERPRINT = (
+    "8171ed72d3cbd29f034623b06220765ad46e7422a0851fb647871d54e6caf735"
+)
+EXPECTED_PRODUCER_VERSION = "m2.0"
+
+
+def _precip_product(unit: str) -> CanonicalProduct:
+    now = datetime(2026, 5, 7, tzinfo=UTC)
+    return CanonicalProduct(
+        canonical_product_id="cp_prcp",
+        source_id="gfs",
+        cycle_time=now,
+        valid_time=now,
+        variable="prcp_rate_or_amount",
+        unit=unit,
+        grid_id="grid_a",
+        object_uri="s3://nhms/canonical/cp_prcp",
+        checksum="deadbeef",
+    )
+
+
+def _compute_output_semantics_fingerprint(producer: ForcingProducer) -> str:
+    """Reproduce the pinned fingerprint from observable output semantics.
+
+    The fingerprint covers exactly the output-semantics surface that #272 guards:
+    OUTPUT_UNITS, the precipitation conversion branch (mm/day -> 1.0, anything
+    else rejected), and the rn_shortwave_factor default.
+    """
+    mmday_factor = producer._precip_to_timestep_factor("gfs", _precip_product("mm/day"))
+    other_rejected = True
+    try:
+        producer._precip_to_timestep_factor("gfs", _precip_product("mm"))
+        other_rejected = False
+    except ForcingProductionError:
+        other_rejected = True
+    parts = [
+        "OUTPUT_UNITS=" + repr(sorted(OUTPUT_UNITS.items())),
+        f"precip_mmday_factor={mmday_factor!r}",
+        f"precip_other_rejected={other_rejected!r}",
+        f"rn_shortwave_factor={producer.config.rn_shortwave_factor!r}",
+    ]
+    blob = "|".join(parts).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def test_output_semantics_fingerprint_pins_producer_version(tmp_path: Path) -> None:
+    """Regression gate: any change to producer output semantics must bump the version.
+
+    This test fingerprints the producer's output-semantics surface (OUTPUT_UNITS,
+    precip conversion branch, rn_shortwave_factor default) and pins it together
+    with ``producer_version``. If a developer changes any output semantic, the
+    fingerprint changes and this test goes RED, forcing them to BOTH bump
+    ``producer_version`` AND update ``EXPECTED_OUTPUT_SEMANTICS_FINGERPRINT`` here
+    in the same change. This is the enforcement gate that keeps forcing lineage
+    currency checks honest (see #266/#272).
+    """
+    config = ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3)
+    store = LocalObjectStore(tmp_path)
+    repository = _build_repository(tmp_path)[1]
+    producer = ForcingProducer(config=config, repository=repository, object_store=store)
+
+    fingerprint = _compute_output_semantics_fingerprint(producer)
+
+    assert (fingerprint, producer.config.producer_version) == (
+        EXPECTED_OUTPUT_SEMANTICS_FINGERPRINT,
+        EXPECTED_PRODUCER_VERSION,
+    )
+
+
+def test_precip_mmday_accepted_and_other_units_rejected(tmp_path: Path) -> None:
+    """#272: precip conversion branch accepts mm/day (factor 1.0) and rejects others."""
+    config = ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3)
+    store = LocalObjectStore(tmp_path)
+    repository = _build_repository(tmp_path)[1]
+    producer = ForcingProducer(config=config, repository=repository, object_store=store)
+
+    assert producer._precip_to_timestep_factor("gfs", _precip_product("mm/day")) == 1.0
+    with pytest.raises(ForcingProductionError):
+        producer._precip_to_timestep_factor("gfs", _precip_product("mm"))

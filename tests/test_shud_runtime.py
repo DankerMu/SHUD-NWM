@@ -78,7 +78,9 @@ def _write_forcing(object_root: Path) -> None:
     (forcing / "forcing.tsd.forc").write_text("forcing\n", encoding="utf-8")
 
 
-def _write_standard_shud_forcing(object_root: Path) -> dict[str, str]:
+def _write_standard_shud_forcing(
+    object_root: Path, *, units: dict[str, str] | None = None
+) -> dict[str, str]:
     forcing = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
     shud_dir = forcing / "shud"
     shud_dir.mkdir(parents=True)
@@ -86,7 +88,7 @@ def _write_standard_shud_forcing(object_root: Path) -> dict[str, str]:
     csv_content = "2\t6\t20260501\t20260501\nTime_Day\tPrecip\tTemp\tRH\tWind\tRN\n0\t1\t2\t3\t4\t5\n"
     (shud_dir / "qhh.tsd.forc").write_text(tsd_content, encoding="utf-8")
     (shud_dir / "forcing.csv").write_text(csv_content, encoding="utf-8")
-    manifest_payload = {
+    manifest_payload: dict[str, Any] = {
         "station_count": 1,
         "files": [
             {
@@ -103,6 +105,8 @@ def _write_standard_shud_forcing(object_root: Path) -> dict[str, str]:
             },
         ],
     }
+    if units is not None:
+        manifest_payload["units"] = units
     manifest_content = json_bytes(manifest_payload)
     (forcing / "forcing_package.json").write_bytes(manifest_content)
     return {
@@ -327,6 +331,68 @@ def test_runtime_staging_accepts_manifest_carried_forcing_checksums(tmp_path: Pa
 
     assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
     assert (input_dir / "alias-a" / "forcing.csv").exists()
+
+
+_MMDAY_UNITS = {
+    "PRCP": "mm/day",
+    "TEMP": "degC",
+    "RH": "0-1",
+    "wind": "m/s",
+    "Rn": "W/m2",
+    "Press": "Pa",
+}
+
+
+def test_runtime_staging_rejects_non_mmday_prcp_unit(tmp_path: Path) -> None:
+    """#270: a package declaring PRCP in per-step ``mm`` must fail loudly at staging."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    bad_units = {**_MMDAY_UNITS, "PRCP": "mm"}
+    checksums = _write_standard_shud_forcing(object_root, units=bad_units)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "FORCING_PRCP_UNIT_MISMATCH"
+    assert "mm/day" in exc_info.value.message
+    assert "mm" in exc_info.value.message
+
+
+def test_runtime_staging_accepts_mmday_prcp_unit(tmp_path: Path) -> None:
+    """#270: a package declaring PRCP in mm/day stages normally."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root, units=_MMDAY_UNITS)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+
+
+def test_runtime_staging_tolerates_missing_unit_metadata(tmp_path: Path) -> None:
+    """#270: packages without a units block (legacy) must not fail (backward compat)."""
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root, units=None)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
 
 
 @pytest.mark.parametrize(

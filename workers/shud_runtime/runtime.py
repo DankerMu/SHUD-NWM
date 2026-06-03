@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from collections.abc import Mapping
 from dataclasses import InitVar, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -33,6 +34,14 @@ class SHUDRuntimeError(RuntimeError):
         super().__init__(message)
         self.error_code = error_code
         self.message = message
+
+
+# Authoritative SHUD forcing PRCP unit (Decision A): SHUD reads precip from
+# ``qhh.tsd.forc`` as a daily rate in millimetres per day.
+EXPECTED_PRCP_UNIT = "mm/day"
+# Forcing package manifests are tiny JSON metadata; cap the read to guard against
+# pathological inputs while staging.
+MAX_PACKAGE_MANIFEST_BYTES = 1 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -796,6 +805,7 @@ class SHUDRuntime:
                     "Forcing package manifest checksum mismatch: "
                     f"expected {expected_package_checksum}, got {actual_checksum}.",
                 )
+            self._assert_forcing_prcp_unit(package_manifest_uri)
 
         for file_entry in _forcing_checksum_entries(manifest):
             uri = str(file_entry["uri"])
@@ -806,6 +816,50 @@ class SHUDRuntime:
                     "FORCING_FILE_CHECKSUM_MISMATCH",
                     f"Forcing file checksum mismatch for {uri}: expected {expected_checksum}, got {actual_checksum}.",
                 )
+
+    def _assert_forcing_prcp_unit(self, package_manifest_uri: str) -> None:
+        """Fail loudly if the forcing package declares a PRCP unit other than mm/day.
+
+        This is the SHUD staging terminus guard for #270: SHUD reads PRCP from
+        ``qhh.tsd.forc`` as a daily rate (``mm/day``, Decision A). If an upstream
+        regression re-introduced a per-step ``mm`` accumulation, SHUD would silently
+        consume a physically wrong precip amount. We assert the unit here using the
+        package manifest already fetched/checksum-verified above (no extra network
+        fetch). Missing unit metadata is tolerated for backward compatibility (old
+        packages); only an explicit, non-mm/day PRCP unit is rejected.
+        """
+        try:
+            content = self.object_store.read_bytes_limited(
+                package_manifest_uri, max_bytes=MAX_PACKAGE_MANIFEST_BYTES
+            )
+        except Exception as error:
+            raise SHUDRuntimeError(
+                "FORCING_PACKAGE_MANIFEST_READ_FAILED",
+                f"Failed to read forcing package manifest {package_manifest_uri}: {error}",
+            ) from error
+        try:
+            package_manifest = json.loads(content.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise SHUDRuntimeError(
+                "FORCING_PACKAGE_MANIFEST_INVALID",
+                f"Forcing package manifest is not valid JSON: {package_manifest_uri}: {error}",
+            ) from error
+
+        units = package_manifest.get("units")
+        if not isinstance(units, Mapping):
+            # Backward compatibility: packages without a units block predate this
+            # metadata; do not fail the run on missing unit information.
+            return
+        observed = units.get("PRCP")
+        if observed is None:
+            return
+        if str(observed).strip().lower() != EXPECTED_PRCP_UNIT:
+            raise SHUDRuntimeError(
+                "FORCING_PRCP_UNIT_MISMATCH",
+                "Forcing package PRCP unit mismatch: "
+                f"expected '{EXPECTED_PRCP_UNIT}', observed '{observed}'. "
+                "SHUD requires PRCP in mm/day; refusing to stage forcing.",
+            )
 
     def _verify_staged_forcing_checksums(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
         forcing_root = _object_key(manifest["forcing"]["forcing_uri"], self.config.object_store_prefix).rstrip("/")

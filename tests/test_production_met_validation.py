@@ -31,6 +31,17 @@ def test_package_manifest_unit_matches_producer_output_units(variable: str) -> N
     assert package_manifest_unit(variable) == OUTPUT_UNITS[variable]
 
 
+def test_output_units_keyset_equals_required_forcing_variables() -> None:
+    # #272: the keysets must be identical, not merely overlapping. The per-variable
+    # parametrized test above only iterates REQUIRED_FORCING_VARIABLES, so a future
+    # OUTPUT_UNITS key added without a matching manifest unit would slip through.
+    # This set-equality guard catches that, and asserts every manifest unit is non-empty.
+    assert set(OUTPUT_UNITS) == set(REQUIRED_FORCING_VARIABLES)
+    for variable in REQUIRED_FORCING_VARIABLES:
+        unit = package_manifest_unit(variable)
+        assert isinstance(unit, str) and unit.strip(), variable
+
+
 def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
