@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.redaction import redact_text
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -26,6 +27,7 @@ from packages.common.safe_fs import (
     stat_no_follow,
     unlink_no_follow,
 )
+from packages.common.shud_preflight import check_shud_executable
 from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateSnapshot, assess_freshness
 
 
@@ -414,6 +416,7 @@ class SHUDRuntime:
         output_dir: Path,
         log_dir: Path,
     ) -> None:
+        self._preflight_shud_executable()
         command = _runtime_command(
             self.config.shud_executable,
             cfg_path,
@@ -454,6 +457,40 @@ class SHUDRuntime:
                 f"SHUD executable exited with code {completed.returncode}: {detail}",
             )
         _ensure_directory(output_dir)
+
+    def _preflight_shud_executable(self) -> None:
+        """Reject stub/missing SHUD executables before invoking the solver.
+
+        ``.py`` runtime engines (test/mock harnesses) are run through
+        ``sys.executable`` and are intentionally not compiled SHUD binaries, so
+        the stub/ldd/version-banner probes do not apply: for those we only assert
+        the script exists and is a regular file. Compiled executables go through
+        the full shared production preflight (stub basename, exec bit, shared
+        libraries, bounded SHUD version/help signal).
+        """
+
+        executable = str(self.config.shud_executable or "").strip()
+        if not executable:
+            raise SHUDRuntimeError(
+                "SHUD_EXECUTABLE_NOT_CONFIGURED",
+                "SHUD_EXECUTABLE is empty or unset; refusing to run a hydro run.",
+            )
+        if executable.endswith(".py"):
+            script = Path(executable).expanduser()
+            if not _python_runtime_script_present(script):
+                raise SHUDRuntimeError(
+                    "SHUD_EXECUTABLE_MISSING",
+                    f"SHUD runtime script not found: {redact_text(script.name)}",
+                )
+            return
+
+        result = check_shud_executable(executable)
+        if not result.ok:
+            primary = result.blockers[0]
+            raise SHUDRuntimeError(
+                str(primary.get("error_code", "SHUD_EXECUTABLE_PREFLIGHT_FAILED")),
+                str(primary.get("message", "SHUD executable preflight failed.")),
+            )
 
     def _prepare_shud_project_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
         if self._stage_standard_shud_forcing(manifest, model_input_dir):
@@ -1229,6 +1266,14 @@ def _validate_manifest_path_components(manifest: dict[str, Any]) -> None:
         for key in ("project_name", "shud_input_name"):
             if section.get(key) is not None:
                 _safe_path_component(section[key])
+
+
+def _python_runtime_script_present(script: Path) -> bool:
+    try:
+        script_stat = os.stat(script)
+    except OSError:
+        return False
+    return stat_module.S_ISREG(script_stat.st_mode)
 
 
 def _runtime_command(

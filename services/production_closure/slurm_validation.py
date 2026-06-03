@@ -24,6 +24,7 @@ from packages.common.safe_fs import (
     ensure_directory_no_follow,
     unlink_no_follow,
 )
+from packages.common.shud_preflight import check_shud_executable
 from packages.common.slurm_env import secret_bearing_url_reason
 from services.orchestrator.retry import compute_backoff_seconds, is_transient_error
 from services.production_closure.e2e_validation import (
@@ -633,11 +634,38 @@ def _preflight_blockers(config: ProductionSlurmConfig) -> list[dict[str, str]]:
     for name, value in required.items():
         if not value:
             blockers.append({"error_code": "PRODUCTION_SLURM_PREFLIGHT_MISSING", "field": name})
-    if config.submit and not config.fake_slurm:
+    live_submit = config.submit and not config.fake_slurm
+    blockers.extend(_shud_executable_blockers(config.solver_binary, live_submit=live_submit))
+    if live_submit:
         for command in ("sinfo", "squeue", "sacct", "scontrol", "sbatch", "scancel"):
             if shutil.which(command) is None:
                 blockers.append({"error_code": "SLURM_CLI_MISSING", "field": command})
     return blockers
+
+
+def _shud_executable_blockers(solver_binary: str, *, live_submit: bool) -> list[dict[str, str]]:
+    """Return SHUD-executable preflight blockers, redacted.
+
+    Stub executables (``/bin/true``, ``/bin/false``, empty, …) are rejected in
+    every mode so a deterministic fixture lane can never imply a runnable solver.
+    The full binary-dependency validation (existence, exec bit, shared libraries,
+    bounded SHUD version/help signal) only runs for a live submit because the
+    deterministic placeholder ``shud_omp`` is not expected to exist off node-22.
+    """
+
+    result = check_shud_executable(
+        solver_binary,
+        probe_version=live_submit,
+        probe_libraries=live_submit,
+    )
+    if live_submit:
+        return list(result.blockers)
+    return [
+        blocker
+        for blocker in result.blockers
+        if blocker.get("error_code")
+        in {"SHUD_EXECUTABLE_NOT_CONFIGURED", "SHUD_EXECUTABLE_STUB_REJECTED"}
+    ]
 
 
 def _write_manifest_index(

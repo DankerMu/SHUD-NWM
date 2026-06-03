@@ -52,6 +52,47 @@ from workers.shud_runtime import runtime as shud_runtime_module
 _TEST_CANONICAL_READINESS_PROVIDER_UNSET = object()
 
 
+def _write_valid_shud_executable(directory: Path) -> Path:
+    """Create a non-stub, executable, SHUD-identifying binary stand-in.
+
+    Mirrors the real compiled SHUD binary: flags (--version/--help) report
+    "Unknown option" with no token, and only a no-argument invocation prints the
+    identity banner, so the shared preflight treats it as a real solver. ``ldd``
+    on a shell script reports "not a dynamic executable" (Linux) or is absent
+    (macOS), so the shared-library probe never produces a false blocker for it.
+    """
+
+    path = directory / "shud_omp"
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$#" -gt 0 ]; then\n'
+        '  echo "Unknown option: $1" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'echo "Simulator for Hydrologic Unstructured Domains v2.0  2022"\n'
+        'echo "./shud [-0gv] [-p project_file] [-o output] <project_name>"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _valid_shud_executable_env(tmp_path_factory: pytest.TempPathFactory, monkeypatch: Any) -> None:
+    """Default every scheduler test to a valid SHUD executable.
+
+    The pre-submit SHUD preflight (#257) blocks stub/missing executables before
+    Slurm submission. Tests exercising the happy submission path therefore need a
+    real executable configured; the stub-rejection tests override this env var
+    explicitly with monkeypatch.setenv.
+    """
+
+    bin_dir = tmp_path_factory.mktemp("shud_bin")
+    executable = _write_valid_shud_executable(bin_dir)
+    monkeypatch.setenv("SHUD_EXECUTABLE", str(executable))
+
+
 class _AlwaysReadyCanonicalReadinessProvider:
     def canonical_readiness(self, **kwargs: Any) -> Mapping[str, Any]:
         return {
@@ -10034,3 +10075,108 @@ def _unexpected_lock_acquire(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
 
 def _unexpected_run_once(*_args: Any, **_kwargs: Any) -> SchedulerPassResult:
     raise AssertionError("missing DATABASE_URL must fail before candidate or evidence work")
+
+
+# --- Issue #257 / M23-6: scheduler SHUD executable pre-submit preflight -------
+
+
+class _AssertNoSubmitOrchestrator:
+    """Orchestrator that fails the test if it is ever invoked.
+
+    Does not allocate a LocalObjectStore, so it is safe to construct on any
+    platform (unlike FakeProductionOrchestrator).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def orchestrate_cycle(self, source: str, cycle_time: datetime, basins: list[dict[str, Any]]) -> Any:
+        self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+        raise AssertionError("orchestrator must not run when SHUD preflight blocks submission")
+
+
+def _slurm_shud_scheduler(tmp_path: Path, *, shud_executable: str) -> tuple[Any, Any]:
+    roots = _slurm_roots(tmp_path)
+    orchestrator = _AssertNoSubmitOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_env={"SHUD_EXECUTABLE": shud_executable},
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    return scheduler, orchestrator
+
+
+@pytest.mark.parametrize(
+    ("shud_executable", "expected_code"),
+    [
+        ("/bin/true", "SHUD_EXECUTABLE_STUB_REJECTED"),
+        ("/bin/false", "SHUD_EXECUTABLE_STUB_REJECTED"),
+        ("", "SHUD_EXECUTABLE_NOT_CONFIGURED"),
+        ("/nonexistent/shud_omp", "SHUD_EXECUTABLE_MISSING"),
+    ],
+)
+def test_scheduler_slurm_preflight_blocks_stub_or_missing_shud_before_submit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shud_executable: str,
+    expected_code: str,
+) -> None:
+    # The empty case must also clear the ambient SHUD_EXECUTABLE env so the
+    # scheduler cannot fall back to a valid one set by the autouse fixture.
+    if shud_executable == "":
+        monkeypatch.delenv("SHUD_EXECUTABLE", raising=False)
+    scheduler, orchestrator = _slurm_shud_scheduler(tmp_path, shud_executable=shud_executable)
+
+    result = scheduler.run_once()
+
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "slurm_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    # No Slurm submission, no active pipeline job, no hydro success state.
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert orchestrator.calls == []
+    blocker_codes = {b["code"] for b in result.evidence["slurm_preflight"]["blockers"]}
+    assert expected_code in blocker_codes
+    model_run = result.evidence["model_run_evidence"][0]
+    assert model_run["status"] == "preflight_blocked"
+    assert model_run["submitted"] is False
+    assert "secret" not in json.dumps(result.evidence)
+
+
+def test_scheduler_slurm_preflight_does_not_leak_library_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = tmp_path / "shud_omp"
+    binary.write_text('#!/bin/sh\necho "SHUD"\n', encoding="utf-8")
+    binary.chmod(0o755)
+
+    import packages.common.shud_preflight as preflight
+
+    monkeypatch.setattr(preflight, "_missing_shared_libraries", lambda _resolved: ["libqhh-token.so.2"])
+    monkeypatch.setattr(preflight, "_version_identity_signal", lambda _resolved: "present")
+
+    scheduler, orchestrator = _slurm_shud_scheduler(tmp_path, shud_executable=str(binary))
+
+    result = scheduler.run_once()
+
+    assert result.status == "preflight_blocked"
+    assert orchestrator.calls == []
+    blockers = result.evidence["slurm_preflight"]["blockers"]
+    library_blockers = [b for b in blockers if b["code"] == "SHUD_EXECUTABLE_LIBRARY_MISSING"]
+    assert library_blockers
+    assert library_blockers[0]["library"] == "libqhh-token.so.2"
+    assert "password" not in json.dumps(result.evidence)
