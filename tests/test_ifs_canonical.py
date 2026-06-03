@@ -20,6 +20,8 @@ convert_ifs_precipitation_with_metadata = converter_module.convert_ifs_precipita
 convert_ifs_shortwave_down_values = converter_module.convert_ifs_shortwave_down_values
 parse_cycle_time = converter_module.parse_cycle_time
 
+IFS_STANDARD_UNITS = converter_module.IFS_STANDARD_UNITS
+
 IFS_VARIABLES: tuple[str, ...] = ("2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str")
 
 
@@ -209,6 +211,27 @@ def test_precipitation_cumulative_m_to_mm_per_step(tmp_path: Path) -> None:
     assert lineage["accumulation_type"] == "since_cycle"
     assert lineage["unit_conversion"] == "m_to_mm"
     assert lineage["step_hours"] == 3.0
+
+
+def test_ifs_canonical_prcp_unit_contract_is_per_step_mm(tmp_path: Path) -> None:
+    # Cross-layer contract: the producer's "IFS PRCP unchanged" branch assumes IFS canonical PRCP
+    # is per-step `mm`. If this unit drifts to mm/day upstream, the producer would pass it through
+    # (factor 1.0) and silently lose the 24/step (e.g. 16x) conversion. Pin the per-step `mm`
+    # contract both at the constant and at the actually-produced canonical product.
+    assert IFS_STANDARD_UNITS["prcp_rate_or_amount"] == "mm"
+
+    repository = FakeCanonicalRepository()
+    _store, manifest = build_ifs_manifest(
+        tmp_path,
+        forecast_hours=(3, 6),
+        overrides={("tp", 3): [0.003], ("tp", 6): [0.006]},
+    )
+    converter = build_converter(tmp_path, repository=repository)
+    converter.convert_manifest(manifest)
+
+    precipitation = repository.products["IFS_2026050100_prcp_rate_or_amount_f006"]
+    assert precipitation["unit"] == "mm"
+    assert precipitation["unit"] == IFS_STANDARD_UNITS["prcp_rate_or_amount"]
 
 
 def test_negative_precipitation_handling_all_cases() -> None:

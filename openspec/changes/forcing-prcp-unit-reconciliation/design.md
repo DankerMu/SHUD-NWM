@@ -48,6 +48,8 @@ This change alters the numeric PRCP magnitude for two already-merged source path
 - **ERA5**: previously converted `mm/day -> step/24` per-step `mm`; now passes through unchanged (`×1.0`). Existing ERA5 forcing snapshots and downstream hydro results may need regeneration.
 - **IFS**: unchanged (`24/step` was already correct); no migration required.
 
+The migration is **executable, not just advisory**: `producer_version` is bumped `m1.0 -> m2.0` and is now part of the `forcing_version` currency check (`_existing_forcing_version_is_current` compares both the stored lineage and the on-disk manifest lineage). Any `forcing_version` produced before this change (lineage `producer_version` `m1.0`, or a manifest lineage missing the field) is therefore judged non-current on the next `produce()` for the same cycle and is force-recomputed with the corrected mm/day conversion — old per-step bytes can no longer be short-circuited to `already_done` and relabelled.
+
 ## Decision criteria
 
 1. Confirm the consumed unit empirically (SHUD run with a unit-probe forcing, or authoritative rSHUD/AutoSHUD ingestion code path that this pipeline must match).

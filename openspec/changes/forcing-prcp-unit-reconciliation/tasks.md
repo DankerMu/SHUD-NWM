@@ -17,7 +17,7 @@
 
 ## 4. Compatibility and verification
 
-- [x] 4.1 Record a data note: existing forcing snapshots / hydro results for any source whose magnitude changes may need regeneration (no silent value change).
+- [x] 4.1 Record a data note: existing forcing snapshots / hydro results for any source whose magnitude changes may need regeneration (no silent value change). Make it executable: bump `producer_version` `m1.0 -> m2.0` and include it in the `forcing_version` currency check so pre-change snapshots are force-recomputed instead of relabelled.
 - [ ] 4.2 Verify with `uv run pytest -q tests/test_forcing_producer.py tests/test_ifs_forecast_integration.py tests/test_production_met_validation.py`, `uv run ruff check .`, and `openspec validate forcing-prcp-unit-reconciliation --strict --no-interactive`.
 
 ### Evidence Floor

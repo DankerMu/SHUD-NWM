@@ -278,7 +278,7 @@ class ForcingProducerConfig:
     idw_power: float = 2.0
     idw_neighbors: int = 4
     rn_shortwave_factor: float = 1.0
-    producer_version: str = "m1.0"
+    producer_version: str = "m2.0"
     forcing_filename: str = "forcing.tsd.forc"
     csv_filename: str = "forcing_debug.csv"
     package_manifest_filename: str = "forcing_package.json"
@@ -1421,6 +1421,10 @@ class ForcingProducer:
                 lineage = {}
         if not isinstance(lineage, Mapping):
             lineage = {}
+        # Output transform semantics are versioned via producer_version; a mismatch means the
+        # stored bytes predate the current output unit/conversion contract and must be recomputed.
+        if str(lineage.get("producer_version") or "") != self.config.producer_version:
+            return False
         if _optional_int(lineage.get("min_lead_hours")) != lead_window.get("min_lead_hours"):
             return False
         if _optional_int(lineage.get("max_lead_hours")) != lead_window.get("max_lead_hours"):
@@ -1447,6 +1451,9 @@ class ForcingProducer:
                 return False
             manifest_lineage = manifest.get("lineage")
             if not isinstance(manifest_lineage, Mapping):
+                return False
+            # Manifests without producer_version predate output-semantics versioning -> stale.
+            if str(manifest_lineage.get("producer_version") or "") != self.config.producer_version:
                 return False
             if not _station_signature_matches(manifest_lineage.get("station_signature"), station_signature):
                 return False

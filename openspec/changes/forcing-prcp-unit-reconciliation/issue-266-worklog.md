@@ -56,7 +56,25 @@ uv run ruff check .
 openspec validate forcing-prcp-unit-reconciliation --strict --no-interactive
 ```
 
+## 5. Phase 4.5 验证门裁定台账 (round 1)
+| Finding | 来源 pack | 裁定 | 处置 |
+|---|---|---|---|
+| INV-1 缓存复用旧单位 (currency key 不含输出语义) | invariant | CONFIRMED in-scope BLOCKING | G5 |
+| INV-2 无 discriminator/仅散文迁移 | invariant | CONFIRMED | G5 关闭+design note |
+| INV-4 复用旧字节贴新单位标签 | invariant | CONFIRMED | G5 关闭 |
+| INT-1 package_manifest_unit 重复 OUTPUT_UNITS 无一致性测试 | integration | CONFIRMED low | G6a |
+| TEST-1 unknown-step 缺 forcing_versions=={}/upsert==0 | test | CONFIRMED low | G6b |
+| INV-3 IFS canonical unit==mm 跨层契约缺测 | invariant/correctness | PLAUSIBLE | G6c |
+| CORR-1 native_time_resolution≠实际累积窗口 | correctness | PLAUSIBLE 架构/既存 | OOS issue |
+| INT-2 SHUD runtime 终端单位无守卫 | integration | PLAUSIBLE 可选 | OOS issue |
+| SPEC-1 Press "Pa" vs SHUD doc "kPa"/无压力列 | spec | PLAUSIBLE 越界 | OOS issue |
+| security-perf | security | NO FINDINGS | - |
+
 ## 7. 进度日志 (倒序)
 | 时间 | 阶段 | 动作 | 结果 |
 |------|------|------|------|
+| T4 | D/E | 6-pack 并行评审 + 验证门裁定 | 1 BLOCKING(INV-1) + 3 low + 3 OOS |
+| T3 | C | node-22 真实 DB 目标套件 @9223092 | ✅ 96 passed (仅 cfgrib warning) |
+| T2 | B/C | fix subagent 交付 + 自验 + commit 9223092 + push + PR #268 | ✅ 本机 96 passed, ruff clean |
+| T1 | B | 派发 fix subagent（Decision A 全契约） | ✅ 连带修 met_validation 硬编码单位 |
 | T0 | A | 评估状态 + 锁定 Decision A（权威单位证据） | ✅ 无 PR；node-22 OK；契约确定 |

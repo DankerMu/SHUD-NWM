@@ -540,6 +540,37 @@ def test_existing_forcing_version_not_reused_when_child_rows_are_missing(tmp_pat
     assert len(repository.components) == 7 * 2
 
 
+def test_existing_forcing_version_not_reused_when_producer_version_is_stale(tmp_path: Path) -> None:
+    # A forcing_version produced before the output-semantics bump (producer_version "m1.0")
+    # carries stale per-step bytes even though every other reuse signature (station / canonical
+    # input / scheduler identity / manifest checksum) still matches the current inputs. The
+    # currency check must treat the producer_version mismatch as non-current and force a
+    # recompute instead of short-circuiting to already_done with mislabelled bytes.
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    assert first.status == "forcing_ready"
+    assert producer.config.producer_version == "m2.0"
+
+    # Downgrade only the producer_version on the stored lineage to mimic a pre-#266 record;
+    # all other signatures stay byte-identical to the current inputs.
+    record = repository.forcing_versions[first.forcing_version_id]
+    lineage = dict(record["lineage_json"])
+    assert lineage["producer_version"] == "m2.0"
+    lineage["producer_version"] = "m1.0"
+    record["lineage_json"] = lineage
+
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert second.status == "forcing_ready"
+    assert second.status != "already_done"
+    assert second.forcing_version_id == first.forcing_version_id
+    assert repository.upsert_count == 2
+    # The recompute restamps the lineage with the current producer_version.
+    assert repository.forcing_versions[second.forcing_version_id]["lineage_json"]["producer_version"] == "m2.0"
+
+
 def test_scheduler_basin_identity_mismatch_blocks_before_records(tmp_path: Path) -> None:
     store, repository = _build_repository(tmp_path)
     producer = _build_producer(tmp_path, repository, store)
@@ -645,6 +676,8 @@ def test_gfs_per_step_mm_without_step_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ForcingProductionError):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
     assert not repository.timeseries
+    # Rejection must not leak a half-built forcing_version.
+    assert repository.forcing_versions == {}
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
 
 
