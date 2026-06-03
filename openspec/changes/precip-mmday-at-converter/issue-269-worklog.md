@@ -15,22 +15,29 @@
 | phase | 状态 |
 |---|---|
 | A 评估+决策 | ✅ Option B |
-| B 修复 | ⏳ |
-| C 远端验证 | ⬜ |
-| D 评审 | ⬜ |
-| E 验证门 | ⬜ |
-| F 循环 | ⬜ |
-| G merge | ⬜ |
+| B 修复 | ✅ |
+| C 远端验证 | ✅ c96b4ed 264 passed / afcc3a7 115 passed |
+| D 评审 | ✅ round-1 6-pack + round-2 6/4-pack |
+| E 验证门 | ✅ round-2 CLEAN（全 LOW，零阻断） |
+| F 循环 | ✅ 1 fix 轮 → CLEAN |
+| G merge | ⏳ 等 CI Unit Tests 绿 → auto-merge |
 
 ## 进度日志
 | 时间 | 阶段 | 动作 | 结果 |
 |---|---|---|---|
-| T3 | F | F1→follow-up #275；round-2 修复派发 | ⏳ |
-| T2 | D/E | 4-pack 评审+裁定：1 latent-HIGH(→#275)、CORR-F1、杂项 | - |
+| T6 | E/F | round-2 6-pack：全 LOW、迁移闭环+集成 NO FINDINGS = CLEAN；3 test LOW 补强 afcc3a7（本机 8 passed/远端 115 passed） | ✅ |
+| T5 | B/C | MED-A inline 修复 c96b4ed（orchestrator unit 正交判据+SQL投影unit+4用例+design Migration）；远端 264 passed | ✅ |
+| T4 | D | round-1 6-pack 全 diff 复审：5 lens 通过/仅 LOW，唯一实质 MED-A（旧 mm 迁移无自愈） | ✅ |
+| T3 | F | F1 修复折叠入本 PR（不再 follow-up #275，用户裁定"直接修"）；缺失-version 规则 8fd0b6e；远端 260 passed | ✅ |
+| T2 | D/E | 4-pack 评审+裁定：1 latent-HIGH、CORR-F1、杂项 | - |
 | T1 | B/C | fix subagent 交付 + commit 7160a83 + PR #274 + 远端 150 passed | ✅ |
 | T0 | A | ground-truth #269 + 用户裁定 Option B | ✅ |
 
 ## Phase 4.5 裁定 (round 1)
-- INV-F1 旧 GFS canonical_ready 硬失败: CONFIRMED-latent（E2E库/未上线非 active break；健壮修复=orchestrator canonical 失效，越界）→ #275 + 防御性 converter_version 入 currency check
-- CORR-F1 GFS 首帧非零起报 ×24: PLAUSIBLE-latent → round-2 GFS 本地化对齐 IFS
-- 杂项: CONVERSION_PARAMS["tp"] 标签 / 注释:685 / GFS canonical unit 断言 → round-2
+- INV-F1 旧 GFS canonical_ready 硬失败: CONFIRMED-latent → **折叠入本 PR**（6c9ef6b/8fd0b6e orchestrator demote 重转），不再外移 #275（用户："不 follow-up，发现问题直接修"）
+- CORR-F1 GFS 首帧非零起报 ×24: 已修（converter 首帧用 forecast_hour 作 step），专测覆盖
+- 杂项: CONVERSION_PARAMS["tp"] 标签 / GFS unit 断言 → 已处理
+
+## Phase 4.5 裁定 (round 2，post-MED-A-fix)
+- MED-A 旧 `mm` canonical 降水产物（常缺 converter_version）无自愈、卡死 failed_forcing: **CONFIRMED in-scope**（本 PR 契约变更引入）→ inline 修复 c96b4ed：orchestrator 加正交 unit-stale 判据（unit≠mm/day→demote→重转），缺失 unit/version 仍兜底容忍，闭合迁移环。
+- round-2 全部 LOW（producer/detector 归一化口径差异不可触发→YAGNI；test 正向断言/边界用例→已补 afcc3a7）；迁移闭环、SQL/集成两条 NO FINDINGS → CLEAN，放行 merge。
