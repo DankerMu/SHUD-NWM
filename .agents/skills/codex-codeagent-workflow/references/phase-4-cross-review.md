@@ -2,6 +2,10 @@
 
 Use this template when running Phase 4 and follow-up cross-review rounds after Phase 6 fixes. Replace placeholders before invoking `codeagent-wrapper`.
 
+Canonical source: reviewer-pack scope and the actionable finding contract are defined by the `risk-adaptive-cross-review` skill (`reviewer-packages.md`, `finding-contract.md`, `failure-class-synthesis.md`). This file does not redefine them; it is the codex/OpenSpec instantiation — the concrete `codeagent-wrapper` task scaffolding, the `Invariant Matrix` binding, and the Phase 4.5 verifier. If a checklist here drifts from the canonical contract, the `risk-adaptive-cross-review` definition wins.
+
+Reviewers are recall-biased producers. Everything a reviewer writes under `Findings:` is a **candidate finding**, not a final merge-blocking verdict. Candidates pass through the Phase 4.5 independent verification gate (verifier template at the bottom of this file) before entering Phase 5. Reviewers should therefore surface any candidate with a nameable failure scenario instead of self-censoring half-believed ones; the verifier, not the reviewer, decides REFUTED.
+
 Required variables:
 
 - `<PR#>`: Pull request number
@@ -159,6 +163,7 @@ Inputs:
 
 Checklist:
 - Return value contracts match downstream expectations.
+- Removed-behavior audit: for every line the diff deletes or replaces, name the invariant, guard, validation, or error path it enforced, then locate where the new code re-establishes it. If you cannot find the re-establishment, that is a candidate finding (dropped guard, narrowed validation, removed error branch, deleted covering test).
 - For high or broad-expanded fixtures, trace the source-of-truth identity/contract through every producer, validator, storage/cache/query, route/entrypoint, downstream consumer, failure path, and evidence surface named by the Invariant Matrix.
 - Shared variables flow correctly from setup/config to consumers.
 - Execution order satisfies prerequisites before first use.
@@ -312,5 +317,61 @@ Findings:
 - ...or "None." if clean
 Non-blocking notes:
 - <items without concrete scenario/test, or "None.">
+EOF
+```
+
+## Phase 4.5 Verifier Template
+
+Run this after dedup, on the deduped candidate set, as one parallel invocation. Each candidate becomes one verifier task. A verifier must not be the reviewer that produced the candidate.
+
+Additional variables:
+
+- `<CANDIDATE_ID>`: stable id for the deduped candidate (e.g. `cand-03`).
+- `<CANDIDATE_BLOCK>`: the full candidate finding text (severity, failure class, invariant, scenario, required test, sibling surfaces, originating reviewer).
+
+Verifier contract:
+
+- Return exactly one verdict: `CONFIRMED`, `PLAUSIBLE`, or `REFUTED`.
+- `CONFIRMED`: the failing scenario is constructible from the diff, fixture, or existing contracts/tests. Cite the constructing evidence.
+- `PLAUSIBLE`: reachable but not fully constructible. Default here for realistic runtime states — rare error paths, falsy-zero treated as missing, off-by-one at a boundary the code does not exclude, concurrency races, retry storms, stale cache/DB rows, regex/allowlist that lost an anchor. Do not refute a candidate merely for being "speculative" or "depends on runtime state" when the state is realistic.
+- `REFUTED`: only when constructible from the code — factually wrong (quote the actual line), provably impossible (cite the type/constant/invariant), already handled in this diff (cite the guard), or pure style with no observable effect.
+- Use only evidence from the diff, OpenSpec fixture, existing code/contracts, or tests. Do not invent a scenario to confirm or a guard to refute.
+
+```bash
+"$CODEAGENT" --parallel --backend codex --full-output <<'EOF'
+---TASK---
+id: verify-<CANDIDATE_ID>
+backend: codex
+workdir: <absolute repo path>
+---CONTENT---
+# Finding Verification: <CANDIDATE_ID>
+
+Verify one candidate review finding for PR #<N> on branch <branch>.
+Head SHA: <FULL_SHA>
+Write the verdict to <REVIEW_DIR>/verify-<CANDIDATE_ID>.md.
+
+Rules:
+- Do not edit files, commit, push, or change state.
+- You are a leaf verifier. Do not invoke codeagent-wrapper, use the codeagent skill, use codex-codeagent-workflow, spawn subagents, launch parallel agents, or ask another AI/code agent to verify, fix, implement, or plan.
+- Adjudicate only this candidate. Do not search for new findings.
+- Output only the structured verdict.
+
+Inputs:
+- Candidate finding: <CANDIDATE_BLOCK>
+- Changed files: <@path list>
+- Fixture summary: <fixture summary>
+- Spec references: <@proposal.md> <@design.md> <@tasks.md>
+
+Adjudication:
+- CONFIRMED: scenario constructible from diff/fixture/contracts; cite the evidence.
+- PLAUSIBLE: realistic but not fully constructible runtime state; explain reachability.
+- REFUTED: factually wrong (quote line), provably impossible (cite type/constant/invariant), already handled (cite guard), or pure style. Only when constructible from the code.
+
+Output:
+Verifier verdict for: <CANDIDATE_ID>
+Reviewed head SHA: <FULL_SHA>
+Verdict: CONFIRMED|PLAUSIBLE|REFUTED
+Evidence: <quoted line / cited guard / reachability path>
+Note: <one line, or "None.">
 EOF
 ```

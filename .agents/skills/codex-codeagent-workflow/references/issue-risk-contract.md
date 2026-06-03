@@ -29,28 +29,12 @@ If `openspec new change` creates only a skeleton, the orchestrator should direct
 
 ## Project Profiles
 
-Map generic risk packs to project-specific surfaces.
-
-### SHUD Solver
-
-- Entry surfaces: `src/main.cpp`, `src/Model*`, `src/classes/*`, `Makefile`, example inputs.
-- Contracts: model input files, config/control files, initial condition/restart files, output file names and units.
-- Risk axes: numerical stability, CVODE/SUNDIALS integration, OpenMP/thread behavior, runtime performance, file output cadence, restart/IC compatibility, mass/water balance.
-- Typical evidence: compile, small example run, output schema check, conservation/numerical sanity, crash/NaN guard.
-
-### rSHUD Package
-
-- Entry surfaces: `R/*`, `src/*`, `tests/testthat`, `DESCRIPTION`, exported functions.
-- Contracts: R function signatures, return classes, column names, units, CRS, parser/writer formats, compatibility wrappers.
-- Risk axes: public API compatibility, testthat/R CMD check, GIS geometry/CRS, timeseries parsing, SHUD input/output readers, Rcpp behavior, CRAN-sensitive dependencies.
-- Typical evidence: focused testthat, `R CMD check` or package test command, parser round trip, fixture read/write.
-
-### AutoSHUD Pipeline
-
-- Entry surfaces: `GetReady.R`, `Step*.R`, `Rfunction/*`, `SubScript/*`, `Example/*`.
-- Contracts: project config, global/caller environment, Step artifacts, SHUD input files, GIS sidecars, forcing CSV and `meteoCov`.
-- Risk axes: step ordering, legacy branch compatibility, `source()` environment, geospatial CRS/schema, NetCDF/raster discovery, file publish/rollback, external command paths.
-- Typical evidence: focused Rscript tests, Step-style synthetic fixture, legacy branch smoke, output file/schema assertions.
+Map the generic risk packs and triggers below onto the concrete project using a
+profile from `project-profiles.md`. Infer the matching profile from repo files,
+or use the **Generic** profile when none matches. A profile adds project-specific
+entry surfaces, contracts, risk axes, evidence, optional domain risk packs, and
+optional domain expanded-triggers. Keep project-specific surfaces in the profile,
+not in this contract, so the core stays portable.
 
 ## Risk Triage
 
@@ -58,7 +42,7 @@ Output at most 20 lines.
 
 ```text
 Issue type: feature|bugfix|refactor|docs|release|test
-Project profile: SHUD|rSHUD|AutoSHUD|other
+Project profile: Generic|SHUD|rSHUD|AutoSHUD|... (from project-profiles.md)
 Blast radius: low|medium|high|critical
 Fixture level: none|compact|expanded
 Why:
@@ -78,34 +62,40 @@ Evidence floor:
 
 Prefer `compact` when uncertain unless a trigger above is present. Do not expand merely because the issue is important.
 
-Mandatory `expanded` triggers. If the issue text, expected change surface, or likely diff touches any of these, do not downgrade:
+Mandatory `expanded` triggers. If the issue text, expected change surface, or likely diff touches any of these core triggers, do not downgrade:
 
 - `dispatcher`, `routing`, `entrypoint`, `public API`, `CLI`
 - `parser`, `reader`, `writer`, `schema`, `column`, `field`, `unit`, `format`
 - `file output`, `delete`, `overwrite`, `publish`, `rollback`, `temp`, `symlink`, `path`
-- `NetCDF`, `raster`, `shapefile`, `CRS`, `geometry`, `projection`
-- `solver`, `CVODE`, `SUNDIALS`, `OpenMP`, `thread`, `restart`, `initial condition`
-- `Rcpp`, `S3`, `S4`, exported R function, compatibility wrapper
-- `legacy`, `example`, `migration`, `backward compatibility`
-- `Step`, `config`, `global`, `source()`, generated SHUD input
+- `auth`, `permission`, `secret`, `token`, `credential`
+- `migration`, `backward compatibility`, `legacy`, `example`
+- concurrency, retry, cancellation, persisted/shared state transitions
+
+The active project profile may add domain expanded-triggers (for example
+solver/numerical or geospatial keywords). Treat the profile's triggers as
+mandatory too. See `project-profiles.md`.
 
 ## Risk Packs
 
 Every pack must be considered. Mark each as `selected` or `not selected` with a short reason in `design.md` or `tasks.md`. Only selected packs need evidence, but unjustified non-selection is a fixture defect.
 
+Core packs (apply to every profile):
+
 - Public API / CLI / script entry
 - Config / project setup
 - File IO / path safety / overwrite
 - Schema / columns / units / field names
-- Geospatial / CRS / shapefile sidecars
-- Time series / forcing / temporal boundaries
-- Numerical stability / conservation / NaN
-- Solver runtime / performance / threading
+- Auth / permissions / secrets
+- Concurrency / shared state / ordering
 - Resource limits / large input / discovery
 - Legacy compatibility / examples
 - Error handling / rollback / partial outputs
 - Release / packaging / dependency compatibility
 - Documentation / migration notes
+
+Domain packs: the active profile may add packs (for example geospatial/CRS,
+time-series/forcing, numerical/conservation, solver/threading). Include the
+profile's domain packs in the considered set. See `project-profiles.md`.
 
 ## High-Risk Pack Closure Checklists
 
@@ -185,7 +175,7 @@ Target 25-45 lines across `design.md` and `tasks.md`.
 
 ```text
 Fixture level: expanded
-Project profile: <SHUD|rSHUD|AutoSHUD|other>
+Project profile: <Generic|SHUD|rSHUD|AutoSHUD|... from project-profiles.md>
 Change surface:
 - <entrypoints and modules>
 
@@ -201,20 +191,20 @@ Selected risk packs:
 - <pack>: <project-specific checks>
 - <pack>: <project-specific checks>
 
-Risk packs considered:
+Risk packs considered (core):
 - Public API / CLI / script entry: selected|not selected - <reason>
 - Config / project setup: selected|not selected - <reason>
 - File IO / path safety / overwrite: selected|not selected - <reason>
 - Schema / columns / units / field names: selected|not selected - <reason>
-- Geospatial / CRS / shapefile sidecars: selected|not selected - <reason>
-- Time series / forcing / temporal boundaries: selected|not selected - <reason>
-- Numerical stability / conservation / NaN: selected|not selected - <reason>
-- Solver runtime / performance / threading: selected|not selected - <reason>
+- Auth / permissions / secrets: selected|not selected - <reason>
+- Concurrency / shared state / ordering: selected|not selected - <reason>
 - Resource limits / large input / discovery: selected|not selected - <reason>
 - Legacy compatibility / examples: selected|not selected - <reason>
 - Error handling / rollback / partial outputs: selected|not selected - <reason>
 - Release / packaging / dependency compatibility: selected|not selected - <reason>
 - Documentation / migration notes: selected|not selected - <reason>
+Domain packs (from active profile, if any):
+- <profile pack>: selected|not selected - <reason>
 
 Required evidence:
 - <scenario/test name or command>: <input> -> <expected output>

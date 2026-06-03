@@ -11,12 +11,31 @@ Skip DAG selection if the user specified an issue number.
 3. Auto-select by phase `p0 > p1 > p2 > p3`, then priority `critical > high > medium`, then `type:backend` over `type:android`, then lower issue number.
 4. Read the selected issue body and relevant comments. Extract an OpenSpec change name if the issue names one.
 5. Locate `openspec/changes/<change-name>/{proposal.md,design.md,tasks.md}` in the active repo or workspace. If the change is missing, create it in Phase 0.5 before implementation.
-6. Identify project family from repo context: SHUD solver, rSHUD package, AutoSHUD pipeline, or other. Load `issue-risk-contract.md`.
-7. Announce the DAG sketch and whether the OpenSpec change exists.
+6. Resolve the project profile (lookup order):
+   1. If `openspec/project-profile.md` exists, load it as the active profile.
+   2. If it is absent, run the one-time **profile bootstrap** (Phase 0.0 below), which writes `openspec/project-profile.md`, then load it.
+   3. Only if bootstrap cannot infer anything project-specific, fall back to the **Generic** profile in `project-profiles.md`.
+   Then load `issue-risk-contract.md`.
+7. Announce the DAG sketch, the active project profile, and whether the OpenSpec change exists.
+
+### Phase 0.0: Profile Bootstrap (one-time per project)
+
+Run only when `openspec/project-profile.md` is missing. The shared
+`project-profiles.md` provides the Generic default and SHUD/rSHUD/AutoSHUD
+example templates to copy from; the active profile is project-local and survives
+skill reinstalls because it lives under `openspec/`, not inside the skill.
+
+1. Scan the repo for risk-bearing structure: primary language/build system, public entrypoints (CLI, API, services), data schemas/formats/serializers, external integrations and credentials, persisted/shared state, and shared helper roots.
+2. Match against `project-profiles.md`. If an example profile fits (e.g. an AutoSHUD repo), copy it as the starting point; otherwise start from Generic.
+3. Write `openspec/project-profile.md` with the six profile fields: entry surfaces, contracts, risk axes, typical evidence, domain risk packs, domain expanded-triggers. Respect the size budget in `project-profiles.md`: short bullets not prose, never restate core packs/triggers, and stay under ~25 lines for a simple project or ~60 for a broad multi-subsystem system. Over-budget means it restates core or the repo should split into narrower profiles.
+4. Note in the file that it is a living artifact maintained in Phase 0.5 as the project evolves.
+
+The profile is a living document, not a one-shot. It does not change per issue, but it is updated whenever the project grows a new risk surface (see Phase 0.5 profile-gap maintenance).
 
 ## Phase 0.5: Risk Triage + OpenSpec Fixture
 
-1. Create a short triage from issue, repo context, expected change surface, and project profile.
+1. Create a short triage from issue, repo context, expected change surface, and the active project profile (`openspec/project-profile.md`).
+   - Profile-gap maintenance: if the issue touches an entry surface, contract, risk axis, or domain pack the profile does not yet describe, update `openspec/project-profile.md` before continuing. Keep the profile a living artifact; do not edit it for ordinary issues that already fit it.
 2. Assign fixture level: `none`, `compact`, or `expanded`. Mandatory expanded triggers live in `issue-risk-contract.md`.
 3. Assign repair intensity:
    - `low`: isolated, low blast-radius change; focused fixes are acceptable.
@@ -130,20 +149,47 @@ Review rounds:
 - After a Phase 6 fix pass, rerun cross-review before Phase 7 using the same risk-adaptive reviewer count and reviewer mix as Phase 4 on the current head.
 - Do not narrow follow-up rounds to only the risk areas touched by the fix. A prior round can miss issues outside the fix area, so each post-fix round must be a comprehensive review of the updated PR diff and OpenSpec fixture before Phase 7.
 - A cross-review round is clean only when it has no actionable findings. Critical/major findings and test coverage gaps always return to Phase 5-6. Minor findings must be fixed or explicitly deferred with issue/OpenSpec/user-instruction basis.
-- A review finding is actionable only if it includes severity, failure class, violated invariant or contract, concrete failing scenario or reproduction path, required test/evidence, sibling surfaces to audit, and merge-blocking status. Treat vague concerns, style preferences, and untestable possibilities as non-blocking notes unless Codex can complete the missing fields from the diff and fixture.
+- A finding is actionable only if it satisfies the finding contract defined in the `risk-adaptive-cross-review` skill (`finding-contract.md`): severity, failure class, violated invariant/contract, concrete scenario, evidence, fix direction, required test/proof, sibling surfaces, and blocking status. Treat vague concerns, style preferences, and untestable possibilities as non-blocking notes unless Codex can complete the missing fields from the diff and fixture.
 - If a follow-up round finds the same failure class in another module, helper, or sibling surface, treat that as an invariant miss, not as a new isolated finding. Trigger Phase 6.2 before issuing the next fix prompt.
 - If Round 3 still reports the same failure class after an invariant-closure pass, stop ordinary review looping. Run a Review Failure Retro before another fix or review pass.
 - If the PR reaches 5 comprehensive cross-review rounds total, the five-round hard gate triggers. Stop ordinary review/fix looping immediately and transition to a root-cause strategy path; this is not permission to abandon the issue. Do not run another codeagent fix, cross-review, Phase 7 final review, CI wait-for-merge, or merge until a Deep Review Failure Retro, Gate-Level PR Strategy Review, Invariant Surface Inventory, and Regression Matrix are written to the local evidence directory or PR working notes.
 - If review/fix activity has consumed more than one working day, or the same invariant keeps failing in sibling surfaces, run a Review Failure Retro before any further review round. The retro must change the next action: update fixture/matrix, broaden or split implementation scope, strengthen reviewer prompts, or make a user-visible scope call only when the decision cannot be derived from issue/OpenSpec evidence.
 - While reviewers run, use the same silent long-wait rule as Phase 1. Avoid verbose `tail`, `watch`, or frequent status polling unless a reviewer fails or exceeds the expected timeout.
 - If parallel review tooling fails without producing reports, diagnose the wrapper/API failure once, then rerun the same reviewer set with `codeagent-wrapper --parallel`. Do not count a failed no-report invocation as a comprehensive review round.
+- Phase 4 reviewers emit candidate findings, not final merge-blocking verdicts. Do not feed reviewer reports straight into Phase 5; they must pass the Phase 4.5 verification gate first.
+
+## Phase 4.5: Independent Finding Verification Gate
+
+Reviewers are recall-biased producers; this gate separates finding from judging so false positives never spawn fix rounds or inflate the round budget.
+
+Steps:
+
+1. Collect every candidate finding from the Phase 4 reports actually run on the current head.
+2. Dedup near-duplicates: same defect + same location + same root reason collapse to one candidate. Merge the cited sibling surfaces and keep the highest severity.
+3. Run one `codeagent-wrapper --parallel --backend codex` verification pass using the verifier template in `phase-4-cross-review.md`. Assign each candidate to a separate verifier task. A verifier must not be the reviewer that produced the candidate, and Codex must not self-adjudicate in place of a verifier.
+4. Each verifier returns exactly one verdict:
+   - `CONFIRMED`: the failing scenario is constructible from the diff/fixture/contracts.
+   - `PLAUSIBLE`: reachable but not fully constructible — rare error paths, falsy-zero treated as missing, off-by-one at a non-excluded boundary, races, retry storms, stale cache/DB rows, regex/allowlist that lost an anchor.
+   - `REFUTED`: factually wrong (quote the line), provably impossible (cite type/constant/invariant), already handled in this diff (cite the guard), or pure style with no observable effect.
+5. Apply the fixture-level bias:
+   - `high` / `broad-expanded`: CONFIRMED and PLAUSIBLE are both merge-blocking inputs to Phase 5 (recall-biased).
+   - `expanded`: CONFIRMED is merge-blocking; PLAUSIBLE is merge-blocking only when it maps to a selected risk pack or Invariant Matrix row, otherwise a non-blocking note.
+   - `low` / `compact`: only CONFIRMED is merge-blocking; PLAUSIBLE becomes a non-blocking note (precision-biased).
+6. Drop every REFUTED candidate and each `wontfix` test-coverage exception is still forbidden. Record one line per dropped candidate: `<candidate> -> REFUTED: <verifier rationale>`. Persist the verdict table to the local review directory.
+
+Rules:
+
+- This verification pass is not a comprehensive cross-review round. Do not increment the Phase 4 round counter for it.
+- Never upgrade a REFUTED candidate back to blocking without a fresh reviewer finding on a later head.
+- If verification tooling fails without producing verdicts, rerun it once; do not silently promote all candidates to blocking, and do not silently drop them.
+- Verdicts must use only evidence from the diff, OpenSpec fixture, existing code/contracts, or tests. A verifier may not invent a scenario to confirm or a guard to refute.
 
 ## Phase 5: Fix Synthesis
 
 Combine:
 
 - OpenSpec fixture and selected risk packs
-- Cross-review reports actually run, including follow-up rounds after fixes
+- Verified findings from Phase 4.5 (CONFIRMED plus risk-weighted PLAUSIBLE), including follow-up rounds after fixes
 - Codex read-only diff review
 - Local verification failures
 - Test coverage gaps from `tasks.md`
@@ -161,7 +207,7 @@ First classify all findings by failure class and selected risk pack. Common clas
 
 Drop or downgrade non-actionable review notes before fix planning unless Codex can complete the actionable finding contract from the diff, fixture, and verification evidence.
 
-Sanity-check reviewer-provided scenarios and tests before accepting a finding as actionable. A formally complete finding is not actionable if its scenario is speculative, impossible to trigger, outside the OpenSpec scope, contradicted by existing contracts/tests, or depends on behavior the issue explicitly declared as a non-goal.
+Phase 4.5 already adjudicated each candidate. Do not re-litigate REFUTED candidates here. Treat the CONFIRMED and risk-weighted PLAUSIBLE set as the actionable input. The only additional filter at this stage is the `wontfix` rule below for findings the OpenSpec fixture, issue text, or explicit user instruction places out of scope; test coverage gaps are never `wontfix`.
 
 Produce one checklist grouped by failure class. For each group include severity, file/line examples when available, violated invariant, concrete failing scenario, requested behavior, required test/evidence, selected risk pack, analogous surfaces that must be audited, and merge-blocking status. A group may cite multiple reviewer comments, but it should produce one class-level fix prompt.
 
