@@ -60,13 +60,44 @@ node-27 可读的 display artifacts —— 与 flood-frequency 发布解耦。
 | strict product identity | test_tile_publisher (NEW) | ⬜ |
 | incomplete-stage aggregate status | test_orchestration_chain (确认/补) | ⬜ |
 
+## Cross-review ledger
+
+### Round-1 (6-pack, DB-backed/shared-root/boundary) → verify gate
+in-scope CONFIRMED 4 项,已修(commit ec20793):
+- **F1 [HIGH]** q_down 不写 DB → spec scenario 1/6 "DB records reference URIs" + 下游27可发现。
+  修:`_upsert_qdown_layer` 写 `map.tile_layer`(tile_uri_template=manifest_uri)+ commit;
+  缺表容忍降级 `db_registered=False`(never-break)。
+- **F2 [HIGH]** 同 run 跨多 river_network_version → layer_id/key 覆盖、count 虚高。
+  修:layer_id/key 纳入 `_safe_key_segment(network)`;source_run_ids 去重;published_basins=
+  distinct run、published_products=行数。
+- **F5 [MED]** PUBLISH_IDENTITY_INCOMPLETE 整 cycle 硬失败连累好 run(裁:strict+never-break 兼顾)。
+  修:per-run skip+blocker,全 incomplete 才 raise。
+- **F7 [LOW]** `_is_private_display_path` 与 reader 漂移。修:补 unquote + file:// 绝对路径判 private。
+test:F6 公开入口(class-level connect listener + 文件 ATTACH)、F8 fixture 保真(真 PK/NOT NULL/
+map.tile_layer 表)、F1/F2/F5 新场景。
+接受不修(有 rationale):F3 station_count=segment 代理(诚实标注 `river_segment_proxy`,非伪造);
+F4 river metadata 由 manifest identity 承载;F9 本地绝对 prefix 自拒(配置脆弱,生产 S3 不触发)。
+
+### Round-2 (3-pack, 全量 re-review of full diff) → **CLEAN**
+- 正确性/DB:CLEAN,无 HIGH;2 条 MED 为弱一致性设计取舍(对象先于 DB 写、缺表降级,有 db_registered
+  诚实标志),reviewer 建议不改(改则牺牲 never-break 独立可发布语义)。
+- never-break/安全:CLEAN,无 CONFIRMED 回归;flood 路径零回归(独立 session、layer_id 命名空间互斥)。
+- spec/test:round-1 两条 HIGH **均闭合 CONFIRMED**;scenario 1-6 全满足;测试强、无假绿。
+
+### 已知 caveat(非 #259 scope,归 #260 E2E)
+- **接线缺口**:`publish_qdown_cycle` 尚无 chain/scheduler 调用方;`publish-tiles` 命令(cli.py:42)
+  仍走 flood 的 `publish_cycle`。接线需改 flood publish-tiles 契约(non-fatal flood)+ 真 Slurm
+  publish stage e2e 验证 → 属 #260(M23-9 E2E,deps all)。本 PR 交付组件能力+DB注册+单测,满足
+  #259 PR-Boundary 与 Verification。
+- task 6.4 的 pipeline_job/event 持久化由 chain publish stage 已覆盖(publisher 是被调用组件)。
+
 ## Progress
 
 - [x] State assessment (Explore + 亲读 publisher/reader/chain/parser)
 - [x] 分支 feat/issue-259-qdown-publish
-- [ ] publisher.py: publish_qdown_cycle 实现
-- [ ] tests/test_tile_publisher.py 新建
-- [ ] 验证: ruff + 本地 pytest + node-22 真库 pytest
-- [ ] cross-review (6-pack, DB-backed/shared-root) → verify → 直到 clean
-- [ ] OpenSpec tasks 6.1-6.6 勾选 + validate
-- [ ] PR + CI 绿 → merge
+- [x] publisher.py: publish_qdown_cycle 实现 (+ round-1 4 修复)
+- [x] tests/test_tile_publisher.py 新建 (38 用例)
+- [x] 本地验证: ruff 全绿 + pytest 49 passed + openspec valid + 大测试 203 passed 无破坏
+- [x] cross-review round-1 (6-pack) → 4 修复 → round-2 (3-pack) → CLEAN
+- [ ] node-22 真库 re-verify (ec20793) 绿
+- [ ] OpenSpec tasks 6.1-6.6 勾选 + PR + CI 绿 → merge

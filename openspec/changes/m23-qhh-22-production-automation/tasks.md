@@ -132,11 +132,11 @@
 
 ## 6. Parse, Publish, and Display Boundary
 
-- [ ] 6.1 Parse real SHUD outputs into `hydro.hydro_run` and `hydro.river_timeseries` with stable run/model/source/cycle/forcing identities and segment/time/unit counts.
-- [ ] 6.2 Publish q_down display products, manifests, and bounded logs under `/ghdc/data/nwm/published` or the configured published root with supported `published://` or allowlisted URIs.
-- [ ] 6.3 Keep frequency/flood publication readiness separate from q_down parsed display readiness; missing return-period curves or warning thresholds must become explicit unavailable/quality metadata, not fabricated readiness.
-- [ ] 6.4 Persist pipeline stage/job/event records for download, convert, forcing, forecast, parse, q_down publish, and frequency/flood publish so `/ops` can read formal state rather than diagnostic script JSON.
-- [ ] 6.5 Add tests for parse success, parse mapping failure, duplicate terminal hydro-run prevention, q_down publish success, frequency unavailable state, private workspace URI rejection, strict product identity, and incomplete-stage aggregate status.
+- [x] 6.1 Parse real SHUD outputs into `hydro.hydro_run` and `hydro.river_timeseries` with stable run/model/source/cycle/forcing identities and segment/time/unit counts. (existing `workers/output_parser`, consumed by #259)
+- [x] 6.2 Publish q_down display products, manifests, and bounded logs under `/ghdc/data/nwm/published` or the configured published root with supported `published://` or allowlisted URIs. (`TilePublisher.publish_qdown_cycle`; live publish-tiles wiring → #260)
+- [x] 6.3 Keep frequency/flood publication readiness separate from q_down parsed display readiness; missing return-period curves or warning thresholds must become explicit unavailable/quality metadata, not fabricated readiness.
+- [x] 6.4 Persist pipeline stage/job/event records for download, convert, forcing, forecast, parse, q_down publish, and frequency/flood publish so `/ops` can read formal state rather than diagnostic script JSON. (chain `M3_STAGES` publish stage covers q_down-publish persistence)
+- [x] 6.5 Add tests for parse success, parse mapping failure, duplicate terminal hydro-run prevention, q_down publish success, frequency unavailable state, private workspace URI rejection, strict product identity, and incomplete-stage aggregate status. (`test_output_parser` + `test_tile_publisher` + chain partial-status tests)
 - [ ] 6.6 Verify with `uv run pytest -q tests/test_output_parser.py tests/test_tile_publisher.py tests/test_orchestration_chain.py tests/test_monitoring_api.py`, `uv run ruff check .`, and published artifact/log URI evidence.
 
 ## 7. Node-22 E2E and Documentation
