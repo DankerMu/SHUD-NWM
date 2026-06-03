@@ -184,6 +184,17 @@ class FakeForcingRepository:
         return dict(kwargs)
 
 
+class FailingWriteObjectStore(LocalObjectStore):
+    def __init__(self, root: Path, *, fail_key_suffix: str) -> None:
+        super().__init__(root)
+        object.__setattr__(self, "fail_key_suffix", fail_key_suffix)
+
+    def write_bytes_atomic(self, key_or_uri: str, content: bytes) -> str:
+        if str(key_or_uri).endswith(self.fail_key_suffix):
+            raise RuntimeError("object write failed")
+        return super().write_bytes_atomic(key_or_uri, content)
+
+
 def test_idw_weights_are_normalized_for_station() -> None:
     station = MetStation("station_1", "basin_v1", 0.5, 0.0, 10.0, "forcing_proxy")
     grid_points = (
@@ -296,6 +307,21 @@ def test_produce_writes_standard_shud_forcing_package_for_all_stations(tmp_path:
     assert (package_root / "shud" / "X100.95Y36.25.csv").exists()
     assert (package_root / "shud" / "X101.05Y36.25.csv").exists()
     assert result.station_count == 2
+    manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
+    assert manifest["variable_set"] == list(FORCING_VARIABLES)
+    assert manifest["units"] == {
+        "PRCP": "mm",
+        "TEMP": "degC",
+        "RH": "0-1",
+        "wind": "m/s",
+        "Rn": "W/m2",
+        "Press": "Pa",
+    }
+    assert [station["station_id"] for station in manifest["station_order"]] == ["qhh_forc_001", "qhh_forc_002"]
+    assert manifest["quality_flags"] == {"canonical_products": ["ok"], "station_timeseries": ["ok"]}
+    lineage = repository.forcing_versions[result.forcing_version_id]["lineage_json"]
+    assert lineage["forcing_package_manifest_uri"].endswith("/forcing_package.json")
+    assert lineage["forcing_package_manifest_checksum"] == result.checksum
 
 
 def test_produce_uses_only_forcing_grid_stations_for_qhh_package(tmp_path: Path) -> None:
@@ -533,25 +559,17 @@ def test_existing_forcing_version_not_reused_when_same_grid_definition_uri_conte
 
 def test_existing_forcing_version_not_reused_when_forcing_grid_station_set_changes(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
-    proxy = MetStation(
-        "qhh_proxy_001",
+    first_forcing_grid = MetStation(
+        "qhh_forc_001",
         "basin_v1",
-        101.95,
-        37.25,
-        3700.0,
-        "forcing_proxy",
-        properties_json={"shud_forcing_index": 999, "forcing_filename": "proxy.csv"},
+        100.95,
+        36.25,
+        3657.0,
+        "forcing_grid",
+        properties_json={"shud_forcing_index": 1, "forcing_filename": "X100.95Y36.25.csv"},
     )
     forcing_grid = (
-        MetStation(
-            "qhh_forc_001",
-            "basin_v1",
-            100.95,
-            36.25,
-            3657.0,
-            "forcing_grid",
-            properties_json={"shud_forcing_index": 1, "forcing_filename": "X100.95Y36.25.csv"},
-        ),
+        first_forcing_grid,
         MetStation(
             "qhh_forc_002",
             "basin_v1",
@@ -562,11 +580,11 @@ def test_existing_forcing_version_not_reused_when_forcing_grid_station_set_chang
             properties_json={"shud_forcing_index": 2, "forcing_filename": "X101.05Y36.25.csv"},
         ),
     )
-    repository = FakeForcingRepository(stations=(proxy,), products=_write_canonical_products(store))
+    repository = FakeForcingRepository(stations=(first_forcing_grid,), products=_write_canonical_products(store))
     producer = _build_producer(tmp_path, repository, store)
 
     first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
-    repository.stations = (*forcing_grid, proxy)
+    repository.stations = forcing_grid
     second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
     assert first.status == "forcing_ready"
@@ -619,6 +637,26 @@ def test_failed_child_write_leaves_forcing_version_incomplete_and_retry_finalize
     assert result.forcing_version_id == forcing_version_id
     assert repository.forcing_versions[forcing_version_id]["checksum"] == result.checksum
     assert repository.upsert_count == 2
+
+
+def test_failed_package_manifest_write_leaves_parent_incomplete_and_retry_finalizes(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    failing_store = FailingWriteObjectStore(tmp_path, fail_key_suffix="forcing_package.json")
+    producer = _build_producer(tmp_path, repository, failing_store)
+
+    with pytest.raises(ForcingProductionError, match="object write failed"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    forcing_version_id = next(iter(repository.forcing_versions))
+    assert repository.forcing_versions[forcing_version_id]["checksum"] is None
+    assert not any(event[0] == "replace_forcing_components" for event in repository.events)
+
+    retry_producer = _build_producer(tmp_path, repository, store)
+    result = retry_producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    assert result.forcing_version_id == forcing_version_id
+    assert repository.forcing_versions[forcing_version_id]["checksum"] == result.checksum
 
 
 def test_invalid_existing_forcing_version_is_replaced_not_duplicated(tmp_path: Path) -> None:
@@ -678,9 +716,116 @@ def test_no_stations_raises_error_before_forcing_records(tmp_path: Path) -> None
     store, repository = _build_repository(tmp_path, stations=())
     producer = _build_producer(tmp_path, repository, store)
 
-    with pytest.raises(ForcingProductionError, match="No active meteorological stations"):
+    with pytest.raises(ForcingProductionError, match="No active forcing_grid"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+
+
+def test_proxy_only_stations_block_fixed_station_forcing(tmp_path: Path) -> None:
+    proxy = MetStation(
+        "qhh_proxy_001",
+        "basin_v1",
+        -74.7,
+        40.1,
+        50.0,
+        "forcing_proxy",
+        properties_json={"shud_forcing_index": 1, "forcing_filename": "proxy.csv"},
+    )
+    store, repository = _build_repository(tmp_path, stations=(proxy,))
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="No active forcing_grid"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+
+
+@pytest.mark.parametrize(
+    ("properties_json", "message"),
+    [
+        ({"forcing_filename": "station.csv"}, "shud_forcing_index"),
+        ({"shud_forcing_index": 1}, "forcing_filename"),
+        ({"shud_forcing_index": 1, "forcing_filename": "../station.csv"}, "forcing_filename"),
+    ],
+)
+def test_forcing_grid_station_requires_shud_index_and_filename(
+    tmp_path: Path,
+    properties_json: Mapping[str, Any],
+    message: str,
+) -> None:
+    station = MetStation(
+        "qhh_forc_001",
+        "basin_v1",
+        -74.7,
+        40.1,
+        50.0,
+        "forcing_grid",
+        properties_json=properties_json,
+    )
+    store, repository = _build_repository(tmp_path, stations=(station,))
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match=message):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+
+
+@pytest.mark.parametrize(
+    ("station_properties", "message"),
+    [
+        (
+            (
+                {"shud_forcing_index": 1, "forcing_filename": "station_1.csv"},
+                {"shud_forcing_index": 1, "forcing_filename": "station_2.csv"},
+            ),
+            "Duplicate SHUD forcing index 1",
+        ),
+        (
+            (
+                {"shud_forcing_index": 1, "forcing_filename": "station.csv"},
+                {"shud_forcing_index": 2, "forcing_filename": "station.csv"},
+            ),
+            "Duplicate SHUD forcing filename 'station.csv'",
+        ),
+    ],
+)
+def test_duplicate_forcing_grid_station_contract_blocks_record_creation(
+    tmp_path: Path,
+    station_properties: tuple[Mapping[str, Any], Mapping[str, Any]],
+    message: str,
+) -> None:
+    stations = (
+        MetStation(
+            "qhh_forc_001",
+            "basin_v1",
+            -74.7,
+            40.1,
+            50.0,
+            "forcing_grid",
+            properties_json=station_properties[0],
+        ),
+        MetStation(
+            "qhh_forc_002",
+            "basin_v1",
+            -74.6,
+            40.2,
+            55.0,
+            "forcing_grid",
+            properties_json=station_properties[1],
+        ),
+    )
+    store, repository = _build_repository(tmp_path, stations=stations)
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match=message):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.upsert_count == 0
     assert repository.forcing_versions == {}
     assert repository.timeseries == []
 
@@ -713,6 +858,21 @@ def test_nonfinite_field_values_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ForcingProductionError, match="non-finite field value"):
         producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+
+def test_canonical_unit_mismatch_blocks_generation_before_forcing_records(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    repository.products = tuple(
+        _replace_product_unit(product, "K") if product.variable == "air_temperature_2m" else product
+        for product in repository.products
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="unit mismatch"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
 
 
 def test_warn_precipitation_or_radiation_products_do_not_enter_ok_forcing(tmp_path: Path) -> None:
@@ -908,7 +1068,17 @@ def _build_repository(
     repository = FakeForcingRepository(
         stations=stations
         if stations is not None
-        else (MetStation("station_1", "basin_v1", -74.7, 40.1, 50.0, "forcing_proxy"),),
+        else (
+            MetStation(
+                "station_1",
+                "basin_v1",
+                -74.7,
+                40.1,
+                50.0,
+                "forcing_grid",
+                properties_json={"shud_forcing_index": 1, "forcing_filename": "station_1.csv"},
+            ),
+        ),
         products=products,
         fail_next_timeseries_replace=fail_next_timeseries_replace,
     )
@@ -1003,6 +1173,25 @@ def _replace_product_quality(product: CanonicalProduct, quality_flag: str) -> Ca
         native_time_resolution=product.native_time_resolution,
         native_spatial_resolution=product.native_spatial_resolution,
         quality_flag=quality_flag,
+        lead_time_hours=product.lead_time_hours,
+    )
+
+
+def _replace_product_unit(product: CanonicalProduct, unit: str) -> CanonicalProduct:
+    return CanonicalProduct(
+        canonical_product_id=product.canonical_product_id,
+        source_id=product.source_id,
+        cycle_time=product.cycle_time,
+        valid_time=product.valid_time,
+        variable=product.variable,
+        unit=unit,
+        grid_id=product.grid_id,
+        object_uri=product.object_uri,
+        checksum=product.checksum,
+        grid_definition_uri=product.grid_definition_uri,
+        native_time_resolution=product.native_time_resolution,
+        native_spatial_resolution=product.native_spatial_resolution,
+        quality_flag=product.quality_flag,
         lead_time_hours=product.lead_time_hours,
     )
 

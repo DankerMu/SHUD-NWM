@@ -56,6 +56,17 @@ OUTPUT_UNITS: dict[str, str] = {
     "Rn": "W/m2",
     "Press": "Pa",
 }
+EXPECTED_CANONICAL_UNITS: dict[str, tuple[str, ...]] = {
+    "prcp_rate_or_amount": ("mm",),
+    "air_temperature_2m": ("degC",),
+    "relative_humidity_2m": ("0-1",),
+    "wind_u_10m": ("m/s",),
+    "wind_v_10m": ("m/s",),
+    "pressure_surface": ("Pa",),
+    "surface_pressure": ("Pa",),
+    "shortwave_down": ("W/m2",),
+    "net_radiation": ("W/m2",),
+}
 CANONICAL_TO_FORCING: dict[str, str] = {
     "prcp_rate_or_amount": "PRCP",
     "air_temperature_2m": "TEMP",
@@ -424,19 +435,21 @@ class ForcingProducer:
     def _load_valid_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
         assert self.repository is not None
         loaded = self.repository.load_met_stations(basin_version_id=basin_version_id)
-        selected = tuple(station for station in loaded if station.station_role == "forcing_grid") or loaded
+        selected = tuple(station for station in loaded if station.station_role == "forcing_grid")
         stations: list[MetStation] = []
         for station in selected:
             if not _valid_station(station):
                 LOGGER.warning("Excluding invalid met station %s for basin %s", station.station_id, basin_version_id)
                 continue
+            _validate_forcing_grid_station_contract(station)
             stations.append(station)
 
         if not stations:
             raise ForcingProductionError(
-                f"No active meteorological stations are defined for basin version {basin_version_id}."
+                f"No active forcing_grid meteorological stations are defined for basin version {basin_version_id}."
             )
-        return tuple(sorted(stations, key=lambda station: station.station_id))
+        _validate_unique_station_forcing_contract(stations)
+        return tuple(sorted(stations, key=_station_forcing_sort_key))
 
     def _required_canonical_variables(self, source_id: str) -> tuple[str, ...]:
         if _is_ifs_source(source_id):
@@ -500,6 +513,7 @@ class ForcingProducer:
         }
         if not grid_ids:
             raise ForcingProductionError("No canonical products are available.")
+        _validate_canonical_product_units(products_by_variable)
 
     def _apply_era5_latency_fallback(
         self,
@@ -1043,20 +1057,26 @@ class ForcingProducer:
         forcing_version_id = rows[0].forcing_version_id
         valid_times = sorted({row.valid_time for row in rows})
         prefix = f"forcing/{source_segment}/{compact_cycle}/{basin_version_id}/{model_id}"
+        package_uri = _directory_uri(self.object_store, prefix)
+        package_manifest_key = f"{prefix}/{self.config.package_manifest_filename}"
+        package_manifest_uri = self.object_store.uri_for_key(package_manifest_key)
 
         tsd_content = format_tsd_forc(rows, stations=stations, variables=self.config.output_variables).encode("utf-8")
         csv_content = format_debug_csv(rows).encode("utf-8")
         tsd_key = f"{prefix}/{self.config.forcing_filename}"
         csv_key = f"{prefix}/{self.config.csv_filename}"
-        tsd_uri = self.object_store.write_bytes_atomic(tsd_key, tsd_content)
-        csv_uri = self.object_store.write_bytes_atomic(csv_key, csv_content)
+        tsd_uri = self.object_store.uri_for_key(tsd_key)
+        csv_uri = self.object_store.uri_for_key(csv_key)
         tsd_checksum = sha256_bytes(tsd_content)
         csv_checksum = sha256_bytes(csv_content)
         shud_files = format_shud_forcing_package(rows, stations=stations)
+        shud_file_payloads: list[tuple[str, bytes]] = []
         shud_file_entries: list[dict[str, str]] = []
         for relative_path, content in shud_files.items():
             content_bytes = content.encode("utf-8")
-            uri = self.object_store.write_bytes_atomic(f"{prefix}/{relative_path}", content_bytes)
+            key = f"{prefix}/{relative_path}"
+            uri = self.object_store.uri_for_key(key)
+            shud_file_payloads.append((key, content_bytes))
             shud_file_entries.append(
                 {
                     "role": "shud_forcing" if relative_path == "shud/qhh.tsd.forc" else "shud_forcing_csv",
@@ -1066,7 +1086,10 @@ class ForcingProducer:
                 }
             )
 
-        package_uri = _directory_uri(self.object_store, prefix)
+        variable_set = list(self.config.output_variables)
+        units = {variable: OUTPUT_UNITS[variable] for variable in variable_set}
+        station_order = _station_order_manifest(stations)
+        quality_flags = _quality_flags_manifest(rows, products_by_variable)
         lineage_json = {
             "producer_version": self.config.producer_version,
             "source_id": source_id,
@@ -1082,7 +1105,16 @@ class ForcingProducer:
             "grid_signatures": _format_grid_signatures(grid_signature_by_source_grid or {}),
             "canonical_input_signature": canonical_input_signature
             or self._canonical_input_signature(products_by_variable, cycle_time),
-            "forcing_variables": list(self.config.output_variables),
+            "forcing_variables": variable_set,
+            "variable_set": variable_set,
+            "units": units,
+            "time_range": {
+                "start_time": _format_time(valid_times[0]),
+                "end_time": _format_time(valid_times[-1]),
+                "timestep_count": len(valid_times),
+            },
+            "quality_flags": quality_flags,
+            "station_order": station_order,
             "canonical_product_ids": sorted(
                 product.canonical_product_id
                 for products_for_variable in products_by_variable.values()
@@ -1108,6 +1140,11 @@ class ForcingProducer:
             "end_time": _format_time(valid_times[-1]),
             "basin_version_id": basin_version_id,
             "station_count": len(stations),
+            "timestep_count": len(valid_times),
+            "variable_set": variable_set,
+            "units": units,
+            "quality_flags": quality_flags,
+            "station_order": station_order,
             "files": [
                 {"role": "tsd_forc", "uri": tsd_uri, "checksum": tsd_checksum},
                 {"role": "csv_debug", "uri": csv_uri, "checksum": csv_checksum},
@@ -1117,10 +1154,6 @@ class ForcingProducer:
         }
         package_content = _json_bytes(package_manifest)
         package_checksum = sha256_bytes(package_content)
-        package_manifest_uri = self.object_store.write_bytes_atomic(
-            f"{prefix}/{self.config.package_manifest_filename}",
-            package_content,
-        )
 
         record = {
             "forcing_version_id": forcing_version_id,
@@ -1135,10 +1168,16 @@ class ForcingProducer:
             "lineage_json": {
                 **lineage_json,
                 "forcing_package_manifest_uri": package_manifest_uri,
+                "forcing_package_manifest_checksum": package_checksum,
                 "output_files": package_manifest["files"],
             },
         }
         self.repository.upsert_forcing_version(record)
+        self.object_store.write_bytes_atomic(tsd_key, tsd_content)
+        self.object_store.write_bytes_atomic(csv_key, csv_content)
+        for key, content_bytes in shud_file_payloads:
+            self.object_store.write_bytes_atomic(key, content_bytes)
+        self.object_store.write_bytes_atomic(package_manifest_key, package_content)
         self.repository.replace_forcing_components(forcing_version_id, components)
         self.repository.replace_forcing_timeseries(forcing_version_id, rows)
         self.repository.finalize_forcing_version(forcing_version_id, package_checksum)
@@ -1450,6 +1489,51 @@ def _station_properties(station: MetStation) -> Mapping[str, Any]:
     return properties if isinstance(properties, Mapping) else {}
 
 
+def _validate_forcing_grid_station_contract(station: MetStation) -> None:
+    props = _station_properties(station)
+    raw_index = props.get("shud_forcing_index")
+    if raw_index in (None, ""):
+        raise ForcingProductionError(
+            f"Fixed forcing_grid station {station.station_id} is missing shud_forcing_index metadata."
+        )
+    try:
+        forcing_index = int(raw_index)
+    except (TypeError, ValueError) as error:
+        raise ForcingProductionError(
+            f"Fixed forcing_grid station {station.station_id} has invalid shud_forcing_index metadata."
+        ) from error
+    if forcing_index < 1:
+        raise ForcingProductionError(
+            f"Fixed forcing_grid station {station.station_id} has non-positive shud_forcing_index metadata."
+        )
+    raw_filename = props.get("forcing_filename")
+    filename = str(raw_filename or "").strip()
+    if not _safe_station_forcing_filename(filename):
+        raise ForcingProductionError(
+            f"Fixed forcing_grid station {station.station_id} is missing a safe forcing_filename metadata value."
+        )
+
+
+def _validate_unique_station_forcing_contract(stations: Sequence[MetStation]) -> None:
+    indexes: dict[int, str] = {}
+    filenames: dict[str, str] = {}
+    for station in stations:
+        forcing_index = _station_forcing_index(station)
+        filename = _station_forcing_filename(station, forcing_index)
+        existing_station_id = indexes.setdefault(forcing_index, station.station_id)
+        if existing_station_id != station.station_id:
+            raise ForcingProductionError(
+                f"Duplicate SHUD forcing index {forcing_index} for stations "
+                f"{existing_station_id} and {station.station_id}."
+            )
+        existing_filename_station_id = filenames.setdefault(filename, station.station_id)
+        if existing_filename_station_id != station.station_id:
+            raise ForcingProductionError(
+                f"Duplicate SHUD forcing filename {filename!r} for stations "
+                f"{existing_filename_station_id} and {station.station_id}."
+            )
+
+
 def _station_forcing_index(station: MetStation) -> int:
     props = _station_properties(station)
     value = props.get("shud_forcing_index")
@@ -1462,13 +1546,54 @@ def _station_forcing_index(station: MetStation) -> int:
 def _station_forcing_filename(station: MetStation, forcing_index: int) -> str:
     props = _station_properties(station)
     filename = str(props.get("forcing_filename") or "").strip()
-    if filename and "/" not in filename and "\\" not in filename and "\x00" not in filename:
+    if _safe_station_forcing_filename(filename):
         return filename
     return f"forcing_{forcing_index:03d}.csv"
 
 
+def _safe_station_forcing_filename(filename: str) -> bool:
+    return bool(
+        filename
+        and "/" not in filename
+        and "\\" not in filename
+        and "\x00" not in filename
+        and ".." not in Path(filename).parts
+        and filename not in {".", ".."}
+    )
+
+
 def _station_forcing_sort_key(station: MetStation) -> tuple[int, str]:
     return (_station_forcing_index(station), station.station_id)
+
+
+def _station_order_manifest(stations: Sequence[MetStation]) -> list[dict[str, Any]]:
+    return [
+        {
+            "station_id": station.station_id,
+            "shud_forcing_index": _station_forcing_index(station),
+            "forcing_filename": _station_forcing_filename(station, _station_forcing_index(station)),
+            "longitude": float(station.longitude),
+            "latitude": float(station.latitude),
+            "elevation_m": float(station.elevation_m),
+        }
+        for station in sorted(stations, key=_station_forcing_sort_key)
+    ]
+
+
+def _quality_flags_manifest(
+    rows: Sequence[ForcingTimeseriesRow],
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+) -> dict[str, Any]:
+    return {
+        "station_timeseries": sorted({row.quality_flag for row in rows}),
+        "canonical_products": sorted(
+            {
+                product.quality_flag
+                for products_for_variable in products_by_variable.values()
+                for product in products_for_variable.values()
+            }
+        ),
+    }
 
 
 def _json_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -1719,6 +1844,23 @@ def _missing_product_details(
             if valid_time not in product_times:
                 missing.append(f"{variable}:{_format_time(valid_time)}")
     return missing
+
+
+def _validate_canonical_product_units(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+) -> None:
+    mismatches: list[str] = []
+    for variable, products_for_variable in products_by_variable.items():
+        expected_units = EXPECTED_CANONICAL_UNITS.get(variable)
+        if expected_units is None:
+            continue
+        for valid_time, product in sorted(products_for_variable.items(), key=lambda item: item[0]):
+            if product.unit not in expected_units:
+                mismatches.append(
+                    f"{variable}:{_format_time(valid_time)} unit={product.unit!r} expected={list(expected_units)}"
+                )
+    if mismatches:
+        raise ForcingProductionError(f"Canonical product unit mismatch: {', '.join(mismatches[:10])}")
 
 
 def _valid_times(products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]]) -> tuple[datetime, ...]:

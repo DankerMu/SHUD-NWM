@@ -259,6 +259,18 @@ class CanonicalReadinessProvider(Protocol):
         raise NotImplementedError
 
 
+class ForcingProducerRunner(Protocol):
+    def produce(
+        self,
+        *,
+        source_id: str | None = None,
+        cycle_time: str | datetime,
+        model_id: str,
+        max_lead_hours: int | None = None,
+    ) -> Any:
+        raise NotImplementedError
+
+
 class ProductionOrchestratorFactory(Protocol):
     def __call__(self, source_id: str) -> ForecastOrchestrator:
         raise NotImplementedError
@@ -359,6 +371,9 @@ class ProductionSchedulerConfig:
     slurm_execution_enabled: bool = field(
         default_factory=lambda: _env_flag("NHMS_PRODUCTION_SLURM_ENABLED")
         or _env_flag("SLURM_EXECUTION_ENABLED")
+    )
+    forcing_production_enabled: bool = field(
+        default_factory=lambda: _env_flag("NHMS_PRODUCTION_FORCING_ENABLED")
     )
     allowed_storage_roots: tuple[Path | str, ...] = field(
         default_factory=lambda: _env_path_list("NHMS_SCHEDULER_ALLOWED_ROOTS")
@@ -693,6 +708,7 @@ class ProductionScheduler:
         canonical_readiness_provider: CanonicalReadinessProvider | None | object = (
             _CANONICAL_READINESS_PROVIDER_UNSET
         ),
+        forcing_producer: ForcingProducerRunner | None = None,
         orchestrator_factory: ProductionOrchestratorFactory | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
@@ -711,6 +727,7 @@ class ProductionScheduler:
             )
         else:
             self.canonical_readiness_provider = canonical_readiness_provider
+        self.forcing_producer = forcing_producer
         self.orchestrator_factory = orchestrator_factory
         self.sleep = sleep or _sleep
         self._source_readiness_context_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -726,6 +743,7 @@ class ProductionScheduler:
             config=config,
             active_repository=_active_repository_from_env(),
             canonical_readiness_provider=_canonical_readiness_provider_from_env(),
+            forcing_producer=_forcing_producer_from_env() if config.forcing_production_enabled else None,
         )
 
     def run_once(self) -> SchedulerPassResult:
@@ -939,15 +957,25 @@ class ProductionScheduler:
                                 cancellation_evidence,
                                 reservation=evidence_reservation,
                             )
+                        if candidates and self.forcing_producer is not None:
+                            (
+                                candidates,
+                                forcing_blocked_candidates,
+                                forcing_evidence,
+                            ) = self._produce_forcing_for_candidates(candidates)
+                            blocked_candidates.extend(forcing_blocked_candidates)
+                            execution_evidence.extend(forcing_evidence)
                         if candidates:
                             slurm_preflight = _slurm_preflight(self.config)
                             if slurm_preflight["status"] != "not_required":
                                 slurm_preflight_evidence = redact_payload(slurm_preflight)
                             if slurm_preflight["status"] == "blocked":
-                                execution_evidence = [
-                                    _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
-                                    for candidate in candidates
-                                ]
+                                execution_evidence.extend(
+                                    [
+                                        _candidate_slurm_preflight_blocked_evidence(candidate, slurm_preflight)
+                                        for candidate in candidates
+                                    ]
+                                )
                                 execution_write_proof = _execution_write_proof_from_evidence(
                                     execution_evidence,
                                     reservation=evidence_reservation,
@@ -955,10 +983,12 @@ class ProductionScheduler:
                                 execution_boundary = "slurm_preflight_blocked"
                                 pass_status = "preflight_blocked"
                             elif self.orchestrator_factory is None and not self.config.slurm_execution_enabled:
-                                execution_evidence = [
-                                    _candidate_preflight_blocked_evidence(candidate, config=self.config)
-                                    for candidate in candidates
-                                ]
+                                execution_evidence.extend(
+                                    [
+                                        _candidate_preflight_blocked_evidence(candidate, config=self.config)
+                                        for candidate in candidates
+                                    ]
+                                )
                                 execution_write_proof = _execution_write_proof_from_evidence(
                                     execution_evidence,
                                     reservation=evidence_reservation,
@@ -967,7 +997,7 @@ class ProductionScheduler:
                                 pass_status = "preflight_blocked"
                                 no_mutation_proof = _no_mutation_proof()
                             else:
-                                execution_evidence = self._execute_candidates(candidates)
+                                execution_evidence.extend(self._execute_candidates(candidates))
                                 execution_write_proof = _execution_write_proof_from_evidence(
                                     execution_evidence,
                                     reservation=evidence_reservation,
@@ -1221,6 +1251,32 @@ class ProductionScheduler:
                 break
             self.sleep(self.config.interval_seconds)
         return results
+
+    def _produce_forcing_for_candidates(
+        self,
+        candidates: Sequence[SchedulerCandidate],
+    ) -> tuple[list[SchedulerCandidate], list[SchedulerCandidate], list[dict[str, Any]]]:
+        assert self.forcing_producer is not None
+        ready: list[SchedulerCandidate] = []
+        blocked: list[SchedulerCandidate] = []
+        evidence: list[dict[str, Any]] = []
+        for candidate in candidates:
+            try:
+                result = self.forcing_producer.produce(
+                    source_id=candidate.source_id,
+                    cycle_time=candidate.cycle_time_utc,
+                    model_id=candidate.model_id,
+                    max_lead_hours=_candidate_max_lead_hours(candidate),
+                )
+            except Exception as error:
+                item = _candidate_forcing_blocked_evidence(candidate, error)
+                evidence.append(item)
+                blocked.append(_blocked_candidate(candidate, "forcing_production_blocked", state_evidence=item))
+                continue
+            item = _candidate_forcing_ready_evidence(candidate, result)
+            evidence.append(item)
+            ready.append(_candidate_with_state_evidence(candidate, {"forcing_production": item}))
+        return ready, blocked, evidence
 
     def _execute_candidates(self, candidates: Sequence[SchedulerCandidate]) -> list[dict[str, Any]]:
         grouped: dict[tuple[str, datetime], list[SchedulerCandidate]] = {}
@@ -4940,6 +4996,18 @@ def _candidate_for(
     )
 
 
+def _candidate_max_lead_hours(candidate: SchedulerCandidate) -> int | None:
+    for key in ("max_lead_hours", "forecast_horizon_hours"):
+        value = candidate.horizon.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _blocked_candidate(
     candidate: SchedulerCandidate,
     reason: str,
@@ -5576,6 +5644,73 @@ def _candidate_execution_evidence(
         )
         for candidate in candidates
     ]
+
+
+def _candidate_forcing_ready_evidence(candidate: SchedulerCandidate, result: Any) -> dict[str, Any]:
+    status = str(getattr(result, "status", "forcing_ready") or "forcing_ready")
+    met_write = status != "already_done"
+    payload = {
+        **_candidate_identity_evidence(candidate, output_uri=None),
+        "stage": "forcing",
+        "production_stage": production_stage_for("forcing"),
+        "status": status,
+        "production_status": production_status_for(status),
+        "submitted": False,
+        "slurm_submit_called": False,
+        "execution_attempted": True,
+        "forcing_producer_called": True,
+        "mutation_occurred": met_write,
+        "met_result_table_write": met_write,
+        "hydro_result_table_write": False,
+        "pipeline_status_writes_proven_absent": True,
+        "pipeline_event_writes_proven_absent": True,
+        "qhh_script_invoked": False,
+        "rshud_runtime_called": False,
+        "forcing": {
+            "forcing_version_id": getattr(result, "forcing_version_id", candidate.forcing_version_id),
+            "forcing_package_uri": getattr(result, "forcing_package_uri", None),
+            "checksum": getattr(result, "checksum", None),
+            "station_count": getattr(result, "station_count", None),
+            "timestep_count": getattr(result, "timestep_count", None),
+            "file_uris": dict(getattr(result, "file_uris", {}) or {}),
+        },
+    }
+    return _evidence_safe(payload)
+
+
+def _candidate_forcing_blocked_evidence(candidate: SchedulerCandidate, error: Exception) -> dict[str, Any]:
+    error_code = str(getattr(error, "error_code", "FORCING_PRODUCTION_BLOCKED"))
+    payload = {
+        **_candidate_identity_evidence(candidate, output_uri=None),
+        "stage": "forcing",
+        "production_stage": production_stage_for("forcing"),
+        "status": "blocked",
+        "production_status": production_status_for("blocked"),
+        "submitted": False,
+        "slurm_submit_called": False,
+        "execution_attempted": True,
+        "forcing_producer_called": True,
+        "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
+        "mutation_occurred": UNKNOWN_AFTER_ATTEMPT,
+        "met_result_table_write": UNKNOWN_AFTER_ATTEMPT,
+        "hydro_result_table_write": False,
+        "pipeline_status_writes_proven_absent": True,
+        "pipeline_event_writes_proven_absent": True,
+        "qhh_script_invoked": False,
+        "rshud_runtime_called": False,
+        "error_code": error_code,
+        "error_message": _evidence_safe(getattr(error, "message", str(error))),
+        "residual_blockers": [
+            {
+                "code": error_code,
+                "stage": "forcing",
+                "state": "blocked",
+                "quality_flag": "forcing_production_blocked",
+                "residual_risk": "Station forcing production did not complete; SHUD submission is blocked.",
+            }
+        ],
+    }
+    return _evidence_safe(payload)
 
 
 def _candidate_execution_evidence_item(
@@ -6947,6 +7082,18 @@ def _execution_write_proof_from_evidence(
     unknown_after_attempt_count = sum(
         1 for item in execution_payloads if item.get("mutation_outcome") == UNKNOWN_AFTER_ATTEMPT
     )
+    hydro_result_table_write_count = sum(
+        1 for item in execution_payloads if item.get("hydro_result_table_write") is True
+    )
+    met_result_table_write_count = sum(
+        1 for item in execution_payloads if item.get("met_result_table_write") is True
+    )
+    unknown_hydro_result_table_write_count = sum(
+        1 for item in execution_payloads if item.get("hydro_result_table_write") == UNKNOWN_AFTER_ATTEMPT
+    )
+    unknown_met_result_table_write_count = sum(
+        1 for item in execution_payloads if item.get("met_result_table_write") == UNKNOWN_AFTER_ATTEMPT
+    )
     preflight_blocked = bool(execution_payloads) and all(
         str(item.get("status") or "") == "preflight_blocked" for item in execution_payloads
     )
@@ -6965,8 +7112,18 @@ def _execution_write_proof_from_evidence(
         slurm_submit_value = UNKNOWN_AFTER_ATTEMPT
     else:
         slurm_submit_value = slurm_submit_count > 0
-    hydro_result_table_write: bool | str = slurm_submit_value
-    met_result_table_write: bool | str = slurm_submit_value
+    if unknown_hydro_result_table_write_count:
+        hydro_result_table_write: bool | str = UNKNOWN_AFTER_ATTEMPT
+    elif hydro_result_table_write_count:
+        hydro_result_table_write = True
+    else:
+        hydro_result_table_write = slurm_submit_value
+    if unknown_met_result_table_write_count:
+        met_result_table_write: bool | str = UNKNOWN_AFTER_ATTEMPT
+    elif met_result_table_write_count:
+        met_result_table_write = True
+    else:
+        met_result_table_write = slurm_submit_value
     pipeline_status_write: bool | str
     if unknown_pipeline_status_write_count:
         pipeline_status_write = UNKNOWN_AFTER_ATTEMPT
@@ -6997,6 +7154,8 @@ def _execution_write_proof_from_evidence(
         "pipeline_event_writes": pipeline_event_write,
         "pipeline_status_write_count": pipeline_status_write_count,
         "pipeline_event_write_count": pipeline_event_write_count,
+        "hydro_result_table_write_count": hydro_result_table_write_count,
+        "met_result_table_write_count": met_result_table_write_count,
     }
     if unknown_slurm_submit_count:
         proof["slurm_submit_outcome"] = UNKNOWN_AFTER_ATTEMPT
@@ -7006,6 +7165,14 @@ def _execution_write_proof_from_evidence(
         proof["slurm_submit_proven_absent"] = slurm_submit_count == 0
     proof["hydro_result_table_writes_proven_absent"] = hydro_result_table_write is False
     proof["met_result_table_writes_proven_absent"] = met_result_table_write is False
+    if unknown_hydro_result_table_write_count:
+        proof["hydro_result_table_write_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_hydro_result_table_write_count"] = unknown_hydro_result_table_write_count
+        proof["hydro_result_table_writes_proven_absent"] = False
+    if unknown_met_result_table_write_count:
+        proof["met_result_table_write_outcome"] = UNKNOWN_AFTER_ATTEMPT
+        proof["unknown_met_result_table_write_count"] = unknown_met_result_table_write_count
+        proof["met_result_table_writes_proven_absent"] = False
     if unknown_pipeline_status_write_count:
         proof["pipeline_status_write_outcome"] = UNKNOWN_AFTER_ATTEMPT
         proof["unknown_pipeline_status_write_count"] = unknown_pipeline_status_write_count
@@ -7343,6 +7510,12 @@ def _canonical_readiness_provider_from_env() -> CanonicalReadinessProvider:
             dependency="canonical_readiness_provider",
             retryable=True,
         )
+
+
+def _forcing_producer_from_env() -> ForcingProducerRunner:
+    from workers.forcing_producer import ForcingProducer
+
+    return ForcingProducer.from_env()
 
 
 def _active_repository_from_env() -> ActiveCandidateRepository:
