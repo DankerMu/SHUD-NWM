@@ -35,6 +35,13 @@ class FakeForcingRepository:
         fail_next_timeseries_replace: bool = False,
     ) -> None:
         self.basin_by_model = {"demo_model": "basin_v1"}
+        self.model_identity_by_model = {
+            "demo_model": {
+                "basin_id": "basin_a",
+                "basin_version_id": "basin_v1",
+                "river_network_version_id": "rivnet_v1",
+            }
+        }
         self.stations = stations
         self.products = products
         self.interp_weights: list[InterpolationWeight] = []
@@ -48,6 +55,9 @@ class FakeForcingRepository:
 
     def resolve_model_basin_version(self, *, model_id: str) -> str:
         return self.basin_by_model[model_id]
+
+    def resolve_model_identity(self, *, model_id: str) -> Mapping[str, Any]:
+        return dict(self.model_identity_by_model[model_id])
 
     def load_met_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
         return tuple(station for station in self.stations if station.basin_version_id == basin_version_id)
@@ -155,6 +165,49 @@ class FakeForcingRepository:
         self.forcing_versions[forcing_version_id]["checksum"] = checksum
         self.events.append(("finalize_forcing_version", checksum))
         return dict(self.forcing_versions[forcing_version_id])
+
+    def verify_forcing_version_children(
+        self,
+        *,
+        forcing_version_id: str,
+        expected_component_ids: list[str] | tuple[str, ...],
+        expected_station_ids: list[str] | tuple[str, ...],
+        expected_valid_times: list[Any] | tuple[Any, ...],
+        expected_variables: list[str] | tuple[str, ...],
+    ) -> Mapping[str, Any]:
+        components = [
+            component
+            for component in self.components
+            if component.forcing_version_id == forcing_version_id
+            and component.canonical_product_id in set(expected_component_ids)
+        ]
+        rows = [
+            row
+            for row in self.timeseries
+            if row.forcing_version_id == forcing_version_id
+            and row.station_id in set(expected_station_ids)
+            and row.valid_time in set(expected_valid_times)
+            and row.variable in set(expected_variables)
+        ]
+        expected_row_count = len(expected_station_ids) * len(expected_valid_times) * len(expected_variables)
+        proof = {
+            "forcing_version_id": forcing_version_id,
+            "expected_component_count": len(expected_component_ids),
+            "component_count": len(components),
+            "expected_timeseries_row_count": expected_row_count,
+            "timeseries_row_count": len(rows),
+            "station_count": len({row.station_id for row in rows}),
+            "timestep_count": len({row.valid_time for row in rows}),
+            "variable_count": len({row.variable for row in rows}),
+        }
+        proof["complete"] = (
+            proof["component_count"] == proof["expected_component_count"]
+            and proof["timeseries_row_count"] == proof["expected_timeseries_row_count"]
+            and proof["station_count"] == len(expected_station_ids)
+            and proof["timestep_count"] == len(expected_valid_times)
+            and proof["variable_count"] == len(expected_variables)
+        )
+        return proof
 
     def replace_forcing_components(
         self,
@@ -460,6 +513,78 @@ def test_produce_is_idempotent_when_existing_checksum_is_valid(tmp_path: Path) -
     assert repository.upsert_count == 1
     assert len(repository.forcing_versions) == 1
     assert len(repository.timeseries) == row_count
+
+
+def test_existing_forcing_version_not_reused_when_child_rows_are_missing(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+    repository.components.clear()
+    second = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert first.status == "forcing_ready"
+    assert second.status == "forcing_ready"
+    assert second.forcing_version_id == first.forcing_version_id
+    assert repository.upsert_count == 2
+    assert len(repository.components) == 7 * 2
+
+
+def test_scheduler_basin_identity_mismatch_blocks_before_records(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="basin_version_id"):
+        producer.produce(
+            source_id="gfs",
+            cycle_time="2026050700",
+            model_id="demo_model",
+            basin_version_id="other_basin_v1",
+        )
+
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+
+
+def test_scheduler_canonical_identity_mismatch_blocks_sibling_rows(tmp_path: Path) -> None:
+    store, repository = _build_repository(tmp_path)
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="scheduler-selected canonical identity"):
+        producer.produce(
+            source_id="gfs",
+            cycle_time="2026050700",
+            model_id="demo_model",
+            canonical_product_id="canon_gfs_2026050700",
+            canonical_identity={
+                "policy_identity": {"source": "gfs", "forecast_hours": [0, 3]},
+                "source_object_identity": {"source": "gfs", "object": "selected"},
+            },
+        )
+
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+
+
+def test_era5_precipitation_mm_per_day_is_accepted_without_amount_scaling(tmp_path: Path) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        source_id="ERA5",
+        radiation_variable="net_radiation",
+        values_by_variable={"prcp_rate_or_amount": (24.0, 24.0, 24.0)},
+    )
+    repository.products = tuple(
+        _replace_product_unit(product, "mm/day") if product.variable == "prcp_rate_or_amount" else product
+        for product in repository.products
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="ERA5", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    prcp_rows = [row for row in repository.timeseries if row.variable == "PRCP"]
+    assert prcp_rows
+    assert all(row.value == pytest.approx(24.0) for row in prcp_rows)
 
 
 def test_existing_forcing_version_not_reused_when_lead_window_changes(tmp_path: Path) -> None:
@@ -828,6 +953,89 @@ def test_duplicate_forcing_grid_station_contract_blocks_record_creation(
     assert repository.upsert_count == 0
     assert repository.forcing_versions == {}
     assert repository.timeseries == []
+
+
+def test_non_contiguous_forcing_grid_indexes_block_record_creation(tmp_path: Path) -> None:
+    stations = (
+        MetStation(
+            "qhh_forc_001",
+            "basin_v1",
+            -74.7,
+            40.1,
+            50.0,
+            "forcing_grid",
+            properties_json={"shud_forcing_index": 1, "forcing_filename": "station_1.csv"},
+        ),
+        MetStation(
+            "qhh_forc_003",
+            "basin_v1",
+            -74.6,
+            40.2,
+            55.0,
+            "forcing_grid",
+            properties_json={"shud_forcing_index": 3, "forcing_filename": "station_3.csv"},
+        ),
+    )
+    store, repository = _build_repository(tmp_path, stations=stations)
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="contiguous SHUD forcing indexes"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.upsert_count == 0
+    assert repository.forcing_versions == {}
+
+
+def test_reserved_qhh_tsd_forc_station_filename_blocks_record_creation(tmp_path: Path) -> None:
+    station = MetStation(
+        "qhh_forc_001",
+        "basin_v1",
+        -74.7,
+        40.1,
+        50.0,
+        "forcing_grid",
+        properties_json={"shud_forcing_index": 1, "forcing_filename": "qhh.tsd.forc"},
+    )
+    store, repository = _build_repository(tmp_path, stations=(station,))
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="Reserved SHUD forcing filename"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.upsert_count == 0
+    assert repository.forcing_versions == {}
+
+
+def test_station_count_resource_limit_blocks_before_records(tmp_path: Path) -> None:
+    stations = (
+        MetStation(
+            "qhh_forc_001",
+            "basin_v1",
+            -74.7,
+            40.1,
+            50.0,
+            "forcing_grid",
+            properties_json={"shud_forcing_index": 1, "forcing_filename": "station_1.csv"},
+        ),
+        MetStation(
+            "qhh_forc_002",
+            "basin_v1",
+            -74.6,
+            40.2,
+            55.0,
+            "forcing_grid",
+            properties_json={"shud_forcing_index": 2, "forcing_filename": "station_2.csv"},
+        ),
+    )
+    store, repository = _build_repository(tmp_path, stations=stations)
+    config = ForcingProducerConfig(workspace_root=tmp_path, idw_neighbors=3, max_station_count=1)
+    producer = ForcingProducer(config=config, repository=repository, object_store=store)
+
+    with pytest.raises(ForcingProductionError, match="station_count"):
+        producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.upsert_count == 0
+    assert repository.forcing_versions == {}
 
 
 def test_missing_geographic_grid_coordinates_raise_before_weight_generation(tmp_path: Path) -> None:

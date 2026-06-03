@@ -267,6 +267,11 @@ class ForcingProducerRunner(Protocol):
         cycle_time: str | datetime,
         model_id: str,
         max_lead_hours: int | None = None,
+        basin_id: str | None = None,
+        basin_version_id: str | None = None,
+        river_network_version_id: str | None = None,
+        canonical_product_id: str | None = None,
+        canonical_identity: Mapping[str, Any] | None = None,
     ) -> Any:
         raise NotImplementedError
 
@@ -1267,15 +1272,21 @@ class ProductionScheduler:
                     cycle_time=candidate.cycle_time_utc,
                     model_id=candidate.model_id,
                     max_lead_hours=_candidate_max_lead_hours(candidate),
+                    basin_id=candidate.basin_id,
+                    basin_version_id=candidate.basin_version_id,
+                    river_network_version_id=candidate.river_network_version_id,
+                    canonical_product_id=_candidate_canonical_product_id(candidate),
+                    canonical_identity=_candidate_scheduler_canonical_identity(candidate),
                 )
             except Exception as error:
                 item = _candidate_forcing_blocked_evidence(candidate, error)
                 evidence.append(item)
                 blocked.append(_blocked_candidate(candidate, "forcing_production_blocked", state_evidence=item))
                 continue
-            item = _candidate_forcing_ready_evidence(candidate, result)
+            produced_candidate = _candidate_with_forcing_result(candidate, result)
+            item = _candidate_forcing_ready_evidence(produced_candidate, result)
             evidence.append(item)
-            ready.append(_candidate_with_state_evidence(candidate, {"forcing_production": item}))
+            ready.append(_candidate_with_state_evidence(produced_candidate, {"forcing_production": item}))
         return ready, blocked, evidence
 
     def _execute_candidates(self, candidates: Sequence[SchedulerCandidate]) -> list[dict[str, Any]]:
@@ -5028,6 +5039,41 @@ def _candidate_with_state_evidence(
     )
 
 
+def _candidate_with_forcing_result(candidate: SchedulerCandidate, result: Any) -> SchedulerCandidate:
+    forcing_version_id = str(getattr(result, "forcing_version_id", candidate.forcing_version_id))
+    file_uris = dict(getattr(result, "file_uris", {}) or {})
+    forcing_package_uri = getattr(result, "forcing_package_uri", None)
+    checksum = getattr(result, "checksum", None)
+    resource_profile = dict(candidate.resource_profile)
+    resource_profile.update(
+        {
+            "forcing_version_id": forcing_version_id,
+            "forcing_package_uri": forcing_package_uri,
+            "forcing_package_manifest_uri": file_uris.get("package_manifest"),
+            "forcing_manifest_checksum": checksum,
+            "forcing_uri": file_uris.get("tsd_forc") or forcing_package_uri,
+            "forcing_file_uris": file_uris,
+            "forcing_variable_count": getattr(result, "variable_count", None),
+            "forcing_time_range": dict(getattr(result, "time_range", {}) or {}),
+            "forcing_units": dict(getattr(result, "units", {}) or {}),
+        }
+    )
+    if getattr(result, "station_count", None) not in (None, ""):
+        resource_profile["station_count"] = getattr(result, "station_count")
+    return replace(candidate, forcing_version_id=forcing_version_id, resource_profile=resource_profile)
+
+
+def _candidate_scheduler_canonical_identity(candidate: SchedulerCandidate) -> dict[str, Any]:
+    readiness = candidate.state_evidence.get("canonical_readiness")
+    identity = {"canonical_product_id": _candidate_canonical_product_id(candidate)}
+    if isinstance(readiness, Mapping):
+        for key in ("policy_identity", "source_object_identity", "accepted_horizon", "expected_leads"):
+            value = readiness.get(key)
+            if value not in (None, ""):
+                identity[key] = _evidence_safe(value)
+    return _evidence_safe(identity)
+
+
 def _merge_state_evidence(
     existing: Mapping[str, Any] | None,
     extra: Mapping[str, Any] | None,
@@ -5070,6 +5116,11 @@ def _candidate_basin_manifest(
         "run_id": candidate.run_id,
         "canonical_product_id": _candidate_canonical_product_id(candidate),
         "forcing_version_id": candidate.forcing_version_id,
+        "forcing_package_uri": resource_profile.get("forcing_package_uri"),
+        "forcing_package_manifest_uri": resource_profile.get("forcing_package_manifest_uri"),
+        "forcing_manifest_checksum": resource_profile.get("forcing_manifest_checksum"),
+        "forcing_uri": resource_profile.get("forcing_uri"),
+        "forcing_file_uris": dict(resource_profile.get("forcing_file_uris") or {}),
         "hydro_run_id": candidate.run_id,
         "published_manifest_id": _candidate_published_manifest_id(candidate),
         "forecast_horizon_hours": candidate.horizon.get("forecast_horizon_hours")
@@ -5669,9 +5720,14 @@ def _candidate_forcing_ready_evidence(candidate: SchedulerCandidate, result: Any
         "forcing": {
             "forcing_version_id": getattr(result, "forcing_version_id", candidate.forcing_version_id),
             "forcing_package_uri": getattr(result, "forcing_package_uri", None),
+            "package_uri": getattr(result, "forcing_package_uri", None),
             "checksum": getattr(result, "checksum", None),
+            "manifest_checksum": getattr(result, "checksum", None),
             "station_count": getattr(result, "station_count", None),
             "timestep_count": getattr(result, "timestep_count", None),
+            "variable_count": getattr(result, "variable_count", None),
+            "time_range": dict(getattr(result, "time_range", {}) or {}),
+            "units": dict(getattr(result, "units", {}) or {}),
             "file_uris": dict(getattr(result, "file_uris", {}) or {}),
         },
     }
@@ -7140,6 +7196,8 @@ def _execution_write_proof_from_evidence(
         "orchestration_called": orchestration_called,
         "mutation_occurred": _execution_mutation_value(
             slurm_submit_value,
+            hydro_result_table_write,
+            met_result_table_write,
             pipeline_status_write,
             pipeline_event_write,
         ),

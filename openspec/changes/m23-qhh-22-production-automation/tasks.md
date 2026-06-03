@@ -97,11 +97,11 @@
 
 ## 4. Fixed-Station Forcing Production
 
-- [ ] 4.1 Wire production scheduler candidates to `workers/forcing_producer` using active QHH model/basin metadata and fixed forcing-grid stations.
-- [ ] 4.2 Persist one ready `met.forcing_version` and `met.forcing_station_timeseries` set per model/source/cycle/canonical identity with units, quality flags, station count, and time range.
-- [ ] 4.3 Materialize SHUD-ready forcing files and runtime manifests with station ordering, filenames, checksums, units, time range, and source/cycle identity.
-- [ ] 4.4 Add tests for missing fixed stations, interpolation coverage gaps, idempotent rerun, SHUD package file generation, and no rSHUD runtime dependency.
-- [ ] 4.5 Verify with `uv run pytest -q tests/test_forcing_producer.py tests/test_orchestration_chain.py tests/test_production_scheduler.py`, `uv run ruff check .`, and forcing evidence containing station count, variable count, time range, and manifest checksum.
+- [x] 4.1 Scheduler passes model/basin/network and canonical readiness identity into forcing production; producer validates repository identity.
+- [x] 4.2 Forcing versions persist canonical lineage, station/timestep/variable counts, units, time range, manifest checksum, and child-row completeness proof.
+- [x] 4.3 SHUD forcing packages include safe station filenames, contiguous station order, package URI, checksums, units, time range, and source/cycle identity.
+- [x] 4.4 Tests cover missing/corrupt children, identity mismatch, fixed-station contract, resource bounds, ERA5 `mm/day`, idempotency, package generation, and no rSHUD runtime dependency.
+- [x] 4.5 Verified with required pytest suite, `uv run ruff check .`, and forcing evidence fields for station count, variable count, time range, units, package URI, and manifest checksum.
 
 ### Issue #256 Evidence Floor
 
