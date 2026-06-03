@@ -366,7 +366,17 @@ class _MetClosureRepository:
     def load_met_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
         if basin_version_id != self.basin_version_id:
             return ()
-        return (MetStation("station_1", basin_version_id, 100.0, 30.0, 12.0, "forcing_proxy"),)
+        return (
+            MetStation(
+                "station_1",
+                basin_version_id,
+                100.0,
+                30.0,
+                12.0,
+                "forcing_grid",
+                properties_json={"shud_forcing_index": 1, "forcing_filename": "station_1.csv"},
+            ),
+        )
 
     def list_canonical_products(self, *, source_id: str, cycle_time: datetime) -> tuple[CanonicalProduct, ...]:
         products: list[CanonicalProduct] = []

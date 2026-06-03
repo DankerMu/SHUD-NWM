@@ -101,7 +101,11 @@ class E2ERepository:
                 longitude=110.0,
                 latitude=30.0,
                 elevation_m=20.0,
-                station_role="forcing_proxy",
+                station_role="forcing_grid",
+                properties_json={
+                    "shud_forcing_index": 1,
+                    "forcing_filename": "station_001.csv",
+                },
             ),
         )
 

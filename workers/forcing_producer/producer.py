@@ -56,6 +56,17 @@ OUTPUT_UNITS: dict[str, str] = {
     "Rn": "W/m2",
     "Press": "Pa",
 }
+EXPECTED_CANONICAL_UNITS: dict[str, tuple[str, ...]] = {
+    "prcp_rate_or_amount": ("mm", "mm/day"),
+    "air_temperature_2m": ("degC",),
+    "relative_humidity_2m": ("0-1",),
+    "wind_u_10m": ("m/s",),
+    "wind_v_10m": ("m/s",),
+    "pressure_surface": ("Pa",),
+    "surface_pressure": ("Pa",),
+    "shortwave_down": ("W/m2",),
+    "net_radiation": ("W/m2",),
+}
 CANONICAL_TO_FORCING: dict[str, str] = {
     "prcp_rate_or_amount": "PRCP",
     "air_temperature_2m": "TEMP",
@@ -175,6 +186,9 @@ class ForcingProductionResult:
     checksum: str | None
     station_count: int
     timestep_count: int
+    variable_count: int = 0
+    time_range: Mapping[str, str | int] = field(default_factory=dict)
+    units: Mapping[str, str] = field(default_factory=dict)
     file_uris: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -186,6 +200,8 @@ class FallbackLineage:
 
 
 class ForcingRepository(Protocol):
+    def resolve_model_identity(self, *, model_id: str) -> Mapping[str, Any]: ...
+
     def resolve_model_basin_version(self, *, model_id: str) -> str: ...
 
     def load_met_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]: ...
@@ -224,6 +240,16 @@ class ForcingRepository(Protocol):
 
     def finalize_forcing_version(self, forcing_version_id: str, checksum: str) -> dict[str, Any]: ...
 
+    def verify_forcing_version_children(
+        self,
+        *,
+        forcing_version_id: str,
+        expected_component_ids: Sequence[str],
+        expected_station_ids: Sequence[str],
+        expected_valid_times: Sequence[datetime],
+        expected_variables: Sequence[str],
+    ) -> Mapping[str, Any]: ...
+
     def replace_forcing_components(self, forcing_version_id: str, components: Sequence[ForcingComponent]) -> None: ...
 
     def replace_forcing_timeseries(
@@ -260,6 +286,13 @@ class ForcingProducerConfig:
     required_canonical_variables: tuple[str, ...] = REQUIRED_CANONICAL_VARIABLES
     era5_latency_fallback_hours: int = 23
     ifs_precip_step_hours: float = 3.0
+    max_station_count: int = field(default_factory=lambda: _env_int("FORCING_MAX_STATION_COUNT", 10_000))
+    max_timestep_count: int = field(default_factory=lambda: _env_int("FORCING_MAX_TIMESTEP_COUNT", 10_000))
+    max_grid_cell_count: int = field(default_factory=lambda: _env_int("FORCING_MAX_GRID_CELL_COUNT", 5_000_000))
+    max_timeseries_row_count: int = field(
+        default_factory=lambda: _env_int("FORCING_MAX_TIMESERIES_ROW_COUNT", 10_000_000)
+    )
+    max_manifest_bytes: int = field(default_factory=lambda: _env_int("FORCING_MAX_MANIFEST_BYTES", 2_000_000))
 
     def __post_init__(self) -> None:
         if not str(self.object_store_root):
@@ -296,6 +329,11 @@ class ForcingProducer:
         cycle_time: str | datetime,
         model_id: str,
         max_lead_hours: int | None = None,
+        basin_id: str | None = None,
+        basin_version_id: str | None = None,
+        river_network_version_id: str | None = None,
+        canonical_product_id: str | None = None,
+        canonical_identity: Mapping[str, Any] | None = None,
     ) -> ForcingProductionResult:
         if self.repository is None:
             raise ForcingProductionError("A forcing repository is required for production.")
@@ -312,8 +350,19 @@ class ForcingProducer:
                 model_id=model_id,
             )
 
-            basin_version_id = self.repository.resolve_model_basin_version(model_id=model_id)
-            stations = self._load_valid_stations(basin_version_id=basin_version_id)
+            model_identity = self._resolve_model_identity(model_id=model_id)
+            self._validate_scheduler_identity(
+                model_identity=model_identity,
+                basin_id=basin_id,
+                basin_version_id=basin_version_id,
+                river_network_version_id=river_network_version_id,
+            )
+            resolved_basin_id = str(model_identity.get("basin_id") or basin_id or "")
+            resolved_basin_version_id = str(model_identity["basin_version_id"])
+            resolved_river_network_version_id = str(model_identity.get("river_network_version_id") or "")
+            _safe_path_component(resolved_basin_version_id)
+            stations = self._load_valid_stations(basin_version_id=resolved_basin_version_id)
+            self._enforce_limit("station_count", len(stations), self.config.max_station_count)
             required_variables = self._required_canonical_variables(resolved_source_id)
             canonical_to_forcing = self._canonical_to_forcing(resolved_source_id)
             products_by_variable = self._load_canonical_products(
@@ -342,14 +391,31 @@ class ForcingProducer:
                 products_by_variable=products_by_variable,
                 required_variables=required_variables,
             )
+            self._validate_scheduler_canonical_identity(
+                source_id=resolved_source_id,
+                products_by_variable=products_by_variable,
+                canonical_product_id=canonical_product_id,
+                canonical_identity=canonical_identity,
+            )
             lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
+            valid_times = _valid_times(products_by_variable)
+            self._enforce_limit("timestep_count", len(valid_times), self.config.max_timestep_count)
             station_signature = _station_signature(stations)
+            scheduler_canonical_identity = _scheduler_canonical_identity_manifest(
+                canonical_product_id=canonical_product_id,
+                canonical_identity=canonical_identity,
+            )
             canonical_input_signature = self._canonical_input_signature(products_by_variable, parsed_cycle_time)
             if self._existing_forcing_version_is_current(
                 existing,
                 lead_window=lead_window,
                 station_signature=station_signature,
                 canonical_input_signature=canonical_input_signature,
+                scheduler_canonical_identity=scheduler_canonical_identity,
+                expected_station_ids=station_signature["station_ids"],
+                expected_valid_times=valid_times,
+                expected_variables=self.config.output_variables,
+                expected_component_ids=_canonical_product_ids(products_by_variable),
             ):
                 return ForcingProductionResult(
                     status="already_done",
@@ -357,11 +423,24 @@ class ForcingProducer:
                     forcing_package_uri=str(existing["forcing_package_uri"]),
                     checksum=str(existing["checksum"]),
                     station_count=int(existing["station_count"]),
-                    timestep_count=0,
-                    file_uris={},
+                    timestep_count=len(valid_times),
+                    variable_count=len(self.config.output_variables),
+                    time_range=_time_range_manifest(valid_times),
+                    units={variable: OUTPUT_UNITS[variable] for variable in self.config.output_variables},
+                    file_uris={
+                        "package_manifest": _package_manifest_uri(
+                            str(existing["forcing_package_uri"]),
+                            self.config.package_manifest_filename,
+                        ),
+                    },
                 )
 
             grid_points_by_source_grid = self._grid_points_by_source_grid_from_products(products_by_variable)
+            self._enforce_limit(
+                "grid_cell_count",
+                sum(len(grid_points) for grid_points in grid_points_by_source_grid.values()),
+                self.config.max_grid_cell_count,
+            )
             grid_ids = tuple(sorted({grid_id for _, grid_id in grid_points_by_source_grid}))
             grid_id = grid_ids[0] if len(grid_ids) == 1 else "mixed"
             grid_signature_by_source_grid = {
@@ -382,7 +461,7 @@ class ForcingProducer:
             values, components = self._generate_timeseries_streaming(
                 source_id=resolved_source_id,
                 forcing_version_id=forcing_version_id,
-                basin_version_id=basin_version_id,
+                basin_version_id=resolved_basin_version_id,
                 products_by_variable=products_by_variable,
                 stations=stations,
                 weights=weights,
@@ -395,7 +474,10 @@ class ForcingProducer:
                 source_id=resolved_source_id,
                 cycle_time=parsed_cycle_time,
                 model_id=model_id,
-                basin_version_id=basin_version_id,
+                basin_id=resolved_basin_id,
+                basin_version_id=resolved_basin_version_id,
+                river_network_version_id=resolved_river_network_version_id,
+                scheduler_canonical_identity=scheduler_canonical_identity,
                 grid_id=grid_id,
                 stations=stations,
                 rows=values,
@@ -421,22 +503,113 @@ class ForcingProducer:
                 raise
             raise ForcingProductionError(str(error)) from error
 
+    def _resolve_model_identity(self, *, model_id: str) -> Mapping[str, Any]:
+        assert self.repository is not None
+        resolver = getattr(self.repository, "resolve_model_identity", None)
+        if callable(resolver):
+            identity = dict(resolver(model_id=model_id))
+        else:
+            identity = {"basin_version_id": self.repository.resolve_model_basin_version(model_id=model_id)}
+        if identity.get("basin_version_id") in (None, ""):
+            raise ForcingProductionError(f"Model instance {model_id!r} has no basin_version_id.")
+        return identity
+
+    def _validate_scheduler_identity(
+        self,
+        *,
+        model_identity: Mapping[str, Any],
+        basin_id: str | None,
+        basin_version_id: str | None,
+        river_network_version_id: str | None,
+    ) -> None:
+        expected = {
+            "basin_id": basin_id,
+            "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
+        }
+        for field_name, expected_value in expected.items():
+            if expected_value in (None, ""):
+                continue
+            actual_value = model_identity.get(field_name)
+            if actual_value in (None, ""):
+                if field_name == "basin_id":
+                    continue
+                raise ForcingProductionError(f"Model identity is missing {field_name}.")
+            if str(actual_value) != str(expected_value):
+                raise ForcingProductionError(
+                    f"Scheduler {field_name} {expected_value!r} does not match repository value {actual_value!r}."
+                )
+
+    def _validate_scheduler_canonical_identity(
+        self,
+        *,
+        source_id: str,
+        products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+        canonical_product_id: str | None,
+        canonical_identity: Mapping[str, Any] | None,
+    ) -> None:
+        identity = _scheduler_canonical_identity_manifest(
+            canonical_product_id=canonical_product_id,
+            canonical_identity=canonical_identity,
+        )
+        expected_policy = _stable_identity(identity.get("policy_identity"))
+        expected_source_object = _stable_identity(identity.get("source_object_identity"))
+        if not expected_policy and not expected_source_object and not identity.get("canonical_product_id"):
+            return
+        mismatches: list[str] = []
+        for product in _products(products_by_variable):
+            if product.source_id != source_id:
+                continue
+            lineage = product.lineage_json if isinstance(product.lineage_json, Mapping) else {}
+            row_policy = _stable_identity(
+                lineage.get("policy_identity")
+                or lineage.get("source_policy")
+                or lineage.get("canonical_policy_identity")
+            )
+            row_source_object = _stable_identity(
+                lineage.get("source_object_identity")
+                or lineage.get("source_identity")
+                or lineage.get("object_identity")
+            )
+            row_canonical_product_id = lineage.get("canonical_product_id")
+            if expected_policy and row_policy != expected_policy:
+                mismatches.append(f"{product.canonical_product_id}:policy_identity")
+            if expected_source_object and row_source_object != expected_source_object:
+                mismatches.append(f"{product.canonical_product_id}:source_object_identity")
+            if (
+                identity.get("canonical_product_id")
+                and row_canonical_product_id not in (None, "")
+                and str(row_canonical_product_id) != str(identity["canonical_product_id"])
+            ):
+                mismatches.append(f"{product.canonical_product_id}:canonical_product_id")
+        if mismatches:
+            raise ForcingProductionError(
+                "Canonical products do not match scheduler-selected canonical identity: "
+                + ", ".join(mismatches[:10])
+            )
+
+    def _enforce_limit(self, name: str, value: int, limit: int) -> None:
+        if value > limit:
+            raise ForcingProductionError(f"Forcing {name} {value} exceeds configured limit {limit}.")
+
     def _load_valid_stations(self, *, basin_version_id: str) -> tuple[MetStation, ...]:
         assert self.repository is not None
         loaded = self.repository.load_met_stations(basin_version_id=basin_version_id)
-        selected = tuple(station for station in loaded if station.station_role == "forcing_grid") or loaded
+        selected = tuple(station for station in loaded if station.station_role == "forcing_grid")
         stations: list[MetStation] = []
         for station in selected:
             if not _valid_station(station):
                 LOGGER.warning("Excluding invalid met station %s for basin %s", station.station_id, basin_version_id)
                 continue
+            _validate_forcing_grid_station_contract(station)
             stations.append(station)
 
         if not stations:
             raise ForcingProductionError(
-                f"No active meteorological stations are defined for basin version {basin_version_id}."
+                f"No active forcing_grid meteorological stations are defined for basin version {basin_version_id}."
             )
-        return tuple(sorted(stations, key=lambda station: station.station_id))
+        _validate_unique_station_forcing_contract(stations)
+        return tuple(sorted(stations, key=_station_forcing_sort_key))
 
     def _required_canonical_variables(self, source_id: str) -> tuple[str, ...]:
         if _is_ifs_source(source_id):
@@ -500,6 +673,7 @@ class ForcingProducer:
         }
         if not grid_ids:
             raise ForcingProductionError("No canonical products are available.")
+        _validate_canonical_product_units(products_by_variable)
 
     def _apply_era5_latency_fallback(
         self,
@@ -876,11 +1050,7 @@ class ForcingProducer:
                 return field
 
             precip_product = products_by_variable["prcp_rate_or_amount"][valid_time]
-            precip_factor = (
-                24.0 / _precip_step_hours(precip_product, self.config.ifs_precip_step_hours)
-                if _is_ifs_source(source_id)
-                else 1.0
-            )
+            precip_factor = self._precip_to_timestep_factor(source_id, precip_product)
             station_values: dict[str, dict[str, float]] = {
                 "PRCP": {
                     station_id: value * precip_factor
@@ -1019,13 +1189,38 @@ class ForcingProducer:
             values[station.station_id] = weighted_value
         return values
 
+    def _precip_to_timestep_factor(self, source_id: str, precip_product: CanonicalProduct) -> float:
+        """Return the multiplier that converts canonical precip into per-timestep ``mm``.
+
+        Output unit for ``PRCP`` is per-timestep accumulated ``mm``. Conversion is unit-
+        and source-aware:
+
+        * ``mm`` (per-timestep amount, e.g. GFS) -> factor ``1.0``.
+        * ``mm/day`` (a daily rate, e.g. ERA5) -> scaled to the canonical timestep amount
+          via ``step_hours / 24``, where ``step_hours`` is the native time resolution.
+        * IFS keeps its dedicated per-step accumulation handling.
+
+        A ``mm/day`` source with an unknown/zero step is rejected so we never silently
+        emit a physically wrong precip amount.
+        """
+        unit = (precip_product.unit or "").strip().lower()
+        if unit == "mm/day":
+            step_hours = _precip_step_hours(precip_product, default_hours=0.0)
+            return step_hours / 24.0
+        if _is_ifs_source(source_id):
+            return 24.0 / _precip_step_hours(precip_product, self.config.ifs_precip_step_hours)
+        return 1.0
+
     def _write_outputs_and_records(
         self,
         *,
         source_id: str,
         cycle_time: datetime,
         model_id: str,
+        basin_id: str,
         basin_version_id: str,
+        river_network_version_id: str,
+        scheduler_canonical_identity: Mapping[str, Any],
         grid_id: str,
         stations: Sequence[MetStation],
         rows: Sequence[ForcingTimeseriesRow],
@@ -1042,21 +1237,34 @@ class ForcingProducer:
         source_segment = _object_source_segment(source_id)
         forcing_version_id = rows[0].forcing_version_id
         valid_times = sorted({row.valid_time for row in rows})
+        self._enforce_limit("timeseries_row_count", len(rows), self.config.max_timeseries_row_count)
+        _validate_package_filenames(
+            forcing_filename=self.config.forcing_filename,
+            csv_filename=self.config.csv_filename,
+            package_manifest_filename=self.config.package_manifest_filename,
+            stations=stations,
+        )
         prefix = f"forcing/{source_segment}/{compact_cycle}/{basin_version_id}/{model_id}"
+        package_uri = _directory_uri(self.object_store, prefix)
+        package_manifest_key = f"{prefix}/{self.config.package_manifest_filename}"
+        package_manifest_uri = self.object_store.uri_for_key(package_manifest_key)
 
         tsd_content = format_tsd_forc(rows, stations=stations, variables=self.config.output_variables).encode("utf-8")
         csv_content = format_debug_csv(rows).encode("utf-8")
         tsd_key = f"{prefix}/{self.config.forcing_filename}"
         csv_key = f"{prefix}/{self.config.csv_filename}"
-        tsd_uri = self.object_store.write_bytes_atomic(tsd_key, tsd_content)
-        csv_uri = self.object_store.write_bytes_atomic(csv_key, csv_content)
+        tsd_uri = self.object_store.uri_for_key(tsd_key)
+        csv_uri = self.object_store.uri_for_key(csv_key)
         tsd_checksum = sha256_bytes(tsd_content)
         csv_checksum = sha256_bytes(csv_content)
         shud_files = format_shud_forcing_package(rows, stations=stations)
+        shud_file_payloads: list[tuple[str, bytes]] = []
         shud_file_entries: list[dict[str, str]] = []
         for relative_path, content in shud_files.items():
             content_bytes = content.encode("utf-8")
-            uri = self.object_store.write_bytes_atomic(f"{prefix}/{relative_path}", content_bytes)
+            key = f"{prefix}/{relative_path}"
+            uri = self.object_store.uri_for_key(key)
+            shud_file_payloads.append((key, content_bytes))
             shud_file_entries.append(
                 {
                     "role": "shud_forcing" if relative_path == "shud/qhh.tsd.forc" else "shud_forcing_csv",
@@ -1066,7 +1274,12 @@ class ForcingProducer:
                 }
             )
 
-        package_uri = _directory_uri(self.object_store, prefix)
+        variable_set = list(self.config.output_variables)
+        units = {variable: OUTPUT_UNITS[variable] for variable in variable_set}
+        time_range = _time_range_manifest(valid_times)
+        station_order = _station_order_manifest(stations)
+        quality_flags = _quality_flags_manifest(rows, products_by_variable)
+        canonical_product_ids = _canonical_product_ids(products_by_variable)
         lineage_json = {
             "producer_version": self.config.producer_version,
             "source_id": source_id,
@@ -1074,7 +1287,10 @@ class ForcingProducer:
             "min_lead_hours": (lead_window or {}).get("min_lead_hours"),
             "max_lead_hours": (lead_window or {}).get("max_lead_hours"),
             "model_id": model_id,
+            "basin_id": basin_id,
             "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
+            "scheduler_canonical_identity": dict(scheduler_canonical_identity),
             "grid_id": grid_id,
             "station_count": len(stations),
             "station_ids": [station.station_id for station in stations],
@@ -1082,12 +1298,14 @@ class ForcingProducer:
             "grid_signatures": _format_grid_signatures(grid_signature_by_source_grid or {}),
             "canonical_input_signature": canonical_input_signature
             or self._canonical_input_signature(products_by_variable, cycle_time),
-            "forcing_variables": list(self.config.output_variables),
-            "canonical_product_ids": sorted(
-                product.canonical_product_id
-                for products_for_variable in products_by_variable.values()
-                for product in products_for_variable.values()
-            ),
+            "forcing_variables": variable_set,
+            "variable_set": variable_set,
+            "units": units,
+            "variable_count": len(variable_set),
+            "time_range": time_range,
+            "quality_flags": quality_flags,
+            "station_order": station_order,
+            "canonical_product_ids": canonical_product_ids,
         }
         if fallback_lineage is not None:
             lineage_json.update(
@@ -1106,8 +1324,18 @@ class ForcingProducer:
             "cycle_time": _format_time(cycle_time),
             "start_time": _format_time(valid_times[0]),
             "end_time": _format_time(valid_times[-1]),
+            "basin_id": basin_id,
             "basin_version_id": basin_version_id,
+            "river_network_version_id": river_network_version_id,
+            "scheduler_canonical_identity": dict(scheduler_canonical_identity),
             "station_count": len(stations),
+            "timestep_count": len(valid_times),
+            "variable_count": len(variable_set),
+            "time_range": time_range,
+            "variable_set": variable_set,
+            "units": units,
+            "quality_flags": quality_flags,
+            "station_order": station_order,
             "files": [
                 {"role": "tsd_forc", "uri": tsd_uri, "checksum": tsd_checksum},
                 {"role": "csv_debug", "uri": csv_uri, "checksum": csv_checksum},
@@ -1116,11 +1344,8 @@ class ForcingProducer:
             "lineage": lineage_json,
         }
         package_content = _json_bytes(package_manifest)
+        self._enforce_limit("manifest_bytes", len(package_content), self.config.max_manifest_bytes)
         package_checksum = sha256_bytes(package_content)
-        package_manifest_uri = self.object_store.write_bytes_atomic(
-            f"{prefix}/{self.config.package_manifest_filename}",
-            package_content,
-        )
 
         record = {
             "forcing_version_id": forcing_version_id,
@@ -1135,10 +1360,16 @@ class ForcingProducer:
             "lineage_json": {
                 **lineage_json,
                 "forcing_package_manifest_uri": package_manifest_uri,
+                "forcing_package_manifest_checksum": package_checksum,
                 "output_files": package_manifest["files"],
             },
         }
         self.repository.upsert_forcing_version(record)
+        self.object_store.write_bytes_atomic(tsd_key, tsd_content)
+        self.object_store.write_bytes_atomic(csv_key, csv_content)
+        for key, content_bytes in shud_file_payloads:
+            self.object_store.write_bytes_atomic(key, content_bytes)
+        self.object_store.write_bytes_atomic(package_manifest_key, package_content)
         self.repository.replace_forcing_components(forcing_version_id, components)
         self.repository.replace_forcing_timeseries(forcing_version_id, rows)
         self.repository.finalize_forcing_version(forcing_version_id, package_checksum)
@@ -1149,6 +1380,9 @@ class ForcingProducer:
             checksum=package_checksum,
             station_count=len(stations),
             timestep_count=len(valid_times),
+            variable_count=len(variable_set),
+            time_range=time_range,
+            units=units,
             file_uris={
                 "tsd_forc": tsd_uri,
                 "csv_debug": csv_uri,
@@ -1163,6 +1397,11 @@ class ForcingProducer:
         lead_window: Mapping[str, int | None],
         station_signature: Mapping[str, Any],
         canonical_input_signature: Mapping[str, Any],
+        scheduler_canonical_identity: Mapping[str, Any],
+        expected_station_ids: Sequence[str],
+        expected_valid_times: Sequence[datetime],
+        expected_variables: Sequence[str],
+        expected_component_ids: Sequence[str],
     ) -> bool:
         if not existing:
             return False
@@ -1190,6 +1429,11 @@ class ForcingProducer:
             return False
         if not _canonical_input_signature_matches(lineage.get("canonical_input_signature"), canonical_input_signature):
             return False
+        if not _scheduler_canonical_identity_matches(
+            lineage.get("scheduler_canonical_identity"),
+            scheduler_canonical_identity,
+        ):
+            return False
         try:
             manifest_uri = _package_manifest_uri(package_uri, self.config.package_manifest_filename)
             if not self.object_store.exists(manifest_uri) or self.object_store.checksum(manifest_uri) != checksum:
@@ -1207,10 +1451,43 @@ class ForcingProducer:
                 canonical_input_signature,
             ):
                 return False
-            return True
+            if not _scheduler_canonical_identity_matches(
+                manifest_lineage.get("scheduler_canonical_identity"),
+                scheduler_canonical_identity,
+            ):
+                return False
+            return self._forcing_children_are_complete(
+                forcing_version_id=str(existing["forcing_version_id"]),
+                expected_component_ids=expected_component_ids,
+                expected_station_ids=expected_station_ids,
+                expected_valid_times=expected_valid_times,
+                expected_variables=expected_variables,
+            )
         except (OSError, ObjectStoreError, ValueError):
             LOGGER.warning("Existing forcing package checksum could not be verified for %s", package_uri)
             return False
+
+    def _forcing_children_are_complete(
+        self,
+        *,
+        forcing_version_id: str,
+        expected_component_ids: Sequence[str],
+        expected_station_ids: Sequence[str],
+        expected_valid_times: Sequence[datetime],
+        expected_variables: Sequence[str],
+    ) -> bool:
+        assert self.repository is not None
+        verifier = getattr(self.repository, "verify_forcing_version_children", None)
+        if not callable(verifier):
+            return False
+        proof = verifier(
+            forcing_version_id=forcing_version_id,
+            expected_component_ids=expected_component_ids,
+            expected_station_ids=expected_station_ids,
+            expected_valid_times=expected_valid_times,
+            expected_variables=expected_variables,
+        )
+        return bool(proof.get("complete"))
 
     def _canonical_input_signature(
         self,
@@ -1450,6 +1727,63 @@ def _station_properties(station: MetStation) -> Mapping[str, Any]:
     return properties if isinstance(properties, Mapping) else {}
 
 
+def _validate_forcing_grid_station_contract(station: MetStation) -> None:
+    props = _station_properties(station)
+    raw_index = props.get("shud_forcing_index")
+    if raw_index in (None, ""):
+        raise ForcingProductionError(
+            f"Fixed forcing_grid station {station.station_id} is missing shud_forcing_index metadata."
+        )
+    try:
+        forcing_index = int(raw_index)
+    except (TypeError, ValueError) as error:
+        raise ForcingProductionError(
+            f"Fixed forcing_grid station {station.station_id} has invalid shud_forcing_index metadata."
+        ) from error
+    if forcing_index < 1:
+        raise ForcingProductionError(
+            f"Fixed forcing_grid station {station.station_id} has non-positive shud_forcing_index metadata."
+        )
+    raw_filename = props.get("forcing_filename")
+    filename = str(raw_filename or "").strip()
+    if not _safe_station_forcing_filename(filename):
+        raise ForcingProductionError(
+            f"Fixed forcing_grid station {station.station_id} is missing a safe forcing_filename metadata value."
+        )
+
+
+def _validate_unique_station_forcing_contract(stations: Sequence[MetStation]) -> None:
+    indexes: dict[int, str] = {}
+    filenames: dict[str, str] = {}
+    reserved = _reserved_shud_station_filenames()
+    for station in stations:
+        forcing_index = _station_forcing_index(station)
+        filename = _station_forcing_filename(station, forcing_index)
+        if filename in reserved:
+            raise ForcingProductionError(
+                f"Reserved SHUD forcing filename {filename!r} cannot be used for station {station.station_id}."
+            )
+        existing_station_id = indexes.setdefault(forcing_index, station.station_id)
+        if existing_station_id != station.station_id:
+            raise ForcingProductionError(
+                f"Duplicate SHUD forcing index {forcing_index} for stations "
+                f"{existing_station_id} and {station.station_id}."
+            )
+        existing_filename_station_id = filenames.setdefault(filename, station.station_id)
+        if existing_filename_station_id != station.station_id:
+            raise ForcingProductionError(
+                f"Duplicate SHUD forcing filename {filename!r} for stations "
+                f"{existing_filename_station_id} and {station.station_id}."
+            )
+    expected_indexes = list(range(1, len(stations) + 1))
+    actual_indexes = sorted(indexes)
+    if actual_indexes != expected_indexes:
+        raise ForcingProductionError(
+            "Fixed forcing_grid stations must use contiguous SHUD forcing indexes "
+            f"{expected_indexes}; got {actual_indexes}."
+        )
+
+
 def _station_forcing_index(station: MetStation) -> int:
     props = _station_properties(station)
     value = props.get("shud_forcing_index")
@@ -1462,13 +1796,90 @@ def _station_forcing_index(station: MetStation) -> int:
 def _station_forcing_filename(station: MetStation, forcing_index: int) -> str:
     props = _station_properties(station)
     filename = str(props.get("forcing_filename") or "").strip()
-    if filename and "/" not in filename and "\\" not in filename and "\x00" not in filename:
+    if _safe_station_forcing_filename(filename):
         return filename
     return f"forcing_{forcing_index:03d}.csv"
 
 
+def _safe_station_forcing_filename(filename: str) -> bool:
+    return bool(
+        filename
+        and "/" not in filename
+        and "\\" not in filename
+        and "\x00" not in filename
+        and ".." not in Path(filename).parts
+        and filename not in {".", ".."}
+        and _SAFE_PATH_COMPONENT.fullmatch(filename) is not None
+    )
+
+
+def _reserved_shud_station_filenames() -> set[str]:
+    return {"qhh.tsd.forc", "forcing_package.json", "forcing_debug.csv", "forcing.tsd.forc"}
+
+
+def _validate_package_filenames(
+    *,
+    forcing_filename: str,
+    csv_filename: str,
+    package_manifest_filename: str,
+    stations: Sequence[MetStation],
+) -> None:
+    package_names = {
+        "forcing_filename": forcing_filename,
+        "csv_filename": csv_filename,
+        "package_manifest_filename": package_manifest_filename,
+    }
+    seen: dict[str, str] = {}
+    for field_name, filename in package_names.items():
+        if not _safe_station_forcing_filename(str(filename)):
+            raise ForcingProductionError(f"Configured package filename {field_name}={filename!r} is unsafe.")
+        previous = seen.setdefault(str(filename), field_name)
+        if previous != field_name:
+            raise ForcingProductionError(f"Configured package filename {filename!r} is reused by {previous}.")
+    station_names = {
+        _station_forcing_filename(station, _station_forcing_index(station))
+        for station in stations
+    }
+    reserved = _reserved_shud_station_filenames()
+    collisions = sorted(station_names.intersection(reserved))
+    if collisions:
+        raise ForcingProductionError(
+            "Station forcing filenames collide with reserved SHUD/package names: " + ", ".join(collisions)
+        )
+
+
 def _station_forcing_sort_key(station: MetStation) -> tuple[int, str]:
     return (_station_forcing_index(station), station.station_id)
+
+
+def _station_order_manifest(stations: Sequence[MetStation]) -> list[dict[str, Any]]:
+    return [
+        {
+            "station_id": station.station_id,
+            "shud_forcing_index": _station_forcing_index(station),
+            "forcing_filename": _station_forcing_filename(station, _station_forcing_index(station)),
+            "longitude": float(station.longitude),
+            "latitude": float(station.latitude),
+            "elevation_m": float(station.elevation_m),
+        }
+        for station in sorted(stations, key=_station_forcing_sort_key)
+    ]
+
+
+def _quality_flags_manifest(
+    rows: Sequence[ForcingTimeseriesRow],
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+) -> dict[str, Any]:
+    return {
+        "station_timeseries": sorted({row.quality_flag for row in rows}),
+        "canonical_products": sorted(
+            {
+                product.quality_flag
+                for products_for_variable in products_by_variable.values()
+                for product in products_for_variable.values()
+            }
+        ),
+    }
 
 
 def _json_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -1566,6 +1977,54 @@ def _station_signature_matches(existing: Any, current: Mapping[str, Any]) -> boo
         and list(existing.get("station_ids") or []) == list(current["station_ids"])
         and str(existing.get("checksum") or "") == str(current["checksum"])
     )
+
+
+def _products(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+) -> tuple[CanonicalProduct, ...]:
+    return tuple(
+        product for products_for_variable in products_by_variable.values() for product in products_for_variable.values()
+    )
+
+
+def _canonical_product_ids(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+) -> tuple[str, ...]:
+    return tuple(sorted(product.canonical_product_id for product in _products(products_by_variable)))
+
+
+def _time_range_manifest(valid_times: Sequence[datetime]) -> dict[str, str | int]:
+    if not valid_times:
+        return {"start_time": "", "end_time": "", "timestep_count": 0}
+    ordered = sorted(valid_times)
+    return {
+        "start_time": _format_time(ordered[0]),
+        "end_time": _format_time(ordered[-1]),
+        "timestep_count": len(ordered),
+    }
+
+
+def _scheduler_canonical_identity_manifest(
+    *,
+    canonical_product_id: str | None,
+    canonical_identity: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    identity = dict(canonical_identity or {})
+    if canonical_product_id not in (None, ""):
+        identity["canonical_product_id"] = str(canonical_product_id)
+    if "policy_identity" in identity and isinstance(identity["policy_identity"], Mapping):
+        identity["policy_identity"] = dict(identity["policy_identity"])
+    if "source_object_identity" in identity and isinstance(identity["source_object_identity"], Mapping):
+        identity["source_object_identity"] = dict(identity["source_object_identity"])
+    return _json_round_trip(identity)
+
+
+def _scheduler_canonical_identity_matches(existing: Any, current: Mapping[str, Any]) -> bool:
+    if not current:
+        return True
+    if not isinstance(existing, Mapping):
+        return False
+    return _stable_identity(existing) == _stable_identity(current)
 
 
 def _canonical_input_signature(
@@ -1689,6 +2148,16 @@ def _canonical_input_signature_matches(existing: Any, current: Mapping[str, Any]
     )
 
 
+def _stable_identity(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    return json.dumps(_json_round_trip(value), sort_keys=True, separators=(",", ":"), default=_json_default)
+
+
+def _json_round_trip(value: Any) -> Any:
+    return json.loads(json.dumps(value, sort_keys=True, default=_json_default))
+
+
 def _validate_field_values(
     values: Sequence[float],
     grid_points: Sequence[GridPoint],
@@ -1719,6 +2188,23 @@ def _missing_product_details(
             if valid_time not in product_times:
                 missing.append(f"{variable}:{_format_time(valid_time)}")
     return missing
+
+
+def _validate_canonical_product_units(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+) -> None:
+    mismatches: list[str] = []
+    for variable, products_for_variable in products_by_variable.items():
+        expected_units = EXPECTED_CANONICAL_UNITS.get(variable)
+        if expected_units is None:
+            continue
+        for valid_time, product in sorted(products_for_variable.items(), key=lambda item: item[0]):
+            if product.unit not in expected_units:
+                mismatches.append(
+                    f"{variable}:{_format_time(valid_time)} unit={product.unit!r} expected={list(expected_units)}"
+                )
+    if mismatches:
+        raise ForcingProductionError(f"Canonical product unit mismatch: {', '.join(mismatches[:10])}")
 
 
 def _valid_times(products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]]) -> tuple[datetime, ...]:
@@ -1778,6 +2264,16 @@ def _min_lead_hours_from_env() -> int | None:
     if value in (None, ""):
         return None
     return int(value)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{name} must be at least 1")
+    return parsed
 
 
 def _lead_window_from_products(

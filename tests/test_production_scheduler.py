@@ -78,6 +78,7 @@ class ProductionScheduler(_RealProductionScheduler):
         adapters: Mapping[str, Any] | None = None,
         active_repository: Any | None = None,
         canonical_readiness_provider: Any = _TEST_CANONICAL_READINESS_PROVIDER_UNSET,
+        forcing_producer: Any | None = None,
         orchestrator_factory: Any | None = None,
         sleep: Any | None = None,
     ) -> None:
@@ -92,6 +93,7 @@ class ProductionScheduler(_RealProductionScheduler):
             adapters=adapters,
             active_repository=active_repository,
             canonical_readiness_provider=canonical_readiness_provider,
+            forcing_producer=forcing_producer,
             orchestrator_factory=orchestrator_factory,
             sleep=sleep,
         )
@@ -340,6 +342,99 @@ def test_checksum_missing_canonical_readiness_blocks_forcing_candidate_submissio
     assert canonical["checksum_missing_samples"][0]["variable"] == "shortwave_down"
     assert canonical["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
     assert adapter.download_calls == 0
+
+
+def test_scheduler_invokes_forcing_producer_before_orchestration_for_ready_canonical_candidate(
+    tmp_path: Path,
+) -> None:
+    forcing_producer = FakeForcingProducer()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert len(forcing_producer.calls) == 1
+    producer_call = forcing_producer.calls[0]
+    assert producer_call["source_id"] == "gfs"
+    assert producer_call["cycle_time"] == _dt("2026-05-21T06:00:00Z")
+    assert producer_call["model_id"] == "model_a"
+    assert producer_call["max_lead_hours"] == 168
+    assert producer_call["basin_id"] == "basin_a"
+    assert producer_call["basin_version_id"] == "basin_a_v1"
+    assert producer_call["river_network_version_id"] == "basin_a_rivnet_v1"
+    assert producer_call["canonical_product_id"] == "canon_gfs_2026052106"
+    assert producer_call["canonical_identity"]["canonical_product_id"] == "canon_gfs_2026052106"
+    assert producer_call["canonical_identity"]["policy_identity"]["source"] == "gfs"
+    assert producer_call["canonical_identity"]["source_object_identity"]["source"] == "gfs"
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["execution_write_proof"]["met_result_table_writes"] is True
+    assert result.evidence["candidates"][0]["state_evidence"]["forcing_production"]["status"] == "forcing_ready"
+    assert result.evidence["model_run_evidence"][0]["stage"] == "forcing"
+    assert result.evidence["model_run_evidence"][0]["forcing"]["station_count"] == 2
+    assert result.evidence["model_run_evidence"][0]["forcing"]["variable_count"] == 6
+    assert result.evidence["model_run_evidence"][0]["forcing"]["manifest_checksum"] == "forcing-manifest-sha"
+    assert orchestrator.calls
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert submitted_basin["forcing_version_id"] == "forc_gfs_2026052106_model_a"
+    assert submitted_basin["forcing_package_uri"].endswith("/forcing/gfs/2026052106/basin_a_v1/model_a/")
+    assert submitted_basin["forcing_uri"].endswith("/forcing/gfs/2026052106/basin_a_v1/model_a/forcing.tsd.forc")
+
+
+def test_scheduler_blocks_orchestration_when_forcing_producer_fails(tmp_path: Path) -> None:
+    forcing_producer = FakeForcingProducer(error=RuntimeError("missing fixed stations"))
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "preflight_blocked"
+    assert forcing_producer.calls
+    assert orchestrator.calls == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["blocked_candidates"][0]["reason"] == "forcing_production_blocked"
+    assert result.evidence["model_run_evidence"][0]["stage"] == "forcing"
+    assert result.evidence["model_run_evidence"][0]["status"] == "blocked"
+    assert result.evidence["model_run_evidence"][0]["slurm_submit_called"] is False
+    assert result.evidence["no_mutation_proof"]["shud_runtime_called"] is False
+
+
+def test_scheduler_propagates_produced_forcing_identity_to_orchestration(tmp_path: Path) -> None:
+    forcing_producer = FakeForcingProducer(forcing_version_id="forc_reused_existing_ready")
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert result.evidence["candidates"][0]["forcing_version_id"] == "forc_reused_existing_ready"
+    assert result.evidence["model_run_evidence"][0]["forcing_version_id"] == "forc_reused_existing_ready"
+    assert orchestrator.calls[0]["basins"][0]["forcing_version_id"] == "forc_reused_existing_ready"
+    assert orchestrator.calls[0]["basins"][0]["forcing_package_manifest_uri"].endswith("forcing_package.json")
 
 
 def test_canonical_readiness_provider_absent_blocks_candidate_with_unavailable_evidence(tmp_path: Path) -> None:
@@ -8649,6 +8744,24 @@ def test_public_from_env_wires_active_repository(monkeypatch: Any, tmp_path: Pat
     assert scheduler.active_repository is active_repository
 
 
+def test_public_from_env_wires_forcing_producer_when_enabled(monkeypatch: Any, tmp_path: Path) -> None:
+    forcing_producer = FakeForcingProducer()
+    monkeypatch.setenv("NHMS_PRODUCTION_FORCING_ENABLED", "1")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=False),
+    )
+    monkeypatch.setattr("services.orchestrator.scheduler._canonical_readiness_provider_from_env", lambda: None)
+    monkeypatch.setattr("services.orchestrator.scheduler._forcing_producer_from_env", lambda: forcing_producer)
+    monkeypatch.setattr("services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env", lambda: FakeRegistry([]))
+    monkeypatch.setattr("services.orchestrator.scheduler._default_adapters", lambda: {})
+
+    scheduler = ProductionScheduler.from_env(_config(tmp_path, now=_dt("2026-05-21T12:00:00Z")))
+
+    assert scheduler.config.forcing_production_enabled is True
+    assert scheduler.forcing_producer is forcing_producer
+
+
 def test_plan_production_cli_public_path_skips_active_duplicate(
     monkeypatch: Any,
     tmp_path: Path,
@@ -9532,6 +9645,77 @@ class FakeProductionOrchestrator:
                 "replacement_submitted": False,
             }
         ]
+
+
+class FakeForcingProducer:
+    def __init__(self, *, error: Exception | None = None, forcing_version_id: str | None = None) -> None:
+        self.error = error
+        self.forcing_version_id = forcing_version_id
+        self.calls: list[dict[str, Any]] = []
+
+    def produce(
+        self,
+        *,
+        source_id: str | None = None,
+        cycle_time: str | datetime,
+        model_id: str,
+        max_lead_hours: int | None = None,
+        basin_id: str | None = None,
+        basin_version_id: str | None = None,
+        river_network_version_id: str | None = None,
+        canonical_product_id: str | None = None,
+        canonical_identity: Mapping[str, Any] | None = None,
+    ) -> Any:
+        parsed_cycle_time = _dt(cycle_time) if isinstance(cycle_time, str) else cycle_time
+        self.calls.append(
+            {
+                "source_id": source_id,
+                "cycle_time": parsed_cycle_time,
+                "model_id": model_id,
+                "max_lead_hours": max_lead_hours,
+                "basin_id": basin_id,
+                "basin_version_id": basin_version_id,
+                "river_network_version_id": river_network_version_id,
+                "canonical_product_id": canonical_product_id,
+                "canonical_identity": dict(canonical_identity or {}),
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        compact_cycle = format_cycle_time(parsed_cycle_time)
+        return type(
+            "FakeForcingProductionResult",
+            (),
+            {
+                "status": "forcing_ready",
+                "forcing_version_id": self.forcing_version_id
+                or f"forc_{str(source_id).lower()}_{compact_cycle}_{model_id}",
+                "forcing_package_uri": f"s3://nhms/forcing/{source_id}/{compact_cycle}/basin_a_v1/{model_id}/",
+                "checksum": "forcing-manifest-sha",
+                "station_count": 2,
+                "timestep_count": 2,
+                "variable_count": 6,
+                "time_range": {
+                    "start_time": "2026-05-21T06:00:00Z",
+                    "end_time": "2026-05-21T09:00:00Z",
+                    "timestep_count": 2,
+                },
+                "units": {
+                    "PRCP": "mm",
+                    "TEMP": "degC",
+                    "RH": "0-1",
+                    "wind": "m/s",
+                    "Rn": "W/m2",
+                    "Press": "Pa",
+                },
+                "file_uris": {
+                    "tsd_forc": f"s3://nhms/forcing/{source_id}/{compact_cycle}/basin_a_v1/{model_id}/forcing.tsd.forc",
+                    "package_manifest": (
+                        f"s3://nhms/forcing/{source_id}/{compact_cycle}/basin_a_v1/{model_id}/forcing_package.json"
+                    )
+                },
+            },
+        )()
 
 
 class FakeProductionOrchestratorWithStageEvidence(FakeProductionOrchestrator):

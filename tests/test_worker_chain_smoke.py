@@ -159,6 +159,8 @@ def _write_grid_definition(store: LocalObjectStore) -> str:
 
 
 def _seed_worker_support_rows(database_url: str) -> None:
+    from psycopg2.extras import Json
+
     from tests.integration_helpers import psycopg_connection
 
     with psycopg_connection(database_url) as connection:
@@ -171,15 +173,22 @@ def _seed_worker_support_rows(database_url: str) -> None:
             cursor.execute(
                 """
                 INSERT INTO met.met_station (
-                    station_id, basin_version_id, station_name, geom, elevation_m, station_role, active_flag
+                    station_id, basin_version_id, station_name, geom, elevation_m,
+                    station_role, active_flag, properties_json
                 )
                 VALUES (
                     'it126_station', %s, 'Integration Station', ST_SetSRID(ST_MakePoint(110.2, 30.2), 4490),
-                    25.0, 'forcing_proxy', true
+                    25.0, 'forcing_grid', true, %s
                 )
-                ON CONFLICT (station_id) DO UPDATE SET active_flag = EXCLUDED.active_flag
+                ON CONFLICT (station_id) DO UPDATE SET
+                    station_role = EXCLUDED.station_role,
+                    active_flag = EXCLUDED.active_flag,
+                    properties_json = EXCLUDED.properties_json
                 """,
-                (BASIN_VERSION_ID,),
+                (
+                    BASIN_VERSION_ID,
+                    Json({"shud_forcing_index": 1, "forcing_filename": "it126_station.csv"}),
+                ),
             )
 
 

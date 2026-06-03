@@ -121,6 +121,17 @@ def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     assert qc["package_uri"].startswith("s3://nhms-prod/met/runs/m10_149/met/forcing/gfs/")
     assert qc["package_manifest_uri"].endswith("/forcing_package.json")
     assert all(check["status"] == "pass" for check in qc["range_checks"])
+    # Pin the Evidence Floor units payload to the package manifest units so a future change to
+    # package_manifest_unit cannot silently drift the documented forcing variable units.
+    assert qc["units"] == {
+        "PRCP": "mm",
+        "TEMP": "degC",
+        "RH": "0-1",
+        "wind": "m/s",
+        "Rn": "W/m2",
+        "Press": "Pa",
+    }
+    assert qc["units"]["PRCP"] == "mm"
 
     lineage = _read_json(lane_dir / "best_available_lineage.json")
     assert lineage["status"] == "ready"

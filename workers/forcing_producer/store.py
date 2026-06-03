@@ -26,6 +26,28 @@ class PsycopgForcingRepository:
     def from_env(cls) -> PsycopgForcingRepository:
         return cls(default_database_url())
 
+    def resolve_model_identity(self, *, model_id: str) -> dict[str, Any]:
+        row = self._fetch_optional(
+            """
+            SELECT
+                mi.basin_version_id,
+                bv.basin_id,
+                mi.river_network_version_id
+            FROM core.model_instance mi
+            JOIN core.basin_version bv
+              ON bv.basin_version_id = mi.basin_version_id
+            WHERE mi.model_id = %s
+            """,
+            (model_id,),
+        )
+        if row is None:
+            raise MetStoreError(f"Model instance {model_id!r} was not found.")
+        return {
+            "basin_id": str(row["basin_id"]),
+            "basin_version_id": str(row["basin_version_id"]),
+            "river_network_version_id": str(row["river_network_version_id"]),
+        }
+
     def resolve_model_basin_version(self, *, model_id: str) -> str:
         row = self._fetch_optional(
             """
@@ -369,6 +391,67 @@ class PsycopgForcingRepository:
             """,
             (checksum, forcing_version_id),
         )
+
+    def verify_forcing_version_children(
+        self,
+        *,
+        forcing_version_id: str,
+        expected_component_ids: Sequence[str],
+        expected_station_ids: Sequence[str],
+        expected_valid_times: Sequence[datetime],
+        expected_variables: Sequence[str],
+    ) -> Mapping[str, Any]:
+        expected_component_count = len(tuple(expected_component_ids))
+        expected_timeseries_count = (
+            len(tuple(expected_station_ids)) * len(tuple(expected_valid_times)) * len(tuple(expected_variables))
+        )
+        component = self._fetch_one(
+            """
+            SELECT COUNT(*) AS row_count,
+                   COUNT(DISTINCT canonical_product_id) AS canonical_product_count
+            FROM met.forcing_version_component
+            WHERE forcing_version_id = %s
+              AND canonical_product_id = ANY(%s)
+            """,
+            (forcing_version_id, list(expected_component_ids)),
+        )
+        timeseries = self._fetch_one(
+            """
+            SELECT COUNT(*) AS row_count,
+                   COUNT(DISTINCT station_id) AS station_count,
+                   COUNT(DISTINCT valid_time) AS timestep_count,
+                   COUNT(DISTINCT variable) AS variable_count
+            FROM met.forcing_station_timeseries
+            WHERE forcing_version_id = %s
+              AND station_id = ANY(%s)
+              AND valid_time = ANY(%s)
+              AND variable = ANY(%s)
+            """,
+            (
+                forcing_version_id,
+                list(expected_station_ids),
+                list(expected_valid_times),
+                list(expected_variables),
+            ),
+        )
+        proof = {
+            "forcing_version_id": forcing_version_id,
+            "expected_component_count": expected_component_count,
+            "component_count": int(component["row_count"]),
+            "expected_timeseries_row_count": expected_timeseries_count,
+            "timeseries_row_count": int(timeseries["row_count"]),
+            "station_count": int(timeseries["station_count"]),
+            "timestep_count": int(timeseries["timestep_count"]),
+            "variable_count": int(timeseries["variable_count"]),
+        }
+        proof["complete"] = (
+            proof["component_count"] == expected_component_count
+            and proof["timeseries_row_count"] == expected_timeseries_count
+            and proof["station_count"] == len(tuple(expected_station_ids))
+            and proof["timestep_count"] == len(tuple(expected_valid_times))
+            and proof["variable_count"] == len(tuple(expected_variables))
+        )
+        return proof
 
     def replace_forcing_components(self, forcing_version_id: str, components: Sequence[ForcingComponent]) -> None:
         rows = [
