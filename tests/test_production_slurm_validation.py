@@ -22,7 +22,18 @@ def _valid_shud_executable_env(tmp_path_factory: pytest.TempPathFactory, monkeyp
 
     bin_dir = tmp_path_factory.mktemp("shud_bin")
     executable = bin_dir / "shud_omp"
-    executable.write_text('#!/bin/sh\necho "SHUD v1.0.0"\n', encoding="utf-8")
+    # Mirror the real SHUD binary: only a no-argument call prints the banner.
+    executable.write_text(
+        "#!/bin/sh\n"
+        'if [ "$#" -gt 0 ]; then\n'
+        '  echo "Unknown option: $1" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'echo "Simulator for Hydrologic Unstructured Domains v2.0  2022"\n'
+        'echo "./shud [-0gv] <project_name>"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
     executable.chmod(0o755)
     monkeypatch.setenv("SHUD_EXECUTABLE", str(executable))
 

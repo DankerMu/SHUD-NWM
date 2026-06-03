@@ -55,14 +55,25 @@ _TEST_CANONICAL_READINESS_PROVIDER_UNSET = object()
 def _write_valid_shud_executable(directory: Path) -> Path:
     """Create a non-stub, executable, SHUD-identifying binary stand-in.
 
-    The script emits a ``SHUD`` banner on ``--version`` so the shared SHUD
-    executable preflight treats it as a real solver. ``ldd`` on a shell script
-    reports "not a dynamic executable" (Linux) or is absent (macOS), so the
-    shared-library probe never produces a false blocker for it.
+    Mirrors the real compiled SHUD binary: flags (--version/--help) report
+    "Unknown option" with no token, and only a no-argument invocation prints the
+    identity banner, so the shared preflight treats it as a real solver. ``ldd``
+    on a shell script reports "not a dynamic executable" (Linux) or is absent
+    (macOS), so the shared-library probe never produces a false blocker for it.
     """
 
     path = directory / "shud_omp"
-    path.write_text('#!/bin/sh\necho "SHUD v1.0.0"\n', encoding="utf-8")
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$#" -gt 0 ]; then\n'
+        '  echo "Unknown option: $1" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'echo "Simulator for Hydrologic Unstructured Domains v2.0  2022"\n'
+        'echo "./shud [-0gv] [-p project_file] [-o output] <project_name>"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
     path.chmod(0o755)
     return path
 

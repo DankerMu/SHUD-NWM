@@ -21,6 +21,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,9 +31,14 @@ from packages.common.redaction import redact_text
 # are the canonical stubs called out by the spec; the rest are common no-op shims.
 STUB_EXECUTABLE_BASENAMES = frozenset({"true", "false", ":", "echo", "cat", "noop", "stub"})
 
-# Tokens that a genuine SHUD ``--version``/``--help`` banner is expected to emit.
-# A stub like ``/bin/true`` produces no output and therefore fails this signal.
-SHUD_IDENTITY_TOKENS = ("shud", "simulator of hydrologic")
+# Tokens that a genuine SHUD identity banner is expected to emit. The real
+# compiled SHUD binary rejects ``--version``/``--help`` ("Unknown option") and
+# only prints its banner when invoked with NO arguments, e.g.:
+#   "Simulator for Hydrologic Unstructured Domains v2.0  2022"
+#   "./shud [-0gv] ... <project_name>"
+# so the matcher must align to "simulator FOR hydrologic" (not "of") and to the
+# "./shud" usage line.
+SHUD_IDENTITY_TOKENS = ("shud", "simulator for hydrologic", "hydrologic unstructured domains")
 
 # Bounded external-probe timeout (seconds). Kept small so a hung binary cannot
 # stall the scheduler pass.
@@ -255,14 +261,30 @@ def _missing_shared_libraries(resolved: str) -> list[str] | None:
 
 
 def _version_identity_signal(resolved: str) -> str:
-    """Probe ``--version``/``-v``/``--help`` for a SHUD identity token, fail-safe.
+    """Probe for a SHUD identity banner, fail-safe and bounded.
+
+    The real compiled SHUD binary rejects ``--version``/``--help`` with
+    "Unknown option" and only prints its identity banner when invoked with NO
+    arguments, so the no-argument probe is tried FIRST. The remaining flag probes
+    are kept as a fallback for variant builds that do honour them.
+
+    The no-argument probe is executed inside an isolated empty temporary
+    directory (``cwd=``) with ``stdin`` closed so it cannot accidentally pick up a
+    project file and start a simulation; without a ``<project_name>`` SHUD only
+    prints usage and exits 0 with no side effects.
 
     Returns ``"present"`` when a SHUD banner is seen, ``"absent"`` when probes ran
-    but emitted no SHUD identity, and ``"unknown"`` when no probe could run
-    (all errored/timed out) so the caller does not fabricate a failure.
+    but emitted no SHUD identity, and ``"unknown"`` when no probe could run (all
+    errored/timed out) so the caller does not fabricate a failure.
     """
 
     ran_any = False
+
+    no_arg_ran, no_arg_present = _no_argument_identity_probe(resolved)
+    ran_any = ran_any or no_arg_ran
+    if no_arg_present:
+        return "present"
+
     for flag in ("--version", "-v", "--help", "-h"):
         try:
             completed = subprocess.run(
@@ -271,11 +293,39 @@ def _version_identity_signal(resolved: str) -> str:
                 text=True,
                 timeout=VERSION_PROBE_TIMEOUT_SECONDS,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
         except (OSError, subprocess.SubprocessError):
             continue
         ran_any = True
-        combined = ((completed.stdout or "") + " " + (completed.stderr or ""))[:MAX_PROBE_OUTPUT_BYTES].lower()
-        if any(token in combined for token in SHUD_IDENTITY_TOKENS):
+        if _output_has_identity(completed.stdout, completed.stderr):
             return "present"
     return "absent" if ran_any else "unknown"
+
+
+def _no_argument_identity_probe(resolved: str) -> tuple[bool, bool]:
+    """Run ``resolved`` with no arguments in an isolated cwd, fail-safe.
+
+    Returns ``(ran, identity_present)``. A failure/timeout yields ``(False, False)``
+    so the caller treats it as "did not run" rather than a false negative.
+    """
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="shud-preflight-") as probe_dir:
+            completed = subprocess.run(
+                [resolved],
+                capture_output=True,
+                text=True,
+                timeout=VERSION_PROBE_TIMEOUT_SECONDS,
+                check=False,
+                cwd=probe_dir,
+                stdin=subprocess.DEVNULL,
+            )
+    except (OSError, subprocess.SubprocessError):
+        return False, False
+    return True, _output_has_identity(completed.stdout, completed.stderr)
+
+
+def _output_has_identity(stdout: str | None, stderr: str | None) -> bool:
+    combined = ((stdout or "") + " " + (stderr or ""))[:MAX_PROBE_OUTPUT_BYTES].lower()
+    return any(token in combined for token in SHUD_IDENTITY_TOKENS)

@@ -845,6 +845,29 @@ def test_create_run_conflict_only_resets_retriable_statuses(monkeypatch: pytest.
 # --- Issue #257 / M23-6: SHUD executable + project-input preflight -----------
 
 
+# Mock that mirrors the REAL compiled SHUD binary observed on node-22:
+#   * any flag (--version/-v/--help/-h) -> "Unknown option", exit 1, NO token;
+#   * no argument                       -> prints the identity banner, exit 0.
+# This is the regression guard for the real-binary finding: a preflight that only
+# probed flags would wrongly mark the genuine SHUD as having no version signal.
+_REAL_SHUD_BEHAVIOR_SCRIPT = (
+    "#!/bin/sh\n"
+    'if [ "$#" -gt 0 ]; then\n'
+    '  echo "Unknown option: $1" >&2\n'
+    "  exit 1\n"
+    "fi\n"
+    'echo "Simulator for Hydrologic Unstructured Domains v2.0  2022"\n'
+    'echo "./shud [-0gv] [-p project_file] [-c Calib_file] [-o output] [-n Num_Threads] <project_name>"\n'
+    "exit 0\n"
+)
+
+
+def _write_real_shud_behavior_binary(path: Path) -> Path:
+    path.write_text(_REAL_SHUD_BEHAVIOR_SCRIPT, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 def _run_shud_dirs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     workspace = tmp_path / "workspace"
     output_dir = workspace / "output"
@@ -976,14 +999,59 @@ def test_prepare_workspace_blocks_missing_project_inputs(tmp_path: Path) -> None
 def test_shared_preflight_passes_for_valid_binary_and_redacts(tmp_path: Path) -> None:
     from packages.common.shud_preflight import check_shud_executable
 
-    binary = tmp_path / "shud_omp"
-    binary.write_text('#!/bin/sh\necho "SHUD v1.0.0"\n', encoding="utf-8")
-    binary.chmod(0o755)
+    binary = _write_real_shud_behavior_binary(tmp_path / "shud_omp")
 
     result = check_shud_executable(str(binary))
 
     assert result.ok is True
     assert result.blockers == []
+
+
+def test_shared_preflight_accepts_real_shud_no_arg_only_banner(tmp_path: Path) -> None:
+    """Regression for the node-22 real-binary finding.
+
+    The genuine SHUD binary rejects --version/--help ("Unknown option") and only
+    prints its identity banner when run with no arguments. The preflight must NOT
+    mark such a binary as missing a version signal.
+    """
+
+    import packages.common.shud_preflight as preflight
+
+    binary = _write_real_shud_behavior_binary(tmp_path / "shud")
+
+    # ldd is unavailable on macOS dev hosts; skip the library probe so the test
+    # exercises the version-signal path deterministically across platforms.
+    result = preflight.check_shud_executable(str(binary), probe_libraries=False)
+
+    assert result.ok is True
+    assert result.checks["version_signal"] == "present"
+    assert not any(
+        b["error_code"] == "SHUD_EXECUTABLE_VERSION_SIGNAL_MISSING" for b in result.blockers
+    )
+
+
+def test_shared_preflight_no_arg_probe_runs_in_isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The no-argument probe must not run inside a real project directory."""
+
+    import packages.common.shud_preflight as preflight
+
+    binary = _write_real_shud_behavior_binary(tmp_path / "shud")
+    seen_cwds: list[str | None] = []
+    real_run = preflight.subprocess.run
+
+    def _capturing_run(command: list[str], *args: Any, **kwargs: Any) -> Any:
+        if command == [str(binary)]:
+            seen_cwds.append(kwargs.get("cwd"))
+            assert kwargs.get("stdin") is preflight.subprocess.DEVNULL
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(preflight.subprocess, "run", _capturing_run)
+
+    preflight.check_shud_executable(str(binary), probe_libraries=False)
+
+    assert seen_cwds, "no-argument probe must execute the binary"
+    # cwd is a dedicated temp dir, never the caller's working directory.
+    assert all(cwd is not None and Path(cwd) != Path.cwd() for cwd in seen_cwds)
 
 
 def test_shared_preflight_reports_missing_libraries_safely(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
