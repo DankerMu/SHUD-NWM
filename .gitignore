@@ -50,6 +50,7 @@ data/
 .codex/tmp/
 .codex/cache/
 .codex/evidence/
+.tmp/
 
 # Coverage
 htmlcov/
