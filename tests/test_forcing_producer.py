@@ -513,6 +513,11 @@ def test_produce_is_idempotent_when_existing_checksum_is_valid(tmp_path: Path) -
     assert repository.upsert_count == 1
     assert len(repository.forcing_versions) == 1
     assert len(repository.timeseries) == row_count
+    # already_done must not re-write met result tables (no upsert/finalize/replace after the first run).
+    write_events = [name for name, _ in repository.events]
+    assert write_events.count("replace_forcing_timeseries") == 1
+    assert write_events.count("upsert_forcing_version") == 1
+    assert write_events.count("finalize_forcing_version") == 1
 
 
 def test_existing_forcing_version_not_reused_when_child_rows_are_missing(tmp_path: Path) -> None:
@@ -566,7 +571,8 @@ def test_scheduler_canonical_identity_mismatch_blocks_sibling_rows(tmp_path: Pat
     assert repository.timeseries == []
 
 
-def test_era5_precipitation_mm_per_day_is_accepted_without_amount_scaling(tmp_path: Path) -> None:
+def test_era5_precipitation_mm_per_day_converts_to_timestep_amount(tmp_path: Path) -> None:
+    # Native time resolution in the fixture is 3h, so 24 mm/day must become 24 * 3/24 = 3.0 mm.
     store, repository = _build_repository(
         tmp_path,
         source_id="ERA5",
@@ -584,7 +590,53 @@ def test_era5_precipitation_mm_per_day_is_accepted_without_amount_scaling(tmp_pa
     assert result.status == "forcing_ready"
     prcp_rows = [row for row in repository.timeseries if row.variable == "PRCP"]
     assert prcp_rows
-    assert all(row.value == pytest.approx(24.0) for row in prcp_rows)
+    assert all(row.value == pytest.approx(3.0) for row in prcp_rows)
+    assert all(row.unit == "mm" for row in prcp_rows)
+
+
+def test_era5_precipitation_mm_per_day_uses_native_step_for_conversion(tmp_path: Path) -> None:
+    # An hourly canonical product (1h step) converts 48 mm/day to 48 * 1/24 = 2.0 mm.
+    store, repository = _build_repository(
+        tmp_path,
+        source_id="ERA5",
+        radiation_variable="net_radiation",
+        values_by_variable={"prcp_rate_or_amount": (48.0, 48.0, 48.0)},
+    )
+    repository.products = tuple(
+        _replace_product_unit(_replace_product_time_resolution(product, "1h"), "mm/day")
+        if product.variable == "prcp_rate_or_amount"
+        else product
+        for product in repository.products
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="ERA5", cycle_time="2026050700", model_id="demo_model")
+
+    assert result.status == "forcing_ready"
+    prcp_rows = [row for row in repository.timeseries if row.variable == "PRCP"]
+    assert prcp_rows
+    assert all(row.value == pytest.approx(2.0) for row in prcp_rows)
+
+
+def test_era5_precipitation_mm_per_day_without_step_is_rejected(tmp_path: Path) -> None:
+    store, repository = _build_repository(
+        tmp_path,
+        source_id="ERA5",
+        radiation_variable="net_radiation",
+        values_by_variable={"prcp_rate_or_amount": (24.0, 24.0, 24.0)},
+    )
+    repository.products = tuple(
+        _replace_product_unit(_replace_product_time_resolution(product, None), "mm/day")
+        if product.variable == "prcp_rate_or_amount"
+        else product
+        for product in repository.products
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError):
+        producer.produce(source_id="ERA5", cycle_time="2026050700", model_id="demo_model")
+    assert not repository.timeseries
+    assert repository.cycle_updates[-1]["status"] == "failed_forcing"
 
 
 def test_existing_forcing_version_not_reused_when_lead_window_changes(tmp_path: Path) -> None:
@@ -1398,6 +1450,27 @@ def _replace_product_unit(product: CanonicalProduct, unit: str) -> CanonicalProd
         checksum=product.checksum,
         grid_definition_uri=product.grid_definition_uri,
         native_time_resolution=product.native_time_resolution,
+        native_spatial_resolution=product.native_spatial_resolution,
+        quality_flag=product.quality_flag,
+        lead_time_hours=product.lead_time_hours,
+    )
+
+
+def _replace_product_time_resolution(
+    product: CanonicalProduct, native_time_resolution: str | None
+) -> CanonicalProduct:
+    return CanonicalProduct(
+        canonical_product_id=product.canonical_product_id,
+        source_id=product.source_id,
+        cycle_time=product.cycle_time,
+        valid_time=product.valid_time,
+        variable=product.variable,
+        unit=product.unit,
+        grid_id=product.grid_id,
+        object_uri=product.object_uri,
+        checksum=product.checksum,
+        grid_definition_uri=product.grid_definition_uri,
+        native_time_resolution=native_time_resolution,
         native_spatial_resolution=product.native_spatial_resolution,
         quality_flag=product.quality_flag,
         lead_time_hours=product.lead_time_hours,

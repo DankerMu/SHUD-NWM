@@ -1050,11 +1050,7 @@ class ForcingProducer:
                 return field
 
             precip_product = products_by_variable["prcp_rate_or_amount"][valid_time]
-            precip_factor = (
-                24.0 / _precip_step_hours(precip_product, self.config.ifs_precip_step_hours)
-                if _is_ifs_source(source_id)
-                else 1.0
-            )
+            precip_factor = self._precip_to_timestep_factor(source_id, precip_product)
             station_values: dict[str, dict[str, float]] = {
                 "PRCP": {
                     station_id: value * precip_factor
@@ -1192,6 +1188,28 @@ class ForcingProducer:
                 weighted_value += grid_value * weight.weight
             values[station.station_id] = weighted_value
         return values
+
+    def _precip_to_timestep_factor(self, source_id: str, precip_product: CanonicalProduct) -> float:
+        """Return the multiplier that converts canonical precip into per-timestep ``mm``.
+
+        Output unit for ``PRCP`` is per-timestep accumulated ``mm``. Conversion is unit-
+        and source-aware:
+
+        * ``mm`` (per-timestep amount, e.g. GFS) -> factor ``1.0``.
+        * ``mm/day`` (a daily rate, e.g. ERA5) -> scaled to the canonical timestep amount
+          via ``step_hours / 24``, where ``step_hours`` is the native time resolution.
+        * IFS keeps its dedicated per-step accumulation handling.
+
+        A ``mm/day`` source with an unknown/zero step is rejected so we never silently
+        emit a physically wrong precip amount.
+        """
+        unit = (precip_product.unit or "").strip().lower()
+        if unit == "mm/day":
+            step_hours = _precip_step_hours(precip_product, default_hours=0.0)
+            return step_hours / 24.0
+        if _is_ifs_source(source_id):
+            return 24.0 / _precip_step_hours(precip_product, self.config.ifs_precip_step_hours)
+        return 1.0
 
     def _write_outputs_and_records(
         self,
