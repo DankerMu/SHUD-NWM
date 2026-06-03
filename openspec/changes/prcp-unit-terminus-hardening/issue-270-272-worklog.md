@@ -21,20 +21,21 @@ guard tests, and the OpenSpec change. No numeric/output behavior changes.
 - Missing unit metadata is tolerated (backward compatibility); only an explicit
   non-`mm/day` PRCP unit is rejected.
 
-## State machine (staging unit assertion)
+## State machine (staging unit assertion — best-effort after round-1 fix)
 
 ```
 package_manifest_uri present?
   no  -> skip (existing behavior, no assertion)
   yes -> checksum verified (existing)
-         -> reread package manifest bytes (reused URI)
+         -> reread package manifest bytes (reused URI, capped 16MB)
+            -> read fails / over-cap / invalid JSON?  -> stage (tolerate-skip)
             -> units block present?
                  no  -> stage (backward compat)
-                 yes -> PRCP key present?
+                 yes -> PRCP key present / non-None?
                           no  -> stage (backward compat)
-                          yes -> PRCP == mm/day?
+                          yes -> PRCP == mm/day (strip/lower)?
                                    yes -> stage
-                                   no  -> raise FORCING_PRCP_UNIT_MISMATCH
+                                   no  -> raise FORCING_PRCP_UNIT_MISMATCH  (ONLY hard failure)
 ```
 
 ## Progress
@@ -53,8 +54,16 @@ package_manifest_uri present?
 - [x] OpenSpec change `prcp-unit-terminus-hardening`: proposal/design/tasks + specs
       (`shud-runtime` MODIFIED, `fixed-station-forcing-production` ADDED).
 - [x] `uv run ruff check .` -> All checks passed.
-- [x] `uv run pytest -q tests/test_forcing_producer.py tests/test_production_met_validation.py tests/test_shud_runtime.py` -> 125 passed.
-- [ ] `openspec validate` -> deferred to parent workflow (node not guaranteed in this env).
+- [x] `uv run pytest ...` local -> 135 passed; remote node-22 5fb0852 125 passed, 98be1eb 135 passed (EXIT=0).
+- [x] `openspec validate prcp-unit-terminus-hardening --strict` -> valid (run locally; node not on remote PATH).
+- [x] Round-1 review (3-pack): MED break-userspace — staging unit peek capped at 1MB hard-failed
+      (FORCING_PACKAGE_MANIFEST_READ_FAILED), but the package manifest scales with station count
+      (M23 QHH multi-station), so a >1MB manifest would brick a previously-runnable package.
+- [x] Round-1 fix (98be1eb): unit peek made purely best-effort — read fail / over-cap (now 16MB) /
+      invalid JSON / missing metadata all tolerate-skip; ONLY explicit non-mm/day raises. Removed
+      READ_FAILED/INVALID codes. Tests: case/whitespace lock + unreadable/invalid-JSON tolerate.
+- [x] Round-2 review (2-pack, comprehensive): CLEAN — MED eliminated (mutation-probed); zero
+      in-scope CONFIRMED/blocking. Residual: LOW (no log on >16MB skip) -> YAGNI, not fixed.
 
 ## Notes / open observations
 
