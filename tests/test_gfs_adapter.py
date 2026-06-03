@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -8,18 +10,23 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.test_netcdf4 import encode_test_netcdf4
 
 base = importlib.import_module("workers.data_adapters.base")
 cli_module = importlib.import_module("workers.data_adapters.cli")
+converter_module = importlib.import_module("workers.canonical_converter.converter")
 gfs_module = importlib.import_module("workers.data_adapters.gfs_adapter")
 
 DownloadManifest = base.DownloadManifest
 ManifestEntry = base.ManifestEntry
 parse_cycle_time = base.parse_cycle_time
+CanonicalConverter = converter_module.CanonicalConverter
+CanonicalConverterConfig = converter_module.CanonicalConverterConfig
 FileUnavailableError = gfs_module.FileUnavailableError
 FileTooLargeError = gfs_module.FileTooLargeError
 GFSAdapter = gfs_module.GFSAdapter
 GFSAdapterConfig = gfs_module.GFSAdapterConfig
+DownloadedPayload = gfs_module.DownloadedPayload
 
 
 class FakeMetRepository:
@@ -54,6 +61,35 @@ class FakeMetRepository:
 
     def get_forecast_cycle(self, **kwargs: Any) -> dict[str, Any] | None:
         return self.cycles.get((kwargs["source_id"], kwargs["cycle_time"]))
+
+
+class FakeCanonicalRepository:
+    def __init__(self) -> None:
+        self.products: dict[str, dict[str, Any]] = {}
+        self.cycles: dict[tuple[str, datetime], dict[str, Any]] = {}
+
+    def get_canonical_product(self, *, canonical_product_id: str) -> dict[str, Any] | None:
+        product = self.products.get(canonical_product_id)
+        return dict(product) if product is not None else None
+
+    def list_canonical_products(self, *, source_id: str, cycle_time: datetime) -> list[dict[str, Any]]:
+        return [
+            dict(product)
+            for product in self.products.values()
+            if product.get("source_id") == source_id and product.get("cycle_time") == cycle_time
+        ]
+
+    def upsert_canonical_product(self, record: dict[str, Any]) -> dict[str, Any]:
+        self.products[record["canonical_product_id"]] = dict(record)
+        return self.products[record["canonical_product_id"]]
+
+    def update_forecast_cycle(self, **kwargs: Any) -> dict[str, Any]:
+        key = (kwargs["source_id"], kwargs["cycle_time"])
+        cycle = self.cycles.setdefault(key, {"source_id": kwargs["source_id"], "cycle_time": kwargs["cycle_time"]})
+        for field in ("status", "error_code", "error_message"):
+            if kwargs.get(field) is not None:
+                cycle[field] = kwargs[field]
+        return cycle
 
 
 def build_adapter(
@@ -256,6 +292,68 @@ def test_download_plan_raw_complete_idempotency_does_not_modify_cycle(tmp_path: 
     assert repository.cycles[("gfs", manifest.cycle_time)]["retry_count"] == 7
 
 
+def test_raw_complete_untrusted_existing_object_is_redownloaded_not_already_done(tmp_path: Path) -> None:
+    stale = b"GRIB stale collision bytes"
+    fresh = b"GRIB fresh source bytes"
+    downloads = 0
+
+    def downloader(_url: str) -> bytes:
+        nonlocal downloads
+        downloads += 1
+        return fresh
+
+    adapter, manifest = one_entry_manifest(tmp_path)
+    adapter.downloader = downloader
+    adapter.object_store.write_bytes_atomic(manifest.entries[0].local_key, stale)
+    adapter.repository.cycles[("gfs", manifest.cycle_time)] = {
+        "source_id": "gfs",
+        "cycle_time": manifest.cycle_time,
+        "status": "raw_complete",
+    }
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "raw_complete"
+    assert result.files[0].status == "downloaded"
+    assert result.files[0].checksum == sha256_bytes(fresh)
+    assert adapter.object_store.read_bytes(manifest.entries[0].local_key) == fresh
+    assert downloads == 1
+
+
+def test_raw_complete_trusted_existing_object_reuses_already_done(tmp_path: Path) -> None:
+    content = b"GRIB trusted existing bytes"
+    downloads = 0
+
+    def downloader(_url: str) -> bytes:
+        nonlocal downloads
+        downloads += 1
+        return b"GRIB should not download"
+
+    adapter, manifest = one_entry_manifest(tmp_path)
+    adapter.downloader = downloader
+    adapter.object_store.write_bytes_atomic(manifest.entries[0].local_key, content)
+    manifest.metadata["source_policy"] = adapter.source_policy_identity([0])
+    manifest.metadata["source_object_identity"] = adapter.source_object_identity(manifest.cycle_time, [0])
+    manifest = replace(manifest, manifest_uri="raw/gfs/2026050700/prior_manifest.json")
+    adapter.object_store.write_bytes_atomic(
+        manifest.manifest_uri,
+        json.dumps(manifest.as_dict(), sort_keys=True).encode("utf-8"),
+    )
+    adapter.repository.cycles[("gfs", manifest.cycle_time)] = {
+        "source_id": "gfs",
+        "cycle_time": manifest.cycle_time,
+        "status": "raw_complete",
+        "manifest_uri": manifest.manifest_uri,
+    }
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "already_done"
+    assert result.files[0].status == "already_done"
+    assert result.files[0].checksum == sha256_bytes(content)
+    assert downloads == 0
+
+
 def test_data_source_initialization_is_upserted_not_duplicated(tmp_path: Path) -> None:
     repository = FakeMetRepository()
     adapter = build_adapter(tmp_path, repository=repository)
@@ -327,6 +425,161 @@ def test_url_download_reads_bounded_chunks_and_enforces_max_size(
         adapter._download_url("https://example.test/gfs.grib2")
 
     assert response.read_sizes == [2, 2]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"GRIB oversized",
+        DownloadedPayload(content=b"GRIB oversized", checksum="sha", bytes_written=len(b"GRIB oversized")),
+    ],
+)
+def test_injected_payload_enforces_max_size_before_object_store_write(tmp_path: Path, payload: Any) -> None:
+    adapter = build_adapter(tmp_path, downloader=lambda _url: payload, max_file_size_bytes=4)
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[0])
+    entry = manifest.entries[0]
+
+    result = adapter.download_plan(DownloadManifest(source_id="gfs", cycle_time=manifest.cycle_time, entries=(entry,)))
+
+    assert result.status == "failed_download"
+    assert result.files[0].error_code == "FILE_TOO_LARGE"
+    assert not adapter.object_store.exists(entry.local_key)
+
+
+def test_source_object_identity_changes_when_remote_or_policy_content_changes(tmp_path: Path) -> None:
+    first = build_adapter(tmp_path / "first")
+    second = build_adapter(tmp_path / "second")
+    second.config = GFSAdapterConfig(
+        workspace_root=tmp_path / "second",
+        base_url="https://alternate.example.test/gfs",
+        forecast_end_hour=3,
+    )
+
+    first_identity = first.source_object_identity("2026050700", [0, 3])
+    second_identity = second.source_object_identity("2026050700", [0, 3])
+    changed_policy_identity = first.source_object_identity("2026050700", [0])
+
+    assert first_identity["identity_schema_version"] == "nhms.source_object_identity.v2"
+    assert first_identity["manifest_digest"] != second_identity["manifest_digest"]
+    assert first_identity["raw_entry_digest"] != second_identity["raw_entry_digest"]
+    assert first_identity["manifest_digest"] != changed_policy_identity["manifest_digest"]
+    assert first_identity["raw_entry_count"] == 14
+    assert len(first_identity["raw_entry_samples"]) == 2
+
+
+def test_source_object_identity_changes_when_same_key_content_changes(tmp_path: Path) -> None:
+    adapter = build_adapter(tmp_path)
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[0])
+    entry = manifest.entries[0]
+
+    before = adapter.source_object_identity("2026050700", [0])
+    adapter.object_store.write_bytes_atomic(entry.local_key, b"GRIB first payload 7777")
+    first = adapter.source_object_identity("2026050700", [0])
+    adapter.object_store.write_bytes_atomic(entry.local_key, b"GRIB second payload 7777")
+    second = adapter.source_object_identity("2026050700", [0])
+
+    assert before["raw_entry_digest"] != first["raw_entry_digest"]
+    assert first["raw_entry_digest"] != second["raw_entry_digest"]
+    assert first["raw_entry_samples"][0]["observed_raw_object"]["status"] == "present"
+    assert first["raw_entry_samples"][0]["observed_raw_object"]["checksum"] != (
+        second["raw_entry_samples"][0]["observed_raw_object"]["checksum"]
+    )
+
+
+def test_source_object_identity_blocks_oversized_raw_before_checksum(tmp_path: Path) -> None:
+    adapter = build_adapter(tmp_path, max_file_size_bytes=4)
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[0])
+    entry = manifest.entries[0]
+    adapter.object_store.write_bytes_atomic(entry.local_key, b"GRIB oversized raw payload")
+    original_store = adapter.object_store
+
+    class NoChecksumStore:
+        def exists(self, key_or_uri: str) -> bool:
+            return original_store.exists(key_or_uri)
+
+        def size(self, key_or_uri: str) -> int:
+            return original_store.size(key_or_uri)
+
+        def checksum(self, key_or_uri: str) -> str:
+            del key_or_uri
+            raise AssertionError("oversized raw object must block before checksum")
+
+    adapter.object_store = NoChecksumStore()  # type: ignore[assignment]
+
+    identity = adapter.source_object_identity(manifest.cycle_time, [0])
+    observation = identity["raw_entry_observation_digest_by_key"][entry.local_key]
+
+    assert observation["status"] == "oversized"
+    assert observation["checksum"] is None
+
+
+def test_downloaded_manifest_identity_feeds_gfs_canonical_readiness_and_blocks_stale_reuse(tmp_path: Path) -> None:
+    adapter = build_adapter(tmp_path)
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[0, 3])
+    pre_download_identity = manifest.metadata["source_object_identity"]
+    assert pre_download_identity["raw_entry_samples"][0]["observed_raw_object"]["status"] == "missing"
+
+    payloads = {
+        entry.remote_url: encode_test_netcdf4(entry.variable, entry.forecast_hour, cycle_time=manifest.cycle_time)
+        for entry in manifest.entries
+    }
+    adapter.downloader = lambda url: payloads[url]
+
+    download = adapter.download_plan(manifest)
+
+    observed_identity = adapter.source_object_identity(manifest.cycle_time, [0, 3])
+    persisted_manifest = adapter.load_manifest(manifest.manifest_uri or "")
+    assert download.status == "raw_complete"
+    assert manifest.metadata["source_object_identity"] == observed_identity
+    assert persisted_manifest.metadata["source_object_identity"] == observed_identity
+    assert observed_identity["raw_entry_samples"][0]["observed_raw_object"]["status"] == "present"
+    assert observed_identity["raw_entry_digest"] != pre_download_identity["raw_entry_digest"]
+
+    repository = FakeCanonicalRepository()
+    converter = CanonicalConverter(
+        config=CanonicalConverterConfig(workspace_root=tmp_path),
+        repository=repository,
+        object_store=LocalObjectStore(tmp_path),
+    )
+    conversion = converter.convert_manifest(manifest.as_dict())
+    readiness = converter.canonical_readiness(
+        cycle_time=manifest.cycle_time,
+        forecast_hours=[0, 3],
+        policy_identity=manifest.metadata["source_policy"],
+        source_object_identity=observed_identity,
+        canonical_product_id="canon_gfs_2026050700",
+        model_id="model_a",
+        basin_id="basin_a",
+    )
+
+    assert conversion.status == "canonical_ready"
+    assert readiness.ready is True
+    lineage_identity = repository.products["gfs_2026050700_air_temperature_2m_f000"]["lineage_json"][
+        "source_object_identity"
+    ]
+    assert lineage_identity == observed_identity
+    assert lineage_identity["raw_entry_samples"][0]["observed_raw_object"]["status"] == "present"
+
+    changed_entry = manifest.entries[0]
+    adapter.object_store.write_bytes_atomic(
+        changed_entry.local_key,
+        encode_test_netcdf4(changed_entry.variable, changed_entry.forecast_hour, values=[999.0]),
+    )
+    changed_identity = adapter.source_object_identity(manifest.cycle_time, [0, 3])
+    stale_readiness = converter.canonical_readiness(
+        cycle_time=manifest.cycle_time,
+        forecast_hours=[0, 3],
+        policy_identity=manifest.metadata["source_policy"],
+        source_object_identity=changed_identity,
+        canonical_product_id="canon_gfs_2026050700",
+        model_id="model_a",
+        basin_id="basin_a",
+    )
+
+    assert changed_identity["raw_entry_digest"] != observed_identity["raw_entry_digest"]
+    assert stale_readiness.ready is False
+    assert stale_readiness.evidence["reason"] == "canonical_identity_mismatch"
+    assert stale_readiness.evidence["source_object_identity_matched"] is False
 
 
 def test_cli_download_exits_nonzero_on_failed_download(

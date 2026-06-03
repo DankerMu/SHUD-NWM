@@ -90,7 +90,8 @@ class PsycopgForcingRepository:
                 native_spatial_resolution,
                 object_uri,
                 checksum,
-                quality_flag
+                quality_flag,
+                lineage_json
             FROM met.canonical_met_product
             WHERE source_id = %s
               AND cycle_time = %s
@@ -114,6 +115,7 @@ class PsycopgForcingRepository:
                 object_uri=str(row["object_uri"]),
                 checksum=str(row["checksum"] or ""),
                 quality_flag=str(row.get("quality_flag") or "ok"),
+                lineage_json=row.get("lineage_json") or {},
             )
             for row in rows
         )
@@ -146,6 +148,7 @@ class PsycopgForcingRepository:
                     cmp.object_uri,
                     cmp.checksum,
                     cmp.quality_flag,
+                    cmp.lineage_json,
                     ROW_NUMBER() OVER (
                         PARTITION BY cmp.valid_time, cmp.variable
                         ORDER BY cmp.lead_time_hours ASC NULLS LAST, cmp.cycle_time DESC, cmp.canonical_product_id
@@ -159,8 +162,8 @@ class PsycopgForcingRepository:
                   AND cmp.valid_time >= %s
                   AND cmp.valid_time <= %s
                   AND cmp.variable = ANY(%s)
-                  AND cmp.quality_flag <> 'fail'
-                  AND cmp.checksum <> ''
+                  AND cmp.quality_flag = 'ok'
+                  AND NULLIF(BTRIM(cmp.checksum), '') IS NOT NULL
             )
             SELECT
                 canonical_product_id,
@@ -176,7 +179,8 @@ class PsycopgForcingRepository:
                 native_spatial_resolution,
                 object_uri,
                 checksum,
-                quality_flag
+                quality_flag,
+                lineage_json
             FROM ranked
             WHERE rank = 1
             ORDER BY variable, valid_time, canonical_product_id
@@ -199,6 +203,7 @@ class PsycopgForcingRepository:
                 object_uri=str(row["object_uri"]),
                 checksum=str(row["checksum"] or ""),
                 quality_flag=str(row.get("quality_flag") or "ok"),
+                lineage_json=row.get("lineage_json") or {},
             )
             for row in rows
         )

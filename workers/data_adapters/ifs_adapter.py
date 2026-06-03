@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.redaction import redact_payload
 
 from .base import (
     CycleDiscovery,
@@ -93,6 +94,10 @@ class IFSAdapterError(RuntimeError):
 
 class FileUnavailableError(IFSAdapterError):
     error_code = "HTTP_404"
+
+
+class ForbiddenSourceError(IFSAdapterError):
+    error_code = "HTTP_403"
 
 
 class NetworkDownloadError(IFSAdapterError):
@@ -285,9 +290,28 @@ class IFSAdapter(DataSourceAdapter):
                 remote_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0])
                 try:
                     available = self.availability_checker(remote_url)
-                except Exception:
-                    LOGGER.exception("Failed to check IFS availability for %s", remote_url)
+                    status = "discovered" if available else "unavailable"
+                    reason = None if available else "source_cycle_unavailable"
+                    classifier = None if available else "unavailable"
+                    retryable = None if available else True
+                except ForbiddenSourceError:
+                    LOGGER.warning(
+                        "IFS availability check was forbidden for %s",
+                        self._safe_text(remote_url),
+                        exc_info=True,
+                    )
                     available = False
+                    status = "forbidden"
+                    reason = "source_cycle_forbidden"
+                    classifier = "forbidden"
+                    retryable = False
+                except Exception:
+                    LOGGER.exception("Failed to check IFS availability for %s", self._safe_text(remote_url))
+                    available = False
+                    status = "unavailable"
+                    reason = "source_cycle_unavailable"
+                    classifier = "unavailable"
+                    retryable = True
 
                 discovery = CycleDiscovery(
                     cycle_id=cycle_id,
@@ -295,7 +319,20 @@ class IFSAdapter(DataSourceAdapter):
                     cycle_time=cycle_time,
                     cycle_hour=cycle_hour,
                     available=available,
-                    status="discovered" if available else "unavailable",
+                    status=status,
+                    reason=reason,
+                    classifier=classifier,
+                    retryable=retryable,
+                    probe_uri=self._safe_text(remote_url),
+                    evidence={
+                        "source": self.config.source_id,
+                        "probe": {
+                            "uri": self._safe_text(remote_url),
+                            "forecast_hour": 0,
+                            "variable": self.config.variables[0],
+                            "preferred_source": self.config.preferred_source,
+                        },
+                    },
                 )
                 discoveries.append(discovery)
 
@@ -365,6 +402,8 @@ class IFSAdapter(DataSourceAdapter):
             "last_forecast_hour": max(hours) if hours else None,
             "forecast_hours": list(hours),
             "max_lead_hours": max_lead_hours,
+            "source_policy": self.source_policy_identity(parsed_cycle_time, hours),
+            "source_object_identity": self.source_object_identity(parsed_cycle_time, hours),
             "variable_count": len(self.config.variables),
             "total_file_count": len(entries),
             "preferred_source": self.config.preferred_source,
@@ -414,11 +453,31 @@ class IFSAdapter(DataSourceAdapter):
     def download_plan(self, manifest: DownloadManifest) -> DownloadPlanResult:
         cycle_time = manifest.cycle_time
         existing_cycle = self._get_cycle(cycle_time)
+        trusted_source_object_identity = self._trusted_prior_source_object_identity(manifest, existing_cycle)
         already_done_by_key: dict[str, DownloadFileResult] = {}
         needs_download = False
 
         for entry in manifest.entries:
-            already_done = self._already_done_result(entry)
+            try:
+                already_done = self._already_done_result(
+                    entry,
+                    trusted_source_object_identity=trusted_source_object_identity,
+                )
+            except FileTooLargeError as error:
+                self._record_download_failure(cycle_time, error.error_code, str(error), retry_count=0)
+                return DownloadPlanResult(
+                    status="failed_download",
+                    files=(
+                        DownloadFileResult(
+                            local_key=entry.local_key,
+                            status="failed",
+                            error_code=error.error_code,
+                            error_message=str(error),
+                        ),
+                    ),
+                    total_bytes_written=0,
+                    retry_count=0,
+                )
             if already_done is None:
                 needs_download = True
             else:
@@ -427,6 +486,7 @@ class IFSAdapter(DataSourceAdapter):
         if not needs_download:
             results = tuple(already_done_by_key[entry.local_key] for entry in manifest.entries)
             if existing_cycle is not None and existing_cycle.get("status") == "raw_complete":
+                self._refresh_manifest_source_object_identity(manifest)
                 return DownloadPlanResult(
                     status="already_done",
                     files=results,
@@ -444,6 +504,7 @@ class IFSAdapter(DataSourceAdapter):
                     total_bytes_written=0,
                     retry_count=0,
                 )
+            self._refresh_manifest_source_object_identity(manifest)
             return DownloadPlanResult(
                 status="raw_complete",
                 files=results,
@@ -513,6 +574,7 @@ class IFSAdapter(DataSourceAdapter):
             )
 
         self._update_cycle(cycle_time=cycle_time, status="raw_complete", retry_count=0)
+        self._refresh_manifest_source_object_identity(manifest)
         return DownloadPlanResult(
             status="raw_complete",
             files=tuple(results),
@@ -644,6 +706,9 @@ class IFSAdapter(DataSourceAdapter):
                     total_retries += max(0, error.attempts - 1)
                     saw_unavailable = True
                     continue
+                except ForbiddenSourceError:
+                    self._delete_partial(entry.local_key)
+                    raise
                 except RateLimitedError as error:
                     total_retries += error.attempts
                     saw_rate_limit = True
@@ -737,17 +802,22 @@ class IFSAdapter(DataSourceAdapter):
         for attempt in range(1, max_attempts + 1):
             try:
                 return self._normalize_payload(self.downloader(remote_url)), attempt - 1
-            except (FileUnavailableError, RateLimitedError, FileTooLargeError):
+            except (FileUnavailableError, ForbiddenSourceError, RateLimitedError, FileTooLargeError):
                 raise
             except HTTPError as error:
                 if error.code == 404:
                     raise FileUnavailableError(
-                        f"Remote IFS file is unavailable: {remote_url}",
+                        f"Remote IFS file is unavailable: {self._safe_text(remote_url)}",
+                        attempts=attempt,
+                    ) from error
+                if error.code == 403:
+                    raise ForbiddenSourceError(
+                        f"Remote IFS file is forbidden: {self._safe_text(remote_url)}",
                         attempts=attempt,
                     ) from error
                 if error.code == 429:
                     raise RateLimitedError(
-                        f"IFS source rate limited while downloading {remote_url}",
+                        f"IFS source rate limited while downloading {self._safe_text(remote_url)}",
                         retry_after_seconds=_retry_after_seconds(error.headers.get("Retry-After")),
                         attempts=attempt - 1,
                     ) from error
@@ -760,12 +830,20 @@ class IFSAdapter(DataSourceAdapter):
             self.sleeper(self._backoff_for(attempt))
 
         raise NetworkDownloadError(
-            f"Failed to download {remote_url} after {max_attempts} attempts: {last_error}",
+            f"Failed to download {self._safe_text(remote_url)} after {max_attempts} attempts: "
+            f"{self._safe_text(str(last_error))}",
             attempts=max_attempts - 1,
         )
 
     def _normalize_payload(self, payload: bytes | DownloadedPayload) -> DownloadedPayload:
         if isinstance(payload, DownloadedPayload):
+            if (
+                payload.bytes_written > self.config.max_file_size_bytes
+                or len(payload.content) > self.config.max_file_size_bytes
+            ):
+                raise FileTooLargeError(
+                    f"Downloaded IFS payload exceeds maximum size {self.config.max_file_size_bytes} bytes"
+                )
             return payload
         content = bytes(payload)
         if len(content) > self.config.max_file_size_bytes:
@@ -774,24 +852,46 @@ class IFSAdapter(DataSourceAdapter):
             )
         return DownloadedPayload(content=content, checksum=sha256_bytes(content), bytes_written=len(content))
 
-    def _entry_already_done(self, entry: ManifestEntry) -> bool:
+    def _entry_already_done(
+        self,
+        entry: ManifestEntry,
+        *,
+        trusted_source_object_identity: Mapping[str, Any] | None,
+    ) -> bool:
         try:
             if not self.object_store.exists(entry.local_key):
                 return False
-            if self.object_store.size(entry.local_key) == 0:
+            size_bytes = self.object_store.size(entry.local_key)
+            if size_bytes == 0:
                 return False
             minimum_size = entry.expected_size_bytes or self.config.min_file_size_bytes
-            if self.object_store.size(entry.local_key) < minimum_size:
+            if size_bytes < minimum_size:
                 return False
+            if size_bytes > self.config.max_file_size_bytes:
+                raise FileTooLargeError(
+                    f"Existing IFS raw object {entry.local_key} exceeds maximum size "
+                    f"{self.config.max_file_size_bytes} bytes"
+                )
             if entry.expected_checksum is None:
-                return True
+                return self._trusted_raw_observation_matches(
+                    entry.local_key,
+                    trusted_source_object_identity=trusted_source_object_identity,
+                    size_bytes=size_bytes,
+                )
             return self.object_store.checksum(entry.local_key) == entry.expected_checksum
+        except FileTooLargeError:
+            raise
         except (OSError, ObjectStoreError, ValueError):
             LOGGER.exception("Failed to check IFS idempotency for %s", entry.local_key)
             return False
 
-    def _already_done_result(self, entry: ManifestEntry) -> DownloadFileResult | None:
-        if not self._entry_already_done(entry):
+    def _already_done_result(
+        self,
+        entry: ManifestEntry,
+        *,
+        trusted_source_object_identity: Mapping[str, Any] | None,
+    ) -> DownloadFileResult | None:
+        if not self._entry_already_done(entry, trusted_source_object_identity=trusted_source_object_identity):
             return None
         try:
             checksum = self.object_store.checksum(entry.local_key)
@@ -813,25 +913,48 @@ class IFSAdapter(DataSourceAdapter):
                     param=parsed["variable"],
                     target=target.name,
                 )
+                payload_size = Path(target.name).stat().st_size
+                if payload_size > self.config.max_file_size_bytes:
+                    raise FileTooLargeError(
+                        f"Remote IFS file {self._safe_text(remote_url)} exceeded maximum size "
+                        f"{self.config.max_file_size_bytes} bytes"
+                    )
                 payload = Path(target.name).read_bytes()
+            except FileTooLargeError:
+                raise
             except HTTPError as error:
                 if error.code == 404:
-                    raise FileUnavailableError(f"Remote IFS file is unavailable: {remote_url}", attempts=1) from error
+                    raise FileUnavailableError(
+                        f"Remote IFS file is unavailable: {self._safe_text(remote_url)}",
+                        attempts=1,
+                    ) from error
+                if error.code == 403:
+                    raise ForbiddenSourceError(
+                        f"Remote IFS file is forbidden: {self._safe_text(remote_url)}",
+                        attempts=1,
+                    ) from error
                 if error.code == 429:
                     raise RateLimitedError(
-                        f"IFS source rate limited while downloading {remote_url}",
+                        f"IFS source rate limited while downloading {self._safe_text(remote_url)}",
                         retry_after_seconds=_retry_after_seconds(error.headers.get("Retry-After")),
                         attempts=0,
                     ) from error
-                raise NetworkDownloadError(f"HTTP {error.code} while downloading {remote_url}: {error}") from error
+                raise NetworkDownloadError(
+                    f"HTTP {error.code} while downloading {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
+                ) from error
             except (URLError, TimeoutError, OSError) as error:
-                raise NetworkDownloadError(f"Network error while downloading {remote_url}: {error}") from error
+                raise NetworkDownloadError(
+                    f"Network error while downloading {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
+                ) from error
             except Exception as error:
-                raise NetworkDownloadError(f"Failed to retrieve IFS Open Data {remote_url}: {error}") from error
+                raise NetworkDownloadError(
+                    f"Failed to retrieve IFS Open Data {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
+                ) from error
 
         if len(payload) > self.config.max_file_size_bytes:
             raise FileTooLargeError(
-                f"Remote IFS file {remote_url} exceeded maximum size {self.config.max_file_size_bytes} bytes"
+                f"Remote IFS file {self._safe_text(remote_url)} exceeded maximum size "
+                f"{self.config.max_file_size_bytes} bytes"
             )
         checksum = hashlib.sha256(payload).hexdigest()
         return DownloadedPayload(content=payload, checksum=checksum, bytes_written=len(payload))
@@ -843,10 +966,12 @@ class IFSAdapter(DataSourceAdapter):
         except FileUnavailableError:
             return False
         except RateLimitedError:
-            LOGGER.warning("IFS availability check was rate limited for %s", remote_url)
+            LOGGER.warning("IFS availability check was rate limited for %s", self._safe_text(remote_url))
             return False
+        except ForbiddenSourceError:
+            raise
         except IFSAdapterError:
-            LOGGER.warning("IFS availability check failed for %s", remote_url, exc_info=True)
+            LOGGER.warning("IFS availability check failed for %s", self._safe_text(remote_url), exc_info=True)
             return False
 
     def _client_for_source(self, source: str) -> Any:
@@ -868,8 +993,196 @@ class IFSAdapter(DataSourceAdapter):
             status="failed_download",
             retry_count=retry_count,
             error_code=error_code,
-            error_message=error_message,
+            error_message=self._safe_text(error_message),
         )
+
+    def _refresh_manifest_source_object_identity(self, manifest: DownloadManifest) -> None:
+        hours = self._manifest_forecast_hours(manifest)
+        manifest.metadata["source_object_identity"] = self.source_object_identity(manifest.cycle_time, hours)
+        if manifest.manifest_uri is None:
+            return
+        try:
+            self.object_store.write_bytes_atomic(
+                manifest.manifest_uri,
+                json.dumps(manifest.as_dict(), indent=2, sort_keys=True).encode("utf-8"),
+            )
+        except (OSError, ObjectStoreError, ValueError):
+            LOGGER.exception("Failed to persist refreshed IFS source object identity for %s", manifest.manifest_uri)
+            raise
+
+    def _manifest_forecast_hours(self, manifest: DownloadManifest) -> list[int]:
+        forecast_hours = manifest.metadata.get("forecast_hours")
+        if isinstance(forecast_hours, list):
+            return [int(forecast_hour) for forecast_hour in forecast_hours]
+        return sorted({int(entry.forecast_hour) for entry in manifest.entries})
+
+    def source_policy_identity(
+        self,
+        cycle_time: str | datetime,
+        forecast_hours: list[int] | None = None,
+    ) -> dict[str, Any]:
+        parsed_cycle_time = parse_cycle_time(cycle_time)
+        hours = list(
+            forecast_hours if forecast_hours is not None else self.config.forecast_hours_for_cycle(parsed_cycle_time)
+        )
+        return {
+            "source": self.config.source_id,
+            "cycle_hours_utc": list(self.config.cycle_hours_utc),
+            "forecast_start_hour": self.config.forecast_start_hour,
+            "forecast_end_hour": self.config.forecast_end_hour_for_cycle(parsed_cycle_time.hour),
+            "forecast_step_hours": self.config.forecast_step_hours,
+            "forecast_hours": hours,
+            "variables": list(self.config.variables),
+            "preferred_source": self.config.preferred_source,
+            "fallback_sources": list(self.config.fallback_sources),
+            "max_retries": self.config.max_retries,
+            "max_wait_seconds": self.config.max_wait_seconds,
+        }
+
+    def source_object_identity(
+        self,
+        cycle_time: str | datetime,
+        forecast_hours: list[int] | None = None,
+    ) -> dict[str, Any]:
+        parsed_cycle_time = parse_cycle_time(cycle_time)
+        hours = list(
+            forecast_hours if forecast_hours is not None else self.config.forecast_hours_for_cycle(parsed_cycle_time)
+        )
+        entries = self._source_object_entry_identities(parsed_cycle_time, hours)
+        entry_digest = _stable_digest(entries)
+        return {
+            "identity_schema_version": "nhms.source_object_identity.v2",
+            "source": self.config.source_id,
+            "cycle_time": parsed_cycle_time.isoformat(),
+            "preferred_source": self.config.preferred_source,
+            "first_forecast_hour": min(hours) if hours else None,
+            "last_forecast_hour": max(hours) if hours else None,
+            "forecast_hour_count": len(hours),
+            "variable_count": len(self.config.variables),
+            "manifest_object_key": f"raw/{self.config.source_id}/{format_cycle_time(parsed_cycle_time)}/manifest.json",
+            "manifest_digest": _stable_digest(
+                {
+                    "source_id": self.config.source_id,
+                    "cycle_time": parsed_cycle_time.isoformat(),
+                    "entries": entries,
+                    "source_policy": self.source_policy_identity(parsed_cycle_time, hours),
+                }
+            ),
+            "raw_entry_count": len(entries),
+            "raw_entry_digest": entry_digest,
+            "raw_entry_observation_digest_by_key": _entry_observation_digest_by_key(entries),
+            "remote_identity_digest": _stable_digest([entry["remote_identity"] for entry in entries]),
+            "raw_entry_samples": _entry_samples(entries),
+        }
+
+    def _safe_text(self, value: object) -> str:
+        return str(redact_payload(str(value)))
+
+    def _source_object_entry_identities(
+        self,
+        cycle_time: datetime,
+        forecast_hours: list[int],
+    ) -> list[dict[str, Any]]:
+        compact_cycle = format_cycle_time(cycle_time)
+        entries: list[dict[str, Any]] = []
+        for forecast_hour in forecast_hours:
+            for variable in self.config.variables:
+                filename = self.raw_filename(cycle_time, forecast_hour, variable)
+                remote_identities = [
+                    self._safe_text(self.remote_url(cycle_time, forecast_hour, variable, source=source))
+                    for source in self.config.sources()
+                ]
+                local_key = f"raw/{self.config.source_id}/{compact_cycle}/{filename}"
+                entries.append(
+                    {
+                        "local_key": local_key,
+                        "remote_identity": remote_identities[0] if remote_identities else None,
+                        "remote_identity_fallbacks": remote_identities,
+                        "variable": variable,
+                        "forecast_hour": forecast_hour,
+                        "expected_checksum": None,
+                        "expected_size_bytes": None,
+                        "observed_raw_object": self._raw_object_observation(local_key),
+                    }
+                )
+        return entries
+
+    def _raw_object_observation(self, local_key: str) -> dict[str, Any]:
+        try:
+            if not self.object_store.exists(local_key):
+                return {"status": "missing", "checksum": None, "size_bytes": None}
+            size_bytes = self.object_store.size(local_key)
+            if size_bytes > self.config.max_file_size_bytes:
+                return {
+                    "status": "oversized",
+                    "checksum": None,
+                    "size_bytes": size_bytes,
+                    "max_size_bytes": self.config.max_file_size_bytes,
+                }
+            return {
+                "status": "present",
+                "checksum": self.object_store.checksum(local_key),
+                "size_bytes": size_bytes,
+            }
+        except (OSError, ObjectStoreError, ValueError) as error:
+            return {
+                "status": "unavailable",
+                "checksum": None,
+                "size_bytes": None,
+                "error_type": type(error).__name__,
+            }
+
+    def _trusted_raw_observation_matches(
+        self,
+        local_key: str,
+        *,
+        trusted_source_object_identity: Mapping[str, Any] | None,
+        size_bytes: int,
+        expected_checksum: str | None = None,
+    ) -> bool:
+        trusted_observation = _trusted_observed_raw_object(
+            trusted_source_object_identity,
+            local_key=local_key,
+        )
+        if trusted_observation is None or trusted_observation.get("status") != "present":
+            return False
+        trusted_size = trusted_observation.get("size_bytes")
+        if trusted_size is None or int(trusted_size) != int(size_bytes):
+            return False
+        trusted_checksum = trusted_observation.get("checksum")
+        if not trusted_checksum:
+            return False
+        if expected_checksum is not None and trusted_checksum != expected_checksum:
+            return False
+        return self.object_store.checksum(local_key) == trusted_checksum
+
+    def _trusted_prior_source_object_identity(
+        self,
+        manifest: DownloadManifest,
+        existing_cycle: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if existing_cycle is None or existing_cycle.get("status") != "raw_complete":
+            return None
+        manifest_uri = existing_cycle.get("manifest_uri")
+        if not isinstance(manifest_uri, str) or not manifest_uri:
+            return None
+        try:
+            prior_manifest = self.load_manifest(manifest_uri)
+        except IFSAdapterError:
+            LOGGER.warning("Raw-complete IFS cycle has unreadable prior manifest %s", manifest_uri, exc_info=True)
+            return None
+        current_policy = manifest.metadata.get("source_policy")
+        prior_policy = prior_manifest.metadata.get("source_policy")
+        if _stable_digest(current_policy) != _stable_digest(prior_policy):
+            return None
+        prior_identity = prior_manifest.metadata.get("source_object_identity")
+        if not isinstance(prior_identity, Mapping):
+            return None
+        if prior_identity.get("source") != manifest.source_id:
+            return None
+        if str(prior_identity.get("cycle_time") or "") != manifest.cycle_time.isoformat():
+            return None
+        return dict(prior_identity)
 
     def _get_cycle(self, cycle_time: datetime) -> dict[str, Any] | None:
         if self.repository is None:
@@ -936,6 +1249,56 @@ class IFSAdapter(DataSourceAdapter):
             f"ecmwf-opendata://{selected_source}/ifs/{parsed_cycle_time:%Y%m%d%H}/"
             f"ifs.t{parsed_cycle_time:%H}z.f{forecast_hour:03d}.{variable}.grib2"
         )
+
+
+def _stable_digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def _entry_samples(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(entries) <= 2:
+        return [dict(entry) for entry in entries]
+    return [dict(entries[0]), dict(entries[-1])]
+
+
+def _entry_observation_digest_by_key(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    observations: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        local_key = entry.get("local_key")
+        observed = entry.get("observed_raw_object")
+        if not isinstance(local_key, str) or not isinstance(observed, Mapping):
+            continue
+        observations[local_key] = {
+            "status": observed.get("status"),
+            "checksum": observed.get("checksum"),
+            "size_bytes": observed.get("size_bytes"),
+            "digest": _stable_digest(observed),
+        }
+    return observations
+
+
+def _trusted_observed_raw_object(
+    source_object_identity: Mapping[str, Any] | None,
+    *,
+    local_key: str,
+) -> Mapping[str, Any] | None:
+    if not isinstance(source_object_identity, Mapping):
+        return None
+    by_key = source_object_identity.get("raw_entry_observation_digest_by_key")
+    if isinstance(by_key, Mapping):
+        observed = by_key.get(local_key)
+        if isinstance(observed, Mapping):
+            return observed
+    samples = source_object_identity.get("raw_entry_samples")
+    if not isinstance(samples, list):
+        return None
+    for sample in samples:
+        if not isinstance(sample, Mapping) or sample.get("local_key") != local_key:
+            continue
+        observed = sample.get("observed_raw_object")
+        if isinstance(observed, Mapping):
+            return observed
+    return None
 
 
 def _parse_ifs_url(remote_url: str) -> dict[str, Any]:

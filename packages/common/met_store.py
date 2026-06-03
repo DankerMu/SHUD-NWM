@@ -207,6 +207,19 @@ class PsycopgMetStore:
             (canonical_product_id,),
         )
 
+    def list_canonical_products(self, *, source_id: str, cycle_time: datetime) -> list[dict[str, Any]]:
+        source_id = normalize_source_id(source_id)
+        return self._fetch_all(
+            """
+            SELECT *
+            FROM met.canonical_met_product
+            WHERE source_id = %s
+              AND cycle_time = %s
+            ORDER BY lead_time_hours ASC, variable ASC, canonical_product_id ASC
+            """,
+            (source_id, cycle_time),
+        )
+
     def upsert_canonical_product(self, record: Mapping[str, Any]) -> dict[str, Any]:
         try:
             from psycopg2.extras import Json
@@ -302,6 +315,30 @@ class PsycopgMetStore:
                     return None
                 columns = [description.name for description in cursor.description]
                 return dict(zip(columns, row, strict=True))
+        except psycopg2.Error as error:
+            if connection is not None:
+                connection.rollback()
+            raise MetStoreError(f"Met database operation failed: {error}") from error
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+        try:
+            import psycopg2
+        except ImportError as error:
+            raise MetStoreError("psycopg2 is required for met database operations.") from error
+
+        connection = None
+        try:
+            connection = psycopg2.connect(self.database_url)
+            connection.autocommit = False
+            with connection.cursor() as cursor:
+                cursor.execute(statement, parameters)
+                rows = cursor.fetchall()
+                connection.commit()
+                columns = [description.name for description in cursor.description]
+                return [dict(zip(columns, row, strict=True)) for row in rows]
         except psycopg2.Error as error:
             if connection is not None:
                 connection.rollback()

@@ -14,8 +14,12 @@ from services.orchestrator.chain import (
     ForecastOrchestrator,
     ModelContext,
     OrchestratorConfig,
+    _auto_trigger_source_object_identity,
+    _auto_trigger_source_policy_identity,
     scenario_for_source,
 )
+from workers.canonical_converter.converter import IFS_REQUIRED_STANDARD_VARIABLES
+from workers.data_adapters.base import format_cycle_time
 from workers.forcing_producer import (
     CanonicalProduct,
     ForcingProducer,
@@ -25,6 +29,7 @@ from workers.forcing_producer import (
     parse_cycle_time,
 )
 from workers.forcing_producer.producer import ForcingComponent, ForcingTimeseriesRow
+from workers.forcing_producer.store import PsycopgForcingRepository
 
 
 def test_scenario_for_source_maps_forecast_sources() -> None:
@@ -69,6 +74,37 @@ def test_ifs_forcing_uses_surface_pressure_shortwave_and_precip_conversion(tmp_p
     assert _row_value(repository.timeseries, "PRCP", cycle_time + timedelta(hours=3)) == pytest.approx(16.0)
     assert _row_value(repository.timeseries, "Rn", cycle_time + timedelta(hours=3)) == pytest.approx(500.0)
     assert _row_value(repository.timeseries, "Press", cycle_time + timedelta(hours=3)) == pytest.approx(100000.0)
+
+
+def test_fallback_query_uses_stripped_nonblank_checksum_predicate() -> None:
+    class CapturingRepository(PsycopgForcingRepository):
+        def __init__(self) -> None:
+            super().__init__("postgresql://example")
+            self.statement = ""
+
+        def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+            self.statement = statement
+            assert parameters == (
+                "gfs",
+                parse_cycle_time("2026050700"),
+                parse_cycle_time("2026050703"),
+                ["shortwave_down"],
+            )
+            return []
+
+    repository = CapturingRepository()
+
+    assert (
+        repository.list_fallback_canonical_products(
+            source_id="gfs",
+            start_time=parse_cycle_time("2026050700"),
+            end_time=parse_cycle_time("2026050703"),
+            variables=["shortwave_down"],
+        )
+        == ()
+    )
+    assert "NULLIF(BTRIM(cmp.checksum), '') IS NOT NULL" in repository.statement
+    assert "cmp.checksum <> ''" not in repository.statement
 
 
 def test_ifs_max_lead_hours_limits_forcing_range(tmp_path: Path) -> None:
@@ -159,7 +195,14 @@ def test_explicit_scenario_id_override_is_preserved_for_ifs_context(tmp_path: Pa
 
 def test_ifs_canonical_ready_auto_trigger_starts_at_forcing_stage(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-07T06:00:00Z")
-    repository = FakeReadyRepository(source_id="IFS", cycle_time=cycle_time, max_lead_hours=144)
+    object_root = tmp_path / "object-store"
+    repository = FakeReadyRepository(
+        source_id="IFS",
+        cycle_time=cycle_time,
+        max_lead_hours=144,
+        workspace_root=tmp_path / "workspace",
+        object_store_root=object_root,
+    )
     slurm_client = ImmediateSlurmClient()
     orchestrator = _build_ready_orchestrator(tmp_path, repository, slurm_client)
 
@@ -179,10 +222,13 @@ def test_ifs_canonical_ready_auto_trigger_starts_at_forcing_stage(tmp_path: Path
 
 def test_auto_trigger_skips_completed_ifs_cycle(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-07T06:00:00Z")
+    object_root = tmp_path / "object-store"
     repository = FakeReadyRepository(
         source_id="IFS",
         cycle_time=cycle_time,
         max_lead_hours=144,
+        workspace_root=tmp_path / "workspace",
+        object_store_root=object_root,
         completed=True,
     )
     slurm_client = ImmediateSlurmClient()
@@ -283,11 +329,17 @@ class FakeReadyRepository:
         source_id: str,
         cycle_time: datetime,
         max_lead_hours: int,
+        workspace_root: Path,
+        object_store_root: Path,
+        object_store_prefix: str = "",
         completed: bool = False,
     ) -> None:
         self.source_id = source_id
         self.cycle_time = cycle_time
         self.max_lead_hours = max_lead_hours
+        self.workspace_root = workspace_root
+        self.object_store_root = object_store_root
+        self.object_store_prefix = object_store_prefix
         self.completed = completed
         self.model = _model()
         self.created_runs: list[tuple[Any, dict[str, Any]]] = []
@@ -304,6 +356,7 @@ class FakeReadyRepository:
                 "source_id": self.source_id,
                 "cycle_time": self.cycle_time,
                 "max_lead_hours": self.max_lead_hours,
+                "canonical_products": self._canonical_products(),
             }
         ]
 
@@ -409,6 +462,49 @@ class FakeReadyRepository:
         assert (source_id, cycle_time) == (self.source_id, self.cycle_time)
         self.cycle_statuses.append(status)
         return {"source_id": source_id, "cycle_time": cycle_time, "status": status}
+
+    def _canonical_products(self) -> list[dict[str, Any]]:
+        forecast_hours = list(range(0, self.max_lead_hours + 1, 3))
+        policy_identity = _auto_trigger_source_policy_identity(
+            source_id=self.source_id,
+            cycle_time=self.cycle_time,
+            forecast_hours=forecast_hours,
+            workspace_root=self.workspace_root,
+            object_store_root=self.object_store_root,
+            object_store_prefix=self.object_store_prefix,
+        )
+        source_object_identity = _auto_trigger_source_object_identity(
+            source_id=self.source_id,
+            cycle_time=self.cycle_time,
+            forecast_hours=forecast_hours,
+            workspace_root=self.workspace_root,
+            object_store_root=self.object_store_root,
+            object_store_prefix=self.object_store_prefix,
+        )
+        compact_cycle = format_cycle_time(self.cycle_time)
+        rows: list[dict[str, Any]] = []
+        for forecast_hour in forecast_hours:
+            for variable in IFS_REQUIRED_STANDARD_VARIABLES:
+                rows.append(
+                    {
+                        "canonical_product_id": (
+                            f"{self.source_id}_{compact_cycle}_{variable}_f{forecast_hour:03d}"
+                        ),
+                        "source_id": self.source_id,
+                        "cycle_time": self.cycle_time,
+                        "valid_time": self.cycle_time + timedelta(hours=forecast_hour),
+                        "lead_time_hours": forecast_hour,
+                        "variable": variable,
+                        "checksum": f"sha256:{variable}:{forecast_hour}",
+                        "quality_flag": "ok",
+                        "lineage_json": {
+                            "policy_identity": policy_identity,
+                            "source_object_identity": source_object_identity,
+                            "source_cycle_id": f"{self.source_id}_{compact_cycle}",
+                        },
+                    }
+                )
+        return rows
 
 
 class ImmediateSlurmClient:

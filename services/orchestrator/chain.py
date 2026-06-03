@@ -34,6 +34,7 @@ from services.orchestrator.production_contract import (
 )
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.slurm_gateway.config import SlurmGatewaySettings
+from workers.canonical_converter.converter import evaluate_canonical_readiness
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
@@ -2879,7 +2880,24 @@ class ForecastOrchestrator:
                 continue
             parsed_cycle_time = parse_cycle_time(cycle_time_value)
             max_lead_hours = _optional_int(cycle.get("max_lead_hours"))
+            readiness = self._validate_auto_trigger_canonical_readiness(
+                cycle,
+                source_id=cycle_source_id,
+                cycle_time=parsed_cycle_time,
+                max_lead_hours=max_lead_hours,
+            )
             for model_id in selected_model_ids:
+                if not bool(readiness.get("ready")):
+                    results.append(
+                        _skipped_ready_forecast_result(
+                            source_id=cycle_source_id,
+                            cycle_time=parsed_cycle_time,
+                            model_id=model_id,
+                            reason=str(readiness.get("reason") or "canonical_readiness_not_trusted"),
+                            canonical_readiness=readiness,
+                        )
+                    )
+                    continue
                 if self._has_completed_forecast(
                     source_id=cycle_source_id,
                     cycle_time=parsed_cycle_time,
@@ -2898,6 +2916,63 @@ class ForecastOrchestrator:
                 except PipelineAlreadyActiveError:
                     continue
         return tuple(results)
+
+    def _validate_auto_trigger_canonical_readiness(
+        self,
+        cycle: Mapping[str, Any],
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        max_lead_hours: int | None,
+    ) -> dict[str, Any]:
+        forecast_hours = _auto_trigger_forecast_hours(
+            source_id=source_id,
+            cycle_time=cycle_time,
+            configured_horizon_hours=self.config.forecast_horizon_hours,
+            max_lead_hours=max_lead_hours,
+        )
+        try:
+            policy_identity = _auto_trigger_source_policy_identity(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                forecast_hours=forecast_hours,
+                workspace_root=self.config.workspace_root,
+                object_store_root=self.config.object_store_root,
+                object_store_prefix=self.config.object_store_prefix,
+            )
+            source_object_identity = _auto_trigger_source_object_identity(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                forecast_hours=forecast_hours,
+                workspace_root=self.config.workspace_root,
+                object_store_root=self.config.object_store_root,
+                object_store_prefix=self.config.object_store_prefix,
+            )
+            products = _canonical_products_from_ready_cycle(cycle, source_id=source_id, cycle_time=cycle_time)
+            readiness = evaluate_canonical_readiness(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                products=products,
+                forecast_hours=forecast_hours,
+                policy_identity=policy_identity,
+                source_object_identity=source_object_identity,
+                canonical_product_id=f"canon_{source_id.lower()}_{format_cycle_time(cycle_time)}",
+            )
+            evidence = dict(readiness.evidence)
+        except Exception as error:
+            evidence = _auto_trigger_canonical_readiness_unavailable_evidence(
+                source_id=source_id,
+                cycle_time=cycle_time,
+                forecast_hours=forecast_hours,
+                reason="canonical_readiness_query_failed",
+                error=error,
+            )
+        evidence.setdefault("entrypoint", "trigger_ready_forecasts")
+        evidence.setdefault("source_id", source_id)
+        evidence.setdefault("source", source_id)
+        evidence.setdefault("cycle_time", _format_time(cycle_time))
+        evidence.setdefault("accepted_horizon", _accepted_horizon_from_hours(forecast_hours))
+        return dict(redact_payload(_json_safe_pipeline_event_value(evidence)))
 
     def _list_canonical_ready_cycles(self, *, source_id: str | None, limit: int) -> tuple[dict[str, Any], ...]:
         provider = getattr(self.repository, "list_canonical_ready_cycles", None)
@@ -4376,12 +4451,30 @@ class PsycopgOrchestratorRepository:
                 fc.source_id,
                 fc.cycle_time,
                 fc.cycle_id,
-                MAX(cmp.lead_time_hours) AS max_lead_hours
+                MAX(cmp.lead_time_hours) AS max_lead_hours,
+                COALESCE(
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'canonical_product_id', cmp.canonical_product_id,
+                            'source_id', cmp.source_id,
+                            'cycle_time', cmp.cycle_time,
+                            'valid_time', cmp.valid_time,
+                            'lead_time_hours', cmp.lead_time_hours,
+                            'variable', cmp.variable,
+                            'quality_flag', cmp.quality_flag,
+                            'checksum', cmp.checksum,
+                            'lineage_json', cmp.lineage_json
+                        )
+                        ORDER BY cmp.lead_time_hours, cmp.variable, cmp.canonical_product_id
+                    ) FILTER (WHERE cmp.canonical_product_id IS NOT NULL),
+                    '[]'::jsonb
+                ) AS canonical_products
             FROM met.forecast_cycle fc
             LEFT JOIN met.canonical_met_product cmp
               ON cmp.source_id = fc.source_id
              AND cmp.cycle_time = fc.cycle_time
-             AND cmp.quality_flag <> 'fail'
+             AND cmp.quality_flag = 'ok'
+             AND NULLIF(BTRIM(cmp.checksum), '') IS NOT NULL
             WHERE fc.status = 'canonical_ready'
               {source_filter}
             GROUP BY fc.source_id, fc.cycle_time, fc.cycle_id
@@ -6358,6 +6451,220 @@ def _max_lead_hours_from_lineage(value: Any) -> int | None:
     if not isinstance(value, Mapping):
         return None
     return _optional_int(value.get("max_lead_hours"))
+
+
+def _auto_trigger_forecast_hours(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    configured_horizon_hours: int,
+    max_lead_hours: int | None,
+) -> list[int]:
+    source_max_lead_hours = max_lead_hours
+    normalized_source_id = normalize_source_id(source_id)
+    if source_max_lead_hours is None and normalized_source_id == "IFS":
+        source_max_lead_hours = _ifs_max_lead_hours_for_cycle(cycle_time)
+    if source_max_lead_hours is None:
+        source_max_lead_hours = int(configured_horizon_hours)
+    horizon = min(int(configured_horizon_hours), int(source_max_lead_hours))
+    return list(range(0, horizon + 1, 3))
+
+
+def _auto_trigger_source_policy_identity(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    forecast_hours: Sequence[int],
+    workspace_root: Path | str,
+    object_store_root: Path | str,
+    object_store_prefix: str,
+) -> dict[str, Any]:
+    adapter = _auto_trigger_source_identity_adapter(
+        source_id=source_id,
+        workspace_root=workspace_root,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+    )
+    if adapter is not None and hasattr(adapter, "source_policy_identity"):
+        try:
+            return dict(adapter.source_policy_identity(cycle_time, list(forecast_hours)))
+        except TypeError:
+            return dict(adapter.source_policy_identity(list(forecast_hours)))
+    return {
+        "source": source_id,
+        "cycle_hour": _ensure_utc(cycle_time).hour,
+        "forecast_hours": list(forecast_hours),
+    }
+
+
+def _auto_trigger_source_object_identity(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    forecast_hours: Sequence[int],
+    workspace_root: Path | str,
+    object_store_root: Path | str,
+    object_store_prefix: str,
+) -> dict[str, Any]:
+    adapter = _auto_trigger_source_identity_adapter(
+        source_id=source_id,
+        workspace_root=workspace_root,
+        object_store_root=object_store_root,
+        object_store_prefix=object_store_prefix,
+    )
+    if adapter is not None and hasattr(adapter, "source_object_identity"):
+        return dict(adapter.source_object_identity(cycle_time, list(forecast_hours)))
+    return {
+        "source": source_id,
+        "cycle_time": _format_time(cycle_time),
+        "cycle_id": cycle_id_for(source_id, cycle_time),
+        "forecast_hour_count": len(forecast_hours),
+    }
+
+
+def _auto_trigger_source_identity_adapter(
+    *,
+    source_id: str,
+    workspace_root: Path | str,
+    object_store_root: Path | str,
+    object_store_prefix: str,
+) -> Any | None:
+    normalized_source_id = normalize_source_id(source_id)
+    if normalized_source_id == "gfs":
+        from workers.data_adapters.gfs_adapter import GFSAdapter, GFSAdapterConfig
+
+        return GFSAdapter(
+            config=GFSAdapterConfig(
+                workspace_root=workspace_root,
+                object_store_root=object_store_root,
+                object_store_prefix=object_store_prefix,
+            ),
+            repository=None,
+        )
+    if normalized_source_id == "IFS":
+        from workers.data_adapters.ifs_adapter import IFSAdapter, IFSAdapterConfig
+
+        return IFSAdapter(
+            config=IFSAdapterConfig(
+                workspace_root=workspace_root,
+                object_store_root=object_store_root,
+                object_store_prefix=object_store_prefix,
+            ),
+            repository=None,
+        )
+    return None
+
+
+def _canonical_products_from_ready_cycle(
+    cycle: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+) -> list[dict[str, Any]]:
+    products = cycle.get("canonical_products")
+    if isinstance(products, str):
+        try:
+            products = json.loads(products)
+        except json.JSONDecodeError:
+            products = []
+    if not isinstance(products, Sequence) or isinstance(products, (bytes, bytearray, str)):
+        products = []
+    return [
+        _canonical_product_row_from_ready_cycle(row, source_id=source_id, cycle_time=cycle_time)
+        for row in products
+    ]
+
+
+def _canonical_product_row_from_ready_cycle(
+    row: Any,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+) -> dict[str, Any]:
+    product = dict(row) if isinstance(row, Mapping) else {}
+    product.setdefault("source_id", source_id)
+    product.setdefault("cycle_time", cycle_time)
+    lineage = product.get("lineage_json")
+    if isinstance(lineage, str):
+        try:
+            product["lineage_json"] = json.loads(lineage)
+        except json.JSONDecodeError:
+            product["lineage_json"] = {}
+    elif not isinstance(lineage, Mapping):
+        product["lineage_json"] = {}
+    return product
+
+
+def _auto_trigger_canonical_readiness_unavailable_evidence(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    forecast_hours: Sequence[int],
+    reason: str,
+    error: Exception,
+) -> dict[str, Any]:
+    return {
+        "source": source_id,
+        "source_id": source_id,
+        "cycle_time": _format_time(cycle_time),
+        "status": "canonical_incomplete",
+        "ready": False,
+        "reason": reason,
+        "canonical_product_id": f"canon_{source_id.lower()}_{format_cycle_time(cycle_time)}",
+        "accepted_horizon": _accepted_horizon_from_hours(forecast_hours),
+        "expected_leads": list(forecast_hours),
+        "policy_identity_matched": False,
+        "source_object_identity_matched": False,
+        "dependency": {
+            "name": "canonical_readiness_provider",
+            "status": "unavailable",
+            "retryable": True,
+        },
+        "failure": {
+            "error_type": type(error).__name__,
+            "message": str(redact_payload(str(error))),
+        },
+    }
+
+
+def _accepted_horizon_from_hours(forecast_hours: Sequence[int]) -> dict[str, Any]:
+    hours = sorted(int(hour) for hour in forecast_hours)
+    return {
+        "first_lead_hour": min(hours) if hours else None,
+        "last_lead_hour": max(hours) if hours else None,
+        "lead_count": len(hours),
+    }
+
+
+def _skipped_ready_forecast_result(
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    model_id: str,
+    reason: str,
+    canonical_readiness: Mapping[str, Any],
+) -> PipelineResult:
+    cycle_id = cycle_id_for(source_id, cycle_time)
+    run_id = f"fcst_{source_id.lower()}_{format_cycle_time(cycle_time)}_{model_id}"
+    return PipelineResult(
+        run_id=run_id,
+        cycle_id=cycle_id,
+        status="skipped",
+        stages=(),
+        candidate_outcomes=(
+            {
+                "candidate_id": run_id,
+                "run_id": run_id,
+                "cycle_id": cycle_id,
+                "source_id": source_id,
+                "cycle_time": _format_time(cycle_time),
+                "model_id": model_id,
+                "status": "skipped",
+                "reason": reason,
+                "state_evidence": {"canonical_readiness": dict(canonical_readiness)},
+            },
+        ),
+    )
 
 
 def _parse_gateway_time(value: Any) -> datetime | None:

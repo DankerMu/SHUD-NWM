@@ -16,6 +16,7 @@ from typing import AbstractSet, Any, Protocol
 from packages.common.met_store import PsycopgMetStore
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.source_identity import normalize_source_id
+from workers.canonical_converter.converter import canonical_product_is_forcing_usable
 
 LOGGER = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ class CanonicalProduct:
     native_spatial_resolution: str | None = None
     quality_flag: str = "ok"
     lead_time_hours: int | None = None
+    lineage_json: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -466,7 +468,9 @@ class ForcingProducer:
         for product in products:
             if product.variable not in products_by_variable:
                 continue
-            if product.quality_flag != "ok" or not product.checksum:
+            if not canonical_product_is_forcing_usable(
+                {"quality_flag": product.quality_flag, "checksum": product.checksum}
+            ):
                 continue
             products_by_variable[product.variable][product.valid_time] = product
 
@@ -1850,7 +1854,9 @@ def _fallback_products_by_required_variable(
     grouped: dict[str, dict[datetime, CanonicalProduct]] = {variable: {} for variable in required_variables}
     for product in products:
         required_variable = reverse_variables.get(product.variable)
-        if required_variable is None or product.quality_flag != "ok" or not product.checksum:
+        if required_variable is None or not canonical_product_is_forcing_usable(
+            {"quality_flag": product.quality_flag, "checksum": product.checksum}
+        ):
             continue
         grouped[required_variable][product.valid_time] = product
     return grouped
