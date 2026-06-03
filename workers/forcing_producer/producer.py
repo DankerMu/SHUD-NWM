@@ -57,7 +57,7 @@ OUTPUT_UNITS: dict[str, str] = {
     "Press": "Pa",
 }
 EXPECTED_CANONICAL_UNITS: dict[str, tuple[str, ...]] = {
-    "prcp_rate_or_amount": ("mm", "mm/day"),
+    "prcp_rate_or_amount": ("mm/day",),
     "air_temperature_2m": ("degC",),
     "relative_humidity_2m": ("0-1",),
     "wind_u_10m": ("m/s",),
@@ -285,7 +285,6 @@ class ForcingProducerConfig:
     output_variables: tuple[str, ...] = FORCING_VARIABLES
     required_canonical_variables: tuple[str, ...] = REQUIRED_CANONICAL_VARIABLES
     era5_latency_fallback_hours: int = 23
-    ifs_precip_step_hours: float = 3.0
     max_station_count: int = field(default_factory=lambda: _env_int("FORCING_MAX_STATION_COUNT", 10_000))
     max_timestep_count: int = field(default_factory=lambda: _env_int("FORCING_MAX_TIMESTEP_COUNT", 10_000))
     max_grid_cell_count: int = field(default_factory=lambda: _env_int("FORCING_MAX_GRID_CELL_COUNT", 5_000_000))
@@ -1193,23 +1192,18 @@ class ForcingProducer:
         """Return the multiplier that converts canonical precip into SHUD ``PRCP`` (mm/day).
 
         The authoritative SHUD runtime unit for ``PRCP`` read from ``qhh.tsd.forc`` is a
-        daily rate, ``mm/day`` (Decision A). Conversion is unit- and source-aware:
+        daily rate, ``mm/day`` (Decision A). All canonical sources (GFS/IFS/ERA5) now emit
+        precip in ``mm/day``: the canonical converter rescales each per-step accumulation by
+        its own actual step (``24 / step_hours``) before persisting. The producer therefore
+        passes the canonical value through unchanged (factor ``1.0``).
 
-        * ``mm/day`` (a daily rate, e.g. ERA5) -> factor ``1.0`` (passthrough).
-        * ``mm`` (per-step accumulated amount, e.g. GFS/IFS) -> daily rate via
-          ``24 / step_hours``, where ``step_hours`` is the native time resolution.
-          GFS requires a resolvable step; IFS falls back to the configured default.
-
-        Any unit without a documented ``->mm/day`` conversion is rejected so we never
-        silently emit a physically wrong precip amount. A per-step ``mm`` source with an
-        unknown/zero/non-finite step is rejected by ``_precip_step_hours``.
+        Any other unit is rejected so we never silently emit a physically wrong precip
+        amount; a per-step ``mm`` value drifting from upstream is also rejected by the
+        ``EXPECTED_CANONICAL_UNITS`` unit gate before reaching this method.
         """
         unit = (precip_product.unit or "").strip().lower()
         if unit == "mm/day":
             return 1.0
-        if unit == "mm":
-            default = self.config.ifs_precip_step_hours if _is_ifs_source(source_id) else 0.0
-            return 24.0 / _precip_step_hours(precip_product, default)
         raise ForcingProductionError(
             f"Unsupported precipitation unit '{precip_product.unit}' for source {source_id}: "
             "no documented PRCP->mm/day conversion."
@@ -2481,36 +2475,6 @@ def _native_resolution_for_output(
     return products_by_variable[canonical_variable][valid_time].native_time_resolution
 
 
-def _precip_step_hours(product: CanonicalProduct, default_hours: float) -> float:
-    parsed = _parse_hour_resolution(product.native_time_resolution)
-    step_hours = parsed if parsed is not None else default_hours
-    if step_hours <= 0.0 or not math.isfinite(step_hours):
-        raise ForcingProductionError(
-            f"Invalid precipitation step hours for canonical product {product.canonical_product_id}."
-        )
-    return step_hours
-
-
-def _parse_hour_resolution(value: str | None) -> float | None:
-    if not value:
-        return None
-    normalized = value.strip().lower()
-    if normalized.startswith("pt") and normalized.endswith("h"):
-        normalized = normalized[2:]
-    if normalized.endswith("hours"):
-        normalized = normalized.removesuffix("hours").strip()
-    elif normalized.endswith("hour"):
-        normalized = normalized.removesuffix("hour").strip()
-    elif normalized.endswith("hrs"):
-        normalized = normalized.removesuffix("hrs").strip()
-    elif normalized.endswith("hr"):
-        normalized = normalized.removesuffix("hr").strip()
-    elif normalized.endswith("h"):
-        normalized = normalized[:-1].strip()
-    try:
-        return float(normalized)
-    except ValueError:
-        return None
 
 
 def _distance_degrees(lon_a: float, lat_a: float, lon_b: float, lat_b: float) -> float:

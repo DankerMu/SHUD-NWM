@@ -512,7 +512,12 @@ def test_canonical_readiness_blocks_legacy_rows_missing_required_lineage() -> No
 def test_unit_conversion_boundaries() -> None:
     assert convert_units("tmp2m", [233.15]) == pytest.approx((-40.0,))
     assert convert_units("apcp", [0.0], [0.0]) == pytest.approx((0.0,))
-    assert convert_units("apcp", [6.0], [2.0]) == pytest.approx((4.0,))
+    # No forecast hours -> step_hours defaults to 1.0; per-step delta 4.0 mm -> 4.0 * 24 = 96.0 mm/day
+    assert convert_units("apcp", [6.0], [2.0]) == pytest.approx((96.0,))
+    # With an explicit 3h step, delta 4.0 mm -> 4.0 * 24 / 3 = 32.0 mm/day
+    assert convert_units_with_metadata(
+        "apcp", [6.0], [2.0], forecast_hour=3, previous_forecast_hour=0
+    ).values == pytest.approx((32.0,))
     assert convert_units("rh2m", [0.0, 100.0]) == pytest.approx((0.0, 1.0))
     assert convert_units("u10m", [3.5]) == pytest.approx((3.5,))
 
@@ -539,7 +544,7 @@ def test_conversion_writes_lineage_json_with_required_keys(tmp_path: Path) -> No
     lineage = prcp_f003["lineage_json"]
     assert set(lineage) >= {"source_files", "source_cycle_id", "conversion_params", "converter_version"}
     assert len(lineage["source_files"]) == 2
-    assert lineage["conversion_params"]["operation"] == "cumulative_to_period"
+    assert lineage["conversion_params"]["operation"] == "cumulative_to_mm_day"
 
 
 def test_conversion_writes_rectilinear_grid_definition(tmp_path: Path) -> None:

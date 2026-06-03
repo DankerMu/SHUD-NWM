@@ -48,7 +48,7 @@ IFS_VARIABLE_MAPPING: dict[str, str] = {
 }
 STANDARD_UNITS: dict[str, str] = {
     "air_temperature_2m": "degC",
-    "prcp_rate_or_amount": "mm",
+    "prcp_rate_or_amount": "mm/day",
     "relative_humidity_2m": "0-1",
     "wind_u_10m": "m/s",
     "wind_v_10m": "m/s",
@@ -64,7 +64,7 @@ ERA5_STANDARD_UNITS: dict[str, str] = {
 IFS_STANDARD_UNITS: dict[str, str] = {
     **STANDARD_UNITS,
     "surface_pressure": "Pa",
-    "prcp_rate_or_amount": "mm",
+    "prcp_rate_or_amount": "mm/day",
 }
 GFS_REQUIRED_STANDARD_VARIABLES: tuple[str, ...] = (
     "prcp_rate_or_amount",
@@ -100,7 +100,7 @@ REQUIRED_STANDARD_VARIABLES_BY_SOURCE: dict[str, tuple[str, ...]] = {
 }
 CONVERSION_PARAMS: dict[str, str] = {
     "tmp2m": "K_to_C",
-    "apcp": "cumulative_to_period",
+    "apcp": "cumulative_to_mm_day",
     "rh2m": "pct_to_frac",
     "u10m": "pass_through",
     "v10m": "pass_through",
@@ -642,7 +642,9 @@ def convert_units_with_metadata(
                     "min_delta": min(negative_deltas),
                 },
             )
-        return UnitConversionResult(tuple(max(0.0, delta) for delta in deltas), quality_flag, anomalies)
+        step_hours = _step_hours(forecast_hour, previous_forecast_hour)
+        mm_per_day = tuple(max(0.0, delta) * 24.0 / step_hours for delta in deltas)
+        return UnitConversionResult(mm_per_day, quality_flag, anomalies)
     if native_variable == "total_precipitation":
         return convert_era5_precipitation_with_metadata(
             current,
@@ -806,7 +808,7 @@ def convert_ifs_precipitation_with_metadata(
             }
         )
 
-    values = tuple(max(0.0, delta) for delta in deltas_mm)
+    values = tuple(max(0.0, delta) * 24.0 / step_hours for delta in deltas_mm)
     return UnitConversionResult(values, quality_flag, tuple(anomalies)), next_consecutive_negative_count, step_hours
 
 
@@ -2206,9 +2208,11 @@ class IFSCanonicalConverter(CanonicalConverter):
                     precipitation_sources.insert(0, previous_precipitation.source_file)
                 precipitation_params: dict[str, Any] = {
                     "native_variable": precipitation.native_variable,
-                    "operation": "cumulative_m_to_mm_step",
+                    # mm/day, derived from the per-step accumulation rescaled by the
+                    # actual step (24 / step_hours); step_hours kept for audit.
+                    "operation": "cumulative_m_to_mm_day",
                     "accumulation_type": "since_cycle",
-                    "unit_conversion": "m_to_mm",
+                    "unit_conversion": "m_to_mm_day",
                     "step_hours": precip_step_hours,
                 }
                 if precipitation_conversion.anomalies:
