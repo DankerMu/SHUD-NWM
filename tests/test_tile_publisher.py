@@ -3,11 +3,26 @@
 These tests exercise the q_down display-publication contract that is decoupled
 from flood-frequency readiness. Because ``publish_qdown_cycle`` constructs its
 own SQLAlchemy engine internally (and sqlite cannot resolve ``schema.table``
-without an ATTACH on that same connection), the success / identity / frequency /
+without an ATTACH on that same connection), most success / identity / frequency /
 private-path assertions drive the lower-level ``_publish_qdown_from_database``
-entry point with a session whose connection has the schemas ATTACHed. Only the
-``DATABASE_URL_MISSING`` case must go through the public ``publish_qdown_cycle``
-because it short-circuits before any engine is created.
+entry point with a session whose connection has the schemas ATTACHed. The
+``DATABASE_URL_MISSING`` case and the F6 public-entry happy path exercise the
+public ``publish_qdown_cycle`` directly.
+
+Contract (post q_down fix):
+* layer_id / artifact keys embed the river_network_version_id segment so a single
+  run that spans multiple river networks yields distinct, non-colliding layers:
+  ``q_down_{run_id}_{network_segment}`` and
+  ``tiles/hydro/{cycle_id}/q-down/{run_id}/{network_segment}/manifest.json``.
+* When ``map.tile_layer`` exists each published layer is upserted + committed and
+  lineage carries ``db_registered=True``; a missing table is tolerated
+  (``db_registered=False``, no commit, never break).
+* cycle manifest/lineage: ``source_run_ids`` is deduped (sorted set),
+  ``published_basins`` counts distinct run_id, ``published_products`` counts the
+  run x river_network rows.
+* per-run identity skip (F5): in a multi-run cycle an identity-incomplete run is
+  skipped (blocker accumulated, peers still publish); only if *every* run is
+  incomplete does the cycle raise PUBLISH_IDENTITY_INCOMPLETE.
 """
 
 from __future__ import annotations
@@ -24,7 +39,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from services.tile_publisher.publisher import PublishError, PublishResult, TilePublisher
+from services.tile_publisher.publisher import (
+    PublishError,
+    PublishResult,
+    TilePublisher,
+    _is_private_display_path,
+)
 
 CYCLE_TIME = datetime(2024, 6, 1, 12, tzinfo=UTC)
 COMPACT_TIME = "2024060112"
@@ -41,9 +61,12 @@ def _attach_schemas(engine: Engine) -> None:
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS hydro")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS flood")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS map")
 
 
 def _create_hydro_tables(connection: Any) -> None:
+    # F8: river_timeseries carries the real composite primary key and hydro_run
+    # run_manifest_uri is NOT NULL to match the production schema fidelity.
     connection.execute(
         text(
             """
@@ -59,7 +82,7 @@ def _create_hydro_tables(connection: Any) -> None:
                 start_time DATETIME,
                 end_time DATETIME,
                 status TEXT NOT NULL,
-                run_manifest_uri TEXT,
+                run_manifest_uri TEXT NOT NULL,
                 output_uri TEXT
             )
             """
@@ -71,13 +94,14 @@ def _create_hydro_tables(connection: Any) -> None:
             CREATE TABLE hydro.river_timeseries (
                 run_id TEXT NOT NULL,
                 basin_version_id TEXT,
-                river_network_version_id TEXT,
+                river_network_version_id TEXT NOT NULL,
                 river_segment_id TEXT NOT NULL,
                 valid_time DATETIME NOT NULL,
                 variable TEXT NOT NULL,
                 value REAL NOT NULL,
                 unit TEXT,
-                quality_flag TEXT DEFAULT 'ok'
+                quality_flag TEXT DEFAULT 'ok',
+                PRIMARY KEY (run_id, river_network_version_id, river_segment_id, variable, valid_time)
             )
             """
         )
@@ -101,8 +125,46 @@ def _create_flood_table(connection: Any) -> None:
     )
 
 
+def _create_tile_layer_table(connection: Any) -> None:
+    # Mirrors db/migrations/000008_map.sql map.tile_layer (sqlite-compatible types).
+    connection.execute(
+        text(
+            """
+            CREATE TABLE map.tile_layer (
+                layer_id TEXT PRIMARY KEY,
+                layer_type TEXT NOT NULL,
+                source_run_id TEXT,
+                source_product_id TEXT,
+                source_version TEXT,
+                variable TEXT,
+                valid_time DATETIME,
+                tile_format TEXT NOT NULL,
+                tile_uri_template TEXT NOT NULL,
+                maplibre_source_layer TEXT,
+                property_schema_version TEXT,
+                property_schema_json TEXT,
+                cache_version TEXT,
+                fallback_available BOOLEAN NOT NULL DEFAULT 0,
+                release_blocking BOOLEAN NOT NULL DEFAULT 0,
+                min_zoom INTEGER NOT NULL DEFAULT 0,
+                max_zoom INTEGER NOT NULL DEFAULT 14,
+                style_json TEXT,
+                published_flag BOOLEAN NOT NULL DEFAULT 0,
+                publish_time DATETIME,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+
+
 @contextmanager
-def _store(*, create_hydro: bool = True, create_flood: bool = False) -> Iterator[Session]:
+def _store(
+    *,
+    create_hydro: bool = True,
+    create_flood: bool = False,
+    create_tile_layer: bool = True,
+) -> Iterator[Session]:
     engine = create_engine(
         "sqlite://",
         future=True,
@@ -115,6 +177,8 @@ def _store(*, create_hydro: bool = True, create_flood: bool = False) -> Iterator
             _create_hydro_tables(connection)
         if create_flood:
             _create_flood_table(connection)
+        if create_tile_layer:
+            _create_tile_layer_table(connection)
     session = Session(engine)
     try:
         yield session
@@ -142,36 +206,44 @@ def _insert_run(
     forcing_version_id: str | None = "forcing-1",
     river_network_version_id: str | None = "rivnet-1",
     output_uri: str | None = "published://tiles/hydro",
-    run_manifest_uri: str | None = "published://tiles/hydro/manifest.json",
+    run_manifest_uri: str = "published://tiles/hydro/manifest.json",
     segments: int = 3,
+    insert_run_row: bool = True,
 ) -> None:
-    session.execute(
-        text(
-            """
-            INSERT INTO hydro.hydro_run (
-                run_id, run_type, scenario_id, model_id, basin_version_id,
-                forcing_version_id, source_id, cycle_time, start_time, end_time,
-                status, run_manifest_uri, output_uri
-            ) VALUES (
-                :run_id, :run_type, 'scn', :model_id, :basin_version_id,
-                :forcing_version_id, :source_id, :cycle_time, :cycle_time, :cycle_time,
-                :status, :run_manifest_uri, :output_uri
-            )
-            """
-        ),
-        {
-            "run_id": run_id,
-            "run_type": run_type,
-            "model_id": model_id,
-            "basin_version_id": basin_version_id,
-            "forcing_version_id": forcing_version_id,
-            "source_id": SOURCE_ID,
-            "cycle_time": CYCLE_TIME,
-            "status": status,
-            "run_manifest_uri": run_manifest_uri,
-            "output_uri": output_uri,
-        },
-    )
+    """Seed one hydro_run plus its q_down river_timeseries rows.
+
+    ``insert_run_row=False`` adds river_timeseries for an additional
+    river_network_version_id without re-inserting the (PK) hydro_run row, so a
+    single run can span multiple river networks (F2).
+    """
+    if insert_run_row:
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id,
+                    forcing_version_id, source_id, cycle_time, start_time, end_time,
+                    status, run_manifest_uri, output_uri
+                ) VALUES (
+                    :run_id, :run_type, 'scn', :model_id, :basin_version_id,
+                    :forcing_version_id, :source_id, :cycle_time, :cycle_time, :cycle_time,
+                    :status, :run_manifest_uri, :output_uri
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "run_type": run_type,
+                "model_id": model_id,
+                "basin_version_id": basin_version_id,
+                "forcing_version_id": forcing_version_id,
+                "source_id": SOURCE_ID,
+                "cycle_time": CYCLE_TIME,
+                "status": status,
+                "run_manifest_uri": run_manifest_uri,
+                "output_uri": output_uri,
+            },
+        )
     for index in range(segments):
         session.execute(
             text(
@@ -212,6 +284,10 @@ def _insert_return_period(session: Session, *, run_id: str) -> None:
     session.commit()
 
 
+def _layer_id(run_id: str, network: str = "rivnet-1") -> str:
+    return f"q_down_{run_id}_{network}"
+
+
 # --------------------------------------------------------------------------- #
 # Scenario 1: q_down publish success (no flood table)
 # --------------------------------------------------------------------------- #
@@ -229,26 +305,29 @@ def test_publish_qdown_success_publishes_one_layer_per_run(tmp_path: Any) -> Non
     assert len(result.layers) == 2
 
     layer_ids = {layer["layer_id"] for layer in result.layers}
-    assert layer_ids == {"q_down_run-a", "q_down_run-b"}
+    assert layer_ids == {_layer_id("run-a"), _layer_id("run-b")}
     for layer in result.layers:
         assert layer["layer_type"] == "q_down_timeseries"
 
-    # artifacts: manifest + log per run.
+    # artifacts: manifest + log per run x network (network segment embedded in id).
     artifact_ids = {artifact["artifact_id"] for artifact in result.artifacts}
-    assert "q_down_manifest_run-a" in artifact_ids
-    assert "q_down_log_run-a" in artifact_ids
-    assert "q_down_manifest_run-b" in artifact_ids
-    assert "q_down_log_run-b" in artifact_ids
+    assert "q_down_manifest_run-a_rivnet-1" in artifact_ids
+    assert "q_down_log_run-a_rivnet-1" in artifact_ids
+    assert "q_down_manifest_run-b_rivnet-1" in artifact_ids
+    assert "q_down_log_run-b_rivnet-1" in artifact_ids
 
     # cycle manifest physically written to the object store.
     manifest_key = f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json"
     assert publisher.object_store.exists(manifest_key)
     manifest = json.loads(publisher.object_store.read_bytes(manifest_key))
     assert manifest["published_basins"] == 2
+    assert manifest["published_products"] == 2
     assert sorted(manifest["source_run_ids"]) == ["run-a", "run-b"]
 
-    # per-run manifest also present.
-    assert publisher.object_store.exists(f"tiles/hydro/{CYCLE_ID}/q-down/run-a/manifest.json")
+    # per-run x network manifest also present under the network segment.
+    assert publisher.object_store.exists(
+        f"tiles/hydro/{CYCLE_ID}/q-down/run-a/rivnet-1/manifest.json"
+    )
 
 
 def test_publish_qdown_identity_carries_all_nine_fields(tmp_path: Any) -> None:
@@ -426,6 +505,8 @@ def test_publish_qdown_rejects_private_run_manifest_uri(tmp_path: Any) -> None:
 def test_publish_qdown_missing_lineage_raises_identity_incomplete(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path)
     with _store(create_flood=False) as session:
+        # Sole run is identity-incomplete -> the whole cycle has nothing
+        # publishable, so the cycle-level PUBLISH_IDENTITY_INCOMPLETE is raised.
         _insert_run(session, run_id="run-a", segments=2, forcing_version_id=None)
 
         with pytest.raises(PublishError) as excinfo:
@@ -433,7 +514,10 @@ def test_publish_qdown_missing_lineage_raises_identity_incomplete(tmp_path: Any)
 
     error = excinfo.value
     assert error.error_code == "PUBLISH_IDENTITY_INCOMPLETE"
-    assert "forcing_version_id" in error.details["missing_fields"]
+    # Cycle-level shape (F5): blockers, not raw missing_fields, carry the failure.
+    assert error.details["quality_state"] == "unavailable"
+    blocker_codes = {blocker["code"] for blocker in error.details["residual_blockers"]}
+    assert "PUBLISH_IDENTITY_INCOMPLETE" in blocker_codes
 
 
 def test_publish_qdown_missing_model_id_raises_identity_incomplete(tmp_path: Any) -> None:
@@ -444,8 +528,13 @@ def test_publish_qdown_missing_model_id_raises_identity_incomplete(tmp_path: Any
         with pytest.raises(PublishError) as excinfo:
             publisher._publish_qdown_from_database(session, CYCLE_ID)
 
-    assert excinfo.value.error_code == "PUBLISH_IDENTITY_INCOMPLETE"
-    assert "model_id" in excinfo.value.details["missing_fields"]
+    error = excinfo.value
+    assert error.error_code == "PUBLISH_IDENTITY_INCOMPLETE"
+    blockers = error.details["residual_blockers"]
+    assert any(
+        blocker["code"] == "PUBLISH_IDENTITY_INCOMPLETE" and blocker.get("run_id") == "run-a"
+        for blocker in blockers
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -508,9 +597,248 @@ def test_publish_qdown_twice_is_idempotent(tmp_path: Any) -> None:
     assert len(first.layers) == len(second.layers) == 2
     first_ids = sorted(layer["layer_id"] for layer in first.layers)
     second_ids = sorted(layer["layer_id"] for layer in second.layers)
-    assert first_ids == second_ids == ["q_down_run-a", "q_down_run-b"]
+    assert first_ids == second_ids == [_layer_id("run-a"), _layer_id("run-b")]
 
     # Object store holds a single canonical manifest (overwritten, not duplicated).
     manifest_key = f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json"
     manifest = json.loads(publisher.object_store.read_bytes(manifest_key))
     assert manifest["published_basins"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# F1: map.tile_layer DB registration (and never-break missing-table tolerance)
+# --------------------------------------------------------------------------- #
+def test_publish_qdown_registers_layer_in_tile_layer_table(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    with _store(create_flood=False, create_tile_layer=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+        # F1: a tile_layer row was upserted + committed for the published layer.
+        row = session.execute(
+            text(
+                """
+                SELECT layer_id, layer_type, source_run_id, variable,
+                       tile_format, tile_uri_template, published_flag
+                FROM map.tile_layer
+                WHERE layer_id = :layer_id
+                """
+            ),
+            {"layer_id": _layer_id("run-a")},
+        ).mappings().first()
+
+    assert result.lineage["db_registered"] is True
+    assert row is not None
+    assert row["layer_type"] == "q_down_timeseries"
+    assert row["source_run_id"] == "run-a"
+    assert row["variable"] == "q_down"
+    assert row["tile_format"] == "geojson_timeseries"
+    assert bool(row["published_flag"]) is True
+
+    # tile_uri_template points at the written per-run manifest URI.
+    manifest_uri = publisher.object_store.uri_for_key(
+        f"tiles/hydro/{CYCLE_ID}/q-down/run-a/rivnet-1/manifest.json"
+    )
+    assert row["tile_uri_template"] == manifest_uri
+
+
+def test_publish_qdown_tolerates_missing_tile_layer_table(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    # never-break: no map.tile_layer table at all.
+    with _store(create_flood=False, create_tile_layer=False) as session:
+        _insert_run(session, run_id="run-a", segments=2)
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    # Still published to the object store, but no DB registration happened.
+    assert result.status == "published"
+    assert len(result.layers) == 1
+    assert result.lineage["db_registered"] is False
+    assert publisher.object_store.exists(
+        f"tiles/hydro/{CYCLE_ID}/q-down/run-a/rivnet-1/manifest.json"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# F2: one run spanning two river networks -> two distinct, non-colliding layers
+# --------------------------------------------------------------------------- #
+def test_publish_qdown_run_across_two_networks_yields_two_layers(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    with _store(create_flood=False, create_tile_layer=True) as session:
+        # Single run_id, q_down rows split over two river_network_version_ids.
+        _insert_run(session, run_id="run-a", river_network_version_id="rivnet-1", segments=3)
+        _insert_run(
+            session,
+            run_id="run-a",
+            river_network_version_id="rivnet-2",
+            segments=2,
+            insert_run_row=False,
+        )
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+        layer_rows = session.execute(
+            text("SELECT layer_id FROM map.tile_layer ORDER BY layer_id")
+        ).scalars().all()
+
+    # Two distinct layers, one per network segment, no collision/overwrite.
+    layer_ids = {layer["layer_id"] for layer in result.layers}
+    assert layer_ids == {_layer_id("run-a", "rivnet-1"), _layer_id("run-a", "rivnet-2")}
+    assert len(result.layers) == 2
+    assert set(layer_rows) == layer_ids
+
+    # Two separate per-network manifests written to distinct keys.
+    assert publisher.object_store.exists(
+        f"tiles/hydro/{CYCLE_ID}/q-down/run-a/rivnet-1/manifest.json"
+    )
+    assert publisher.object_store.exists(
+        f"tiles/hydro/{CYCLE_ID}/q-down/run-a/rivnet-2/manifest.json"
+    )
+
+    # cycle manifest: distinct run -> published_basins=1; run x network -> products=2.
+    cycle_manifest = json.loads(
+        publisher.object_store.read_bytes(f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json")
+    )
+    assert cycle_manifest["published_basins"] == 1
+    assert cycle_manifest["published_products"] == 2
+    assert cycle_manifest["source_run_ids"] == ["run-a"]
+
+
+# --------------------------------------------------------------------------- #
+# F5: per-run identity skip (one incomplete run must not sink its peers)
+# --------------------------------------------------------------------------- #
+def test_publish_qdown_skips_only_identity_incomplete_run(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    with _store(create_flood=False, create_tile_layer=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)  # complete
+        _insert_run(session, run_id="run-b", segments=2, forcing_version_id=None)  # incomplete
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+        layer_rows = session.execute(
+            text("SELECT layer_id FROM map.tile_layer ORDER BY layer_id")
+        ).scalars().all()
+
+    # Only the complete run publishes; the incomplete one is skipped, not fatal.
+    assert result.status == "published"
+    layer_ids = {layer["layer_id"] for layer in result.layers}
+    assert layer_ids == {_layer_id("run-a")}
+    assert set(layer_rows) == {_layer_id("run-a")}
+
+    # Degraded cycle with the skipped run recorded as a residual blocker.
+    assert result.lineage["quality_state"] == "degraded"
+    incomplete = [
+        blocker
+        for blocker in result.lineage["residual_blockers"]
+        if blocker["code"] == "PUBLISH_IDENTITY_INCOMPLETE"
+    ]
+    assert incomplete, "skipped run must surface a PUBLISH_IDENTITY_INCOMPLETE blocker"
+    assert any(blocker.get("run_id") == "run-b" for blocker in incomplete)
+
+
+def test_publish_qdown_all_runs_incomplete_raises(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    with _store(create_flood=False, create_tile_layer=True) as session:
+        _insert_run(session, run_id="run-a", segments=2, forcing_version_id=None)
+        _insert_run(session, run_id="run-b", segments=2, model_id=None)
+
+        with pytest.raises(PublishError) as excinfo:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    # Only when *every* candidate run is incomplete does the cycle fail.
+    assert excinfo.value.error_code == "PUBLISH_IDENTITY_INCOMPLETE"
+
+
+# --------------------------------------------------------------------------- #
+# F6: public entry (publish_qdown_cycle) happy path through a real engine.
+#
+# publish_qdown_cycle builds its own engine via create_engine(self.database_url),
+# so to make schema.table resolve there we register a class-level "connect"
+# listener that ATTACHes each schema as a *file* database (in-memory ATTACH is
+# per-connection and would hide the seeded data from the publisher's connection).
+# Class-level listeners fire for every Engine, so we always remove ours in a
+# finally block to avoid polluting other fixtures/tests.
+# --------------------------------------------------------------------------- #
+def test_publish_qdown_cycle_public_entry_happy_path(tmp_path: Any) -> None:
+    schemas = ("hydro", "flood", "ops", "map")
+    schema_files = {name: tmp_path / f"{name}.db" for name in schemas}
+    db_url = f"sqlite:///{tmp_path / 'main.db'}"
+
+    def _attach_all(dbapi_conn: Any, _rec: Any) -> None:  # pragma: no cover - sqlite hook
+        for name in schemas:
+            dbapi_conn.execute(f"ATTACH DATABASE '{schema_files[name]}' AS {name}")
+
+    event.listen(Engine, "connect", _attach_all)
+    try:
+        # Seed through a dedicated engine that shares the same ATTACHed files.
+        seed_engine = create_engine(db_url, future=True)
+        with Session(seed_engine) as session:
+            _create_hydro_tables(session)
+            _create_tile_layer_table(session)
+            _insert_run(session, run_id="run-a", segments=3)
+            session.commit()
+        seed_engine.dispose()
+
+        publisher = _publisher(tmp_path, database_url=db_url)
+        result = publisher.publish_qdown_cycle(CYCLE_ID)
+    finally:
+        event.remove(Engine, "connect", _attach_all)
+
+    # The public entry constructs the engine, translates errors, manages the
+    # session lifecycle, and runs the real publish path end to end.
+    assert result.status == "published"
+    assert len(result.layers) == 1
+    assert {layer["layer_id"] for layer in result.layers} == {_layer_id("run-a")}
+    assert result.lineage["db_registered"] is True
+    assert publisher.object_store.exists(
+        f"tiles/hydro/{CYCLE_ID}/q-down/run-a/rivnet-1/manifest.json"
+    )
+
+
+def test_publish_qdown_cycle_public_entry_translates_engine_failure(tmp_path: Any) -> None:
+    # A malformed/unopenable database_url must be translated into QDOWN_PUBLISH_FAILED
+    # by the public entry's exception boundary (real postgres happy paths are
+    # additionally covered on node-22).
+    bad_dir = tmp_path / "missing-dir"
+    publisher = _publisher(tmp_path, database_url=f"sqlite:///{bad_dir / 'no.db'}")
+
+    with pytest.raises(PublishError) as excinfo:
+        publisher.publish_qdown_cycle(CYCLE_ID)
+
+    assert excinfo.value.error_code == "QDOWN_PUBLISH_FAILED"
+
+
+# --------------------------------------------------------------------------- #
+# F7/G: private-display-path unit assertions (positive + boundary cases)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "private_path",
+    [
+        "/home/frd_muziyao/run-a/output",
+        "/root/run-a/output",
+        "file:///home/user/output",
+        "file:///root/secret",
+        "/scratch/run/out",
+        "/tmp/run-a",
+        ".nhms-runs/run-a/output",
+        # percent-encoded escapes are decoded before the absolute-path check.
+        "file:///home/%2e%2e/run-a",
+        "file:///%2froot/run-a",
+    ],
+)
+def test_is_private_display_path_rejects_private(private_path: str) -> None:
+    assert _is_private_display_path(private_path) is True
+
+
+@pytest.mark.parametrize(
+    "public_path",
+    [
+        "published://tiles/hydro/run-a/manifest.json",
+        "tiles/hydro/run-a/manifest.json",  # relative object-store key
+        "s3://bucket/tiles/hydro/manifest.json",
+        "",
+    ],
+)
+def test_is_private_display_path_allows_public(public_path: str) -> None:
+    assert _is_private_display_path(public_path) is False

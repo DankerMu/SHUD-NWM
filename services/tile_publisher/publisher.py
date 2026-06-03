@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from sqlalchemy import bindparam, create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -495,12 +495,26 @@ class TilePublisher:
             )
 
         frequency_available = _has_table(session, "flood", "return_period_result")
+        # never-break: tolerate a missing map.tile_layer table by skipping DB
+        # registration; when present we must register every published layer + commit.
+        tile_layer_available = _has_table(session, "map", "tile_layer")
         layers: list[dict[str, Any]] = []
         artifacts: list[dict[str, Any]] = []
+        registrations: list[tuple[dict[str, Any], dict[str, Any], str]] = []
         cycle_unavailable: set[str] = set()
         cycle_blockers: list[dict[str, Any]] = []
+        identity_skips = 0
         for run in runs:
-            identity = self._build_qdown_identity(run)
+            try:
+                identity = self._build_qdown_identity(run)
+            except PublishError as error:
+                if error.error_code != "PUBLISH_IDENTITY_INCOMPLETE":
+                    raise
+                # F5: do not let one identity-incomplete run sink publishable peers.
+                identity_skips += 1
+                cycle_unavailable.add("q_down_timeseries")
+                cycle_blockers.extend(_qdown_identity_blockers(error, run))
+                continue
             freq = self._qdown_frequency_metadata(session, run, frequency_available=frequency_available)
             cycle_unavailable.update(freq["unavailable_products"])
             cycle_blockers.extend(freq["residual_blockers"])
@@ -513,27 +527,62 @@ class TilePublisher:
             layers.append(layer_artifact["layer"])
             artifacts.append(layer_artifact["manifest_artifact"])
             artifacts.append(layer_artifact["log_artifact"])
+            registrations.append((run, layer_artifact["layer"], layer_artifact["manifest_uri"]))
 
-        quality_state = "ready" if not cycle_unavailable and not cycle_blockers else "degraded"
+        if not layers:
+            # F5: every candidate run was identity-incomplete; nothing publishable.
+            raise PublishError(
+                "PUBLISH_IDENTITY_INCOMPLETE",
+                "All candidate runs have incomplete identity; q_down display cannot be published.",
+                {
+                    "cycle_id": cycle_id,
+                    "quality_state": "unavailable",
+                    "unavailable_products": sorted(cycle_unavailable),
+                    "residual_blockers": cycle_blockers,
+                },
+            )
+
+        quality_state = (
+            "ready"
+            if not cycle_unavailable and not cycle_blockers and identity_skips == 0
+            else "degraded"
+        )
         cycle_manifest_uri = self._write_qdown_cycle_manifest(
             cycle_id=cycle_id,
             layers=layers,
-            runs=runs,
             quality_state=quality_state,
             unavailable_products=sorted(cycle_unavailable),
             residual_blockers=cycle_blockers,
         )
+
+        # F1: register each published q_down layer in map.tile_layer so the read
+        # replica can discover display products from the DB; tolerate a missing table.
+        db_registered = False
+        if tile_layer_available:
+            for run, layer, manifest_uri in registrations:
+                self._upsert_qdown_layer(
+                    session,
+                    cycle_id=cycle_id,
+                    run=run,
+                    layer=layer,
+                    manifest_uri=manifest_uri,
+                )
+            session.commit()
+            db_registered = True
+
         layers.sort(key=lambda layer: str(layer["layer_id"]))
         artifacts.sort(key=lambda artifact: str(artifact["artifact_id"]))
-        source_run_ids = sorted(str(run["run_id"]) for run in runs)
+        source_run_ids = sorted({str(layer["source_run_id"]) for layer in layers})
         lineage = {
             "cycle_id": cycle_id,
-            "published_basins": len(runs),
+            "published_basins": len(source_run_ids),
+            "published_products": len(layers),
             "source_run_ids": source_run_ids,
             "quality_state": quality_state,
             "unavailable_products": sorted(cycle_unavailable),
             "residual_blockers": cycle_blockers,
             "manifest_uri": cycle_manifest_uri,
+            "db_registered": db_registered,
         }
         return PublishResult(
             cycle_id=cycle_id,
@@ -724,7 +773,9 @@ class TilePublisher:
         frequency: dict[str, Any],
     ) -> dict[str, Any]:
         run_id = str(run["run_id"])
-        layer_id = f"q_down_{run_id}"
+        network_segment = _safe_key_segment(run.get("river_network_version_id"))
+        run_key = f"{run_id}_{network_segment}"
+        layer_id = f"q_down_{run_key}"
         quality_state = "ready" if frequency["frequency_ready"] else "degraded"
         # Reject any display reference that points at a private workspace path.
         for candidate in (run.get("output_uri"), run.get("run_manifest_uri")):
@@ -739,6 +790,8 @@ class TilePublisher:
             "layer_id": layer_id,
             "layer_type": "q_down_timeseries",
             "source_run_id": run_id,
+            "source_product_id": str(run.get("scenario_id") or cycle_id),
+            "river_network_version_id": run.get("river_network_version_id"),
             "tile_format": "geojson_timeseries",
             "identity": identity,
             "quality_state": quality_state,
@@ -749,7 +802,9 @@ class TilePublisher:
             "quality_flags": _quality_flags(run.get("quality_flags")),
         }
 
-        manifest_key = self.object_store.normalize_key(f"tiles/hydro/{cycle_id}/q-down/{run_id}/manifest.json")
+        manifest_key = self.object_store.normalize_key(
+            f"tiles/hydro/{cycle_id}/q-down/{run_id}/{network_segment}/manifest.json"
+        )
         manifest_payload = redact_payload(
             {
                 "cycle_id": cycle_id,
@@ -769,7 +824,9 @@ class TilePublisher:
         manifest_uri = self._write_qdown_artifact(manifest_key, manifest_payload)
         _reject_private_display_uri(manifest_uri)
 
-        log_key = self.object_store.normalize_key(f"tiles/hydro/{cycle_id}/q-down/{run_id}/publish.log.json")
+        log_key = self.object_store.normalize_key(
+            f"tiles/hydro/{cycle_id}/q-down/{run_id}/{network_segment}/publish.log.json"
+        )
         log_payload = redact_payload(
             {
                 "cycle_id": cycle_id,
@@ -784,36 +841,101 @@ class TilePublisher:
 
         return {
             "layer": layer,
+            "manifest_uri": manifest_uri,
             "manifest_artifact": {
-                "artifact_id": f"q_down_manifest_{run_id}",
+                "artifact_id": f"q_down_manifest_{run_key}",
                 "artifact_type": "q_down_manifest",
                 "uri": manifest_uri,
                 "source_run_id": run_id,
             },
             "log_artifact": {
-                "artifact_id": f"q_down_log_{run_id}",
+                "artifact_id": f"q_down_log_{run_key}",
                 "artifact_type": "q_down_publish_log",
                 "uri": log_uri,
                 "source_run_id": run_id,
             },
         }
 
+    def _upsert_qdown_layer(
+        self,
+        session: Session,
+        *,
+        cycle_id: str,
+        run: dict[str, Any],
+        layer: dict[str, Any],
+        manifest_uri: str,
+    ) -> None:
+        """Upsert one published q_down layer into map.tile_layer (F1).
+
+        ``tile_uri_template`` references the already-written + boundary-validated
+        manifest URI so the read replica can discover the display product from the
+        DB. Mirrors _upsert_flood_layer's column-filtering / ON CONFLICT pattern.
+        """
+        # Defense in depth: manifest_uri was validated at write time, re-check here.
+        _reject_private_display_uri(manifest_uri)
+        run_id = str(run["run_id"])
+        now = datetime.now(UTC)
+        style_json = json.dumps(
+            {
+                "cycle_id": cycle_id,
+                "type": "q_down_timeseries",
+                "river_network_version_id": run.get("river_network_version_id"),
+            },
+            sort_keys=True,
+        )
+        values: dict[str, Any] = {
+            "layer_id": layer["layer_id"],
+            "layer_type": "q_down_timeseries",
+            "source_run_id": run_id,
+            "source_product_id": str(run.get("scenario_id") or cycle_id),
+            "variable": "q_down",
+            "valid_time": None,
+            "tile_format": "geojson_timeseries",
+            "tile_uri_template": manifest_uri,
+            "min_zoom": 0,
+            "max_zoom": 14,
+            "style_json": style_json,
+            "published_flag": True,
+            "publish_time": now,
+            "created_at": now,
+        }
+        columns = _table_columns(session, "map", "tile_layer")
+        insert_columns = [column for column in values if column in columns]
+        assignments = [
+            f"{column} = EXCLUDED.{column}"
+            for column in insert_columns
+            if column not in {"layer_id", "created_at"}
+        ]
+        session.execute(
+            text(
+                f"""
+                INSERT INTO map.tile_layer ({', '.join(insert_columns)})
+                VALUES ({', '.join(f':{column}' for column in insert_columns)})
+                ON CONFLICT (layer_id) DO UPDATE SET {', '.join(assignments)}
+                """
+            ),
+            {column: values[column] for column in insert_columns},
+        )
+
     def _write_qdown_cycle_manifest(
         self,
         *,
         cycle_id: str,
         layers: list[dict[str, Any]],
-        runs: list[dict[str, Any]],
         quality_state: str,
         unavailable_products: list[str],
         residual_blockers: list[dict[str, Any]],
     ) -> str:
         manifest_key = self.object_store.normalize_key(f"tiles/hydro/{cycle_id}/q-down/manifest.json")
+        # Each layer is one run x river_network_version_id product. published_basins
+        # counts distinct run_id; published_products counts the run x network rows.
+        source_run_ids = sorted({str(layer["source_run_id"]) for layer in layers})
         payload = redact_payload(
             {
                 "cycle_id": cycle_id,
-                "published_basins": len(runs),
-                "source_run_ids": sorted(str(run["run_id"]) for run in runs),
+                "published_basins": len(source_run_ids),
+                "published_products": len(layers),
+                "source_run_ids": source_run_ids,
                 "quality_state": quality_state,
                 "unavailable_products": unavailable_products,
                 "residual_blockers": residual_blockers,
@@ -830,6 +952,24 @@ class TilePublisher:
         content = json.dumps(payload, sort_keys=True).encode("utf-8")
         self.object_store.write_bytes_atomic(key, content)
         return self.object_store.uri_for_key(key)
+
+
+def _safe_key_segment(value: Any) -> str:
+    """Return a single safe path/key segment for a river_network_version_id.
+
+    Keeps the segment matching ``_SAFE_ID_RE`` so it can never inject ``/`` or
+    ``..`` into object-store keys. Unsafe characters collapse to ``-`` and an
+    empty/None id falls back to ``default``.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return "default"
+    if _SAFE_ID_RE.match(raw):
+        return raw
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]", "-", raw).strip("-") or "default"
+    if not _SAFE_ID_RE.match(sanitized):
+        sanitized = f"x-{sanitized}"
+    return sanitized
 
 
 def _qdown_isoformat(value: Any) -> str | None:
@@ -856,29 +996,58 @@ def _qdown_cycle_quality_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _qdown_identity_blockers(error: PublishError, run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract (or synthesize) residual blockers for an identity-incomplete run (F5)."""
+    raw = error.details.get("residual_blockers")
+    if isinstance(raw, list) and raw:
+        return [dict(blocker) for blocker in raw if isinstance(blocker, dict)]
+    return [
+        {
+            "code": "PUBLISH_IDENTITY_INCOMPLETE",
+            "state": "unavailable",
+            "run_id": run.get("run_id"),
+            "model_id": run.get("model_id"),
+            "residual_risk": (
+                "Strict identity fields are NULL in hydro.hydro_run; "
+                "q_down display cannot be published for this run without complete lineage."
+            ),
+        }
+    ]
+
+
 def _is_private_display_path(path: str) -> bool:
     """Reject private workspace-only paths for display artifacts.
 
-    Mirrors services/artifacts/reader.py::_local_path_needs_redaction semantics
-    (/scratch, /tmp, .nhms-runs, bare absolute local paths). Replicated rather
-    than imported to avoid a fragile dependency on a private cross-module helper.
+    Mirrors services/artifacts/reader.py::_local_path_needs_redaction with
+    ``redact_absolute=True`` semantics: any absolute local path (bare or behind a
+    ``file://`` scheme), plus /scratch, /tmp, and .nhms-runs even when relative,
+    is workspace-only. ``published://``, relative object-store keys, and ``s3://``
+    targets stay allowlisted. Replicated rather than imported to avoid a fragile
+    dependency on a private cross-module helper.
     """
     raw = path.strip()
     if not raw:
         return False
     parsed = urlparse(raw)
-    # published:// and configured object-store keys are allowlisted display targets.
-    if parsed.scheme == "published":
+    # published:// and remote object-store schemes are allowlisted display targets.
+    if parsed.scheme in ("published", "s3"):
         return False
+    # file:// path or a bare path is decoded so %2e/%2f cannot smuggle escapes.
     candidate = parsed.path if parsed.scheme == "file" else raw
+    try:
+        candidate = unquote(candidate)
+    except Exception:
+        pass
     normalized = candidate.replace("\\", "/")
     parts = PurePosixPath(normalized).parts
     if ".nhms-runs" in parts:
         return True
     if normalized in ("/scratch", "/tmp") or normalized.startswith(("/scratch/", "/tmp/")):
         return True
-    # bare absolute local path with no allowlisted scheme is workspace-only.
-    return not parsed.scheme and PurePosixPath(normalized).is_absolute()
+    # Any absolute local path (no scheme or file://) is workspace-only.
+    if parsed.scheme in ("", "file") and PurePosixPath(normalized).is_absolute():
+        return True
+    return False
 
 
 def _reject_private_display_uri(uri: str) -> None:
