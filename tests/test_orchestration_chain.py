@@ -4307,6 +4307,154 @@ def test_trigger_ready_forecasts_demotes_stale_converter_version_before_submissi
     assert stale_events[0]["status_to"] == "raw_complete"
 
 
+def test_trigger_ready_forecasts_demotes_old_mm_precip_unit_before_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Migration self-heal regression lock: a pre-#269 cycle whose precip rows were
+    # written with unit="mm" and *no* converter_version must still be demoted via
+    # the orthogonal unit criterion, instead of dying terminally at the producer
+    # mm/day gate.
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+            omit_converter_version=True,
+            unit="mm",
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    results = orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert len(results) == 1
+    assert results[0].status == "skipped"
+    assert client.submissions == []
+    assert repository.cycle_statuses == ["raw_complete"]
+    outcome = results[0].candidate_outcomes[0]
+    assert outcome["reason"] == "canonical_converter_version_stale"
+    evidence = outcome["state_evidence"]["canonical_readiness"]
+    assert evidence["observed_converter_versions"] == ["unit:mm"]
+    stale_events = [
+        event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
+    ]
+    assert len(stale_events) == 1
+    assert stale_events[0]["status_to"] == "raw_complete"
+
+
+def test_trigger_ready_forecasts_mm_per_day_precip_unit_is_not_demoted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Post-#269 contract products (unit="mm/day") are consumable even when the
+    # converter_version is absent, so they must not be demoted by the unit check.
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+            omit_converter_version=True,
+            unit="mm/day",
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert "raw_complete" not in repository.cycle_statuses
+    assert not [
+        event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
+    ]
+
+
+def test_trigger_ready_forecasts_missing_converter_version_is_not_demoted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Explicit lock on the 8fd0b6e missing-version backstop: a cycle without a
+    # converter_version and without any unit must NOT be demoted (fixture/seed
+    # safety), so the version criterion alone never fires on a missing value.
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    current_object = {"source": "gfs", "object": "current"}
+    repository = ReadyForecastRepository(
+        cycle_time=cycle_time,
+        canonical_products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            forecast_hours=(0, 3),
+            policy_identity=current_policy,
+            source_object_identity=current_object,
+            omit_converter_version=True,
+        ),
+    )
+    client = ImmediateTerminalSlurmClient()
+    _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    orchestrator.trigger_ready_forecasts(source_id="gfs")
+
+    assert "raw_complete" not in repository.cycle_statuses
+    assert not [
+        event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
+    ]
+
+
+def test_trigger_ready_forecasts_era5_version_is_not_demoted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Cross-source version isolation: ERA5 (which never changed precip units)
+    # must not be demoted, whether its products carry the current ERA5 version or
+    # omit it entirely. The unit criterion stays dormant (no unit recorded).
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    current_policy = {"source": "ERA5", "forecast_hours": [0, 3]}
+    current_object = {"source": "ERA5", "object": "current"}
+    for version_kwargs in (
+        {"converter_version": expected_converter_version("ERA5")},
+        {"omit_converter_version": True},
+    ):
+        repository = ReadyForecastRepository(
+            cycle_time=cycle_time,
+            canonical_products=_canonical_rows(
+                source_id="ERA5",
+                cycle_time=cycle_time,
+                forecast_hours=(0, 3),
+                policy_identity=current_policy,
+                source_object_identity=current_object,
+                **version_kwargs,
+            ),
+            source_id="ERA5",
+        )
+        client = ImmediateTerminalSlurmClient()
+        _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
+        orchestrator = _orchestrator(tmp_path, repository, client)
+
+        orchestrator.trigger_ready_forecasts(source_id="ERA5")
+
+        assert "raw_complete" not in repository.cycle_statuses
+        assert not [
+            event for event in repository.events if event["event_type"] == "canonical_converter_version_stale"
+        ]
+
+
 def test_trigger_ready_forecasts_current_converter_version_is_not_demoted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4572,6 +4720,8 @@ def _canonical_rows(
     source_object_identity: Mapping[str, Any],
     omit_source_object_identity: bool = False,
     converter_version: str | None = None,
+    omit_converter_version: bool = False,
+    unit: str | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     compact_cycle = format_cycle_time(cycle_time)
@@ -4588,19 +4738,22 @@ def _canonical_rows(
             }
             if omit_source_object_identity:
                 lineage.pop("source_object_identity")
-            rows.append(
-                {
-                    "canonical_product_id": f"{source_id}_{compact_cycle}_{variable}_f{forecast_hour:03d}",
-                    "source_id": source_id,
-                    "cycle_time": cycle_time,
-                    "valid_time": cycle_time + timedelta(hours=forecast_hour),
-                    "lead_time_hours": forecast_hour,
-                    "variable": variable,
-                    "checksum": f"sha256:{variable}:{forecast_hour}",
-                    "quality_flag": "ok",
-                    "lineage_json": lineage,
-                }
-            )
+            if omit_converter_version:
+                lineage.pop("converter_version", None)
+            row: dict[str, Any] = {
+                "canonical_product_id": f"{source_id}_{compact_cycle}_{variable}_f{forecast_hour:03d}",
+                "source_id": source_id,
+                "cycle_time": cycle_time,
+                "valid_time": cycle_time + timedelta(hours=forecast_hour),
+                "lead_time_hours": forecast_hour,
+                "variable": variable,
+                "checksum": f"sha256:{variable}:{forecast_hour}",
+                "quality_flag": "ok",
+                "lineage_json": lineage,
+            }
+            if unit is not None:
+                row["unit"] = unit
+            rows.append(row)
     return rows
 
 

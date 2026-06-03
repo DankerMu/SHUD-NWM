@@ -186,6 +186,15 @@ STAGES: tuple[StageDefinition, ...] = M3_STAGES
 # next tick re-runs conversion with the current converter_version.
 CANONICAL_DEMOTE_CYCLE_STATUS = "raw_complete"
 
+# Canonical precipitation contract (mirrors the converter's STANDARD_UNITS /
+# IFS_STANDARD_UNITS entry ``prcp_rate_or_amount: "mm/day"``, post-#269). Used as
+# an orthogonal stale criterion: pre-#269 canonical precip rows were written with
+# ``unit="mm"`` and often without a converter_version, so they slip past the
+# version check below and would otherwise die terminally at the producer's
+# mm/day unit gate (failed_forcing) with no self-heal path.
+CANONICAL_PRECIP_VARIABLE = "prcp_rate_or_amount"
+CANONICAL_PRECIP_UNIT = "mm/day"
+
 ANALYSIS_STAGES: tuple[StageDefinition, ...] = (
     StageDefinition(
         "era5_download",
@@ -4532,6 +4541,7 @@ class PsycopgOrchestratorRepository:
                             'valid_time', cmp.valid_time,
                             'lead_time_hours', cmp.lead_time_hours,
                             'variable', cmp.variable,
+                            'unit', cmp.unit,
                             'quality_flag', cmp.quality_flag,
                             'checksum', cmp.checksum,
                             'lineage_json', cmp.lineage_json
@@ -6631,13 +6641,27 @@ def _stale_converter_versions_in_cycle(
     *,
     source_id: str,
 ) -> set[str | None]:
-    """Return canonical converter_versions in ``cycle`` that are not current.
+    """Return stale canonical markers in ``cycle`` (version mismatch or bad unit).
 
-    Each canonical product carries ``converter_version`` inside ``lineage_json``
-    (with a top-level fallback). A value that is explicitly recorded and differs
-    from the source's current expected version is considered stale. A missing
-    version is NOT flagged here (the producer's canonical unit gate is the
-    backstop), so incomplete fixtures/seeds are not aggressively demoted.
+    Two orthogonal stale criteria are applied:
+
+    1. Version: each canonical product carries ``converter_version`` inside
+       ``lineage_json`` (with a top-level fallback). A value that is explicitly
+       recorded and differs from the source's current expected version is stale.
+       A missing version is NOT flagged (mirrors fixture/seed safety).
+
+    2. Unit (precip): a precipitation product (``prcp_rate_or_amount``) whose
+       ``unit`` is explicitly recorded and is not the post-#269 canonical
+       ``mm/day`` is stale, marked as ``"unit:<observed>"``. A missing/empty
+       unit is NOT flagged (same fixture/seed safety philosophy).
+
+    WHY the unit criterion: pre-#269 precip rows were written with ``unit="mm"``
+    and frequently lack a converter_version, so they slip past criterion 1.
+    Without this orthogonal check they would pass readiness and then hit the
+    producer's mm/day unit gate, terminating in ``failed_forcing`` with no
+    self-heal path (a "break userspace" regression). Flagging the unit triggers
+    the same demote -> re-conversion loop, restoring migration self-heal.
+
     Returns an empty set when every product is current (or none exist).
     """
     products = cycle.get("canonical_products")
@@ -6666,11 +6690,21 @@ def _stale_converter_versions_in_cycle(
         else:
             raw = row.get("converter_version")
             version = str(raw) if raw is not None else None
-        # Only an explicitly-recorded, different version is treated as stale here.
-        # A missing version (None) is left to the producer's canonical unit gate as
-        # the backstop, so incomplete fixtures/seeds are not aggressively demoted.
+        # Criterion 1 (version): only an explicitly-recorded, different version is
+        # treated as stale. A missing version (None) is left untouched so that
+        # incomplete fixtures/seeds and post-#269 rows lacking a version are not
+        # aggressively demoted.
         if version is not None and version != expected:
             stale.add(version)
+        # Criterion 2 (precip unit): a precip product whose unit is explicitly
+        # recorded and is not the canonical mm/day is stale. Missing/empty unit is
+        # left untouched (same fixture/seed safety as the version criterion).
+        if row.get("variable") == CANONICAL_PRECIP_VARIABLE:
+            raw_unit = row.get("unit")
+            if raw_unit is not None:
+                normalized_unit = str(raw_unit).strip().lower()
+                if normalized_unit and normalized_unit != CANONICAL_PRECIP_UNIT:
+                    stale.add(f"unit:{normalized_unit}")
     return stale
 
 

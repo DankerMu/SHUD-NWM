@@ -50,3 +50,14 @@ With the `mm` branch gone from `_precip_to_timestep_factor`, these become unrefe
 - `_parse_hour_resolution` (its only caller was `_precip_step_hours`)
 
 Negative-delta anomaly records keep the *raw* `mm` delta (`min_delta` / `min_delta_mm`) for audit; only the emitted values are rescaled to `mm/day`.
+
+## Migration & Rollout
+
+Pre-#269 canonical precip products were written with `unit="mm"`, and many lack a `converter_version`. The orchestrator self-heals them before the producer's unit gate can fail them terminally:
+
+- **Version drift** — a product whose `converter_version` is recorded and differs from the source's current version triggers a demote (`canonical_ready` → `raw_complete`) and re-conversion. (Pre-existing, commit 8fd0b6e.)
+- **Old `mm` unit (orthogonal criterion, new)** — a `prcp_rate_or_amount` product whose `unit` is explicitly recorded and is not `mm/day` triggers the same demote → re-conversion. This catches the common pre-#269 rows that carry `unit="mm"` but no `converter_version`, which would otherwise slip past the version check and die in `failed_forcing` with no self-heal path.
+- **Missing version/unit is left untouched** — preserving fixture/seed safety; such rows fall through to the producer.
+- **Producer `mm/day` unit gate** — the final backstop: anything that reaches production with a non-`mm/day` precip unit fails loud before writing a `forcing_version`.
+
+Rollback: the bumped m1.1/m4.1 `mm/day` canonical rows pass through an old producer at factor `1.0` (magnitude-safe). If the demote logic is reverted, residual stale-version rows are silently retained, which is acceptable.
