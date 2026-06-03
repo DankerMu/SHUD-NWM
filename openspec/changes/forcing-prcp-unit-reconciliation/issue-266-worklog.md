@@ -73,6 +73,11 @@ openspec validate forcing-prcp-unit-reconciliation --strict --no-interactive
 ## 7. 进度日志 (倒序)
 | 时间 | 阶段 | 动作 | 结果 |
 |------|------|------|------|
+| T9 | G | follow-up 硬化 issue #272 + worklog CLEAN | ✅ |
+| T8 | D/E | round-2 comprehensive 6-pack 复审 + 验证门 | ✅ CLEAN: INV-1 闭合; 0 in-scope CONFIRMED; 2 PLAUSIBLE→#272 |
+| T7 | C | node-22 真实 DB round-2 @b514d72 | ✅ 116 passed |
+| T6 | F | OOS issue #269/#270/#271 创建 | ✅ |
+| T5 | F/B | round-2 修复(G5 缓存失效 + G6 收敛守卫) commit b514d72 push | ✅ 本机 116 passed |
 | T4 | D/E | 6-pack 并行评审 + 验证门裁定 | 1 BLOCKING(INV-1) + 3 low + 3 OOS |
 | T3 | C | node-22 真实 DB 目标套件 @9223092 | ✅ 96 passed (仅 cfgrib warning) |
 | T2 | B/C | fix subagent 交付 + 自验 + commit 9223092 + push + PR #268 | ✅ 本机 96 passed, ruff clean |
