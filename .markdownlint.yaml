@@ -15,6 +15,15 @@ MD033:
     - sup
     - sub
 
+# MD060 (table-column-style) shipped in markdownlint-cli2-action@v19 and flags the
+# repo-wide compact table style (|a|b|). We deliberately write compact tables, so
+# disable it like the other stylistic rules below rather than re-pad every table.
+MD060: false
+
+# MD036 (no-emphasis-as-heading): docs use bold sub-labels (**交付物**, **怎么算完成**)
+# as lightweight section markers throughout; this is house style, like the rules below.
+MD036: false
+
 MD009: false
 MD012: false
 MD029: false
