@@ -5,15 +5,16 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from sqlalchemy import bindparam, create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from packages.common.object_store import LocalObjectStore
+from packages.common.redaction import redact_payload
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -448,6 +449,614 @@ class TilePublisher:
                 {"expected_cycle_id": cycle_id, "metadata_uri": metadata_uri},
             )
         return metadata
+
+    # ------------------------------------------------------------------
+    # q_down display publication (frequency-independent path)
+    # ------------------------------------------------------------------
+    def publish_qdown_cycle(self, cycle_id: str) -> PublishResult:
+        """Publish q_down display products without depending on flood-frequency.
+
+        Display readiness is independent from frequency readiness: q_down layers
+        publish from ``parsed`` runs, while any missing return-period products are
+        recorded as honest ``unavailable_products`` / ``residual_blockers``.
+        """
+        cycle_id = _validate_cycle_id(cycle_id)
+        if not self.database_url:
+            raise PublishError(
+                "DATABASE_URL_MISSING",
+                "DATABASE_URL is required for q_down display publication.",
+                {"cycle_id": cycle_id},
+            )
+        try:
+            engine = create_engine(self.database_url, future=True)
+            with Session(engine) as session:
+                return self._publish_qdown_from_database(session, cycle_id)
+        except PublishError:
+            raise
+        except (SQLAlchemyError, OSError, ValueError) as error:
+            raise PublishError("QDOWN_PUBLISH_FAILED", f"q_down publish failed: {error}") from error
+
+    def _publish_qdown_from_database(self, session: Session, cycle_id: str) -> PublishResult:
+        if not _has_table(session, "hydro", "hydro_run"):
+            raise PublishError("DELIVERY_SCHEMA_MISSING", "hydro.hydro_run is required for q_down publication.")
+        if not _has_table(session, "hydro", "river_timeseries"):
+            raise PublishError(
+                "DELIVERY_SCHEMA_MISSING",
+                "hydro.river_timeseries is required for q_down publication.",
+            )
+
+        runs = self._discover_qdown_runs(session, cycle_id)
+        if not runs:
+            quality = _qdown_cycle_quality_summary(runs)
+            raise PublishError(
+                "NO_PUBLISHABLE_QDOWN_PRODUCTS",
+                f"No publishable q_down products found for cycle_id={cycle_id}.",
+                {"cycle_id": cycle_id, **quality},
+            )
+
+        frequency_available = _has_table(session, "flood", "return_period_result")
+        # never-break: tolerate a missing map.tile_layer table by skipping DB
+        # registration; when present we must register every published layer + commit.
+        tile_layer_available = _has_table(session, "map", "tile_layer")
+        layers: list[dict[str, Any]] = []
+        artifacts: list[dict[str, Any]] = []
+        registrations: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+        cycle_unavailable: set[str] = set()
+        cycle_blockers: list[dict[str, Any]] = []
+        identity_skips = 0
+        for run in runs:
+            try:
+                identity = self._build_qdown_identity(run)
+            except PublishError as error:
+                if error.error_code != "PUBLISH_IDENTITY_INCOMPLETE":
+                    raise
+                # F5: do not let one identity-incomplete run sink publishable peers.
+                identity_skips += 1
+                cycle_unavailable.add("q_down_timeseries")
+                cycle_blockers.extend(_qdown_identity_blockers(error, run))
+                continue
+            freq = self._qdown_frequency_metadata(session, run, frequency_available=frequency_available)
+            cycle_unavailable.update(freq["unavailable_products"])
+            cycle_blockers.extend(freq["residual_blockers"])
+            layer_artifact = self._publish_qdown_run(
+                cycle_id=cycle_id,
+                run=run,
+                identity=identity,
+                frequency=freq,
+            )
+            layers.append(layer_artifact["layer"])
+            artifacts.append(layer_artifact["manifest_artifact"])
+            artifacts.append(layer_artifact["log_artifact"])
+            registrations.append((run, layer_artifact["layer"], layer_artifact["manifest_uri"]))
+
+        if not layers:
+            # F5: every candidate run was identity-incomplete; nothing publishable.
+            raise PublishError(
+                "PUBLISH_IDENTITY_INCOMPLETE",
+                "All candidate runs have incomplete identity; q_down display cannot be published.",
+                {
+                    "cycle_id": cycle_id,
+                    "quality_state": "unavailable",
+                    "unavailable_products": sorted(cycle_unavailable),
+                    "residual_blockers": cycle_blockers,
+                },
+            )
+
+        quality_state = (
+            "ready"
+            if not cycle_unavailable and not cycle_blockers and identity_skips == 0
+            else "degraded"
+        )
+        cycle_manifest_uri = self._write_qdown_cycle_manifest(
+            cycle_id=cycle_id,
+            layers=layers,
+            quality_state=quality_state,
+            unavailable_products=sorted(cycle_unavailable),
+            residual_blockers=cycle_blockers,
+        )
+
+        # F1: register each published q_down layer in map.tile_layer so the read
+        # replica can discover display products from the DB; tolerate a missing table.
+        db_registered = False
+        if tile_layer_available:
+            for run, layer, manifest_uri in registrations:
+                self._upsert_qdown_layer(
+                    session,
+                    cycle_id=cycle_id,
+                    run=run,
+                    layer=layer,
+                    manifest_uri=manifest_uri,
+                )
+            session.commit()
+            db_registered = True
+
+        layers.sort(key=lambda layer: str(layer["layer_id"]))
+        artifacts.sort(key=lambda artifact: str(artifact["artifact_id"]))
+        source_run_ids = sorted({str(layer["source_run_id"]) for layer in layers})
+        lineage = {
+            "cycle_id": cycle_id,
+            "published_basins": len(source_run_ids),
+            "published_products": len(layers),
+            "source_run_ids": source_run_ids,
+            "quality_state": quality_state,
+            "unavailable_products": sorted(cycle_unavailable),
+            "residual_blockers": cycle_blockers,
+            "manifest_uri": cycle_manifest_uri,
+            "db_registered": db_registered,
+        }
+        return PublishResult(
+            cycle_id=cycle_id,
+            status="published",
+            layers=tuple(layers),
+            artifacts=tuple(artifacts),
+            lineage=redact_payload(lineage),
+        )
+
+    def _discover_qdown_runs(self, session: Session, cycle_id: str) -> list[dict[str, Any]]:
+        hydro_columns = _table_columns(session, "hydro", "hydro_run")
+        cycle = _cycle_filter(cycle_id)
+        if cycle is None:
+            raise PublishError(
+                "NON_CANONICAL_CYCLE_ID",
+                f"cycle_id must use canonical <source>_YYYYMMDDHH lineage: {cycle_id}.",
+                {"cycle_id": cycle_id},
+            )
+        if not {"source_id", "cycle_time"}.issubset(hydro_columns):
+            raise PublishError(
+                "DELIVERY_LINEAGE_COLUMNS_MISSING",
+                "hydro.hydro_run source_id and cycle_time columns are required for q_down publication.",
+                {"required_columns": ["source_id", "cycle_time"]},
+            )
+
+        is_sqlite = session.get_bind().dialect.name == "sqlite"
+        where_clauses = [
+            "h.run_type = 'forecast'" if "run_type" in hydro_columns else "1 = 1",
+            "h.status IN ('parsed', 'frequency_done', 'published')",
+            "r.variable = 'q_down'",
+            "lower(h.source_id) = :source_id",
+        ]
+        params: dict[str, Any] = {"source_id": cycle["source_id"].lower()}
+        if is_sqlite:
+            where_clauses.append("strftime('%Y%m%d%H', h.cycle_time) = :compact_time")
+            params["compact_time"] = cycle["compact_time"]
+        else:
+            where_clauses.append("h.cycle_time = :cycle_time")
+            params["cycle_time"] = cycle["cycle_time"]
+
+        agg_unit = "GROUP_CONCAT(DISTINCT r.unit)" if is_sqlite else "STRING_AGG(DISTINCT r.unit, ',')"
+        agg_quality = (
+            "GROUP_CONCAT(DISTINCT r.quality_flag)" if is_sqlite else "STRING_AGG(DISTINCT r.quality_flag, ',')"
+        )
+        optional = self._qdown_optional_selects(hydro_columns)
+        rows = session.execute(
+            text(
+                f"""
+                SELECT h.run_id, h.model_id, h.basin_version_id, h.forcing_version_id,
+                       h.source_id, h.cycle_time, h.scenario_id,
+                       r.river_network_version_id,
+                       {optional['select']}
+                       COUNT(DISTINCT r.river_network_version_id || '::' || r.river_segment_id) AS segment_count,
+                       COUNT(r.value) AS row_count,
+                       MIN(r.valid_time) AS first_valid_time,
+                       MAX(r.valid_time) AS last_valid_time,
+                       {agg_unit} AS units,
+                       {agg_quality} AS quality_flags
+                FROM hydro.hydro_run h
+                JOIN hydro.river_timeseries r
+                  ON r.run_id = h.run_id AND r.variable = 'q_down'
+                WHERE {' AND '.join(where_clauses)}
+                GROUP BY h.run_id, h.model_id, h.basin_version_id, h.forcing_version_id,
+                         h.source_id, h.cycle_time, h.scenario_id,
+                         r.river_network_version_id{optional['group']}
+                ORDER BY h.run_id
+                """
+            ),
+            params,
+        ).mappings()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _qdown_optional_selects(hydro_columns: set[str]) -> dict[str, str]:
+        select_parts: list[str] = []
+        group_parts: list[str] = []
+        for column in ("run_manifest_uri", "output_uri"):
+            if column in hydro_columns:
+                select_parts.append(f"h.{column}")
+                group_parts.append(f"h.{column}")
+        select = (", ".join(select_parts) + ",") if select_parts else ""
+        group = ("," + ", ".join(group_parts)) if group_parts else ""
+        return {"select": select, "group": group}
+
+    def _build_qdown_identity(self, run: dict[str, Any]) -> dict[str, Any]:
+        """Assemble the strict-identity manifest, refusing to silently fill NULLs."""
+        cycle_time = run.get("cycle_time")
+        segment_count = int(run.get("segment_count") or 0)
+        # station_count source: hydro_run has no station metadata here, so we honestly
+        # carry the distinct river-segment count as a documented proxy rather than fake one.
+        station_count = segment_count
+        identity = {
+            "run_id": run.get("run_id"),
+            "source": run.get("source_id"),
+            "cycle_time": _qdown_isoformat(cycle_time),
+            "model_id": run.get("model_id"),
+            "basin_version_id": run.get("basin_version_id"),
+            "river_network_version_id": run.get("river_network_version_id"),
+            "forcing_version_id": run.get("forcing_version_id"),
+            "station_count": station_count,
+            "station_count_source": "river_segment_proxy",
+            "segment_count": segment_count,
+        }
+        required = (
+            "run_id",
+            "source",
+            "cycle_time",
+            "model_id",
+            "basin_version_id",
+            "river_network_version_id",
+            "forcing_version_id",
+        )
+        missing = [field for field in required if identity.get(field) in (None, "")]
+        if missing:
+            raise PublishError(
+                "PUBLISH_IDENTITY_INCOMPLETE",
+                "Strict identity is incomplete; refusing to publish q_down display with missing lineage.",
+                {
+                    "run_id": run.get("run_id"),
+                    "missing_fields": missing,
+                    "residual_blockers": [
+                        {
+                            "code": "PUBLISH_IDENTITY_INCOMPLETE",
+                            "state": "unavailable",
+                            "run_id": run.get("run_id"),
+                            "model_id": run.get("model_id"),
+                            "residual_risk": (
+                                "Strict identity fields are NULL in hydro.hydro_run; "
+                                "q_down display cannot be published without complete lineage."
+                            ),
+                        }
+                    ],
+                },
+            )
+        return identity
+
+    def _qdown_frequency_metadata(
+        self, session: Session, run: dict[str, Any], *, frequency_available: bool
+    ) -> dict[str, Any]:
+        """Detect flood-frequency availability without fabricating any values."""
+        unavailable: list[str] = []
+        blockers: list[dict[str, Any]] = []
+        return_period_rows = 0
+        if frequency_available:
+            return_period_rows = self._qdown_return_period_rows(session, str(run["run_id"]))
+        if return_period_rows <= 0:
+            unavailable.extend(["return_period_result", "frequency_curves", "warning_thresholds"])
+            blockers.append(
+                {
+                    "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                    "state": "unavailable",
+                    "run_id": run.get("run_id"),
+                    "model_id": run.get("model_id"),
+                    "residual_risk": (
+                        "Flood-frequency results are unavailable for this run; "
+                        "q_down display is published but return-period overlays are not."
+                    ),
+                }
+            )
+        return {
+            "frequency_ready": return_period_rows > 0,
+            "return_period_rows": return_period_rows,
+            "unavailable_products": unavailable,
+            "residual_blockers": blockers,
+        }
+
+    @staticmethod
+    def _qdown_return_period_rows(session: Session, run_id: str) -> int:
+        row = session.execute(
+            text(
+                """
+                SELECT COUNT(*) AS rows
+                FROM flood.return_period_result r
+                WHERE r.run_id = :run_id
+                  AND r.return_period IS NOT NULL
+                """
+            ),
+            {"run_id": run_id},
+        ).mappings().first()
+        return int(row["rows"]) if row else 0
+
+    def _publish_qdown_run(
+        self,
+        *,
+        cycle_id: str,
+        run: dict[str, Any],
+        identity: dict[str, Any],
+        frequency: dict[str, Any],
+    ) -> dict[str, Any]:
+        run_id = str(run["run_id"])
+        network_segment = _safe_key_segment(run.get("river_network_version_id"))
+        run_key = f"{run_id}_{network_segment}"
+        layer_id = f"q_down_{run_key}"
+        quality_state = "ready" if frequency["frequency_ready"] else "degraded"
+        # Reject any display reference that points at a private workspace path.
+        for candidate in (run.get("output_uri"), run.get("run_manifest_uri")):
+            if candidate and _is_private_display_path(str(candidate)):
+                raise PublishError(
+                    "DISPLAY_BOUNDARY_VIOLATION",
+                    "q_down display references a private workspace path and cannot be published.",
+                    {"run_id": run_id},
+                )
+
+        layer = {
+            "layer_id": layer_id,
+            "layer_type": "q_down_timeseries",
+            "source_run_id": run_id,
+            "source_product_id": str(run.get("scenario_id") or cycle_id),
+            "river_network_version_id": run.get("river_network_version_id"),
+            "tile_format": "geojson_timeseries",
+            "identity": identity,
+            "quality_state": quality_state,
+            "unavailable_products": list(frequency["unavailable_products"]),
+            "segment_count": int(run.get("segment_count") or 0),
+            "row_count": int(run.get("row_count") or 0),
+            "units": _quality_flags(run.get("units")),
+            "quality_flags": _quality_flags(run.get("quality_flags")),
+        }
+
+        manifest_key = self.object_store.normalize_key(
+            f"tiles/hydro/{cycle_id}/q-down/{run_id}/{network_segment}/manifest.json"
+        )
+        manifest_payload = redact_payload(
+            {
+                "cycle_id": cycle_id,
+                "layer": layer,
+                "identity": identity,
+                "frequency": {
+                    "frequency_ready": frequency["frequency_ready"],
+                    "unavailable_products": frequency["unavailable_products"],
+                    "residual_blockers": frequency["residual_blockers"],
+                },
+                "time_range": {
+                    "first_valid_time": _qdown_isoformat(run.get("first_valid_time")),
+                    "last_valid_time": _qdown_isoformat(run.get("last_valid_time")),
+                },
+            }
+        )
+        manifest_uri = self._write_qdown_artifact(manifest_key, manifest_payload)
+        _reject_private_display_uri(manifest_uri)
+
+        log_key = self.object_store.normalize_key(
+            f"tiles/hydro/{cycle_id}/q-down/{run_id}/{network_segment}/publish.log.json"
+        )
+        log_payload = redact_payload(
+            {
+                "cycle_id": cycle_id,
+                "run_id": run_id,
+                "event": "q_down_published",
+                "quality_state": quality_state,
+                "unavailable_products": frequency["unavailable_products"],
+            }
+        )
+        log_uri = self._write_qdown_artifact(log_key, log_payload)
+        _reject_private_display_uri(log_uri)
+
+        return {
+            "layer": layer,
+            "manifest_uri": manifest_uri,
+            "manifest_artifact": {
+                "artifact_id": f"q_down_manifest_{run_key}",
+                "artifact_type": "q_down_manifest",
+                "uri": manifest_uri,
+                "source_run_id": run_id,
+            },
+            "log_artifact": {
+                "artifact_id": f"q_down_log_{run_key}",
+                "artifact_type": "q_down_publish_log",
+                "uri": log_uri,
+                "source_run_id": run_id,
+            },
+        }
+
+    def _upsert_qdown_layer(
+        self,
+        session: Session,
+        *,
+        cycle_id: str,
+        run: dict[str, Any],
+        layer: dict[str, Any],
+        manifest_uri: str,
+    ) -> None:
+        """Upsert one published q_down layer into map.tile_layer (F1).
+
+        ``tile_uri_template`` references the already-written + boundary-validated
+        manifest URI so the read replica can discover the display product from the
+        DB. Mirrors _upsert_flood_layer's column-filtering / ON CONFLICT pattern.
+        """
+        # Defense in depth: manifest_uri was validated at write time, re-check here.
+        _reject_private_display_uri(manifest_uri)
+        run_id = str(run["run_id"])
+        now = datetime.now(UTC)
+        style_json = json.dumps(
+            {
+                "cycle_id": cycle_id,
+                "type": "q_down_timeseries",
+                "river_network_version_id": run.get("river_network_version_id"),
+            },
+            sort_keys=True,
+        )
+        values: dict[str, Any] = {
+            "layer_id": layer["layer_id"],
+            "layer_type": "q_down_timeseries",
+            "source_run_id": run_id,
+            "source_product_id": str(run.get("scenario_id") or cycle_id),
+            "variable": "q_down",
+            "valid_time": None,
+            "tile_format": "geojson_timeseries",
+            "tile_uri_template": manifest_uri,
+            "min_zoom": 0,
+            "max_zoom": 14,
+            "style_json": style_json,
+            "published_flag": True,
+            "publish_time": now,
+            "created_at": now,
+        }
+        columns = _table_columns(session, "map", "tile_layer")
+        insert_columns = [column for column in values if column in columns]
+        assignments = [
+            f"{column} = EXCLUDED.{column}"
+            for column in insert_columns
+            if column not in {"layer_id", "created_at"}
+        ]
+        session.execute(
+            text(
+                f"""
+                INSERT INTO map.tile_layer ({', '.join(insert_columns)})
+                VALUES ({', '.join(f':{column}' for column in insert_columns)})
+                ON CONFLICT (layer_id) DO UPDATE SET {', '.join(assignments)}
+                """
+            ),
+            {column: values[column] for column in insert_columns},
+        )
+
+    def _write_qdown_cycle_manifest(
+        self,
+        *,
+        cycle_id: str,
+        layers: list[dict[str, Any]],
+        quality_state: str,
+        unavailable_products: list[str],
+        residual_blockers: list[dict[str, Any]],
+    ) -> str:
+        manifest_key = self.object_store.normalize_key(f"tiles/hydro/{cycle_id}/q-down/manifest.json")
+        # Each layer is one run x river_network_version_id product. published_basins
+        # counts distinct run_id; published_products counts the run x network rows.
+        source_run_ids = sorted({str(layer["source_run_id"]) for layer in layers})
+        payload = redact_payload(
+            {
+                "cycle_id": cycle_id,
+                "published_basins": len(source_run_ids),
+                "published_products": len(layers),
+                "source_run_ids": source_run_ids,
+                "quality_state": quality_state,
+                "unavailable_products": unavailable_products,
+                "residual_blockers": residual_blockers,
+                "layers": [
+                    {"layer_id": layer["layer_id"], "source_run_id": layer["source_run_id"]} for layer in layers
+                ],
+            }
+        )
+        manifest_uri = self._write_qdown_artifact(manifest_key, payload)
+        _reject_private_display_uri(manifest_uri)
+        return manifest_uri
+
+    def _write_qdown_artifact(self, key: str, payload: dict[str, Any]) -> str:
+        content = json.dumps(payload, sort_keys=True).encode("utf-8")
+        self.object_store.write_bytes_atomic(key, content)
+        return self.object_store.uri_for_key(key)
+
+
+def _safe_key_segment(value: Any) -> str:
+    """Return a single safe path/key segment for a river_network_version_id.
+
+    Keeps the segment matching ``_SAFE_ID_RE`` so it can never inject ``/`` or
+    ``..`` into object-store keys. Unsafe characters collapse to ``-`` and an
+    empty/None id falls back to ``default``.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return "default"
+    if _SAFE_ID_RE.match(raw):
+        return raw
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]", "-", raw).strip("-") or "default"
+    if not _SAFE_ID_RE.match(sanitized):
+        sanitized = f"x-{sanitized}"
+    return sanitized
+
+
+def _qdown_isoformat(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _qdown_cycle_quality_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    if runs:
+        return {"quality_state": "degraded", "unavailable_products": [], "residual_blockers": []}
+    return {
+        "quality_state": "unavailable",
+        "unavailable_products": ["q_down_timeseries"],
+        "residual_blockers": [
+            {
+                "code": "NO_QDOWN_RUNS",
+                "state": "unavailable",
+                "residual_risk": "No parsed q_down river timeseries were found for the requested cycle.",
+            }
+        ],
+    }
+
+
+def _qdown_identity_blockers(error: PublishError, run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract (or synthesize) residual blockers for an identity-incomplete run (F5)."""
+    raw = error.details.get("residual_blockers")
+    if isinstance(raw, list) and raw:
+        return [dict(blocker) for blocker in raw if isinstance(blocker, dict)]
+    return [
+        {
+            "code": "PUBLISH_IDENTITY_INCOMPLETE",
+            "state": "unavailable",
+            "run_id": run.get("run_id"),
+            "model_id": run.get("model_id"),
+            "residual_risk": (
+                "Strict identity fields are NULL in hydro.hydro_run; "
+                "q_down display cannot be published for this run without complete lineage."
+            ),
+        }
+    ]
+
+
+def _is_private_display_path(path: str) -> bool:
+    """Reject private workspace-only paths for display artifacts.
+
+    Mirrors services/artifacts/reader.py::_local_path_needs_redaction with
+    ``redact_absolute=True`` semantics: any absolute local path (bare or behind a
+    ``file://`` scheme), plus /scratch, /tmp, and .nhms-runs even when relative,
+    is workspace-only. ``published://``, relative object-store keys, and ``s3://``
+    targets stay allowlisted. Replicated rather than imported to avoid a fragile
+    dependency on a private cross-module helper.
+    """
+    raw = path.strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    # published:// and remote object-store schemes are allowlisted display targets.
+    if parsed.scheme in ("published", "s3"):
+        return False
+    # file:// path or a bare path is decoded so %2e/%2f cannot smuggle escapes.
+    candidate = parsed.path if parsed.scheme == "file" else raw
+    try:
+        candidate = unquote(candidate)
+    except Exception:
+        pass
+    normalized = candidate.replace("\\", "/")
+    parts = PurePosixPath(normalized).parts
+    if ".nhms-runs" in parts:
+        return True
+    if normalized in ("/scratch", "/tmp") or normalized.startswith(("/scratch/", "/tmp/")):
+        return True
+    # Any absolute local path (no scheme or file://) is workspace-only.
+    if parsed.scheme in ("", "file") and PurePosixPath(normalized).is_absolute():
+        return True
+    return False
+
+
+def _reject_private_display_uri(uri: str) -> None:
+    if _is_private_display_path(uri):
+        raise PublishError(
+            "DISPLAY_BOUNDARY_VIOLATION",
+            "Generated q_down display artifact URI is outside the published boundary.",
+            {"uri": str(redact_payload(uri))},
+        )
 
 
 def failure_payload(cycle_id: str, error: PublishError) -> dict[str, Any]:
