@@ -46,6 +46,16 @@ def _publish_tiles(*, cycle_id: str) -> dict[str, object]:
         raise PublishError("PUBLISH_TILES_FAILED", f"Tile publication failed: {error}") from error
 
 
+def _publish_qdown(*, cycle_id: str) -> dict[str, object]:
+    try:
+        publisher = TilePublisher.from_env()
+        return publisher.publish_qdown_cycle(cycle_id).to_dict()
+    except PublishError:
+        raise
+    except (OSError, RuntimeError, ValueError) as error:
+        raise PublishError("PUBLISH_QDOWN_FAILED", f"q_down publication failed: {error}") from error
+
+
 def _split_csv(values: Sequence[str] | None) -> tuple[str, ...]:
     result: list[str] = []
     for value in values or ():
@@ -212,6 +222,15 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(json.dumps(failure_payload(cycle_id, error), sort_keys=True))
             raise SystemExit(1) from error
 
+    @cli.command("publish-qdown")
+    @click.option("--cycle-id", required=True)
+    def publish_qdown(cycle_id: str) -> None:
+        try:
+            click.echo(json.dumps(_publish_qdown(cycle_id=cycle_id), sort_keys=True))
+        except PublishError as error:
+            click.echo(json.dumps(failure_payload(cycle_id, error), sort_keys=True))
+            raise SystemExit(1) from error
+
     @cli.command("plan-production")
     @click.option(
         "--source",
@@ -298,6 +317,8 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     trigger_parser.add_argument("--date-range", required=True)
     publish_tiles_parser = subparsers.add_parser("publish-tiles")
     publish_tiles_parser.add_argument("--cycle-id", required=True)
+    publish_qdown_parser = subparsers.add_parser("publish-qdown")
+    publish_qdown_parser.add_argument("--cycle-id", required=True)
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
     plan_parser.add_argument("--lookback-hours", type=int, default=24)
@@ -326,6 +347,13 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     if args.command == "publish-tiles":
         try:
             print(json.dumps(_publish_tiles(cycle_id=args.cycle_id), sort_keys=True))
+            return 0
+        except PublishError as error:
+            print(json.dumps(failure_payload(args.cycle_id, error), sort_keys=True))
+            return 1
+    if args.command == "publish-qdown":
+        try:
+            print(json.dumps(_publish_qdown(cycle_id=args.cycle_id), sort_keys=True))
             return 0
         except PublishError as error:
             print(json.dumps(failure_payload(args.cycle_id, error), sort_keys=True))

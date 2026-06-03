@@ -357,6 +357,58 @@ sudo systemctl disable --now nhms-compute-scheduler.timer
 sudo systemctl reset-failed nhms-compute-scheduler.service
 ```
 
+#### 6.4.1 scheduler-once 两种调用模式
+
+`plan-production` 有两种调用形态，必须严格区分：no-flag root 是**业务验证**路径，`--workspace-root`
+覆盖只用于**诊断/排查**。两者默认都是 `--dry-run`（`--plan` 是其同义别名），不提交 Slurm、非变更；
+只有显式 `--submit` 才会真正进入生产编排提交。
+
+| 维度 | 业务验证（no-flag root） | 诊断（`--workspace-root`） |
+| --- | --- | --- |
+| 触发方式 | `scheduler-once` 默认命令 / `nhms-pipeline plan-production --plan` | `nhms-pipeline plan-production --plan --workspace-root /path` |
+| root 来源 | 从 `WORKSPACE_ROOT` 环境变量解析 | 由 `--workspace-root` 显式覆盖 |
+| 用途 | 两节点 E2E 业务验收的 proof path | 本地/排查兼容性诊断，不作为业务证据 |
+| 是否变更 | 否（dry-run 默认，不提交 Slurm） | 否（dry-run 默认，不提交 Slurm） |
+| 输出 JSON | `scheduler.run_once()` 计划结果（候选 cycle、source、model_id、basin_id、resolved roots） | 同结构 JSON，但 root 反映显式覆盖值 |
+| evidence 位置 | `NHMS_SCHEDULER_EVIDENCE_ROOT` / `--evidence-dir` 默认解析 | 可随 `--evidence-dir` 显式落到诊断目录 |
+
+实现依据（`services/orchestrator/cli.py` 的 `_plan_production`）：
+
+- 省略 `--workspace-root` 时，root 从 `WORKSPACE_ROOT` 读取；缺失则报错。这是 no-flag root 业务路径，
+  并强制 `require_runtime_roots`（runtime/temp/lock/evidence root 必须就位）。
+- 传 `--workspace-root /path` 时显式覆盖 root；dry-run 下放宽 runtime root 要求，仅供诊断兼容，
+  不应作为 22 business proof path。
+
+可复制命令示例：
+
+```bash
+# 业务验证：root 从 WORKSPACE_ROOT 读取，无任何 root flag
+uv run nhms-pipeline plan-production --plan
+
+# 诊断/排查：显式覆盖 root，仅供兼容性诊断
+uv run nhms-pipeline plan-production --plan \
+  --workspace-root /scratch/frd_muziyao/nwm-diagnostic-workspace
+```
+
+#### 6.4.2 逻辑概念 / DB 表列 / API payload 字段映射
+
+下表把同一逻辑概念在三处的命名拉直：「DB 列名」与「API payload 字段名」是两套独立命名，避免混淆。
+字段以仓库真实定义为准（`db/migrations/000006_hydro.sql`、`db/migrations/000009_ops.sql`、
+`apps/api/routes/pipeline.py`、`apps/api/routes/forecast.py`）。
+
+| 逻辑概念 | DB 表 / 列 | API payload 字段名 |
+| --- | --- | --- |
+| pipeline job | `ops.pipeline_job.job_id`（PK），`run_id`、`cycle_id`、`job_type`、`slurm_job_id`、`status`、`stage`、`exit_code`、`retry_count`、`error_code`、`error_message`、`log_uri` | `/jobs` 与 `/jobs/{job_id}/logs`：`job_id`、`run_id`、`cycle_id`、`job_type`、`slurm_job_id`、`model_id`、`status`、`stage`、`exit_code`、`retry_count`、`error_code`、`error_message`、`log_uri`、`duration_seconds` |
+| pipeline event | `ops.pipeline_event`：`event_id`（PK）、`entity_type`、`entity_id`、`event_type`、`status_from`、`status_to`、`message`、`details` | 经由 pipeline status/stages 聚合暴露状态迁移；事件级字段以实现为准 |
+| hydro run | `hydro.hydro_run.run_id`（PK），`source_id`、`cycle_time`、`model_id`、`status`、`slurm_job_id`、`log_uri` | `run_id`、`source`/`source_id`、`cycle_time`、`model_id`（latest-product / forecast 响应；request 端用 `source` 查询参数） |
+
+说明：
+
+- DB 用 `source_id`（`hydro.hydro_run.source_id`、外键到 `met.data_source`），API 请求端用 `source`
+  查询参数，latest-product 响应同时回 `run_id/source_id/cycle_time/model_id`；命名不要互相套用。
+- `ops.pipeline_event` 的事件粒度字段（`status_from`/`status_to` 等）属于 DB 列；API 侧主要以
+  pipeline status/stages 聚合形态展示，逐字段 API 命名「以实现为准」。
+
 必须覆盖阶段：
 
 - source download
