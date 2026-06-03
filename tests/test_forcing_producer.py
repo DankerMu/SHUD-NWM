@@ -639,6 +639,30 @@ def test_era5_precipitation_mm_per_day_without_step_is_rejected(tmp_path: Path) 
     assert repository.cycle_updates[-1]["status"] == "failed_forcing"
 
 
+def test_precipitation_mm_per_second_unit_is_rejected_before_records(tmp_path: Path) -> None:
+    # "mm/s" is outside EXPECTED_CANONICAL_UNITS["prcp_rate_or_amount"] = {"mm", "mm/day"}.
+    # Accepting a rate unit would let _precip_to_timestep_factor fall back to 1.0 and silently
+    # treat the per-second rate as a per-step amount (off by ~3600x), so it must be rejected
+    # before any forcing_version / station_timeseries is written.
+    store, repository = _build_repository(
+        tmp_path,
+        source_id="ERA5",
+        radiation_variable="net_radiation",
+        values_by_variable={"prcp_rate_or_amount": (24.0, 24.0, 24.0)},
+    )
+    repository.products = tuple(
+        _replace_product_unit(product, "mm/s") if product.variable == "prcp_rate_or_amount" else product
+        for product in repository.products
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    with pytest.raises(ForcingProductionError, match="unit mismatch"):
+        producer.produce(source_id="ERA5", cycle_time="2026050700", model_id="demo_model")
+
+    assert repository.forcing_versions == {}
+    assert repository.timeseries == []
+
+
 def test_existing_forcing_version_not_reused_when_lead_window_changes(tmp_path: Path) -> None:
     store, repository = _build_repository(tmp_path)
     producer = _build_producer(tmp_path, repository, store)
