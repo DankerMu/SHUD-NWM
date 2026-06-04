@@ -566,6 +566,22 @@ def test_gfs_apcp_within_bucket_negative_still_warns() -> None:
     assert result.values == pytest.approx((0.0,))
 
 
+def test_gfs_apcp_within_bucket_small_negative_stays_ok() -> None:
+    # 桶内 -0.005mm 的量化噪声(<0.01mm)按 SHUD precip 钳零约定与 0 等价,记 anomaly
+    # 但保持 quality_flag=ok,避免被 forcing 当不可用剔除。
+    result = convert_units_with_metadata(
+        "apcp", [2.995], [3.0], forecast_hour=12, previous_forecast_hour=9
+    )
+    assert result.quality_flag == "ok"
+    assert result.values == pytest.approx((0.0,))
+    assert result.anomalies[0]["type"] == "small_negative_apcp_delta"
+
+
+def test_gfs_rh2m_clamps_supersaturation_to_unit_range() -> None:
+    # GRIB rh2m 常含过饱和 >100%;canonical 单位为分数 0-1,需按 SHUD 模型钳到 [0,1]。
+    assert convert_units("rh2m", [105.0, -2.0, 50.0]) == pytest.approx((1.0, 0.0, 0.5))
+
+
 def test_time_axis_is_monotonic() -> None:
     axis = compute_time_axis("2026050700", [0, 3, 6, 9])
 

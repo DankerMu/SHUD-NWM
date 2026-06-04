@@ -292,10 +292,11 @@ def test_ifs_precipitation_rejects_nonfinite_accumulated_values() -> None:
         convert_ifs_precipitation_with_metadata([math.nan], [0.0], forecast_hour=3, previous_forecast_hour=0)
 
 
-def test_ifs_shortwave_negative_delta_is_warn_lineage_not_silent_ok() -> None:
+def test_ifs_shortwave_significant_negative_delta_is_warn_lineage_not_silent_ok() -> None:
+    # -20000 J/m² over 3h ≈ -1.85 W/m²,超出量化噪声容差(1.0 W/m²)→ 真异常,标 warn。
     conversion, step_hours = convert_ifs_shortwave_down_values(
-        [100.0],
-        [200.0],
+        [0.0],
+        [20000.0],
         forecast_hour=6,
         previous_forecast_hour=3,
     )
@@ -306,14 +307,30 @@ def test_ifs_shortwave_negative_delta_is_warn_lineage_not_silent_ok() -> None:
     assert conversion.anomalies[0]["type"] == "negative_ifs_shortwave_delta"
 
 
+def test_ifs_shortwave_quantization_noise_negative_delta_stays_ok() -> None:
+    # 夜间持平段的 GRIB 量化抖动:-100 J/m² over 3h ≈ -0.009 W/m²,SHUD 自身对 Rn<0
+    # 即钳 0 并取整到整数 W/m²,此负值读入后与 0 逐位等价 → 不标 warn,值 clamp 到 0。
+    conversion, step_hours = convert_ifs_shortwave_down_values(
+        [100.0],
+        [200.0],
+        forecast_hour=6,
+        previous_forecast_hour=3,
+    )
+
+    assert step_hours == 3.0
+    assert conversion.values == pytest.approx((0.0,))
+    assert conversion.quality_flag == "ok"
+    assert conversion.anomalies[0]["type"] == "small_negative_ifs_shortwave_delta"
+
+
 def test_ifs_shortwave_negative_delta_writes_warn_product_with_lineage(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     _, manifest = build_ifs_manifest(
         tmp_path,
         forecast_hours=(3, 6),
         overrides={
-            ("ssr", 3): [200.0],
-            ("ssr", 6): [100.0],
+            ("ssr", 3): [20000.0],
+            ("ssr", 6): [0.0],
         },
     )
     converter = build_converter(tmp_path, repository=repository)

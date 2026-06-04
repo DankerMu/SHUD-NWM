@@ -17,6 +17,15 @@ from packages.common.source_identity import normalize_source_id
 
 LOGGER = logging.getLogger(__name__)
 
+# IFS 累积净太阳辐射夜间持平,GRIB 位打包让持平段抖动几百 J/m²(≈0.1 W/m²),
+# 去累积后产生伪负 delta。SHUD 模型自身(NetcdfForcingProvider.cpp)对净辐射 Rn 即
+# "rn<0 → 0" 再 nearbyint 取整到整数 W/m²,故亚 W/m² 的负值经模型读入后与 0 逐位等价,
+# 并非数据降级。低于此速率阈值的负值按模型约定 clamp 到 0,不标 quality_flag=warn,
+# 以免夜间 shortwave 产品被 forcing 当不可用剔除;超阈值的负值仍标 warn 供诊断。
+IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2 = float(
+    os.getenv("IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2", "1.0")
+)
+
 VARIABLE_MAPPING: dict[str, str] = {
     "tmp2m": "air_temperature_2m",
     "apcp": "prcp_rate_or_amount",
@@ -668,20 +677,35 @@ def convert_units_with_metadata(
             deltas = current
         else:
             deltas = tuple(current_value - previous_value for current_value, previous_value in zip(current, previous))
-        negative_deltas = tuple(delta for delta in deltas if delta < 0.0)
-        anomalies: tuple[dict[str, Any], ...] = ()
+        # 量化噪声级微小负 delta(|δ|<0.01mm)按 SHUD precip<0.0001mm/day→0 的钳零+量化
+        # 约定与 0 等价,记 anomaly 但保持 quality_flag=ok(对齐 IFS 降水 small/significant
+        # 处理);显著负值(δ<=-0.01mm)才标 warn,以免量化噪声让 forcing 误剔除产品。
+        small_negatives = tuple(delta for delta in deltas if -0.01 < delta < 0.0)
+        significant_negatives = tuple(delta for delta in deltas if delta <= -0.01)
+        anomalies_list: list[dict[str, Any]] = []
         quality_flag = "ok"
-        if negative_deltas:
+        if small_negatives:
+            anomalies_list.append(
+                {
+                    "type": "small_negative_apcp_delta",
+                    "forecast_hour": forecast_hour,
+                    "previous_forecast_hour": previous_forecast_hour,
+                    "negative_count": len(small_negatives),
+                    "min_delta": min(small_negatives),
+                }
+            )
+        if significant_negatives:
             quality_flag = "warn"
-            anomalies = (
+            anomalies_list.append(
                 {
                     "type": "negative_apcp_delta",
                     "forecast_hour": forecast_hour,
                     "previous_forecast_hour": previous_forecast_hour,
-                    "negative_count": len(negative_deltas),
-                    "min_delta": min(negative_deltas),
-                },
+                    "negative_count": len(significant_negatives),
+                    "min_delta": min(significant_negatives),
+                }
             )
+        anomalies: tuple[dict[str, Any], ...] = tuple(anomalies_list)
         # APCP accumulates within a reset bucket. Across a reset the increment spans
         # from the bucket start to fh. On the first frame (previous=None) the smallest
         # forecast hour always lies in the first bucket, so the span is 0->fh; keep the
@@ -703,7 +727,9 @@ def convert_units_with_metadata(
             previous_forecast_hour=previous_forecast_hour,
         )
     if native_variable == "rh2m":
-        return UnitConversionResult(tuple(value / 100.0 for value in current))
+        # canonical 单位为分数 0-1;GRIB rh2m 常含过饱和 >100%,按 SHUD 模型(rh 钳 [0,1])
+        # 与 IFS RH 路径一致钳到 [0,1],避免 canonical 产品越界声明单位。
+        return UnitConversionResult(tuple(clamp(value / 100.0, 0.0, 1.0) for value in current))
     return UnitConversionResult(current)
 
 
@@ -919,27 +945,43 @@ def convert_ifs_shortwave_down_values(
     step_seconds = step_hours * 3600.0
     values: list[float] = []
     negative_deltas: list[float] = []
+    small_negative_deltas: list[float] = []
     for current_ssr, prior_ssr in zip(ssr, previous_ssr):
         delta = current_ssr - prior_ssr
         if not math.isfinite(delta):
             raise CanonicalConversionError("IFS shortwave radiation deltas must be finite.")
-        if delta < 0.0:
+        rate = delta / step_seconds
+        # 只有负速率超过量化噪声容差才算真异常(标 warn);夜间持平段的亚阈值伪负值
+        # 记 anomaly 但保持 quality_flag=ok(对齐 IFS 降水 small/significant 处理)。
+        if rate < -IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2:
             negative_deltas.append(delta)
-        values.append(max(0.0, delta / step_seconds))
-    anomalies: tuple[dict[str, Any], ...] = ()
+        elif delta < 0.0:
+            small_negative_deltas.append(delta)
+        values.append(max(0.0, rate))
+    anomalies_list: list[dict[str, Any]] = []
     quality_flag = "ok"
+    if small_negative_deltas:
+        anomalies_list.append(
+            {
+                "type": "small_negative_ifs_shortwave_delta",
+                "forecast_hour": forecast_hour,
+                "previous_forecast_hour": previous_forecast_hour,
+                "negative_count": len(small_negative_deltas),
+                "min_delta_j_m2": min(small_negative_deltas),
+            }
+        )
     if negative_deltas:
         quality_flag = "warn"
-        anomalies = (
+        anomalies_list.append(
             {
                 "type": "negative_ifs_shortwave_delta",
                 "forecast_hour": forecast_hour,
                 "previous_forecast_hour": previous_forecast_hour,
                 "negative_count": len(negative_deltas),
                 "min_delta_j_m2": min(negative_deltas),
-            },
+            }
         )
-    return UnitConversionResult(tuple(values), quality_flag, anomalies), step_hours
+    return UnitConversionResult(tuple(values), quality_flag, tuple(anomalies_list)), step_hours
 
 
 def _finite_float_tuple(values: Iterable[float], label: str) -> tuple[float, ...]:
