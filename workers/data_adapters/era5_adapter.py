@@ -880,7 +880,7 @@ class ERA5Adapter(DataSourceAdapter):
             if self.object_store.size(entry.local_key) < minimum_size:
                 return False
             if entry.expected_checksum is None:
-                return False
+                return True
             return self.object_store.checksum(entry.local_key) == entry.expected_checksum
         except (OSError, ObjectStoreError, ValueError):
             LOGGER.exception("Failed to check ERA5 idempotency for %s", entry.local_key)

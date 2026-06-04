@@ -17,14 +17,31 @@ from packages.common.source_identity import normalize_source_id
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        LOGGER.warning("Invalid %s=%r; using default %s", name, raw_value, default)
+        return default
+
+
 # IFS 累积净太阳辐射夜间持平,GRIB 位打包让持平段抖动几百 J/m²(≈0.1 W/m²),
 # 去累积后产生伪负 delta。SHUD 模型自身(NetcdfForcingProvider.cpp)对净辐射 Rn 即
 # "rn<0 → 0" 再 nearbyint 取整到整数 W/m²,故亚 W/m² 的负值经模型读入后与 0 逐位等价,
 # 并非数据降级。低于此速率阈值的负值按模型约定 clamp 到 0,不标 quality_flag=warn,
 # 以免夜间 shortwave 产品被 forcing 当不可用剔除;超阈值的负值仍标 warn 供诊断。
-IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2 = float(
-    os.getenv("IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2", "1.0")
-)
+IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2 = _float_env("IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2", 1.0)
+
+# 累积降水去累积的负 delta 噪声容差(mm/步)。IFS tp(米,GRIB 16-bit 打包)的量化步长
+# ≈1000×2⁻¹⁶=0.0153mm,会让晚时次(累积量大)出现伪负 delta;原 0.01mm 阈值比量化步长还
+# 小,把量化噪声误判为 warning_negative_precip → 被 forcing(只收 quality_flag==ok)剔除致缺产品。
+# SHUD 模型自身对 precip<0 即钳 0 并量化到 4 位,故亚阈值负值与 0 等价。默认 0.05mm 覆盖该步长
+# 并留 ~3× 余量;超阈值的负值仍标 warn 供诊断。IFS 降水与 GFS APCP 共用此常量。
+PRECIP_NEGATIVE_NOISE_TOLERANCE_MM = _float_env("PRECIP_NEGATIVE_NOISE_TOLERANCE_MM", 0.05)
 
 VARIABLE_MAPPING: dict[str, str] = {
     "tmp2m": "air_temperature_2m",
@@ -677,11 +694,12 @@ def convert_units_with_metadata(
             deltas = current
         else:
             deltas = tuple(current_value - previous_value for current_value, previous_value in zip(current, previous))
-        # 量化噪声级微小负 delta(|δ|<0.01mm)按 SHUD precip<0.0001mm/day→0 的钳零+量化
-        # 约定与 0 等价,记 anomaly 但保持 quality_flag=ok(对齐 IFS 降水 small/significant
-        # 处理);显著负值(δ<=-0.01mm)才标 warn,以免量化噪声让 forcing 误剔除产品。
-        small_negatives = tuple(delta for delta in deltas if -0.01 < delta < 0.0)
-        significant_negatives = tuple(delta for delta in deltas if delta <= -0.01)
+        # 量化噪声级微小负 delta(|δ|<容差)按 SHUD precip<0.0001mm/day→0 的钳零+量化约定
+        # 与 0 等价,记 anomaly 但保持 quality_flag=ok(对齐 IFS 降水 small/significant 处理);
+        # 显著负值才标 warn。容差用 PRECIP_NEGATIVE_NOISE_TOLERANCE_MM 以覆盖 GRIB 量化步长。
+        _tol = PRECIP_NEGATIVE_NOISE_TOLERANCE_MM
+        small_negatives = tuple(delta for delta in deltas if -_tol < delta < 0.0)
+        significant_negatives = tuple(delta for delta in deltas if delta <= -_tol)
         anomalies_list: list[dict[str, Any]] = []
         quality_flag = "ok"
         if small_negatives:
@@ -852,8 +870,11 @@ def convert_ifs_precipitation_with_metadata(
     deltas_mm = tuple(
         (current_value - previous_value) * 1000.0 for current_value, previous_value in zip(current, previous)
     )
-    small_negatives = tuple(delta for delta in deltas_mm if -0.01 < delta < 0.0)
-    significant_negatives = tuple(delta for delta in deltas_mm if delta <= -0.01)
+    # 容差用 PRECIP_NEGATIVE_NOISE_TOLERANCE_MM 覆盖 IFS tp 的 GRIB 量化步长(≈0.0153mm),
+    # 否则量化噪声被判 significant→warning_negative_precip→被 forcing 当不可用剔除致缺产品。
+    _tol = PRECIP_NEGATIVE_NOISE_TOLERANCE_MM
+    small_negatives = tuple(delta for delta in deltas_mm if -_tol < delta < 0.0)
+    significant_negatives = tuple(delta for delta in deltas_mm if delta <= -_tol)
     anomalies: list[dict[str, Any]] = []
     next_consecutive_negative_count = 0
     quality_flag = "ok"
@@ -1146,13 +1167,19 @@ class CanonicalConverter:
                 source_object_identity=_mapping_value(manifest_metadata.get("source_object_identity")),
             )
         except Exception as error:
-            self._update_cycle_status(
-                cycle_time,
-                status="failed_convert",
-                error_code="CONVERT_FAILED",
-                error_message=str(error),
-            )
-            raise
+            try:
+                self._update_cycle_status(
+                    cycle_time,
+                    status="failed_convert",
+                    error_code="CONVERT_FAILED",
+                    error_message=str(error),
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Failed to record CONVERT_FAILED status for %s; preserving original conversion error",
+                    format_cycle_time(cycle_time),
+                )
+            raise error
 
     def convert_manifest_uri(self, manifest_uri: str) -> ConversionResult:
         return self.convert_manifest(self.load_manifest(manifest_uri))
@@ -1266,6 +1293,11 @@ class CanonicalConverter:
                 dataset = xr.open_dataset(file_path, engine="cfgrib")
             except Exception as _cfgrib_err:
                 cfgrib_error = _cfgrib_err
+                LOGGER.warning(
+                    "Failed to parse raw file %s with cfgrib; falling back to netcdf4: %s",
+                    local_key,
+                    _cfgrib_err,
+                )
                 dataset = xr.open_dataset(file_path, engine="netcdf4")
             expected_native_variable = str(entry["variable"])
             data_variable = self._select_data_variable(dataset, expected_native_variable, local_key)
@@ -1533,6 +1565,9 @@ class CanonicalConverter:
         )
         checksum = sha256_bytes(content)
 
+        # TODO: Batch repository reads for a cycle once CanonicalRepository exposes a
+        # keyed bulk fetch; this per-product check intentionally preserves the
+        # current write/idempotency/error semantics.
         existing = self._get_existing_product(canonical_product_id)
         if self._existing_product_is_current(existing, object_key, checksum):
             return CanonicalProductResult(
@@ -1969,13 +2004,19 @@ class ERA5CanonicalConverter(CanonicalConverter):
                 source_object_identity=source_object_identity,
             )
         except Exception as error:
-            self._update_cycle_status(
-                cycle_time,
-                status="failed_convert",
-                error_code="CONVERT_FAILED",
-                error_message=str(error),
-            )
-            raise
+            try:
+                self._update_cycle_status(
+                    cycle_time,
+                    status="failed_convert",
+                    error_code="CONVERT_FAILED",
+                    error_message=str(error),
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Failed to record CONVERT_FAILED status for %s; preserving original conversion error",
+                    format_cycle_time(cycle_time),
+                )
+            raise error
 
     def _records_by_hour_and_variable(self, records: list[RawRecord]) -> dict[int, dict[str, RawRecord]]:
         grouped: dict[int, dict[str, RawRecord]] = {}
@@ -2420,13 +2461,19 @@ class IFSCanonicalConverter(CanonicalConverter):
                 source_object_identity=source_object_identity,
             )
         except Exception as error:
-            self._update_cycle_status(
-                cycle_time,
-                status="failed_convert",
-                error_code="CONVERT_FAILED",
-                error_message=str(error),
-            )
-            raise
+            try:
+                self._update_cycle_status(
+                    cycle_time,
+                    status="failed_convert",
+                    error_code="CONVERT_FAILED",
+                    error_message=str(error),
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Failed to record CONVERT_FAILED status for %s; preserving original conversion error",
+                    format_cycle_time(cycle_time),
+                )
+            raise error
 
     def _records_by_hour_and_variable(self, records: list[RawRecord]) -> dict[int, dict[str, RawRecord]]:
         grouped: dict[int, dict[str, RawRecord]] = {}

@@ -210,6 +210,21 @@ def test_idempotency_skips_existing_file_when_checksum_matches(tmp_path: Path) -
     assert client.retrieve_requests == []
 
 
+def test_idempotency_skips_existing_file_without_checksum_when_size_matches(tmp_path: Path) -> None:
+    client = MockCDSClient(failure_factory=lambda: RuntimeError("should not retrieve"))
+    adapter = build_adapter(tmp_path, cds_client=client)
+    manifest = single_entry_manifest(adapter)
+    entry = manifest.entries[0]
+    payload = encode_test_netcdf4(entry.variable, entry.forecast_hour, cycle_time=manifest.cycle_time, source="ERA5")
+    adapter.object_store.write_bytes_atomic(entry.local_key, payload)
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "raw_complete"
+    assert result.files[0].status == "already_done"
+    assert client.retrieve_requests == []
+
+
 def test_era5_cli_invocation_downloads_with_area(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

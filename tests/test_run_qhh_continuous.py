@@ -76,7 +76,7 @@ def test_slurm_exports_excludes_extra_database_and_credential_urls(
 
     exports = runner._slurm_exports(_candidate(), tmp_path)
 
-    assert exports["DATABASE_URL"] == "postgresql://nhms:required@10.0.2.100:55432/nhms"
+    assert "DATABASE_URL" not in exports
     assert exports["SHUD_EXECUTABLE"] == "/opt/shud/bin/shud"
     assert exports["NHMS_BASINS_ROOT"] == "/data/Basins"
     assert exports["QHH_PACKAGE_VERSION"] == "v0.0.1-qhh-smoke-lake2"
@@ -114,14 +114,42 @@ def test_slurm_submit_uses_env_file_not_full_submit_environment(
     export_arg = submit_command[submit_command.index("--export") + 1]
     assert result["status"] == "submitted"
     assert export_arg.startswith("QHH_SLURM_ENV_FILE=")
+    assert ",DATABASE_URL" in export_arg
     assert "ALL" not in export_arg
-    assert "DATABASE_URL" not in export_arg
+    assert "postgresql://nhms:secret" not in export_arg
     env_file = tmp_path / "slurm-logs" / "gfs" / "2026052106" / "qhh-cycle.env"
     assert env_file.exists()
     assert env_file.stat().st_mode & 0o777 == 0o600
     assert env_file.parent.stat().st_mode & 0o777 == 0o700
     assert env_file.parent.parent.stat().st_mode & 0o777 == 0o700
-    assert "DATABASE_URL=" in env_file.read_text(encoding="utf-8")
+    env_content = env_file.read_text(encoding="utf-8")
+    assert "DATABASE_URL=" not in env_content
+    assert "postgresql://nhms:secret" not in env_content
+
+
+def test_slurm_submit_rejects_non_numeric_sbatch_job_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout="warning: retrying\nSubmitted batch job abc\n", stderr="")
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55432/nhms")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    args = Namespace(
+        slurm_partition="CPU",
+        slurm_cpus=2,
+        slurm_mem="4G",
+        slurm_time="00:30:00",
+        slurm_wait=False,
+    )
+    state_file = tmp_path / "state.json"
+
+    result = runner._submit_slurm_cycle(_candidate(), run_root=tmp_path, state_file=state_file, args=args)
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "invalid sbatch job id"
+    assert runner._read_json(state_file)["finished_at"]
 
 
 def test_slurm_env_file_rejects_symlink_target_without_modifying_it(tmp_path: Path) -> None:
@@ -132,7 +160,7 @@ def test_slurm_env_file_rejects_symlink_target_without_modifying_it(tmp_path: Pa
     env_file.symlink_to(target)
 
     with pytest.raises(RuntimeError, match="symlink"):
-        runner._write_slurm_env_file(env_file, {"DATABASE_URL": "postgresql://nhms:secret@db/nhms"})
+        runner._write_slurm_env_file(env_file, {"QHH_RUN_ID": "fcst_gfs_2026052106_basins_qhh_shud"})
 
     assert target.read_text(encoding="utf-8") == "unchanged\n"
     assert env_file.is_symlink()
@@ -152,9 +180,9 @@ def test_slurm_env_file_helper_does_not_use_write_text_chmod_secret_path(
     monkeypatch.setattr(Path, "chmod", forbidden_chmod)
     env_file = tmp_path / "slurm-logs" / "gfs" / "2026052106" / "qhh-cycle.env"
 
-    runner._write_slurm_env_file(env_file, {"DATABASE_URL": "postgresql://nhms:secret@db/nhms"})
+    runner._write_slurm_env_file(env_file, {"QHH_RUN_ID": "fcst_gfs_2026052106_basins_qhh_shud"})
 
-    assert env_file.read_text(encoding="utf-8").startswith("export DATABASE_URL=")
+    assert env_file.read_text(encoding="utf-8").startswith("export QHH_RUN_ID=")
     assert env_file.stat().st_mode & 0o777 == 0o600
 
 
@@ -369,7 +397,7 @@ def test_active_submitted_slurm_state_is_skipped(monkeypatch: pytest.MonkeyPatch
 
     reason = runner._skip_reason(_candidate(), state, executor="slurm")
 
-    assert reason == "slurm job 5743 status is nonterminal or unknown (RUNNING)"
+    assert reason == "slurm job 5743 status is active (RUNNING)"
     assert calls == [["squeue", "-h", "-j", "5743", "-o", "%T"]]
 
 
@@ -407,7 +435,7 @@ def test_terminal_failed_slurm_state_is_not_skipped_after_unknown_active_state(
     assert runner._skip_reason(_candidate(), state, executor="slurm") is None
 
 
-def test_unknown_active_submitted_slurm_state_is_skipped_without_controller_visibility(
+def test_unknown_submitted_slurm_state_is_retried_without_controller_visibility(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runner, "_slurm_job_status", lambda _job_id: runner.SLURM_ACCOUNTING_UNKNOWN)
@@ -419,12 +447,7 @@ def test_unknown_active_submitted_slurm_state_is_skipped_without_controller_visi
         "slurm_status": runner.SLURM_ACCOUNTING_UNKNOWN,
     }
 
-    reason = runner._skip_reason(_candidate(), state, executor="slurm")
-
-    assert reason == (
-        "slurm job 5743 status is nonterminal or unknown "
-        f"({runner.SLURM_ACCOUNTING_UNKNOWN})"
-    )
+    assert runner._skip_reason(_candidate(), state, executor="slurm") is None
 
 
 def test_run_pass_does_not_resubmit_active_slurm_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -457,10 +480,10 @@ def test_run_pass_does_not_resubmit_active_slurm_job(tmp_path: Path, monkeypatch
     summary = runner.run_pass(args=args, run_root=tmp_path, state_root=state_root)
 
     assert summary["status"] == "completed"
-    assert summary["results"][0]["reason"] == "slurm job 5743 status is nonterminal or unknown (RUNNING)"
+    assert summary["results"][0]["reason"] == "slurm job 5743 status is active (RUNNING)"
 
 
-def test_run_pass_does_not_resubmit_unknown_active_slurm_job(
+def test_run_pass_resubmits_unknown_slurm_job_after_controller_loses_visibility(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -478,11 +501,19 @@ def test_run_pass_does_not_resubmit_unknown_active_slurm_job(
     )
     monkeypatch.setattr(runner, "_candidate_cycles", lambda **_: [_candidate()])
     monkeypatch.setattr(runner, "_slurm_job_status", lambda _job_id: runner.SLURM_ACCOUNTING_UNKNOWN)
-    monkeypatch.setattr(
-        runner,
-        "_submit_slurm_cycle",
-        lambda *_args, **_kwargs: pytest.fail("unknown-active job should not be resubmitted"),
-    )
+    submissions: list[str] = []
+
+    def fake_submit(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        submissions.append("submitted")
+        return {
+            "source_id": "gfs",
+            "cycle_time": "2026052106",
+            "run_id": _candidate().run_id,
+            "status": "submitted",
+            "slurm_job_id": "6000",
+        }
+
+    monkeypatch.setattr(runner, "_submit_slurm_cycle", fake_submit)
     args = Namespace(
         sources="gfs",
         lookback_hours=24,
@@ -494,12 +525,10 @@ def test_run_pass_does_not_resubmit_unknown_active_slurm_job(
 
     summary = runner.run_pass(args=args, run_root=tmp_path, state_root=state_root)
 
+    assert submissions == ["submitted"]
     assert summary["status"] == "completed"
     assert summary["results"][0]["status"] == "submitted"
-    assert summary["results"][0]["reason"] == (
-        "slurm job 5743 status is nonterminal or unknown "
-        f"({runner.SLURM_ACCOUNTING_UNKNOWN})"
-    )
+    assert summary["results"][0]["slurm_job_id"] == "6000"
 
 
 def test_run_pass_does_not_resubmit_wait_timeout_slurm_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -535,7 +564,7 @@ def test_run_pass_does_not_resubmit_wait_timeout_slurm_job(tmp_path: Path, monke
 
     assert summary["status"] == "completed"
     assert summary["results"][0]["status"] == "submitted"
-    assert summary["results"][0]["reason"] == "slurm job 5743 status is nonterminal or unknown (RUNNING)"
+    assert summary["results"][0]["reason"] == "slurm job 5743 status is active (RUNNING)"
 
 
 def test_run_pass_resubmits_deadline_slurm_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

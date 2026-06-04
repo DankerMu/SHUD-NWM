@@ -803,7 +803,7 @@ def _upsert_metadata_only_forcing_version(
             "station_count": station_count,
             "forcing_package_uri": forcing_package_uri,
             "checksum": checksum,
-            "lineage_json": _json_param(db_session, lineage),
+            "lineage_json": _json_param(lineage),
         },
     )
 
@@ -874,7 +874,7 @@ def _record_qc_result(
             "run_id": run_id,
             "passed": passed,
             "severity": "info" if passed else "error",
-            "checks_json": _json_param(db_session, checks_json),
+            "checks_json": _json_param(checks_json),
             "message": message,
         },
     )
@@ -938,16 +938,18 @@ def _set_run_forcing(
                     :lineage_json
                 FROM hydro.hydro_run
                 WHERE run_id = :run_id
-                ON CONFLICT (forcing_version_id) DO UPDATE SET
-                    forcing_package_uri = EXCLUDED.forcing_package_uri,
-                    lineage_json = EXCLUDED.lineage_json
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM met.forcing_version
+                      WHERE forcing_version_id = :forcing_version_id
+                  )
                 """
             ),
             {
                 "run_id": run_id,
                 "forcing_version_id": forcing_version_id,
                 "forcing_package_uri": forcing_package_uri,
-                "lineage_json": _json_param(db_session, {"purpose": "hindcast", "producer_result": True}),
+                "lineage_json": _json_param({"purpose": "hindcast", "producer_result": True}),
             },
         )
     db_session.execute(
@@ -1288,7 +1290,7 @@ def _run_log_uri(run_id: str) -> str:
     return f"runs/{run_id}/logs/hindcast.log"
 
 
-def _json_param(db_session: Session, value: dict[str, Any]) -> Any:
+def _json_param(value: dict[str, Any]) -> Any:
     return json.dumps(value, sort_keys=True)
 
 

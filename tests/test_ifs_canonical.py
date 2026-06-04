@@ -257,6 +257,19 @@ def test_negative_precipitation_handling_all_cases() -> None:
     assert error_count == 3
 
 
+def test_ifs_precip_grib_quantization_noise_stays_ok() -> None:
+    # IFS tp 的 GRIB 16-bit 量化步长 ≈1000×2⁻¹⁶=0.0152587890625mm。该幅度的伪负 delta
+    # 是量化噪声(实测 cycle 2026060400 +129h/+144h 即此值),应判 small→quality_flag=ok,
+    # 不得判 warning_negative_precip(否则被 forcing 当不可用剔除致缺降水产品)。
+    quant_step_m = 1000.0 * (2.0**-16) / 1000.0  # 0.0152587890625mm 对应的米
+    result, count, _ = convert_ifs_precipitation_with_metadata(
+        [0.002 - quant_step_m], [0.002], forecast_hour=129, previous_forecast_hour=126
+    )
+    assert result.values == pytest.approx((0.0,))
+    assert result.quality_flag == "ok"
+    assert count == 0
+
+
 def test_radiation_cumulative_diff_to_w_m2(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     store, manifest = build_ifs_manifest(

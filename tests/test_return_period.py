@@ -171,7 +171,10 @@ def test_one_hour_window_keeps_peak_and_timestep_rows() -> None:
         assert [row["warning_level"] for row in rows] == ["high_risk", "high_risk"]
 
 
-def test_ifs_six_day_window_uses_actual_duration_label() -> None:
+def test_ifs_six_day_window_peak_uses_curve_duration_label() -> None:
+    # 峰值行的 duration 必须与所用频率曲线的设计历时一致('1h'),不能用预报时窗长度
+    # 冒充设计历时(否则展示侧按 duration 过滤峰值层会查不到,且 lineage 自相矛盾)。
+    # "峰值跨预报窗"的语义由 max_over_window=True 承载。
     with _store() as session:
         _insert_curve(session, "seg_001")
         _insert_forecast_run(
@@ -183,7 +186,7 @@ def test_ifs_six_day_window_uses_actual_duration_label() -> None:
         compute_return_periods("forecast_run", session)
 
         row = _result_row(session, segment_id="seg_001", max_over_window=True)
-        assert row["duration"] == "6d"
+        assert row["duration"] == "1h"
 
 
 def test_state_machine_success_transitions_parsed_to_frequency_done() -> None:

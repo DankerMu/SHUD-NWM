@@ -311,8 +311,16 @@ def _validate_shud_forcing_header(
             break
     if not tsd_uri:
         raise RuntimeError("forcing package manifest is missing shud/qhh.tsd.forc.")
-    first_line = object_store.read_bytes(tsd_uri).decode("utf-8").splitlines()[0]
-    header_count = int(first_line.split()[0])
+    lines = object_store.read_bytes(tsd_uri).decode("utf-8-sig").splitlines()
+    if not lines or not lines[0].strip():
+        raise RuntimeError(f"qhh.tsd.forc station header is empty: {tsd_uri}.")
+    fields = lines[0].split()
+    if not fields:
+        raise RuntimeError(f"qhh.tsd.forc station header is empty: {tsd_uri}.")
+    try:
+        header_count = int(fields[0])
+    except ValueError as error:
+        raise RuntimeError(f"qhh.tsd.forc station header count is invalid: {fields[0]!r}.") from error
     if header_count != station_count:
         raise RuntimeError(
             f"qhh.tsd.forc station header {header_count} does not match forcing manifest {station_count}."

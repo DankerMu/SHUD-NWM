@@ -46,6 +46,7 @@ DEFAULT_SLURM_SQUEUE_POLL_SECONDS = 30
 DEFAULT_SLURM_ACCOUNTING_TIMEOUT_SECONDS = 300
 DEFAULT_SLURM_ACCOUNTING_POLL_SECONDS = 10
 SLURM_EXPORT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SLURM_JOB_ID_RE = re.compile(r"^\d+$")
 PRIVATE_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 PRIVATE_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 SLURM_EXPLICIT_ENV_NAMES = {
@@ -295,6 +296,7 @@ def _submit_slurm_cycle(
     _ensure_private_slurm_log_dir(slurm_root, run_root=run_root)
     env_exports = _slurm_exports(candidate, run_root)
     env_file = _write_slurm_env_file(slurm_root / "qhh-cycle.env", env_exports)
+    inherited_submit_names = ("DATABASE_URL",) if os.environ.get("DATABASE_URL") else ()
     command = [
         "sbatch",
         "--parsable",
@@ -313,7 +315,7 @@ def _submit_slurm_cycle(
         "--error",
         str(slurm_root / "%j.err"),
         "--export",
-        _format_slurm_export({"QHH_SLURM_ENV_FILE": str(env_file)}),
+        _format_slurm_export({"QHH_SLURM_ENV_FILE": str(env_file)}, inherit_names=inherited_submit_names),
         str(ROOT / "scripts" / "run_qhh_cycle.sbatch"),
     ]
     started = time.monotonic()
@@ -331,7 +333,23 @@ def _submit_slurm_cycle(
         _write_state(state_file, {**result, "finished_at": _now_iso()})
         return result
 
-    job_id = submitted.stdout.strip().split(";", 1)[0]
+    try:
+        job_id = _parse_sbatch_job_id(submitted.stdout)
+    except RuntimeError as error:
+        result = {
+            "source_id": candidate.source_id,
+            "cycle_time": candidate.token,
+            "run_id": candidate.run_id,
+            "status": "failed",
+            "reason": "invalid sbatch job id",
+            "returncode": submitted.returncode,
+            "stdout": submitted.stdout.strip(),
+            "stderr": submitted.stderr.strip(),
+            "error": str(error),
+        }
+        _write_state(state_file, {**result, "finished_at": _now_iso()})
+        return result
+
     _write_state(
         state_file,
         {
@@ -419,14 +437,33 @@ def _slurm_exports(candidate: CandidateCycle, run_root: Path) -> dict[str, str]:
             "PATH": os.environ.get("PATH", ""),
         }
     )
-    if "DATABASE_URL" in os.environ:
-        inherited["DATABASE_URL"] = os.environ["DATABASE_URL"]
     return {key: value for key, value in inherited.items() if value != ""}
 
 
-def _format_slurm_export(values: Mapping[str, str]) -> str:
-    assignments = [f"{key}={value}" for key, value in values.items()]
+def _format_slurm_export(values: Mapping[str, str], *, inherit_names: tuple[str, ...] = ()) -> str:
+    assignments: list[str] = []
+    for key, value in values.items():
+        if SLURM_EXPORT_NAME_RE.fullmatch(key) is None:
+            raise RuntimeError(f"Invalid Slurm export variable name: {key!r}")
+        if not _slurm_export_value_allowed(value):
+            raise RuntimeError(f"Invalid Slurm export value for {key}: value contains a comma or newline.")
+        assignments.append(f"{key}={value}")
+    for key in inherit_names:
+        if SLURM_EXPORT_NAME_RE.fullmatch(key) is None:
+            raise RuntimeError(f"Invalid Slurm inherited export variable name: {key!r}")
+        assignments.append(key)
     return ",".join(assignments)
+
+
+def _parse_sbatch_job_id(stdout: str) -> str:
+    job_ids: list[str] = []
+    for line in stdout.splitlines():
+        candidate = line.strip().split(";", 1)[0].strip()
+        if SLURM_JOB_ID_RE.fullmatch(candidate):
+            job_ids.append(candidate)
+    if len(job_ids) == 1:
+        return job_ids[0]
+    raise RuntimeError(f"sbatch did not return exactly one numeric job id: {stdout.strip()!r}")
 
 
 def _write_slurm_env_file(path: Path, values: Mapping[str, str]) -> Path:
@@ -627,8 +664,8 @@ def _skip_reason(candidate: CandidateCycle, state: dict[str, Any], *, executor: 
         slurm_status = str(state.get("slurm_status") or "")
         if job_id:
             slurm_status = _slurm_job_status(job_id)
-        if _slurm_status_is_unknown_active(slurm_status):
-            return f"slurm job {job_id or '<unknown>'} status is nonterminal or unknown ({slurm_status})"
+        if _slurm_status_is_active(slurm_status):
+            return f"slurm job {job_id or '<unknown>'} status is active ({slurm_status})"
     if status in RETRYABLE_STATE and os.getenv("QHH_CONTINUOUS_RETRY_FAILED", "1") != "1":
         return "state file retry disabled"
     if not state:
@@ -636,14 +673,6 @@ def _skip_reason(candidate: CandidateCycle, state: dict[str, Any], *, executor: 
     if state.get("source_id") == candidate.source_id and state.get("cycle_time") == candidate.token:
         return "state file already terminal" if status in TERMINAL_SUCCESS else None
     return None
-
-
-def _should_skip(candidate: CandidateCycle, state: dict[str, Any]) -> bool:
-    return _skip_reason(candidate, state, executor=os.getenv("QHH_CONTINUOUS_EXECUTOR", "local")) is not None
-
-
-def _slurm_job_is_active(job_id: str) -> bool:
-    return _slurm_status_is_unknown_active(_slurm_job_status(job_id))
 
 
 def _slurm_job_status(job_id: str) -> str:
@@ -703,6 +732,13 @@ def _slurm_status_is_unknown_active(status: str) -> bool:
     return normalized in SLURM_UNKNOWN_ACTIVE or (
         normalized not in SLURM_TERMINAL_SUCCESS and normalized not in SLURM_TERMINAL_FAILURE
     )
+
+
+def _slurm_status_is_active(status: str) -> bool:
+    normalized = status.strip().upper()
+    if not normalized or normalized in SLURM_UNKNOWN_ACTIVE:
+        return False
+    return normalized not in SLURM_TERMINAL_SUCCESS and normalized not in SLURM_TERMINAL_FAILURE
 
 
 def _state_file(state_root: Path, candidate: CandidateCycle) -> Path:

@@ -48,6 +48,13 @@ def test_env_overrides_bbox(monkeypatch: pytest.MonkeyPatch) -> None:
     assert bbox.as_dict() == {"south": 10.0, "north": 55.0, "west": 70.0, "east": 140.0}
 
 
+def test_invalid_bbox_env_float_reports_name_and_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_SOUTH", "not-a-float")
+
+    with pytest.raises(ValueError, match="NHMS_DOWNLOAD_BBOX_SOUTH.*not-a-float"):
+        china_buffered_bbox_from_env()
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

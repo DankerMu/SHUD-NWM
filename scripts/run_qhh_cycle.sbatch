@@ -14,6 +14,10 @@ if [[ -n "${QHH_SLURM_ENV_FILE:-}" ]]; then
     printf 'QHH_SLURM_ENV_FILE does not exist: %s\n' "$QHH_SLURM_ENV_FILE" >&2
     exit 2
   fi
+  cleanup_slurm_env_file() {
+    rm -f -- "$QHH_SLURM_ENV_FILE"
+  }
+  trap cleanup_slurm_env_file EXIT
   # shellcheck source=/dev/null
   source "$QHH_SLURM_ENV_FILE"
 fi

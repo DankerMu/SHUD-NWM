@@ -810,9 +810,9 @@ class ForcingProducer:
         self,
         product: CanonicalProduct,
         grid_points: Sequence[GridPoint],
+        expected_grid_points: Sequence[GridPoint],
     ) -> None:
-        representative = self._read_canonical_grid(product)
-        if _grid_signature(representative) != _grid_signature(grid_points):
+        if _grid_signature(grid_points) != _grid_signature(expected_grid_points):
             raise ForcingProductionError(
                 f"Canonical product {product.canonical_product_id} grid definition/order does not match "
                 f"the interpolation grid for source {product.source_id} grid {product.grid_id}."
@@ -858,6 +858,7 @@ class ForcingProducer:
         product: CanonicalProduct,
         *,
         required_grid_cell_ids: AbstractSet[str] | None = None,
+        expected_grid_points: Sequence[GridPoint] | None = None,
         retain_grid_points: bool = True,
     ) -> CanonicalField:
         try:
@@ -886,6 +887,8 @@ class ForcingProducer:
                     f"{len(grid_points)} grid points."
                 )
             _validate_grid_points(grid_points, product.canonical_product_id)
+            if expected_grid_points is not None:
+                self._validate_field_grid_matches_product(product, grid_points, expected_grid_points)
             values_by_grid_cell_id: dict[str, float] = {}
             for point, raw_value in zip(grid_points, flat_values, strict=True):
                 value = float(raw_value)
@@ -960,7 +963,20 @@ class ForcingProducer:
             return None
         try:
             definition = json.loads(self.object_store.read_bytes(product.grid_definition_uri).decode("utf-8"))
-        except Exception:
+        except (OSError, ObjectStoreError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            LOGGER.warning(
+                "Failed to read canonical grid definition %s for product %s; falling back to NetCDF coordinates: %s",
+                product.grid_definition_uri,
+                product.canonical_product_id,
+                error,
+            )
+            return None
+        if not isinstance(definition, Mapping):
+            LOGGER.warning(
+                "Canonical grid definition %s for product %s is not an object; falling back to NetCDF coordinates.",
+                product.grid_definition_uri,
+                product.canonical_product_id,
+            )
             return None
 
         cells = definition.get("cells") or definition.get("points")
@@ -1036,14 +1052,12 @@ class ForcingProducer:
                     return cached
                 product = products_by_variable[variable][valid_time]
                 source_grid = (product.source_id, product.grid_id)
+                expected_grid_points = tuple(grid_points_by_source_grid[source_grid])
                 field = self._read_canonical_field(
                     product,
                     required_grid_cell_ids=required_grid_cell_ids_by_source_grid.get(source_grid),
+                    expected_grid_points=expected_grid_points,
                     retain_grid_points=False,
-                )
-                self._validate_field_grid_matches_product(
-                    product,
-                    tuple(grid_points_by_source_grid[source_grid]),
                 )
                 field_cache[variable] = field
                 return field
@@ -2163,19 +2177,6 @@ def _json_round_trip(value: Any) -> Any:
     return json.loads(json.dumps(value, sort_keys=True, default=_json_default))
 
 
-def _validate_field_values(
-    values: Sequence[float],
-    grid_points: Sequence[GridPoint],
-    canonical_product_id: str,
-) -> None:
-    for point, value in zip(grid_points, values, strict=True):
-        if not math.isfinite(value):
-            raise ForcingProductionError(
-                f"Canonical product {canonical_product_id} has non-finite field value "
-                f"for grid cell {point.grid_cell_id}."
-            )
-
-
 def _missing_product_details(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
     required_variables: Sequence[str],
@@ -2268,16 +2269,25 @@ def _min_lead_hours_from_env() -> int | None:
     value = os.getenv("FORCING_MIN_LEAD_HOURS")
     if value in (None, ""):
         return None
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        LOGGER.warning("Invalid FORCING_MIN_LEAD_HOURS=%r; using no minimum lead-hour filter.", value)
+        return None
 
 
 def _env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value in (None, ""):
         return default
-    parsed = int(value)
+    try:
+        parsed = int(value)
+    except ValueError:
+        LOGGER.warning("Invalid %s=%r; using default %s.", name, value, default)
+        return default
     if parsed < 1:
-        raise ValueError(f"{name} must be at least 1")
+        LOGGER.warning("Invalid %s=%r; value must be at least 1, using default %s.", name, value, default)
+        return default
     return parsed
 
 
@@ -2361,25 +2371,6 @@ def _fallback_products_by_required_variable(
             continue
         grouped[required_variable][product.valid_time] = product
     return grouped
-
-
-def _grid_points_by_source_grid(
-    fields: Mapping[str, Mapping[datetime, CanonicalField]],
-) -> dict[tuple[str, str], tuple[GridPoint, ...]]:
-    grid_points_by_source_grid: dict[tuple[str, str], tuple[GridPoint, ...]] = {}
-    for fields_by_time in fields.values():
-        for canonical_field in fields_by_time.values():
-            source_grid = (canonical_field.product.source_id, canonical_field.product.grid_id)
-            existing = grid_points_by_source_grid.get(source_grid)
-            if existing is None:
-                grid_points_by_source_grid[source_grid] = tuple(canonical_field.grid_points)
-            elif existing != tuple(canonical_field.grid_points):
-                raise ForcingProductionError(
-                    f"Canonical products for source {canonical_field.product.source_id} "
-                    f"grid {canonical_field.product.grid_id} "
-                    "do not share one grid definition."
-                )
-    return grid_points_by_source_grid
 
 
 def _required_grid_cell_ids_by_source_grid(

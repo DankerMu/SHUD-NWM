@@ -305,7 +305,7 @@ def bootstrap_qhh_production(
         )
         database_succeeded = True
     except QhhProductionBootstrapError as error:
-        _persist_inactive_on_exact_set_blocker(resolved_database_url, error, model_id=model_id)
+        _persist_inactive_on_scheduler_visibility_blocker(resolved_database_url, error, model_id=model_id)
         raise
     except BasinsRegistryImportError as error:
         raise _from_registry_error(error, model_id=model_id) from error
@@ -696,12 +696,19 @@ def seed_qhh_output_segments(
             sp_riv_path=Path(sp_riv_path),
             sp_riv_checksum=checksum,
         )
+        geometry_backfilled_count = _backfill_output_segment_geometry(cursor, model["river_network_version_id"])
+        geometry_counts = _qhh_output_segment_geometry_counts(
+            cursor,
+            model["river_network_version_id"],
+            geometry_backfilled_count=geometry_backfilled_count,
+        )
     return {
         "schema_version": "qhh.output_segment_seed.v1",
         "status": "seeded",
         "model_id": model_id,
         "river_network_version_id": model["river_network_version_id"],
         "segment_count": output_segment_count,
+        **geometry_counts,
         "output_segment_row_counts": counts,
         "source_file": str(Path(sp_riv_path)),
         "source_sha256": checksum,
@@ -1063,8 +1070,17 @@ def _bootstrap_database(
             sp_riv_path=context.paths.qhh_input_dir.path / f"{sources.model['shud_input_name']}.sp.riv",
             sp_riv_checksum=context.sp_riv_checksum,
         )
+        geometry_backfilled_count = _backfill_output_segment_geometry(
+            cursor,
+            sources.ids["river_network_version_id"],
+        )
         _assert_exact_qhh_station_set(cursor, context)
         _assert_exact_qhh_output_segment_set(cursor, context)
+        output_geometry_counts = _assert_complete_qhh_output_segment_geometry(
+            cursor,
+            context,
+            geometry_backfilled_count=geometry_backfilled_count,
+        )
         forcing_after = _dynamic_forcing_counts(cursor, model_id)
         _assert_dynamic_forcing_unchanged(model_id, before=forcing_before, after=forcing_after)
         _activate_qhh_model(cursor, model_id)
@@ -1083,6 +1099,8 @@ def _bootstrap_database(
         "lifecycle_state": active_model.get("lifecycle_state") or "active",
         "station_count": len(context.stations),
         "output_segment_count": context.output_segment_count,
+        "geometry_backfilled_count": output_geometry_counts["geometry_backfilled_count"],
+        "geometry_missing_count": output_geometry_counts["geometry_missing_count"],
         "registry_import": registry_report,
         "model_row_counts": model_counts,
         "station_row_counts": station_counts,
@@ -1112,6 +1130,7 @@ def _bootstrap_database(
         },
         "scheduler_readiness": {
             "ready": True,
+            "output_segment_geometry": output_geometry_counts,
             "required_fields": {
                 "model_id": active_model["model_id"],
                 "basin_id": active_model["basin_id"],
@@ -1347,6 +1366,57 @@ def _assert_exact_qhh_output_segment_set(cursor: Any, context: QhhBootstrapConte
         )
 
 
+def _assert_complete_qhh_output_segment_geometry(
+    cursor: Any,
+    context: QhhBootstrapContext,
+    *,
+    geometry_backfilled_count: int,
+) -> dict[str, int]:
+    model_id = context.sources.ids["model_id"]
+    river_network_version_id = context.sources.ids["river_network_version_id"]
+    geometry_counts = _qhh_output_segment_geometry_counts(
+        cursor,
+        river_network_version_id,
+        geometry_backfilled_count=geometry_backfilled_count,
+    )
+    if geometry_counts["geometry_missing_count"] > 0:
+        raise QhhProductionBootstrapError(
+            "QHH_BOOTSTRAP_OUTPUT_SEGMENT_GEOMETRY_INCOMPLETE",
+            "Active QHH output river segments must have complete geometry before scheduler activation.",
+            model_id=model_id,
+            details={
+                "river_network_version_id": river_network_version_id,
+                **geometry_counts,
+                "no_scheduler_ready_model": True,
+                "rollback_expected": True,
+            },
+        )
+    return geometry_counts
+
+
+def _qhh_output_segment_geometry_counts(
+    cursor: Any,
+    river_network_version_id: str,
+    *,
+    geometry_backfilled_count: int,
+) -> dict[str, int]:
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS geometry_missing_count
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
+          AND geom IS NULL
+        """,
+        (river_network_version_id,),
+    )
+    row = cursor.fetchone()
+    return {
+        "geometry_backfilled_count": int(geometry_backfilled_count),
+        "geometry_missing_count": int(row["geometry_missing_count"] or 0),
+    }
+
+
 def _seed_station_rows(
     cursor: Any,
     *,
@@ -1504,7 +1574,6 @@ def _seed_output_segment_rows(
             template="(%s, %s, %s, %s)",
             page_size=1000,
         )
-        _backfill_output_segment_geometry(cursor, model["river_network_version_id"])
     return {"created": created, "updated": updated, "unchanged": unchanged}
 
 
@@ -1544,7 +1613,7 @@ def _output_segment_order_offset(cursor: Any, river_network_version_id: str) -> 
     return int(cursor.fetchone()["order_offset"] or 0)
 
 
-def _backfill_output_segment_geometry(cursor: Any, river_network_version_id: str) -> None:
+def _backfill_output_segment_geometry(cursor: Any, river_network_version_id: str) -> int:
     cursor.execute(
         """
         WITH gis_points AS (
@@ -1609,6 +1678,7 @@ def _backfill_output_segment_geometry(cursor: Any, river_network_version_id: str
         """,
         (river_network_version_id, river_network_version_id),
     )
+    return max(int(getattr(cursor, "rowcount", 0) or 0), 0)
 
 
 def _activate_qhh_model(cursor: Any, model_id: str) -> None:
@@ -1623,7 +1693,7 @@ def _activate_qhh_model(cursor: Any, model_id: str) -> None:
     )
 
 
-def _persist_inactive_on_exact_set_blocker(
+def _persist_inactive_on_scheduler_visibility_blocker(
     database_url: str,
     error: QhhProductionBootstrapError,
     *,
@@ -1632,6 +1702,7 @@ def _persist_inactive_on_exact_set_blocker(
     if error.error_code not in {
         "QHH_BOOTSTRAP_STALE_STATION_IDENTITY",
         "QHH_BOOTSTRAP_STALE_OUTPUT_SEGMENT_IDENTITY",
+        "QHH_BOOTSTRAP_OUTPUT_SEGMENT_GEOMETRY_INCOMPLETE",
     }:
         return
     if error.model_id is not None and error.model_id != model_id:

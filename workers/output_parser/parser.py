@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import csv
+import logging
 import math
 import os
-from dataclasses import dataclass, replace
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -11,9 +14,18 @@ from typing import Any, Protocol
 from packages.common.object_store import LocalObjectStore
 from packages.common.storage import validate_object_path
 
+LOGGER = logging.getLogger(__name__)
+
 SECONDS_PER_DAY = 86_400.0
 VARIABLE_Q_DOWN = "q_down"
 UNIT_M3S = "m3/s"
+UNIX_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=UTC)
+AUTO_TIME_BASIS_MAX_RELATIVE_DAYS = 366
+AUTO_TIME_BASIS_CONTEXT_PADDING_DAYS = 1
+DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 10
+DEFAULT_DB_STATEMENT_TIMEOUT_MS = 60_000
+PARSE_READY_RUN_STATUSES = ("succeeded", "parsed", "failed")
+FAILABLE_RUN_STATUSES = ("created", "staged", "submitted", "running", "succeeded", "parsed")
 
 
 class OutputParsingError(RuntimeError):
@@ -122,6 +134,9 @@ class OutputParserRepository(Protocol):
     def mark_run_failed(self, run_id: str, error_code: str, error_message: str) -> dict[str, Any]:
         raise NotImplementedError
 
+    def transaction(self) -> Iterator[OutputParserRepository]:
+        raise NotImplementedError
+
 
 class OutputParser:
     def __init__(
@@ -150,9 +165,16 @@ class OutputParser:
             if not qc_record.passed:
                 rows = tuple(replace(row, quality_flag="qc_warning") for row in rows)
 
-            self.repository.upsert_river_timeseries(rows, batch_size=self.config.batch_size)
-            self.repository.insert_qc_result(qc_record)
-            self.repository.mark_run_parsed(context.run_id)
+            transaction = getattr(self.repository, "transaction", None)
+            if callable(transaction):
+                with transaction() as repository:
+                    repository.upsert_river_timeseries(rows, batch_size=self.config.batch_size)
+                    repository.insert_qc_result(qc_record)
+                    repository.mark_run_parsed(context.run_id)
+            else:
+                self.repository.upsert_river_timeseries(rows, batch_size=self.config.batch_size)
+                self.repository.insert_qc_result(qc_record)
+                self.repository.mark_run_parsed(context.run_id)
             return OutputParsingResult(
                 run_id=context.run_id,
                 status="parsed",
@@ -162,8 +184,32 @@ class OutputParser:
                 max_value_m3s=qc_record.checks_json["range_check"].get("max_value"),
             )
         except OutputParsingError as error:
-            self.repository.mark_run_failed(context.run_id, error.error_code, error.message)
+            self._mark_run_failed_preserving_error(context.run_id, error.error_code, error.message)
             raise
+        except OSError as error:
+            self._mark_run_failed_preserving_error(
+                context.run_id,
+                "OUTPUT_PARSE_OS_ERROR",
+                _runtime_error_message(error),
+            )
+            raise
+        except Exception as error:
+            self._mark_run_failed_preserving_error(
+                context.run_id,
+                "OUTPUT_PARSE_RUNTIME_ERROR",
+                _runtime_error_message(error),
+            )
+            raise
+
+    def _mark_run_failed_preserving_error(self, run_id: str, error_code: str, error_message: str) -> None:
+        try:
+            self.repository.mark_run_failed(run_id, error_code, error_message)
+        except Exception:
+            LOGGER.exception(
+                "Failed to mark hydro_run %s failed after output parsing error %s; preserving original error.",
+                run_id,
+                error_code,
+            )
 
     def _find_rivqdown_file(self, context: HydroRunContext) -> Path:
         output_uri = context.output_uri or f"runs/{context.run_id}/output/"
@@ -235,10 +281,14 @@ def parse_rivqdown_file(
             raise OutputParsingError("MALFORMED_ROW", f"Row {line_number} must contain time plus data columns")
 
         valid_time = _parse_valid_time(tokens[0], context.start_time, line_number, numeric_unit=time_basis)
-        if time_basis == "auto" and _ensure_utc(valid_time) > _ensure_utc(context.start_time) + timedelta(days=366):
+        # "auto" is retained for legacy callers: values more than a leap-year window after
+        # run start are interpreted as absolute Unix minutes from the 1970 UTC epoch.
+        if time_basis == "auto" and _ensure_utc(valid_time) > _ensure_utc(context.start_time) + timedelta(
+            days=AUTO_TIME_BASIS_MAX_RELATIVE_DAYS
+        ):
             valid_time = _parse_valid_time(
                 tokens[0],
-                datetime(1970, 1, 1, tzinfo=UTC),
+                UNIX_EPOCH_UTC,
                 line_number,
                 numeric_unit="absolute_unix_minutes",
             )
@@ -313,13 +363,41 @@ def build_qc_result(
 @dataclass(frozen=True)
 class PsycopgOutputParserRepository:
     database_url: str
+    connect_timeout_seconds: int = DEFAULT_DB_CONNECT_TIMEOUT_SECONDS
+    statement_timeout_ms: int = DEFAULT_DB_STATEMENT_TIMEOUT_MS
+    _connection: Any | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_env(cls) -> PsycopgOutputParserRepository:
         database_url = os.getenv("DATABASE_URL", "").strip()
         if not database_url:
             raise OutputParsingError("DATABASE_URL_MISSING", "DATABASE_URL is required for output parsing.")
-        return cls(database_url)
+        return cls(
+            database_url,
+            connect_timeout_seconds=int(
+                os.getenv("OUTPUT_PARSER_DB_CONNECT_TIMEOUT_SECONDS", str(DEFAULT_DB_CONNECT_TIMEOUT_SECONDS))
+            ),
+            statement_timeout_ms=int(
+                os.getenv("OUTPUT_PARSER_DB_STATEMENT_TIMEOUT_MS", str(DEFAULT_DB_STATEMENT_TIMEOUT_MS))
+            ),
+        )
+
+    @contextmanager
+    def transaction(self) -> Iterator[PsycopgOutputParserRepository]:
+        if self._connection is not None:
+            yield self
+            return
+
+        connection = self._connect()
+        connection.autocommit = False
+        try:
+            yield replace(self, _connection=connection)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def load_run_context(self, run_id: str) -> HydroRunContext:
         row = self._fetch_one(
@@ -446,7 +524,47 @@ class PsycopgOutputParserRepository:
         except ImportError as error:
             raise OutputParsingError("PSYCOPG2_MISSING", "psycopg2 is required for QC writes.") from error
 
-        return self._fetch_one(
+        if self._connection is None:
+            with self.transaction() as repository:
+                return repository.insert_qc_result(record)
+
+        self._fetch_all(
+            """
+            SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))
+            """,
+            (_qc_result_lock_key(record),),
+        )
+        row = self._fetch_optional(
+            """
+            UPDATE ops.qc_result
+            SET cycle_id = %s,
+                passed = %s,
+                severity = %s,
+                checks_json = %s,
+                message = %s,
+                created_at = now()
+            WHERE qc_checkpoint = %s
+              AND target_type = %s
+              AND target_id = %s
+              AND run_id IS NOT DISTINCT FROM %s
+            RETURNING *
+            """,
+            (
+                record.cycle_id,
+                record.passed,
+                record.severity,
+                Json(record.checks_json),
+                record.message,
+                record.qc_checkpoint,
+                record.target_type,
+                record.target_id,
+                record.run_id,
+            ),
+        )
+        if row is not None:
+            return row
+
+        row = self._fetch_optional(
             """
             INSERT INTO ops.qc_result (
                 qc_checkpoint,
@@ -460,6 +578,7 @@ class PsycopgOutputParserRepository:
                 message
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
             RETURNING *
             """,
             (
@@ -474,9 +593,24 @@ class PsycopgOutputParserRepository:
                 record.message,
             ),
         )
+        if row is not None:
+            return row
+        return self._fetch_one(
+            """
+            SELECT *
+            FROM ops.qc_result
+            WHERE qc_checkpoint = %s
+              AND target_type = %s
+              AND target_id = %s
+              AND run_id IS NOT DISTINCT FROM %s
+            ORDER BY created_at DESC, qc_id DESC
+            LIMIT 1
+            """,
+            (record.qc_checkpoint, record.target_type, record.target_id, record.run_id),
+        )
 
     def mark_run_parsed(self, run_id: str) -> dict[str, Any]:
-        return self._fetch_one(
+        row = self._fetch_optional(
             """
             UPDATE hydro.hydro_run
             SET status = 'parsed',
@@ -484,13 +618,17 @@ class PsycopgOutputParserRepository:
                 error_message = NULL,
                 updated_at = now()
             WHERE run_id = %s
+              AND status IN %s
             RETURNING *
             """,
-            (run_id,),
+            (run_id, PARSE_READY_RUN_STATUSES),
         )
+        if row is not None:
+            return row
+        return self._terminal_state_or_missing_row(run_id)
 
     def mark_run_failed(self, run_id: str, error_code: str, error_message: str) -> dict[str, Any]:
-        return self._fetch_one(
+        row = self._fetch_optional(
             """
             UPDATE hydro.hydro_run
             SET status = 'failed',
@@ -498,10 +636,14 @@ class PsycopgOutputParserRepository:
                 error_message = %s,
                 updated_at = now()
             WHERE run_id = %s
+              AND status IN %s
             RETURNING *
             """,
-            (error_code, error_message, run_id),
+            (error_code, error_message, run_id, FAILABLE_RUN_STATUSES),
         )
+        if row is not None:
+            return row
+        return self._terminal_state_or_missing_row(run_id)
 
     def _fetch_one(
         self,
@@ -516,34 +658,49 @@ class PsycopgOutputParserRepository:
             raise OutputParsingError(missing_code, missing_message)
         return rows[0]
 
-    def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
-        try:
-            import psycopg2
-        except ImportError as error:
-            raise OutputParsingError("PSYCOPG2_MISSING", "psycopg2 is required for output parsing.") from error
+    def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+        rows = self._fetch_all(statement, parameters)
+        return rows[0] if rows else None
 
-        connection = None
+    def _terminal_state_or_missing_row(self, run_id: str) -> dict[str, Any]:
+        return self._fetch_one(
+            """
+            SELECT *
+            FROM hydro.hydro_run
+            WHERE run_id = %s
+            """,
+            (run_id,),
+            missing_code="DATABASE_ROW_MISSING",
+            missing_message=f"hydro_run not found: {run_id}",
+        )
+
+    def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+        connection = self._connection
+        owns_connection = connection is None
         try:
-            connection = psycopg2.connect(self.database_url)
-            connection.autocommit = False
+            if connection is None:
+                connection = self._connect()
+                connection.autocommit = False
             with connection.cursor() as cursor:
                 cursor.execute(statement, parameters)
                 if cursor.description is None:
-                    connection.commit()
+                    if owns_connection:
+                        connection.commit()
                     return []
                 rows = cursor.fetchall()
                 columns = [description.name for description in cursor.description]
-                connection.commit()
+                if owns_connection:
+                    connection.commit()
                 return [dict(zip(columns, row, strict=True)) for row in rows]
-        except psycopg2.Error as error:
-            if connection is not None:
+        except self._psycopg_error() as error:
+            if owns_connection and connection is not None:
                 connection.rollback()
             raise OutputParsingError(
                 "OUTPUT_PARSE_DB_ERROR",
                 f"Output parser database operation failed: {error}",
             ) from error
         finally:
-            if connection is not None:
+            if owns_connection and connection is not None:
                 connection.close()
 
     def _execute_values(
@@ -554,28 +711,50 @@ class PsycopgOutputParserRepository:
         page_size: int,
     ) -> None:
         try:
-            import psycopg2
             from psycopg2.extras import execute_values
         except ImportError as error:
             raise OutputParsingError("PSYCOPG2_MISSING", "psycopg2 is required for output parsing.") from error
 
-        connection = None
+        connection = self._connection
+        owns_connection = connection is None
         try:
-            connection = psycopg2.connect(self.database_url)
-            connection.autocommit = False
+            if connection is None:
+                connection = self._connect()
+                connection.autocommit = False
             with connection.cursor() as cursor:
                 execute_values(cursor, statement, rows, page_size=page_size)
-            connection.commit()
-        except psycopg2.Error as error:
-            if connection is not None:
+            if owns_connection:
+                connection.commit()
+        except self._psycopg_error() as error:
+            if owns_connection and connection is not None:
                 connection.rollback()
             raise OutputParsingError(
                 "OUTPUT_PARSE_DB_ERROR",
                 f"Output parser database operation failed: {error}",
             ) from error
         finally:
-            if connection is not None:
+            if owns_connection and connection is not None:
                 connection.close()
+
+    def _connect(self) -> Any:
+        try:
+            import psycopg2
+        except ImportError as error:
+            raise OutputParsingError("PSYCOPG2_MISSING", "psycopg2 is required for output parsing.") from error
+
+        return psycopg2.connect(
+            self.database_url,
+            connect_timeout=self.connect_timeout_seconds,
+            options=f"-c statement_timeout={self.statement_timeout_ms}",
+        )
+
+    @staticmethod
+    def _psycopg_error() -> type[Exception]:
+        try:
+            import psycopg2
+        except ImportError as error:
+            raise OutputParsingError("PSYCOPG2_MISSING", "psycopg2 is required for output parsing.") from error
+        return psycopg2.Error
 
 
 def _split_row(line: str) -> list[str]:
@@ -631,7 +810,7 @@ def _rivqdown_time_basis(lines: list[str], start_time: datetime, *, context: Hyd
     if data_lines:
         first_token = _split_row(data_lines[0])[0]
         if _is_float(first_token):
-            absolute_time = _parse_time_token(first_token, datetime(1970, 1, 1, tzinfo=UTC), numeric_unit="minutes")
+            absolute_time = _parse_time_token(first_token, UNIX_EPOCH_UTC, numeric_unit="minutes")
             if _absolute_time_matches_context(absolute_time, context):
                 return "absolute_unix_minutes"
     return "minutes"
@@ -641,11 +820,23 @@ def _absolute_time_matches_context(valid_time: datetime, context: HydroRunContex
     candidate = _ensure_utc(valid_time)
     start_time = _ensure_utc(context.start_time)
     if context.run_type == "analysis":
-        return start_time - timedelta(days=1) <= candidate <= start_time + timedelta(days=366)
+        return (
+            start_time - timedelta(days=AUTO_TIME_BASIS_CONTEXT_PADDING_DAYS)
+            <= candidate
+            <= start_time + timedelta(days=AUTO_TIME_BASIS_MAX_RELATIVE_DAYS)
+        )
     if context.cycle_time is not None:
         cycle_time = _ensure_utc(context.cycle_time)
-        return cycle_time - timedelta(days=1) <= candidate <= cycle_time + timedelta(days=366)
-    return start_time - timedelta(days=1) <= candidate <= start_time + timedelta(days=366)
+        return (
+            cycle_time - timedelta(days=AUTO_TIME_BASIS_CONTEXT_PADDING_DAYS)
+            <= candidate
+            <= cycle_time + timedelta(days=AUTO_TIME_BASIS_MAX_RELATIVE_DAYS)
+        )
+    return (
+        start_time - timedelta(days=AUTO_TIME_BASIS_CONTEXT_PADDING_DAYS)
+        <= candidate
+        <= start_time + timedelta(days=AUTO_TIME_BASIS_MAX_RELATIVE_DAYS)
+    )
 
 
 def _looks_like_shud_metadata_row(tokens: list[str]) -> bool:
@@ -672,7 +863,7 @@ def _parse_time_token(token: str, start_time: datetime, *, numeric_unit: str = "
         if numeric_unit == "days":
             return _ensure_utc(start_time) + timedelta(days=value)
         if numeric_unit == "absolute_unix_minutes":
-            return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(minutes=value)
+            return UNIX_EPOCH_UTC + timedelta(minutes=value)
         return _ensure_utc(start_time) + timedelta(minutes=value)
 
     try:
@@ -718,6 +909,22 @@ def _format_time(value: datetime) -> str:
     return _ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
+def _runtime_error_message(error: BaseException) -> str:
+    message = str(error).strip()
+    return message or error.__class__.__name__
+
+
+def _qc_result_lock_key(record: QCResultRecord) -> str:
+    return "\x1f".join(
+        (
+            record.qc_checkpoint,
+            record.target_type,
+            record.target_id,
+            record.run_id,
+        )
+    )
+
+
 def _is_rivqdown_path(path: Path) -> bool:
     name = path.name.lower()
     return name.endswith((".rivqdown", ".rivqdown.csv", ".rivqdown.dat")) or name in {
@@ -741,11 +948,3 @@ def _resolve_object_path_allowing_directory(object_store: LocalObjectStore, key_
     except ValueError as error:
         raise OutputParsingError("OUTPUT_URI_INVALID", f"Object key escapes object store root: {key_or_uri}") from error
     return target
-
-
-def _object_key(uri_or_key: str, object_store_prefix: str) -> str:
-    candidate = uri_or_key.strip()
-    prefix = object_store_prefix.rstrip("/")
-    if prefix and candidate.startswith(prefix + "/"):
-        candidate = candidate[len(prefix) + 1 :]
-    return candidate.strip("/")

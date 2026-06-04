@@ -190,10 +190,15 @@ class IFSAdapterConfig:
             override_hour = int(override)
             if override_hour < self.forecast_start_hour:
                 raise ValueError("IFS_FORECAST_END_HOUR must be >= forecast_start_hour.")
-            if (
-                not self.forecast_resolution_segments
-                and (override_hour - self.forecast_start_hour) % self.forecast_step_hours != 0
-            ):
+            if self.forecast_resolution_segments:
+                native_hours = generate_segmented_forecast_hours(
+                    self.forecast_start_hour,
+                    override_hour,
+                    self.forecast_resolution_segments,
+                )
+                if not native_hours or native_hours[-1] != override_hour:
+                    raise ValueError("IFS_FORECAST_END_HOUR must align to the IFS native resolution schedule.")
+            elif (override_hour - self.forecast_start_hour) % self.forecast_step_hours != 0:
                 raise ValueError("IFS_FORECAST_END_HOUR must align to the IFS forecast step.")
             return override_hour
         normalized = cycle_hour % 24

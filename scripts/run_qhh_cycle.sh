@@ -62,6 +62,42 @@ require_cycle_time() {
   fi
 }
 
+validate_model_output_interval() {
+  if ! [[ "$MODEL_OUTPUT_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
+    log "blocked: QHH_MODEL_OUTPUT_INTERVAL must be a positive integer number of minutes; got '$MODEL_OUTPUT_INTERVAL'"
+    exit 2
+  fi
+
+  local start_hour=""
+  local end_hour=""
+  if [[ "$SOURCE_ID" == "gfs" ]]; then
+    start_hour="$GFS_FORECAST_START_HOUR"
+    end_hour="$GFS_FORECAST_END_HOUR"
+  elif [[ "$SOURCE_ID" == "IFS" ]]; then
+    start_hour="$IFS_FORECAST_START_HOUR"
+    end_hour="${IFS_FORECAST_END_HOUR:-}"
+  fi
+
+  if [[ -z "$end_hour" ]]; then
+    return
+  fi
+  if ! [[ "$start_hour" =~ ^[0-9]+$ && "$end_hour" =~ ^[0-9]+$ ]]; then
+    log "blocked: forecast window hours must be non-negative integers; got start='$start_hour' end='$end_hour'"
+    exit 2
+  fi
+  local start_hour_int=$((10#$start_hour))
+  local end_hour_int=$((10#$end_hour))
+  local window_minutes=$(((end_hour_int - start_hour_int) * 60))
+  if ((window_minutes <= 0)); then
+    log "blocked: forecast end hour must be greater than start hour; got start=$start_hour_int end=$end_hour_int"
+    exit 2
+  fi
+  if ((window_minutes % MODEL_OUTPUT_INTERVAL != 0)); then
+    log "blocked: QHH_MODEL_OUTPUT_INTERVAL=$MODEL_OUTPUT_INTERVAL minutes must evenly divide forecast window ${window_minutes} minutes (start=$start_hour_int end=$end_hour_int)"
+    exit 2
+  fi
+}
+
 normalize_source() {
   uv run python - "$SOURCE_INPUT" <<'PY'
 import sys
@@ -280,6 +316,7 @@ elif [[ "$SOURCE_ID" == "IFS" ]]; then
   fi
   export FORCING_MIN_LEAD_HOURS="${QHH_FORCING_MIN_LEAD_HOURS:-${FORCING_MIN_LEAD_HOURS:-$IFS_FORECAST_START_HOUR}}"
 fi
+validate_model_output_interval
 
 if [[ -f "$ROOT_DIR/.conda-postgres-runtime/lib/libstdc++.so.6" ]]; then
   export LD_PRELOAD="$ROOT_DIR/.conda-postgres-runtime/lib/libstdc++.so.6${LD_PRELOAD:+:$LD_PRELOAD}"

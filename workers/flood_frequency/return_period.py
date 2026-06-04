@@ -16,7 +16,7 @@ from workers.data_adapters.base import cycle_id_for
 
 RETURN_PERIODS: tuple[int, ...] = (2, 5, 10, 20, 50, 100)
 QUANTILE_KEYS: tuple[str, ...] = tuple(f"Q{return_period}" for return_period in RETURN_PERIODS)
-USABLE_CURVE_FLAGS: tuple[str, ...] = ("ok", "partial_sample", "monotonicity_corrected")
+USABLE_CURVE_FLAGS: tuple[str, ...] = ("ok", "partial_sample", "monotonicity_corrected", "p3_fallback_gev")
 WARNING_LEVELS: tuple[str, ...] = (
     "normal",
     "elevated",
@@ -126,10 +126,54 @@ def get_frequency_curve(
     segment_id: str,
     db_session: Session,
 ) -> FrequencyCurve | None:
-    row = db_session.execute(
+    return get_frequency_curves(model_id, river_network_version_id, [segment_id], db_session).get(segment_id)
+
+
+def get_frequency_curves(
+    model_id: str,
+    river_network_version_id: str,
+    segment_ids: list[str],
+    db_session: Session,
+) -> dict[str, FrequencyCurve | None]:
+    if not segment_ids:
+        return {}
+    segment_placeholders, params = _segment_in_params(segment_ids)
+    flag_placeholders, flag_params = _flag_in_params(USABLE_CURVE_FLAGS)
+    params.update(flag_params)
+    params.update(
+        {
+            "model_id": model_id,
+            "river_network_version_id": river_network_version_id,
+        }
+    )
+    rows = db_session.execute(
         text(
-            """
+            f"""
+            WITH ranked AS (
+                SELECT
+                    river_segment_id,
+                    curve_id,
+                    parameters_json,
+                    quality_flag,
+                    q2,
+                    q5,
+                    q10,
+                    q20,
+                    q50,
+                    q100,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY river_segment_id
+                        ORDER BY sample_period_end DESC, sample_period_start DESC, curve_id DESC
+                    ) AS rank
+                FROM flood.flood_frequency_curve
+                WHERE model_id = :model_id
+                  AND river_network_version_id = :river_network_version_id
+                  AND river_segment_id IN ({segment_placeholders})
+                  AND duration = '1h'
+                  AND quality_flag IN ({flag_placeholders})
+            )
             SELECT
+                river_segment_id,
                 curve_id,
                 parameters_json,
                 quality_flag,
@@ -139,25 +183,21 @@ def get_frequency_curve(
                 q20,
                 q50,
                 q100
-            FROM flood.flood_frequency_curve
-            WHERE model_id = :model_id
-              AND river_network_version_id = :river_network_version_id
-              AND river_segment_id = :river_segment_id
-              AND duration = '1h'
-              AND quality_flag IN ('ok', 'partial_sample', 'monotonicity_corrected', 'p3_fallback_gev')
-            ORDER BY sample_period_end DESC, sample_period_start DESC, curve_id DESC
-            LIMIT 1
+            FROM ranked
+            WHERE rank = 1
             """
         ),
-        {
-            "model_id": model_id,
-            "river_network_version_id": river_network_version_id,
-            "river_segment_id": segment_id,
-        },
-    ).mappings().first()
-    if row is None:
-        return None
+        params,
+    ).mappings()
+    curves = {segment_id: None for segment_id in segment_ids}
+    for row in rows:
+        curve = _frequency_curve_from_row(row)
+        if curve is not None:
+            curves[str(row["river_segment_id"])] = curve
+    return curves
 
+
+def _frequency_curve_from_row(row: Mapping[str, Any]) -> FrequencyCurve | None:
     thresholds: dict[str, float] = {}
     for key in QUANTILE_KEYS:
         value = row[key.lower()]
@@ -173,6 +213,16 @@ def get_frequency_curve(
         sample_quality=sample_quality,
         quality_flag=str(row["quality_flag"]),
     )
+
+
+def _segment_in_params(segment_ids: list[str]) -> tuple[str, dict[str, Any]]:
+    params = {f"segment_id_{index}": segment_id for index, segment_id in enumerate(segment_ids)}
+    return ", ".join(f":segment_id_{index}" for index in range(len(segment_ids))), params
+
+
+def _flag_in_params(flags: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+    params = {f"quality_flag_{index}": flag for index, flag in enumerate(flags)}
+    return ", ".join(f":quality_flag_{index}" for index in range(len(flags))), params
 
 
 def interpolate_return_period(q_value: float, thresholds: dict[str, float]) -> float | None:
@@ -277,26 +327,28 @@ def _compute_return_periods(
     if not segment_ids:
         raise ReturnPeriodError("NO_FORECAST_Q", f"No q_down values found for run: {run_id}")
 
-    curves: dict[str, FrequencyCurve | None] = {}
+    curves = get_frequency_curves(
+        str(context["model_id"]),
+        str(context["river_network_version_id"]),
+        segment_ids,
+        db_session,
+    )
+    existing_curve_segments = _existing_frequency_curve_segments(context, segment_ids, db_session)
     no_curve_quality: dict[str, str] = {}
     for segment_id in segment_ids:
-        curve = get_frequency_curve(
-            str(context["model_id"]),
-            str(context["river_network_version_id"]),
-            segment_id,
-            db_session,
-        )
-        curves[segment_id] = curve
-        if curve is None:
+        if curves[segment_id] is None:
             no_curve_quality[segment_id] = (
                 "no_usable_frequency_curve"
-                if _any_frequency_curve_exists(context, segment_id, db_session)
+                if segment_id in existing_curve_segments
                 else "no_frequency_curve"
             )
 
     rows_written = 0
     warning_counts: Counter[str] = Counter()
-    max_duration = _window_duration_label(context["start_time"], context["end_time"])
+    # return_period_result.duration is the design-duration key of the frequency curve.
+    # Forecast-window peak rows use the same 1h curve as timestep rows; max_over_window
+    # carries the "peak over forecast window" semantics.
+    curve_duration = "1h"
 
     peak_rows: list[dict[str, Any]] = []
     for segment_id, (q_value, max_time) in max_values.items():
@@ -309,7 +361,7 @@ def _compute_return_periods(
         warning_counts.update([result["warning_level"]] if result["warning_level"] else [])
         peak_rows.append(
             _build_return_period_row(
-                context, segment_id, max_time, max_duration, q_value,
+                context, segment_id, max_time, curve_duration, q_value,
                 max_over_window=True, result=result,
             )
         )
@@ -326,7 +378,7 @@ def _compute_return_periods(
             )
             timestep_rows.append(
                 _build_return_period_row(
-                    context, segment_id, valid_time, "1h", q_value,
+                    context, segment_id, valid_time, curve_duration, q_value,
                     max_over_window=False, result=result,
                 )
             )
@@ -334,9 +386,11 @@ def _compute_return_periods(
 
     # 峰值行的 valid_time 随重算移动，先批量清除旧峰值再批量写（保留 moved-peak 语义）。
     if peak_rows:
-        _delete_all_prior_peaks(db_session, context, max_duration)
+        _delete_all_prior_peaks(db_session, context, curve_duration)
         _batch_upsert_return_period_results(db_session, peak_rows)
-    _batch_upsert_return_period_results(db_session, timestep_rows)
+    if timestep_rows:
+        _delete_all_prior_timesteps(db_session, context, curve_duration)
+        _batch_upsert_return_period_results(db_session, timestep_rows)
 
     _mark_frequency_succeeded(db_session, context, started_at)
     unavailable_products = set(contract["unavailable_products"])
@@ -346,7 +400,8 @@ def _compute_return_periods(
         *_frequency_residual_blockers(context, no_curve_quality),
         *_quality_contract_residual_blockers(context, unavailable_products),
     ]
-    if not unavailable_products:
+    tile_blockers = unavailable_products - {"frequency_curves"}
+    if not tile_blockers and any(curve is not None for curve in curves.values()):
         register_flood_tile_layer(run_id, db_session)
     return ReturnPeriodComputationStats(
         total_segments=len(segment_ids),
@@ -553,24 +608,20 @@ def _delete_all_prior_peaks(db_session: Session, context: dict[str, Any], durati
     )
 
 
-def _delete_prior_peak_result(
-    db_session: Session, context: dict[str, Any], segment_id: str, duration: str
-) -> None:
+def _delete_all_prior_timesteps(db_session: Session, context: dict[str, Any], duration: str) -> None:
     db_session.execute(
         text(
             """
             DELETE FROM flood.return_period_result
             WHERE run_id = :run_id
               AND river_network_version_id = :river_network_version_id
-              AND river_segment_id = :river_segment_id
               AND duration = :duration
-              AND max_over_window = true
+              AND max_over_window = false
             """
         ),
         {
             "run_id": context["run_id"],
             "river_network_version_id": context["river_network_version_id"],
-            "river_segment_id": segment_id,
             "duration": duration,
         },
     )
@@ -589,7 +640,24 @@ def _upsert_return_period_result(
 ) -> None:
     """单行 upsert（委派到批量路径）；保留给定向调用方与单元测试使用。"""
     if max_over_window:
-        _delete_prior_peak_result(db_session, context, segment_id, duration)
+        db_session.execute(
+            text(
+                """
+                DELETE FROM flood.return_period_result
+                WHERE run_id = :run_id
+                  AND river_network_version_id = :river_network_version_id
+                  AND river_segment_id = :river_segment_id
+                  AND duration = :duration
+                  AND max_over_window = true
+                """
+            ),
+            {
+                "run_id": context["run_id"],
+                "river_network_version_id": context["river_network_version_id"],
+                "river_segment_id": segment_id,
+                "duration": duration,
+            },
+        )
     _batch_upsert_return_period_results(
         db_session,
         [
@@ -641,26 +709,34 @@ def _load_run_context(run_id: str, db_session: Session) -> dict[str, Any]:
     return context
 
 
-def _any_frequency_curve_exists(context: dict[str, Any], segment_id: str, db_session: Session) -> bool:
-    row = db_session.execute(
-        text(
-            """
-            SELECT 1
-            FROM flood.flood_frequency_curve
-            WHERE model_id = :model_id
-              AND river_network_version_id = :river_network_version_id
-              AND river_segment_id = :river_segment_id
-              AND duration = '1h'
-            LIMIT 1
-            """
-        ),
+def _existing_frequency_curve_segments(
+    context: dict[str, Any],
+    segment_ids: list[str],
+    db_session: Session,
+) -> set[str]:
+    if not segment_ids:
+        return set()
+    segment_placeholders, params = _segment_in_params(segment_ids)
+    params.update(
         {
             "model_id": context["model_id"],
             "river_network_version_id": context["river_network_version_id"],
-            "river_segment_id": segment_id,
-        },
-    ).first()
-    return row is not None
+        }
+    )
+    rows = db_session.execute(
+        text(
+            f"""
+            SELECT DISTINCT river_segment_id
+            FROM flood.flood_frequency_curve
+            WHERE model_id = :model_id
+              AND river_network_version_id = :river_network_version_id
+              AND river_segment_id IN ({segment_placeholders})
+              AND duration = '1h'
+            """
+        ),
+        params,
+    ).mappings()
+    return {str(row["river_segment_id"]) for row in rows}
 
 
 def _frequency_residual_blockers(
@@ -875,6 +951,9 @@ def _raw_warning_level(return_period: float) -> str:
 
 
 def _highest_reliable_warning_index(sample_quality: dict[str, dict[str, Any]]) -> int:
+    # QUANTILE_KEYS excludes the sub-Q2 "normal" bucket, so N reliable thresholds
+    # permits WARNING_LEVELS[N - 1]; all thresholds reliable permits "extreme".
+    assert len(WARNING_LEVELS) == len(QUANTILE_KEYS) + 1
     if not sample_quality:
         return len(WARNING_LEVELS) - 1
     reliable_count = 0
@@ -886,26 +965,6 @@ def _highest_reliable_warning_index(sample_quality: dict[str, dict[str, Any]]) -
     if reliable_count == len(QUANTILE_KEYS):
         return len(WARNING_LEVELS) - 1
     return max(0, reliable_count - 1)
-
-
-def _window_duration_label(start_time: Any, end_time: Any) -> str:
-    start = _parse_time(start_time)
-    end = _parse_time(end_time)
-    hours = max(1, round((end - start).total_seconds() / 3600))
-    if hours % 24 == 0:
-        return f"{hours // 24}d"
-    return f"{hours}h"
-
-
-def _parse_time(value: Any) -> datetime:
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
 
 def _json_loads(value: Any) -> dict[str, Any]:
     if value is None:

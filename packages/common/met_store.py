@@ -13,6 +13,24 @@ class MetStoreError(RuntimeError):
     """Raised when a met-schema database operation fails."""
 
 
+_TERMINAL_CYCLE_STATUSES = (
+    # Keep aligned with apps.api.routes.pipeline._TERMINAL_CYCLE_STATUSES and
+    # met.cycle_status migrations; failed_* remain overwritable for retries.
+    "published",
+    "cancelled",
+)
+_UPSERT_PRESERVED_CYCLE_STATUSES = (
+    "raw_complete",
+    "canonical_ready",
+    "canonical_incomplete",
+    "forcing_ready_partial",
+    "forcing_ready",
+    "forecast_running",
+    "parsed_partial",
+    "complete",
+) + _TERMINAL_CYCLE_STATUSES
+
+
 def default_database_url() -> str:
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
@@ -114,16 +132,7 @@ class PsycopgMetStore:
             ON CONFLICT (source_id, cycle_time) DO UPDATE SET
                 issue_time = COALESCE(EXCLUDED.issue_time, met.forecast_cycle.issue_time),
                 status = CASE
-                    WHEN met.forecast_cycle.status IN (
-                        'raw_complete',
-                        'canonical_ready',
-                        'forcing_ready_partial',
-                        'forcing_ready',
-                        'forecast_running',
-                        'parsed_partial',
-                        'complete',
-                        'published'
-                    )
+                    WHEN met.forecast_cycle.status::text = ANY(%s)
                     THEN met.forecast_cycle.status
                     ELSE EXCLUDED.status
                 END,
@@ -143,6 +152,7 @@ class PsycopgMetStore:
                 retry_count,
                 error_code,
                 error_message,
+                list(_UPSERT_PRESERVED_CYCLE_STATUSES),
                 retry_count,
             ),
         )
@@ -161,6 +171,13 @@ class PsycopgMetStore:
         source_id = normalize_source_id(source_id)
         assignments: list[str] = []
         parameters: list[Any] = []
+        preserve_terminal_update = status is not None
+        guarded_assignment_prefix = (
+            "CASE WHEN status::text = ANY(%s) AND status::text <> %s THEN met.forecast_cycle."
+            if preserve_terminal_update
+            else ""
+        )
+        guarded_assignment_suffix = " ELSE %s END" if preserve_terminal_update else ""
         for column, value in (
             ("status", status),
             ("manifest_uri", manifest_uri),
@@ -169,8 +186,14 @@ class PsycopgMetStore:
             ("error_message", error_message),
         ):
             if value is not None:
-                assignments.append(f"{column} = %s")
-                parameters.append(value)
+                if preserve_terminal_update:
+                    assignments.append(
+                        f"{column} = {guarded_assignment_prefix}{column}{guarded_assignment_suffix}"
+                    )
+                    parameters.extend([list(_TERMINAL_CYCLE_STATUSES), status, value])
+                else:
+                    assignments.append(f"{column} = %s")
+                    parameters.append(value)
 
         if not assignments:
             return self.get_forecast_cycle(source_id=source_id, cycle_time=cycle_time)

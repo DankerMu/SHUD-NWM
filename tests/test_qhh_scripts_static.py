@@ -103,6 +103,26 @@ def test_qhh_manifest_validates_forcing_manifest_station_count_and_header(tmp_pa
     with pytest.raises(RuntimeError, match="station header"):
         qhh_manifest._validate_shud_forcing_header(manifest, store, 2)
 
+    store.write_bytes_atomic(tsd_uri, b"\xef\xbb\xbf")
+    with pytest.raises(RuntimeError, match="station header is empty"):
+        qhh_manifest._validate_shud_forcing_header(manifest, store, 2)
+
+
+def test_run_qhh_cycle_validates_model_output_interval_before_shud_runtime() -> None:
+    script = Path("scripts/run_qhh_cycle.sh").read_text(encoding="utf-8")
+
+    assert "validate_model_output_interval()" in script
+    assert "must evenly divide forecast window" in script
+    assert script.index("\nvalidate_model_output_interval\n") < script.index("\nprepare_database_url\n")
+
+
+def test_slurm_sbatch_cleans_filtered_env_file_after_sourcing() -> None:
+    script = Path("scripts/run_qhh_cycle.sbatch").read_text(encoding="utf-8")
+
+    assert "trap cleanup_slurm_env_file EXIT" in script
+    assert 'rm -f -- "$QHH_SLURM_ENV_FILE"' in script
+    assert script.index('source "$QHH_SLURM_ENV_FILE"') < script.index('exec "$ROOT_DIR/scripts/run_qhh_cycle.sh"')
+
 
 def test_qhh_manifest_rejects_forcing_package_checksum_mismatch(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)

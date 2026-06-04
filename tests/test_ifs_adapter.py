@@ -199,6 +199,18 @@ def test_build_manifest_honors_env_forecast_end_hour_override(tmp_path: Path, mo
     assert manifest.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f144.str.grib2"
 
 
+def test_segmented_forecast_end_hour_override_must_be_native_hour(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IFS_FORECAST_RESOLUTION_SEGMENTS", "144:3,360:6")
+    monkeypatch.setenv("IFS_FORECAST_END_HOUR", "147")
+    adapter = build_adapter(tmp_path)
+
+    with pytest.raises(ValueError, match="native resolution schedule"):
+        adapter.build_manifest("2026050100")
+
+
 def test_build_manifest_honors_env_forecast_start_hour_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
