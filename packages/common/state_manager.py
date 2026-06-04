@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
+from packages.common.state_lineage import STATE_QC_FAILED
+from packages.common.state_qc import run_state_variable_qc
 
 
 class StateManagerError(RuntimeError):
@@ -32,6 +35,13 @@ class StateSnapshot:
     checksum: str
     usable_flag: bool = False
     created_at: datetime | None = None
+    # Lineage (M24 §2 Lane 1) - all optional, default None for backward compatibility.
+    source_id: str | None = None
+    cycle_id: str | None = None
+    lead_hours: int | None = None
+    model_package_version: str | None = None
+    model_package_checksum: str | None = None
+    original_shud_filename: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,12 @@ class StateManager:
         run_id: str,
         valid_time: datetime,
         ic_file_path: Path | str,
+        source_id: str | None = None,
+        cycle_id: str | None = None,
+        lead_hours: int | None = None,
+        model_package_version: str | None = None,
+        model_package_checksum: str | None = None,
+        original_shud_filename: str | None = None,
     ) -> StateSnapshotSaveResult:
         parsed_valid_time = _ensure_utc(valid_time)
         state_id = state_snapshot_id(model_id, parsed_valid_time)
@@ -127,6 +143,12 @@ class StateManager:
             state_uri=state_uri,
             checksum=checksum,
             usable_flag=False,
+            source_id=source_id,
+            cycle_id=cycle_id,
+            lead_hours=lead_hours,
+            model_package_version=model_package_version,
+            model_package_checksum=model_package_checksum,
+            original_shud_filename=original_shud_filename,
         )
         saved = self.repository.upsert_state_snapshot(snapshot)
         status = "superseded" if existing is not None else "created"
@@ -256,8 +278,44 @@ class StateManager:
             )
             return checks
 
+        state_qc = self._run_state_variable_qc(snapshot)
+        checks["state_variable_qc"] = state_qc.to_dict()
+        if not state_qc.passed:
+            checks.update(
+                {
+                    "passed": False,
+                    "error_code": STATE_QC_FAILED,
+                    "message": state_qc.reason or "State-variable QC failed.",
+                }
+            )
+            return checks
+
         checks.update({"passed": True, "error_code": None, "message": "State snapshot QC passed."})
         return checks
+
+    def _run_state_variable_qc(self, snapshot: StateSnapshot) -> Any:
+        """Parse the IC object and run SHUD state-variable QC.
+
+        Expected element counts are not available at the snapshot layer in this Lane,
+        so structural + range/non-negative checks run with counts=None. A parse
+        failure is reported as a QC failure (never raised) by run_state_variable_qc.
+        """
+
+        try:
+            content = self.object_store.read_bytes(snapshot.state_uri)
+        except (OSError, ObjectStoreError, ValueError) as error:
+            from packages.common.state_qc import StateQCResult
+
+            return StateQCResult(
+                passed=False,
+                checks={"read_error": str(error)},
+                reason=f"Failed to read IC object for QC: {error}",
+            )
+
+        with tempfile.NamedTemporaryFile(suffix=".cfg.ic", delete=True) as handle:
+            handle.write(content)
+            handle.flush()
+            return run_state_variable_qc(handle.name)
 
 
 @dataclass(frozen=True)
@@ -301,15 +359,27 @@ class PsycopgStateSnapshotRepository:
                 valid_time,
                 state_uri,
                 checksum,
-                usable_flag
+                usable_flag,
+                source_id,
+                cycle_id,
+                lead_hours,
+                model_package_version,
+                model_package_checksum,
+                original_shud_filename
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (model_id, valid_time) DO UPDATE SET
                 state_id = EXCLUDED.state_id,
                 run_id = EXCLUDED.run_id,
                 state_uri = EXCLUDED.state_uri,
                 checksum = EXCLUDED.checksum,
                 usable_flag = false,
+                source_id = EXCLUDED.source_id,
+                cycle_id = EXCLUDED.cycle_id,
+                lead_hours = EXCLUDED.lead_hours,
+                model_package_version = EXCLUDED.model_package_version,
+                model_package_checksum = EXCLUDED.model_package_checksum,
+                original_shud_filename = EXCLUDED.original_shud_filename,
                 created_at = now()
             RETURNING *
             """,
@@ -321,6 +391,12 @@ class PsycopgStateSnapshotRepository:
                 snapshot.state_uri,
                 snapshot.checksum,
                 snapshot.usable_flag,
+                snapshot.source_id,
+                snapshot.cycle_id,
+                snapshot.lead_hours,
+                snapshot.model_package_version,
+                snapshot.model_package_checksum,
+                snapshot.original_shud_filename,
             ),
         )
         return _snapshot_from_row(row)
@@ -518,6 +594,7 @@ def _qc_record(
 
 
 def _snapshot_from_row(row: Mapping[str, Any]) -> StateSnapshot:
+    lead_hours = row.get("lead_hours")
     return StateSnapshot(
         state_id=str(row["state_id"]),
         model_id=str(row["model_id"]),
@@ -527,6 +604,12 @@ def _snapshot_from_row(row: Mapping[str, Any]) -> StateSnapshot:
         checksum=str(row["checksum"]),
         usable_flag=bool(row["usable_flag"]),
         created_at=_ensure_utc(row["created_at"]) if row.get("created_at") is not None else None,
+        source_id=_optional_str(row.get("source_id")),
+        cycle_id=_optional_str(row.get("cycle_id")),
+        lead_hours=int(lead_hours) if lead_hours is not None else None,
+        model_package_version=_optional_str(row.get("model_package_version")),
+        model_package_checksum=_optional_str(row.get("model_package_checksum")),
+        original_shud_filename=_optional_str(row.get("original_shud_filename")),
     )
 
 
@@ -540,7 +623,19 @@ def _snapshot_to_dict(snapshot: StateSnapshot) -> dict[str, Any]:
         "checksum": snapshot.checksum,
         "usable_flag": snapshot.usable_flag,
         "created_at": _format_time(snapshot.created_at),
+        "source_id": snapshot.source_id,
+        "cycle_id": snapshot.cycle_id,
+        "lead_hours": snapshot.lead_hours,
+        "model_package_version": snapshot.model_package_version,
+        "model_package_checksum": snapshot.model_package_checksum,
+        "original_shud_filename": snapshot.original_shud_filename,
     }
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
 
 
 def _ensure_utc(value: datetime) -> datetime:

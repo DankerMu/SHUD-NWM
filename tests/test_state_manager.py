@@ -216,7 +216,7 @@ def test_conflicting_checksum_overwrites_snapshot_as_superseded(
     repository.set_usable_flag(state_id=first.state_id, usable_flag=True)
 
     second_path = tmp_path / "second.cfg.ic"
-    second_path.write_bytes(b"second")
+    second_path.write_bytes(_valid_ic_bytes(b"second"))
     second = manager.save_state_snapshot(
         model_id="demo_model",
         run_id="run_002",
@@ -228,7 +228,7 @@ def test_conflicting_checksum_overwrites_snapshot_as_superseded(
     assert second.state_id == first.state_id
     snapshot = repository.snapshots[second.state_id]
     assert snapshot.run_id == "run_002"
-    assert snapshot.checksum == sha256_bytes(b"second")
+    assert snapshot.checksum == sha256_bytes(_valid_ic_bytes(b"second"))
     assert snapshot.usable_flag is False
 
 
@@ -239,7 +239,7 @@ def test_same_checksum_save_is_idempotent(
 ) -> None:
     first = _save_ic(tmp_path, manager, content=b"same")
     second_path = tmp_path / "same-again.cfg.ic"
-    second_path.write_bytes(b"same")
+    second_path.write_bytes(_valid_ic_bytes(b"same"))
 
     second = manager.save_state_snapshot(
         model_id="demo_model",
@@ -276,6 +276,19 @@ async def test_state_snapshot_api_list_and_get(
     assert get_response.json()["state_id"] == latest.state_id
 
 
+def _valid_ic_bytes(content: bytes) -> bytes:
+    # Structurally-valid SHUD .cfg.ic body; vary the minute-time token by content so
+    # distinct callers keep distinct checksums while passing state-variable QC.
+    minute = 27_000_000.0 + (int.from_bytes(content[:4].ljust(4, b"\x00"), "big") % 1000)
+    lines = [
+        f"2\t1\t{minute:.6f}",
+        "1\t0.1\t0.1\t0.1\t0.1\t0.1",
+        "2\t0.1\t0.1\t0.1\t0.1\t0.1",
+        "1\t0.5",
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 def _save_ic(
     tmp_path: Path,
     manager: StateManager,
@@ -285,7 +298,7 @@ def _save_ic(
 ) -> Any:
     valid_time = valid_time or _dt("2026-04-30T00:00:00Z")
     path = tmp_path / f"{content.decode('utf-8')}.cfg.ic"
-    path.write_bytes(content)
+    path.write_bytes(_valid_ic_bytes(content))
     return manager.save_state_snapshot(
         model_id="demo_model",
         run_id="run_001",

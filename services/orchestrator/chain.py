@@ -23,6 +23,12 @@ from packages.common.safe_fs import (
     read_bytes_no_follow,
 )
 from packages.common.source_identity import normalize_source_id
+from packages.common.state_lineage import (
+    LINEAGE_MAX_LEAD_EXCEEDED,
+    LINEAGE_PACKAGE_VERSION_MISMATCH,
+    LINEAGE_SOURCE_MISMATCH,
+    STATE_QC_FAILED,
+)
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
 from services.orchestrator.persistence import PipelineJob, PipelineStore
@@ -314,6 +320,50 @@ class InitialStateSelection:
     valid_time: datetime | None
     checksum: str | None
     quality: str
+    # Lineage (M24 §2 Lane 1) - optional, default None for backward compatibility.
+    source_id: str | None = None
+    cycle_id: str | None = None
+    lead_hours: int | None = None
+    model_package_version: str | None = None
+    model_package_checksum: str | None = None
+    rejection_code: str | None = None
+
+
+# Bound on the warm-start fallback loop to avoid unbounded scans of stale snapshots.
+_MAX_STATE_FALLBACK_CANDIDATES = 8
+
+
+def _validate_state_lineage(
+    state: StateSnapshot,
+    *,
+    source_id: str | None,
+    model_package_version: str | None,
+    model_package_checksum: str | None,
+    max_lead_hours: int | None,
+) -> str | None:
+    """Return a stable rejection code if the candidate state's lineage is incompatible.
+
+    Each check is skipped when the corresponding target value is unknown (None) so
+    pre-lineage states and callers without full target metadata are not falsely
+    rejected. Returns None when the candidate is compatible.
+    """
+
+    if source_id is not None and state.source_id is not None:
+        if normalize_source_id(state.source_id) != normalize_source_id(source_id):
+            return LINEAGE_SOURCE_MISMATCH
+
+    if state.model_package_version is not None and model_package_version is not None:
+        if state.model_package_version != model_package_version:
+            return LINEAGE_PACKAGE_VERSION_MISMATCH
+    if state.model_package_checksum is not None and model_package_checksum is not None:
+        if state.model_package_checksum != model_package_checksum:
+            return LINEAGE_PACKAGE_VERSION_MISMATCH
+
+    if max_lead_hours is not None and state.lead_hours is not None:
+        if int(state.lead_hours) > int(max_lead_hours):
+            return LINEAGE_MAX_LEAD_EXCEEDED
+
+    return None
 
 
 @dataclass(frozen=True)
@@ -2838,7 +2888,13 @@ class ForecastOrchestrator:
             model_id=model_id,
         )
         self.repository.ensure_forecast_cycle(source_id=source_id, cycle_time=parsed_cycle_time)
-        initial_state = self._select_forecast_initial_state(model_id=model_id, cycle_time=parsed_cycle_time)
+        initial_state = self._select_forecast_initial_state(
+            model_id=model_id,
+            cycle_time=parsed_cycle_time,
+            source_id=source_id,
+            model_package_version=model.model_package_uri,
+            max_lead_hours=max_lead_hours,
+        )
         context = self._build_run_context(
             source_id,
             parsed_cycle_time,
@@ -3779,29 +3835,89 @@ class ForecastOrchestrator:
             },
         }
 
-    def _select_forecast_initial_state(self, *, model_id: str, cycle_time: datetime) -> InitialStateSelection:
+    def _state_passes_qc(self, state: StateSnapshot) -> bool:
+        """Selection-time QC gate for a warm-start candidate.
+
+        Defers to the state manager's optional ``state_variable_qc_passed`` hook when
+        present; absent the hook, a usable snapshot is trusted (run-time/save-time QC
+        already gated ``usable_flag``). Returns False to skip a candidate that fails QC.
+        """
+
+        hook = getattr(self.state_manager, "state_variable_qc_passed", None)
+        if hook is None:
+            return True
+        try:
+            return bool(hook(state))
+        except Exception:  # noqa: BLE001 - a QC hook failure must not crash selection
+            return False
+
+    def _select_forecast_initial_state(
+        self,
+        *,
+        model_id: str,
+        cycle_time: datetime,
+        source_id: str | None = None,
+        model_package_version: str | None = None,
+        model_package_checksum: str | None = None,
+        max_lead_hours: int | None = None,
+    ) -> InitialStateSelection:
         if self.state_manager is None:
             return InitialStateSelection(None, None, None, None, "cold_start_no_state")
 
-        state = self.state_manager.get_latest_usable_state(model_id=model_id, before_time=cycle_time)
-        if state is None:
-            return InitialStateSelection(None, None, None, None, "cold_start_no_state")
+        cursor = cycle_time
+        last_rejection_code: str | None = None
+        # Fallback loop: reject incompatible-lineage / failed-QC candidates and try
+        # the next older usable state, never failing the cycle for a missing successor.
+        for _ in range(_MAX_STATE_FALLBACK_CANDIDATES):
+            state = self.state_manager.get_latest_usable_state(model_id=model_id, before_time=cursor)
+            if state is None:
+                return InitialStateSelection(
+                    None, None, None, None, "cold_start_no_state", rejection_code=last_rejection_code
+                )
 
-        quality = assess_freshness(
-            state.valid_time,
-            cycle_time,
-            soft_threshold_days=self.config.state_soft_stale_threshold_days,
-            hard_threshold_days=self.config.state_hard_stale_threshold_days,
-        )
-        if quality == "cold_start_stale_state":
-            return InitialStateSelection(None, None, None, None, quality)
+            quality = assess_freshness(
+                state.valid_time,
+                cycle_time,
+                soft_threshold_days=self.config.state_soft_stale_threshold_days,
+                hard_threshold_days=self.config.state_hard_stale_threshold_days,
+            )
+            if quality == "cold_start_stale_state":
+                # Older states are even staler; stop and record stale cold start.
+                return InitialStateSelection(
+                    None, None, None, None, quality, rejection_code=last_rejection_code
+                )
+
+            rejection_code = _validate_state_lineage(
+                state,
+                source_id=source_id,
+                model_package_version=model_package_version,
+                model_package_checksum=model_package_checksum,
+                max_lead_hours=max_lead_hours,
+            )
+            if rejection_code is None and not self._state_passes_qc(state):
+                rejection_code = STATE_QC_FAILED
+            if rejection_code is not None:
+                # Record the rejection on the candidate and advance to an older one.
+                last_rejection_code = rejection_code
+                cursor = state.valid_time - timedelta(microseconds=1)
+                continue
+
+            return InitialStateSelection(
+                state_id=state.state_id,
+                state_uri=state.state_uri,
+                valid_time=state.valid_time,
+                checksum=state.checksum,
+                quality=quality,
+                source_id=state.source_id,
+                cycle_id=state.cycle_id,
+                lead_hours=state.lead_hours,
+                model_package_version=state.model_package_version,
+                model_package_checksum=state.model_package_checksum,
+                rejection_code=None,
+            )
 
         return InitialStateSelection(
-            state_id=state.state_id,
-            state_uri=state.state_uri,
-            valid_time=state.valid_time,
-            checksum=state.checksum,
-            quality=quality,
+            None, None, None, None, "cold_start_no_state", rejection_code=last_rejection_code
         )
 
     def _write_run_manifest(self, context: ForecastRunContext | AnalysisRunContext, manifest: dict[str, Any]) -> None:

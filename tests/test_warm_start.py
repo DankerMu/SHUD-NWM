@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.state_lineage import (
+    LINEAGE_PACKAGE_VERSION_MISMATCH,
+    LINEAGE_SOURCE_MISMATCH,
+    STATE_QC_FAILED,
+)
 from packages.common.state_manager import StateSnapshot
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig
 from tests.test_orchestrator import FakeOrchestratorRepository, FakeSlurmClient
@@ -14,9 +19,18 @@ from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig
 
 
 class FakeStateManager:
-    def __init__(self, snapshots: list[StateSnapshot] | None = None) -> None:
+    def __init__(
+        self,
+        snapshots: list[StateSnapshot] | None = None,
+        *,
+        qc_failures: set[str] | None = None,
+    ) -> None:
         self.snapshots = {snapshot.state_id: snapshot for snapshot in snapshots or []}
         self.corrupted: list[str] = []
+        self.qc_failures = qc_failures or set()
+
+    def state_variable_qc_passed(self, state: StateSnapshot) -> bool:
+        return state.state_id not in self.qc_failures
 
     def get_latest_usable_state(self, *, model_id: str, before_time: datetime) -> StateSnapshot | None:
         candidates = [
@@ -158,6 +172,106 @@ def test_runtime_corrupted_init_state_is_rejected_and_next_state_is_staged(tmp_p
     assert staged_ic.read_bytes() == good_content
 
 
+def test_lineage_reject_incompatible_state(tmp_path: Path) -> None:
+    # Newer candidate has a mismatched source; older candidate is compatible.
+    bad = _state(
+        "state_demo_model_2026043012",
+        "2026-04-30T12:00:00Z",
+        source_id="IFS",
+        model_package_version="models/demo_model/package/",
+    )
+    good = _state(
+        "state_demo_model_2026043000",
+        "2026-04-30T00:00:00Z",
+        source_id="GFS",
+        model_package_version="models/demo_model/package/",
+    )
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([bad, good]))
+
+    selection = orchestrator._select_forecast_initial_state(
+        model_id="demo_model",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        source_id="gfs",
+        model_package_version="models/demo_model/package/",
+    )
+
+    # Falls back to the next usable (compatible) state, not failing the cycle.
+    assert selection.state_id == good.state_id
+    assert selection.quality == "fresh"
+
+
+def test_lineage_reject_falls_back_to_cold_start_with_code(tmp_path: Path) -> None:
+    # Only candidate is incompatible (wrong model package version) -> cold start,
+    # carrying the stable rejection code.
+    bad = _state(
+        "state_demo_model_2026043000",
+        "2026-04-30T00:00:00Z",
+        source_id="GFS",
+        model_package_version="models/demo_model/OLD/",
+    )
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([bad]))
+
+    selection = orchestrator._select_forecast_initial_state(
+        model_id="demo_model",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        source_id="gfs",
+        model_package_version="models/demo_model/package/",
+    )
+
+    assert selection.state_id is None
+    assert selection.quality == "cold_start_no_state"
+    assert selection.rejection_code == LINEAGE_PACKAGE_VERSION_MISMATCH
+
+
+def test_lineage_source_mismatch_rejection_code(tmp_path: Path) -> None:
+    bad = _state("state_demo_model_2026043000", "2026-04-30T00:00:00Z", source_id="IFS")
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([bad]))
+
+    selection = orchestrator._select_forecast_initial_state(
+        model_id="demo_model",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        source_id="gfs",
+    )
+
+    assert selection.state_id is None
+    assert selection.rejection_code == LINEAGE_SOURCE_MISMATCH
+
+
+def test_qc_failure_fallback(tmp_path: Path) -> None:
+    # Newer candidate fails state-variable QC; older one passes and is selected.
+    failing = _state("state_demo_model_2026043012", "2026-04-30T12:00:00Z")
+    healthy = _state("state_demo_model_2026043000", "2026-04-30T00:00:00Z")
+    repository = FakeOrchestratorRepository()
+    state_manager = FakeStateManager([failing, healthy], qc_failures={failing.state_id})
+    orchestrator = _orchestrator(tmp_path, repository, state_manager)
+
+    selection = orchestrator._select_forecast_initial_state(
+        model_id="demo_model",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+    )
+
+    assert selection.state_id == healthy.state_id
+    assert selection.quality == "fresh"
+
+
+def test_qc_failure_cold_start_carries_code(tmp_path: Path) -> None:
+    failing = _state("state_demo_model_2026043000", "2026-04-30T00:00:00Z")
+    repository = FakeOrchestratorRepository()
+    state_manager = FakeStateManager([failing], qc_failures={failing.state_id})
+    orchestrator = _orchestrator(tmp_path, repository, state_manager)
+
+    selection = orchestrator._select_forecast_initial_state(
+        model_id="demo_model",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+    )
+
+    assert selection.state_id is None
+    assert selection.rejection_code == STATE_QC_FAILED
+
+
 def _orchestrator(
     tmp_path: Path,
     repository: FakeOrchestratorRepository,
@@ -180,7 +294,15 @@ def _orchestrator(
     )
 
 
-def _state(state_id: str, valid_time: str, *, checksum: str = "abc123") -> StateSnapshot:
+def _state(
+    state_id: str,
+    valid_time: str,
+    *,
+    checksum: str = "abc123",
+    source_id: str | None = None,
+    model_package_version: str | None = None,
+    lead_hours: int | None = None,
+) -> StateSnapshot:
     return StateSnapshot(
         state_id=state_id,
         model_id="demo_model",
@@ -189,6 +311,9 @@ def _state(state_id: str, valid_time: str, *, checksum: str = "abc123") -> State
         state_uri=f"states/demo_model/{_dt(valid_time):%Y%m%d%H}/state.cfg.ic",
         checksum=checksum,
         usable_flag=True,
+        source_id=source_id,
+        model_package_version=model_package_version,
+        lead_hours=lead_hours,
     )
 
 
