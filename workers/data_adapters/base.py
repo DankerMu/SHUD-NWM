@@ -51,6 +51,63 @@ def valid_time_for(cycle_time: str | datetime, forecast_hour: int) -> datetime:
     return parse_cycle_time(cycle_time) + timedelta(hours=forecast_hour)
 
 
+def parse_resolution_segments(spec: str | None) -> tuple[tuple[int, int], ...] | None:
+    """Parse a piecewise forecast-resolution spec like "120:1,384:3".
+
+    Each segment is ``upto_hour:step_hours`` (ascending upto), meaning forecast hours
+    up to and including ``upto_hour`` use ``step_hours``. Returns None for an empty
+    spec so callers fall back to a single uniform step.
+    """
+    if not spec or not spec.strip():
+        return None
+    segments: list[tuple[int, int]] = []
+    last_upto = -1
+    for raw in spec.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        try:
+            upto_text, step_text = token.split(":")
+            upto, step = int(upto_text), int(step_text)
+        except ValueError as error:
+            raise ValueError(f"Invalid forecast-resolution segment {token!r}; expected 'upto:step'.") from error
+        if step <= 0:
+            raise ValueError(f"Forecast-resolution step must be positive in segment {token!r}.")
+        if upto <= last_upto:
+            raise ValueError(f"Forecast-resolution segments must have strictly ascending upto: {token!r}.")
+        segments.append((upto, step))
+        last_upto = upto
+    return tuple(segments) or None
+
+
+def generate_segmented_forecast_hours(
+    start_hour: int,
+    end_hour: int,
+    segments: tuple[tuple[int, int], ...],
+) -> list[int]:
+    """Generate non-uniform forecast hours from piecewise (upto, step) segments.
+
+    Each segment emits hours on its own step grid within ``(previous_upto, upto]``,
+    so e.g. GFS ``((120, 1), (384, 3))`` yields hourly 0..120 then 3-hourly 123..end.
+    """
+    hours: list[int] = []
+    seen: set[int] = set()
+    lower = start_hour
+    for upto, step in segments:
+        seg_hi = min(end_hour, upto)
+        remainder = lower % step
+        hour = lower if remainder == 0 else lower + (step - remainder)
+        while hour <= seg_hi:
+            if hour not in seen:
+                seen.add(hour)
+                hours.append(hour)
+            hour += step
+        lower = upto + 1
+        if lower > end_hour:
+            break
+    return hours
+
+
 def validate_forecast_hours(
     forecast_hours: list[int],
     *,
@@ -58,8 +115,14 @@ def validate_forecast_hours(
     min_hour: int,
     max_hour: int,
     step_hours: int,
+    allowed_hours: set[int] | None = None,
 ) -> list[int]:
-    """Validate caller-supplied lead hours before manifest path generation."""
+    """Validate caller-supplied lead hours before manifest path generation.
+
+    When ``allowed_hours`` is provided each hour must be a member of that canonical
+    set (supporting non-uniform native resolution); otherwise hours must align to a
+    single uniform ``step_hours`` grid.
+    """
     if step_hours <= 0:
         raise ValueError(f"{source_id} forecast-hour step must be positive.")
 
@@ -74,7 +137,12 @@ def validate_forecast_hours(
             raise ValueError(f"{source_id} forecast hour {forecast_hour} is below minimum {min_hour}.")
         if forecast_hour > max_hour:
             raise ValueError(f"{source_id} forecast hour {forecast_hour} exceeds maximum {max_hour}.")
-        if (forecast_hour - min_hour) % step_hours != 0:
+        if allowed_hours is not None:
+            if forecast_hour not in allowed_hours:
+                raise ValueError(
+                    f"{source_id} forecast hour {forecast_hour} is not in the native resolution schedule."
+                )
+        elif (forecast_hour - min_hour) % step_hours != 0:
             raise ValueError(f"{source_id} forecast hour {forecast_hour} is not aligned to {step_hours}h steps.")
         seen.add(forecast_hour)
         normalized.append(forecast_hour)

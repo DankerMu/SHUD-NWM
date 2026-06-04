@@ -29,8 +29,10 @@ from .base import (
     VerificationResult,
     cycle_id_for,
     format_cycle_time,
+    generate_segmented_forecast_hours,
     parse_cycle_date,
     parse_cycle_time,
+    parse_resolution_segments,
     valid_time_for,
     validate_forecast_hours,
 )
@@ -153,6 +155,11 @@ class GFSAdapterConfig:
     forecast_start_hour: int = field(default_factory=lambda: int(os.getenv("GFS_FORECAST_START_HOUR", "0")))
     forecast_end_hour: int = field(default_factory=lambda: int(os.getenv("GFS_FORECAST_END_HOUR", "168")))
     forecast_step_hours: int = 3
+    # Optional piecewise native resolution, e.g. GFS "120:1,384:3" (hourly to 120h,
+    # 3-hourly beyond). When unset, the uniform forecast_step_hours grid is used.
+    forecast_resolution_segments: tuple[tuple[int, int], ...] | None = field(
+        default_factory=lambda: parse_resolution_segments(os.getenv("GFS_FORECAST_RESOLUTION_SEGMENTS"))
+    )
     variables: tuple[str, ...] = GFS_VARIABLES
     poll_interval_seconds: float = 300.0
     max_wait_seconds: float = 21600.0
@@ -169,6 +176,12 @@ class GFSAdapterConfig:
     bbox: GeoBBox = field(default_factory=china_buffered_bbox_from_env)
 
     def forecast_hours(self) -> list[int]:
+        if self.forecast_resolution_segments:
+            return generate_segmented_forecast_hours(
+                self.forecast_start_hour,
+                self.forecast_end_hour,
+                self.forecast_resolution_segments,
+            )
         return list(range(self.forecast_start_hour, self.forecast_end_hour + 1, self.forecast_step_hours))
 
     def __post_init__(self) -> None:
@@ -331,6 +344,7 @@ class GFSAdapter(DataSourceAdapter):
             min_hour=self.config.forecast_start_hour,
             max_hour=self.config.forecast_end_hour,
             step_hours=self.config.forecast_step_hours,
+            allowed_hours=set(self.config.forecast_hours()) if self.config.forecast_resolution_segments else None,
         )
         entries: list[ManifestEntry] = []
 
@@ -850,6 +864,11 @@ class GFSAdapter(DataSourceAdapter):
             "forecast_start_hour": self.config.forecast_start_hour,
             "forecast_end_hour": self.config.forecast_end_hour,
             "forecast_step_hours": self.config.forecast_step_hours,
+            "forecast_resolution_segments": (
+                [list(segment) for segment in self.config.forecast_resolution_segments]
+                if self.config.forecast_resolution_segments
+                else None
+            ),
             "forecast_hours": hours,
             "variables": list(self.config.variables),
             "max_retries": self.config.max_retries,

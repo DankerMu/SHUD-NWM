@@ -31,8 +31,10 @@ from .base import (
     VerificationResult,
     cycle_id_for,
     format_cycle_time,
+    generate_segmented_forecast_hours,
     parse_cycle_date,
     parse_cycle_time,
+    parse_resolution_segments,
     valid_time_for,
     validate_forecast_hours,
 )
@@ -157,6 +159,11 @@ class IFSAdapterConfig:
     cycle_hours_utc: tuple[int, ...] = (0, 6, 12, 18)
     forecast_start_hour: int = field(default_factory=lambda: int(os.getenv("IFS_FORECAST_START_HOUR", "0")))
     forecast_step_hours: int = 3
+    # Optional piecewise native resolution, e.g. IFS "144:3,360:6" (3-hourly to 144h,
+    # 6-hourly beyond). When unset, the uniform forecast_step_hours grid is used.
+    forecast_resolution_segments: tuple[tuple[int, int], ...] | None = field(
+        default_factory=lambda: parse_resolution_segments(os.getenv("IFS_FORECAST_RESOLUTION_SEGMENTS"))
+    )
     preferred_source: str = field(default_factory=lambda: os.getenv("IFS_OPEN_DATA_SOURCE", "ecmwf"))
     fallback_sources: tuple[str, ...] = IFS_FALLBACK_SOURCES
     poll_interval_seconds: float = 600.0
@@ -183,7 +190,10 @@ class IFSAdapterConfig:
             override_hour = int(override)
             if override_hour < self.forecast_start_hour:
                 raise ValueError("IFS_FORECAST_END_HOUR must be >= forecast_start_hour.")
-            if (override_hour - self.forecast_start_hour) % self.forecast_step_hours != 0:
+            if (
+                not self.forecast_resolution_segments
+                and (override_hour - self.forecast_start_hour) % self.forecast_step_hours != 0
+            ):
                 raise ValueError("IFS_FORECAST_END_HOUR must align to the IFS forecast step.")
             return override_hour
         normalized = cycle_hour % 24
@@ -195,13 +205,14 @@ class IFSAdapterConfig:
 
     def forecast_hours_for_cycle(self, cycle_time: str | datetime) -> list[int]:
         parsed = parse_cycle_time(cycle_time)
-        return list(
-            range(
+        end_hour = self.forecast_end_hour_for_cycle(parsed.hour)
+        if self.forecast_resolution_segments:
+            return generate_segmented_forecast_hours(
                 self.forecast_start_hour,
-                self.forecast_end_hour_for_cycle(parsed.hour) + 1,
-                self.forecast_step_hours,
+                end_hour,
+                self.forecast_resolution_segments,
             )
-        )
+        return list(range(self.forecast_start_hour, end_hour + 1, self.forecast_step_hours))
 
     def sources(self) -> tuple[str, ...]:
         ordered: list[str] = []
@@ -386,6 +397,11 @@ class IFSAdapter(DataSourceAdapter):
             min_hour=self.config.forecast_start_hour,
             max_hour=max_lead_hours,
             step_hours=self.config.forecast_step_hours,
+            allowed_hours=(
+                set(self.config.forecast_hours_for_cycle(parsed_cycle_time))
+                if self.config.forecast_resolution_segments
+                else None
+            ),
         )
         entries: list[ManifestEntry] = []
 
@@ -1095,6 +1111,11 @@ class IFSAdapter(DataSourceAdapter):
             "forecast_start_hour": self.config.forecast_start_hour,
             "forecast_end_hour": self.config.forecast_end_hour_for_cycle(parsed_cycle_time.hour),
             "forecast_step_hours": self.config.forecast_step_hours,
+            "forecast_resolution_segments": (
+                [list(segment) for segment in self.config.forecast_resolution_segments]
+                if self.config.forecast_resolution_segments
+                else None
+            ),
             "forecast_hours": hours,
             "variables": list(self.config.variables),
             "preferred_source": self.config.preferred_source,
