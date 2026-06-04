@@ -30,6 +30,7 @@ EXPECTED_MIGRATIONS = [
     "000024_qhh_latest_display_product_indexes.sql",
     "000025_active_manual_retry_guard.sql",
     "000026_ops_strict_identity_indexes.sql",
+    "000027_cycle_status_canonical_incomplete.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}

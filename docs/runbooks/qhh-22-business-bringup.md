@@ -36,28 +36,34 @@
 ## 2. 前置依赖（一次性准备）
 
 ### 2.1 SHUD 二进制 ✅
+
 - 路径（QHH 约定）：`/scratch/frd_muziyao/NWM/SHUD/shud`
 - 在**计算节点**重编以匹配运行环境（cn：Ubuntu 24.04 / g++ 13.3 / glibc 2.39）：
+
   ```bash
   cd /scratch/frd_muziyao  # Slurm 拦截器要求从 /scratch 提交
   srun -p CPU -n1 -c4 -t10 bash -lc \
     'cd /scratch/frd_muziyao/NWM/SHUD && make clean && SUNDIALS_DIR=$HOME/sundials make shud'
   ```
+
 - 依赖 SUNDIALS/CVODE 6（已装 `$HOME/sundials`，即 `/users/frd_muziyao/sundials`，计算节点可见）；Makefile 经 `-Wl,-rpath,$HOME/sundials/lib` 把库路径写进二进制。
 - 验证：`file shud`（应为 ELF x86-64）、`ldd ./shud | grep sundials`（应解析到 `$HOME/sundials/lib`）、`./shud`（应输出 `Success.`）。
 - ⚠️ 注意：仓库内存在一套**未提交的 WIP**（solar/netcdf/timecontext，引用了 `Control_Data` 未添加的成员）会让 `make` 失败。首跑已将其隔离到 `SHUD/.wip-quarantine-20260604/`（13 文件，可恢复），用**干净 master** 编译。
 
 ### 2.2 GRIB 工具链 ✅
+
 - conda env：`/scratch/frd_muziyao/nhms-grib`（cdo 2.6.1 + libeccodes + `share/eccodes/definitions` + libstdc++）。
 - 用途：canonical 读 GRIB（cfgrib/eccodes）、IFS 下载裁剪（cdo）。在 QHH sbatch 里通过 `QHH_ECCODES_RUNTIME` 注入 `LD_LIBRARY_PATH`/`ECCODES_DEFINITION_PATH`；`bin/cdo` 加进 `PATH`。
 
 ### 2.3 数据库 schema ✅
+
 ```bash
 set -a; . infra/env/compute.host.env; set +a   # 提供 DATABASE_URL
 uv run python -m packages.common.migrate        # 26 迁移；已应用则全部 skip
 ```
 
 ### 2.4 Basins 数据 ✅
+
 - `/volume/data/nwm/Basins/qhh`（计算节点可见）。QHH 包由运行器从此发布。
 
 ---
@@ -65,6 +71,7 @@ uv run python -m packages.common.migrate        # 26 迁移；已应用则全部
 ## 3. 运行环境配置
 
 ### 3.1 host 运行 env：`infra/env/compute.host.env`
+
 由 `infra/env/compute.env` 派生（**不提交**，密钥留服务器），关键改写：
 
 | 键 | 值 | 说明 |
@@ -80,7 +87,9 @@ uv run python -m packages.common.migrate        # 26 迁移；已应用则全部
 | 首跑期 | `NHMS_SCHEDULER_BACKFILL_ENABLED=false`、`NHMS_RETENTION_ENABLED=false` | 受控验证；业务化再开（见 §7） |
 
 ### 3.2 启动脚本：`run_qhh_business_slurm.sh`
+
 （位于仓库根，**不提交**；source 上面 env 后追加 QHH_* 覆盖）业务参数：
+
 ```bash
 export QHH_RUN_ROOT=/scratch/frd_muziyao/nhms-prod/qhh-continuous
 export OBJECT_STORE_ROOT=$QHH_RUN_ROOT          # 必须 = RUN_ROOT
@@ -104,6 +113,7 @@ export QHH_SLURM_TIME=08:00:00
 # 输出间隔走代码默认 5min；段分隔符用 ';'（slurm env 透传禁逗号）
 uv run python scripts/run_qhh_continuous.py --once --executor slurm
 ```
+
 > 并行多 cycle:需 `QHH_SLURM_WAIT=0`(提交即放锁)+ `MAX_CYCLES_PER_SOURCE≥2`;否则 `--once` 默认 `slurm-wait=True` 抱单例锁阻塞等作业,提交串行(执行仍是独立 slurm 作业并行)。
 
 ---
@@ -115,6 +125,7 @@ ssh -p 32099 frd_muziyao@210.77.77.22
 cd /scratch/frd_muziyao/NWM
 nohup ./run_qhh_once_slurm.sh > /tmp/qhh-once-slurm.log 2>&1 &
 ```
+
 运行器 `run_qhh_continuous.py --once --executor slurm` 会：
 1. 发现窗口内 cycle（lookback/cycle_lag），选 1 个；
 2. 渲染 `scripts/run_qhh_cycle.sbatch` → `sbatch` 提交到 CPU 分区（一个作业包整 cycle）；
@@ -133,6 +144,7 @@ tail -f /scratch/frd_muziyao/nhms-prod/qhh-continuous/slurm-logs/gfs/<cycle>/<jo
 # DB 运行态：
 psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 desc limit 5;"
 ```
+
 作业里每个 stage 以结构化 JSON（含 `error_code`/`status`）落到 `.out`，便于定位失败 stage。
 
 ---
