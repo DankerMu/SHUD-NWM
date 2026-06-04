@@ -21,7 +21,9 @@ MODEL_ID = os.getenv("QHH_MODEL_ID", "basins_qhh_shud")
 PACKAGE_VERSION = os.getenv("QHH_PACKAGE_VERSION", "v0.0.1-qhh-smoke-lake2")
 SOURCE_ID = normalize_source_id(os.getenv("QHH_SOURCE_ID", "gfs"))
 PROJECT_NAME = os.getenv("QHH_PROJECT_NAME", "qhh")
-OUTPUT_INTERVAL_MINUTES = int(os.getenv("QHH_MODEL_OUTPUT_INTERVAL", "5"))
+# SHUD 求解器 MAX_SOLVER_STEP=10min 是输出下限；默认设 10min 与之对齐，
+# 避免请求更细间隔时实际仍按 10min 输出导致 OUTPUT_ROW_COUNT_MISMATCH。
+OUTPUT_INTERVAL_MINUTES = int(os.getenv("QHH_MODEL_OUTPUT_INTERVAL", "10"))
 THREADS = int(os.getenv("QHH_SHUD_THREADS", "1"))
 
 

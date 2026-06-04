@@ -145,6 +145,45 @@ with psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=3) as conn, co
 PY
 }
 
+canonical_ready() {
+  uv run python - "$SOURCE_ID" "$CYCLE_TIME" <<'PY'
+import os
+import sys
+from datetime import datetime, timezone
+
+import psycopg2
+
+source_id, cycle_token = sys.argv[1:3]
+cycle_time = datetime.strptime(cycle_token, "%Y%m%d%H").replace(tzinfo=timezone.utc)
+with psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=3) as conn, conn.cursor() as cur:
+    cur.execute(
+        "SELECT 1 FROM met.canonical_met_product WHERE source_id = %s AND cycle_time = %s LIMIT 1",
+        (source_id, cycle_time),
+    )
+    print("1" if cur.fetchone() else "0")
+PY
+}
+
+forcing_ready() {
+  uv run python - "$MODEL_ID" "$SOURCE_ID" "$CYCLE_TIME" <<'PY'
+import os
+import sys
+from datetime import datetime, timezone
+
+import psycopg2
+
+model_id, source_id, cycle_token = sys.argv[1:4]
+cycle_time = datetime.strptime(cycle_token, "%Y%m%d%H").replace(tzinfo=timezone.utc)
+with psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=3) as conn, conn.cursor() as cur:
+    cur.execute(
+        "SELECT 1 FROM met.forcing_version "
+        "WHERE model_id = %s AND source_id = %s AND cycle_time = %s LIMIT 1",
+        (model_id, source_id, cycle_time),
+    )
+    print("1" if cur.fetchone() else "0")
+PY
+}
+
 last_json_status() {
   local path="$1"
   uv run python - "$path" <<'PY'
@@ -222,7 +261,7 @@ export WORKSPACE_ROOT="$RUN_ROOT"
 export OBJECT_STORE_ROOT="$OBJECT_ROOT"
 export OBJECT_STORE_PREFIX="$OBJECT_PREFIX"
 export NHMS_BASINS_ROOT="$BASINS_ROOT"
-export MODEL_OUTPUT_INTERVAL="${QHH_MODEL_OUTPUT_INTERVAL:-180}"
+export MODEL_OUTPUT_INTERVAL="${QHH_MODEL_OUTPUT_INTERVAL:-10}"
 export SHUD_COMMAND_STYLE="${QHH_SHUD_COMMAND_STYLE:-shud_project}"
 
 if [[ "$SOURCE_ID" == "gfs" ]]; then
@@ -300,31 +339,60 @@ log "seeding qhh standard forcing stations and SHUD output river identities"
 uv run python scripts/seed_qhh_forcing_stations.py | tee "$CYCLE_ROOT/seed-qhh-forcing-stations.stdout.json"
 uv run python scripts/seed_qhh_shud_output_segments.py | tee "$CYCLE_ROOT/seed-qhh-shud-output-segments.stdout.json"
 
-if [[ "$SOURCE_ID" == "IFS" ]]; then
-  log "downloading IFS cycle $CYCLE_TIME"
-  uv run nhms-ifs download --cycle-time "$CYCLE_TIME" | tee "$CYCLE_ROOT/download.stdout.json"
+# Stage-skip 门：基于已持久化产物存在性，避免重试时重跑已完成的上游阶段。
+# forcing_version 存在 ⇒ raw+canonical+forcing 都已完成（SHUD 失败重试时只跑 SHUD）。
+# canonical 产物存在 ⇒ raw+canonical 已完成。
+# QHH_FORCE_UPSTREAM=1 强制重跑全部上游（改 forcing 配置/horizon 时用）。
+CANONICAL_DONE="$(canonical_ready)"
+FORCING_DONE="$(forcing_ready)"
+if [[ "${QHH_FORCE_UPSTREAM:-0}" == "1" ]]; then
+  CANONICAL_DONE="0"
+  FORCING_DONE="0"
+fi
+
+if [[ "$FORCING_DONE" == "1" || "$CANONICAL_DONE" == "1" ]]; then
+  log "skip download for $SOURCE_ID cycle $CYCLE_TIME; raw already complete (canonical/forcing present)"
+  json_status "$CYCLE_ROOT/download.stdout.json" "already_done" "raw download already complete" \
+    "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME"
 else
-  log "downloading GFS cycle $CYCLE_TIME for forecast hours $GFS_FORECAST_START_HOUR-$GFS_FORECAST_END_HOUR"
-  uv run nhms-gfs download --source-id "$SOURCE_ID" --cycle-time "$CYCLE_TIME" | tee "$CYCLE_ROOT/download.stdout.json"
+  if [[ "$SOURCE_ID" == "IFS" ]]; then
+    log "downloading IFS cycle $CYCLE_TIME"
+    uv run nhms-ifs download --cycle-time "$CYCLE_TIME" | tee "$CYCLE_ROOT/download.stdout.json"
+  else
+    log "downloading GFS cycle $CYCLE_TIME for forecast hours $GFS_FORECAST_START_HOUR-$GFS_FORECAST_END_HOUR"
+    uv run nhms-gfs download --source-id "$SOURCE_ID" --cycle-time "$CYCLE_TIME" | tee "$CYCLE_ROOT/download.stdout.json"
+  fi
+
+  DOWNLOAD_STATUS="$(last_json_status "$CYCLE_ROOT/download.stdout.json")"
+  if [[ "$DOWNLOAD_STATUS" == "unavailable" ]]; then
+    log "$SOURCE_ID cycle $CYCLE_TIME is unavailable; downstream stages skipped"
+    json_status "$STATE_FILE" "unavailable" "source cycle is not available" \
+      "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME" "run_id=$RUN_ID"
+    exit 0
+  fi
 fi
 
-DOWNLOAD_STATUS="$(last_json_status "$CYCLE_ROOT/download.stdout.json")"
-if [[ "$DOWNLOAD_STATUS" == "unavailable" ]]; then
-  log "$SOURCE_ID cycle $CYCLE_TIME is unavailable; downstream stages skipped"
-  json_status "$STATE_FILE" "unavailable" "source cycle is not available" \
-    "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME" "run_id=$RUN_ID"
-  exit 0
+if [[ "$FORCING_DONE" == "1" || "$CANONICAL_DONE" == "1" ]]; then
+  log "skip canonical convert for $SOURCE_ID cycle $CYCLE_TIME; canonical products already present"
+  json_status "$CYCLE_ROOT/canonical-convert.stdout.json" "already_done" "canonical products already present" \
+    "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME"
+else
+  log "converting $SOURCE_ID cycle $CYCLE_TIME to canonical products"
+  uv run nhms-canonical convert --source-id "$SOURCE_ID" --cycle-time "$CYCLE_TIME" | tee "$CYCLE_ROOT/canonical-convert.stdout.json"
 fi
 
-log "converting $SOURCE_ID cycle $CYCLE_TIME to canonical products"
-uv run nhms-canonical convert --source-id "$SOURCE_ID" --cycle-time "$CYCLE_TIME" | tee "$CYCLE_ROOT/canonical-convert.stdout.json"
-
-log "producing qhh forcing for $MODEL_ID from $SOURCE_ID cycle $CYCLE_TIME"
-FORCING_ARGS=(nhms-forcing produce --source-id "$SOURCE_ID" --cycle-time "$CYCLE_TIME" --model-id "$MODEL_ID")
-if [[ -n "${QHH_MAX_LEAD_HOURS:-}" ]]; then
-  FORCING_ARGS+=(--max-lead-hours "$QHH_MAX_LEAD_HOURS")
+if [[ "$FORCING_DONE" == "1" ]]; then
+  log "skip forcing produce for $MODEL_ID $SOURCE_ID cycle $CYCLE_TIME; forcing_version already present"
+  json_status "$CYCLE_ROOT/forcing-produce.stdout.json" "already_done" "forcing version already present" \
+    "model_id=$MODEL_ID" "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME"
+else
+  log "producing qhh forcing for $MODEL_ID from $SOURCE_ID cycle $CYCLE_TIME"
+  FORCING_ARGS=(nhms-forcing produce --source-id "$SOURCE_ID" --cycle-time "$CYCLE_TIME" --model-id "$MODEL_ID")
+  if [[ -n "${QHH_MAX_LEAD_HOURS:-}" ]]; then
+    FORCING_ARGS+=(--max-lead-hours "$QHH_MAX_LEAD_HOURS")
+  fi
+  uv run "${FORCING_ARGS[@]}" | tee "$CYCLE_ROOT/forcing-produce.stdout.json"
 fi
-uv run "${FORCING_ARGS[@]}" | tee "$CYCLE_ROOT/forcing-produce.stdout.json"
 
 require_shud
 

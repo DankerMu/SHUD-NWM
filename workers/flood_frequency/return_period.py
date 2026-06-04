@@ -298,6 +298,7 @@ def _compute_return_periods(
     warning_counts: Counter[str] = Counter()
     max_duration = _window_duration_label(context["start_time"], context["end_time"])
 
+    peak_rows: list[dict[str, Any]] = []
     for segment_id, (q_value, max_time) in max_values.items():
         result = _evaluate_q(
             q_value,
@@ -306,18 +307,15 @@ def _compute_return_periods(
             warning_thresholds_available=warning_thresholds_available,
         )
         warning_counts.update([result["warning_level"]] if result["warning_level"] else [])
-        _upsert_return_period_result(
-            db_session,
-            context,
-            segment_id,
-            max_time,
-            max_duration,
-            q_value,
-            max_over_window=True,
-            result=result,
+        peak_rows.append(
+            _build_return_period_row(
+                context, segment_id, max_time, max_duration, q_value,
+                max_over_window=True, result=result,
+            )
         )
         rows_written += 1
 
+    timestep_rows: list[dict[str, Any]] = []
     for valid_time, segment_values in timestep_values.items():
         for segment_id, q_value in segment_values.items():
             result = _evaluate_q(
@@ -326,17 +324,19 @@ def _compute_return_periods(
                 no_curve_quality.get(segment_id),
                 warning_thresholds_available=warning_thresholds_available,
             )
-            _upsert_return_period_result(
-                db_session,
-                context,
-                segment_id,
-                valid_time,
-                "1h",
-                q_value,
-                max_over_window=False,
-                result=result,
+            timestep_rows.append(
+                _build_return_period_row(
+                    context, segment_id, valid_time, "1h", q_value,
+                    max_over_window=False, result=result,
+                )
             )
             rows_written += 1
+
+    # 峰值行的 valid_time 随重算移动，先批量清除旧峰值再批量写（保留 moved-peak 语义）。
+    if peak_rows:
+        _delete_all_prior_peaks(db_session, context, max_duration)
+        _batch_upsert_return_period_results(db_session, peak_rows)
+    _batch_upsert_return_period_results(db_session, timestep_rows)
 
     _mark_frequency_succeeded(db_session, context, started_at)
     unavailable_products = set(contract["unavailable_products"])
@@ -442,8 +442,43 @@ def _evaluate_q(
     }
 
 
-def _upsert_return_period_result(
-    db_session: Session,
+_RETURN_PERIOD_COLUMNS: tuple[str, ...] = (
+    "run_id",
+    "scenario_id",
+    "basin_version_id",
+    "river_network_version_id",
+    "model_id",
+    "river_segment_id",
+    "valid_time",
+    "duration",
+    "q_value",
+    "q_unit",
+    "return_period",
+    "warning_level",
+    "source_id",
+    "cycle_time",
+    "max_over_window",
+    "quality_flag",
+)
+
+_RETURN_PERIOD_UPDATE_SET: tuple[str, ...] = (
+    "scenario_id = EXCLUDED.scenario_id",
+    "basin_version_id = EXCLUDED.basin_version_id",
+    "model_id = EXCLUDED.model_id",
+    "q_value = EXCLUDED.q_value",
+    "q_unit = EXCLUDED.q_unit",
+    "return_period = EXCLUDED.return_period",
+    "warning_level = EXCLUDED.warning_level",
+    "source_id = EXCLUDED.source_id",
+    "cycle_time = EXCLUDED.cycle_time",
+    "quality_flag = EXCLUDED.quality_flag",
+)
+
+# 每条多行 INSERT 受 PostgreSQL 65535 绑定参数上限约束：16 列 × 500 行 = 8000，留足余量。
+_RETURN_PERIOD_CHUNK_ROWS = 500
+
+
+def _build_return_period_row(
     context: dict[str, Any],
     segment_id: str,
     valid_time: Any,
@@ -452,101 +487,60 @@ def _upsert_return_period_result(
     *,
     max_over_window: bool,
     result: dict[str, Any],
-) -> None:
-    if max_over_window:
-        _delete_prior_peak_result(db_session, context, segment_id, duration)
-    db_session.execute(
-        text(
-            """
-            INSERT INTO flood.return_period_result (
-                run_id,
-                scenario_id,
-                basin_version_id,
-                river_network_version_id,
-                model_id,
-                river_segment_id,
-                valid_time,
-                duration,
-                q_value,
-                q_unit,
-                return_period,
-                warning_level,
-                source_id,
-                cycle_time,
-                max_over_window,
-                quality_flag
-            )
-            VALUES (
-                :run_id,
-                :scenario_id,
-                :basin_version_id,
-                :river_network_version_id,
-                :model_id,
-                :river_segment_id,
-                :valid_time,
-                :duration,
-                :q_value,
-                'm3/s',
-                :return_period,
-                :warning_level,
-                :source_id,
-                :cycle_time,
-                :max_over_window,
-                :quality_flag
-            )
-            ON CONFLICT (
-                run_id,
-                river_network_version_id,
-                river_segment_id,
-                duration,
-                valid_time,
-                max_over_window
-            ) DO UPDATE SET
-                scenario_id = EXCLUDED.scenario_id,
-                basin_version_id = EXCLUDED.basin_version_id,
-                model_id = EXCLUDED.model_id,
-                q_value = EXCLUDED.q_value,
-                q_unit = EXCLUDED.q_unit,
-                return_period = EXCLUDED.return_period,
-                warning_level = EXCLUDED.warning_level,
-                source_id = EXCLUDED.source_id,
-                cycle_time = EXCLUDED.cycle_time,
-                quality_flag = EXCLUDED.quality_flag
-            """
-        ),
-        {
-            "run_id": context["run_id"],
-            "scenario_id": context["scenario_id"],
-            "basin_version_id": context["basin_version_id"],
-            "river_network_version_id": context["river_network_version_id"],
-            "model_id": context["model_id"],
-            "river_segment_id": segment_id,
-            "valid_time": valid_time,
-            "duration": duration,
-            "q_value": float(q_value),
-            "return_period": result["return_period"],
-            "warning_level": result["warning_level"],
-            "source_id": context.get("source_id"),
-            "cycle_time": context.get("cycle_time"),
-            "max_over_window": bool(max_over_window),
-            "quality_flag": result["quality_flag"],
-        },
-    )
+) -> dict[str, Any]:
+    return {
+        "run_id": context["run_id"],
+        "scenario_id": context["scenario_id"],
+        "basin_version_id": context["basin_version_id"],
+        "river_network_version_id": context["river_network_version_id"],
+        "model_id": context["model_id"],
+        "river_segment_id": segment_id,
+        "valid_time": valid_time,
+        "duration": duration,
+        "q_value": float(q_value),
+        "q_unit": "m3/s",
+        "return_period": result["return_period"],
+        "warning_level": result["warning_level"],
+        "source_id": context.get("source_id"),
+        "cycle_time": context.get("cycle_time"),
+        "max_over_window": bool(max_over_window),
+        "quality_flag": result["quality_flag"],
+    }
 
 
-def _delete_prior_peak_result(
-    db_session: Session,
-    context: dict[str, Any],
-    segment_id: str,
-    duration: str,
-) -> None:
+def _batch_upsert_return_period_results(db_session: Session, rows: list[dict[str, Any]]) -> None:
+    """分块多行 upsert，替代逐行 INSERT（百万级行时单行写会拖垮 publish）。"""
+    if not rows:
+        return
+    column_list = ", ".join(_RETURN_PERIOD_COLUMNS)
+    update_set = ", ".join(_RETURN_PERIOD_UPDATE_SET)
+    for start in range(0, len(rows), _RETURN_PERIOD_CHUNK_ROWS):
+        chunk = rows[start : start + _RETURN_PERIOD_CHUNK_ROWS]
+        value_groups: list[str] = []
+        params: dict[str, Any] = {}
+        for index, row in enumerate(chunk):
+            placeholders = ", ".join(f":{column}_{index}" for column in _RETURN_PERIOD_COLUMNS)
+            value_groups.append(f"({placeholders})")
+            for column in _RETURN_PERIOD_COLUMNS:
+                params[f"{column}_{index}"] = row[column]
+        statement = (
+            f"INSERT INTO flood.return_period_result ({column_list}) "
+            f"VALUES {', '.join(value_groups)} "
+            "ON CONFLICT ("
+            "run_id, river_network_version_id, river_segment_id, "
+            "duration, valid_time, max_over_window"
+            f") DO UPDATE SET {update_set}"
+        )
+        db_session.execute(text(statement), params)
+
+
+def _delete_all_prior_peaks(db_session: Session, context: dict[str, Any], duration: str) -> None:
     db_session.execute(
         text(
             """
             DELETE FROM flood.return_period_result
             WHERE run_id = :run_id
               AND river_network_version_id = :river_network_version_id
-              AND river_segment_id = :river_segment_id
               AND duration = :duration
               AND max_over_window = true
             """
@@ -554,7 +548,6 @@ def _delete_prior_peak_result(
         {
             "run_id": context["run_id"],
             "river_network_version_id": context["river_network_version_id"],
-            "river_segment_id": segment_id,
             "duration": duration,
         },
     )
