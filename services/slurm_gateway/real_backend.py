@@ -495,6 +495,13 @@ class RealSlurmGateway(SlurmGateway):
         if model_id and isinstance(overrides.get(model_id), dict):
             resolved.update(overrides[model_id])
 
+        # Per-deployment partition override: the canonical profile default partition
+        # ("compute") may not exist on a given cluster; SLURM_GATEWAY_PARTITION_OVERRIDE
+        # lets a deployment target its real partition without editing shared config.
+        partition_override = str(getattr(self.settings, "partition_override", "") or "").strip()
+        if partition_override:
+            resolved["partition"] = partition_override
+
         try:
             return validate_resource_profile(resolved, model_id=model_id)
         except ResourceProfileValidationError as exc:

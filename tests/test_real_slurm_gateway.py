@@ -2706,3 +2706,26 @@ def test_fake_slurm_command_matrix_for_production_job_types(monkeypatch, tmp_pat
     assert cancelled.status == SlurmJobStatus.CANCELLED
     assert health.status == "healthy"
     assert {"sbatch", "squeue", "sacct", "scancel"}.issubset({Path(command[0]).name for command in commands})
+
+
+def test_partition_override_redirects_resolved_partition(tmp_path: Path) -> None:
+    base = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+    assert base.resolve_resource_profile("any_model")["partition"] == "compute"
+
+    overridden = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            partition_override="CPU",
+        )
+    )
+    # Per-deployment override targets the cluster's real partition without editing
+    # the shared canonical profile (which still defaults to "compute").
+    assert overridden.resolve_resource_profile("any_model")["partition"] == "CPU"
