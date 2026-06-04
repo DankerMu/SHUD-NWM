@@ -553,6 +553,54 @@ def _delete_all_prior_peaks(db_session: Session, context: dict[str, Any], durati
     )
 
 
+def _delete_prior_peak_result(
+    db_session: Session, context: dict[str, Any], segment_id: str, duration: str
+) -> None:
+    db_session.execute(
+        text(
+            """
+            DELETE FROM flood.return_period_result
+            WHERE run_id = :run_id
+              AND river_network_version_id = :river_network_version_id
+              AND river_segment_id = :river_segment_id
+              AND duration = :duration
+              AND max_over_window = true
+            """
+        ),
+        {
+            "run_id": context["run_id"],
+            "river_network_version_id": context["river_network_version_id"],
+            "river_segment_id": segment_id,
+            "duration": duration,
+        },
+    )
+
+
+def _upsert_return_period_result(
+    db_session: Session,
+    context: dict[str, Any],
+    segment_id: str,
+    valid_time: Any,
+    duration: str,
+    q_value: float,
+    *,
+    max_over_window: bool,
+    result: dict[str, Any],
+) -> None:
+    """单行 upsert（委派到批量路径）；保留给定向调用方与单元测试使用。"""
+    if max_over_window:
+        _delete_prior_peak_result(db_session, context, segment_id, duration)
+    _batch_upsert_return_period_results(
+        db_session,
+        [
+            _build_return_period_row(
+                context, segment_id, valid_time, duration, q_value,
+                max_over_window=max_over_window, result=result,
+            )
+        ],
+    )
+
+
 def _load_run_context(run_id: str, db_session: Session) -> dict[str, Any]:
     hydro_columns = _table_columns(db_session, "hydro", "hydro_run")
     select_parts = []
