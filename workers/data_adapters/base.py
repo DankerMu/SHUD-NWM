@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -55,14 +56,15 @@ def parse_resolution_segments(spec: str | None) -> tuple[tuple[int, int], ...] |
     """Parse a piecewise forecast-resolution spec like "120:1,384:3".
 
     Each segment is ``upto_hour:step_hours`` (ascending upto), meaning forecast hours
-    up to and including ``upto_hour`` use ``step_hours``. Returns None for an empty
-    spec so callers fall back to a single uniform step.
+    up to and including ``upto_hour`` use ``step_hours``. Segments may be separated by
+    ``,`` or ``;`` (the latter survives Slurm env-export value filtering). Returns None
+    for an empty spec so callers fall back to a single uniform step.
     """
     if not spec or not spec.strip():
         return None
     segments: list[tuple[int, int]] = []
     last_upto = -1
-    for raw in spec.split(","):
+    for raw in re.split(r"[,;]", spec):
         token = raw.strip()
         if not token:
             continue

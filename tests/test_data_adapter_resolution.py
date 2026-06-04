@@ -13,6 +13,11 @@ def test_parse_resolution_segments_parses_ascending_segments() -> None:
     assert parse_resolution_segments("120:1,384:3") == ((120, 1), (384, 3))
 
 
+def test_parse_resolution_segments_accepts_semicolon_separator() -> None:
+    # Slurm env-export value filtering rejects commas; semicolons survive it.
+    assert parse_resolution_segments("120:1;384:3") == ((120, 1), (384, 3))
+
+
 def test_parse_resolution_segments_returns_none_for_empty() -> None:
     assert parse_resolution_segments(None) is None
     assert parse_resolution_segments("   ") is None
