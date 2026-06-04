@@ -291,7 +291,7 @@ class ForcingProducerConfig:
     max_timeseries_row_count: int = field(
         default_factory=lambda: _env_int("FORCING_MAX_TIMESERIES_ROW_COUNT", 10_000_000)
     )
-    max_manifest_bytes: int = field(default_factory=lambda: _env_int("FORCING_MAX_MANIFEST_BYTES", 2_000_000))
+    max_manifest_bytes: int = field(default_factory=lambda: _env_int("FORCING_MAX_MANIFEST_BYTES", 33_554_432))
 
     def __post_init__(self) -> None:
         if not str(self.object_store_root):
