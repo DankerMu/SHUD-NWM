@@ -175,6 +175,59 @@ def test_identity_missing_subkey_raises():
         validate_receipt(receipt)
 
 
+@pytest.mark.parametrize(
+    "id_key",
+    ["model_id", "basin_id", "basin_version_id", "river_network_version_id"],
+)
+@pytest.mark.parametrize("bad_value", [["x"], 7, "", {"k": "v"}])
+def test_identity_nullable_id_invalid_type_raises(id_key, bad_value):
+    receipt = _base_receipt()
+    receipt["identity"][id_key] = bad_value
+    with pytest.raises(ReceiptValidationError):
+        validate_receipt(receipt)
+
+
+@pytest.mark.parametrize(
+    "id_key",
+    ["model_id", "basin_id", "basin_version_id", "river_network_version_id"],
+)
+def test_identity_nullable_id_none_and_str_pass(id_key):
+    receipt = _base_receipt()
+    receipt["identity"][id_key] = None
+    validate_receipt(receipt)
+    receipt["identity"][id_key] = "v-123"
+    validate_receipt(receipt)
+
+
+@pytest.mark.parametrize("slurm_key", ["array_task_id", "original_task_id"])
+def test_slurm_reindex_field_invalid_type_raises(slurm_key):
+    receipt = _base_receipt()
+    receipt["slurm"][slurm_key] = {"bad": "dict"}
+    with pytest.raises(ReceiptValidationError):
+        validate_receipt(receipt)
+
+
+@pytest.mark.parametrize("slurm_key", ["array_task_id", "original_task_id"])
+@pytest.mark.parametrize("good_value", [None, 3, "task-3"])
+def test_slurm_reindex_field_int_str_none_pass(slurm_key, good_value):
+    receipt = _base_receipt()
+    receipt["slurm"][slurm_key] = good_value
+    validate_receipt(receipt)
+
+
+@pytest.mark.parametrize("nn_key", ["status", "node", "redaction", "slurm"])
+def test_non_nullable_top_key_none_raises(nn_key):
+    receipt = _base_receipt(**{nn_key: None})
+    with pytest.raises(ReceiptValidationError):
+        validate_receipt(receipt)
+
+
+def test_extra_non_schema_keys_tolerated():
+    receipt = _base_receipt(notes="freeform", section="baseline", foo={"a": 1})
+    receipt["extra_top"] = ["anything"]
+    validate_receipt(receipt)
+
+
 def test_redaction_missing_subkey_raises():
     receipt = _base_receipt()
     del receipt["redaction"]["bounds"]

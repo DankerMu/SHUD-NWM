@@ -246,6 +246,22 @@ def _require_nullable_enum(value: Mapping[str, Any], key: str, allowed: tuple[st
         raise ReceiptValidationError(f"{key!r} must be one of {allowed} or null, got {item!r}")
 
 
+def _check_nullable_nonempty_str(item: Any, label: str) -> None:
+    """None passes; otherwise must be a non-empty string."""
+    if item is None:
+        return
+    if not isinstance(item, str) or not item:
+        raise ReceiptValidationError(f"{label} must be a non-empty string or null")
+
+
+def _check_nullable_int_or_str(item: Any, label: str) -> None:
+    """None passes; otherwise must be an int or str (bool rejected)."""
+    if item is None:
+        return
+    if isinstance(item, bool) or not isinstance(item, int | str):
+        raise ReceiptValidationError(f"{label} must be an int, string, or null")
+
+
 def _validate_timestamp(value: Any) -> None:
     if not isinstance(value, str) or not value:
         raise ReceiptValidationError("'timestamp' must be a non-empty ISO-8601 string")
@@ -282,12 +298,11 @@ def _validate_identity(value: Any) -> None:
     if not isinstance(value, Mapping):
         raise ReceiptValidationError("'identity' must be an object")
     _require_keys(value, _IDENTITY_KEYS, where="identity")
-    # source/cycle_time are the only strongly-typed identity fields; the rest are
-    # nullable placeholders for baseline-style sections.
-    for key in ("source", "cycle_time"):
-        item = value[key]
-        if item is not None and (not isinstance(item, str) or not item):
-            raise ReceiptValidationError(f"identity.{key} must be a non-empty string or null")
+    # All identity sub-keys are nullable strings: None passes (baseline-style
+    # placeholders), but a present value MUST be a non-empty string. §3B/§4 rely
+    # on these id fields being strongly typed when populated.
+    for key in _IDENTITY_KEYS:
+        _check_nullable_nonempty_str(value[key], f"identity.{key}")
 
 
 def _validate_stages(value: Any) -> None:
@@ -313,8 +328,13 @@ def _validate_slurm(value: Any) -> None:
     _require_keys(value, _SLURM_KEYS, where="slurm")
     # Empty-skeleton convention: every Slurm sub-key may be None but must exist.
     # When present, job_id/log_uri are strings, accounting is an object.
-    if value["job_id"] is not None and not isinstance(value["job_id"], str | int):
+    if value["job_id"] is not None and (
+        isinstance(value["job_id"], bool) or not isinstance(value["job_id"], str | int)
+    ):
         raise ReceiptValidationError("slurm.job_id must be a string/int or null")
+    # reindex identity-mapping fields (§3B): None or int/str.
+    _check_nullable_int_or_str(value["array_task_id"], "slurm.array_task_id")
+    _check_nullable_int_or_str(value["original_task_id"], "slurm.original_task_id")
     if value["accounting"] is not None and not isinstance(value["accounting"], Mapping):
         raise ReceiptValidationError("slurm.accounting must be an object or null")
     if value["log_uri"] is not None and (not isinstance(value["log_uri"], str) or not value["log_uri"]):
