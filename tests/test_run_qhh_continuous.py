@@ -88,6 +88,30 @@ def test_slurm_exports_excludes_extra_database_and_credential_urls(
     assert "SHUD_LICENSE_TOKEN" not in exports
 
 
+def test_slurm_exports_passes_through_force_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55432/nhms")
+    monkeypatch.setenv("QHH_FORCE_UPSTREAM", "1")
+
+    exports = runner._slurm_exports(_candidate(), tmp_path)
+
+    assert exports["QHH_FORCE_UPSTREAM"] == "1"
+
+
+def test_slurm_exports_omits_force_upstream_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://nhms:secret@10.0.2.100:55432/nhms")
+    monkeypatch.delenv("QHH_FORCE_UPSTREAM", raising=False)
+
+    exports = runner._slurm_exports(_candidate(), tmp_path)
+
+    assert "QHH_FORCE_UPSTREAM" not in exports
+
+
 def test_slurm_submit_uses_env_file_not_full_submit_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
