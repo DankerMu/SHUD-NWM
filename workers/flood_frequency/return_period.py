@@ -592,6 +592,10 @@ def _batch_upsert_return_period_results(db_session: Session, rows: list[dict[str
 
 def _delete_all_prior_peaks(db_session: Session, context: dict[str, Any]) -> None:
     # 单 run 单 duration 不变量下，不限定 duration —— 清除该 run 全部旧峰值行（含陈旧标签）。
+    # FUTURE WARNING: 该不限定 duration 的 DELETE 仅在"单 run 单 duration"不变量下安全
+    # （curve_duration 硬编码 '1h'，且本模块 _compute_return_periods 是 return_period_result
+    # 的唯一生产写入方）。若将来对同一 run 引入第二个 duration 的 return_period_result 写入，
+    # 必须恢复 duration scope，否则会跨 duration 误删另一历时的合法峰值行。
     db_session.execute(
         text(
             """
@@ -610,6 +614,9 @@ def _delete_all_prior_peaks(db_session: Session, context: dict[str, Any]) -> Non
 
 def _delete_all_prior_timesteps(db_session: Session, context: dict[str, Any]) -> None:
     # 同 peak：清除该 run 全部旧 timestep 行（含陈旧 duration 标签）。
+    # FUTURE WARNING: 同 _delete_all_prior_peaks —— 去 duration 限定的 DELETE 仅在"单 run
+    # 单 duration"不变量下安全。若将来对同一 run 引入第二个 duration 的 return_period_result
+    # 写入，必须恢复 duration scope，否则会跨 duration 误删另一历时的合法 timestep 行。
     db_session.execute(
         text(
             """

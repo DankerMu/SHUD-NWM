@@ -461,12 +461,20 @@ def test_recompute_clears_stale_label_peak_orphans() -> None:
             max_over_window=True,
         )
 
-        compute_return_periods("forecast_run", session)
+        result = compute_return_periods("forecast_run", session)
 
         assert _stale_label_count(session, duration="167h", max_over_window=True) == 0
         peak_rows = _result_rows(session, max_over_window=True)
         assert len(peak_rows) == 1
         assert peak_rows[0]["duration"] == "1h"
+        # 全表不翻倍：1 peak(seg_001 max=260) + 2 timestep(260,150) = 3 行；陈旧 167h 行已删。
+        timestep_rows = _result_rows(session, max_over_window=False)
+        total_rows = int(
+            session.execute(text("SELECT COUNT(*) FROM flood.return_period_result")).scalar_one()
+        )
+        assert len(timestep_rows) == 2
+        assert total_rows == len(peak_rows) + len(timestep_rows) == 3
+        assert result.rows_written == 3
 
 
 def test_recompute_clears_stale_label_timestep_orphans() -> None:
@@ -484,6 +492,8 @@ def test_recompute_clears_stale_label_timestep_orphans() -> None:
 
         compute_return_periods("forecast_run", session)
 
+        # 与 peak 测试对称的显式行数断言：新 '1h' timestep 恰为 2 行(80,150)，陈旧 '167h' 清零。
+        assert _stale_label_count(session, duration="1h", max_over_window=False) == 2
         assert _stale_label_count(session, duration="167h", max_over_window=False) == 0
         timestep_rows = _result_rows(session, max_over_window=False)
         assert {row["duration"] for row in timestep_rows} == {"1h"}
@@ -544,6 +554,9 @@ def test_upsert_return_period_result_clears_stale_segment_peak_label() -> None:
             duration="167h",
             max_over_window=True,
         )
+
+        # 前置断言：陈旧 167h 峰值行确已写入，杜绝"删了个不存在的行也绿"的假绿。
+        assert _stale_label_count(session, duration="167h", max_over_window=True) == 1
 
         return_period._upsert_return_period_result(
             session, context, "seg_001", valid_time, "1h", 300.0,
