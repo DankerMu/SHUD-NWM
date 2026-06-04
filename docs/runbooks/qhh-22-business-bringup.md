@@ -4,7 +4,11 @@
 >
 > 状态标注：✅ 已实测验证 / ⏳ 待完成 / ⚠️ 已知待修。
 >
-> 最后更新：2026-06-04（GFS 7天/5min 全流程跑通至 `frequency_done`；IFS 全流程进行中；GFS/IFS forcing 变量质量处理对齐 SHUD/rSHUD 约定；xhigh 复审整改）。
+> 最后更新：2026-06-04（GFS+IFS 双源跑通至 `frequency_done`；本文路径定性为**诊断 lane**，正式业务化迁移至 m24 通用 daemon——见下方横幅）。
+>
+> ⚠️ **架构转向（m24）**：本 runbook 记录的是 `run_qhh_continuous.py → run_qhh_cycle.sh` **诊断/bring-up 路径**，m23 `design.md` 已**否决其作为生产自动化**。
+> 正式"全持续守护"迁移到**通用编排器**（`services/orchestrator` scheduler/chain + Slurm HTTP gateway），由 **m24** 落地：多流域并发 + 跨周期暖启动承接 + 退役诊断脚本。
+> OpenSpec：`openspec/changes/m24-multibasin-continuous-daemon-live/`；跟踪 epic **#285**（子任务 #286–#293）。本文继续作为诊断/排障与 m24 bring-up 期回退手册。
 
 ---
 
@@ -184,9 +188,14 @@ psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 de
 4. ✅ **GFS 尾段刷新（方案A）**：用修正后的 return_period（peak `curve_duration` 167h→1h）对 GFS 既有 SHUD 输出重跑 frequency/publish，不重算 SHUD；跨标签 re-run 残留的旧 167h 孤儿 peak 行已手动清理。
 5. ⏳ **发布到用户面**：`NHMS_PUBLISHED_ARTIFACT_ROOT` 由 `published-staging` 切 `/ghdc/data/nwm/published`（node-27 NFS）；计算节点无 `/ghdc`，需控制节点 copyback。
 6. ⏳ **7天 gap 审计 + 保留清理**：`NHMS_SCHEDULER_BACKFILL_ENABLED=true`、`LOOKBACK_HOURS=168`、`MAX_CYCLES_PER_SOURCE=8`；retention 先 `DRY_RUN=true`。不变量 `RETENTION_DAYS*24 > LOOKBACK_HOURS`。**注意数据量**：5min×7天≈327万行/cycle，retention 必须配套。
-7. ⏳ **转连续**（等指令）：去 `--once` 或 systemd timer；并行需 `QHH_SLURM_WAIT=0`+`MAX_CYCLES≥2`。
-8. ⏳ **生产硬化**：独立生产 PostgreSQL（替换 e2e 容器）、固化 `compute.host.env`、`QHH_FORCE_UPSTREAM` 透传 sbatch（§6 #16）、source-trust/docker 预检、监控告警。
+7. 🔀 **转连续 = m24**（不再沿用本诊断脚本转连续）：正式守护走通用 scheduler/chain daemon，由 **m24** 落地。三道硬坎(均为 m24 任务)：
+   - ① Slurm HTTP gateway 在 node-22 部署(#288，通用 chain 只走 gateway、从未 live)；
+   - ② 跨周期暖启动 path(b) 短 analysis 段(#289，现状每周期从固定打包标定态起跑、无水文记忆)；
+   - ③ 并发 submit-and-return + durable reservation(#290)。daemon live = #292，依赖 #287(验 m23 #255 鲜活摄取)。
+8. ⏳ **生产硬化**（并入 m24/后续）：独立生产 PostgreSQL（替换 e2e 容器）、固化 `compute.host.env`、`QHH_FORCE_UPSTREAM` 透传 sbatch（§6 #16，亦由 m24 改走 chain 自动重转消解）、source-trust/docker 预检、监控告警、诊断脚本退役护栏(#293)。
 9. ⏳ **洪频曲线对齐**：将来建 ERA5 hindcast 洪频曲线（hourly）后，5min 预报侧 return-period 窗口需按 12 行/小时折算（`flood_frequency/frequency.py` ROWS 窗口假设 hourly）。
+
+> 注:本节 1–4 是诊断路径下已实测的科学链路结果(GFS+IFS 至 frequency_done),证明 worker 链正确;5–9 的"正式业务化"在 m24 通用 daemon 上重做并 live 验证,不再以本脚本声称 production。
 
 ---
 

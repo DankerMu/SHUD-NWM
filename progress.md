@@ -17,8 +17,11 @@
 - ⚠️ **已知待修（不阻塞，均记后续 issue）**：
   - ① `QHH_FORCE_UPSTREAM` 未透传进 sbatch（continuous runner `--export` 仅带 `DATABASE_URL`），改 converter 逻辑后旧 canonical 不自动重转，当前以删除 `met.canonical_met_product` 行触发重转兜底（runbook §6/§9）。
   - ② `curve_duration` 标签由 `167h→1h` 后，`_delete_all_prior_peaks` 按新 duration 删除清不掉旧标签孤儿 peak 行（仅跨标签 re-run 出现，fresh 业务跑不受影响），GFS 方案A 已手动清理 1633 行。
-- **全持续守护暂缓**（等指令）。
-- 运行手册：[`docs/runbooks/qhh-22-business-bringup.md`](docs/runbooks/qhh-22-business-bringup.md)。
+- **架构转向（m24，已立项）**：上面的双源 live 跑通走的是 `run_qhh_continuous.py → run_qhh_cycle.sh` **诊断脚本**（m23 design.md 已否决其作生产自动化）；**通用编排器**（`services/orchestrator` scheduler/chain + Slurm HTTP gateway）虽代码就绪但**从未 live**（m20 0/33）。本轮"全持续守护"改造 = 把业务化迁到通用 daemon,瞄准**多流域通用 + 并行发起任务 + 跨周期暖启动承接**。
+  - 三道硬坎:① Slurm HTTP gateway 在 node-22 从未部署(通用 chain 只走 gateway)② 暖启动 forecast→forecast 有时间语义缺口(`nhms-state save` 存预报窗末 `end_time`、非下周期 init time;现状每周期从固定打包标定态起跑、无水文记忆)→ m24 走 path(b) 短 analysis 段 ③ 并发 submit-and-return 是净新增(现状顺序 cohort)。
+  - OpenSpec：[`openspec/changes/m24-multibasin-continuous-daemon-live/`](openspec/changes/m24-multibasin-continuous-daemon-live/)(`openspec validate --strict` 通过;经三轮 codex 复审含 full-output 并行收敛)。跟踪 **epic #285** + 子任务 #286–#293(§0 baseline→§P 依赖门→§1 gateway→§2 暖启动→§3A 并发→§3B 多流域 live→§4 daemon→§5 诊断退役)。
+  - **诊断脚本暂留作 bring-up 回退与排障**,不再以其声称 production;待 m24 落地后退役(护栏 #293)。
+- 运行手册：[`docs/runbooks/qhh-22-business-bringup.md`](docs/runbooks/qhh-22-business-bringup.md)(已标注诊断 lane + m24 转向)。
 - ⚠️ 运行纪律:作业运行中**禁止在 node-22 `git pull`**(会换 inode 触发 NFS stale handle 杀掉正在 exec 脚本的作业)。
 
 ## 当前结论
