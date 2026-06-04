@@ -27,6 +27,7 @@ DEFAULT_JOB_TYPE_TEMPLATES = {
     "parse_analysis_output": "parse_analysis_output.sbatch",
     "save_state_snapshot": "save_state_snapshot.sbatch",
     "hindcast": "hindcast.sbatch",
+    "smoke": "smoke.sbatch",
 }
 
 
@@ -42,6 +43,11 @@ class SlurmGatewaySettings(BaseSettings):
     force_fail_run_ids: list[str] = Field(default_factory=list)
     workspace_dir: str = "workspace"
     slurm_bin_path: str = ""
+    # Per-deployment Slurm partition override (env SLURM_GATEWAY_PARTITION_OVERRIDE).
+    # Canonical resource_profiles.yaml defaults to "compute"; clusters whose real
+    # partition differs (e.g. node-22 "CPU") set this so submitted jobs target a
+    # valid partition without editing the shared profile config. Empty = no override.
+    partition_override: str = ""
     template_dir: str = "infra/sbatch"
     resource_profiles_path: str = "config/resource_profiles.yaml"
     job_type_templates: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_JOB_TYPE_TEMPLATES))
@@ -50,6 +56,7 @@ class SlurmGatewaySettings(BaseSettings):
     max_retries: int = Field(default=3, ge=0)
     retry_backoff_seconds: list[int] = Field(default_factory=lambda: [60, 300, 900])
     allow_internal_reset: bool = False
+    mock_missing_binaries: list[str] = Field(default_factory=list)
 
     model_config = SettingsConfigDict(
         env_prefix="SLURM_GATEWAY_",

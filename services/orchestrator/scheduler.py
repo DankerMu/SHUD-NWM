@@ -6842,35 +6842,163 @@ def _slurm_gateway_backend() -> str:
         return ""
 
 
-def _default_gateway_probe(config: ProductionSchedulerConfig) -> dict[str, Any]:
-    """Bounded, fail-safe default gateway health/capability probe.
+_GATEWAY_HEALTH_PATH = "/api/v1/slurm/health"
+_GATEWAY_REQUIRED_BINARIES = ("sbatch", "squeue", "sacct", "scancel")
+_GATEWAY_PROBE_TIMEOUT_SECONDS = 10.0
 
-    Builds a gateway from environment-backed :class:`SlurmGatewaySettings` and
-    reads its health. Any exception (missing Slurm CLI, unreachable host,
-    misconfiguration) is converted into ``healthy=False`` with a redacted reason
-    rather than raised, so the scheduler records a BLOCKED state instead of
-    crashing or faking a PASS.
+
+def _interpret_gateway_health(payload: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
+    """Map a gateway ``/api/v1/slurm/health`` body to a probe verdict.
+
+    Prefers the Lane 1 structure (top-level ``healthy: bool`` + per-binary
+    ``binaries[name].executable``): any required binary that is not executable
+    flips the verdict to unhealthy. Falls back to the legacy ``status`` field
+    (``healthy``/``ok``) when the new fields are absent, so a gateway still on
+    the old shape is never wrongly fenced or wrongly passed.
+    """
+
+    binaries = payload.get("binaries")
+    reasons: list[str] = []
+    if isinstance(binaries, Mapping) and binaries:
+        missing = [
+            name
+            for name in _GATEWAY_REQUIRED_BINARIES
+            if not bool((binaries.get(name) or {}).get("executable"))
+        ]
+        binaries_ok = not missing
+        if missing:
+            reasons.append("missing/non-executable Slurm binaries: " + ", ".join(missing))
+    else:
+        # Legacy gateway without per-binary probes: cannot prove binaries.
+        binaries_ok = None
+
+    if "healthy" in payload:
+        top_healthy = bool(payload.get("healthy"))
+    else:
+        status = str(payload.get("status", "") or "").lower()
+        top_healthy = status in {"healthy", "ok"}
+    if not top_healthy:
+        reason = str(payload.get("error", "") or "").strip()
+        reasons.append(reason or "gateway reported unhealthy")
+
+    if binaries_ok is None:
+        is_healthy = top_healthy
+    else:
+        is_healthy = top_healthy and binaries_ok
+
+    return {
+        "mode": mode,
+        "backend": str(payload.get("backend", mode) or mode),
+        "version": str(payload.get("version", "") or ""),
+        "healthy": is_healthy,
+        "submit_capable": is_healthy,
+        "accounting_available": is_healthy,
+        "reason": ("; ".join(reasons) or None) if not is_healthy else None,
+    }
+
+
+def _in_process_gateway_probe(mode: str) -> dict[str, Any]:
+    """In-process health for the co-located mock/dev gateway convention.
+
+    The mock backend runs in-process (no HTTP server to probe), so the dev
+    convention reads ``create_gateway().health()`` directly. This keeps a
+    submittable dev/test run from ever being fenced (never-break-userspace);
+    the HTTP probe path is reserved for a real node-22 gateway deployment.
     """
 
     from services.slurm_gateway.config import SlurmGatewaySettings
     from services.slurm_gateway.gateway import create_gateway
 
-    settings = SlurmGatewaySettings()
-    mode = settings.backend
     try:
-        gateway = create_gateway(settings)
+        gateway = create_gateway(SlurmGatewaySettings())
         health = gateway.health()
-        status = str(getattr(health, "status", "") or "").lower()
-        is_healthy = status in {"healthy", "ok"}
+        return _interpret_gateway_health(
+            {
+                "backend": getattr(health, "backend", mode),
+                "version": getattr(health, "version", ""),
+                "status": getattr(health, "status", ""),
+                "healthy": getattr(health, "healthy", None),
+                "error": getattr(health, "error", "") or "",
+                "binaries": {
+                    name: {
+                        "resolved": getattr(probe, "resolved", False),
+                        "executable": getattr(probe, "executable", False),
+                    }
+                    for name, probe in (getattr(health, "binaries", {}) or {}).items()
+                },
+            },
+            mode=mode,
+        )
+    except Exception as error:  # noqa: BLE001 - probe must be fail-safe, never raise.
         return {
             "mode": mode,
-            "backend": str(getattr(health, "backend", mode) or mode),
-            "version": str(getattr(health, "version", "") or ""),
-            "healthy": is_healthy,
-            "submit_capable": is_healthy,
-            "accounting_available": is_healthy,
-            "reason": str(getattr(health, "error", "") or "") or None,
+            "healthy": False,
+            "submit_capable": False,
+            "accounting_available": False,
+            "reason": str(redact_payload(str(error))),
         }
+
+
+def _default_gateway_probe(config: ProductionSchedulerConfig) -> dict[str, Any]:
+    """Bounded, fail-safe gateway health probe.
+
+    For a **real** node-22 gateway, HTTP GETs
+    ``${SLURM_GATEWAY_URL}/api/v1/slurm/health`` (the configured URL, not an
+    in-process ``create_gateway().health()``) with a bounded timeout, and
+    interprets the Lane 1 health structure (top-level ``healthy`` + per-binary
+    ``executable`` flags). Any non-2xx response, unreachable host, malformed
+    body, or exception (missing Slurm CLI on the gateway, network failure) is
+    converted into ``healthy=False`` with a redacted reason rather than raised,
+    so the scheduler records a BLOCKED state instead of crashing or faking PASS.
+
+    For the **mock** dev backend (co-located, in-process, no HTTP server), reads
+    in-process health instead, so a submittable dev/test run is never fenced.
+    """
+
+    from services.slurm_gateway.config import SlurmGatewaySettings
+
+    try:
+        mode = str(SlurmGatewaySettings().backend or "")
+    except Exception:  # noqa: BLE001 - config read must not break the probe.
+        mode = ""
+
+    if mode not in {"real", "slurm"}:
+        return _in_process_gateway_probe(mode)
+
+    base_url = str(config.slurm_gateway_url or "").strip()
+    if not base_url:
+        return {
+            "mode": mode,
+            "healthy": False,
+            "submit_capable": False,
+            "accounting_available": False,
+            "reason": "SLURM_GATEWAY_URL is not configured.",
+        }
+
+    url = base_url.rstrip("/") + _GATEWAY_HEALTH_PATH
+    try:
+        import httpx
+
+        with httpx.Client(timeout=_GATEWAY_PROBE_TIMEOUT_SECONDS) as client:
+            response = client.get(url)
+        if response.status_code // 100 != 2:
+            return {
+                "mode": mode,
+                "healthy": False,
+                "submit_capable": False,
+                "accounting_available": False,
+                "reason": f"gateway health returned HTTP {response.status_code}",
+            }
+        payload = response.json()
+        if not isinstance(payload, Mapping):
+            return {
+                "mode": mode,
+                "healthy": False,
+                "submit_capable": False,
+                "accounting_available": False,
+                "reason": "gateway health returned a non-object body",
+            }
+        return _interpret_gateway_health(payload, mode=mode)
     except Exception as error:  # noqa: BLE001 - probe must be fail-safe, never raise.
         return {
             "mode": mode,

@@ -184,6 +184,24 @@ class PipelineStore:
         statement = select(PipelineJob).where(PipelineJob.slurm_job_id == slurm_job_id)
         return self.session.scalars(statement).first()
 
+    def query_inflight_jobs(self) -> list[PipelineJob]:
+        """Durable in-flight jobs for restart reconcile.
+
+        Returns rows that were submitted/running and carry a ``slurm_job_id``,
+        read from the durable ``pipeline_job`` table (never from gateway memory),
+        so a restarted scheduler/gateway can recover job identity authoritatively.
+        """
+
+        statement = (
+            select(PipelineJob)
+            .where(
+                PipelineJob.status.in_(("submitted", "running")),
+                PipelineJob.slurm_job_id.is_not(None),
+            )
+            .order_by(PipelineJob.submitted_at.asc(), PipelineJob.created_at.asc())
+        )
+        return list(self.session.scalars(statement))
+
     def insert_event(
         self,
         *,

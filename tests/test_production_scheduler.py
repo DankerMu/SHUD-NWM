@@ -10365,20 +10365,178 @@ def test_slurm_gateway_check_self_reference_blocks_schemeless_localhost(
     assert checks["self_reference"] is True
 
 
-def test_slurm_gateway_check_default_probe_maps_mock_health_to_healthy(
+class _FakeHttpResponse:
+    def __init__(self, status_code: int, payload: Any) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class _FakeHttpClient:
+    """Records the GET URL so tests can assert the configured URL is probed."""
+
+    last_url: str | None = None
+    response: Any = None
+    raise_error: Exception | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: D401
+        del args, kwargs
+
+    def __enter__(self) -> _FakeHttpClient:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        del args
+
+    def get(self, url: str) -> Any:
+        type(self).last_url = url
+        if type(self).raise_error is not None:
+            raise type(self).raise_error
+        return type(self).response
+
+
+def _healthy_health_payload() -> dict[str, Any]:
+    executable = {"resolved": True, "executable": True, "detail": None}
+    return {
+        "backend": "slurm",
+        "version": "24.05",
+        "status": "healthy",
+        "healthy": True,
+        "binaries": {name: dict(executable) for name in ("sbatch", "squeue", "sacct", "scancel")},
+    }
+
+
+def _install_fake_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    response: Any = None,
+    raise_error: Exception | None = None,
+) -> type[_FakeHttpClient]:
+    import httpx
+
+    # HTTP probing is the real-gateway path; force backend=real so the probe
+    # does not take the in-process mock branch.
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "real")
+    _FakeHttpClient.last_url = None
+    _FakeHttpClient.response = response
+    _FakeHttpClient.raise_error = raise_error
+    monkeypatch.setattr(httpx, "Client", _FakeHttpClient)
+    return _FakeHttpClient
+
+
+def test_preflight_http_probes_configured_gateway_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # No injected probe: _default_gateway_probe must build the mock gateway and
-    # map its health (status="ok", backend="mock") to healthy=True / mode="mock".
-    monkeypatch.delenv("SLURM_GATEWAY_BACKEND", raising=False)
-    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8000")
+    # The default probe must HTTP-GET ${SLURM_GATEWAY_URL}/api/v1/slurm/health,
+    # NOT an in-process create_gateway().health(). Guard create_gateway so any
+    # in-process call would fail the test.
+    import services.slurm_gateway.gateway as gateway_module
 
-    checks, blockers = scheduler_module._slurm_gateway_check(config)
+    def _boom(*_args: Any, **_kwargs: Any):
+        raise AssertionError("preflight must not use in-process create_gateway().health()")
 
-    assert blockers == []
-    assert checks["healthy"] is True
-    assert checks["mode"] == "mock"
+    monkeypatch.setattr(gateway_module, "create_gateway", _boom)
+    client = _install_fake_httpx(
+        monkeypatch, response=_FakeHttpResponse(200, _healthy_health_payload())
+    )
+
+    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    result = scheduler_module._default_gateway_probe(config)
+
+    assert client.last_url == "http://gw-node22.internal:8081/api/v1/slurm/health"
+    assert result["healthy"] is True
+    assert result["submit_capable"] is True
+    assert result["accounting_available"] is True
+
+
+def test_preflight_http_probe_missing_binary_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _healthy_health_payload()
+    payload["binaries"]["sacct"] = {"resolved": True, "executable": False, "detail": "no sacct"}
+    _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, payload))
+
+    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    result = scheduler_module._default_gateway_probe(config)
+
+    assert result["healthy"] is False
+    assert "sacct" in (result["reason"] or "")
+
+
+def test_preflight_http_probe_unreachable_fails_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    _install_fake_httpx(monkeypatch, raise_error=httpx.ConnectError("connection refused"))
+
+    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    result = scheduler_module._default_gateway_probe(config)
+
+    assert result["healthy"] is False
+    assert result["submit_capable"] is False
+
+
+def test_preflight_http_probe_non_2xx_fails_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(503, {"detail": "unavailable"}))
+
+    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    result = scheduler_module._default_gateway_probe(config)
+
+    assert result["healthy"] is False
+    assert "503" in (result["reason"] or "")
+
+
+def test_preflight_http_probe_legacy_status_only_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Backward compat: a gateway still on the old shape (only ``status``) is
+    # accepted via the legacy fallback.
+    _install_fake_httpx(
+        monkeypatch, response=_FakeHttpResponse(200, {"status": "ok", "backend": "mock"})
+    )
+
+    config = _gateway_config(tmp_path, slurm_gateway_url="http://gw-node22.internal:8081")
+    result = scheduler_module._default_gateway_probe(config)
+
+    assert result["healthy"] is True
+
+
+def test_unreachable_or_unhealthy_gateway_blocks_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unreachable gateway -> pre-mutation BLOCKED via _slurm_gateway_check,
+    # and the preflight aggregate is blocked (no submission proceeds).
+    import httpx
+
+    _install_fake_httpx(monkeypatch, raise_error=httpx.ConnectError("refused"))
+    roots = _slurm_roots(tmp_path)
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8081",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    codes = {b["code"] for b in preflight["blockers"]}
+    assert "SLURM_GATEWAY_UNAVAILABLE" in codes
+    assert preflight["checks"]["gateway"]["healthy"] is False
 
 
 def test_slurm_gateway_check_healthy_but_not_submit_capable_blocks(tmp_path: Path) -> None:

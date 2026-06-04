@@ -51,23 +51,34 @@ Evidence Floor: a closed/BLOCKED receipt for m23 #255; m24 §4 may not close whi
 
 ## 1. Slurm gateway deployment + live receipts on node-22
 
-- [ ] 1.1 Implement/prove a standalone gateway app + systemd unit listening at
+- [x] 1.1 Implement/prove a standalone gateway app + systemd unit listening at
   `SLURM_GATEWAY_URL=http://127.0.0.1:8081`, serving `/api/v1/slurm/health`
   (`NHMS_SERVICE_ROLE=slurm_gateway` currently reserved/fail-fast).
-- [ ] 1.2 Make `health()` probe `sbatch`/`squeue`/`sacct`/`scancel` (not only `sinfo --version`);
+- [x] 1.2 Make `health()` probe `sbatch`/`squeue`/`sacct`/`scancel` (not only `sinfo --version`);
   scheduler preflight HTTP-probes the configured URL → typed pre-mutation blocker when unhealthy.
-- [ ] 1.3 Prove mock-vs-real parity (submit→poll→terminal + template selection) gating live use.
-- [ ] 1.4 Emit a short-job terminal receipt (submit→poll→terminal, log root under workspace) and a
+- [x] 1.3 Prove mock-vs-real parity (submit→poll→terminal + template selection) gating live use.
+- [x] 1.4 Emit a short-job terminal receipt (submit→poll→terminal, log root under workspace) and a
   separate long-job cancel receipt (submit→cancel-while-active→cancelled/accounting); do not
   conflate terminal-poll and cancel.
-- [ ] 1.5 Stale-job reconcile reads job ids from durable `pipeline_job`/pre-execution evidence (not
+- [x] 1.5 Stale-job reconcile reads job ids from durable `pipeline_job`/pre-execution evidence (not
   gateway in-memory `_jobs`) and verifies candidate identity via `sacct`.
-- [ ] 1.6 Confirm the production scheduler routes submission through the gateway; demote the
+- [x] 1.6 Confirm the production scheduler routes submission through the gateway; demote the
   diagnostic direct-`sbatch` runner.
 
 Evidence Floor: gateway `/api/v1/slurm/health` receipt probing 4 binaries; parity test PASS;
 short-job terminal receipt + long-job cancel receipt; restart reconcile-by-identity proof.
 Verification: `uv run pytest -q tests/test_real_slurm_gateway.py tests/test_production_slurm_validation.py tests/test_slurm_array_contract.py` + `uv run ruff check .` + node-22 gateway proof receipts or BLOCKED.
+
+> Closure (issue #288), 2026-06-04: standalone `services/slurm_gateway/app.py` +
+> `python -m services.slurm_gateway` + `infra/systemd/nhms-slurm-gateway.service`; 4-binary
+> health; HTTP preflight (`scheduler._default_gateway_probe`) → pre-mutation BLOCKED;
+> `services/orchestrator/reconcile.py` reconcile-by-identity from durable `pipeline_job` via
+> `sacct`. Deterministic Verification on **node-22: 959 passed** (gateway+scheduler+chain
+> suites, HEAD de38c49). **Live gateway receipt** `artifacts/m24/m24-gateway-8c6f6d0/gateway.json`
+> (status=PASS, live_proof_accepted=true, slurm-wlm 23.11.4): health 4/4 binaries; short job
+> 6009 submit→poll→succeeded; long job 6010 submit→cancel-while-active→cancelled (distinct
+> jobs/stages, not conflated). §1.6 production routing via `HttpSlurmGatewayClient`; full
+> diagnostic-script retirement is tracked in §5/#293.
 
 ## 2. Cross-cycle warm-start closure (analysis-segment + cohort wiring)
 

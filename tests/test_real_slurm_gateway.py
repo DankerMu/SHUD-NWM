@@ -119,6 +119,7 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     bin_dir.mkdir()
     command_log = tmp_path / "slurm-commands.jsonl"
     _write_fake_slurm_binary(bin_dir / "sbatch", command_log)
+    _write_fake_slurm_binary(bin_dir / "squeue", command_log)
     _write_fake_slurm_binary(bin_dir / "sacct", command_log)
     _write_fake_slurm_binary(bin_dir / "scancel", command_log)
     _write_fake_slurm_binary(bin_dir / "sinfo", command_log)
@@ -222,7 +223,7 @@ def test_real_slurm_gateway_fake_binaries_cover_command_boundary(
     command_records = [
         json.loads(line) for line in command_log.read_text(encoding="utf-8").splitlines() if line.strip()
     ]
-    assert {record["program"] for record in command_records} == {"sbatch", "sacct", "sinfo", "scancel"}
+    assert {record["program"] for record in command_records} == {"sbatch", "squeue", "sacct", "scancel"}
     assert all(isinstance(arg, str) and "\n" not in arg for record in command_records for arg in record["argv"])
     assert any("--array=0-1%2" in record["argv"] for record in command_records if record["program"] == "sbatch")
 
@@ -276,6 +277,9 @@ from pathlib import Path
 program = Path(sys.argv[0]).name
 argv = sys.argv[1:]
 Path({str(command_log)!r}).open("a", encoding="utf-8").write(json.dumps({{"program": program, "argv": argv}}) + "\\n")
+if argv == ["--version"]:
+    print("slurm 24.05.0")
+    sys.exit(0)
 if program == "sbatch":
     print("Submitted batch job 12345")
 elif program == "sacct" and "--format=JobID,State,ExitCode,Start,End,Elapsed,MaxRSS,AveRSS,AllocTRES" in argv:
@@ -299,6 +303,8 @@ elif program == "sacct":
     print("12346|run_002|RUNNING|0:0|2026-05-08T12:00:00|")
 elif program == "sinfo":
     print("slurm 24.05.0")
+elif program == "squeue":
+    sys.exit(0)
 elif program == "scancel":
     sys.exit(0)
 else:
@@ -2228,23 +2234,44 @@ def test_health_check_success_and_failure(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(command, 0, stdout="slurm 24.05.1\n", stderr="")
 
     monkeypatch.setattr(subprocess, "run", success)
-    assert gateway.health().model_dump() == {
-        "backend": "slurm",
-        "version": "slurm 24.05.1",
-        "status": "healthy",
-        "error": None,
-    }
+    healthy = gateway.health()
+    assert healthy.backend == "slurm"
+    assert healthy.status == "healthy"
+    assert healthy.healthy is True
+    assert healthy.version == "slurm 24.05.1"
+    assert healthy.error is None
+    assert set(healthy.binaries) == {"sbatch", "squeue", "sacct", "scancel"}
+    assert all(probe.resolved and probe.executable for probe in healthy.binaries.values())
 
     def failure(command, **kwargs):
         del kwargs
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="missing sinfo")
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="missing binary")
 
     monkeypatch.setattr(subprocess, "run", failure)
     response = gateway.health()
     assert response.backend == "slurm"
     assert response.status == "unhealthy"
+    assert response.healthy is False
     assert response.version == ""
     assert response.error
+    assert all(not probe.executable for probe in response.binaries.values())
+
+
+def test_health_survives_non_slurm_probe_exception(monkeypatch, tmp_path):
+    # A probe failure that is NOT a SlurmGatewayError (e.g. PermissionError raised
+    # below the wrapping layer) must still degrade to a structured healthy=false
+    # response so /api/v1/slurm/health never returns a 500.
+    gateway = _gateway(tmp_path)
+
+    def boom(command, **kwargs):
+        del kwargs
+        raise PermissionError("secret-token leaked in message")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    response = gateway.health()
+    assert response.status == "unhealthy"
+    assert response.healthy is False
+    assert all(not probe.executable for probe in response.binaries.values())
 
 
 def test_fetch_logs_refuses_symlink(monkeypatch, tmp_path):
@@ -2594,6 +2621,8 @@ def test_fake_slurm_command_matrix_for_production_job_types(monkeypatch, tmp_pat
         del kwargs
         commands.append(command)
         executable = Path(command[0]).name
+        if command[1:] == ["--version"]:
+            return subprocess.CompletedProcess(command, 0, stdout="slurm 24.05.1\n", stderr="")
         if executable == "sbatch":
             return subprocess.CompletedProcess(
                 command,
@@ -2693,4 +2722,51 @@ def test_fake_slurm_command_matrix_for_production_job_types(monkeypatch, tmp_pat
     assert logs.logs == "analysis log"
     assert cancelled.status == SlurmJobStatus.CANCELLED
     assert health.status == "healthy"
-    assert {"sbatch", "sacct", "scancel", "sinfo"}.issubset({Path(command[0]).name for command in commands})
+    assert {"sbatch", "squeue", "sacct", "scancel"}.issubset({Path(command[0]).name for command in commands})
+
+
+def test_partition_override_redirects_resolved_partition(tmp_path: Path) -> None:
+    base = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+    assert base.resolve_resource_profile("any_model")["partition"] == "compute"
+
+    overridden = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            partition_override="CPU",
+        )
+    )
+    # Per-deployment override targets the cluster's real partition without editing
+    # the shared canonical profile (which still defaults to "compute").
+    assert overridden.resolve_resource_profile("any_model")["partition"] == "CPU"
+
+
+@pytest.mark.parametrize(
+    "malicious_override",
+    [
+        "CPU; rm -rf /",
+        "CPU\n#SBATCH x",
+        "-X",
+    ],
+)
+def test_partition_override_rejects_injection(tmp_path: Path, malicious_override: str) -> None:
+    # A partition override carrying shell metacharacters, a newline, or a leading
+    # dash must be rejected by validate_resource_profile->validate_slurm_identifier
+    # at resolution time, never reaching an sbatch invocation.
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            partition_override=malicious_override,
+        )
+    )
+    with pytest.raises(ConfigurationError):
+        gateway.resolve_resource_profile("any_model")
