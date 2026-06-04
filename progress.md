@@ -7,9 +7,17 @@
 ## QHH node-22 业务化（live，进行中）
 
 - **首个真实端到端 cycle 已跑通 publish**（24h 冒烟，job 5980）：download→canonical→forcing(386 站)→SHUD→parse(qc_passed)→published_for_display(1633 段，return_period 诚实标 `no_frequency_curve`，无伪造洪水位)。
+- **GFS 7 天 / 5min 全流程已跑通**（cycle 2026060400, s3://nhms）：`hydro.hydro_run` 状态 `frequency_done`（洪频结果已生成，display-products 已发布）。
+- **IFS 7 天 / 10min 全流程已跑通**（job 6004, cycle 2026060400, s3://nhms）：`frequency_done`，river_timeseries 1,381,518 行 × 1633 段，return_period `('1h',True,1633)+('1h',False,1381518)`。
+- IFS canonical 重转后 384 产品全 `ok`（修复前 382 ok + 2 `warning_negative_precip`），**8a8ba3d precip 量化容差修复在真实 IFS cycle 验证通过**（forcing 不再缺 prcp）。
 - **已落地修复**（master）：sp.riv 多块解析（17f5229）、GFS APCP 6h 桶去累积（142dff0）、原生变步长预报 GFS/IFS（b642b86/eaf5649）、forcing manifest 默认 2MB→32MB（a58c25a）、cycle 脚本 state 文件保留 `slurm_job_id`（1baee15）、SHUD 输出间隔默认 180→5min（81e50ff）。
+- **近期修复**：stage-skip 门 + 10min 默认 + return_period 批量 INSERT（d29d370/539f793）；GFS/IFS forcing 变量质量处理对齐 SHUD/rSHUD 约定（rn/rh 钳位、precip/shortwave GRIB 量化负值容差，8cced52）；xhigh 全面复审 39 项 CONFIRMED 整改 + IFS precip 量化容差（8a8ba3d）。
 - **对象存储切换**：废弃 e2e 标签 `s3://nhms-22-e2e`，DB+文件系统 e2e 数据已清除（残留 0），前缀切 `s3://nhms`。
-- **进行中**：干净 GFS 7 天 / 5min 全流程（job 5992, cycle 2026060400, s3://nhms）跑至 publish；之后跑 IFS 全流程。全持续守护暂缓（等指令）。
+- **GFS 尾段刷新（方案A）已完成**：用修正后的 return_period（`curve_duration` peak 行 `167h→1h`）重跑 frequency/publish，不重算 SHUD。
+- ⚠️ **已知待修（不阻塞，均记后续 issue）**：
+  - ① `QHH_FORCE_UPSTREAM` 未透传进 sbatch（continuous runner `--export` 仅带 `DATABASE_URL`），改 converter 逻辑后旧 canonical 不自动重转，当前以删除 `met.canonical_met_product` 行触发重转兜底（runbook §6/§9）。
+  - ② `curve_duration` 标签由 `167h→1h` 后，`_delete_all_prior_peaks` 按新 duration 删除清不掉旧标签孤儿 peak 行（仅跨标签 re-run 出现，fresh 业务跑不受影响），GFS 方案A 已手动清理 1633 行。
+- **全持续守护暂缓**（等指令）。
 - 运行手册：[`docs/runbooks/qhh-22-business-bringup.md`](docs/runbooks/qhh-22-business-bringup.md)。
 - ⚠️ 运行纪律:作业运行中**禁止在 node-22 `git pull`**(会换 inode 触发 NFS stale handle 杀掉正在 exec 脚本的作业)。
 

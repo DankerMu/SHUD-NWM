@@ -4,7 +4,7 @@
 >
 > 状态标注：✅ 已实测验证 / ⏳ 待完成 / ⚠️ 已知待修。
 >
-> 最后更新：2026-06-04（首个真实 cycle 已跑通 publish；e2e→生产前缀切换；干净 GFS 7天/5min 全流程进行中）。
+> 最后更新：2026-06-04（GFS 7天/5min 全流程跑通至 `frequency_done`；IFS 全流程进行中；GFS/IFS forcing 变量质量处理对齐 SHUD/rSHUD 约定；xhigh 复审整改）。
 
 ---
 
@@ -166,22 +166,27 @@ psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 de
 | 11 | `INVALID_TIME_WINDOW: not divisible by output interval` | 167h 窗口 ÷ 3h 输出间隔除不尽 | 输出间隔默认改 5min，81e50ff | ✅ |
 | 12 | 重提作业秒死 `Stale file handle` | 运行中 `git pull` 换了正在 exec 的脚本 inode（NFS ESTALE） | 运行纪律:作业运行中不 pull（§0.8） | ✅ |
 | 13 | runner state 文件被 cycle 脚本覆盖丢 `slurm_job_id` | STATE_FILE 同路径整体覆写 | json_status 合并保留 runner 字段，1baee15 | ✅ |
-| 14 | 重提反复重下 125MB | download 被打断后状态停 `downloading`、trusted-identity 未持久化 | 干净跑完一次即稳；download-skip 门待落地（task #7） | ⏳ |
+| 14 | 重提反复重下 125MB | download 被打断后状态停 `downloading`、trusted-identity 未持久化 | 干净跑完一次即稳；download-skip 门已落地（d29d370） | ✅ |
+| 15 | forcing `Missing canonical shortwave_down/prcp_rate_or_amount`（夜间/长程时步） | GFS/IFS 累积量（ssr/apcp）16-bit GRIB 量化噪声在平段去累积出微负 delta，被标 `warn` → forcing 只收 `ok` 故剔除致缺产品 | 对齐 SHUD（`rn<0→0`、`prcp<1e-4→0`、`rh∈[0,1]`）/rSHUD：亚阈值微负记 anomaly 但保 `ok`，超阈值仍 `warn`；8cced52 + 8a8ba3d | ✅ |
+| 16 | 改 converter 逻辑后重跑，旧 canonical 不重转、forcing 仍按旧 `warn` 剔除 | `QHH_FORCE_UPSTREAM=1` 未透传进 sbatch（runner `--export` 仅带 `DATABASE_URL`）；`canonical_ready` 见任意 `met.canonical_met_product` 行即跳过重转 | 兜底：FK 守卫下删该 cycle `canonical_met_product` 行触发全量重转（§9）；透传修复记后续 issue | ⏳ |
 
-**首个真实端到端 cycle 已跑通 publish**（24h 冒烟，job 5980）：迁移→模型注册（river_segment 3738）→forcing 站点（386）→SHUD→parse（qc_passed，11431 行）→published_for_display（1633 段，return_period 诚实 `no_frequency_curve`）。当前在跑干净 GFS 7天/5min 全流程（job 5992, s3://nhms）。
+**首个真实端到端 cycle 已跑通 publish**（24h 冒烟，job 5980）：迁移→模型注册（river_segment 3738）→forcing 站点（386）→SHUD→parse（qc_passed，11431 行）→published_for_display（1633 段，return_period 诚实 `no_frequency_curve`）。
+
+**GFS 7天/5min 全流程已跑通至 `frequency_done`**（cycle 2026060400, s3://nhms）；**IFS 7天/10min 全流程已跑通至 `frequency_done`**（job 6004, river_timeseries 1,381,518 行，canonical 384 全 ok）。GFS+IFS 双源业务化端到端验证通过。
 
 ---
 
 ## 7. 通往连续正式业务化的后续步骤
 
 1. ✅ **修 sp.riv 解析 + 跑到 publish**：冒烟 24h cycle 已 published（job 5980）。
-2. ⏳ **校验 7天/5min 全流程产物**：干净 GFS（job 5992, s3://nhms）跑至 `published`，校验 DB `hydro.hydro_run`、river_timeseries（≈2004步×1633段）、return_period_result。
-3. ⏳ **发布到用户面**：`NHMS_PUBLISHED_ARTIFACT_ROOT` 由 `published-staging` 切 `/ghdc/data/nwm/published`（node-27 NFS）；计算节点无 `/ghdc`，需控制节点 copyback。
-4. ⏳ **7天 gap 审计 + 保留清理**：`NHMS_SCHEDULER_BACKFILL_ENABLED=true`、`LOOKBACK_HOURS=168`、`MAX_CYCLES_PER_SOURCE=8`；retention 先 `DRY_RUN=true`。不变量 `RETENTION_DAYS*24 > LOOKBACK_HOURS`。**注意数据量**：5min×7天≈327万行/cycle，retention 必须配套。
-5. ⏳ **加 IFS 源**（GFS 跑通后）：`QHH_CONTINUOUS_SOURCES=gfs,IFS`，`IFS_FORECAST_RESOLUTION_SEGMENTS`（3h≤144h+6h），cdo 本地裁剪（已在 PATH）。
-6. ⏳ **转连续**（等指令）：去 `--once` 或 systemd timer；并行需 `QHH_SLURM_WAIT=0`+`MAX_CYCLES≥2`。
-7. ⏳ **生产硬化**：独立生产 PostgreSQL（替换 e2e 容器）、固化 `compute.host.env`、download-skip 门、source-trust/docker 预检、监控告警。
-8. ⏳ **洪频曲线对齐**：将来建 ERA5 hindcast 洪频曲线（hourly）后，5min 预报侧 return-period 窗口需按 12 行/小时折算（`flood_frequency/frequency.py` ROWS 窗口假设 hourly）。
+2. ✅ **GFS 7天/5min 全流程**：cycle 2026060400 跑至 `frequency_done`（洪频已算、display-products 已发布）。
+3. ✅ **IFS 全流程**：job 6004 跑通至 `frequency_done`（cycle 2026060400；删旧 warn canonical 触发重转 → canonical 384 全 ok → forcing→SHUD→parse→frequency；river_timeseries 1,381,518 行）。
+4. ✅ **GFS 尾段刷新（方案A）**：用修正后的 return_period（peak `curve_duration` 167h→1h）对 GFS 既有 SHUD 输出重跑 frequency/publish，不重算 SHUD；跨标签 re-run 残留的旧 167h 孤儿 peak 行已手动清理。
+5. ⏳ **发布到用户面**：`NHMS_PUBLISHED_ARTIFACT_ROOT` 由 `published-staging` 切 `/ghdc/data/nwm/published`（node-27 NFS）；计算节点无 `/ghdc`，需控制节点 copyback。
+6. ⏳ **7天 gap 审计 + 保留清理**：`NHMS_SCHEDULER_BACKFILL_ENABLED=true`、`LOOKBACK_HOURS=168`、`MAX_CYCLES_PER_SOURCE=8`；retention 先 `DRY_RUN=true`。不变量 `RETENTION_DAYS*24 > LOOKBACK_HOURS`。**注意数据量**：5min×7天≈327万行/cycle，retention 必须配套。
+7. ⏳ **转连续**（等指令）：去 `--once` 或 systemd timer；并行需 `QHH_SLURM_WAIT=0`+`MAX_CYCLES≥2`。
+8. ⏳ **生产硬化**：独立生产 PostgreSQL（替换 e2e 容器）、固化 `compute.host.env`、`QHH_FORCE_UPSTREAM` 透传 sbatch（§6 #16）、source-trust/docker 预检、监控告警。
+9. ⏳ **洪频曲线对齐**：将来建 ERA5 hindcast 洪频曲线（hourly）后，5min 预报侧 return-period 窗口需按 12 行/小时折算（`flood_frequency/frequency.py` ROWS 窗口假设 hourly）。
 
 ---
 
@@ -190,3 +195,32 @@ psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 de
 - 位置：`workers/model_registry/qhh_production_bootstrap.py::read_qhh_output_segment_count`（commit 17f5229）。
 - 原因：旧逻辑 `rows = lines[1:]` 把首行后**所有行**当数据，既不跳列名行也不在首块 `count` 行后停。真实 SHUD `.sp.riv` 是多块（拓扑/河道类型/坐标），每块"计数行+列名行+数据行"。
 - 修法：跳过可选列名行（首 token 非段号时）→ 只读首块 `count` 行 → 忽略尾块；兼容旧格式；已补多块 fixture 单测。本例首块 1633 段。
+
+---
+
+## 9. 操作：改 converter 逻辑后强制 canonical 重转
+
+改了 `canonical_converter` 的质量/单位处理（如 §6 #15 的量化容差）后，已下载并转过的 cycle 不会自动重转——`run_qhh_cycle.sh::canonical_ready` 见任意 `met.canonical_met_product` 行即跳过，且 `QHH_FORCE_UPSTREAM=1` 当前不透传进 sbatch（§6 #16）。兜底是删该 cycle 的 canonical 行使 `canonical_ready=0`，再重跑 launcher 即在完整 sbatch env 下重转：
+
+```bash
+# 1) 删前先确认无 forcing_version_component 引用（FK 守卫），再删
+set -a; source infra/env/compute.host.env; set +a   # 提供 DATABASE_URL（仅 DB，不含 S3 凭证）
+uv run python - <<'PY'
+import os, psycopg2
+from datetime import datetime, timezone
+SRC, CT = "IFS", datetime(2026,6,4,0,0,tzinfo=timezone.utc)   # 改成目标 source/cycle
+con = psycopg2.connect(os.environ["DATABASE_URL"]); con.autocommit=False; cur=con.cursor()
+cur.execute("""SELECT count(*) FROM met.forcing_version_component fvc
+  JOIN met.canonical_met_product c ON c.canonical_product_id=fvc.canonical_product_id
+  WHERE c.source_id=%s AND c.cycle_time=%s""",(SRC,CT))
+if cur.fetchone()[0]==0:
+    cur.execute("DELETE FROM met.canonical_met_product WHERE source_id=%s AND cycle_time=%s",(SRC,CT))
+    print("deleted", cur.rowcount); con.commit()
+else:
+    con.rollback(); print("ABORT: forcing_version_component 仍引用，先处理 forcing_version")
+con.close()
+PY
+# 2) 重跑 launcher：canonical_ready=0 → 全量重转（应用新代码）→ forcing→SHUD→parse→publish
+```
+
+> ⚠️ 不要手动 `nhms-canonical convert`：手动 shell 只 source 了 `compute.host.env`（无对象存储 endpoint/凭证），读 `s3://nhms/raw/.../manifest.json` 会回退成本地相对路径 `raw` 而报 `No such file or directory`。必须走 sbatch（计算节点有完整 S3 runtime）。
