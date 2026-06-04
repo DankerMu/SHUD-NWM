@@ -68,10 +68,17 @@
 
 ## 3. Fresh Forecast Ingestion
 
-- [ ] 3.1 Harden GFS/IFS cycle discovery with source-specific lag/lookback/horizon policy, 403/unavailable handling, operator filters, and typed blocked evidence.
-- [ ] 3.2 Ensure download and canonical conversion require source-specific complete QHH forcing variable ids and per-valid-time lead coverage before marking canonical products ready.
-- [ ] 3.3 Add idempotency and retry tests for completed canonical reuse, transient download failure, source unavailable, incomplete variables, source-specific horizon handling, and reduced-scope source filters.
-- [ ] 3.4 Verify with focused adapter/canonical tests, `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py`, `uv run ruff check .`, and a dry-run evidence sample that cannot proceed to forcing when canonical coverage is incomplete.
+- [x] 3.1 Harden GFS/IFS cycle discovery with source-specific lag/lookback/horizon policy, 403/unavailable handling, operator filters, and typed blocked evidence.
+- [x] 3.2 Ensure download and canonical conversion require source-specific complete QHH forcing variable ids and per-valid-time lead coverage before marking canonical products ready.
+- [x] 3.3 Add idempotency and retry tests for completed canonical reuse, transient download failure, source unavailable, incomplete variables, source-specific horizon handling, and reduced-scope source filters.
+- [x] 3.4 Verify with focused adapter/canonical tests, `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py`, `uv run ruff check .`, and a dry-run evidence sample that cannot proceed to forcing when canonical coverage is incomplete.
+
+> Closure reconciled by m24 §P dependency gate (issue #287), 2026-06-04: issue #255 CLOSED
+> 2026-06-03; node-22 `tests/test_production_scheduler.py tests/test_orchestration_chain.py`
+> **564 passed** (522s, HEAD 9f49cc7); live evidence — m24 baseline.json shows GFS and IFS
+> `2026060400` each reached `frequency_done`, proving fresh cycle discovery → download →
+> canonical-completeness gate → forcing → SHUD → frequency end-to-end. Fresh ingestion is usable
+> by the m24 daemon (§4); gate OPEN, not BLOCKED.
 
 ### Issue #255 Evidence Floor
 

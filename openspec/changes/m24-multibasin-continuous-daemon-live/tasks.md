@@ -38,10 +38,16 @@ Evidence Floor: openspec valid; `baseline.json` present with all fields from one
 This is a **dependency gate / tracking issue** (label `dependency-gate`), not an m24 implementation
 issue. It carries no m24 code; it only gates §4.
 
-- [ ] P.1 Close (or record explicit `BLOCKED`) m23 Task 3.1–3.4 fresh GFS/IFS cycle ingestion in
+- [x] P.1 Close (or record explicit `BLOCKED`) m23 Task 3.1–3.4 fresh GFS/IFS cycle ingestion in
   its own issue. m24 §4 consumes this capability and does **not** implement ingestion.
 
 Evidence Floor: a closed/BLOCKED receipt for m23 #255; m24 §4 may not close while this is open.
+
+> Gate decision (issue #287), 2026-06-04 — **OPEN (PASS, not BLOCKED)**. Evidence: m23 #255 CLOSED
+> 2026-06-03; m23 tasks.md 3.1–3.4 reconciled/ticked; node-22
+> `tests/test_production_scheduler.py tests/test_orchestration_chain.py` **564 passed** (HEAD
+> 9f49cc7); live ingestion proven by m24 baseline.json (GFS+IFS `2026060400` each `frequency_done`).
+> §4 daemon live proof may now consume fresh ingestion; this gate no longer blocks §4.
 
 ## 1. Slurm gateway deployment + live receipts on node-22
 
