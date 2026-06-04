@@ -547,10 +547,26 @@ def read_qhh_output_segment_count(
                 "no_mutation_expected": True,
             },
         )
-    rows = lines[1:]
+    body = lines[1:]
+    # Standard SHUD .sp.riv files are multi-block: the count header is followed by a
+    # column-name line (e.g. "Index Down Type Slope Length BC"), then `count` data
+    # rows, then unrelated trailing blocks (channel types, coordinates). Skip the
+    # optional column-name line and read exactly the first block's `count` rows. A
+    # legacy single-block file (data rows immediately after the header) still works:
+    # such a first row parses as a valid segment row, not a column-name line.
+    if body:
+        _, first_raw = body[0]
+        first_parts = first_raw.split()
+        if (
+            len(first_parts) >= 6
+            and _parse_sp_riv_segment_token(first_parts[0]) is None
+            and not _sp_riv_numeric_columns_valid(first_parts[1:6])
+        ):
+            body = body[1:]
+    data_rows = body[:count]
     malformed_rows: list[dict[str, Any]] = []
     segment_tokens: list[int] = []
-    for line_number, raw in rows:
+    for line_number, raw in data_rows:
         parts = raw.split()
         if len(parts) < 6:
             malformed_rows.append({"line_number": line_number, "reason": "too_few_columns"})
@@ -571,7 +587,7 @@ def read_qhh_output_segment_count(
             path=str(source),
             details={"malformed_rows": malformed_rows[:20], "no_mutation_expected": True},
         )
-    if len(rows) != count:
+    if len(data_rows) != count:
         raise QhhProductionBootstrapError(
             "QHH_BOOTSTRAP_OUTPUT_SEGMENT_COUNT_MISMATCH",
             "QHH SHUD output river body row count does not match qhh.sp.riv header.",
@@ -579,7 +595,7 @@ def read_qhh_output_segment_count(
             path=str(source),
             details={
                 "expected_count": count,
-                "parsed_count": len(rows),
+                "parsed_count": len(data_rows),
                 "header_line_number": header_line_number,
                 "no_mutation_expected": True,
             },

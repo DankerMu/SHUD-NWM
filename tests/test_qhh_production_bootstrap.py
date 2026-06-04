@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from collections.abc import Callable, Iterator
@@ -307,6 +308,44 @@ def test_read_qhh_output_segment_count_rejects_non_exact_segment_tokens(tmp_path
     assert exc_info.value.details["missing_segment_tokens"] == [2]
     assert exc_info.value.details["extra_segment_tokens"] == [3]
     assert exc_info.value.details["no_mutation_expected"] is True
+
+
+def test_read_qhh_output_segment_count_accepts_multiblock_shud_format(tmp_path: Path) -> None:
+    input_dir = tmp_path / "qhh"
+    input_dir.mkdir()
+    sp_riv = input_dir / "qhh.sp.riv"
+    # Standard SHUD layout: count header, column-name line, `count` data rows, then
+    # unrelated trailing blocks (channel types, coordinates) that must be ignored.
+    sp_riv.write_text(
+        "\n".join(
+            [
+                "3\t6",
+                "Index\tDown\tType\tSlope\tLength\tBC",
+                "1\t2\t2\t0.001\t100\t0",
+                "2\t3\t2\t-0.002\t200\t0",
+                "3\t4\t2\t0.003\t300\t0",
+                "5\t9",
+                "ChannelType\tBankSlope\tWidth\tDepth\tSinuosity\tManningN\tCwr\tKsatH\tBedThick",
+                "1\t1\t10\t2\t1\t0.03\t0.6\t0.0001\t0.1",
+                "2\t1\t12\t3\t1\t0.03\t0.6\t0.0001\t0.1",
+                "3\t1\t14\t4\t1\t0.03\t0.6\t0.0001\t0.1",
+                "4\t1\t16\t5\t1\t0.03\t0.6\t0.0001\t0.1",
+                "5\t1\t18\t6\t1\t0.03\t0.6\t0.0001\t0.1",
+                "3\t6",
+                "From.x\tFrom.y\tTo.x\tTo.y\tArea\tElev",
+                "0\t0\t1\t1\t10\t100",
+                "1\t1\t2\t2\t20\t200",
+                "2\t2\t3\t3\t30\t300",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    count, checksum = read_qhh_output_segment_count(sp_riv, input_dir)
+
+    assert count == 3
+    assert checksum == hashlib.sha256(sp_riv.read_bytes()).hexdigest()
 
 
 def test_bootstrap_rejects_relative_traversal_project_path(tmp_path: Path) -> None:
