@@ -11,6 +11,7 @@ from packages.common.state_lineage import (
     LINEAGE_PACKAGE_VERSION_MISMATCH,
     LINEAGE_SOURCE_MISMATCH,
     STATE_QC_FAILED,
+    STATE_TOO_STALE,
 )
 from packages.common.state_manager import StateSnapshot
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig
@@ -270,6 +271,37 @@ def test_qc_failure_cold_start_carries_code(tmp_path: Path) -> None:
 
     assert selection.state_id is None
     assert selection.rejection_code == STATE_QC_FAILED
+
+
+def test_stale_cold_start_reports_staleness_not_carried_lineage_code(tmp_path: Path) -> None:
+    # A younger candidate is lineage-rejected (wrong source), and the only older
+    # candidate is past the hard staleness threshold -> terminal cold_start_stale_state.
+    # The rejection_code must reflect the PRIMARY cause (staleness) via STATE_TOO_STALE,
+    # NOT the carried-forward LINEAGE_SOURCE_MISMATCH of the younger candidate (which
+    # would falsely conflate quality=stale with a lineage rejection).
+    younger_bad_lineage = _state(
+        "state_demo_model_2026043000",
+        "2026-04-30T00:00:00Z",  # ~1 day before cycle, but wrong source
+        source_id="IFS",
+    )
+    older_too_stale = _state(
+        "state_demo_model_2026030100",
+        "2026-03-01T00:00:00Z",  # > 30 days before cycle -> cold_start_stale_state
+        source_id="GFS",
+    )
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([younger_bad_lineage, older_too_stale]))
+
+    selection = orchestrator._select_forecast_initial_state(
+        model_id="demo_model",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        source_id="gfs",
+    )
+
+    assert selection.state_id is None
+    assert selection.quality == "cold_start_stale_state"
+    assert selection.rejection_code == STATE_TOO_STALE
+    assert selection.rejection_code != LINEAGE_SOURCE_MISMATCH
 
 
 def _orchestrator(

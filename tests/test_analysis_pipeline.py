@@ -307,6 +307,13 @@ def test_analysis_run_creation_uses_scenario_and_latest_init_state(tmp_path: Pat
     assert manifest["initial_state"]["ic_file_uri"] == state.state_uri
     assert manifest["runtime"]["init_mode"] == 3
     assert state_manager.requests == [("demo_model", _dt("2026-05-01T00:00:00Z"))]
+    # The analysis segment is built from delayed ERA5 reanalysis; the manifest's
+    # causality marker MUST be honest about that and never claim a real-time causal
+    # nowcast (no over-claim of no_future_leak via a non-existent causal path).
+    causality = manifest["forcing_causality"]
+    assert causality["mode"] == "delayed_reanalysis"
+    assert causality["mode"] != "causal"
+    assert causality["latency_minutes"] > 0
 
 
 def test_analysis_duplicate_prevention_rejects_before_submission(tmp_path: Path) -> None:

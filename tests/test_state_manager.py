@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from packages.common.state_manager import (
     assess_freshness,
     state_snapshot_id,
 )
+from packages.common.state_qc import MAX_STATE_IC_BYTES
 
 
 class FakeStateSnapshotRepository:
@@ -174,6 +176,28 @@ def test_state_snapshot_qc_fail_keeps_usable_false(
     assert repository.snapshots[result.state_id].usable_flag is False
     assert repository.qc_results[-1]["passed"] is False
     assert repository.qc_results[-1]["checks_json"]["error_code"] == "STATE_FILE_MISSING"
+
+
+def test_oversized_state_object_fails_qc_without_crash(
+    tmp_path: Path,
+    manager: StateManager,
+    repository: FakeStateSnapshotRepository,
+) -> None:
+    # An oversized stored IC object must fail QC with STATE_FILE_TOO_LARGE (bounded
+    # read / OOM protection), not be read unboundedly into memory.
+    result = _save_ic(tmp_path, manager, content=b"valid-state")
+    snapshot = repository.snapshots[result.state_id]
+    # Overwrite the stored object with content exceeding the read limit.
+    oversized = b"1 0.1\n" * ((MAX_STATE_IC_BYTES // 6) + 16)
+    manager.object_store.write_bytes_atomic(snapshot.state_uri, oversized)
+    # Keep the recorded checksum consistent so the size guard (not checksum) trips.
+    repository.snapshots[result.state_id] = replace(snapshot, checksum=sha256_bytes(oversized))
+
+    passed = manager.run_qc(result.state_id)
+
+    assert passed is False
+    assert repository.snapshots[result.state_id].usable_flag is False
+    assert repository.qc_results[-1]["checks_json"]["error_code"] == "STATE_FILE_TOO_LARGE"
 
 
 def test_latest_usable_state_selects_max_valid_time(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from packages.common.state_qc import run_state_variable_qc
+from packages.common.state_qc import MAX_STATE_IC_BYTES, run_state_variable_qc
 
 
 def _write_ic(
@@ -167,3 +167,71 @@ def test_water_balance_absent_is_skipped(tmp_path: Path) -> None:
     result = run_state_variable_qc(ic, expected_mesh_count=1, expected_river_count=1)
     assert result.passed is True
     assert result.checks["water_balance"] == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Bounded read (OOM protection): oversized / binary input -> QC fail, never crash
+# ---------------------------------------------------------------------------
+
+
+def test_oversized_ic_fails_without_crash(tmp_path: Path) -> None:
+    # A file larger than MAX_STATE_IC_BYTES must fail QC (parse failure), not be read
+    # unboundedly into memory. Write a valid header then pad past the limit.
+    path = tmp_path / "huge.cfg.ic"
+    header = "2\t1\t27000000.000000\n"
+    padding = "1\t0.1\n" * 8  # a few valid data rows
+    body = header + padding
+    # Pad with a long comment-free numeric line repeated to exceed the byte limit.
+    filler = ("2 0.1\n") * ((MAX_STATE_IC_BYTES // 6) + 16)
+    path.write_text(body + filler, encoding="utf-8")
+    assert path.stat().st_size > MAX_STATE_IC_BYTES
+
+    result = run_state_variable_qc(path)
+    assert result.passed is False
+    assert result.reason is not None
+    assert "limit" in (result.reason or "").lower() or "exceeds" in (result.reason or "").lower()
+
+
+def test_binary_non_utf8_ic_fails_without_crash(tmp_path: Path) -> None:
+    # Non-UTF-8 / binary garbage must be a QC failure, not a UnicodeDecodeError crash.
+    path = tmp_path / "binary.cfg.ic"
+    path.write_bytes(b"\xff\xfe\x00\x01\x02 not valid utf-8 \x80\x81")
+
+    result = run_state_variable_qc(path)
+    assert result.passed is False
+    assert result.reason is not None
+
+
+# ---------------------------------------------------------------------------
+# Missing state columns + header/body lake inconsistency -> QC fail
+# ---------------------------------------------------------------------------
+
+
+def test_missing_state_columns_row_fails(tmp_path: Path) -> None:
+    # A river row with only the element id and no state column is structurally short:
+    # missing state columns -> QC fail (not silently range-checked on absent columns).
+    path = tmp_path / "shortrow.cfg.ic"
+    ic = _write_ic(
+        path,
+        mesh=1,
+        river=1,
+        mesh_rows=[[1.0, 0.1, 0.1, 0.1, 0.1, 0.1]],
+        river_rows=[[1.0]],  # id only, missing river_stage state column
+    )
+    result = run_state_variable_qc(ic, expected_mesh_count=1, expected_river_count=1)
+    assert result.passed is False
+    assert "missing state columns" in (result.reason or "")
+
+
+def test_header_declares_lake_but_body_missing_lake_fails(tmp_path: Path) -> None:
+    # Header reports lake_count=1 but the body has no lake row. Silently truncating to
+    # an empty lake block masks a corrupt/truncated restart file -> must be QC fail.
+    path = tmp_path / "lake_missing.cfg.ic"
+    # mesh=1, river=1 rows present, but no lake row despite header lake=1.
+    header = "1\t1\t1\t27000000.000000\n"
+    body = "1\t0.1\t0.1\t0.1\t0.1\t0.1\n1\t0.1\n"  # mesh row + river row only
+    path.write_text(header + body, encoding="utf-8")
+
+    result = run_state_variable_qc(path, expected_mesh_count=1, expected_river_count=1, expected_lake_count=1)
+    assert result.passed is False
+    assert "lake" in (result.reason or "").lower()

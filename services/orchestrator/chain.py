@@ -28,6 +28,7 @@ from packages.common.state_lineage import (
     LINEAGE_PACKAGE_VERSION_MISMATCH,
     LINEAGE_SOURCE_MISMATCH,
     STATE_QC_FAILED,
+    STATE_TOO_STALE,
 )
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
@@ -39,6 +40,7 @@ from services.orchestrator.production_contract import (
     production_status_for,
 )
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
+from services.orchestrator.time_consistency import check_three_way_time_consistency
 from services.slurm_gateway.config import SlurmGatewaySettings
 from workers.canonical_converter.converter import (
     evaluate_canonical_readiness,
@@ -62,6 +64,14 @@ COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published"
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
+# ERA5 reanalysis is published with a multi-day production delay; the analysis
+# segment is therefore built from *delayed reanalysis*, never a real-time causal
+# nowcast. We record a conservative default latency (5 days, ERA5T-style "initial
+# release" lag) so the causality marker is honest about how far the reanalysis
+# trails real time. Overridable via ERA5_REANALYSIS_LATENCY_MINUTES.
+# TODO(M24): source the exact per-cycle latency from the ERA5 download metadata
+# (publish_time - segment_end) once it is recorded; until then this is the floor.
+DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = 5 * 24 * 60
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 MAX_CANDIDATE_STATE_TASK_RESULTS = 16
@@ -375,54 +385,56 @@ def _ensure_segment_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+def _era5_reanalysis_latency_minutes() -> int:
+    """Recorded latency (minutes) by which ERA5 reanalysis trails its own segment.
+
+    Overridable via ``ERA5_REANALYSIS_LATENCY_MINUTES``; falls back to a conservative
+    default when unset or unparseable, so the analysis causality marker always carries
+    a non-null latency. (TODO M24: replace with the exact per-cycle publish lag once
+    the ERA5 download metadata records it.)
+    """
+
+    raw = os.getenv("ERA5_REANALYSIS_LATENCY_MINUTES", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
+
+
 def _analysis_forcing_causality(latency_minutes: int | None = None) -> dict[str, Any]:
     """Causality marker recorded on the analysis context/manifest.
 
-    Real-time daemon operation is ``causal`` (no future leak: cycle N's ``0..Δ`` lead
-    or best-available nowcast). ``delayed_reanalysis`` is permitted only when an
-    explicit reanalysis latency is supplied, and the latency is recorded so consumers
-    can reason about how far the reanalysis trails the segment.
+    The marker must honestly reflect the *actual* forcing source of the segment.
+
+    The analysis segment is currently built exclusively from whole-day ERA5
+    reanalysis (``ANALYSIS_SOURCE_ID == "ERA5"``, stage chain
+    ``era5_download -> analysis_*``). ERA5 is historical data published with a
+    multi-day delay, so it is ``delayed_reanalysis`` with a recorded latency -- it is
+    NOT a real-time ``causal`` nowcast and must never be marked as such. Callers that
+    omit ``latency_minutes`` for the ERA5 analysis path therefore get the default
+    recorded reanalysis latency, not a causal marker.
+
+    ``causal`` is reserved for a *future* real-time implementation (cycle-N lead /
+    nowcast with no future leak and, by construction, no reanalysis latency). When
+    that path exists it will pass an explicit ``latency_minutes=0``-style causal
+    marker; until then the ERA5 segment is always ``delayed_reanalysis``.
     """
 
-    if latency_minutes is None:
-        return {"mode": FORCING_CAUSALITY_CAUSAL, "latency_minutes": None, "no_future_leak": True}
+    resolved_latency = _era5_reanalysis_latency_minutes() if latency_minutes is None else int(latency_minutes)
     return {
         "mode": FORCING_CAUSALITY_DELAYED_REANALYSIS,
-        "latency_minutes": int(latency_minutes),
+        "latency_minutes": resolved_latency,
         "no_future_leak": True,
     }
 
 
-def _check_three_way_time_consistency(
-    *,
-    snapshot_valid_time: datetime | None,
-    ic_header_minute_time: float | None,
-    run_start_time: datetime | None,
-) -> str | None:
-    """Verify snapshot valid_time, ``.cfg.ic`` header minute-time, and run start agree.
-
-    All three must equal ``T_{N+1}`` (to whole-minute resolution). Returns a human
-    reason string on mismatch (a recorded blocker), or None when consistent. Inputs
-    that are unavailable (None) are skipped so partial metadata is not a false blocker.
-    """
-
-    times: list[tuple[str, float]] = []
-    if snapshot_valid_time is not None:
-        times.append(("snapshot_valid_time", round(_ensure_segment_utc(snapshot_valid_time).timestamp() / 60.0)))
-    if ic_header_minute_time is not None:
-        times.append(("ic_header_minute_time", round(float(ic_header_minute_time))))
-    if run_start_time is not None:
-        times.append(("run_start_time", round(_ensure_segment_utc(run_start_time).timestamp() / 60.0)))
-    if len(times) < 2:
-        return None
-    reference_name, reference_minute = times[0]
-    for name, minute in times[1:]:
-        if minute != reference_minute:
-            return (
-                f"warm-start time mismatch: {name}={minute} != {reference_name}={reference_minute} "
-                "(minutes since epoch); restart at the wrong time is a blocker."
-            )
-    return None
+# Re-exported from the shared module so chain and the forecast runtime share one
+# implementation (single source of truth; see services.orchestrator.time_consistency).
+_check_three_way_time_consistency = check_three_way_time_consistency
 
 
 def _validate_state_lineage(
@@ -4029,9 +4041,13 @@ class ForecastOrchestrator:
                 hard_threshold_days=self.config.state_hard_stale_threshold_days,
             )
             if quality == "cold_start_stale_state":
-                # Older states are even staler; stop and record stale cold start.
+                # Older states are even staler; stop and record stale cold start. The
+                # primary cause here is staleness, so the rejection_code is the explicit
+                # STATE_TOO_STALE marker -- never a carried-forward LINEAGE_* code from a
+                # younger candidate, which would falsely conflate quality=stale with a
+                # lineage rejection.
                 return InitialStateSelection(
-                    None, None, None, None, quality, rejection_code=last_rejection_code
+                    None, None, None, None, quality, rejection_code=STATE_TOO_STALE
                 )
 
             rejection_code = _validate_state_lineage(

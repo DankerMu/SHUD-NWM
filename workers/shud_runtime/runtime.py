@@ -29,6 +29,7 @@ from packages.common.safe_fs import (
 )
 from packages.common.shud_preflight import check_shud_executable
 from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateSnapshot, assess_freshness
+from services.orchestrator.time_consistency import check_three_way_time_consistency as _check_three_way_time_consistency
 
 
 class SHUDRuntimeError(RuntimeError):
@@ -779,10 +780,49 @@ class SHUDRuntime:
         manifest: dict[str, Any],
         ic_header_minute_time: float | None,
     ) -> None:
+        """Enforce warm-start time consistency on the production consume path.
+
+        Two legitimate cases (M24 §2 Lane 2):
+
+        - **Warm-continuity / exact successor**: the snapshot is the prior cycle's
+          state recorded at ``T_{N+1}`` and ``valid_time == run start_time`` (the run
+          consumes it as the precise next-cycle init). Here all three of snapshot
+          ``valid_time`` / native ``.cfg.ic`` header minute-time / run ``start_time``
+          must agree exactly; any mismatch is a recorded ``WARM_START_TIME_MISMATCH``
+          blocker, not a silent restart at the wrong time. The three-way check is run
+          via the shared ``_check_three_way_time_consistency`` helper.
+        - **Degraded / stale reuse**: a forecast legitimately reuses an *older* state
+          (``valid_time < run start_time``); the header is deliberately re-stamped to
+          the run start downstream. Here only the snapshot/header equality is
+          enforced (the artifact must be the state it claims to be); the run-start leg
+          is intentionally NOT forced.
+        """
+
         snapshot_valid_time = _parse_time_or_none((manifest.get("initial_state") or {}).get("valid_time"))
         if snapshot_valid_time is None or ic_header_minute_time is None:
             return
+
+        run_start_time = _parse_time_or_none(manifest.get("start_time"))
         snapshot_minute = round(_ensure_utc(snapshot_valid_time).timestamp() / 60.0)
+        run_start_minute = (
+            round(_ensure_utc(run_start_time).timestamp() / 60.0) if run_start_time is not None else None
+        )
+        is_warm_continuity = run_start_minute is not None and snapshot_minute == run_start_minute
+
+        if is_warm_continuity:
+            # Exact successor: enforce strict snapshot / header / run-start three-way
+            # equality through the shared helper (single source of truth).
+            reason = _check_three_way_time_consistency(
+                snapshot_valid_time=snapshot_valid_time,
+                ic_header_minute_time=ic_header_minute_time,
+                run_start_time=run_start_time,
+            )
+            if reason is not None:
+                raise SHUDRuntimeError("WARM_START_TIME_MISMATCH", reason)
+            return
+
+        # Degraded/stale reuse of an older state: only the snapshot/header identity is
+        # enforced; the header is re-stamped to run start downstream by design.
         header_minute = round(ic_header_minute_time)
         if snapshot_minute != header_minute:
             raise SHUDRuntimeError(

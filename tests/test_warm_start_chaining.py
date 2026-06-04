@@ -72,11 +72,42 @@ def test_update_ic_step_rejects_non_positive_window() -> None:
         _analysis_update_ic_step_minutes(_dt("2026-05-01T06:00:00Z"), _dt("2026-05-01T00:00:00Z"))
 
 
-def test_analysis_forcing_causality_marker_defaults_to_causal() -> None:
-    causal = _analysis_forcing_causality()
-    assert causal == {"mode": "causal", "latency_minutes": None, "no_future_leak": True}
-    delayed = _analysis_forcing_causality(latency_minutes=720)
-    assert delayed == {"mode": "delayed_reanalysis", "latency_minutes": 720, "no_future_leak": True}
+def test_analysis_forcing_causality_marker_is_delayed_reanalysis_for_era5(monkeypatch: Any) -> None:
+    # The analysis segment is built from delayed ERA5 reanalysis (the only
+    # implementation), so the default marker MUST be delayed_reanalysis with a
+    # recorded latency -- never causal (which would over-claim no future leak from a
+    # real-time nowcast that does not exist yet).
+    from services.orchestrator import chain as chain_module
+
+    monkeypatch.delenv("ERA5_REANALYSIS_LATENCY_MINUTES", raising=False)
+    marker = _analysis_forcing_causality()
+    assert marker["mode"] == "delayed_reanalysis"
+    assert marker["mode"] != "causal"
+    assert marker["latency_minutes"] == chain_module.DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
+    assert marker["latency_minutes"] > 0
+    assert marker["no_future_leak"] is True
+
+    # Explicit latency is recorded verbatim, still delayed_reanalysis.
+    explicit = _analysis_forcing_causality(latency_minutes=720)
+    assert explicit == {"mode": "delayed_reanalysis", "latency_minutes": 720, "no_future_leak": True}
+
+
+def test_analysis_forcing_causality_latency_is_env_overridable(monkeypatch: Any) -> None:
+    monkeypatch.setenv("ERA5_REANALYSIS_LATENCY_MINUTES", "4320")
+    marker = _analysis_forcing_causality()
+    assert marker == {"mode": "delayed_reanalysis", "latency_minutes": 4320, "no_future_leak": True}
+
+
+def test_future_causal_mode_carries_no_reanalysis_latency() -> None:
+    # Semantic guard for the FUTURE real-time causal path: a true causal nowcast has
+    # no future leak AND, by construction, no reanalysis latency. ERA5 today cannot
+    # satisfy this; this asserts the reserved mode's contract so it is not conflated
+    # with delayed_reanalysis.
+    from services.orchestrator.chain import FORCING_CAUSALITY_CAUSAL, FORCING_CAUSALITY_DELAYED_REANALYSIS
+
+    assert FORCING_CAUSALITY_CAUSAL == "causal"
+    assert FORCING_CAUSALITY_DELAYED_REANALYSIS == "delayed_reanalysis"
+    assert FORCING_CAUSALITY_CAUSAL != FORCING_CAUSALITY_DELAYED_REANALYSIS
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +299,63 @@ def test_consume_materializes_canonical_ic_to_project_name(tmp_path: Path) -> No
     assert manifest["runtime"]["init_mode"] == 3
     # Header is restamped to the run start (== T_{N+1} here).
     assert round(_read_cfg_ic_header_minute(project_ic)) == round(_minute_time(t_next))
+
+
+def test_consume_warm_continuity_blocks_on_three_way_run_start_mismatch(tmp_path: Path) -> None:
+    # PRODUCTION-PATH three-way enforcement: the snapshot is consumed as the exact
+    # successor (valid_time == run start_time == T_{N+1}, quality=fresh), but the
+    # native .cfg.ic header minute-time disagrees with both. Warm-continuity demands
+    # snapshot valid_time == header == run start; the mismatch must be a recorded
+    # WARM_START_TIME_MISMATCH blocker on the production consume path, not a silent
+    # restart. (Reverting the production wiring of _check_three_way_time_consistency
+    # makes this test red.)
+    t_next = "2026-05-02T00:00:00Z"
+    header_wrong = "2026-05-02T06:00:00Z"  # header off by 6h from snapshot/run-start
+    ic_content = f"2 1 {_minute_time(header_wrong):.6f}\n1 0.1\n2 0.2\n1 0.0\n".encode()
+    state = _ic_state(t_next, ic_content)
+    state_manager = FakeStateManager([state])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    (object_root / state.state_uri).parent.mkdir(parents=True, exist_ok=True)
+    (object_root / state.state_uri).write_bytes(ic_content)
+
+    # valid_time == start_time == T_{N+1} -> warm-continuity (exact successor).
+    manifest = _consume_manifest(state, start_time=t_next, valid_time=t_next, quality="fresh")
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(Exception) as excinfo:
+        runtime._stage_initial_state(manifest, input_dir)
+    assert "WARM_START_TIME_MISMATCH" in str(getattr(excinfo.value, "error_code", "")) or "mismatch" in str(
+        excinfo.value
+    )
+
+
+def test_consume_degraded_reuse_of_older_state_is_not_three_way_blocked(tmp_path: Path) -> None:
+    # Legitimate degraded/stale reuse: an OLDER state (valid_time < run start_time) is
+    # reused; its native header equals its own valid_time but NOT the run start (which
+    # is intentionally re-stamped downstream). The three-way run-start leg must NOT be
+    # forced here -- this must succeed, not be a false WARM_START_TIME_MISMATCH.
+    snapshot_valid = "2026-04-25T00:00:00Z"  # older than run start
+    run_start = "2026-05-02T00:00:00Z"
+    # Native header agrees with the snapshot's own valid_time (it is the state it claims).
+    ic_content = f"2 1 {_minute_time(snapshot_valid):.6f}\n1 0.1\n2 0.2\n1 0.0\n".encode()
+    state = _ic_state(snapshot_valid, ic_content)
+    state_manager = FakeStateManager([state])
+    runtime, object_root, workspace = _runtime(tmp_path, state_manager)
+    (object_root / state.state_uri).parent.mkdir(parents=True, exist_ok=True)
+    (object_root / state.state_uri).write_bytes(ic_content)
+
+    manifest = _consume_manifest(
+        state, start_time=run_start, valid_time=snapshot_valid, quality="degraded_stale_init_state"
+    )
+    input_dir = workspace / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    # No raise: degraded reuse of an older state is allowed; header re-stamped to run start.
+    runtime._stage_initial_state(manifest, input_dir)
+    project_ic = input_dir / "demo.cfg.ic"
+    assert project_ic.exists()
+    assert round(_read_cfg_ic_header_minute(project_ic)) == round(_minute_time(run_start))
 
 
 def test_consume_blocks_on_native_header_snapshot_mismatch(tmp_path: Path) -> None:

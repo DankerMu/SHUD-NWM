@@ -36,6 +36,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Upper bound (bytes) on a SHUD ``.cfg.ic`` state file the QC parser will read into
+# memory. Real per-basin restart states are far smaller; a file above this bound is
+# treated as a QC failure (corrupt / wrong artifact) rather than read unboundedly into
+# memory (OOM protection). 64 MiB matches the limited-read ceiling used elsewhere.
+MAX_STATE_IC_BYTES = 64 * 1024 * 1024
+
 # Mesh state-variable column layout (SHUD element IC columns, by position).
 # Index 0 is the element id; storage/stage state columns follow. These are the
 # columns that must be finite and non-negative (depths/storages cannot be < 0).
@@ -138,7 +144,18 @@ def _parse_ic_file(path: Path) -> tuple[list[list[float]], list[list[float]], li
     unusable file (empty, no numeric rows, non-numeric tokens in data rows).
     """
 
-    raw = path.read_text(encoding="utf-8", errors="strict")
+    # Bounded read (OOM protection): read at most one byte past the limit so an
+    # oversized file is detected without being slurped whole into memory. The path here
+    # is a trusted local IC file (the snapshot layer stages it before calling), so a
+    # plain bounded read is used rather than the no-follow safe-fs reader (which would
+    # reject legitimate symlinked temp dirs such as macOS /tmp).
+    data = _read_bytes_limited(path, max_bytes=MAX_STATE_IC_BYTES)
+    if len(data) > MAX_STATE_IC_BYTES:
+        raise ValueError(f"IC file exceeds size limit of {MAX_STATE_IC_BYTES} bytes")
+    try:
+        raw = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"IC file is not valid UTF-8: {error}") from error
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
     if not lines:
         raise ValueError("empty IC file")
@@ -167,29 +184,53 @@ def _parse_ic_file(path: Path) -> tuple[list[list[float]], list[list[float]], li
     mesh_rows = data_rows[:mesh_count]
     river_rows = data_rows[mesh_count : mesh_count + river_count]
     lake_rows: list[list[float]] = []
-    if lake_count > 0 and len(data_rows) >= total_expected:
+    if lake_count > 0:
+        # The header declares lakes; the body MUST contain them. A short body is a
+        # structural inconsistency (truncated / wrong artifact), not an empty-lake
+        # state -- silently dropping the lakes would mask a corrupt restart file.
+        if len(data_rows) < total_expected:
+            raise ValueError(
+                f"header declares lake_count={lake_count} but body has only "
+                f"{len(data_rows)} rows (< {total_expected} = mesh+river+lake)"
+            )
         lake_rows = data_rows[mesh_count + river_count : total_expected]
     return mesh_rows, river_rows, lake_rows
+
+
+def _read_bytes_limited(path: Path, *, max_bytes: int) -> bytes:
+    """Read at most ``max_bytes + 1`` bytes from a trusted local IC file.
+
+    Reading one byte past the limit lets the caller detect (and reject) an oversized
+    file without ever materialising more than ``max_bytes + 1`` bytes in memory.
+    """
+
+    with open(path, "rb") as handle:
+        return handle.read(max_bytes + 1)
 
 
 def _header_counts(header: Sequence[str]) -> tuple[int, int, int] | None:
     """Extract (mesh, river, lake) counts from the header tokens.
 
-    SHUD IC headers lead with integer element counts; the trailing token is a
-    fractional minute-time. We take the first up-to-three integer-valued tokens as
-    (mesh, river, lake). lake defaults to 0 when absent.
+    SHUD IC headers lead with integer element counts and end with a minute-time token.
+    The minute-time may itself be integer-valued (e.g. ``27000000.000000``), so it
+    cannot be distinguished from a count by integer-ness alone. We therefore take the
+    LAST numeric token as the minute-time and the integer-valued tokens BEFORE it as
+    the (mesh, river, lake) counts. lake defaults to 0 when absent.
     """
 
+    numeric = [value for value in (_as_float(token) for token in header) if value is not None]
+    if len(numeric) < 2:
+        # Need at least one count token plus the trailing minute-time.
+        return None
+    # Drop the trailing minute-time; the remaining tokens are the integer counts.
+    count_values = numeric[:-1]
     ints: list[int] = []
-    for token in header:
-        value = _as_float(token)
-        if value is None:
-            continue
-        if float(value).is_integer():
-            ints.append(int(value))
-        else:
-            # First fractional token marks the minute-time; counts precede it.
+    for value in count_values:
+        if not float(value).is_integer():
+            # A fractional token among the counts marks an earlier minute-time / malformed
+            # header; counts must precede it.
             break
+        ints.append(int(value))
         if len(ints) == 3:
             break
     if not ints:
@@ -237,7 +278,14 @@ def _check_block_range(
 
     block_report: dict[str, Any] = {"rows": len(rows), "violations": 0}
     report[kind] = block_report
+    # Each row must carry the element id (column 0) plus every expected state column.
+    # A short row means missing state variables -- a structural QC failure, not a row
+    # to be silently range-checked on whatever columns happen to be present.
+    min_columns = 1 + len(columns)
     for index, row in enumerate(rows):
+        if len(row) < min_columns:
+            block_report["violations"] += 1
+            return f"{kind} row {index} missing state columns (have {len(row)}, need >= {min_columns})"
         # Validate all columns are finite; element id is column 0.
         for col_index, value in enumerate(row):
             if not math.isfinite(value):

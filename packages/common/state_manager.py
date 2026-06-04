@@ -11,7 +11,7 @@ from typing import Any, Protocol
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
 from packages.common.state_lineage import STATE_QC_FAILED
-from packages.common.state_qc import run_state_variable_qc
+from packages.common.state_qc import MAX_STATE_IC_BYTES, run_state_variable_qc
 
 
 class StateManagerError(RuntimeError):
@@ -255,6 +255,17 @@ class StateManager:
             if size_bytes <= 0:
                 checks.update({"passed": False, "error_code": "STATE_FILE_EMPTY", "message": "State file is empty."})
                 return checks
+            if size_bytes > MAX_STATE_IC_BYTES:
+                checks.update(
+                    {
+                        "passed": False,
+                        "error_code": "STATE_FILE_TOO_LARGE",
+                        "message": (
+                            f"State file size {size_bytes} bytes exceeds limit of {MAX_STATE_IC_BYTES} bytes."
+                        ),
+                    }
+                )
+                return checks
 
             actual_checksum = self.object_store.checksum(snapshot.state_uri)
             checks["actual_checksum"] = actual_checksum
@@ -296,13 +307,23 @@ class StateManager:
     def _run_state_variable_qc(self, snapshot: StateSnapshot) -> Any:
         """Parse the IC object and run SHUD state-variable QC.
 
-        Expected element counts are not available at the snapshot layer in this Lane,
-        so structural + range/non-negative checks run with counts=None. A parse
-        failure is reported as a QC failure (never raised) by run_state_variable_qc.
+        Production QC scope (honest boundaries):
+
+        - Expected element counts are NOT available at the snapshot layer in this Lane,
+          so QC runs with ``counts=None``: the row-count dimension is NOT exercised in
+          production; only structure / range / non-negativity are enforced here.
+        - Selection-time ``state_variable_qc_passed`` is not re-checked by the
+          production ``StateManager`` (trust-through of the save-time usable_flag), and
+          the restart first-step water-balance check is skipped (no first-step
+          diagnostics wired this Lane).
+        - The IC object is read with a hard byte bound (``MAX_STATE_IC_BYTES``) so a
+          corrupt / oversized artifact fails QC instead of reading unboundedly into
+          memory. A parse failure is reported as a QC failure (never raised) by
+          ``run_state_variable_qc``.
         """
 
         try:
-            content = self.object_store.read_bytes(snapshot.state_uri)
+            content = self.object_store.read_bytes_limited(snapshot.state_uri, max_bytes=MAX_STATE_IC_BYTES)
         except (OSError, ObjectStoreError, ValueError) as error:
             from packages.common.state_qc import StateQCResult
 

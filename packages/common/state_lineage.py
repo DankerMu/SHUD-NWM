@@ -23,6 +23,12 @@ LINEAGE_MAX_LEAD_EXCEEDED = "LINEAGE_MAX_LEAD_EXCEEDED"
 # / water-balance checks) and is therefore unusable.
 STATE_QC_FAILED = "STATE_QC_FAILED"
 
+# The newest usable state is older than the hard staleness threshold, so selection
+# falls back to a stale cold start. This is the *primary cause* marker for the
+# ``cold_start_stale_state`` terminal: it must not be conflated with a lineage
+# rejection of some younger candidate (staleness, not lineage, drove the cold start).
+STATE_TOO_STALE = "STATE_TOO_STALE"
+
 
 REJECTION_CODES = frozenset(
     {
@@ -30,5 +36,6 @@ REJECTION_CODES = frozenset(
         LINEAGE_PACKAGE_VERSION_MISMATCH,
         LINEAGE_MAX_LEAD_EXCEEDED,
         STATE_QC_FAILED,
+        STATE_TOO_STALE,
     }
 )
