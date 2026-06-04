@@ -31,11 +31,21 @@ import sys
 from datetime import UTC, datetime
 
 path, status, reason, *pairs = sys.argv[1:]
-payload = {
-    "status": status,
-    "reason": reason,
-    "recorded_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-}
+# Merge onto any existing state so runner-written fields (e.g. slurm_job_id,
+# slurm_log_dir, submitted_at) survive the cycle script's status updates.
+# Without this the slurm executor loses the job id and its crash-recovery
+# reconciliation can misjudge an active job and re-submit a duplicate cycle.
+payload = {}
+try:
+    with open(path, encoding="utf-8") as handle:
+        existing = json.load(handle)
+    if isinstance(existing, dict):
+        payload.update(existing)
+except (FileNotFoundError, json.JSONDecodeError):
+    pass
+payload["status"] = status
+payload["reason"] = reason
+payload["recorded_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 for pair in pairs:
     key, value = pair.split("=", 1)
     payload[key] = value
