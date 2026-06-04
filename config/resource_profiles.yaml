@@ -14,3 +14,11 @@ resource_profiles:
       memory_gb: 256
       walltime: "12:00:00"
       shud_threads: 64
+    m24_smoke:
+      nodes: 1
+      ntasks: 1
+      cpus_per_task: 1
+      memory_gb: 1
+      walltime: "00:02:00"
+      max_concurrent: 1
+      shud_threads: 1

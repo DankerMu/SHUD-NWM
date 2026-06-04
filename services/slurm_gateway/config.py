@@ -27,6 +27,7 @@ DEFAULT_JOB_TYPE_TEMPLATES = {
     "parse_analysis_output": "parse_analysis_output.sbatch",
     "save_state_snapshot": "save_state_snapshot.sbatch",
     "hindcast": "hindcast.sbatch",
+    "smoke": "smoke.sbatch",
 }
 
 
