@@ -394,6 +394,182 @@ def test_extract_max_forecast_q_returns_peak_time_per_segment() -> None:
         assert result["seg_002"][0] == 120.0
 
 
+def _insert_stale_result_row(
+    session: Session,
+    *,
+    segment_id: str,
+    valid_time: datetime,
+    duration: str,
+    max_over_window: bool,
+    q_value: float = 999.0,
+) -> None:
+    session.execute(
+        text(
+            """
+            INSERT INTO flood.return_period_result (
+                run_id, scenario_id, basin_version_id, river_network_version_id,
+                model_id, river_segment_id, valid_time, duration, q_value, q_unit,
+                return_period, warning_level, source_id, cycle_time, max_over_window,
+                quality_flag
+            )
+            VALUES (
+                'forecast_run', 'scenario_v1', 'basin_v1', 'rnv_v1',
+                'model_v1', :segment_id, :valid_time, :duration, :q_value, 'm3/s',
+                50.0, 'severe', 'GFS', :cycle_time, :max_over_window, 'ok'
+            )
+            """
+        ),
+        {
+            "segment_id": segment_id,
+            "valid_time": valid_time,
+            "duration": duration,
+            "q_value": q_value,
+            "cycle_time": datetime(2026, 5, 1),
+            "max_over_window": max_over_window,
+        },
+    )
+    session.commit()
+
+
+def _stale_label_count(session: Session, *, duration: str, max_over_window: bool) -> int:
+    return int(
+        session.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM flood.return_period_result
+                WHERE run_id = 'forecast_run'
+                  AND duration = :duration
+                  AND max_over_window = :max_over_window
+                """
+            ),
+            {"duration": duration, "max_over_window": max_over_window},
+        ).scalar_one()
+    )
+
+
+def test_recompute_clears_stale_label_peak_orphans() -> None:
+    # 核心场景：旧标签('167h')峰值孤儿在按新标签('1h')重跑后必须被清除，不留跨标签孤儿。
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [260.0, 150.0]})
+        _insert_stale_result_row(
+            session,
+            segment_id="seg_001",
+            valid_time=datetime(2026, 4, 1),
+            duration="167h",
+            max_over_window=True,
+        )
+
+        result = compute_return_periods("forecast_run", session)
+
+        assert _stale_label_count(session, duration="167h", max_over_window=True) == 0
+        peak_rows = _result_rows(session, max_over_window=True)
+        assert len(peak_rows) == 1
+        assert peak_rows[0]["duration"] == "1h"
+        # 全表不翻倍：1 peak(seg_001 max=260) + 2 timestep(260,150) = 3 行；陈旧 167h 行已删。
+        timestep_rows = _result_rows(session, max_over_window=False)
+        total_rows = int(
+            session.execute(text("SELECT COUNT(*) FROM flood.return_period_result")).scalar_one()
+        )
+        assert len(timestep_rows) == 2
+        assert total_rows == len(peak_rows) + len(timestep_rows) == 3
+        assert result.rows_written == 3
+
+
+def test_recompute_clears_stale_label_timestep_orphans() -> None:
+    # timestep 对称回归：旧标签 timestep 行重跑后同样被清除，只剩 '1h'。
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [80.0, 150.0]})
+        _insert_stale_result_row(
+            session,
+            segment_id="seg_001",
+            valid_time=datetime(2026, 4, 1),
+            duration="167h",
+            max_over_window=False,
+        )
+
+        compute_return_periods("forecast_run", session)
+
+        # 与 peak 测试对称的显式行数断言：新 '1h' timestep 恰为 2 行(80,150)，陈旧 '167h' 清零。
+        assert _stale_label_count(session, duration="1h", max_over_window=False) == 2
+        assert _stale_label_count(session, duration="167h", max_over_window=False) == 0
+        timestep_rows = _result_rows(session, max_over_window=False)
+        assert {row["duration"] for row in timestep_rows} == {"1h"}
+
+
+def test_fresh_run_writes_without_overdelete() -> None:
+    # 保留语义不回退：一开始就是 1h 的 fresh 跑正确写入，无误删。
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_curve(session, "seg_002")
+        _insert_forecast_run(
+            session,
+            segment_values={"seg_001": [260.0], "seg_002": [150.0]},
+        )
+
+        compute_return_periods("forecast_run", session)
+
+        peak_rows = _result_rows(session, max_over_window=True)
+        assert {row["river_segment_id"] for row in peak_rows} == {"seg_001", "seg_002"}
+        assert all(row["duration"] == "1h" for row in peak_rows)
+
+
+def test_idempotent_recompute_keeps_single_peak_per_segment() -> None:
+    # 幂等重跑（连续两次 1h）不产生重复行：峰值行数 = segment 数。
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_curve(session, "seg_002")
+        _insert_forecast_run(
+            session,
+            segment_values={"seg_001": [260.0, 150.0], "seg_002": [120.0, 90.0]},
+        )
+        compute_return_periods("forecast_run", session)
+        compute_return_periods("forecast_run", session)
+
+        peak_rows = _result_rows(session, max_over_window=True)
+        assert len(peak_rows) == 2
+        assert {row["river_segment_id"] for row in peak_rows} == {"seg_001", "seg_002"}
+
+
+def test_upsert_return_period_result_clears_stale_segment_peak_label() -> None:
+    # per-segment 路径：_upsert_return_period_result 写新峰值时清除该 segment 旧标签峰值孤儿。
+    valid_time = datetime(2026, 5, 1, 1)
+    context = {
+        "run_id": "forecast_run",
+        "scenario_id": "scenario_v1",
+        "basin_version_id": "basin_v1",
+        "river_network_version_id": "rnv_v1",
+        "model_id": "model_v1",
+        "source_id": "GFS",
+        "cycle_time": datetime(2026, 5, 1),
+    }
+    result = {"return_period": 20.0, "warning_level": "warning", "quality_flag": "ok"}
+    with _store() as session:
+        _insert_stale_result_row(
+            session,
+            segment_id="seg_001",
+            valid_time=datetime(2026, 4, 1),
+            duration="167h",
+            max_over_window=True,
+        )
+
+        # 前置断言：陈旧 167h 峰值行确已写入，杜绝"删了个不存在的行也绿"的假绿。
+        assert _stale_label_count(session, duration="167h", max_over_window=True) == 1
+
+        return_period._upsert_return_period_result(
+            session, context, "seg_001", valid_time, "1h", 300.0,
+            max_over_window=True, result=result,
+        )
+
+        assert _stale_label_count(session, duration="167h", max_over_window=True) == 0
+        peak_rows = _result_rows(session, max_over_window=True)
+        assert len(peak_rows) == 1
+        assert peak_rows[0]["duration"] == "1h"
+        assert peak_rows[0]["q_value"] == 300.0
+
+
 @contextmanager
 def _store() -> Iterator[Session]:
     engine = create_engine(
