@@ -396,6 +396,11 @@ class SHUDRuntime:
                     "SCR_INTV": str(_output_interval_minutes(manifest, self.config.output_interval_minutes)),
                 }
             )
+            update_ic_step = _update_ic_step_minutes(manifest)
+            if update_ic_step is not None:
+                # Restart cadence so SHUD writes its interim state exactly at the
+                # segment end (T_{N+1}) rather than the default daily boundary.
+                replacements["Update_IC_STEP"] = str(update_ic_step)
         else:
             content = "\n".join(line for line in content.splitlines() if ".cfg.ic" not in line)
         for key, value in replacements.items():
@@ -668,6 +673,7 @@ class SHUDRuntime:
             self._clear_staged_initial_states(input_dir)
             staged_path, actual_checksum, error_message = self._stage_and_checksum_initial_state(state_uri, input_dir)
             if staged_path is not None and (expected_checksum is None or actual_checksum == expected_checksum):
+                self._materialize_ic_to_project_name(manifest, staged_path, input_dir)
                 _set_runtime_init_mode(manifest, 3)
                 self._sync_init_state_id(manifest)
                 return
@@ -727,6 +733,64 @@ class SHUDRuntime:
             return None, None, error.message
         except OSError as error:
             return None, None, f"Failed to read staged initial state {staged_path}: {error}"
+
+    def _materialize_ic_to_project_name(
+        self,
+        manifest: dict[str, Any],
+        staged_path: Path,
+        input_dir: Path,
+    ) -> None:
+        """Rename the staged canonical ``state.cfg.ic`` to ``<project_name>.cfg.ic``.
+
+        The warm-start object is stored canonically as ``state.cfg.ic``; SHUD actually
+        reads ``<project_name>.cfg.ic`` from the model input directory. Materialize the
+        consuming filename and shift its header minute-time to the run start, then verify
+        the three-way time consistency (snapshot valid_time / IC header / run start_time)
+        so a wrong-time restart is a recorded blocker, not silent (M24 §2 Lane 2).
+        """
+
+        model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
+        target = model_input_dir / f"{_project_name(manifest)}.cfg.ic"
+        if staged_path.resolve() != target.resolve():
+            content = _read_staged_bytes(staged_path, root=input_dir)
+            _ensure_directory(model_input_dir)
+            atomic_write_bytes_no_follow(target, content, containment_root=input_dir, temp_suffix="part")
+            if staged_path.name.endswith(".cfg.ic") or staged_path.name.endswith(".cfg.ic.update"):
+                try:
+                    unlink_no_follow(staged_path, containment_root=input_dir, missing_ok=True)
+                except SafeFilesystemError:
+                    pass
+
+        # The saved artifact's NATIVE header minute-time must match the snapshot
+        # valid_time it was recorded at (state-integrity invariant) BEFORE the header is
+        # re-stamped to the run start. A native header that disagrees with the recorded
+        # snapshot valid_time means the staged artifact is not the state it claims to be
+        # -- a recorded blocker, not a silent restart at the wrong time. (The three-way
+        # snapshot/header/run-start equality of warm continuity is enforced at daemon
+        # selection time; here a forecast may legitimately reuse an older state and the
+        # header is deliberately re-stamped to the run start below.)
+        start_time = _parse_time(manifest["start_time"])
+        native_header_minute = _read_cfg_ic_header_minute(target)
+        self._verify_ic_time_consistency(manifest, native_header_minute)
+        _shift_cfg_ic_time(target, start_time)
+
+    def _verify_ic_time_consistency(
+        self,
+        manifest: dict[str, Any],
+        ic_header_minute_time: float | None,
+    ) -> None:
+        snapshot_valid_time = _parse_time_or_none((manifest.get("initial_state") or {}).get("valid_time"))
+        if snapshot_valid_time is None or ic_header_minute_time is None:
+            return
+        snapshot_minute = round(_ensure_utc(snapshot_valid_time).timestamp() / 60.0)
+        header_minute = round(ic_header_minute_time)
+        if snapshot_minute != header_minute:
+            raise SHUDRuntimeError(
+                "WARM_START_TIME_MISMATCH",
+                f"Warm-start time mismatch: ic_header_minute_time={header_minute} != "
+                f"snapshot_valid_time={snapshot_minute} (minutes since epoch); "
+                "restart at the wrong time is a blocker.",
+            )
 
     def _mark_init_state_corrupted(
         self,
@@ -1534,6 +1598,22 @@ def _shift_tsd_time_axis(path: Path, start_time: datetime, *, start_minute: floa
         _write_text_no_follow(path, "\n".join(lines) + "\n", containment_root=path.parent)
 
 
+def _read_cfg_ic_header_minute(path: Path) -> float | None:
+    """Return the SHUD ``.cfg.ic`` header minute-time (token index 2), or None."""
+    if not _regular_file_exists(path, containment_root=path.parent):
+        return None
+    lines = _read_text_no_follow(path, containment_root=path.parent).splitlines()
+    if not lines:
+        return None
+    header = lines[0].split()
+    if len(header) < 3:
+        return None
+    try:
+        return float(header[2])
+    except ValueError:
+        return None
+
+
 def _shift_cfg_ic_time(path: Path, start_time: datetime) -> None:
     if not _regular_file_exists(path, containment_root=path.parent):
         return
@@ -1637,6 +1717,17 @@ def _output_interval_minutes(manifest: dict[str, Any], default_interval_minutes:
         or default_interval_minutes
     )
     return int(value)
+
+
+def _update_ic_step_minutes(manifest: dict[str, Any]) -> int | None:
+    """Restart cadence (minutes) for SHUD ``Update_IC_STEP``, or None when unset.
+
+    Set on analysis/nowcast segments so SHUD writes its restart state exactly at the
+    segment end (T_{N+1}); absent on plain forecast runs (M24 §2 Lane 2).
+    """
+    runtime = manifest.get("runtime") or {}
+    value = runtime.get("update_ic_step_minutes") or runtime.get("Update_IC_STEP")
+    return int(value) if value not in (None, "") else None
 
 
 def _segment_count(manifest: dict[str, Any]) -> int:

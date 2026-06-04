@@ -332,6 +332,98 @@ class InitialStateSelection:
 # Bound on the warm-start fallback loop to avoid unbounded scans of stale snapshots.
 _MAX_STATE_FALLBACK_CANDIDATES = 8
 
+# Forcing causality modes for the analysis/nowcast segment (M24 §2 Lane 2). The
+# analysis segment [T_N, T_{N+1}] must be built from data that does not leak the
+# future relative to its own segment; ``causal`` is the real-time default,
+# ``delayed_reanalysis`` is the only mode permitted to use ERA5-style reanalysis
+# and must record the latency with which the reanalysis trails real time.
+FORCING_CAUSALITY_CAUSAL = "causal"
+FORCING_CAUSALITY_DELAYED_REANALYSIS = "delayed_reanalysis"
+
+
+def _analysis_update_ic_step_minutes(start_time: datetime, end_time: datetime) -> int:
+    """Restart cadence (minutes) that writes a SHUD restart state exactly at ``end_time``.
+
+    The analysis segment is ``[T_N, T_{N+1}]`` with ``end_time == T_{N+1}``. SHUD writes
+    a restart artifact every ``Update_IC_STEP`` minutes measured from the segment start,
+    so the cadence must divide the segment so that a write lands on the final step. The
+    simplest cadence guaranteed to land exactly on ``T_{N+1}`` (and never on an earlier
+    modulo boundary, never on the default 1440-minute day) is the full segment length.
+
+    Short 6h/12h cycles therefore get 360/720-minute cadences; a 24h cycle gets 1440.
+    Returns the segment length in whole minutes. Raises on a non-positive or
+    non-minute-aligned window so a wrong-time restart is a hard error, not silent.
+    """
+
+    duration_seconds = (_ensure_segment_utc(end_time) - _ensure_segment_utc(start_time)).total_seconds()
+    if duration_seconds <= 0:
+        raise OrchestratorError(
+            "ANALYSIS_SEGMENT_INVALID_WINDOW",
+            "Analysis segment end_time must be after start_time.",
+            {"start_time": start_time.isoformat(), "end_time": end_time.isoformat()},
+        )
+    if duration_seconds % 60 != 0:
+        raise OrchestratorError(
+            "ANALYSIS_SEGMENT_NON_MINUTE_ALIGNED",
+            "Analysis segment length must be a whole number of minutes for restart cadence.",
+            {"duration_seconds": duration_seconds},
+        )
+    return int(duration_seconds // 60)
+
+
+def _ensure_segment_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _analysis_forcing_causality(latency_minutes: int | None = None) -> dict[str, Any]:
+    """Causality marker recorded on the analysis context/manifest.
+
+    Real-time daemon operation is ``causal`` (no future leak: cycle N's ``0..Δ`` lead
+    or best-available nowcast). ``delayed_reanalysis`` is permitted only when an
+    explicit reanalysis latency is supplied, and the latency is recorded so consumers
+    can reason about how far the reanalysis trails the segment.
+    """
+
+    if latency_minutes is None:
+        return {"mode": FORCING_CAUSALITY_CAUSAL, "latency_minutes": None, "no_future_leak": True}
+    return {
+        "mode": FORCING_CAUSALITY_DELAYED_REANALYSIS,
+        "latency_minutes": int(latency_minutes),
+        "no_future_leak": True,
+    }
+
+
+def _check_three_way_time_consistency(
+    *,
+    snapshot_valid_time: datetime | None,
+    ic_header_minute_time: float | None,
+    run_start_time: datetime | None,
+) -> str | None:
+    """Verify snapshot valid_time, ``.cfg.ic`` header minute-time, and run start agree.
+
+    All three must equal ``T_{N+1}`` (to whole-minute resolution). Returns a human
+    reason string on mismatch (a recorded blocker), or None when consistent. Inputs
+    that are unavailable (None) are skipped so partial metadata is not a false blocker.
+    """
+
+    times: list[tuple[str, float]] = []
+    if snapshot_valid_time is not None:
+        times.append(("snapshot_valid_time", round(_ensure_segment_utc(snapshot_valid_time).timestamp() / 60.0)))
+    if ic_header_minute_time is not None:
+        times.append(("ic_header_minute_time", round(float(ic_header_minute_time))))
+    if run_start_time is not None:
+        times.append(("run_start_time", round(_ensure_segment_utc(run_start_time).timestamp() / 60.0)))
+    if len(times) < 2:
+        return None
+    reference_name, reference_minute = times[0]
+    for name, minute in times[1:]:
+        if minute != reference_minute:
+            return (
+                f"warm-start time mismatch: {name}={minute} != {reference_name}={reference_minute} "
+                "(minutes since epoch); restart at the wrong time is a blocker."
+            )
+    return None
+
 
 def _validate_state_lineage(
     state: StateSnapshot,
@@ -418,6 +510,9 @@ class AnalysisRunContext:
     init_state_uri: str | None = None
     init_state_valid_time: datetime | None = None
     output_segment_count: int | None = None
+    # M24 §2 Lane 2: restart cadence landing on T_{N+1} and forcing causality marker.
+    update_ic_step_minutes: int | None = None
+    forcing_causality: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -803,6 +898,7 @@ class ForecastOrchestrator:
         normalized_basins = self._normalize_cycle_basins(basins, source, parsed_cycle_time)
         if not normalized_basins:
             raise OrchestratorError("EMPTY_BASIN_LIST", "orchestrate_cycle requires at least one basin.")
+        self._apply_cohort_warm_start(normalized_basins, source, parsed_cycle_time)
         self._validate_cycle_basin_identities(normalized_basins, source, parsed_cycle_time, cycle_id)
         context_run_id = _cycle_orchestration_run_id(source, parsed_cycle_time, normalized_basins)
         if _active_orchestration_conflicts(
@@ -2477,6 +2573,7 @@ class ForecastOrchestrator:
                 "valid_time": _format_time_or_none(_parse_gateway_time(basin.get("init_state_valid_time"))),
                 "checksum": basin.get("init_state_checksum"),
                 "quality": basin.get("init_state_quality") or "cold_start_no_state",
+                "lineage": dict(basin.get("init_state_lineage") or {}),
             },
             "runtime": dict(assembly.runtime),
             "outputs": dict(assembly.outputs),
@@ -2664,6 +2761,56 @@ class ForecastOrchestrator:
                     _validate_safe_id(f"basins[{index}].{field_name}", str(field_value))
             entries.append(entry)
         return entries
+
+    def _apply_cohort_warm_start(
+        self,
+        basins: Sequence[dict[str, Any]],
+        source_id: str,
+        cycle_time: datetime,
+    ) -> None:
+        """Select each basin's warm-start state so all three manifest faces agree.
+
+        Populates ``init_state_uri`` / ``init_state_id`` / ``init_state_checksum`` /
+        ``init_state_valid_time`` / ``init_state_quality`` plus lineage on each basin
+        dict. These same fields flow unchanged into (1) the scheduler basin record we
+        were handed, (2) the cycle-stage manifest index entries, and (3) the forecast
+        runtime manifest (which reads ``basin.get('init_state_*')``), giving a single
+        selected state across all three faces (M24 §2 Lane 2).
+        """
+
+        if self.state_manager is None:
+            return
+        for basin in basins:
+            if basin.get("init_state_uri") not in (None, ""):
+                # Caller (scheduler) already selected a state; do not override it.
+                continue
+            model_id = str(basin.get("model_id") or "")
+            if not model_id:
+                continue
+            selection = self._select_forecast_initial_state(
+                model_id=model_id,
+                cycle_time=cycle_time,
+                source_id=str(basin.get("source_id") or source_id),
+                model_package_version=basin.get("model_package_uri"),
+                model_package_checksum=basin.get("model_package_checksum"),
+                max_lead_hours=_basin_max_lead_hours(basin),
+            )
+            basin["init_state_id"] = selection.state_id
+            basin["init_state_uri"] = selection.state_uri
+            basin["init_state_checksum"] = selection.checksum
+            basin["init_state_valid_time"] = (
+                _format_time(selection.valid_time) if selection.valid_time is not None else None
+            )
+            basin["init_state_quality"] = selection.quality
+            basin["init_state_lineage"] = {
+                "source_id": selection.source_id,
+                "cycle_id": selection.cycle_id,
+                "lead_hours": selection.lead_hours,
+                "model_package_version": selection.model_package_version,
+                "model_package_checksum": selection.model_package_checksum,
+            }
+            if selection.rejection_code is not None:
+                basin["init_state_rejection_code"] = selection.rejection_code
 
     def _validate_cycle_basin_identities(
         self,
@@ -4076,6 +4223,8 @@ class AnalysisOrchestrator(ForecastOrchestrator):
             init_state_uri=init_state.state_uri if init_state is not None else None,
             init_state_valid_time=init_state.valid_time if init_state is not None else None,
             output_segment_count=model.output_segment_count,
+            update_ic_step_minutes=_analysis_update_ic_step_minutes(start_time, end_time),
+            forcing_causality=_analysis_forcing_causality(),
         )
 
     def _build_run_manifest(self, context: AnalysisRunContext) -> dict[str, Any]:
@@ -4108,9 +4257,21 @@ class AnalysisOrchestrator(ForecastOrchestrator):
                 "forcing_version_id": context.forcing_version_id,
                 "forcing_uri": context.forcing_package_uri,
             },
+            "forcing_causality": dict(
+                context.forcing_causality
+                if context.forcing_causality is not None
+                else _analysis_forcing_causality()
+            ),
             "runtime": {
                 "output_interval_minutes": 60,
                 "init_mode": 3 if context.init_state_id else 1,
+                # Restart cadence lands exactly at end_time == T_{N+1} so the saved
+                # interim state is valid at the next cycle's init time.
+                "update_ic_step_minutes": (
+                    context.update_ic_step_minutes
+                    if context.update_ic_step_minutes is not None
+                    else _analysis_update_ic_step_minutes(context.start_time, context.end_time)
+                ),
             },
             "outputs": {
                 "run_manifest_uri": context.run_manifest_uri,
@@ -6653,6 +6814,18 @@ def _max_lead_hours_from_lineage(value: Any) -> int | None:
     if not isinstance(value, Mapping):
         return None
     return _optional_int(value.get("max_lead_hours"))
+
+
+def _basin_max_lead_hours(basin: Mapping[str, Any]) -> int | None:
+    """Configured ``max_lead`` policy (hours) for a cohort basin's warm-start chaining."""
+    for key in ("max_lead_hours", "warm_start_max_lead_hours"):
+        value = _optional_int(basin.get(key))
+        if value is not None:
+            return value
+    horizon = basin.get("horizon")
+    if isinstance(horizon, Mapping):
+        return _optional_int(horizon.get("max_lead_hours"))
+    return None
 
 
 def _auto_trigger_forecast_hours(

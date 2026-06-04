@@ -5271,6 +5271,7 @@ def _candidate_basin_manifest(
     pipeline_job_id = _candidate_contract_pipeline_job_id(candidate)
     if pipeline_job_id not in (None, ""):
         manifest["pipeline_job_id"] = pipeline_job_id
+    _apply_candidate_warm_start_fields(manifest, candidate)
     if candidate.state_evidence:
         state_evidence = _evidence_safe(candidate.state_evidence)
         manifest["state_evidence"] = state_evidence
@@ -5298,6 +5299,35 @@ def _candidate_basin_manifest(
     if source_inventory_checksum not in (None, ""):
         manifest["source_inventory_checksum"] = str(source_inventory_checksum)
     return manifest
+
+
+def _apply_candidate_warm_start_fields(manifest: dict[str, Any], candidate: SchedulerCandidate) -> None:
+    """Carry warm-start init-state fields onto the scheduler basin record.
+
+    When the candidate's ``state_evidence`` already names a selected warm-start state
+    (``candidate_state``), copy ``init_state_*`` + lineage onto the basin manifest so
+    the scheduler basin record agrees with the cycle-stage and forecast runtime
+    manifests (M24 §2 Lane 2). When absent, the orchestrator's ``_apply_cohort_warm_start``
+    is authoritative and fills these fields; this is a no-op passthrough.
+    """
+
+    evidence = candidate.state_evidence
+    if not isinstance(evidence, Mapping):
+        return
+    selected = evidence.get("candidate_state")
+    if not isinstance(selected, Mapping):
+        return
+    uri = selected.get("init_state_uri") or selected.get("state_uri") or selected.get("ic_file_uri")
+    if uri in (None, ""):
+        return
+    manifest["init_state_uri"] = str(uri)
+    for key in ("init_state_id", "init_state_checksum", "init_state_valid_time", "init_state_quality"):
+        value = selected.get(key) or selected.get(key.removeprefix("init_state_"))
+        if value not in (None, ""):
+            manifest[key] = value
+    lineage = selected.get("init_state_lineage") or selected.get("lineage")
+    if isinstance(lineage, Mapping):
+        manifest["init_state_lineage"] = dict(lineage)
 
 
 def _resource_profile_project_identity(resource_profile: Mapping[str, Any]) -> dict[str, str] | None:
