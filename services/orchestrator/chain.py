@@ -39,6 +39,11 @@ from services.orchestrator.production_contract import (
     production_stage_for,
     production_status_for,
 )
+from services.orchestrator.reservation import (
+    bind_reservation,
+    reserve_candidate,
+    slurm_comment_for,
+)
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.orchestrator.time_consistency import check_three_way_time_consistency
 from services.slurm_gateway.config import SlurmGatewaySettings
@@ -727,6 +732,22 @@ class OrchestratorRepository(Protocol):
         raise NotImplementedError
 
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def bind_pipeline_job_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        status: str = "submitted",
+        array_task_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def query_candidate_state(self, idempotency_key: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def update_pipeline_job_status(
@@ -1540,6 +1561,13 @@ class ForecastOrchestrator:
             )
 
         self._before_cycle_stage_submit(stage, context)
+
+        # M24 §3A phase 1: durable reservation BEFORE sbatch. Idempotent across
+        # overlapping passes and the submit-crash window. Best-effort against
+        # repositories that predate the reservation methods.
+        idempotency_key = _cycle_stage_idempotency_key(context, stage)
+        self._reserve_cycle_stage(stage, context, pipeline_job_id, idempotency_key)
+
         submitted: dict[str, Any]
         manifest_index_path: Path | None = None
         stage_manifest = self._build_cycle_stage_manifest(stage, context)
@@ -1560,6 +1588,7 @@ class ForecastOrchestrator:
                             "model_id": _cycle_payload_model_id(context),
                             "job_type": stage.job_type,
                             "manifest": self._slurm_submission_manifest(stage_manifest),
+                            "comment": slurm_comment_for(idempotency_key),
                         }
                     )
                 )
@@ -1574,6 +1603,14 @@ class ForecastOrchestrator:
             return result, None
 
         slurm_job_id = str(submitted["job_id"])
+        # M24 §3A phase 2: atomically bind slurm_job_id onto the reservation
+        # (no-op if a concurrent pass already bound it). The full upsert below
+        # remains authoritative for status/metadata.
+        self._bind_cycle_stage_reservation(
+            idempotency_key,
+            slurm_job_id=slurm_job_id,
+            array_task_id=_coerce_array_task_id(submitted.get("array_task_id")),
+        )
         log_publication = self._display_log_publication_for_stage(
             source_id=context.source_id,
             cycle_time=context.cycle_time,
@@ -1610,6 +1647,7 @@ class ForecastOrchestrator:
                 "model_id": _cycle_pipeline_job_model_id(context),
                 "status": submitted_status,
                 "stage": stage.stage,
+                "idempotency_key": idempotency_key,
                 "submitted_at": _parse_gateway_time(submitted.get("submitted_at")) or _utcnow(),
                 "started_at": _parse_gateway_time(submitted.get("started_at")),
                 "finished_at": _parse_gateway_time(submitted.get("finished_at")),
@@ -2278,6 +2316,48 @@ class ForecastOrchestrator:
             status=stage.failure_cycle_status,
             error_code=error_code,
             error_message=error_message,
+        )
+
+    def _reserve_cycle_stage(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        pipeline_job_id: str,
+        idempotency_key: str,
+    ) -> None:
+        """Phase 1 durable reservation; best-effort for legacy repositories."""
+
+        if not hasattr(self.repository, "reserve_pipeline_job"):
+            return
+        reserve_candidate(
+            self.repository,
+            idempotency_key=idempotency_key,
+            job_id=pipeline_job_id,
+            run_id=context.run_id,
+            cycle_id=context.cycle_id,
+            job_type=stage.job_type,
+            model_id=_cycle_pipeline_job_model_id(context),
+            stage=stage.stage,
+            candidate_id=context.run_id,
+        )
+
+    def _bind_cycle_stage_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        array_task_id: int | None,
+    ) -> None:
+        """Phase 2 atomic bind; best-effort for legacy repositories."""
+
+        if not hasattr(self.repository, "bind_pipeline_job_reservation"):
+            return
+        bind_reservation(
+            self.repository,
+            idempotency_key=idempotency_key,
+            slurm_job_id=slurm_job_id,
+            status="submitted",
+            array_task_id=array_task_id,
         )
 
     def _before_cycle_stage_submit(self, stage: StageDefinition, context: CycleOrchestrationContext) -> None:
@@ -5163,6 +5243,75 @@ class PsycopgOrchestratorRepository:
             ),
         )
 
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Phase 1: durable reservation row keyed by idempotency_key.
+
+        ``ON CONFLICT (idempotency_key) DO NOTHING`` makes this at-most-once even
+        under a concurrent race; the row already present is returned unchanged.
+        """
+
+        inserted = self._fetch_optional(
+            """
+            INSERT INTO ops.pipeline_job (
+                job_id, run_id, cycle_id, job_type, model_id, stage,
+                status, idempotency_key, candidate_id, submitted_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+                DO NOTHING
+            RETURNING *
+            """,
+            (
+                record["job_id"],
+                record.get("run_id"),
+                record.get("cycle_id"),
+                record["job_type"],
+                record.get("model_id"),
+                record.get("stage"),
+                record.get("status", "reserved"),
+                record["idempotency_key"],
+                record.get("candidate_id"),
+            ),
+        )
+        if inserted is not None:
+            return inserted
+        return self._fetch_one(
+            "SELECT * FROM ops.pipeline_job WHERE idempotency_key = %s",
+            (record["idempotency_key"],),
+            missing_code="PIPELINE_RESERVATION_NOT_FOUND",
+            missing_message=f"reservation not found for idempotency_key={record['idempotency_key']}",
+        )
+
+    def bind_pipeline_job_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        status: str = "submitted",
+        array_task_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Phase 2: atomically bind slurm_job_id; no-op if already bound."""
+
+        return self._fetch_optional(
+            """
+            UPDATE ops.pipeline_job
+            SET slurm_job_id = %s,
+                array_task_id = COALESCE(%s, array_task_id),
+                status = %s,
+                updated_at = now()
+            WHERE idempotency_key = %s
+              AND slurm_job_id IS NULL
+            RETURNING *
+            """,
+            (slurm_job_id, array_task_id, status, idempotency_key),
+        )
+
+    def query_candidate_state(self, idempotency_key: str) -> dict[str, Any] | None:
+        return self._fetch_optional(
+            "SELECT * FROM ops.pipeline_job WHERE idempotency_key = %s",
+            (idempotency_key,),
+        )
+
     def update_pipeline_job_status(
         self,
         job_id: str,
@@ -6726,6 +6875,17 @@ def _parse_slurm_exit_code(raw_exit_code: str) -> int | None:
 
 def _pipeline_job_id(run_id: str, stage: str) -> str:
     return f"job_{run_id}_{stage}"
+
+
+def _cycle_stage_idempotency_key(context: CycleOrchestrationContext, stage: StageDefinition) -> str:
+    """Stable idempotency key for a cohort's cycle-level stage submission.
+
+    ``run_id`` deterministically encodes source/cycle/basin-cohort, so
+    ``run_id:stage`` is the equivalent of the per-candidate
+    ``source:cycle:basin:stage`` key and is constant across passes.
+    """
+
+    return f"{context.run_id}:{stage.stage}"
 
 
 def _published_artifact_root_configured() -> bool:

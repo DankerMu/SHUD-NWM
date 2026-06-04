@@ -13,12 +13,82 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from services.orchestrator.persistence import Base, PipelineStore
+from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
 from services.orchestrator.reconcile import (
     RECONCILE_UNVERIFIED_STATUS,
     SacctRecord,
     reconcile_inflight_jobs,
 )
+
+
+class _StoreRepo:
+    """Repository-shaped wrapper over PipelineStore for reservation tests.
+
+    Exposes the ``reserve_pipeline_job``/``bind_pipeline_job_reservation``/
+    ``query_candidate_state`` surface the chain repository implements, backed by
+    the in-memory store, so the durable two-phase protocol is exercised exactly
+    as production would.
+    """
+
+    def __init__(self, store: PipelineStore) -> None:
+        self.store = store
+
+    def query_candidate_state(self, idempotency_key: str):
+        job = self.store.query_candidate_state(idempotency_key)
+        return _job_dict(job) if job is not None else None
+
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        existing = self.store.query_candidate_state(record["idempotency_key"])
+        if existing is not None:
+            return _job_dict(existing)
+        job = self.store.create_job(
+            job_id=record["job_id"],
+            run_id=record.get("run_id"),
+            cycle_id=record.get("cycle_id"),
+            job_type=record["job_type"],
+            slurm_job_id=None,
+            model_id=record.get("model_id"),
+            stage=record.get("stage"),
+            status=record.get("status", "reserved"),
+            idempotency_key=record["idempotency_key"],
+            candidate_id=record.get("candidate_id"),
+        )
+        return _job_dict(job)
+
+    def bind_pipeline_job_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        status: str = "submitted",
+        array_task_id: int | None = None,
+    ):
+        job = self.store.bind_reservation(
+            idempotency_key,
+            slurm_job_id=slurm_job_id,
+            status=status,
+            array_task_id=array_task_id,
+        )
+        return _job_dict(job) if job is not None else None
+
+
+def _job_dict(job: PipelineJob) -> dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "run_id": job.run_id,
+        "cycle_id": job.cycle_id,
+        "job_type": job.job_type,
+        "slurm_job_id": job.slurm_job_id,
+        "model_id": job.model_id,
+        "status": job.status,
+        "stage": job.stage,
+        "idempotency_key": job.idempotency_key,
+        "candidate_id": job.candidate_id,
+    }
+
+
+def _store_repo() -> _StoreRepo:
+    return _StoreRepo(_store())
 
 
 def _store() -> PipelineStore:
@@ -204,3 +274,174 @@ def test_reconcile_failed_job_records_error_code() -> None:
     job = store.get_job("job_fail")
     assert job.status == "failed"
     assert job.error_code == "SLURM_TIMEOUT"
+
+
+# --- M24 §3A: durable two-phase reservation + crash-window reconcile ---------
+
+
+def test_idempotency_key_unique_constraint() -> None:
+    """Reserving the same idempotency_key twice does NOT create a second row."""
+
+    from services.orchestrator.reservation import reserve_candidate
+
+    store = _store_repo()
+    common = dict(
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+
+    first = reserve_candidate(store, idempotency_key="gfs:cyc:basin:forcing", job_id="job_a", **common)
+    second = reserve_candidate(store, idempotency_key="gfs:cyc:basin:forcing", job_id="job_b", **common)
+
+    assert first.created is True
+    assert second.created is False  # reused, not a new row.
+    assert second.job_id == "job_a"
+    # Exactly one durable row carries that key.
+    rows = [j for j in store.store.session.query(PipelineJob).all() if j.idempotency_key == "gfs:cyc:basin:forcing"]
+    assert len(rows) == 1
+
+
+def test_reservation_written_before_submit_and_queryable() -> None:
+    """Phase 1 reserve writes status=reserved, queryable via candidate_state."""
+
+    from services.orchestrator.persistence import RESERVED_STATUS
+    from services.orchestrator.reservation import reserve_candidate
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forecast"
+    result = reserve_candidate(
+        store,
+        idempotency_key=key,
+        job_id="job_resv",
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forecast",
+        model_id="model_1",
+        stage="forecast",
+    )
+
+    assert result.created is True
+    state = store.query_candidate_state(key)
+    assert state is not None
+    assert state["status"] == RESERVED_STATUS
+    assert state["slurm_job_id"] is None  # not yet bound.
+
+
+def test_overlapping_pass_does_not_double_submit() -> None:
+    """An overlapping pass sees the reservation and skips, even before sacct."""
+
+    from services.orchestrator.reservation import reservation_is_active, reserve_candidate
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forcing"
+    common = dict(
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+
+    first = reserve_candidate(store, idempotency_key=key, job_id="job_pass1", **common)
+    assert first.created is True
+
+    # Pass 2: query candidate_state BEFORE any sacct row exists.
+    state = store.query_candidate_state(key)
+    assert reservation_is_active(state["status"]) is True
+
+    # If pass 2 still calls reserve (race), it reuses the existing row.
+    second = reserve_candidate(store, idempotency_key=key, job_id="job_pass2", **common)
+    assert second.already_inflight is True
+    assert second.job_id == "job_pass1"
+    rows = [j for j in store.store.session.query(PipelineJob).all() if j.idempotency_key == key]
+    assert len(rows) == 1
+
+
+def test_kill_after_submit_before_bind_reconciles_by_idempotency() -> None:
+    """Crash after sbatch, before bind: reconcile binds via the comment key."""
+
+    from services.orchestrator.reconcile import (
+        SacctRecord,
+        reconcile_reserved_unbound_jobs,
+    )
+    from services.orchestrator.reservation import reserve_candidate, slurm_comment_for
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forecast"
+    reserve_candidate(
+        store,
+        idempotency_key=key,
+        job_id="job_crash",
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forecast",
+        model_id="model_1",
+        stage="forecast",
+    )
+    # Reservation row exists, slurm_job_id is NULL (bind never ran).
+    assert store.query_candidate_state(key)["slurm_job_id"] is None
+
+    # sbatch DID accept the job (it recorded our comment).
+    def _comment_query(idem: str) -> SacctRecord | None:
+        if idem == key:
+            return SacctRecord(
+                slurm_job_id="88001",
+                raw_state="RUNNING",
+                job_name="nhms_forecast",
+                comment=slurm_comment_for(key),
+            )
+        return None
+
+    outcomes = reconcile_reserved_unbound_jobs(store.store, comment_query=_comment_query)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == "bound"
+    assert outcomes[0].slurm_job_id == "88001"
+    bound = store.query_candidate_state(key)
+    assert bound["slurm_job_id"] == "88001"
+    assert bound["status"] == "submitted"
+
+
+def test_submit_timeout_unknown_result_not_blindly_resubmitted() -> None:
+    """HTTP submit timeout: reservation stays; recovery reconciles, no double-run."""
+
+    from services.orchestrator.reconcile import (
+        RESERVATION_LOST_STATUS,
+        reconcile_reserved_unbound_jobs,
+    )
+    from services.orchestrator.reservation import reserve_candidate
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forcing"
+    reserve_candidate(
+        store,
+        idempotency_key=key,
+        job_id="job_timeout",
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+
+    submit_attempts: list[str] = []
+
+    # sbatch never actually took (accounting has no job for this comment).
+    def _comment_query(idem: str) -> Any:
+        submit_attempts.append(idem)
+        return None
+
+    outcomes = reconcile_reserved_unbound_jobs(store.store, comment_query=_comment_query)
+
+    # Reconcile queried accounting (did not re-submit) and marked it typed.
+    assert submit_attempts == [key]
+    assert outcomes[0].action == "reservation_lost"
+    state = store.query_candidate_state(key)
+    assert state["status"] == RESERVATION_LOST_STATUS
+    assert state["slurm_job_id"] is None
+    # At most one row for this key ever existed.
+    rows = [j for j in store.store.session.query(PipelineJob).all() if j.idempotency_key == key]
+    assert len(rows) == 1

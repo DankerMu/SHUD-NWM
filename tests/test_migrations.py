@@ -32,6 +32,7 @@ EXPECTED_MIGRATIONS = [
     "000026_ops_strict_identity_indexes.sql",
     "000027_cycle_status_canonical_incomplete.sql",
     "000028_state_lineage.sql",
+    "000029_pipeline_reservation.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}

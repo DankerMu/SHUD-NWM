@@ -278,8 +278,44 @@ class FakeCycleRepository:
         return {"status": status, "error_code": error_code, "error_message": error_message}
 
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
-        self.jobs[record["job_id"]] = dict(record)
-        return dict(record)
+        existing = self.jobs.get(record["job_id"])
+        merged = dict(existing) if existing else {}
+        merged.update(record)
+        self.jobs[record["job_id"]] = merged
+        return dict(merged)
+
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        key = record["idempotency_key"]
+        for job in self.jobs.values():
+            if job.get("idempotency_key") == key:
+                return dict(job)
+        stored = dict(record)
+        stored.setdefault("slurm_job_id", None)
+        self.jobs[record["job_id"]] = stored
+        return dict(stored)
+
+    def bind_pipeline_job_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        status: str = "submitted",
+        array_task_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        for job in self.jobs.values():
+            if job.get("idempotency_key") == idempotency_key and job.get("slurm_job_id") is None:
+                job["slurm_job_id"] = slurm_job_id
+                job["status"] = status
+                if array_task_id is not None:
+                    job["array_task_id"] = array_task_id
+                return dict(job)
+        return None
+
+    def query_candidate_state(self, idempotency_key: str) -> dict[str, Any] | None:
+        for job in self.jobs.values():
+            if job.get("idempotency_key") == idempotency_key:
+                return dict(job)
+        return None
 
     def update_pipeline_job_status(
         self,
@@ -472,6 +508,50 @@ class StoreBackedCycleRepository(FakeCycleRepository):
         self.jobs[job_id] = record
         return previous, dict(record)
 
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+        existing = self.store.query_candidate_state(record["idempotency_key"])
+        if existing is not None:
+            return self._job_to_dict(existing)
+        job = self.store.create_job(
+            job_id=record["job_id"],
+            run_id=record.get("run_id"),
+            cycle_id=record.get("cycle_id"),
+            job_type=record["job_type"],
+            slurm_job_id=None,
+            model_id=record.get("model_id"),
+            stage=record.get("stage"),
+            status=record.get("status", "reserved"),
+            idempotency_key=record["idempotency_key"],
+            candidate_id=record.get("candidate_id"),
+        )
+        result = self._job_to_dict(job)
+        self.jobs[record["job_id"]] = result
+        return dict(result)
+
+    def bind_pipeline_job_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        status: str = "submitted",
+        array_task_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        job = self.store.bind_reservation(
+            idempotency_key,
+            slurm_job_id=slurm_job_id,
+            status=status,
+            array_task_id=array_task_id,
+        )
+        if job is None:
+            return None
+        result = self._job_to_dict(job)
+        self.jobs[result["job_id"]] = result
+        return dict(result)
+
+    def query_candidate_state(self, idempotency_key: str) -> dict[str, Any] | None:
+        job = self.store.query_candidate_state(idempotency_key)
+        return self._job_to_dict(job) if job is not None else None
+
     def get_pipeline_job(self, job_id: str) -> dict[str, Any] | None:
         job = self.store.get_job(job_id)
         return self._job_to_dict(job) if job is not None else None
@@ -501,6 +581,8 @@ class StoreBackedCycleRepository(FakeCycleRepository):
             "model_id": job.model_id,
             "status": job.status,
             "stage": job.stage,
+            "idempotency_key": job.idempotency_key,
+            "candidate_id": job.candidate_id,
             "submitted_at": job.submitted_at,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
@@ -5145,3 +5227,81 @@ def test_template_export_lines_quotes_grib_env_with_special_chars(monkeypatch):
     # The dangerous substitution must be inside single quotes (neutralized).
     path_line = next(line for line in lines if line.startswith("export PATH="))
     assert "$(touch pwn)" not in path_line.replace(quoted, "")
+
+
+# --- M24 §3A: two-phase reserve -> bind through the real chain submit path ----
+
+
+def test_chain_stage_reserves_before_submit_and_binds_after(tmp_path: Path) -> None:
+    """Each cycle-level stage is reserved (durably, reserved status, no slurm
+    bind) BEFORE sbatch and atomically bound to slurm_job_id after, with the
+    idempotency comment threaded to the slurm client."""
+
+    from services.orchestrator.reservation import (
+        SLURM_COMMENT_PREFIX,
+        idempotency_key_from_comment,
+    )
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+
+    observed: list[dict[str, Any]] = []
+
+    class _ReservationAssertingClient(FakeCycleSlurmClient):
+        def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+            comment = payload.get("comment")
+            key = idempotency_key_from_comment(comment)
+            # The reservation MUST already be durable and unbound at submit time.
+            state = repository.query_candidate_state(key)
+            observed.append(
+                {
+                    "stage": payload["manifest"]["stage"],
+                    "comment": comment,
+                    "reserved_before_submit": state is not None,
+                    "slurm_unbound_at_submit": state is not None and state["slurm_job_id"] is None,
+                    "status_at_submit": state["status"] if state else None,
+                }
+            )
+            return super().submit_job(payload)
+
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return super().submit_job_array(*args, **kwargs)
+
+    client = _ReservationAssertingClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "complete"
+
+    # Non-array stages went through the reservation-asserting submit_job.
+    assert observed, "expected at least one non-array stage submission"
+    for entry in observed:
+        assert entry["comment"].startswith(SLURM_COMMENT_PREFIX)
+        assert entry["reserved_before_submit"] is True
+        assert entry["slurm_unbound_at_submit"] is True
+        assert entry["status_at_submit"] == "reserved"
+
+    # After the run, those reservations are bound to a slurm_job_id (phase 2).
+    for stage in ("download", "convert"):
+        job = repository.jobs[f"job_cycle_gfs_2026050100_{stage}"]
+        assert job["idempotency_key"] == f"cycle_gfs_2026050100:{stage}"
+        assert job["slurm_job_id"] is not None
+
+
+def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -> None:
+    """Re-running the same cycle reuses the reservation (same idempotency_key,
+    no duplicate durable row)."""
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    orchestrator = _orchestrator(tmp_path, repository, FakeCycleSlurmClient())
+
+    orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+    key = "cycle_gfs_2026050100:download"
+    first = repository.query_candidate_state(key)
+    assert first is not None
+
+    # A second pass over the same cycle must not create a second row for the key.
+    rows = [j for j in store.session.query(PipelineJob).all() if j.idempotency_key == key]
+    assert len(rows) == 1

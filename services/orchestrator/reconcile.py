@@ -23,6 +23,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from services.orchestrator.reservation import idempotency_key_from_comment
 from services.slurm_gateway.models import TERMINAL_STATUSES, SlurmJobStatus
 from services.slurm_gateway.real_backend import (
     SLURM_STATE_MAP,
@@ -33,6 +34,10 @@ from services.slurm_gateway.real_backend import (
 LOGGER = logging.getLogger(__name__)
 
 RECONCILE_UNVERIFIED_STATUS = "reconcile_unverified"
+# A reservation whose sbatch was never confirmed by accounting: sbatch did not
+# take, so the candidate may be safely re-submitted on a later pass. We mark it
+# typed rather than blindly re-submitting inside reconcile.
+RESERVATION_LOST_STATUS = "reservation_lost"
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,7 @@ class SacctRecord:
     raw_state: str
     job_name: str
     exit_code: str | None = None
+    comment: str | None = None
 
 
 # A sacct querier maps a slurm_job_id to its accounting record (or None when the
@@ -66,7 +72,7 @@ def default_sacct_querier(slurm_bin_path: str = "") -> SacctQuerier:
             sacct,
             "--parsable2",
             "--noheader",
-            "--format=JobID,JobName,State,ExitCode",
+            "--format=JobID,JobName,State,ExitCode,Comment",
             f"--jobs={slurm_job_id}",
         ]
         try:
@@ -86,6 +92,65 @@ def default_sacct_querier(slurm_bin_path: str = "") -> SacctQuerier:
             )
             return None
         return _parse_master_sacct_row(result.stdout, slurm_job_id)
+
+    return _query
+
+
+def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQuerier:
+    """Build a comment querier: idempotency_key -> the job sbatch recorded.
+
+    Queries ``sacct`` for the master row whose ``Comment`` is
+    ``nhms_idem:<idempotency_key>`` so a crashed reservation can be reconciled
+    back to the real ``slurm_job_id`` even though the durable bind never ran.
+    """
+
+    from services.orchestrator.reservation import slurm_comment_for
+
+    sacct = f"{slurm_bin_path.rstrip('/')}/sacct" if slurm_bin_path else "sacct"
+
+    def _query(idempotency_key: str) -> SacctRecord | None:
+        target_comment = slurm_comment_for(idempotency_key)
+        command = [
+            sacct,
+            "--parsable2",
+            "--noheader",
+            "--format=JobID,JobName,State,ExitCode,Comment",
+            "--allusers",
+        ]
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed argv, no shell.
+                command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            LOGGER.warning("sacct comment query failed for %s: %s", idempotency_key, error)
+            return None
+        if result.returncode != 0:
+            LOGGER.warning("sacct comment query returned %s", result.returncode)
+            return None
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            fields = line.split("|")
+            if len(fields) < 5:
+                continue
+            job_id = fields[0]
+            if "_" in job_id or "." in job_id:
+                continue
+            if fields[4].strip() != target_comment:
+                continue
+            return SacctRecord(
+                slurm_job_id=job_id,
+                job_name=fields[1],
+                raw_state=fields[2],
+                exit_code=fields[3] or None,
+                comment=fields[4].strip(),
+            )
+        return None
 
     return _query
 
@@ -111,6 +176,7 @@ def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | Non
             job_name=fields[1],
             raw_state=fields[2],
             exit_code=fields[3] if len(fields) > 3 else None,
+            comment=fields[4].strip() if len(fields) > 4 else None,
         )
     return None
 
@@ -223,6 +289,86 @@ def reconcile_inflight_jobs(
                 slurm_job_id=str(slurm_job_id),
                 action="still_running",
                 status=slurm_status.value,
+            )
+        )
+
+    return outcomes
+
+
+# A comment querier maps an idempotency_key to the accounting record of the job
+# sbatch accepted under that ``--comment`` (or None when accounting has no such
+# job). Injectable so tests need no real cluster.
+CommentSacctQuerier = Callable[[str], "SacctRecord | None"]
+
+
+@dataclass(frozen=True)
+class ReservationReconcileOutcome:
+    job_id: str
+    idempotency_key: str
+    action: str  # "bound" | "reservation_lost"
+    status: str
+    slurm_job_id: str | None = None
+
+
+def reconcile_reserved_unbound_jobs(
+    store,
+    *,
+    comment_query: CommentSacctQuerier,
+) -> list[ReservationReconcileOutcome]:
+    """Reconcile the submit-crash window: reserved rows with no slurm_job_id.
+
+    A crash after ``sbatch`` accepted a job but before the durable bind leaves a
+    ``status='reserved'`` row whose ``slurm_job_id`` is NULL. We recover the real
+    ``slurm_job_id`` by querying accounting for the job sbatch recorded under
+    ``--comment=nhms_idem:<idempotency_key>`` and bind it — never blindly
+    re-submitting, so at most one job per idempotency_key enters submitted.
+
+    If accounting has no job for that comment, sbatch did not actually take; we
+    mark the reservation ``reservation_lost`` (typed), leaving a later pass free
+    to reserve+submit again under the same idempotency_key.
+    """
+
+    outcomes: list[ReservationReconcileOutcome] = []
+    for job in store.query_reserved_unbound_jobs():
+        idempotency_key = job.idempotency_key
+        if not idempotency_key:
+            continue
+
+        record = comment_query(str(idempotency_key))
+        # Confirm the accounting row truly carries our idempotency comment.
+        if record is None or idempotency_key_from_comment(record.comment) != idempotency_key:
+            store.update_job_status(
+                job.job_id,
+                RESERVATION_LOST_STATUS,
+                error_code="SLURM_RESERVATION_LOST",
+                error_message=(
+                    "sbatch acceptance for reservation "
+                    f"idempotency_key={idempotency_key} could not be confirmed in accounting."
+                ),
+            )
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="reservation_lost",
+                    status=RESERVATION_LOST_STATUS,
+                )
+            )
+            continue
+
+        bound = store.bind_reservation(
+            str(idempotency_key),
+            slurm_job_id=record.slurm_job_id,
+            status="submitted",
+        )
+        bound_status = "submitted" if bound is not None else str(job.status)
+        outcomes.append(
+            ReservationReconcileOutcome(
+                job_id=job.job_id,
+                idempotency_key=str(idempotency_key),
+                action="bound",
+                status=bound_status,
+                slurm_job_id=record.slurm_job_id,
             )
         )
 

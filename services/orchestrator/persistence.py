@@ -10,6 +10,12 @@ TERMINAL_STATUS_GUARD = {"succeeded", "failed", "cancelled", "permanently_failed
 TERMINAL_STATUS_OVERRIDES = {"partially_failed", "permanently_failed"}
 ACTIVE_MANUAL_RETRY_STATUSES = ("pending", "queued", "submitted", "running")
 
+# M24 §3A two-phase reservation.
+RESERVED_STATUS = "reserved"
+# A candidate whose idempotency_key already maps to one of these is considered
+# already in-flight; an overlapping pass must NOT re-submit it.
+RESERVATION_ACTIVE_STATUSES = ("reserved", "submitted", "running", "queued", "pending")
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -31,6 +37,8 @@ class PipelineJob(Base):
     model_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     stage: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -81,6 +89,17 @@ Index(
 )
 
 
+# At most one durable pipeline_job row per idempotency_key. Partial so legacy
+# NULL rows (pre-reservation) do not collide. Mirrors migration 000029.
+Index(
+    "pipeline_job_idempotency_key_uidx",
+    PipelineJob.idempotency_key,
+    unique=True,
+    sqlite_where=PipelineJob.idempotency_key.is_not(None),
+    postgresql_where=PipelineJob.idempotency_key.is_not(None),
+)
+
+
 class PipelineStore:
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -98,6 +117,8 @@ class PipelineStore:
         status: str = "pending",
         retry_count: int = 0,
         manual_retry_marker: bool = False,
+        idempotency_key: str | None = None,
+        candidate_id: str | None = None,
         commit: bool = True,
     ) -> PipelineJob:
         job = PipelineJob(
@@ -111,6 +132,8 @@ class PipelineStore:
             status=status,
             retry_count=retry_count,
             manual_retry_marker=manual_retry_marker,
+            idempotency_key=idempotency_key,
+            candidate_id=candidate_id,
             submitted_at=_utcnow(),
         )
         self.session.add(job)
@@ -201,6 +224,60 @@ class PipelineStore:
             .order_by(PipelineJob.submitted_at.asc(), PipelineJob.created_at.asc())
         )
         return list(self.session.scalars(statement))
+
+    def query_reserved_unbound_jobs(self) -> list[PipelineJob]:
+        """Reservations stuck in the submit-crash window.
+
+        Rows written ``status='reserved'`` whose ``slurm_job_id`` was never bound
+        (crash after sbatch accepted but before the durable bind). Recovery
+        reconciles these by ``idempotency_key`` via Slurm accounting comment,
+        never by blindly re-submitting.
+        """
+
+        statement = (
+            select(PipelineJob)
+            .where(
+                PipelineJob.status == RESERVED_STATUS,
+                PipelineJob.slurm_job_id.is_(None),
+                PipelineJob.idempotency_key.is_not(None),
+            )
+            .order_by(PipelineJob.created_at.asc())
+        )
+        return list(self.session.scalars(statement))
+
+    def bind_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        status: str = "submitted",
+        array_task_id: int | None = None,
+    ) -> PipelineJob | None:
+        """Atomically bind slurm_job_id onto a reservation; no-op if bound."""
+
+        job = self.query_candidate_state(idempotency_key)
+        if job is None or job.slurm_job_id is not None:
+            return None
+        job.slurm_job_id = slurm_job_id
+        job.status = status
+        if array_task_id is not None:
+            job.array_task_id = array_task_id
+        job.updated_at = _utcnow()
+        self.session.add(job)
+        self.session.commit()
+        self.session.refresh(job)
+        return job
+
+    def query_candidate_state(self, idempotency_key: str) -> PipelineJob | None:
+        """The durable reservation/binding row for an idempotency_key, if any.
+
+        Queryable before the pass lock is released so an overlapping pass sees
+        ``reserved``/``submitted``/``running`` even in the window before the job
+        surfaces in ``squeue``/``sacct``.
+        """
+
+        statement = select(PipelineJob).where(PipelineJob.idempotency_key == idempotency_key)
+        return self.session.scalars(statement).first()
 
     def insert_event(
         self,

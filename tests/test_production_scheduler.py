@@ -10558,3 +10558,176 @@ def test_slurm_gateway_check_healthy_but_not_submit_capable_blocks(tmp_path: Pat
     assert "SLURM_GATEWAY_UNAVAILABLE" in codes
     assert checks["healthy"] is True
     assert checks["submit_capable"] is False
+
+
+# --- M24 §3A: concurrent submit-and-return with durable reservation ----------
+
+
+class _BarrierOrchestrator:
+    """Orchestrator whose ``orchestrate_cycle`` blocks on a shared barrier.
+
+    Two cohorts submitted concurrently both reach the barrier before either
+    returns, deterministically proving the submits overlap (neither waits for
+    the other's terminal state).
+    """
+
+    def __init__(self, barrier: Any) -> None:
+        self._barrier = barrier
+        self.object_store = None
+        self.calls: list[str] = []
+
+    def orchestrate_cycle(self, source: str, cycle_time: datetime, basins: list[dict[str, Any]]) -> PipelineResult:
+        self.calls.append(source)
+        # Block until BOTH cohorts have entered; if execution were sequential the
+        # barrier would deadlock and the test would time out.
+        self._barrier.wait(timeout=5.0)
+        stages = tuple(
+            StageRunResult(
+                stage=stage.stage,
+                job_type=stage.job_type,
+                pipeline_job_id=f"job_{stage.stage}",
+                slurm_job_id=f"slurm_{stage.stage}",
+                status="succeeded",
+            )
+            for stage in M3_STAGES
+        )
+        return PipelineResult(
+            run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+            cycle_id=cycle_id_for(source, cycle_time),
+            status="complete",
+            stages=stages,
+            candidate_outcomes=(),
+        )
+
+
+def _concurrency_candidate(source_id: str, model_id: str, basin_id: str) -> scheduler_module.SchedulerCandidate:
+    return scheduler_module._candidate_for(
+        discovery=CycleDiscovery(
+            cycle_id=f"{source_id}_2026052106",
+            source_id=source_id,
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            cycle_hour=6,
+            available=True,
+            status="discovered",
+        ),
+        model=scheduler_module.RegisteredSchedulerModel(
+            model_id=model_id,
+            basin_id=basin_id,
+            basin_version_id=f"{basin_id}_v1",
+            river_network_version_id=f"{basin_id}_rivnet_v1",
+            segment_count=3,
+            output_segment_count=3,
+            model_package_uri=f"s3://nhms/models/{model_id}/package/",
+            shud_code_version="2.0",
+            resource_profile={"output_uri": f"s3://nhms/out/{model_id}/"},
+            resource_profile_summary={},
+            display_capabilities={},
+            frequency_capabilities={},
+        ),
+        horizon={},
+    )
+
+
+def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
+    import threading
+
+    barrier = threading.Barrier(2)
+    orchestrators: dict[str, _BarrierOrchestrator] = {}
+
+    def _factory(source_id: str) -> _BarrierOrchestrator:
+        orchestrators.setdefault(source_id, _BarrierOrchestrator(barrier))
+        return orchestrators[source_id]
+
+    config = _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=4)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
+        orchestrator_factory=_factory,
+    )
+
+    candidates = [
+        _concurrency_candidate("gfs", "model_a", "basin_a"),
+        _concurrency_candidate("IFS", "model_b", "basin_b"),
+    ]
+
+    evidence = scheduler._execute_candidates(candidates)
+
+    # Both cohorts ran (barrier did not deadlock) => submits overlapped.
+    assert len(evidence) == 2
+    receipt = scheduler._last_submit_overlap_receipt
+    assert receipt.overlapping is True
+    receipt_dict = receipt.to_dict()
+    assert receipt_dict["concurrent_submit_count"] == 2
+    assert receipt_dict["overlapping"] is True
+    # Two windows recorded, each with start/finish timestamps.
+    assert len(receipt_dict["submissions"]) == 2
+    for entry in receipt_dict["submissions"]:
+        assert entry["submit_finished_at"] >= entry["submit_started_at"]
+
+
+def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
+    import threading
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class _CountingOrchestrator:
+        def __init__(self) -> None:
+            self.object_store = None
+
+        def orchestrate_cycle(self, source: str, cycle_time: datetime, basins: list[dict[str, Any]]) -> PipelineResult:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                import time as _time
+
+                _time.sleep(0.02)
+            finally:
+                with lock:
+                    active -= 1
+            stages = tuple(
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=f"job_{stage.stage}",
+                    slurm_job_id=f"slurm_{stage.stage}",
+                    status="succeeded",
+                )
+                for stage in M3_STAGES
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=stages,
+                candidate_outcomes=(),
+            )
+
+    config = _config(tmp_path, sources=("gfs", "IFS", "ERA5"), concurrent_submit_bound=2)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter("gfs", []),
+            "IFS": FakeAdapter("IFS", []),
+            "ERA5": FakeAdapter("ERA5", []),
+        },
+        orchestrator_factory=lambda _s: _CountingOrchestrator(),
+    )
+
+    candidates = [
+        _concurrency_candidate("gfs", "model_a", "basin_a"),
+        _concurrency_candidate("IFS", "model_b", "basin_b"),
+        _concurrency_candidate("ERA5", "model_c", "basin_c"),
+    ]
+
+    evidence = scheduler._execute_candidates(candidates)
+
+    assert len(evidence) == 3
+    # Never exceed the configured bound, but do run more than one at a time.
+    assert peak <= 2
+    assert peak >= 2

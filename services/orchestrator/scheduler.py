@@ -38,6 +38,11 @@ from services.orchestrator.production_contract import (
     production_status_for,
     validate_compatible_production_identity,
 )
+from services.orchestrator.reservation import (
+    SubmitOverlapReceipt,
+    run_concurrent_submissions,
+    timed_submission,
+)
 from services.orchestrator.retention import RetentionConfig, run_retention
 from services.orchestrator.retry import classify_failure
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
@@ -69,6 +74,7 @@ MAX_MODEL_RUN_STAGE_TASK_ROWS = 16
 CANDIDATE_STATE_TASK_RESULT_LIMIT = MAX_MODEL_RUN_STAGE_TASK_ROWS
 MAX_SLURM_ENV_VALUE_LENGTH = 1024
 DEFAULT_RETRY_LIMIT = 3
+DEFAULT_CONCURRENT_SUBMIT_BOUND = 4
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 STATE_M23_COMPARISON_FIELDS = (
@@ -407,6 +413,9 @@ class ProductionSchedulerConfig:
     continuous: bool = False
     interval_seconds: float = 300.0
     retry_limit: int = field(default_factory=lambda: _env_int("NHMS_SCHEDULER_RETRY_LIMIT", DEFAULT_RETRY_LIMIT))
+    concurrent_submit_bound: int = field(
+        default_factory=lambda: _env_int("NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND", DEFAULT_CONCURRENT_SUBMIT_BOUND)
+    )
     candidate_state_job_limit: int = field(
         default_factory=lambda: _env_int("NHMS_CANDIDATE_STATE_JOB_LIMIT", DEFAULT_CANDIDATE_STATE_JOB_LIMIT)
     )
@@ -522,6 +531,7 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "basin_ids", tuple(str(basin_id) for basin_id in self.basin_ids if basin_id))
         object.__setattr__(self, "interval_seconds", max(float(self.interval_seconds), 1.0))
         object.__setattr__(self, "retry_limit", max(int(self.retry_limit), 0))
+        object.__setattr__(self, "concurrent_submit_bound", max(int(self.concurrent_submit_bound), 1))
         object.__setattr__(self, "candidate_state_job_limit", max(int(self.candidate_state_job_limit), 1))
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
         object.__setattr__(self, "lock_ttl_seconds", max(int(self.lock_ttl_seconds), 1))
@@ -1351,7 +1361,21 @@ class ProductionScheduler:
         for candidate in candidates:
             grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
 
-        evidence: list[dict[str, Any]] = []
+        # M24 §3A: each cohort is an independent candidate (different
+        # basin/source/cycle). Build one submitter per cohort, then run them
+        # concurrently within the configured bound. Durable reservation (unique
+        # idempotency_key) is the correctness backstop against double-submit, so
+        # concurrency here is purely throughput; ordering is preserved in the
+        # collected evidence for determinism.
+        @dataclass
+        class _CohortUnit:
+            source_id: str
+            cycle_time: datetime
+            cycle_id: str
+            execution_candidates: list[SchedulerCandidate]
+            cohort_run_id: str | None
+
+        units: list[_CohortUnit] = []
         for (source_id, cycle_time), cycle_candidates in sorted(
             grouped.items(),
             key=lambda item: (item[0][0], item[0][1], [candidate.model_id for candidate in item[1]]),
@@ -1364,15 +1388,45 @@ class ProductionScheduler:
                     cohort_key,
                     cohort_candidates,
                 ):
-                    evidence.extend(
-                        self._execute_candidate_cohort(
-                            source_id,
-                            cycle_time,
-                            cycle_id,
-                            execution_candidates,
-                            orchestration_run_id=cohort_run_id,
+                    units.append(
+                        _CohortUnit(
+                            source_id=source_id,
+                            cycle_time=cycle_time,
+                            cycle_id=cycle_id,
+                            execution_candidates=list(execution_candidates),
+                            cohort_run_id=cohort_run_id,
                         )
                     )
+
+        receipt = SubmitOverlapReceipt()
+        self._last_submit_overlap_receipt = receipt
+
+        def _submitter(unit: "_CohortUnit") -> list[dict[str, Any]]:
+            key = f"{unit.source_id}:{unit.cycle_id}:{unit.cohort_run_id or 'full'}"
+            run = timed_submission(
+                lambda: self._execute_candidate_cohort(
+                    unit.source_id,
+                    unit.cycle_time,
+                    unit.cycle_id,
+                    unit.execution_candidates,
+                    orchestration_run_id=unit.cohort_run_id,
+                ),
+                receipt=receipt,
+                idempotency_key=key,
+                candidate_id=unit.cohort_run_id,
+            )
+            return run()
+
+        results = run_concurrent_submissions(
+            [(lambda u=unit: _submitter(u)) for unit in units],
+            max_workers=self.config.concurrent_submit_bound,
+        )
+
+        evidence: list[dict[str, Any]] = []
+        for result in results:
+            if isinstance(result, Exception):
+                raise result
+            evidence.extend(result)
         return evidence
 
     def _execute_candidate_cohort(
