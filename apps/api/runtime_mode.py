@@ -137,12 +137,20 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
         explicit = True
 
     if role == ServiceRole.SLURM_GATEWAY:
+        # slurm_gateway is a legitimate standalone role served by the bounded
+        # gateway app (services.slurm_gateway.app:create_gateway_app /
+        # `python -m services.slurm_gateway`). The *full business API* must still
+        # refuse to start under this role so that forecast/model/pipeline routes
+        # are never exposed by a gateway deployment.
         raise RuntimeModeError(
             code="SERVICE_ROLE_RESERVED",
-            message="NHMS_SERVICE_ROLE=slurm_gateway is reserved and cannot start the full API.",
+            message=(
+                "NHMS_SERVICE_ROLE=slurm_gateway must run the standalone bounded gateway app "
+                "(python -m services.slurm_gateway), not the full business API."
+            ),
             details={
                 "service_role": role.value,
-                "bounded_gateway_app": False,
+                "bounded_gateway_app": True,
             },
         )
 

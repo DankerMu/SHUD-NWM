@@ -50,6 +50,7 @@ class SlurmGatewaySettings(BaseSettings):
     max_retries: int = Field(default=3, ge=0)
     retry_backoff_seconds: list[int] = Field(default_factory=lambda: [60, 300, 900])
     allow_internal_reset: bool = False
+    mock_missing_binaries: list[str] = Field(default_factory=list)
 
     model_config = SettingsConfigDict(
         env_prefix="SLURM_GATEWAY_",

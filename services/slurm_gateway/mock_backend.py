@@ -13,10 +13,12 @@ from services.slurm_gateway.gateway import (
     SlurmValidationError,
 )
 from services.slurm_gateway.models import (
+    SLURM_HEALTH_BINARIES,
     TERMINAL_STATUSES,
     ArraySubmitJobRequest,
     ResetRequest,
     ResetResponse,
+    SlurmBinaryProbe,
     SlurmHealthResponse,
     SlurmJobRecord,
     SlurmJobStatus,
@@ -218,7 +220,24 @@ class MockSlurmGateway(SlurmGateway):
             return ResetResponse(status="ok", cleared=cleared, next_job_id="mock_1001")
 
     def health(self) -> SlurmHealthResponse:
-        return SlurmHealthResponse(backend="mock", version=self.settings.version, status="ok")
+        missing = set(self.settings.mock_missing_binaries)
+        binaries = {
+            name: SlurmBinaryProbe(
+                resolved=name not in missing,
+                executable=name not in missing,
+                detail=None if name not in missing else "mock: binary configured as missing",
+            )
+            for name in SLURM_HEALTH_BINARIES
+        }
+        healthy = all(probe.executable for probe in binaries.values())
+        return SlurmHealthResponse(
+            backend="mock",
+            version=self.settings.version if healthy else "",
+            status="ok" if healthy else "unhealthy",
+            error=None if healthy else "Mock Slurm gateway has one or more missing binaries.",
+            healthy=healthy,
+            binaries=binaries,
+        )
 
     def _get_job_locked(self, job_id: str, now: datetime) -> SlurmJobRecord:
         job = self._jobs.get(job_id)

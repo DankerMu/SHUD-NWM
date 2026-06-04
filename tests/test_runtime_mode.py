@@ -93,7 +93,7 @@ def test_slurm_gateway_role_is_reserved_and_does_not_start_business_api() -> Non
         create_app(_clean_env({"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": "slurm_gateway"}))
 
     assert exc_info.value.code == "SERVICE_ROLE_RESERVED"
-    assert exc_info.value.details == {"service_role": "slurm_gateway", "bounded_gateway_app": False}
+    assert exc_info.value.details == {"service_role": "slurm_gateway", "bounded_gateway_app": True}
 
 
 def test_display_readonly_starts_with_runtime_config_and_without_slurm_routes() -> None:

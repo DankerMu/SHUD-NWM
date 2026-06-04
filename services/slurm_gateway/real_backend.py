@@ -5,6 +5,7 @@ import os
 import re
 import selectors
 import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -50,10 +51,12 @@ from services.slurm_gateway.gateway import (
     TemplateSecurityError,
 )
 from services.slurm_gateway.models import (
+    SLURM_HEALTH_BINARIES,
     TERMINAL_STATUSES,
     ArraySubmitJobRequest,
     ResetRequest,
     ResetResponse,
+    SlurmBinaryProbe,
     SlurmHealthResponse,
     SlurmJobRecord,
     SlurmJobStatus,
@@ -413,12 +416,59 @@ class RealSlurmGateway(SlurmGateway):
         return ResetResponse(status="ok", cleared=cleared, next_job_id="")
 
     def health(self) -> SlurmHealthResponse:
+        binaries: dict[str, SlurmBinaryProbe] = {}
+        version = ""
+        errors: list[str] = []
+        for name in SLURM_HEALTH_BINARIES:
+            probe, probe_version = self._probe_binary(name)
+            binaries[name] = probe
+            if probe_version and not version:
+                version = probe_version
+            if not probe.executable and probe.detail:
+                errors.append(f"{name}: {probe.detail}")
+
+        healthy = all(probe.executable for probe in binaries.values())
+        version = version or self.settings.version
+        if healthy:
+            return SlurmHealthResponse(
+                backend="slurm",
+                version=version,
+                status="healthy",
+                healthy=True,
+                binaries=binaries,
+            )
+        return SlurmHealthResponse(
+            backend="slurm",
+            version="",
+            status="unhealthy",
+            error="; ".join(errors) or "One or more required Slurm binaries are unavailable.",
+            healthy=False,
+            binaries=binaries,
+        )
+
+    def _probe_binary(self, name: str) -> tuple[SlurmBinaryProbe, str]:
+        """Probe a single Slurm client binary for resolvability and executability.
+
+        ``resolved`` is True when the binary can be located (via the configured
+        ``slurm_bin_path``/PATH or when a light ``--version`` probe succeeds).
+        ``executable`` requires the probe command to return successfully without
+        submitting any work. Any error is captured as a redacted detail string.
+        """
+
+        command_path = self._slurm_command(name)
+        which_resolved = shutil.which(command_path) is not None
         try:
-            result = self._run_command([self._slurm_command("sinfo"), "--version"])
+            result = self._run_command([command_path, "--version"])
         except SlurmGatewayError as exc:
-            return SlurmHealthResponse(backend="slurm", version="", status="unhealthy", error=exc.message)
-        version = result.stdout.strip() or self.settings.version
-        return SlurmHealthResponse(backend="slurm", version=version, status="healthy")
+            detail = exc.message
+            file_missing = isinstance(exc, SlurmCommandError) and (exc.details or {}).get("returncode") is None
+            resolved = which_resolved and not file_missing
+            return SlurmBinaryProbe(resolved=resolved, executable=False, detail=detail), ""
+        probe_version = result.stdout.strip()
+        return (
+            SlurmBinaryProbe(resolved=True, executable=True, detail=None),
+            probe_version,
+        )
 
     def load_resource_profiles(self) -> dict[str, Any]:
         path = Path(self.settings.resource_profiles_path).expanduser()

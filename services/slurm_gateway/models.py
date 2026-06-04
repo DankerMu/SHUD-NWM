@@ -138,11 +138,24 @@ class SlurmLogsResponse(BaseModel):
     array_task_logs: list[dict[str, Any]] | None = None
 
 
+class SlurmBinaryProbe(BaseModel):
+    """Probe result for a single Slurm client binary."""
+
+    resolved: bool = False
+    executable: bool = False
+    detail: str | None = None
+
+
+SLURM_HEALTH_BINARIES = ("sbatch", "squeue", "sacct", "scancel")
+
+
 class SlurmHealthResponse(BaseModel):
     backend: str
     version: str
     status: str
     error: str | None = None
+    healthy: bool = True
+    binaries: dict[str, SlurmBinaryProbe] = Field(default_factory=dict)
 
 
 class ResetRequest(BaseModel):

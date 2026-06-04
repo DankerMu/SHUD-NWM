@@ -1,0 +1,47 @@
+# Example systemd unit for the standalone NHMS Slurm gateway on node 22.
+#
+# This unit serves ONLY the bounded gateway app
+# (services.slurm_gateway.app:create_gateway_app via `python -m services.slurm_gateway`):
+# it exposes /health and /api/v1/slurm/* and NO forecast/model/pipeline/static/
+# frontend business routes. It MUST NOT point ExecStart at the full business API
+# (apps.api.main:create_app) — doing so would expose business surfaces from a
+# gateway deployment and fails the deployment receipt.
+#
+# Operator edits required before install:
+# - Replace /opt/SHUD-NWM with the absolute repository checkout path on node 22.
+# - Set User=/Group= to the unprivileged service account that owns the workspace.
+# - Set SLURM_GATEWAY_URL to the gateway listen URL (host:port the scheduler
+#   preflight HTTP-probes). Default below is http://127.0.0.1:8081.
+# - Set SLURM_GATEWAY_BACKEND=slurm for live Slurm submission and point
+#   SLURM_GATEWAY_WORKSPACE_DIR / SLURM_GATEWAY_TEMPLATE_DIR /
+#   SLURM_GATEWAY_RESOURCE_PROFILES_PATH at workspace-root paths (not the system
+#   disk). If sbatch/squeue/sacct/scancel are not on PATH, set
+#   SLURM_GATEWAY_SLURM_BIN_PATH to their directory.
+# - Leave SLURM_GATEWAY_ALLOW_INTERNAL_RESET unset/false in production: the
+#   /api/v1/slurm/internal/reset endpoint clears gateway state and is not
+#   registered unless explicitly enabled.
+# - The health endpoint probes sbatch/squeue/sacct/scancel; a missing binary
+#   reports healthy=false, which the scheduler preflight treats as a
+#   pre-mutation blocker.
+
+[Unit]
+Description=NHMS standalone Slurm gateway (node 22)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/SHUD-NWM
+Environment=SLURM_GATEWAY_URL=http://127.0.0.1:8081
+Environment=SLURM_GATEWAY_BACKEND=slurm
+Environment=SLURM_GATEWAY_WORKSPACE_DIR=/work/nhms/slurm
+Environment=SLURM_GATEWAY_TEMPLATE_DIR=/opt/SHUD-NWM/infra/sbatch
+Environment=SLURM_GATEWAY_RESOURCE_PROFILES_PATH=/opt/SHUD-NWM/config/resource_profiles.yaml
+ExecStart=/usr/bin/env uv run python -m services.slurm_gateway
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

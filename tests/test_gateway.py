@@ -34,7 +34,14 @@ async def test_health(client):
     response = await client.get("/api/v1/slurm/health")
 
     assert response.status_code == 200
-    assert response.json() == {"backend": "mock", "version": "0.1.0", "status": "ok", "error": None}
+    payload = response.json()
+    assert payload["backend"] == "mock"
+    assert payload["version"] == "0.1.0"
+    assert payload["status"] == "ok"
+    assert payload["error"] is None
+    assert payload["healthy"] is True
+    assert set(payload["binaries"]) == {"sbatch", "squeue", "sacct", "scancel"}
+    assert all(probe["resolved"] and probe["executable"] for probe in payload["binaries"].values())
 
 
 @pytest.mark.asyncio
