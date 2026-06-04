@@ -25,8 +25,8 @@ marked nullable):
 
 ## 0. Pre-change baseline and evidence
 
-- [ ] 0.1 `openspec validate m24-multibasin-continuous-daemon-live --strict --no-interactive`.
-- [ ] 0.2 Emit `artifacts/m24/<run_id>/baseline.json` (schema above): node, redacted DB identity,
+- [x] 0.1 `openspec validate m24-multibasin-continuous-daemon-live --strict --no-interactive`.
+- [x] 0.2 Emit `artifacts/m24/<run_id>/baseline.json` (schema above): node, redacted DB identity,
   cycle filters, active model counts, `hydro_run` status counts for GFS/IFS 2026060400, gateway
   `/api/v1/slurm/health` result, `hydro.state_snapshot` count (expected 0), and the claim that live
   QHH ran via `run_qhh_cycle.sh` while the generic scheduler has never run live (m20 0/33).
