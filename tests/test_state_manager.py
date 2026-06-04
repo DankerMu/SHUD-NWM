@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from packages.common.state_manager import (
     assess_freshness,
     state_snapshot_id,
 )
+from packages.common.state_qc import MAX_STATE_IC_BYTES
 
 
 class FakeStateSnapshotRepository:
@@ -176,6 +178,28 @@ def test_state_snapshot_qc_fail_keeps_usable_false(
     assert repository.qc_results[-1]["checks_json"]["error_code"] == "STATE_FILE_MISSING"
 
 
+def test_oversized_state_object_fails_qc_without_crash(
+    tmp_path: Path,
+    manager: StateManager,
+    repository: FakeStateSnapshotRepository,
+) -> None:
+    # An oversized stored IC object must fail QC with STATE_FILE_TOO_LARGE (bounded
+    # read / OOM protection), not be read unboundedly into memory.
+    result = _save_ic(tmp_path, manager, content=b"valid-state")
+    snapshot = repository.snapshots[result.state_id]
+    # Overwrite the stored object with content exceeding the read limit.
+    oversized = b"1 0.1\n" * ((MAX_STATE_IC_BYTES // 6) + 16)
+    manager.object_store.write_bytes_atomic(snapshot.state_uri, oversized)
+    # Keep the recorded checksum consistent so the size guard (not checksum) trips.
+    repository.snapshots[result.state_id] = replace(snapshot, checksum=sha256_bytes(oversized))
+
+    passed = manager.run_qc(result.state_id)
+
+    assert passed is False
+    assert repository.snapshots[result.state_id].usable_flag is False
+    assert repository.qc_results[-1]["checks_json"]["error_code"] == "STATE_FILE_TOO_LARGE"
+
+
 def test_latest_usable_state_selects_max_valid_time(
     tmp_path: Path,
     manager: StateManager,
@@ -216,7 +240,7 @@ def test_conflicting_checksum_overwrites_snapshot_as_superseded(
     repository.set_usable_flag(state_id=first.state_id, usable_flag=True)
 
     second_path = tmp_path / "second.cfg.ic"
-    second_path.write_bytes(b"second")
+    second_path.write_bytes(_valid_ic_bytes(b"second"))
     second = manager.save_state_snapshot(
         model_id="demo_model",
         run_id="run_002",
@@ -228,7 +252,7 @@ def test_conflicting_checksum_overwrites_snapshot_as_superseded(
     assert second.state_id == first.state_id
     snapshot = repository.snapshots[second.state_id]
     assert snapshot.run_id == "run_002"
-    assert snapshot.checksum == sha256_bytes(b"second")
+    assert snapshot.checksum == sha256_bytes(_valid_ic_bytes(b"second"))
     assert snapshot.usable_flag is False
 
 
@@ -239,7 +263,7 @@ def test_same_checksum_save_is_idempotent(
 ) -> None:
     first = _save_ic(tmp_path, manager, content=b"same")
     second_path = tmp_path / "same-again.cfg.ic"
-    second_path.write_bytes(b"same")
+    second_path.write_bytes(_valid_ic_bytes(b"same"))
 
     second = manager.save_state_snapshot(
         model_id="demo_model",
@@ -276,6 +300,19 @@ async def test_state_snapshot_api_list_and_get(
     assert get_response.json()["state_id"] == latest.state_id
 
 
+def _valid_ic_bytes(content: bytes) -> bytes:
+    # Structurally-valid SHUD .cfg.ic body; vary the minute-time token by content so
+    # distinct callers keep distinct checksums while passing state-variable QC.
+    minute = 27_000_000.0 + (int.from_bytes(content[:4].ljust(4, b"\x00"), "big") % 1000)
+    lines = [
+        f"2\t1\t{minute:.6f}",
+        "1\t0.1\t0.1\t0.1\t0.1\t0.1",
+        "2\t0.1\t0.1\t0.1\t0.1\t0.1",
+        "1\t0.5",
+    ]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 def _save_ic(
     tmp_path: Path,
     manager: StateManager,
@@ -285,7 +322,7 @@ def _save_ic(
 ) -> Any:
     valid_time = valid_time or _dt("2026-04-30T00:00:00Z")
     path = tmp_path / f"{content.decode('utf-8')}.cfg.ic"
-    path.write_bytes(content)
+    path.write_bytes(_valid_ic_bytes(content))
     return manager.save_state_snapshot(
         model_id="demo_model",
         run_id="run_001",

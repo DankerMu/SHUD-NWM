@@ -23,6 +23,13 @@ from packages.common.safe_fs import (
     read_bytes_no_follow,
 )
 from packages.common.source_identity import normalize_source_id
+from packages.common.state_lineage import (
+    LINEAGE_MAX_LEAD_EXCEEDED,
+    LINEAGE_PACKAGE_VERSION_MISMATCH,
+    LINEAGE_SOURCE_MISMATCH,
+    STATE_QC_FAILED,
+    STATE_TOO_STALE,
+)
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
 from services.orchestrator.persistence import PipelineJob, PipelineStore
@@ -33,6 +40,7 @@ from services.orchestrator.production_contract import (
     production_status_for,
 )
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
+from services.orchestrator.time_consistency import check_three_way_time_consistency
 from services.slurm_gateway.config import SlurmGatewaySettings
 from workers.canonical_converter.converter import (
     evaluate_canonical_readiness,
@@ -56,6 +64,14 @@ COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published"
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
+# ERA5 reanalysis is published with a multi-day production delay; the analysis
+# segment is therefore built from *delayed reanalysis*, never a real-time causal
+# nowcast. We record a conservative default latency (5 days, ERA5T-style "initial
+# release" lag) so the causality marker is honest about how far the reanalysis
+# trails real time. Overridable via ERA5_REANALYSIS_LATENCY_MINUTES.
+# TODO(M24): source the exact per-cycle latency from the ERA5 download metadata
+# (publish_time - segment_end) once it is recorded; until then this is the floor.
+DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = 5 * 24 * 60
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 MAX_CANDIDATE_STATE_TASK_RESULTS = 16
@@ -314,6 +330,144 @@ class InitialStateSelection:
     valid_time: datetime | None
     checksum: str | None
     quality: str
+    # Lineage (M24 §2 Lane 1) - optional, default None for backward compatibility.
+    source_id: str | None = None
+    cycle_id: str | None = None
+    lead_hours: int | None = None
+    model_package_version: str | None = None
+    model_package_checksum: str | None = None
+    rejection_code: str | None = None
+
+
+# Bound on the warm-start fallback loop to avoid unbounded scans of stale snapshots.
+_MAX_STATE_FALLBACK_CANDIDATES = 8
+
+# Forcing causality modes for the analysis/nowcast segment (M24 §2 Lane 2). The
+# analysis segment [T_N, T_{N+1}] must be built from data that does not leak the
+# future relative to its own segment; ``causal`` is the real-time default,
+# ``delayed_reanalysis`` is the only mode permitted to use ERA5-style reanalysis
+# and must record the latency with which the reanalysis trails real time.
+FORCING_CAUSALITY_CAUSAL = "causal"
+FORCING_CAUSALITY_DELAYED_REANALYSIS = "delayed_reanalysis"
+
+
+def _analysis_update_ic_step_minutes(start_time: datetime, end_time: datetime) -> int:
+    """Restart cadence (minutes) that writes a SHUD restart state exactly at ``end_time``.
+
+    The analysis segment is ``[T_N, T_{N+1}]`` with ``end_time == T_{N+1}``. SHUD writes
+    a restart artifact every ``Update_IC_STEP`` minutes measured from the segment start,
+    so the cadence must divide the segment so that a write lands on the final step. The
+    simplest cadence guaranteed to land exactly on ``T_{N+1}`` (and never on an earlier
+    modulo boundary, never on the default 1440-minute day) is the full segment length.
+
+    Short 6h/12h cycles therefore get 360/720-minute cadences; a 24h cycle gets 1440.
+    Returns the segment length in whole minutes. Raises on a non-positive or
+    non-minute-aligned window so a wrong-time restart is a hard error, not silent.
+    """
+
+    duration_seconds = (_ensure_segment_utc(end_time) - _ensure_segment_utc(start_time)).total_seconds()
+    if duration_seconds <= 0:
+        raise OrchestratorError(
+            "ANALYSIS_SEGMENT_INVALID_WINDOW",
+            "Analysis segment end_time must be after start_time.",
+            {"start_time": start_time.isoformat(), "end_time": end_time.isoformat()},
+        )
+    if duration_seconds % 60 != 0:
+        raise OrchestratorError(
+            "ANALYSIS_SEGMENT_NON_MINUTE_ALIGNED",
+            "Analysis segment length must be a whole number of minutes for restart cadence.",
+            {"duration_seconds": duration_seconds},
+        )
+    return int(duration_seconds // 60)
+
+
+def _ensure_segment_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _era5_reanalysis_latency_minutes() -> int:
+    """Recorded latency (minutes) by which ERA5 reanalysis trails its own segment.
+
+    Overridable via ``ERA5_REANALYSIS_LATENCY_MINUTES``; falls back to a conservative
+    default when unset or unparseable, so the analysis causality marker always carries
+    a non-null latency. (TODO M24: replace with the exact per-cycle publish lag once
+    the ERA5 download metadata records it.)
+    """
+
+    raw = os.getenv("ERA5_REANALYSIS_LATENCY_MINUTES", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
+
+
+def _analysis_forcing_causality(latency_minutes: int | None = None) -> dict[str, Any]:
+    """Causality marker recorded on the analysis context/manifest.
+
+    The marker must honestly reflect the *actual* forcing source of the segment.
+
+    The analysis segment is currently built exclusively from whole-day ERA5
+    reanalysis (``ANALYSIS_SOURCE_ID == "ERA5"``, stage chain
+    ``era5_download -> analysis_*``). ERA5 is historical data published with a
+    multi-day delay, so it is ``delayed_reanalysis`` with a recorded latency -- it is
+    NOT a real-time ``causal`` nowcast and must never be marked as such. Callers that
+    omit ``latency_minutes`` for the ERA5 analysis path therefore get the default
+    recorded reanalysis latency, not a causal marker.
+
+    ``causal`` is reserved for a *future* real-time implementation (cycle-N lead /
+    nowcast with no future leak and, by construction, no reanalysis latency). When
+    that path exists it will pass an explicit ``latency_minutes=0``-style causal
+    marker; until then the ERA5 segment is always ``delayed_reanalysis``.
+    """
+
+    resolved_latency = _era5_reanalysis_latency_minutes() if latency_minutes is None else int(latency_minutes)
+    return {
+        "mode": FORCING_CAUSALITY_DELAYED_REANALYSIS,
+        "latency_minutes": resolved_latency,
+        "no_future_leak": True,
+    }
+
+
+# Re-exported from the shared module so chain and the forecast runtime share one
+# implementation (single source of truth; see services.orchestrator.time_consistency).
+_check_three_way_time_consistency = check_three_way_time_consistency
+
+
+def _validate_state_lineage(
+    state: StateSnapshot,
+    *,
+    source_id: str | None,
+    model_package_version: str | None,
+    model_package_checksum: str | None,
+    max_lead_hours: int | None,
+) -> str | None:
+    """Return a stable rejection code if the candidate state's lineage is incompatible.
+
+    Each check is skipped when the corresponding target value is unknown (None) so
+    pre-lineage states and callers without full target metadata are not falsely
+    rejected. Returns None when the candidate is compatible.
+    """
+
+    if source_id is not None and state.source_id is not None:
+        if normalize_source_id(state.source_id) != normalize_source_id(source_id):
+            return LINEAGE_SOURCE_MISMATCH
+
+    if state.model_package_version is not None and model_package_version is not None:
+        if state.model_package_version != model_package_version:
+            return LINEAGE_PACKAGE_VERSION_MISMATCH
+    if state.model_package_checksum is not None and model_package_checksum is not None:
+        if state.model_package_checksum != model_package_checksum:
+            return LINEAGE_PACKAGE_VERSION_MISMATCH
+
+    if max_lead_hours is not None and state.lead_hours is not None:
+        if int(state.lead_hours) > int(max_lead_hours):
+            return LINEAGE_MAX_LEAD_EXCEEDED
+
+    return None
 
 
 @dataclass(frozen=True)
@@ -368,6 +522,9 @@ class AnalysisRunContext:
     init_state_uri: str | None = None
     init_state_valid_time: datetime | None = None
     output_segment_count: int | None = None
+    # M24 §2 Lane 2: restart cadence landing on T_{N+1} and forcing causality marker.
+    update_ic_step_minutes: int | None = None
+    forcing_causality: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -753,6 +910,7 @@ class ForecastOrchestrator:
         normalized_basins = self._normalize_cycle_basins(basins, source, parsed_cycle_time)
         if not normalized_basins:
             raise OrchestratorError("EMPTY_BASIN_LIST", "orchestrate_cycle requires at least one basin.")
+        self._apply_cohort_warm_start(normalized_basins, source, parsed_cycle_time)
         self._validate_cycle_basin_identities(normalized_basins, source, parsed_cycle_time, cycle_id)
         context_run_id = _cycle_orchestration_run_id(source, parsed_cycle_time, normalized_basins)
         if _active_orchestration_conflicts(
@@ -2427,6 +2585,7 @@ class ForecastOrchestrator:
                 "valid_time": _format_time_or_none(_parse_gateway_time(basin.get("init_state_valid_time"))),
                 "checksum": basin.get("init_state_checksum"),
                 "quality": basin.get("init_state_quality") or "cold_start_no_state",
+                "lineage": dict(basin.get("init_state_lineage") or {}),
             },
             "runtime": dict(assembly.runtime),
             "outputs": dict(assembly.outputs),
@@ -2614,6 +2773,56 @@ class ForecastOrchestrator:
                     _validate_safe_id(f"basins[{index}].{field_name}", str(field_value))
             entries.append(entry)
         return entries
+
+    def _apply_cohort_warm_start(
+        self,
+        basins: Sequence[dict[str, Any]],
+        source_id: str,
+        cycle_time: datetime,
+    ) -> None:
+        """Select each basin's warm-start state so all three manifest faces agree.
+
+        Populates ``init_state_uri`` / ``init_state_id`` / ``init_state_checksum`` /
+        ``init_state_valid_time`` / ``init_state_quality`` plus lineage on each basin
+        dict. These same fields flow unchanged into (1) the scheduler basin record we
+        were handed, (2) the cycle-stage manifest index entries, and (3) the forecast
+        runtime manifest (which reads ``basin.get('init_state_*')``), giving a single
+        selected state across all three faces (M24 §2 Lane 2).
+        """
+
+        if self.state_manager is None:
+            return
+        for basin in basins:
+            if basin.get("init_state_uri") not in (None, ""):
+                # Caller (scheduler) already selected a state; do not override it.
+                continue
+            model_id = str(basin.get("model_id") or "")
+            if not model_id:
+                continue
+            selection = self._select_forecast_initial_state(
+                model_id=model_id,
+                cycle_time=cycle_time,
+                source_id=str(basin.get("source_id") or source_id),
+                model_package_version=basin.get("model_package_uri"),
+                model_package_checksum=basin.get("model_package_checksum"),
+                max_lead_hours=_basin_max_lead_hours(basin),
+            )
+            basin["init_state_id"] = selection.state_id
+            basin["init_state_uri"] = selection.state_uri
+            basin["init_state_checksum"] = selection.checksum
+            basin["init_state_valid_time"] = (
+                _format_time(selection.valid_time) if selection.valid_time is not None else None
+            )
+            basin["init_state_quality"] = selection.quality
+            basin["init_state_lineage"] = {
+                "source_id": selection.source_id,
+                "cycle_id": selection.cycle_id,
+                "lead_hours": selection.lead_hours,
+                "model_package_version": selection.model_package_version,
+                "model_package_checksum": selection.model_package_checksum,
+            }
+            if selection.rejection_code is not None:
+                basin["init_state_rejection_code"] = selection.rejection_code
 
     def _validate_cycle_basin_identities(
         self,
@@ -2838,7 +3047,13 @@ class ForecastOrchestrator:
             model_id=model_id,
         )
         self.repository.ensure_forecast_cycle(source_id=source_id, cycle_time=parsed_cycle_time)
-        initial_state = self._select_forecast_initial_state(model_id=model_id, cycle_time=parsed_cycle_time)
+        initial_state = self._select_forecast_initial_state(
+            model_id=model_id,
+            cycle_time=parsed_cycle_time,
+            source_id=source_id,
+            model_package_version=model.model_package_uri,
+            max_lead_hours=max_lead_hours,
+        )
         context = self._build_run_context(
             source_id,
             parsed_cycle_time,
@@ -3779,29 +3994,93 @@ class ForecastOrchestrator:
             },
         }
 
-    def _select_forecast_initial_state(self, *, model_id: str, cycle_time: datetime) -> InitialStateSelection:
+    def _state_passes_qc(self, state: StateSnapshot) -> bool:
+        """Selection-time QC gate for a warm-start candidate.
+
+        Defers to the state manager's optional ``state_variable_qc_passed`` hook when
+        present; absent the hook, a usable snapshot is trusted (run-time/save-time QC
+        already gated ``usable_flag``). Returns False to skip a candidate that fails QC.
+        """
+
+        hook = getattr(self.state_manager, "state_variable_qc_passed", None)
+        if hook is None:
+            return True
+        try:
+            return bool(hook(state))
+        except Exception:  # noqa: BLE001 - a QC hook failure must not crash selection
+            return False
+
+    def _select_forecast_initial_state(
+        self,
+        *,
+        model_id: str,
+        cycle_time: datetime,
+        source_id: str | None = None,
+        model_package_version: str | None = None,
+        model_package_checksum: str | None = None,
+        max_lead_hours: int | None = None,
+    ) -> InitialStateSelection:
         if self.state_manager is None:
             return InitialStateSelection(None, None, None, None, "cold_start_no_state")
 
-        state = self.state_manager.get_latest_usable_state(model_id=model_id, before_time=cycle_time)
-        if state is None:
-            return InitialStateSelection(None, None, None, None, "cold_start_no_state")
+        cursor = cycle_time
+        last_rejection_code: str | None = None
+        # Fallback loop: reject incompatible-lineage / failed-QC candidates and try
+        # the next older usable state, never failing the cycle for a missing successor.
+        for _ in range(_MAX_STATE_FALLBACK_CANDIDATES):
+            state = self.state_manager.get_latest_usable_state(model_id=model_id, before_time=cursor)
+            if state is None:
+                return InitialStateSelection(
+                    None, None, None, None, "cold_start_no_state", rejection_code=last_rejection_code
+                )
 
-        quality = assess_freshness(
-            state.valid_time,
-            cycle_time,
-            soft_threshold_days=self.config.state_soft_stale_threshold_days,
-            hard_threshold_days=self.config.state_hard_stale_threshold_days,
-        )
-        if quality == "cold_start_stale_state":
-            return InitialStateSelection(None, None, None, None, quality)
+            quality = assess_freshness(
+                state.valid_time,
+                cycle_time,
+                soft_threshold_days=self.config.state_soft_stale_threshold_days,
+                hard_threshold_days=self.config.state_hard_stale_threshold_days,
+            )
+            if quality == "cold_start_stale_state":
+                # Older states are even staler; stop and record stale cold start. The
+                # primary cause here is staleness, so the rejection_code is the explicit
+                # STATE_TOO_STALE marker -- never a carried-forward LINEAGE_* code from a
+                # younger candidate, which would falsely conflate quality=stale with a
+                # lineage rejection.
+                return InitialStateSelection(
+                    None, None, None, None, quality, rejection_code=STATE_TOO_STALE
+                )
+
+            rejection_code = _validate_state_lineage(
+                state,
+                source_id=source_id,
+                model_package_version=model_package_version,
+                model_package_checksum=model_package_checksum,
+                max_lead_hours=max_lead_hours,
+            )
+            if rejection_code is None and not self._state_passes_qc(state):
+                rejection_code = STATE_QC_FAILED
+            if rejection_code is not None:
+                # Record the rejection on the candidate and advance to an older one.
+                last_rejection_code = rejection_code
+                cursor = state.valid_time - timedelta(microseconds=1)
+                continue
+
+            return InitialStateSelection(
+                state_id=state.state_id,
+                state_uri=state.state_uri,
+                valid_time=state.valid_time,
+                checksum=state.checksum,
+                quality=quality,
+                source_id=state.source_id,
+                cycle_id=state.cycle_id,
+                lead_hours=state.lead_hours,
+                model_package_version=state.model_package_version,
+                model_package_checksum=state.model_package_checksum,
+                rejection_code=None,
+            )
 
         return InitialStateSelection(
-            state_id=state.state_id,
-            state_uri=state.state_uri,
-            valid_time=state.valid_time,
-            checksum=state.checksum,
-            quality=quality,
+            None, None, None, None, "cold_start_no_state", rejection_code=last_rejection_code
         )
 
     def _write_run_manifest(self, context: ForecastRunContext | AnalysisRunContext, manifest: dict[str, Any]) -> None:
@@ -3960,6 +4239,8 @@ class AnalysisOrchestrator(ForecastOrchestrator):
             init_state_uri=init_state.state_uri if init_state is not None else None,
             init_state_valid_time=init_state.valid_time if init_state is not None else None,
             output_segment_count=model.output_segment_count,
+            update_ic_step_minutes=_analysis_update_ic_step_minutes(start_time, end_time),
+            forcing_causality=_analysis_forcing_causality(),
         )
 
     def _build_run_manifest(self, context: AnalysisRunContext) -> dict[str, Any]:
@@ -3992,9 +4273,21 @@ class AnalysisOrchestrator(ForecastOrchestrator):
                 "forcing_version_id": context.forcing_version_id,
                 "forcing_uri": context.forcing_package_uri,
             },
+            "forcing_causality": dict(
+                context.forcing_causality
+                if context.forcing_causality is not None
+                else _analysis_forcing_causality()
+            ),
             "runtime": {
                 "output_interval_minutes": 60,
                 "init_mode": 3 if context.init_state_id else 1,
+                # Restart cadence lands exactly at end_time == T_{N+1} so the saved
+                # interim state is valid at the next cycle's init time.
+                "update_ic_step_minutes": (
+                    context.update_ic_step_minutes
+                    if context.update_ic_step_minutes is not None
+                    else _analysis_update_ic_step_minutes(context.start_time, context.end_time)
+                ),
             },
             "outputs": {
                 "run_manifest_uri": context.run_manifest_uri,
@@ -6537,6 +6830,18 @@ def _max_lead_hours_from_lineage(value: Any) -> int | None:
     if not isinstance(value, Mapping):
         return None
     return _optional_int(value.get("max_lead_hours"))
+
+
+def _basin_max_lead_hours(basin: Mapping[str, Any]) -> int | None:
+    """Configured ``max_lead`` policy (hours) for a cohort basin's warm-start chaining."""
+    for key in ("max_lead_hours", "warm_start_max_lead_hours"):
+        value = _optional_int(basin.get(key))
+        if value is not None:
+            return value
+    horizon = basin.get("horizon")
+    if isinstance(horizon, Mapping):
+        return _optional_int(horizon.get("max_lead_hours"))
+    return None
 
 
 def _auto_trigger_forecast_hours(

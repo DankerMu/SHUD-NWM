@@ -1,3 +1,14 @@
+"""DIAGNOSTIC-ONLY: standalone qhh SHUD manifest builder.
+
+This script is a developer diagnostic / smoke-test fixture and is NOT part of the
+production path. Production warm-start manifests are produced by the scheduler
+(``services/orchestrator/scheduler.py``) and chained through the orchestrator
+(``services/orchestrator/chain.py``); they carry the warm-start ``init_state_*`` +
+lineage and analysis-segment restart cadence that this script does not. Do not wire
+this into the daemon. Full retirement is tracked under M24 §5 / #293; this file is
+retained only for the static reference test (``tests/test_qhh_scripts_static.py``).
+"""
+
 from __future__ import annotations
 
 import json

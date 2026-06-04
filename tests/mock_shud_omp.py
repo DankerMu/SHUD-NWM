@@ -48,10 +48,21 @@ def main() -> int:
         values = [f"{100.0 + index + step:.3f}" for index in range(1, segment_count + 1)]
         rows.append(",".join([timestamp, *values]))
     (output_dir / f"{basin}.rivqdown").write_text("\n".join(rows) + "\n", encoding="utf-8")
-    (output_dir / f"{basin}.cfg.ic").write_text(
-        f"STATE_TIME = {(start + timedelta(minutes=_timesteps(cfg) * interval_minutes)).isoformat()}\n",
-        encoding="utf-8",
-    )
+    # Emit a structurally valid minimal SHUD .cfg.ic restart state so warm-start
+    # state-variable QC (header counts + per-element non-negative state columns) and
+    # the runtime header-minute readers all parse it. Header layout:
+    #   <mesh_count> <river_count> <minute-time>   (minute-time at token index 2)
+    # followed by one mesh row (id + canopy/snow/surface/unsat/groundwater) and one
+    # river row (id + river_stage) per element, all non-negative.
+    state_time = start + timedelta(minutes=_timesteps(cfg) * interval_minutes)
+    minute_time = state_time.timestamp() / 60.0
+    mesh_count = segment_count
+    ic_lines = [f"{mesh_count}\t{segment_count}\t{minute_time:.6f}"]
+    for index in range(1, mesh_count + 1):
+        ic_lines.append(f"{index}\t0.010\t0.000\t0.050\t0.200\t0.500")
+    for index in range(1, segment_count + 1):
+        ic_lines.append(f"{index}\t0.300")
+    (output_dir / f"{basin}.cfg.ic").write_text("\n".join(ic_lines) + "\n", encoding="utf-8")
     print(f"mock_shud_omp wrote {len(rows) - 1} timesteps to {output_dir}")
     return 0
 

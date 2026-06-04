@@ -82,25 +82,25 @@ Verification: `uv run pytest -q tests/test_real_slurm_gateway.py tests/test_prod
 
 ## 2. Cross-cycle warm-start closure (analysis-segment + cohort wiring)
 
-- [ ] 2.1 Implement path (b): a short analysis/nowcast segment `[T_N, T_{N+1}]` with
+- [x] 2.1 Implement path (b): a short analysis/nowcast segment `[T_N, T_{N+1}]` with
   `end_time == T_{N+1}`, setting `Update_IC_STEP` to a cadence that lands on `T_{N+1}` (default
   1440min misses 6h/12h cycles), and using a causal no-future-leak `[T_N,T_{N+1}]` forcing policy
   (cycle N `0..Δ` lead or best-available nowcast; ERA5 only in delayed-reanalysis mode), so
   `state_save_qc` persists the `T_{N+1}` end state as the next cycle's IC. (Path (a) restart-cadence
   only if timestamped non-overwriting restart artifacts are added later.)
-- [ ] 2.2 Normalize the run state artifact (`*.cfg.ic`/`*.cfg.ic.update`) to canonical
+- [x] 2.2 Normalize the run state artifact (`*.cfg.ic`/`*.cfg.ic.update`) to canonical
   `state.cfg.ic`, recording the original SHUD filename and target `valid_time`; on consume,
   materialize/rename the canonical state to `<project_name>.cfg.ic` that SHUD reads.
-- [ ] 2.3 Close cohort wiring: `_candidate_basin_manifest` emits the selected `init_state_uri`/
+- [x] 2.3 Close cohort wiring: `_candidate_basin_manifest` emits the selected `init_state_uri`/
   checksum so scheduler basin record, cycle-stage manifest, and forecast runtime manifest agree.
-- [ ] 2.4 Extend `StateSnapshot`/selection with lineage (source/cycle/lead, model package version,
+- [x] 2.4 Extend `StateSnapshot`/selection with lineage (source/cycle/lead, model package version,
   checksum); reject incompatible lineage / over-`max_lead` with a stable rejection code.
-- [ ] 2.5 Add state-variable QC (row counts vs mesh/river/lake; range/non-negative for
+- [x] 2.5 Add state-variable QC (row counts vs mesh/river/lake; range/non-negative for
   canopy/snow/surface/unsat/GW/river-stage/lake-stage; restart water-balance delta threshold).
-- [ ] 2.6 Record warm-start quality using the canonical enum (`fresh`/`degraded_stale_init_state`/
+- [x] 2.6 Record warm-start quality using the canonical enum (`fresh`/`degraded_stale_init_state`/
   `cold_start_no_state`/`cold_start_stale_state`); stop using `create_qhh_shud_manifest.py` in
   production.
-- [ ] 2.7 Add deterministic tests (new):
+- [x] 2.7 Add deterministic tests (new):
   - `test_saved_state_valid_time_equals_next_cycle_init` (asserts `valid_time == T_{N+1}`, and
     snapshot/`.cfg.ic` header/run start three-way agreement).
   - `test_cycle_cohort_forecast_manifest_uses_prior_cycle_saved_state` (three manifest surfaces
@@ -108,6 +108,24 @@ Verification: `uv run pytest -q tests/test_real_slurm_gateway.py tests/test_prod
   - lineage-reject (with code) and corrupt/failed-QC fallback cases.
 
 Evidence Floor: the named tests PASS; lineage-reject code + QC + three-way time covered.
+
+> Closure (issue #289), 2026-06-04 — deterministic CLOSED; live two-cycle receipt BLOCKED.
+> Implemented: analysis-segment `Update_IC_STEP` lands restart on `T_{N+1}` (6h/12h/24h →
+> 360/720/1440); IC normalize `*.cfg.ic.update`→canonical `state.cfg.ic` (records original filename
+> + valid_time) and consume materialize→`<project>.cfg.ic` with `init_mode=3`; three-way time
+> consistency wired into the runtime consume path (warm-continuity enforced, degraded reuse 2-way),
+> lake-aware header-minute parsing shared across runtime + QC; cohort selection feeds one
+> `init_state_uri`/checksum/lineage into all three manifest surfaces; `StateSnapshot` lineage +
+> migration 000028 + stable rejection codes (`state_lineage.py`); state-variable QC
+> (`state_qc.py`, bounded 64MiB read, missing-column/lake-mismatch fail); canonical quality enum;
+> `create_qhh_shud_manifest.py` labelled diagnostic-only. **node-22: 267 passed** (HEAD 7b97aae;
+> all named tests + e2e + migrations + runtime IC header). **Honest boundaries**: forcing causality
+> emits a `delayed_reanalysis`+latency marker (true causal cycle-N-lead/nowcast is future work,
+> not over-claimed as `causal`); water-balance delta implemented but skipped pending first-step
+> diagnostics; production save-time row-count QC runs with counts=None and the selection-time QC
+> hook is trust-through (documented). **Live two-cycle receipt** `artifacts/m24/m24-warmstart-7b97aae/
+> warm_start.json` (status=BLOCKED): needs the generic scheduler real-SHUD analysis→save→consume
+> chain on node-22 (m20 0/33 never live) — consumed by and tracked under §4/#292.
 Verification: `uv run pytest -q tests/test_warm_start.py tests/test_orchestration_chain.py tests/test_e2e.py` + `uv run ruff check .` + node-22 two-cycle warm-start receipt (cycle 2 `ic_file_uri`==cycle 1 snapshot, quality recorded) or BLOCKED.
 
 ## 3A. Concurrent submit-and-return with durable reservation
