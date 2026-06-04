@@ -535,6 +535,37 @@ def test_gfs_apcp_first_frame_nonzero_start_uses_forecast_hour_step() -> None:
     assert result.values[0] != pytest.approx(576.0)
 
 
+def test_gfs_apcp_cross_bucket_reset_has_no_spurious_negative() -> None:
+    # GFS APCP resets every 6h: f006 is the full 0-6h bucket (6.0mm), f009 is the
+    # 6-9h bucket-relative accumulation (1.0mm). Differencing across the reset would
+    # give -5.0mm (spurious warn); the current value IS the increment over fh-bucket
+    # start (3h) -> 1.0 * 24 / 3 = 8.0 mm/day, quality ok.
+    result = convert_units_with_metadata(
+        "apcp", [1.0], [6.0], forecast_hour=9, previous_forecast_hour=6
+    )
+    assert result.values == pytest.approx((8.0,))
+    assert result.quality_flag == "ok"
+
+
+def test_gfs_apcp_within_bucket_differences_normally() -> None:
+    # f009 (6-9h, 1.0mm) and f012 (6-12h, 3.0mm) are in the same bucket -> normal
+    # differencing: delta 2.0mm over 3h -> 2.0 * 24 / 3 = 16.0 mm/day.
+    result = convert_units_with_metadata(
+        "apcp", [3.0], [1.0], forecast_hour=12, previous_forecast_hour=9
+    )
+    assert result.values == pytest.approx((16.0,))
+    assert result.quality_flag == "ok"
+
+
+def test_gfs_apcp_within_bucket_negative_still_warns() -> None:
+    # A genuine decrease inside one bucket remains an anomaly worth flagging.
+    result = convert_units_with_metadata(
+        "apcp", [1.0], [3.0], forecast_hour=12, previous_forecast_hour=9
+    )
+    assert result.quality_flag == "warn"
+    assert result.values == pytest.approx((0.0,))
+
+
 def test_time_axis_is_monotonic() -> None:
     axis = compute_time_axis("2026050700", [0, 3, 6, 9])
 

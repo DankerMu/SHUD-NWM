@@ -617,6 +617,18 @@ def unit_for_standard_variable(standard_variable: str) -> str:
         raise CanonicalConversionError(f"No standard unit configured for {standard_variable}") from error
 
 
+# GFS pgrb2 APCP accumulates within fixed-length buckets that reset on a regular
+# interval; the value at forecast hour fh is the accumulation since the most recent
+# reset, not since cycle start. De-accumulation must not subtract across a reset.
+GFS_APCP_ACCUMULATION_RESET_HOURS = 6
+
+
+def _gfs_apcp_bucket_start_hour(forecast_hour: int) -> int:
+    if forecast_hour <= 0:
+        return 0
+    return ((forecast_hour - 1) // GFS_APCP_ACCUMULATION_RESET_HOURS) * GFS_APCP_ACCUMULATION_RESET_HOURS
+
+
 def convert_units(
     native_variable: str,
     values: tuple[float, ...] | list[float],
@@ -643,7 +655,19 @@ def convert_units_with_metadata(
         if len(previous) != len(current):
             raise CanonicalConversionError("APCP previous/current value arrays must have the same length.")
         _validate_finite_values((*current, *previous), "APCP precipitation")
-        deltas = tuple(current_value - previous_value for current_value, previous_value in zip(current, previous))
+        crosses_bucket_reset = (
+            forecast_hour is not None
+            and previous_forecast_hour is not None
+            and _gfs_apcp_bucket_start_hour(forecast_hour) != _gfs_apcp_bucket_start_hour(previous_forecast_hour)
+        )
+        if crosses_bucket_reset:
+            # The previous frame is in an earlier accumulation bucket. The current
+            # value already is the accumulation since this bucket's reset, so it is
+            # the increment directly — subtracting the prior bucket's total would
+            # produce a spurious negative delta.
+            deltas = current
+        else:
+            deltas = tuple(current_value - previous_value for current_value, previous_value in zip(current, previous))
         negative_deltas = tuple(delta for delta in deltas if delta < 0.0)
         anomalies: tuple[dict[str, Any], ...] = ()
         quality_flag = "ok"
@@ -658,12 +682,14 @@ def convert_units_with_metadata(
                     "min_delta": min(negative_deltas),
                 },
             )
-        # GFS APCP is accumulated since cycle start; on the first frame
-        # (previous=None) with a non-zero forecast hour the accumulation spans
-        # 0->fh, so the step is `forecast_hour` rather than the shared default
-        # of 1.0. Mirror the IFS first-frame semantics without touching the
-        # shared _step_hours (which ERA5 also relies on).
-        if previous_forecast_hour is None and forecast_hour and forecast_hour > 0:
+        # APCP accumulates within a reset bucket. Across a reset the increment spans
+        # from the bucket start to fh. On the first frame (previous=None) the smallest
+        # forecast hour always lies in the first bucket, so the span is 0->fh; keep the
+        # since-cycle-start step there (mirrors the IFS first-frame semantics and avoids
+        # inflating the rate by the shared _step_hours default of 1.0).
+        if crosses_bucket_reset and forecast_hour:
+            step_hours = float(max(1, forecast_hour - _gfs_apcp_bucket_start_hour(forecast_hour)))
+        elif previous_forecast_hour is None and forecast_hour and forecast_hour > 0:
             step_hours = float(forecast_hour)
         else:
             step_hours = _step_hours(forecast_hour, previous_forecast_hour)
