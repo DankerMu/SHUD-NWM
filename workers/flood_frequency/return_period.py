@@ -384,12 +384,13 @@ def _compute_return_periods(
             )
             rows_written += 1
 
-    # 峰值行的 valid_time 随重算移动，先批量清除旧峰值再批量写（保留 moved-peak 语义）。
+    # 峰值行的 valid_time 随重算移动，先批量清除该 run 的旧峰值再批量写（无视陈旧 duration
+    # 标签全清，保留 moved-peak 语义并消除跨标签孤儿）。
     if peak_rows:
-        _delete_all_prior_peaks(db_session, context, curve_duration)
+        _delete_all_prior_peaks(db_session, context)
         _batch_upsert_return_period_results(db_session, peak_rows)
     if timestep_rows:
-        _delete_all_prior_timesteps(db_session, context, curve_duration)
+        _delete_all_prior_timesteps(db_session, context)
         _batch_upsert_return_period_results(db_session, timestep_rows)
 
     _mark_frequency_succeeded(db_session, context, started_at)
@@ -589,40 +590,38 @@ def _batch_upsert_return_period_results(db_session: Session, rows: list[dict[str
         db_session.execute(text(statement), params)
 
 
-def _delete_all_prior_peaks(db_session: Session, context: dict[str, Any], duration: str) -> None:
+def _delete_all_prior_peaks(db_session: Session, context: dict[str, Any]) -> None:
+    # 单 run 单 duration 不变量下，不限定 duration —— 清除该 run 全部旧峰值行（含陈旧标签）。
     db_session.execute(
         text(
             """
             DELETE FROM flood.return_period_result
             WHERE run_id = :run_id
               AND river_network_version_id = :river_network_version_id
-              AND duration = :duration
               AND max_over_window = true
             """
         ),
         {
             "run_id": context["run_id"],
             "river_network_version_id": context["river_network_version_id"],
-            "duration": duration,
         },
     )
 
 
-def _delete_all_prior_timesteps(db_session: Session, context: dict[str, Any], duration: str) -> None:
+def _delete_all_prior_timesteps(db_session: Session, context: dict[str, Any]) -> None:
+    # 同 peak：清除该 run 全部旧 timestep 行（含陈旧 duration 标签）。
     db_session.execute(
         text(
             """
             DELETE FROM flood.return_period_result
             WHERE run_id = :run_id
               AND river_network_version_id = :river_network_version_id
-              AND duration = :duration
               AND max_over_window = false
             """
         ),
         {
             "run_id": context["run_id"],
             "river_network_version_id": context["river_network_version_id"],
-            "duration": duration,
         },
     )
 
@@ -647,7 +646,6 @@ def _upsert_return_period_result(
                 WHERE run_id = :run_id
                   AND river_network_version_id = :river_network_version_id
                   AND river_segment_id = :river_segment_id
-                  AND duration = :duration
                   AND max_over_window = true
                 """
             ),
@@ -655,7 +653,6 @@ def _upsert_return_period_result(
                 "run_id": context["run_id"],
                 "river_network_version_id": context["river_network_version_id"],
                 "river_segment_id": segment_id,
-                "duration": duration,
             },
         )
     _batch_upsert_return_period_results(
