@@ -21,7 +21,7 @@ MODEL_ID = os.getenv("QHH_MODEL_ID", "basins_qhh_shud")
 PACKAGE_VERSION = os.getenv("QHH_PACKAGE_VERSION", "v0.0.1-qhh-smoke-lake2")
 SOURCE_ID = normalize_source_id(os.getenv("QHH_SOURCE_ID", "gfs"))
 PROJECT_NAME = os.getenv("QHH_PROJECT_NAME", "qhh")
-OUTPUT_INTERVAL_MINUTES = int(os.getenv("QHH_MODEL_OUTPUT_INTERVAL", "180"))
+OUTPUT_INTERVAL_MINUTES = int(os.getenv("QHH_MODEL_OUTPUT_INTERVAL", "5"))
 THREADS = int(os.getenv("QHH_SHUD_THREADS", "1"))
 
 
