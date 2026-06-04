@@ -29,6 +29,7 @@ from packages.common.safe_fs import (
 )
 from packages.common.shud_preflight import check_shud_executable
 from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateSnapshot, assess_freshness
+from packages.common.state_qc import cfg_ic_header_minute_index, cfg_ic_header_minute_time
 from services.orchestrator.time_consistency import check_three_way_time_consistency as _check_three_way_time_consistency
 
 
@@ -1639,19 +1640,19 @@ def _shift_tsd_time_axis(path: Path, start_time: datetime, *, start_minute: floa
 
 
 def _read_cfg_ic_header_minute(path: Path) -> float | None:
-    """Return the SHUD ``.cfg.ic`` header minute-time (token index 2), or None."""
+    """Return the SHUD ``.cfg.ic`` header minute-time, or None.
+
+    The minute-time is the LAST numeric token in the header (shared rule with
+    ``state_qc``), so a 4-token lake header ``<mesh> <river> <lake> <minute-time>``
+    is read correctly rather than mistaking the lake count for the minute-time.
+    """
     if not _regular_file_exists(path, containment_root=path.parent):
         return None
     lines = _read_text_no_follow(path, containment_root=path.parent).splitlines()
     if not lines:
         return None
     header = lines[0].split()
-    if len(header) < 3:
-        return None
-    try:
-        return float(header[2])
-    except ValueError:
-        return None
+    return cfg_ic_header_minute_time(header)
 
 
 def _shift_cfg_ic_time(path: Path, start_time: datetime) -> None:
@@ -1661,10 +1662,14 @@ def _shift_cfg_ic_time(path: Path, start_time: datetime) -> None:
     if not lines:
         return
     header = lines[0].split()
-    if len(header) >= 3:
-        header[2] = f"{_ensure_utc(start_time).timestamp() / 60.0:.6f}"
-        lines[0] = "\t".join(header)
-        _write_text_no_follow(path, "\n".join(lines) + "\n", containment_root=path.parent)
+    minute_index = cfg_ic_header_minute_index(header)
+    if minute_index is None:
+        # Cannot locate the minute-time token (header lacks a count + minute-time
+        # pair) -- leave the file untouched rather than corrupt it.
+        return
+    header[minute_index] = f"{_ensure_utc(start_time).timestamp() / 60.0:.6f}"
+    lines[0] = "\t".join(header)
+    _write_text_no_follow(path, "\n".join(lines) + "\n", containment_root=path.parent)
 
 
 def _shud_forcing_station(manifest: dict[str, Any]) -> dict[str, Any]:

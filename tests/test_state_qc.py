@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from packages.common.state_qc import MAX_STATE_IC_BYTES, run_state_variable_qc
+from packages.common.state_qc import (
+    MAX_STATE_IC_BYTES,
+    cfg_ic_header_minute_index,
+    cfg_ic_header_minute_time,
+    run_state_variable_qc,
+)
 
 
 def _write_ic(
@@ -235,3 +240,26 @@ def test_header_declares_lake_but_body_missing_lake_fails(tmp_path: Path) -> Non
     result = run_state_variable_qc(path, expected_mesh_count=1, expected_river_count=1, expected_lake_count=1)
     assert result.passed is False
     assert "lake" in (result.reason or "").lower()
+
+
+def test_cfg_ic_header_minute_index_3_token_no_lake() -> None:
+    # <mesh> <river> <minute-time>: minute-time is the trailing (index 2) token.
+    header = ["100", "50", "27000000.000000"]
+    assert cfg_ic_header_minute_index(header) == 2
+    assert cfg_ic_header_minute_time(header) == 27000000.0
+
+
+def test_cfg_ic_header_minute_index_4_token_with_lake() -> None:
+    # <mesh> <river> <lake> <minute-time>: minute-time is the LAST token (index 3),
+    # NOT the lake count at index 2.
+    header = ["100", "50", "3", "27000000.000000"]
+    assert cfg_ic_header_minute_index(header) == 3
+    assert cfg_ic_header_minute_time(header) == 27000000.0
+
+
+def test_cfg_ic_header_minute_no_numeric_returns_none() -> None:
+    assert cfg_ic_header_minute_index(["mesh", "river"]) is None
+    assert cfg_ic_header_minute_time(["mesh", "river"]) is None
+    # Single numeric token is insufficient (need a count + minute-time pair).
+    assert cfg_ic_header_minute_index(["27000000.0"]) is None
+    assert cfg_ic_header_minute_time([]) is None

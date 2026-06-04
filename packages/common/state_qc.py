@@ -241,6 +241,39 @@ def _header_counts(header: Sequence[str]) -> tuple[int, int, int] | None:
     return mesh, river, lake
 
 
+def cfg_ic_header_minute_index(header_tokens: Sequence[str]) -> int | None:
+    """Return the position of the SHUD IC header minute-time token, or None.
+
+    Shares the "LAST numeric token is the minute-time" rule with ``_header_counts``
+    so every consumer (state QC, runtime header read, runtime time shift) interprets
+    3-token ``<mesh> <river> <minute-time>`` and 4-token
+    ``<mesh> <river> <lake> <minute-time>`` headers identically. Returns the index
+    into ``header_tokens`` of that trailing numeric token. None when there are fewer
+    than two numeric tokens (no count + minute-time pair) or none at all.
+    """
+
+    numeric_indices = [
+        index for index, token in enumerate(header_tokens) if _as_float(token) is not None
+    ]
+    if len(numeric_indices) < 2:
+        # Need at least one count token plus the trailing minute-time.
+        return None
+    return numeric_indices[-1]
+
+
+def cfg_ic_header_minute_time(header_tokens: Sequence[str]) -> float | None:
+    """Return the SHUD IC header minute-time value, or None.
+
+    Uses :func:`cfg_ic_header_minute_index` so the minute-time is read from the
+    LAST numeric token regardless of whether a lake count is present.
+    """
+
+    index = cfg_ic_header_minute_index(header_tokens)
+    if index is None:
+        return None
+    return _as_float(header_tokens[index])
+
+
 def _numeric_row(line: str) -> list[float] | None:
     tokens = line.split()
     row: list[float] = []
