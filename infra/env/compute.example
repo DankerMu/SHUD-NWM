@@ -35,7 +35,12 @@ NHMS_SCHEDULER_MODEL_IDS=basins_qhh_shud
 NHMS_SCHEDULER_BASIN_IDS=basins_qhh
 NHMS_SCHEDULER_INTERVAL_SECONDS=300
 NHMS_SCHEDULER_MAX_PASSES=1
-NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE=1
+# Backfill: each pass scans the past LOOKBACK_HOURS window and re-drives every
+# incomplete cycle's full pipeline (completed cycles are skipped, do not consume
+# budget). MAX_CYCLES_PER_SOURCE is the per-pass per-source backfill budget.
+NHMS_SCHEDULER_LOOKBACK_HOURS=168
+NHMS_SCHEDULER_BACKFILL_ENABLED=true
+NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE=8
 
 NHMS_BASINS_ROOT=/volume/data/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets

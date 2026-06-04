@@ -130,7 +130,7 @@ def _non_blank_path(value: str | None, option_name: str) -> str | None:
 def _plan_production(
     *,
     sources: Sequence[str],
-    lookback_hours: int,
+    lookback_hours: int | None,
     cycle_lag_hours: int,
     max_cycles_per_source: int | None,
     model_ids: Sequence[str],
@@ -183,10 +183,15 @@ def _plan_production(
     )
     if resolved_max_cycles < 1:
         raise ValueError("plan-production max_cycles_per_source must be at least 1")
+    resolved_lookback = (
+        lookback_hours
+        if lookback_hours is not None
+        else _env_int("NHMS_SCHEDULER_LOOKBACK_HOURS", 24)
+    )
     config_kwargs: dict[str, object] = {
         "workspace_root": resolved_workspace_root,
         "sources": resolved_sources,
-        "lookback_hours": lookback_hours,
+        "lookback_hours": resolved_lookback,
         "cycle_lag_hours": cycle_lag_hours,
         "max_cycles_per_source": resolved_max_cycles,
         "model_ids": resolved_model_ids,
@@ -269,7 +274,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         multiple=True,
         help="Forecast source id. Repeat or pass comma-separated values.",
     )
-    @click.option("--lookback-hours", default=24, show_default=True, type=int)
+    @click.option("--lookback-hours", default=None, type=int)
     @click.option("--cycle-lag-hours", default=0, show_default=True, type=int)
     @click.option("--max-cycles-per-source", default=None, type=int)
     @click.option(
@@ -356,7 +361,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     cleanup_parser.add_argument("--execute", action="store_false", dest="dry_run")
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
-    plan_parser.add_argument("--lookback-hours", type=int, default=24)
+    plan_parser.add_argument("--lookback-hours", type=int, default=None)
     plan_parser.add_argument("--cycle-lag-hours", type=int, default=0)
     plan_parser.add_argument("--max-cycles-per-source", type=int, default=None)
     plan_parser.add_argument("--model-id", action="append", default=[])
