@@ -2257,6 +2257,23 @@ def test_health_check_success_and_failure(monkeypatch, tmp_path):
     assert all(not probe.executable for probe in response.binaries.values())
 
 
+def test_health_survives_non_slurm_probe_exception(monkeypatch, tmp_path):
+    # A probe failure that is NOT a SlurmGatewayError (e.g. PermissionError raised
+    # below the wrapping layer) must still degrade to a structured healthy=false
+    # response so /api/v1/slurm/health never returns a 500.
+    gateway = _gateway(tmp_path)
+
+    def boom(command, **kwargs):
+        del kwargs
+        raise PermissionError("secret-token leaked in message")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    response = gateway.health()
+    assert response.status == "unhealthy"
+    assert response.healthy is False
+    assert all(not probe.executable for probe in response.binaries.values())
+
+
 def test_fetch_logs_refuses_symlink(monkeypatch, tmp_path):
     gateway = _gateway(tmp_path)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("subprocess.run should not be called"))
@@ -2729,3 +2746,27 @@ def test_partition_override_redirects_resolved_partition(tmp_path: Path) -> None
     # Per-deployment override targets the cluster's real partition without editing
     # the shared canonical profile (which still defaults to "compute").
     assert overridden.resolve_resource_profile("any_model")["partition"] == "CPU"
+
+
+@pytest.mark.parametrize(
+    "malicious_override",
+    [
+        "CPU; rm -rf /",
+        "CPU\n#SBATCH x",
+        "-X",
+    ],
+)
+def test_partition_override_rejects_injection(tmp_path: Path, malicious_override: str) -> None:
+    # A partition override carrying shell metacharacters, a newline, or a leading
+    # dash must be rejected by validate_resource_profile->validate_slurm_identifier
+    # at resolution time, never reaching an sbatch invocation.
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+            partition_override=malicious_override,
+        )
+    )
+    with pytest.raises(ConfigurationError):
+        gateway.resolve_resource_profile("any_model")

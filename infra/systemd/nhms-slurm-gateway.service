@@ -37,6 +37,9 @@ Environment=SLURM_GATEWAY_BACKEND=slurm
 Environment=SLURM_GATEWAY_WORKSPACE_DIR=/work/nhms/slurm
 Environment=SLURM_GATEWAY_TEMPLATE_DIR=/opt/SHUD-NWM/infra/sbatch
 Environment=SLURM_GATEWAY_RESOURCE_PROFILES_PATH=/opt/SHUD-NWM/config/resource_profiles.yaml
+# Set when the cluster's real partition differs from the canonical "compute"
+# profile; redirects resolved partitions without editing the shared profile.
+# Environment=SLURM_GATEWAY_PARTITION_OVERRIDE=CPU
 ExecStart=/usr/bin/env uv run python -m services.slurm_gateway
 Restart=on-failure
 RestartSec=5

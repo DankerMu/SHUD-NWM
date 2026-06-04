@@ -136,13 +136,15 @@ def _identity_matches(record: SacctRecord, expected_token: str | None) -> bool:
     """Confirm the accounting row belongs to the recorded candidate.
 
     When the durable row gives a stage/job_type, the sacct ``JobName`` must carry
-    the matching ``nhms_<stage>`` token. When the durable row has no stage token
-    to anchor on, existence of the master sacct row is the only available signal
-    and is accepted (the slurm_job_id↔candidate binding is itself durable).
+    the matching ``nhms_<stage>`` token.
     """
 
+    # The durable 1:1 slurm_job_id↔candidate binding is the primary identity; the
+    # JobName stage token is a secondary anti-reuse guard against a recycled
+    # slurm_job_id. With no token available we cannot run that guard, so be
+    # conservative and judge unverified (do not accept, do not resubmit).
     if expected_token is None:
-        return True
+        return False
     return record.job_name.strip() == expected_token
 
 

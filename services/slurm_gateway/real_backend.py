@@ -464,6 +464,15 @@ class RealSlurmGateway(SlurmGateway):
             file_missing = isinstance(exc, SlurmCommandError) and (exc.details or {}).get("returncode") is None
             resolved = which_resolved and not file_missing
             return SlurmBinaryProbe(resolved=resolved, executable=False, detail=detail), ""
+        except Exception as exc:  # noqa: BLE001
+            # Any unexpected probe failure (e.g. subprocess.TimeoutExpired, OSError)
+            # must not surface as a 500 from /api/v1/slurm/health. Degrade this one
+            # binary to not-executable with a redacted detail so health() always
+            # returns a structured healthy=false response.
+            return (
+                SlurmBinaryProbe(resolved=which_resolved, executable=False, detail=redact_text(str(exc))),
+                "",
+            )
         probe_version = result.stdout.strip()
         return (
             SlurmBinaryProbe(resolved=True, executable=True, detail=None),

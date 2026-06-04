@@ -1,7 +1,7 @@
 """Standalone Slurm gateway ASGI application factory.
 
 This builds a *bounded* FastAPI app that mounts only the Slurm router
-(`/health` + `/api/v1/slurm/*`). It deliberately includes no forecast/model/
+(`/api/v1/slurm/health` + `/api/v1/slurm/*`). It deliberately includes no forecast/model/
 pipeline/static/frontend business routes, so a node-22 deployment of this app
 cannot expose business surfaces. The full business API (``apps.api.main``)
 remains the only place those routes are served.
