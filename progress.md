@@ -1,8 +1,17 @@
 # 项目进度
 
-最后更新：2026-06-01，测试环境。
+最后更新：2026-06-04，node-22 业务化联调。
 
 用途：作为跨 session 继承的项目真实进度索引。本文只保留当前完成态、仍需 live proof 的边界和常用验证入口；历史 review 细节以 GitHub issue、PR、OpenSpec 和 runbook 为准。
+
+## QHH node-22 业务化（live，进行中）
+
+- **首个真实端到端 cycle 已跑通 publish**（24h 冒烟，job 5980）：download→canonical→forcing(386 站)→SHUD→parse(qc_passed)→published_for_display(1633 段，return_period 诚实标 `no_frequency_curve`，无伪造洪水位)。
+- **已落地修复**（master）：sp.riv 多块解析（17f5229）、GFS APCP 6h 桶去累积（142dff0）、原生变步长预报 GFS/IFS（b642b86/eaf5649）、forcing manifest 默认 2MB→32MB（a58c25a）、cycle 脚本 state 文件保留 `slurm_job_id`（1baee15）、SHUD 输出间隔默认 180→5min（81e50ff）。
+- **对象存储切换**：废弃 e2e 标签 `s3://nhms-22-e2e`，DB+文件系统 e2e 数据已清除（残留 0），前缀切 `s3://nhms`。
+- **进行中**：干净 GFS 7 天 / 5min 全流程（job 5992, cycle 2026060400, s3://nhms）跑至 publish；之后跑 IFS 全流程。全持续守护暂缓（等指令）。
+- 运行手册：[`docs/runbooks/qhh-22-business-bringup.md`](docs/runbooks/qhh-22-business-bringup.md)。
+- ⚠️ 运行纪律:作业运行中**禁止在 node-22 `git pull`**(会换 inode 触发 NFS stale handle 杀掉正在 exec 脚本的作业)。
 
 ## 当前结论
 
