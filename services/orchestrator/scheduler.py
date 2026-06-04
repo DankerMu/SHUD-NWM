@@ -38,6 +38,7 @@ from services.orchestrator.production_contract import (
     production_status_for,
     validate_compatible_production_identity,
 )
+from services.orchestrator.retention import RetentionConfig, run_retention
 from services.orchestrator.retry import classify_failure
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
 from services.slurm_gateway.gateway import ConfigurationError
@@ -399,6 +400,7 @@ class ProductionSchedulerConfig:
     lookback_hours: int = DEFAULT_LOOKBACK_HOURS
     cycle_lag_hours: int = DEFAULT_CYCLE_LAG_HOURS
     max_cycles_per_source: int = DEFAULT_MAX_CYCLES_PER_SOURCE
+    backfill_enabled: bool = field(default_factory=lambda: _env_flag("NHMS_SCHEDULER_BACKFILL_ENABLED"))
     model_ids: tuple[str, ...] = ()
     basin_ids: tuple[str, ...] = ()
     dry_run: bool = True
@@ -862,7 +864,7 @@ class ProductionScheduler:
                     artifact_path=artifact_path,
                 )
             models, model_evidence = self._discover_models()
-            cycles, source_cycle_evidence = self._discover_cycles(started_at)
+            cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
             (
                 candidates,
                 blocked_candidates,
@@ -1122,6 +1124,19 @@ class ProductionScheduler:
                 evidence["evidence_pre_execution"] = evidence_reservation
             if root_preflight["status"] != "not_required":
                 evidence["root_preflight"] = root_preflight
+            if self.config.backfill_enabled:
+                evidence["backfill"] = {
+                    "enabled": True,
+                    "lookback_hours": self.config.lookback_hours,
+                    "audit": [
+                        item
+                        for item in source_cycle_evidence
+                        if item.get("type") == "backfill_audit"
+                    ],
+                }
+            else:
+                evidence["backfill"] = {"enabled": False}
+            evidence["retention"] = self._run_retention(started_at)
             try:
                 artifact_path = self._write_evidence(pass_id, evidence)
             except (OSError, SchedulerEvidenceWriteError) as error:
@@ -1168,6 +1183,37 @@ class ProductionScheduler:
             )
         finally:
             lock.release(pass_id=pass_id)
+
+    def _run_retention(self, started_at: datetime) -> dict[str, Any]:
+        """Run forecast-data retention cleanup; never break the scheduling pass.
+
+        Scheduler ``dry_run`` is the master switch: when the pass runs in
+        dry-run (planning-only, no side effects), retention is forced into
+        dry-run too, regardless of NHMS_RETENTION_DRY_RUN. This preserves the
+        "dry_run => no side effects" contract so a planning pass never deletes
+        aged artifacts even when the env enables real deletion.
+        """
+        retention_config = RetentionConfig.from_env()
+        if not retention_config.enabled:
+            return {"status": "disabled", "enabled": False}
+        forced_dry_run = False
+        if self.config.dry_run and not retention_config.dry_run:
+            retention_config = replace(retention_config, dry_run=True)
+            forced_dry_run = True
+        try:
+            result = run_retention(
+                object_store_root=self.config.object_store_root,
+                now=started_at,
+                config=retention_config,
+                published_artifact_root=self.config.published_artifact_root,
+            )
+        except Exception as error:  # noqa: BLE001 - cleanup must never abort scheduling
+            return {"status": "error", "enabled": True, "error": str(error)}
+        payload = result.to_dict()
+        payload["status"] = "completed"
+        if forced_dry_run:
+            payload["forced_dry_run_by_scheduler"] = True
+        return payload
 
     def _write_prelock_blocked_evidence(
         self,
@@ -1717,13 +1763,41 @@ class ProductionScheduler:
         }
         return selected, evidence
 
-    def _discover_cycles(self, started_at: datetime) -> tuple[list[SchedulerSourceCycle], list[dict[str, Any]]]:
+    def _cycle_completion_status(
+        self,
+        discovery: CycleDiscovery,
+        models: Sequence[RegisteredSchedulerModel],
+    ) -> str:
+        """Return 'complete' if every model's full pipeline is done for this cycle, else 'gap'."""
+
+        provider = (
+            getattr(self.active_repository, "has_completed_pipeline", None)
+            if self.active_repository is not None
+            else None
+        )
+        if not callable(provider) or not models:
+            return "gap"
+        for model in models:
+            if not provider(
+                source_id=discovery.source_id,
+                cycle_time=discovery.cycle_time,
+                model_id=model.model_id,
+            ):
+                return "gap"
+        return "complete"
+
+    def _discover_cycles(
+        self,
+        started_at: datetime,
+        models: Sequence[RegisteredSchedulerModel] = (),
+    ) -> tuple[list[SchedulerSourceCycle], list[dict[str, Any]]]:
         end_time = started_at - timedelta(hours=self.config.cycle_lag_hours)
         start_time = end_time - timedelta(hours=self.config.lookback_hours)
         source_cycles: list[SchedulerSourceCycle] = []
         evidence: list[dict[str, Any]] = []
         seen_cycles: set[tuple[str, str]] = set()
         source_order = {source_id: index for index, source_id in enumerate(self.config.sources)}
+        backfill_mode = bool(self.config.backfill_enabled and models)
 
         for source_id in self.config.sources:
             adapter = self.adapters.get(source_id)
@@ -1751,15 +1825,44 @@ class ProductionScheduler:
                 if discovery.source_id == source_id and start_time <= _ensure_utc(discovery.cycle_time) <= end_time
             ]
             discoveries.sort(key=lambda discovery: discovery.cycle_time, reverse=True)
-            selected_for_source: list[CycleDiscovery] = []
+            deduped: list[CycleDiscovery] = []
             for discovery in discoveries:
                 cycle_key = (source_id, cycle_id_for(source_id, discovery.cycle_time))
                 if cycle_key in seen_cycles:
                     evidence.append(_duplicate_cycle_evidence(discovery, reason="duplicate_source_cycle"))
                     continue
                 seen_cycles.add(cycle_key)
-                if len(selected_for_source) < self.config.max_cycles_per_source:
-                    selected_for_source.append(discovery)
+                deduped.append(discovery)
+
+            if backfill_mode:
+                complete_count = 0
+                gaps: list[CycleDiscovery] = []
+                for discovery in deduped:
+                    status = self._cycle_completion_status(discovery, models)
+                    if status == "complete":
+                        complete_count += 1
+                        continue
+                    gaps.append(discovery)
+                selected_for_source = gaps[: self.config.max_cycles_per_source]
+                deferred = gaps[self.config.max_cycles_per_source :]
+                for discovery in deferred:
+                    evidence.append(
+                        _backfill_deferred_evidence(discovery, reason="backfill_deferred_over_budget")
+                    )
+                evidence.append(
+                    {
+                        "type": "backfill_audit",
+                        "source_id": source_id,
+                        "discovered_count": len(deduped),
+                        "complete_count": complete_count,
+                        "gap_count": len(gaps),
+                        "selected_count": len(selected_for_source),
+                        "deferred_count": len(deferred),
+                    }
+                )
+            else:
+                selected_for_source = deduped[: self.config.max_cycles_per_source]
+
             for discovery in selected_for_source:
                 horizon = _source_horizon_metadata(discovery, adapter)
                 source_cycles.append(SchedulerSourceCycle(discovery=discovery, horizon=horizon))
@@ -3062,6 +3165,19 @@ def _duplicate_cycle_evidence(discovery: CycleDiscovery, *, reason: str) -> dict
         "cycle_hour": discovery.cycle_hour,
         "available": discovery.available,
         "status": "excluded",
+        "reason": reason,
+    }
+
+
+def _backfill_deferred_evidence(discovery: CycleDiscovery, *, reason: str) -> dict[str, Any]:
+    return {
+        "type": "backfill_deferred",
+        "source_id": discovery.source_id,
+        "cycle_id": cycle_id_for(discovery.source_id, discovery.cycle_time),
+        "cycle_time_utc": _format_utc(discovery.cycle_time),
+        "cycle_hour": discovery.cycle_hour,
+        "available": discovery.available,
+        "status": "gap",
         "reason": reason,
     }
 

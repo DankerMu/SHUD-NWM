@@ -34,6 +34,7 @@ from .base import (
     valid_time_for,
     validate_forecast_hours,
 )
+from .region import GeoBBox, china_buffered_bbox_from_env
 
 LOGGER = logging.getLogger(__name__)
 
@@ -165,6 +166,7 @@ class GFSAdapterConfig:
     max_file_size_bytes: int = field(
         default_factory=lambda: int(os.getenv("GFS_MAX_FILE_SIZE_BYTES", str(500 * 1024 * 1024)))
     )
+    bbox: GeoBBox = field(default_factory=china_buffered_bbox_from_env)
 
     def forecast_hours(self) -> list[int]:
         return list(range(self.forecast_start_hour, self.forecast_end_hour + 1, self.forecast_step_hours))
@@ -188,6 +190,7 @@ class GFSAdapterConfig:
             "max_retries": self.max_retries,
             "download_chunk_size_bytes": self.download_chunk_size_bytes,
             "max_file_size_bytes": self.max_file_size_bytes,
+            "bbox": self.bbox.as_dict(),
         }
 
 
@@ -851,6 +854,7 @@ class GFSAdapter(DataSourceAdapter):
             "variables": list(self.config.variables),
             "max_retries": self.config.max_retries,
             "max_wait_seconds": self.config.max_wait_seconds,
+            "bbox": self.config.bbox.as_dict(),
         }
 
     def source_object_identity(
@@ -867,6 +871,7 @@ class GFSAdapter(DataSourceAdapter):
             "source": self.config.source_id,
             "cycle_time": parsed_cycle_time.isoformat(),
             "base_url": self._safe_text(self.config.base_url),
+            "bbox": self.config.bbox.as_dict(),
             "first_forecast_hour": min(hours) if hours else None,
             "last_forecast_hour": max(hours) if hours else None,
             "forecast_hour_count": len(hours),
@@ -1047,10 +1052,16 @@ class GFSAdapter(DataSourceAdapter):
 
         file_name = f"gfs.t{parsed_cycle_time:%H}z.pgrb2.0p25.f{forecast_hour:03d}"
         directory = f"/gfs.{parsed_cycle_time:%Y%m%d}/{parsed_cycle_time:%H}/atmos"
+        bbox = self.config.bbox
         query = {
             "dir": directory,
             "file": file_name,
             **NOMADS_QUERY_PARAMS[variable],
+            "subregion": "on",
+            "leftlon": f"{bbox.west:g}",
+            "rightlon": f"{bbox.east:g}",
+            "toplat": f"{bbox.north:g}",
+            "bottomlat": f"{bbox.south:g}",
         }
         return f"{self._filter_endpoint()}?{urlencode(query, quote_via=quote)}"
 
