@@ -1185,10 +1185,21 @@ class ProductionScheduler:
             lock.release(pass_id=pass_id)
 
     def _run_retention(self, started_at: datetime) -> dict[str, Any]:
-        """Run forecast-data retention cleanup; never break the scheduling pass."""
+        """Run forecast-data retention cleanup; never break the scheduling pass.
+
+        Scheduler ``dry_run`` is the master switch: when the pass runs in
+        dry-run (planning-only, no side effects), retention is forced into
+        dry-run too, regardless of NHMS_RETENTION_DRY_RUN. This preserves the
+        "dry_run => no side effects" contract so a planning pass never deletes
+        aged artifacts even when the env enables real deletion.
+        """
         retention_config = RetentionConfig.from_env()
         if not retention_config.enabled:
             return {"status": "disabled", "enabled": False}
+        forced_dry_run = False
+        if self.config.dry_run and not retention_config.dry_run:
+            retention_config = replace(retention_config, dry_run=True)
+            forced_dry_run = True
         try:
             result = run_retention(
                 object_store_root=self.config.object_store_root,
@@ -1200,6 +1211,8 @@ class ProductionScheduler:
             return {"status": "error", "enabled": True, "error": str(error)}
         payload = result.to_dict()
         payload["status"] = "completed"
+        if forced_dry_run:
+            payload["forced_dry_run_by_scheduler"] = True
         return payload
 
     def _write_prelock_blocked_evidence(

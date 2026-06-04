@@ -73,6 +73,9 @@ NHMS_GRIB_ENV_ROOT=/scratch/frd_muziyao/nhms-grib
 # static grids are always preserved. Opt-in by design; for first production runs
 # keep NHMS_RETENTION_DRY_RUN=true to inspect the plan, then set it false to
 # actually delete.
+# INVARIANT: NHMS_RETENTION_DAYS * 24 must stay > NHMS_SCHEDULER_LOOKBACK_HOURS,
+# else backfill repeatedly retries a cycle retention already deleted
+# (currently 14*24=336 > 168 -- safe).
 NHMS_RETENTION_ENABLED=true
 NHMS_RETENTION_DRY_RUN=false
 NHMS_RETENTION_DAYS=14

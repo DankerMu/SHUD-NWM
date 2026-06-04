@@ -347,3 +347,82 @@ def test_states_prefix_protected_not_deleted(tmp_path: Path) -> None:
     # physical assertion: states content survives
     assert states_dir.exists()
     assert (root / f"states/{old}/state.nc").exists()
+
+
+def _make_scheduler_with_store(tmp_path: Path, *, dry_run: bool):
+    """Build a scheduler bound to a fresh object store + one expired cycle dir."""
+    from services.orchestrator.scheduler import (
+        ProductionScheduler,
+        ProductionSchedulerConfig,
+        _BlockedModelRegistry,
+    )
+
+    store = tmp_path / "object-store"
+    old = _cycle_name(NOW - timedelta(days=20))
+    expired = _write(store, f"raw/gfs/{old}/gfs.f000.nc").parent
+    config = ProductionSchedulerConfig(
+        workspace_root=str(tmp_path / "ws"),
+        object_store_root=str(store),
+        dry_run=dry_run,
+    )
+    scheduler = ProductionScheduler(
+        config=config, registry=_BlockedModelRegistry(), adapters={}, active_repository=None
+    )
+    return scheduler, expired
+
+
+def test_scheduler_dry_run_forces_retention_dry_run(monkeypatch, tmp_path: Path) -> None:
+    """[HIGH] scheduler dry_run must override env-enabled real deletion.
+
+    With NHMS_RETENTION_ENABLED=true + NHMS_RETENTION_DRY_RUN=false but the
+    scheduler pass in dry_run, an expired cycle must survive (planning only)
+    and the payload must record the forced downgrade.
+    """
+    monkeypatch.setenv("NHMS_RETENTION_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_DRY_RUN", "false")
+    monkeypatch.delenv("NHMS_RETENTION_DAYS", raising=False)
+
+    scheduler, expired = _make_scheduler_with_store(tmp_path, dry_run=True)
+    payload = scheduler._run_retention(NOW)
+
+    # (1) the expired dir was planned but NOT physically deleted
+    assert expired.exists()
+    # (2) payload records the forced downgrade and a completed dry-run plan
+    assert payload["forced_dry_run_by_scheduler"] is True
+    assert payload["status"] == "completed"
+    assert payload["dry_run"] is True
+    assert not payload["deleted"]
+    assert payload["planned"]
+
+
+def test_scheduler_non_dry_run_follows_env_and_deletes(monkeypatch, tmp_path: Path) -> None:
+    """[HIGH] non-dry-run pass + env-enabled deletion => expired dir is deleted."""
+    monkeypatch.setenv("NHMS_RETENTION_ENABLED", "true")
+    monkeypatch.setenv("NHMS_RETENTION_DRY_RUN", "false")
+    monkeypatch.delenv("NHMS_RETENTION_DAYS", raising=False)
+
+    scheduler, expired = _make_scheduler_with_store(tmp_path, dry_run=False)
+    payload = scheduler._run_retention(NOW)
+
+    # (1) the expired dir is physically gone
+    assert not expired.exists()
+    # (2) no forced downgrade flag; real deletion happened
+    assert "forced_dry_run_by_scheduler" not in payload
+    assert payload["status"] == "completed"
+    assert payload["dry_run"] is False
+    assert payload["deleted"]
+
+
+def test_scheduler_dry_run_retention_disabled_still_noop(monkeypatch, tmp_path: Path) -> None:
+    """[MED] disabled retention stays a no-op even under a dry-run scheduler pass."""
+    monkeypatch.delenv("NHMS_RETENTION_ENABLED", raising=False)
+    monkeypatch.delenv("NHMS_RETENTION_DRY_RUN", raising=False)
+
+    scheduler, expired = _make_scheduler_with_store(tmp_path, dry_run=True)
+    payload = scheduler._run_retention(NOW)
+
+    assert payload["status"] == "disabled"
+    assert payload["enabled"] is False
+    assert "forced_dry_run_by_scheduler" not in payload
+    # physical assertion: nothing removed
+    assert expired.exists()

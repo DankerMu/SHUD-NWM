@@ -168,6 +168,36 @@ def test_legacy_mode_keeps_newest_even_when_completed(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Requirement: backfill_mode = bool(backfill_enabled and models). Empty models
+# short-circuits to legacy (newest-N) even when backfill is enabled.
+# ---------------------------------------------------------------------------
+def test_backfill_enabled_with_empty_models_falls_back_to_legacy(tmp_path: Path) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    cycle_times = [
+        "2026-05-21T06:00:00Z",  # newest, completed
+        "2026-05-21T00:00:00Z",  # older, gap
+    ]
+    repo = CompletionByCycleRepository({("gfs", _dt("2026-05-21T06:00:00Z"))})
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=now,
+        cycle_times=cycle_times,
+        backfill_enabled=True,
+        max_cycles_per_source=1,
+        active_repository=repo,
+    )
+
+    # No models -> backfill_mode is False (the `and models` short-circuit).
+    cycles, evidence = scheduler._discover_cycles(now, models=())
+    selected = [scheduler_module._format_utc(c.discovery.cycle_time) for c in cycles]
+
+    # Legacy newest-N: newest completed cycle is kept, no gap-first reordering.
+    assert selected == ["2026-05-21T06:00:00Z"]
+    assert not any(item.get("type") == "backfill_audit" for item in evidence)
+    assert not any(item.get("type") == "backfill_deferred" for item in evidence)
+
+
+# ---------------------------------------------------------------------------
 # Requirement: audit evidence counts + run_once pass-level evidence.
 # ---------------------------------------------------------------------------
 def test_backfill_audit_counts_and_pass_evidence(tmp_path: Path) -> None:
