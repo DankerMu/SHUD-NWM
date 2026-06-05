@@ -326,6 +326,57 @@ class PipelineStore:
         self.session.refresh(job)
         return job
 
+    def reclaim_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        run_id: str | None = None,
+        cycle_id: str | None = None,
+        model_id: str | None = None,
+        stage: str | None = None,
+        candidate_id: str | None = None,
+    ) -> PipelineJob | None:
+        """Atomically take over a DEAD reservation back to ``reserved``.
+
+        Mirrors the production conditional UPDATE: only a row that is dead
+        (``slurm_job_id IS NULL`` and ``status IN ('submission_failed',
+        'reservation_lost')``) is re-claimed. A live row (reserved/submitted/
+        running) never matches, so a take-over can never steal an in-flight
+        candidate. Identity columns are filled only when previously NULL.
+        """
+
+        job = self.query_candidate_state(idempotency_key)
+        if (
+            job is None
+            or job.slurm_job_id is not None
+            or job.status not in ("submission_failed", "reservation_lost")
+        ):
+            return None
+        job.status = RESERVED_STATUS
+        job.slurm_job_id = None
+        job.array_task_id = None
+        job.submitted_at = None
+        job.started_at = None
+        job.finished_at = None
+        job.exit_code = None
+        job.error_code = None
+        job.error_message = None
+        if job.run_id is None:
+            job.run_id = run_id
+        if job.cycle_id is None:
+            job.cycle_id = cycle_id
+        if job.model_id is None:
+            job.model_id = model_id
+        if job.stage is None:
+            job.stage = stage
+        if job.candidate_id is None:
+            job.candidate_id = candidate_id
+        job.updated_at = _utcnow()
+        self.session.add(job)
+        self.session.commit()
+        self.session.refresh(job)
+        return job
+
     def query_candidate_state(self, idempotency_key: str) -> PipelineJob | None:
         """The durable reservation/binding row for an idempotency_key, if any.
 

@@ -2373,13 +2373,15 @@ class ForecastOrchestrator:
     def _reservation_already_inflight(self, reservation: ReservationResult | None) -> bool:
         """True when THIS pass lost the reservation and must NOT sbatch.
 
-        Gate for the submit path: a loss (``created=False``) means another row
-        already holds the idempotency_key, so this pass skips submission. The
-        decision is conservative — it does not consult the (non-atomic) re-read
-        status, so a stale terminal / ``reservation_lost`` row still blocks
-        re-submission within THIS pass (avoiding a TOCTOU double-submit). Such a
-        stale candidate is reclaimed by a later, clean pass whose own reserve
-        re-attempts the INSERT, never by re-submitting off this pass's re-read.
+        Gate for the submit path: a loss (``created=False``) means this pass
+        neither inserted a fresh reservation nor reclaimed a dead one, so another
+        row genuinely holds the idempotency_key in a live state (or a concurrent
+        take-over won) — this pass skips submission. A dead, re-submittable row
+        (``submission_failed`` / ``reservation_lost``, never bound) is instead
+        taken over atomically inside ``reserve_candidate`` (via
+        ``reclaim_pipeline_job_reservation``), turning that case into
+        ``created=True`` — so it never reaches this gate. No re-read status is
+        consulted here, hence no TOCTOU double-submit.
         """
 
         return reservation is not None and reservation.already_inflight and not reservation.created
@@ -5362,6 +5364,14 @@ class PsycopgOrchestratorRepository:
         any clash → DO NOTHING → zero rows → ``None`` → judged a loss, never an
         exception.
 
+        A plain reserve can only INSERT, so it loses forever to a DEAD reservation
+        row that still occupies the idempotency_key unique index (one that was
+        reserved but never bound — sbatch rejected it into ``submission_failed``,
+        or a crashed pass had it demoted to ``reservation_lost`` by reconcile).
+        Reclaiming such a dead row is NOT this method's job; it is handled by
+        ``reclaim_pipeline_job_reservation`` (C1 + m3), which atomically takes the
+        dead row back to ``reserved`` so this pass can re-submit.
+
         ``submitted_at`` is deliberately left NULL at reserve time; it is stamped
         only when the reservation is bound to a real slurm_job_id (phase 2).
         """
@@ -5386,6 +5396,59 @@ class PsycopgOrchestratorRepository:
                 record.get("status", "reserved"),
                 record["idempotency_key"],
                 record.get("candidate_id"),
+            ),
+        )
+
+    def reclaim_pipeline_job_reservation(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        """Atomically take over a DEAD reservation (reserved-but-never-bound).
+
+        A row is dead when ``slurm_job_id IS NULL AND status IN
+        ('submission_failed','reservation_lost')`` — it was reserved but never got
+        a live slurm job (sbatch rejected, or the pass crashed and reconcile
+        demoted it). Such a row keeps the idempotency_key and therefore occupies
+        the partial unique index, so a plain ``reserve`` would lose to it forever.
+        This UPDATE re-claims it back to ``reserved`` so THIS pass can re-submit.
+
+        Race-safe: the predicate matches ONLY the dead statuses, so two concurrent
+        take-overs cannot both win — the loser sees ``status='reserved'`` (set by
+        the winner) and the WHERE no longer matches, returning zero rows. A
+        genuinely in-flight ``reserved``/``submitted``/``running`` row is never
+        matched, so no double-submit. ``job_id`` (the PK) is deliberately NOT
+        overwritten — the dead row already carries the deterministic job_id for
+        this identity, so there is no PK-collision risk. Lifecycle fields are
+        reset; identity columns are filled only when previously NULL via COALESCE.
+        """
+
+        return self._fetch_optional(
+            """
+            UPDATE ops.pipeline_job
+            SET status = 'reserved',
+                slurm_job_id = NULL,
+                array_task_id = NULL,
+                submitted_at = NULL,
+                started_at = NULL,
+                finished_at = NULL,
+                exit_code = NULL,
+                error_code = NULL,
+                error_message = NULL,
+                run_id = COALESCE(run_id, %s),
+                cycle_id = COALESCE(cycle_id, %s),
+                model_id = COALESCE(model_id, %s),
+                stage = COALESCE(stage, %s),
+                candidate_id = COALESCE(candidate_id, %s),
+                updated_at = now()
+            WHERE idempotency_key = %s
+              AND slurm_job_id IS NULL
+              AND status IN ('submission_failed', 'reservation_lost')
+            RETURNING *
+            """,
+            (
+                record.get("run_id"),
+                record.get("cycle_id"),
+                record.get("model_id"),
+                record.get("stage"),
+                record.get("candidate_id"),
+                record["idempotency_key"],
             ),
         )
 

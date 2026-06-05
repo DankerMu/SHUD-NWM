@@ -548,6 +548,24 @@ class StoreBackedCycleRepository(FakeCycleRepository):
         self.jobs[result["job_id"]] = result
         return dict(result)
 
+    def reclaim_pipeline_job_reservation(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        # Mirror production: atomically take over a DEAD reservation
+        # (slurm_job_id IS NULL AND status IN submission_failed/reservation_lost)
+        # back to 'reserved'; a live row never matches.
+        job = self.store.reclaim_reservation(
+            record["idempotency_key"],
+            run_id=record.get("run_id"),
+            cycle_id=record.get("cycle_id"),
+            model_id=record.get("model_id"),
+            stage=record.get("stage"),
+            candidate_id=record.get("candidate_id"),
+        )
+        if job is None:
+            return None
+        result = self._job_to_dict(job)
+        self.jobs[result["job_id"]] = result
+        return dict(result)
+
     def query_candidate_state(self, idempotency_key: str) -> dict[str, Any] | None:
         job = self.store.query_candidate_state(idempotency_key)
         return self._job_to_dict(job) if job is not None else None

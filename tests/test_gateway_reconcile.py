@@ -54,6 +54,20 @@ class _StoreRepo:
         )
         return _job_dict(job) if job is not None else None
 
+    def reclaim_pipeline_job_reservation(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        # Mirror the production conditional UPDATE: only a DEAD reservation
+        # (slurm_job_id IS NULL AND status IN submission_failed/reservation_lost)
+        # is re-claimed back to 'reserved'; a live row never matches.
+        job = self.store.reclaim_reservation(
+            record["idempotency_key"],
+            run_id=record.get("run_id"),
+            cycle_id=record.get("cycle_id"),
+            model_id=record.get("model_id"),
+            stage=record.get("stage"),
+            candidate_id=record.get("candidate_id"),
+        )
+        return _job_dict(job) if job is not None else None
+
     def bind_pipeline_job_reservation(
         self,
         idempotency_key: str,
@@ -801,3 +815,171 @@ def test_reserve_candidate_does_not_raise_on_job_id_pk_conflict(tmp_path: Any) -
 
     assert result.created is False
     conn.close()
+
+
+def _reserve_then_set_status(store: _StoreRepo, *, key: str, job_id: str, status: str) -> None:
+    """Reserve a candidate then force its row into ``status`` (with no slurm bind).
+
+    Models a DEAD reservation: a row that was reserved but never bound, then
+    demoted (``submission_failed`` by a rejected sbatch, or ``reservation_lost``
+    by crash-recovery reconcile). The idempotency_key still occupies the partial
+    unique index, so a plain reserve loses to it.
+    """
+
+    from services.orchestrator.reservation import reserve_candidate
+
+    reserve_candidate(
+        store,
+        idempotency_key=key,
+        job_id=job_id,
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+    job = store.store.query_candidate_state(key)
+    assert job is not None and job.slurm_job_id is None
+    job.status = status
+    store.store.session.add(job)
+    store.store.session.commit()
+
+
+def test_reserve_candidate_reclaims_submission_failed_dead_reservation() -> None:
+    """A DEAD reservation in ``submission_failed`` (reserved-but-never-bound) is
+    atomically taken over by a later reserve_candidate: created=True and the row
+    returns to ``reserved`` so THIS pass re-submits.
+
+    This positively covers the previously-missing stale-reclaim (GAP-3): without
+    ``reclaim_pipeline_job_reservation`` the plain INSERT keeps losing to the
+    idempotency_key index forever and the candidate is permanently stuck.
+    """
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forcing"
+    _reserve_then_set_status(store, key=key, job_id="job_dead", status="submission_failed")
+    assert store.query_candidate_state(key)["status"] == "submission_failed"
+
+    from services.orchestrator.reservation import reserve_candidate
+
+    result = reserve_candidate(
+        store,
+        idempotency_key=key,
+        job_id="job_dead",
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+
+    assert result.created is True
+    state = store.query_candidate_state(key)
+    assert state["status"] == "reserved"
+    assert state["slurm_job_id"] is None
+    # Take-over is in place, not a second row.
+    rows = [j for j in store.store.session.query(PipelineJob).all() if j.idempotency_key == key]
+    assert len(rows) == 1
+
+
+def test_reserve_candidate_reclaims_reservation_lost_dead_reservation() -> None:
+    """A DEAD reservation demoted to ``reservation_lost`` by crash-recovery
+    reconcile is likewise atomically reclaimed back to ``reserved`` (created=True).
+    """
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forecast"
+    _reserve_then_set_status(store, key=key, job_id="job_lost", status="reservation_lost")
+    assert store.query_candidate_state(key)["status"] == "reservation_lost"
+
+    from services.orchestrator.reservation import reserve_candidate
+
+    result = reserve_candidate(
+        store,
+        idempotency_key=key,
+        job_id="job_lost",
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+
+    assert result.created is True
+    assert store.query_candidate_state(key)["status"] == "reserved"
+
+
+def test_reserve_candidate_never_reclaims_a_live_reservation() -> None:
+    """The take-over predicate matches ONLY dead statuses, so a LIVE row
+    (``reserved`` / ``submitted`` / ``running``) is never stolen: reserve_candidate
+    reports created=False and leaves the row byte-for-byte unchanged. This is the
+    race-safety guarantee against double-submit.
+    """
+
+    from services.orchestrator.reservation import reserve_candidate
+
+    for live_status in ("reserved", "submitted", "running"):
+        store = _store_repo()
+        key = f"gfs:cyc:basin:{live_status}"
+        _reserve_then_set_status(store, key=key, job_id=f"job_{live_status}", status=live_status)
+        before = store.query_candidate_state(key)
+        assert before["status"] == live_status
+
+        result = reserve_candidate(
+            store,
+            idempotency_key=key,
+            job_id="job_intruder",
+            run_id="run_2",
+            cycle_id="cycle_2",
+            job_type="forcing",
+            model_id="model_2",
+            stage="forcing",
+        )
+
+        assert result.created is False, live_status
+        after = store.query_candidate_state(key)
+        # Untouched: same job_id, same live status, still unbound.
+        assert after["job_id"] == before["job_id"]
+        assert after["status"] == live_status
+        assert after["slurm_job_id"] is None
+
+
+def test_repeated_transient_reconcile_keeps_reservation_reserved() -> None:
+    """GAP-4: two consecutive crash-recovery reconcile passes that both hit a
+    transient query failure (``ReconcileQueryUnavailable``) must leave the row
+    ``reserved`` — never marked ``reservation_lost`` — across BOTH passes, so a
+    transient outage that spans multiple ticks can never free an in-flight
+    reservation for double-submit.
+    """
+
+    from services.orchestrator.reconcile import (
+        RESERVATION_LOST_STATUS,
+        ReconcileQueryUnavailable,
+        reconcile_reserved_unbound_jobs,
+    )
+    from services.orchestrator.reservation import reserve_candidate
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forcing"
+    reserve_candidate(
+        store,
+        idempotency_key=key,
+        job_id="job_transient2",
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+
+    def _comment_query(_idem: str) -> Any:
+        raise ReconcileQueryUnavailable("sacct timed out")
+
+    for _ in range(2):
+        outcomes = reconcile_reserved_unbound_jobs(store.store, comment_query=_comment_query)
+        assert len(outcomes) == 1
+        assert outcomes[0].action == "query_unavailable"
+        state = store.query_candidate_state(key)
+        assert state["status"] == "reserved"
+        assert state["status"] != RESERVATION_LOST_STATUS
+        assert state["slurm_job_id"] is None
