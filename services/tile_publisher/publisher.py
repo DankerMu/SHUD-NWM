@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -111,11 +111,24 @@ class TilePublisher:
         cycle_quality = self._cycle_display_quality_state(session, cycle_id)
         runs = self._discover_publishable_runs(session, cycle_id)
         if not runs:
-            raise PublishError(
-                "NO_PUBLISHABLE_PRODUCTS",
-                f"No publishable flood return-period products found for cycle_id={cycle_id}.",
-                {"cycle_id": cycle_id, **cycle_quality},
-            )
+            # Degrade gracefully: when no flood return-period tiles are publishable
+            # (e.g. flood.flood_frequency_curve empty so return_period is always
+            # NULL), publish the q_down display product instead of hard-failing.
+            # Only a genuine "nothing publishable" (neither flood nor q_down) maps
+            # back to NO_PUBLISHABLE_PRODUCTS so cycle-status handling is unchanged.
+            try:
+                result = self._publish_qdown_from_database(session, cycle_id)
+            except PublishError as error:
+                if error.error_code in {"NO_PUBLISHABLE_QDOWN_PRODUCTS", "PUBLISH_IDENTITY_INCOMPLETE"}:
+                    raise PublishError(
+                        "NO_PUBLISHABLE_PRODUCTS",
+                        "No publishable flood return-period or q_down display products "
+                        f"found for cycle_id={cycle_id}.",
+                        {"cycle_id": cycle_id, **cycle_quality},
+                    ) from error
+                raise
+            degraded_lineage = {**result.lineage, "degraded_to_display": True}
+            return replace(result, lineage=redact_payload(degraded_lineage))
 
         layers: list[dict[str, Any]] = []
         artifacts: list[dict[str, Any]] = []
