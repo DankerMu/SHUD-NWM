@@ -258,6 +258,7 @@ def _import_prepared_sources(
                 "basin_version": _ensure_basin_version(cursor, sources),
                 "river_network_version": _ensure_river_network(cursor, sources),
                 "river_segment": _ensure_river_segments(cursor, sources),
+                "output_river_segment": _ensure_output_river_segments(cursor, sources),
                 "mesh_version": _ensure_mesh(cursor, sources),
                 "model_instance": _ensure_model_instance(cursor, sources),
             }
@@ -283,6 +284,7 @@ def _import_prepared_sources(
         if row_counts["model_instance"] == 1
         else _model_active_state(database_url, sources.ids["model_id"]),
         "segment_count": sources.geometry.segment_count,
+        "output_segment_count": sources.geometry.output_segment_count,
         "row_counts": row_counts,
         "model_package_uri": sources.manifest["model_package_uri"],
         "manifest_uri": sources.manifest["manifest_uri"],
@@ -513,6 +515,140 @@ def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
     return inserted
 
 
+def _ensure_output_river_segments(cursor: Any, sources: ImportSources) -> int:
+    """Seed the `.sp.riv` SHUD output/product river layer.
+
+    SHUD discharge output is keyed on the coarser `.sp.riv` reach topology
+    (``output_segment_count`` rows), not the finer ``seg.shp``/`.sp.rivseg`
+    display geometry the generic import already records. These rows are tagged
+    ``properties_json->>'shud_output_river'='true'`` and carry deterministic ids
+    ``{model_id}_shud_riv_{index:06d}`` so the forecast output verifier and the
+    output parser select the correct column/row count. Geometry is left NULL
+    here: display geometry is a separate concern and the verifier/parser only
+    need the row identities, ordering, and count (geom column is nullable).
+    """
+
+    ids = sources.ids
+    output_segment_count = sources.geometry.output_segment_count
+    incoming = _output_river_segment_rows(sources)
+    existing = _fetch_optional(
+        cursor,
+        """
+        SELECT COUNT(*) AS count
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
+        """,
+        (ids["river_network_version_id"],),
+    )
+    existing_count = int(existing["count"]) if existing is not None else 0
+    if existing_count:
+        _require_existing(existing_count == output_segment_count, "output_river_segment", ids["model_id"])
+        _require_existing(
+            _existing_output_river_segment_digest(cursor, ids["river_network_version_id"])
+            == _output_river_segment_digest(incoming),
+            "output_river_segment",
+            ids["model_id"],
+        )
+        return 0
+    if not incoming:
+        return 0
+    try:
+        from psycopg2.extras import Json, execute_values
+    except ImportError as error:
+        raise BasinsRegistryImportError(
+            "BASINS_REGISTRY_PSYCOPG_MISSING",
+            "psycopg2 is required for Basins registry import.",
+            model_id=ids["model_id"],
+        ) from error
+    inserted = 0
+    for chunk in _chunks(incoming, RIVER_SEGMENT_INSERT_PAGE_SIZE):
+        rows = [
+            (
+                row["river_segment_id"],
+                ids["river_network_version_id"],
+                row["segment_order"],
+                Json(row["properties"]),
+            )
+            for row in chunk
+        ]
+        execute_values(
+            cursor,
+            """
+            INSERT INTO core.river_segment (
+                river_segment_id, river_network_version_id, segment_order, properties_json
+            )
+            VALUES %s
+            """,
+            rows,
+            template="(%s, %s, %s, %s)",
+            page_size=RIVER_SEGMENT_INSERT_PAGE_SIZE,
+        )
+        inserted += len(rows)
+    return inserted
+
+
+def _output_river_segment_rows(sources: ImportSources) -> list[dict[str, Any]]:
+    ids = sources.ids
+    project_name = str(sources.model.get("shud_input_name") or "")
+    offset = sources.geometry.segment_count
+    rows: list[dict[str, Any]] = []
+    for index in range(1, sources.geometry.output_segment_count + 1):
+        rows.append(
+            {
+                "river_segment_id": f"{ids['model_id']}_shud_riv_{index:06d}",
+                "segment_order": offset + index,
+                "properties": {
+                    "seed": "basins_registry_import",
+                    "model_id": ids["model_id"],
+                    "basin_id": ids["basin_id"],
+                    "basin_version_id": ids["basin_version_id"],
+                    "basin_slug": sources.model.get("basin_slug"),
+                    "shud_input_name": sources.model.get("shud_input_name"),
+                    "shud_output_river": True,
+                    "shud_riv_index": index,
+                    "source": f"{project_name}.sp.riv",
+                    "output_identity": f"{project_name}.sp.riv:{index}",
+                },
+            }
+        )
+    return rows
+
+
+def _output_river_segment_digest(rows: list[dict[str, Any]]) -> str:
+    payload = [
+        {
+            "river_segment_id": str(row["river_segment_id"]),
+            "segment_order": None if row["segment_order"] is None else int(row["segment_order"]),
+            "properties": row["properties"],
+        }
+        for row in sorted(rows, key=lambda item: str(item["river_segment_id"]))
+    ]
+    return _sha256_json(payload)
+
+
+def _existing_output_river_segment_digest(cursor: Any, river_network_version_id: str) -> str:
+    cursor.execute(
+        """
+        SELECT river_segment_id, segment_order, properties_json
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
+        ORDER BY river_segment_id
+        """,
+        (river_network_version_id,),
+    )
+    rows = [
+        {
+            "river_segment_id": str(row["river_segment_id"]),
+            "segment_order": None if row["segment_order"] is None else int(row["segment_order"]),
+            "properties": _json_dict(row["properties_json"]),
+        }
+        for row in cursor.fetchall()
+    ]
+    return _output_river_segment_digest(rows)
+
+
 def _ensure_mesh(cursor: Any, sources: ImportSources) -> int:
     ids = sources.ids
     mesh_uri = _mesh_uri(sources)
@@ -637,6 +773,7 @@ def _resource_profile(sources: ImportSources) -> dict[str, Any]:
         "resolved_source_path": sources.model.get("resolved_source_path"),
         "source_is_symlink": bool(sources.model.get("source_is_symlink", False)),
         "segment_count": sources.geometry.segment_count,
+        "output_segment_count": sources.geometry.output_segment_count,
         "shud_evidence_counts": sources.geometry.evidence_counts,
     }
 
