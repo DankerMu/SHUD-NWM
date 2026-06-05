@@ -77,6 +77,11 @@ DEFAULT_RETRY_LIMIT = 3
 DEFAULT_CONCURRENT_SUBMIT_BOUND = 4
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
+# Bound the restart-reconcile DB connect so a misconfigured/unreachable
+# database_url fails fast (best-effort reconcile swallows it and the pass
+# proceeds to the DB-host preflight) instead of hanging the daemon at pass
+# start. Mirrors readonly_db_validation's connect-timeout convention.
+RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = 5
 STATE_M23_COMPARISON_FIELDS = (
     "basin_id",
     "basin_version_id",
@@ -1318,7 +1323,11 @@ class ProductionScheduler:
 
         from services.orchestrator.persistence import PipelineStore
 
-        engine = create_engine(database_url, future=True)
+        engine = create_engine(
+            database_url,
+            future=True,
+            connect_args={"connect_timeout": RECONCILE_DB_CONNECT_TIMEOUT_SECONDS},
+        )
         self._reconcile_store = PipelineStore(Session(engine))
         return self._reconcile_store
 

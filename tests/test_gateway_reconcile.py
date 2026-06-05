@@ -1597,3 +1597,44 @@ def test_young_by_created_at_fallback_when_updated_at_none_defers() -> None:
     assert outcomes[0].action == ABSENCE_UNCONFIRMED_ACTION
     assert outcomes[0].status == "reserved"
     assert update_calls == []  # young by created_at fallback → not demoted.
+
+
+def test_restart_reconcile_store_bounds_db_connect_timeout(monkeypatch: Any) -> None:
+    """_restart_reconcile_store must build its engine with a bounded
+    connect_timeout so a misconfigured/unreachable database_url fails fast
+    instead of hanging the daemon at pass start. Patches sqlalchemy.create_engine
+    at the source (the method does a local ``from sqlalchemy import create_engine``)
+    and asserts the connect_args carry the bound."""
+    from sqlalchemy import create_engine as _real_create_engine
+
+    from services.orchestrator.scheduler import (
+        RECONCILE_DB_CONNECT_TIMEOUT_SECONDS,
+        ProductionScheduler,
+    )
+
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def _fake_create_engine(*args: Any, **kwargs: Any):
+        calls.append((args, kwargs))
+        # Return a real, side-effect-free engine so PipelineStore(Session(engine))
+        # constructs without touching the (fake) postgres URL.
+        return _real_create_engine("sqlite://")
+
+    monkeypatch.setattr("sqlalchemy.create_engine", _fake_create_engine)
+
+    class _Config:
+        database_url = "postgresql://u:p@db.invalid:5432/x"
+
+    class _Shell:
+        config = _Config()
+        _reconcile_store = None
+
+    shell = _Shell()
+    ProductionScheduler._restart_reconcile_store.__get__(shell, ProductionScheduler)()
+
+    assert len(calls) == 1
+    _args, kwargs = calls[0]
+    assert "connect_args" in kwargs
+    connect_timeout = kwargs["connect_args"]["connect_timeout"]
+    assert connect_timeout == RECONCILE_DB_CONNECT_TIMEOUT_SECONDS
+    assert isinstance(connect_timeout, int) and connect_timeout > 0
