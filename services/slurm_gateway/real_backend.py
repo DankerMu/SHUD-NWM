@@ -1105,6 +1105,8 @@ class RealSlurmGateway(SlurmGateway):
 
     def _parse_sacct_status(self, stdout: str, job_id: str) -> SlurmJobRecord:
         matching_fields: list[str] | None = None
+        member_rows: list[list[str]] = []
+        member_pattern = re.compile(rf"^{re.escape(job_id)}_(?:\d+|\[.*\])$")
         for raw_line in stdout.splitlines():
             if not raw_line.strip():
                 continue
@@ -1118,10 +1120,54 @@ class RealSlurmGateway(SlurmGateway):
             if fields[0] == job_id:
                 matching_fields = fields
                 break
+            if member_pattern.fullmatch(fields[0]):
+                member_rows.append(fields)
 
-        if matching_fields is None:
-            raise SlurmJobNotFoundError(job_id)
-        return self._record_from_sacct_fields(matching_fields, job_id)
+        if matching_fields is not None:
+            return self._record_from_sacct_fields(matching_fields, job_id)
+        if member_rows:
+            return self._aggregate_array_member_status(member_rows, job_id)
+        raise SlurmJobNotFoundError(job_id)
+
+    def _aggregate_array_member_status(
+        self, member_rows: Sequence[Sequence[str]], job_id: str
+    ) -> SlurmJobRecord:
+        """Collapse Slurm array member rows into one parent-level status record.
+
+        Mirrors Slurm parent semantics: parent stays non-terminal while any member
+        is non-terminal; once all members are terminal it folds to COMPLETED only
+        when every member succeeded, else FAILED if any failed, else CANCELLED.
+        """
+        states = [self._map_slurm_state(row[1]) for row in member_rows]
+        non_terminal = [s for s in states if s not in TERMINAL_STATUSES]
+        if non_terminal:
+            aggregate_raw = "RUNNING"
+            if all(s == SlurmJobStatus.SUBMITTED for s in states):
+                aggregate_raw = "PENDING"
+        elif any(s == SlurmJobStatus.FAILED for s in states):
+            aggregate_raw = next(
+                row[1] for row, s in zip(member_rows, states) if s == SlurmJobStatus.FAILED
+            )
+        elif any(s == SlurmJobStatus.CANCELLED for s in states):
+            aggregate_raw = "CANCELLED"
+        else:
+            aggregate_raw = "COMPLETED"
+
+        all_terminal = not non_terminal
+        starts = [s for s in (row[3] for row in member_rows) if s.strip()]
+        ends = [e for e in (row[4] for row in member_rows) if e.strip()]
+        start_field = min(starts) if starts else ""
+        end_field = max(ends) if (ends and all_terminal) else ""
+        elapseds = [row[5] for row in member_rows if len(row) > 5 and row[5].strip()]
+        elapsed_field = max(elapseds) if elapseds else ""
+        exit_field = "0:0"
+        for row in member_rows:
+            if len(row) > 2 and row[2].strip() and row[2] != "0:0":
+                exit_field = row[2]
+                break
+
+        aggregated = [job_id, aggregate_raw, exit_field, start_field, end_field, elapsed_field]
+        return self._record_from_sacct_fields(aggregated, job_id)
 
     def _parse_sacct_list(self, stdout: str) -> list[SlurmJobRecord]:
         records: list[SlurmJobRecord] = []

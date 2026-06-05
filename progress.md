@@ -1,6 +1,6 @@
 # 项目进度
 
-最后更新：2026-06-04，node-22 业务化联调 + m24 §3A 并发预留代码合并。
+最后更新：2026-06-05，m24 §3B 多流域 live：通用编排器双流域并发链路打通 + 抓出并修掉 6 个真实缺陷，**已取得 qhh+heihe 双流域 published receipt**（流量 display 口径，cycle gfs_2026060500 → `complete`）。
 
 用途：作为跨 session 继承的项目真实进度索引。本文只保留当前完成态、仍需 live proof 的边界和常用验证入口；历史 review 细节以 GitHub issue、PR、OpenSpec 和 runbook 为准。
 
@@ -22,7 +22,14 @@
   - OpenSpec：[`openspec/changes/m24-multibasin-continuous-daemon-live/`](openspec/changes/m24-multibasin-continuous-daemon-live/)(`openspec validate --strict` 通过;经三轮 codex 复审含 full-output 并行收敛)。跟踪 **epic #285** + 子任务 #286–#293(§0 baseline→§P 依赖门→§1 gateway→§2 暖启动→§3A 并发→§3B 多流域 live→§4 daemon→§5 诊断退役)。
   - **§3A 并发 submit-and-return + durable 两阶段预留(#290)代码已完成并合并**：锁内 sbatch 前写持久预留行(`pipeline_job` + `idempotency_key`,partial unique index)、提交后原子 bind `slurm_job_id`、reclaim 原子接管死预留；防双提交跨重叠 pass + 提交崩溃窗口(crash-after-sbatch-before-bind)经 reconcile-by-comment(`sacct --comment=nhms_idem:<key>`,array master 行归一化到裸 id)恢复;grace-gate 锚 `updated_at` 防 slurmdbd 滞后误把 in-flight 预留降级。**尚未 live**——overlapping-submit 实况 receipt 待 #292 daemon go-live。**部署前置**：迁移 `db/migrations/000029_pipeline_reservation.sql`(预留列 + 部分唯一索引)必须在预留代码上线 / #292 go-live 前 apply(node-22 prod DB 尚未 apply)。out-of-scope LOW 收尾 → #300。
   - **诊断脚本暂留作 bring-up 回退与排障**,不再以其声称 production;待 m24 落地后退役(护栏 #293)。
-- 运行手册：[`docs/runbooks/qhh-22-business-bringup.md`](docs/runbooks/qhh-22-business-bringup.md)(已标注诊断 lane + m24 转向)。
+  - **§3B 多流域 live(2026-06-05,#291)——机制打通 + 抓出并修 6 个真实缺陷 + 双流域 published receipt**:通用编排器在 node-22 真实 Slurm 上把 qhh+heihe **双流域并发**跑过完整链路(download→canonical→forcing→SHUD→parse→frequency→publish),per-basin 身份/array 路由/partial 隔离均 live 验证正确(forecast 一流域失败、survivor 续走、publish 按 per-basin 发 residual_blocker 零泄漏)。EF real DB 2585 passed。抓出真实缺陷:
+    - ①heihe forcing 站点 PK 未按 project 命名空间化(82a137e)②cfgrib 非包坏、是手动路径漏注入 `LD_LIBRARY_PATH=$NHMS_GRIB_ENV_ROOT/lib`(runbook 已补 + #292 §4.5 preflight)③NOMADS 403 瞬时限流被硬标 `retryable=False`→静默丢 cycle(已修 `retryable=True`)④gateway `get_job_status` 解析不了 Slurm array 父 ID→`JOB_NOT_FOUND` 阻断所有 array 阶段(已修:聚合 `<jobid>_<N>` member 行成父状态)。
+    - ⑤**注册保真缺陷(已修,业务化核心)**:通用编排 forecast `verify_output` 被两流域输出列数失配阻断(qhh 期望 3739 列、实得 1634)。根因——通用注册只 seed `seg.shp`/`.sp.rivseg` 几何层(qhh 3738 / heihe 4759)、漏 SHUD forecast 实际算/输出的 **`.sp.riv` 河道层**(qhh **1633** / heihe **2352**),`verify_output` 拿 `segment_count+1` 拒掉**正确**输出。诊断流一直按 `.sp.riv` 发布 1633 段(见本节首条 job 5980 + `river_timeseries × 1633 段`),证明 1633 才是 qhh 产品真值。**修(8cf7130)**:`basins_geometry` 暴露 `output_segment_count`、`basins_registry_import` seed `shud_output_river=true` 输出层(id `{model_id}_shud_riv_NNNNNN`)且记 `resource_profile.output_segment_count`(chain.py:5084 透传 manifest);qhh 现存注册 profile 从真实 `.sp.riv` 派生补 1633(checksum c59a7fa)。使 注册≡输出≡产品——通用路径**暴露**(非引入)的保真问题,反证 m24 迁移价值。
+    - ⑥**publish 无基线硬失败(已修)**:flood return-period tiles 需每流域 `flood.flood_frequency_curve` 历史基线(hindcast 校准),**全库 0 行**(两流域皆无;诊断流当年发的本就是流量 display、显式绕开无基线),M3 publish 遂硬失败 `NO_PUBLISHABLE_PRODUCTS` 破 userspace。**修(0601cea)**:`_publish_from_database` 无 flood 行时降级走现成 `_publish_qdown_from_database` 发流量 display + 标 `degraded_to_display` + return-period 记诚实 residual_blocker,仅 flood/q_down 皆空才真失败(flood happy-path 字节不变)。
+    - **双流域 published receipt(live)**:cycle `gfs_2026060500`→`complete`(publish job 6043 succeeded)。复用 download/forcing(跳过下载)、qhh forecast `6040_0 COMPLETED`(列数不再失配)→publish 降级 manifest `status=published` `degraded_to_display=true` `published_basins=2`;qhh `segment_count=1633`/274344 行、heihe `2352`/395136 行;per-basin 身份零泄漏。①–⑥均已修+测试+提交(分支 `feat/issue-291-multibasin-identity`,commits 含 8cf7130/0601cea)。
+    - **后续(非阻塞)**:真正洪水 return-period tiles 需为两流域 onboard `flood_frequency_curve` 基线(hindcast 校准,新流域入网工作,留 #292/#293 或独立任务);node-22 留有审计表 `ops.pipeline_job_resume_backup`(本轮 resume 前 job 快照)。
+  - **业务化数据 source-of-truth(硬约束)**:每个流域的全部配置以 **`data/Basins/<流域>/input/<流域>/`** 下的真实 SHUD 模型为唯一真值(`.sp.riv` 河道=产品/输出层、`.sp.rivseg`/`seg.shp` GIS 细分层、`.sp.att` 单元、`.cfg.para` 运行参数…);后续新增流域一律落此目录,**业务化注册与运行的所有参数必须从这里派生,严禁手配/即兴覆盖**(本轮 bring-up 的 smoke 注册 3738、`GFS_FORECAST_START_HOUR=3`、partition 覆盖等即兴参数即反面教材,不得带入生产)。
+- 运行手册：[`docs/runbooks/qhh-22-business-bringup.md`](docs/runbooks/qhh-22-business-bringup.md)(已标注诊断 lane + m24 转向 + data/Basins source-of-truth)。
 - ⚠️ 运行纪律:作业运行中**禁止在 node-22 `git pull`**(会换 inode 触发 NFS stale handle 杀掉正在 exec 脚本的作业)。
 
 ## 当前结论

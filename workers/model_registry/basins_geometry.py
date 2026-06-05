@@ -87,6 +87,9 @@ class ParsedBasinsGeometry:
     river_network_checksum: str
     river_network_source_uri: str
     segment_count: int
+    # `.sp.riv` reach count: the SHUD output/product topology, distinct from the
+    # finer `seg.shp`/`.sp.rivseg` display geometry counted by ``segment_count``.
+    output_segment_count: int
     evidence_counts: dict[str, int | None]
 
 
@@ -222,6 +225,7 @@ def parse_basins_geometry(
         ),
         river_network_source_uri=str(selected_layer.base.with_suffix(".shp")),
         segment_count=len(river_segments),
+        output_segment_count=int(sp_riv_header["count"] or 0),
         evidence_counts=evidence_counts,
     )
 

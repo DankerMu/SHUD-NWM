@@ -18,6 +18,9 @@ from workers.model_registry.basins_discovery import discover_basins_inventory, w
 from workers.model_registry.basins_geometry import parse_basins_geometry
 from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
+    _ensure_output_river_segments,
+    _output_river_segment_rows,
+    _resource_profile,
     import_basins_registry,
     prepare_basins_import_sources,
 )
@@ -1349,6 +1352,130 @@ def test_prepare_import_sources_does_not_need_data_basins_default(tmp_path: Path
     assert sources.source_root == (tmp_path / "basins" / "basin-a").resolve()
 
 
+def test_parsed_geometry_exposes_sp_riv_output_segment_count_distinct_from_geometry(tmp_path: Path) -> None:
+    _, input_dir, _, _, model_id = _write_registry_fixture(
+        tmp_path,
+        sp_river_count=3,
+        sp_segment_count=5,
+    )
+    _write_line_shapefile(
+        input_dir / "gis" / "seg",
+        points=[
+            [(100.1, 30.1), (100.2, 30.2)],
+            [(100.2, 30.2), (100.3, 30.3)],
+            [(100.3, 30.3), (100.4, 30.4)],
+            [(100.4, 30.4), (100.5, 30.5)],
+            [(100.5, 30.5), (100.6, 30.6)],
+        ],
+        records=[
+            (1, 1, 2, 100.0),
+            (2, 2, 3, 100.0),
+            (3, 3, 4, 100.0),
+            (4, 4, 5, 100.0),
+            (5, 5, 0, 100.0),
+        ],
+    )
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+
+    parsed = parse_basins_geometry(
+        model_id=model_id,
+        input_dir=input_dir,
+        shud_input_name="alias-a",
+        required_files=model["required_files"],
+    )
+
+    # .sp.riv reach count (output/product) differs from seg.shp geometry count.
+    assert parsed.output_segment_count == 3
+    assert parsed.segment_count == 5
+    assert parsed.output_segment_count != parsed.segment_count
+    assert parsed.evidence_counts["river_count"] == 3
+    assert parsed.evidence_counts["rivseg_segment_count"] == 5
+
+
+def test_resource_profile_records_output_segment_count(tmp_path: Path) -> None:
+    _, _, inventory_path, manifest_path, _ = _write_registry_fixture(
+        tmp_path,
+        sp_river_count=1,
+        sp_segment_count=2,
+    )
+
+    sources = prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+    profile = _resource_profile(sources)
+
+    assert profile["output_segment_count"] == 1
+    assert profile["segment_count"] == 2
+
+
+def test_output_river_segment_rows_use_canonical_ids_and_output_flag(tmp_path: Path) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(
+        tmp_path,
+        sp_river_count=3,
+        sp_segment_count=2,
+    )
+    sources = prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+
+    rows = _output_river_segment_rows(sources)
+
+    assert [row["river_segment_id"] for row in rows] == [
+        f"{model_id}_shud_riv_000001",
+        f"{model_id}_shud_riv_000002",
+        f"{model_id}_shud_riv_000003",
+    ]
+    assert all(row["properties"]["shud_output_river"] is True for row in rows)
+    assert [row["properties"]["shud_riv_index"] for row in rows] == [1, 2, 3]
+    # segment_order is offset past the geometry layer to avoid collisions.
+    assert [row["segment_order"] for row in rows] == [3, 4, 5]
+
+
+def test_ensure_output_river_segments_seeds_exactly_output_segment_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, inventory_path, manifest_path, model_id = _write_registry_fixture(
+        tmp_path,
+        sp_river_count=3,
+        sp_segment_count=2,
+    )
+    sources = prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+    cursor = _FakeRiverSegmentCursor(sources.ids["river_network_version_id"])
+    _patch_execute_values(monkeypatch)
+
+    inserted = _ensure_output_river_segments(cursor, sources)
+
+    output_rows = cursor.output_river_segments()
+    assert inserted == 3
+    assert [row["river_segment_id"] for row in output_rows] == [
+        f"{model_id}_shud_riv_000001",
+        f"{model_id}_shud_riv_000002",
+        f"{model_id}_shud_riv_000003",
+    ]
+    assert all(row["properties_json"]["shud_output_river"] is True for row in output_rows)
+    # Geometry-layer rows are untouched by output seeding.
+    assert cursor.geometry_segment_count() == 0
+
+
+def test_ensure_output_river_segments_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, inventory_path, manifest_path, _ = _write_registry_fixture(
+        tmp_path,
+        sp_river_count=3,
+        sp_segment_count=2,
+    )
+    sources = prepare_basins_import_sources(inventory_path=inventory_path, package_manifest_path=manifest_path)
+    cursor = _FakeRiverSegmentCursor(sources.ids["river_network_version_id"])
+    _patch_execute_values(monkeypatch)
+
+    first = _ensure_output_river_segments(cursor, sources)
+    second = _ensure_output_river_segments(cursor, sources)
+
+    assert first == 3
+    assert second == 0
+    assert len(cursor.output_river_segments()) == 3
+
+
 @pytest.mark.integration
 def test_registry_import_creates_idempotent_inactive_rows(
     tmp_path: Path,
@@ -1387,6 +1514,7 @@ def test_registry_import_creates_idempotent_inactive_rows(
         "basin_version": 1,
         "river_network_version": 1,
         "river_segment": 2,
+        "output_river_segment": 2,
         "mesh_version": 1,
         "model_instance": 1,
     }
@@ -1396,6 +1524,7 @@ def test_registry_import_creates_idempotent_inactive_rows(
         "basin_version": 0,
         "river_network_version": 0,
         "river_segment": 0,
+        "output_river_segment": 0,
         "mesh_version": 0,
         "model_instance": 0,
     }
@@ -1434,7 +1563,9 @@ def test_registry_import_creates_idempotent_inactive_rows(
     assert row["resource_profile"]["package_checksum"] == "package-sha-1"
     assert row["resource_profile"]["basin_slug"] == basin_slug
     assert row["segment_count"] == 2
-    assert row["segment_rows"] == 2
+    # river_network.segment_count stays geometry (2); core.river_segment now holds both layers:
+    # 2 geometry (seg.shp) + 2 .sp.riv SHUD output rows seeded by the registration-fidelity fix.
+    assert row["segment_rows"] == 4
     assert row["first_downstream"] == f"{model_id}_seg_2"
     assert row["second_downstream"] is None
     assert row["basin_geom"].startswith("MULTIPOLYGON")
@@ -1447,7 +1578,9 @@ def test_registry_import_creates_idempotent_inactive_rows(
         offset=0,
     )
     assert segments["type"] == "FeatureCollection"
-    assert segments["total"] == 2
+    # total counts both layers (geometry + .sp.riv output); only the 2 geometry rows render
+    # (output rows are NULL-geom until display backfill), so feature_total / features stay geometry-only.
+    assert segments["total"] == 4
     assert segments["feature_total"] == 2
     assert segments["features"][0]["geometry"]["type"] == "LineString"
     assert segments["features"][0]["properties"]["river_segment_id"] == f"{model_id}_seg_1"
@@ -1915,6 +2048,84 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+class _FakeRiverSegmentCursor:
+    """Minimal in-memory stand-in for core.river_segment writes.
+
+    Routes the two read queries used by ``_ensure_output_river_segments``
+    (output-row COUNT and the ordered digest SELECT) and records rows that the
+    patched ``execute_values`` shim inserts. Avoids any live-DB dependency for
+    local runs; real-DB coverage lives in the @integration tests.
+    """
+
+    def __init__(self, river_network_version_id: str) -> None:
+        self._rnv_id = river_network_version_id
+        self._rows: list[dict[str, Any]] = []
+        self._last: list[dict[str, Any]] = []
+
+    def insert_rows(self, rows: list[tuple[Any, ...]]) -> None:
+        for river_segment_id, rnv_id, segment_order, properties in rows:
+            self._rows.append(
+                {
+                    "river_segment_id": river_segment_id,
+                    "river_network_version_id": rnv_id,
+                    "segment_order": segment_order,
+                    # store the plain dict (mirrors what RealDictCursor yields on read)
+                    "properties_json": _adapted(properties),
+                }
+            )
+
+    def _output_rows(self) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in self._rows
+            if row["river_network_version_id"] == self._rnv_id
+            and bool(_adapted(row["properties_json"]).get("shud_output_river"))
+        ]
+
+    def output_river_segments(self) -> list[dict[str, Any]]:
+        return sorted(self._output_rows(), key=lambda row: row["river_segment_id"])
+
+    def geometry_segment_count(self) -> int:
+        return sum(
+            1
+            for row in self._rows
+            if row["river_network_version_id"] == self._rnv_id
+            and not bool(_adapted(row["properties_json"]).get("shud_output_river"))
+        )
+
+    def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
+        normalized = " ".join(str(statement).split())
+        if "COUNT(*)" in normalized:
+            self._last = [{"count": len(self._output_rows())}]
+        else:
+            self._last = [
+                {
+                    "river_segment_id": row["river_segment_id"],
+                    "segment_order": row["segment_order"],
+                    "properties_json": row["properties_json"],
+                }
+                for row in self.output_river_segments()
+            ]
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._last[0] if self._last else None
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return list(self._last)
+
+
+def _adapted(value: Any) -> dict[str, Any]:
+    adapted = getattr(value, "adapted", value)
+    return adapted if isinstance(adapted, dict) else {}
+
+
+def _patch_execute_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_execute_values(cursor: Any, _sql: str, rows: list[tuple[Any, ...]], **_kwargs: Any) -> None:
+        cursor.insert_rows(list(rows))
+
+    monkeypatch.setattr("psycopg2.extras.execute_values", fake_execute_values)
 
 
 def _invoke_click(argv: list[str]) -> int:

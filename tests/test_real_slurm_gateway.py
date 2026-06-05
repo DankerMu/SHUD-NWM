@@ -23,6 +23,7 @@ from services.slurm_gateway.gateway import (
     ConfigurationError,
     ManifestValidationError,
     SlurmGatewayError,
+    SlurmJobNotFoundError,
     SlurmParseError,
     SlurmTimeoutError,
     SlurmValidationError,
@@ -756,6 +757,87 @@ def test_array_task_results_parse_task_lines_only(monkeypatch, tmp_path):
     ]
     assert "--format=JobID,State,ExitCode,Elapsed,MaxRSS,AveRSS,AllocTRES" in calls[0]
     assert "--jobs=12345" in calls[0]
+
+
+def _array_status_gateway(monkeypatch, tmp_path, stdout: str) -> RealSlurmGateway:
+    gateway = _gateway(tmp_path)
+
+    def fake_run(command, **kwargs):
+        del command, kwargs
+        return subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return gateway
+
+
+def test_get_job_status_array_all_completed_aggregates_to_succeeded(monkeypatch, tmp_path):
+    stdout = "\n".join(
+        [
+            "6031_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_0.batch|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_1|COMPLETED|0:0|2026-05-08T12:01:00|2026-05-08T12:06:00|00:05:00",
+            "6031_1.batch|COMPLETED|0:0|2026-05-08T12:01:00|2026-05-08T12:06:00|00:05:00",
+        ]
+    )
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    assert gateway.get_job_status("6031").status == SlurmJobStatus.SUCCEEDED
+
+
+def test_get_job_status_array_partial_failure_aggregates_to_failed(monkeypatch, tmp_path):
+    stdout = "\n".join(
+        [
+            "6031_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_1|FAILED|1:0|2026-05-08T12:01:00|2026-05-08T12:03:00|00:02:00",
+        ]
+    )
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    record = gateway.get_job_status("6031")
+    assert record.status == SlurmJobStatus.FAILED
+
+
+def test_get_job_status_array_running_member_keeps_parent_running(monkeypatch, tmp_path):
+    stdout = "\n".join(
+        [
+            "6031_0|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6031_1|RUNNING|0:0|2026-05-08T12:01:00||",
+        ]
+    )
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    assert gateway.get_job_status("6031").status == SlurmJobStatus.RUNNING
+
+
+def test_get_job_status_array_pending_master_is_submitted(monkeypatch, tmp_path):
+    stdout = "6031_[0-1]|PENDING|0:0|||\n"
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    assert gateway.get_job_status("6031").status == SlurmJobStatus.SUBMITTED
+
+
+def test_get_job_status_array_all_cancelled_aggregates_to_cancelled(monkeypatch, tmp_path):
+    stdout = "\n".join(
+        [
+            "6031_0|CANCELLED|0:0|2026-05-08T12:00:00|2026-05-08T12:02:00|00:02:00",
+            "6031_1|CANCELLED|0:0|2026-05-08T12:00:00|2026-05-08T12:02:00|00:02:00",
+        ]
+    )
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    assert gateway.get_job_status("6031").status == SlurmJobStatus.CANCELLED
+
+
+def test_get_job_status_missing_job_still_raises_not_found(monkeypatch, tmp_path):
+    gateway = _array_status_gateway(monkeypatch, tmp_path, "")
+    with pytest.raises(SlurmJobNotFoundError):
+        gateway.get_job_status("6031")
+
+
+def test_get_job_status_non_array_exact_match_unchanged(monkeypatch, tmp_path):
+    stdout = "\n".join(
+        [
+            "6029|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+            "6029.batch|COMPLETED|0:0|2026-05-08T12:00:00|2026-05-08T12:05:00|00:05:00",
+        ]
+    )
+    gateway = _array_status_gateway(monkeypatch, tmp_path, stdout)
+    assert gateway.get_job_status("6029").status == SlurmJobStatus.SUCCEEDED
 
 
 @pytest.mark.parametrize(

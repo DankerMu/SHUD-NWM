@@ -27,6 +27,7 @@ FileTooLargeError = gfs_module.FileTooLargeError
 GFSAdapter = gfs_module.GFSAdapter
 GFSAdapterConfig = gfs_module.GFSAdapterConfig
 DownloadedPayload = gfs_module.DownloadedPayload
+ForbiddenSourceError = gfs_module.ForbiddenSourceError
 
 
 class FakeMetRepository:
@@ -151,6 +152,26 @@ def test_cycle_discovery_upserts_four_available_cycles(tmp_path: Path) -> None:
     assert len(repository.cycles) == 4
     assert {cycle["status"] for cycle in repository.cycles.values()} == {"discovered"}
     assert repository.data_sources["gfs"]["adapter_name"] == "gfs_adapter"
+
+
+def test_forbidden_discovery_stays_retryable(tmp_path: Path) -> None:
+    # NOMADS public endpoints have no auth; a 403 is a transient rate-limit that
+    # recovers within minutes. The forbidden cycle must remain retryable so the
+    # next discovery pass re-attempts instead of permanently dropping an
+    # available forecast cycle (regression guard for #291).
+    def forbidden_checker(_url: str) -> bool:
+        raise ForbiddenSourceError("rate-limited", attempts=1)
+
+    adapter = build_adapter(tmp_path, availability_checker=forbidden_checker)
+
+    cycles = adapter.discover_cycles("2026-05-07")
+
+    assert cycles, "expected at least one discovered cycle"
+    for cycle in cycles:
+        assert cycle.status == "forbidden"
+        assert cycle.classifier == "forbidden"
+        assert cycle.available is False
+        assert cycle.retryable is True
 
 
 def test_manifest_contains_57_forecast_hours_times_7_variables(tmp_path: Path) -> None:

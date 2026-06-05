@@ -284,7 +284,10 @@ class GFSAdapter(DataSourceAdapter):
                 status = "forbidden"
                 reason = "source_cycle_forbidden"
                 classifier = "forbidden"
-                retryable = False
+                # NOMADS public endpoints have no auth; a 403 here is a transient
+                # rate-limit that recovers within minutes, so it MUST stay retryable
+                # or a single throttle silently drops an available forecast cycle.
+                retryable = True
             except Exception:
                 LOGGER.exception("Failed to check GFS availability for %s", self._safe_text(remote_url))
                 available = False

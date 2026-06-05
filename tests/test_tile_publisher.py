@@ -118,7 +118,8 @@ def _create_flood_table(connection: Any) -> None:
                 river_network_version_id TEXT,
                 return_period REAL,
                 warning_level TEXT,
-                max_over_window REAL
+                max_over_window REAL,
+                quality_flag TEXT DEFAULT 'ok'
             )
             """
         )
@@ -842,3 +843,91 @@ def test_is_private_display_path_rejects_private(private_path: str) -> None:
 )
 def test_is_private_display_path_allows_public(public_path: str) -> None:
     assert _is_private_display_path(public_path) is False
+
+
+# --------------------------------------------------------------------------- #
+# Degrade-to-display contract (#290): the flood publish entrypoint
+# (_publish_from_database) degrades to the q_down display product when no flood
+# return-period tiles are publishable, and only hard-fails when neither flood
+# nor q_down is publishable. Product-approved behavior change: the empty-flood
+# scenario used to raise NO_PUBLISHABLE_PRODUCTS; it now publishes q_down.
+# --------------------------------------------------------------------------- #
+def _insert_publishable_flood_run(session: Session, *, run_id: str, segments: int = 3) -> None:
+    """Seed a flood run that _discover_publishable_runs treats as ready.
+
+    Status must be frequency_done/published, and every result row needs a
+    non-null return_period + warning_level with max_over_window true.
+    """
+    _insert_run(session, run_id=run_id, status="frequency_done", segments=segments)
+    for index in range(segments):
+        session.execute(
+            text(
+                """
+                INSERT INTO flood.return_period_result (
+                    run_id, river_segment_id, river_network_version_id,
+                    return_period, warning_level, max_over_window
+                ) VALUES (:run_id, :segment, 'rivnet-1', 100.0, 'major', 1)
+                """
+            ),
+            {"run_id": run_id, "segment": f"seg-{index}"},
+        )
+    session.commit()
+
+
+def test_publish_from_database_degrades_to_qdown_when_no_flood_runs(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    # q_down river_timeseries present (parsed), but no publishable flood rows.
+    with _store(create_flood=True) as session:
+        _insert_run(session, run_id="run-a", status="parsed", segments=3)
+
+        result = publisher._publish_from_database(session, CYCLE_ID)
+
+    assert isinstance(result, PublishResult)
+    assert result.status == "published"
+    # Layers are the q_down display layers, not flood return-period layers.
+    assert {layer["layer_type"] for layer in result.layers} == {"q_down_timeseries"}
+    assert result.lineage["degraded_to_display"] is True
+    # Missing flood return-period is recorded honestly, not silently dropped.
+    assert "return_period_result" in result.lineage["unavailable_products"]
+    assert result.lineage["quality_state"] == "degraded"
+
+
+def test_publish_from_database_happy_path_publishes_flood_without_degrade(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    with _store(create_flood=True) as session:
+        _insert_publishable_flood_run(session, run_id="run-a", segments=3)
+
+        result = publisher._publish_from_database(session, CYCLE_ID)
+
+    assert result.status == "published"
+    # Flood layers published exactly as before; NO degrade.
+    assert {layer["layer_type"] for layer in result.layers} == {"flood_return_period"}
+    assert result.lineage.get("degraded_to_display") in (None, False)
+
+
+def test_publish_from_database_raises_when_neither_flood_nor_qdown(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    # No flood rows AND no q_down river_timeseries → genuinely nothing publishable.
+    with _store(create_flood=True) as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, status, source_id, cycle_time, run_manifest_uri
+                ) VALUES (
+                    'run-a', 'forecast', 'parsed', :source_id, :cycle_time,
+                    'published://tiles/hydro/manifest.json'
+                )
+                """
+            ),
+            {"source_id": SOURCE_ID, "cycle_time": CYCLE_TIME},
+        )
+        session.commit()
+
+        with pytest.raises(PublishError) as excinfo:
+            publisher._publish_from_database(session, CYCLE_ID)
+
+    assert excinfo.value.error_code == "NO_PUBLISHABLE_PRODUCTS"
+    # Chained from the qdown empty-runs error.
+    assert isinstance(excinfo.value.__cause__, PublishError)
+    assert excinfo.value.__cause__.error_code == "NO_PUBLISHABLE_QDOWN_PRODUCTS"

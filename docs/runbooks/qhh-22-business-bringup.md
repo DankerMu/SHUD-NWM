@@ -68,9 +68,26 @@ uv run python -m packages.common.migrate        # 全量迁移；已应用则全
 
 > **部署顺序义务（m24 §3A / #290）**：迁移 `000029_pipeline_reservation`（`ops.pipeline_job` 预留列 `idempotency_key`/`candidate_id` + 部分唯一索引 `pipeline_job_idempotency_key_uidx`）**必须在并发预留代码上线前、且在 #292 连续守护进程 go-live 前 apply**。psycopg `reserve_pipeline_job` 引用这两列；列缺失则 reserve 抛 `UndefinedColumn`（被 submit 路径吞为 `submission_failed`，可恢复但退化）。迁移纯 additive + 幂等（`ADD COLUMN IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`），可安全先于代码 apply。node-22 prod DB **尚未 apply 000029**。
 
-### 2.4 Basins 数据 ✅
+### 2.4 Basins 数据 ✅ — 业务化唯一 source-of-truth
 
-- `/volume/data/nwm/Basins/qhh`（计算节点可见）。QHH 包由运行器从此发布。
+- 路径：`/volume/data/nwm/Basins/<流域>/input/<流域>/`（计算节点可见；仓库侧镜像 `data/Basins/<流域>/`）。**后续新增流域一律落此目录**。
+- **硬约束**：业务化注册与运行的**所有参数必须从这套真实 SHUD 模型派生，严禁手配/即兴覆盖**。本轮 bring-up 的即兴参数（smoke 注册段数、`GFS_FORECAST_START_HOUR` 临时改值、partition 覆盖）属反面教材，不得带入生产。
+- **两个 river 图层务必分清（产品键在 `.sp.riv`，不是 seg.shp）**：
+
+  | 文件 | 含义 | qhh | heihe | 用途 |
+  |---|---|---|---|---|
+  | `<b>.sp.riv` | SHUD 河道路由 reach = **输出/产品层** | **1633** | **2352** | river discharge 输出、return_period、发布产品**按此键** |
+  | `<b>.sp.rivseg` / `gis/seg.shp` | GIS 细分 river 段（几何） | 3738 | 4759 | river_network 几何/展示 |
+  | `<b>.sp.att` | SHUD 计算单元 | 4773 | 6335 | 模型单元 |
+
+  SHUD forecast 算/输出的是 `.sp.riv` reach 层（rivqdown.csv 列数 = `.sp.riv` count + 1）。**产品/输出校验必须对 `.sp.riv` 段数（经 `qhh_production_bootstrap.read_qhh_output_segment_count` 读多块 `.sp.riv`），不能对 river_network 几何段数（seg.shp 3738）**。诊断流正确分离了二者（注册 river_segment=3738 几何 + 单独 seed「SHUD 输出河段」1633，发布 1633 段，见 §6/§本节末）；通用编排器（`basins_registry_import`）原先只 seed seg.shp 几何（3738）、漏 `.sp.riv` 输出层，forecast `verify_output` 拿输出（1634 列）对几何（3739）→ 误拒正确输出 → publish 阻断（#291 §3B live 暴露）。**已修（8cf7130）**：`basins_geometry` 暴露 `output_segment_count`、`basins_registry_import` seed `shud_output_river=true` 输出层（id `{model_id}_shud_riv_NNNNNN`）+ 记 `resource_profile.output_segment_count`（chain.py 透传 forecast manifest，`verify_output` 遂按 1633/2352 校验），使 **注册≡输出≡产品**；任何落入 `data/Basins` 的新流域自动获得正确产品身份。
+
+### 2.4.1 业务化运行 receipt（通用编排器，2026-06-05，#291）
+
+- **双流域 published**：通用编排器（非诊断脚本）在 node-22 真实 Slurm 把 qhh+heihe 跑到 published。cycle `gfs_2026060500` → `met.forecast_cycle.status=complete`，publish job 6043 succeeded。
+- **复用 download/forcing（跳过下载）**：重跑设 `restart_stage=forecast`，6029/6030/6031（download/convert/forcing）原样复用未重跑；qhh forecast `6040_0 COMPLETED`（列数不再失配，按 1633 段产出）。
+- **publish 降级口径**：`flood.flood_frequency_curve` 历史基线全库 0 行（两流域皆无 hindcast 校准），故无法发洪水 return-period tiles；publish 降级（0601cea）走 `_publish_qdown_from_database` 发**流量 q_down display 产品**，manifest `status=published` `degraded_to_display=true` `published_basins=2`，return-period 记诚实 `RETURN_PERIOD_RESULT_UNAVAILABLE` residual_blocker。产品：qhh `q_down_timeseries` segment_count=1633 / 274344 行、heihe 2352 / 395136 行；`hydro.river_timeseries` q_down 两流域齐、`map.tile_layer` 各 `published_flag=true`。
+- **真正洪水 tiles 前置（后续）**：需为每流域 onboard `flood_frequency_curve` 基线（`workers/flood_frequency` hindcast 校准），属新流域入网工作，留 #292/#293 或独立任务。
 
 ---
 
@@ -100,7 +117,11 @@ uv run python -m packages.common.migrate        # 全量迁移；已应用则全
 export QHH_RUN_ROOT=/scratch/frd_muziyao/nhms-prod/qhh-continuous
 export OBJECT_STORE_ROOT=$QHH_RUN_ROOT          # 必须 = RUN_ROOT
 export QHH_ECCODES_RUNTIME=/scratch/frd_muziyao/nhms-grib
-export PATH=/scratch/frd_muziyao/nhms-grib/bin:$PATH
+export PATH=/scratch/frd_muziyao/nhms-grib/bin:$PATH                 # cdo 二进制
+# cfgrib(Python) 需经 libeccodes.so 读 GRIB2；手动跑 canonical 必须显式注入 lib，
+# 否则报 "unrecognized engine cfgrib"。sbatch 路径由 chain.py:7571-7579 自动注入，
+# 手动/登录节点路径无此 hook，故此处补全（缺它会被误诊为"包坏了"）。
+export LD_LIBRARY_PATH=/scratch/frd_muziyao/nhms-grib/lib:${LD_LIBRARY_PATH:-}
 export SHUD_TIMEOUT_SECONDS=21600               # 6h，留给 5min×7天
 export QHH_CONTINUOUS_SOURCES=gfs               # GFS 先跑通，再加 IFS
 export QHH_CONTINUOUS_LOOKBACK_HOURS=48
