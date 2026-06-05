@@ -1514,6 +1514,7 @@ def test_registry_import_creates_idempotent_inactive_rows(
         "basin_version": 1,
         "river_network_version": 1,
         "river_segment": 2,
+        "output_river_segment": 2,
         "mesh_version": 1,
         "model_instance": 1,
     }
@@ -1523,6 +1524,7 @@ def test_registry_import_creates_idempotent_inactive_rows(
         "basin_version": 0,
         "river_network_version": 0,
         "river_segment": 0,
+        "output_river_segment": 0,
         "mesh_version": 0,
         "model_instance": 0,
     }
