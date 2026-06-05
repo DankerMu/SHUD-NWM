@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import stat
+import threading
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
@@ -869,6 +871,10 @@ class ProductionScheduler:
                 artifact_path=artifact_path,
             )
 
+        heartbeat = _LeaseHeartbeat(
+            lock, pass_id, max(1, self.config.lock_ttl_seconds // 3)
+        )
+        heartbeat.start()
         try:
             root_preflight = _scheduler_runtime_root_preflight(self.config)
             if root_preflight["status"] == "blocked":
@@ -1234,6 +1240,10 @@ class ProductionScheduler:
                 artifact_path=artifact_path,
             )
         finally:
+            try:
+                heartbeat.stop()
+            except Exception:
+                pass
             lock.release(pass_id=pass_id)
 
     def _run_restart_reconcile(self) -> dict[str, Any] | None:
@@ -2808,13 +2818,79 @@ class ProductionScheduler:
         return artifact_path
 
 
+def _default_owner_liveness_probe(payload: Mapping[str, Any]) -> bool | None:
+    """Probe whether the lock owner process is alive.
+
+    Same-host + valid pid -> os.kill(pid, 0): True if reachable, False on
+    ProcessLookupError (dead), True on PermissionError (alive, other user).
+    Different host or no pid -> None (cannot probe cross-host).
+    """
+
+    host = payload.get("host")
+    pid = payload.get("pid")
+    if host != socket.gethostname() or not isinstance(pid, int):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+class _LeaseHeartbeat:
+    """Background daemon thread that renews a lease until stopped or lost."""
+
+    def __init__(self, lease: FileSchedulerLease, pass_id: str, interval_seconds: float) -> None:
+        self._lease = lease
+        self._pass_id = pass_id
+        self._interval = max(0.001, float(interval_seconds))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.lost = False
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="lease-heartbeat", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                renewed = self._lease.renew(pass_id=self._pass_id)
+            except Exception:
+                renewed = False
+            if not renewed:
+                self.lost = True
+                return
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=self._interval + 1.0)
+        self._thread = None
+
+
 class FileSchedulerLease:
-    def __init__(self, lock_path: Path, *, ttl_seconds: int, workspace_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        lock_path: Path,
+        *,
+        ttl_seconds: int,
+        workspace_root: Path | None = None,
+        owner_liveness_probe: Callable[[Mapping[str, Any]], bool | None] | None = None,
+    ) -> None:
         self.lock_path = lock_path
         self.ttl_seconds = ttl_seconds
         self.workspace_root = workspace_root
         self.acquired = False
         self.lease_token: str | None = None
+        self._owner_liveness_probe = owner_liveness_probe or _default_owner_liveness_probe
 
     def acquire(self, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
         token = uuid4().hex
@@ -2824,6 +2900,9 @@ class FileSchedulerLease:
             "pass_id": pass_id,
             "lease_token": token,
             "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "heartbeat_seq": 0,
+            "heartbeat_at": _format_utc(started_at),
             "started_at": _format_utc(started_at),
             "lock_path": str(self.lock_path),
         }
@@ -2843,6 +2922,50 @@ class FileSchedulerLease:
                 "reason": error.reason,
                 "existing_lock": {"raw": None},
             }
+
+    def renew(self, *, pass_id: str) -> bool:
+        """Refresh our lease heartbeat in place (CAS on pass_id + lease_token).
+
+        Returns True only if we still own the lock and rewrote it. Returns
+        False if the lock is gone or was taken over (token/pass_id mismatch).
+        """
+
+        if not self.acquired or self.lease_token is None:
+            return False
+        try:
+            with self._guarded() as parent_fd:
+                existing = self._read_existing_lock(parent_fd=parent_fd)
+                if (
+                    existing.get("pass_id") != pass_id
+                    or existing.get("lease_token") != self.lease_token
+                ):
+                    return False
+                now = datetime.now(UTC)
+                payload = dict(existing)
+                payload["heartbeat_seq"] = int(existing.get("heartbeat_seq", 0)) + 1
+                payload["heartbeat_at"] = _format_utc(now)
+                self._rewrite_lock_in_place(payload, parent_fd=parent_fd)
+                return True
+        except UnsafeSchedulerLockError:
+            return False
+
+    def _rewrite_lock_in_place(self, payload: Mapping[str, Any], *, parent_fd: int) -> None:
+        flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.lock_path.name, flags, dir_fd=parent_fd)
+        except OSError as error:
+            if error.errno in {ELOOP, ENOTDIR}:
+                raise UnsafeSchedulerLockError("unsafe_lock_symlink") from error
+            raise
+        try:
+            lock_stat = os.fstat(fd)
+            if not stat.S_ISREG(lock_stat.st_mode):
+                raise UnsafeSchedulerLockError("unsafe_lock_not_regular_file")
+            os.write(fd, json.dumps(dict(payload), sort_keys=True).encode("utf-8"))
+            # Refresh st_mtime explicitly for coarse-mtime filesystems.
+            os.utime(fd)
+        finally:
+            os.close(fd)
 
     def _acquire_locked(
         self,
@@ -2866,6 +2989,25 @@ class FileSchedulerLease:
                     "existing_lock": state["existing_lock"],
                 }
             if state["stale"]:
+                stale_existing = state["existing_lock"]
+                token0 = stale_existing.get("lease_token")
+                seq0 = stale_existing.get("heartbeat_seq")
+                # CAS: re-read under the same guard; a holder that renewed
+                # between the stale decision and now must never be unlinked.
+                try:
+                    os.stat(self.lock_path.name, dir_fd=parent_fd, follow_symlinks=False)
+                    lock_present = True
+                except FileNotFoundError:
+                    lock_present = False
+                if lock_present:
+                    reread = self._read_existing_lock(parent_fd=parent_fd)
+                    if (reread.get("lease_token"), reread.get("heartbeat_seq")) != (token0, seq0):
+                        return {
+                            "acquired": False,
+                            "contention": True,
+                            "lock_path": str(self.lock_path),
+                            "existing_lock": reread,
+                        }
                 _unlink_lock_file(self.lock_path.name, parent_fd=parent_fd)
                 return self._acquire_locked(
                     pass_id=pass_id,
@@ -2959,7 +3101,18 @@ class FileSchedulerLease:
             and existing.get("pass_id") not in (None, "")
         )
         mtime = datetime.fromtimestamp(lock_stat.st_mtime, tz=UTC)
-        stale = (now - mtime).total_seconds() > self.ttl_seconds
+        mtime_age = (now - mtime).total_seconds()
+        if mtime_age <= self.ttl_seconds:
+            stale = False  # fresh heartbeat / recent lock
+        else:
+            liveness = self._owner_liveness_probe(existing)
+            if liveness is True:
+                stale = False  # owner provably alive: live contention, never reclaim
+            elif liveness is False:
+                stale = True  # owner provably dead
+            else:
+                # Cross-host unknown: require 2x TTL silence before reclaiming.
+                stale = mtime_age > 2 * self.ttl_seconds
         if stale and not scheduler_owned:
             return {
                 "unsafe": True,

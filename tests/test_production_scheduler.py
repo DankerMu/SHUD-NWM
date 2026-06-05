@@ -40,6 +40,8 @@ from services.orchestrator.scheduler import (
     ProductionSchedulerConfig,
     SchedulerEvidenceWriteError,
     SchedulerPassResult,
+    _default_owner_liveness_probe,
+    _LeaseHeartbeat,
 )
 from services.orchestrator.scheduler import (
     ProductionScheduler as _RealProductionScheduler,
@@ -10945,3 +10947,227 @@ def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
     # Never exceed the configured bound, but do run more than one at a time.
     assert peak <= 2
     assert peak >= 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #292 §4.2: lease heartbeat / renewal + CAS-on-reclaim + liveness reconcile
+# ---------------------------------------------------------------------------
+
+
+def _read_lock(lock_path: Path) -> dict[str, Any]:
+    return json.loads(lock_path.read_text(encoding="utf-8"))
+
+
+def test_renew_bumps_heartbeat_seq_and_preserves_identity(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+
+    acquired = lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))
+    assert acquired["acquired"] is True
+    before = _read_lock(lock_path)
+    assert before["heartbeat_seq"] == 0
+
+    # Backdate mtime so we can prove renew refreshes it.
+    os.utime(lock_path, (1, 1))
+
+    assert lease.renew(pass_id="p1") is True
+    after1 = _read_lock(lock_path)
+    assert after1["heartbeat_seq"] == 1
+    assert os.stat(lock_path).st_mtime > 1
+    # Identity is unchanged.
+    for key in ("pass_id", "lease_token", "pid", "host", "started_at", "owner"):
+        assert after1[key] == before[key]
+
+    assert lease.renew(pass_id="p1") is True
+    assert _read_lock(lock_path)["heartbeat_seq"] == 2
+
+
+def test_renew_returns_false_after_lease_taken_over(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    acquired = lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))
+    assert acquired["acquired"] is True
+
+    # Externally take over: same pass_id but a different lease_token.
+    payload = _read_lock(lock_path)
+    payload["lease_token"] = "someone-else-token"
+    lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    assert lease.renew(pass_id="p1") is False
+
+
+def test_live_long_running_holder_is_not_reclaimed(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    holder = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
+    acquired = holder.acquire(pass_id="holder", started_at=_dt("2026-05-21T12:00:00Z"))
+    assert acquired["acquired"] is True
+    # Holder is THIS process (pid + host recorded), but lock has aged past TTL.
+    os.utime(lock_path, (1, 1))
+
+    contender = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
+    result = contender.acquire(pass_id="contender", started_at=_dt("2026-05-21T12:10:00Z"))
+
+    assert result["acquired"] is False
+    assert result["contention"] is True
+    assert _read_lock(lock_path)["pass_id"] == "holder"
+
+
+def test_dead_holder_is_reclaimed(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    holder = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
+    holder.acquire(pass_id="dead", started_at=_dt("2026-05-21T12:00:00Z"))
+    os.utime(lock_path, (1, 1))
+
+    contender = FileSchedulerLease(
+        lock_path,
+        ttl_seconds=1,
+        workspace_root=tmp_path,
+        owner_liveness_probe=lambda _payload: False,
+    )
+    result = contender.acquire(pass_id="contender", started_at=_dt("2026-05-21T12:10:00Z"))
+
+    assert result["acquired"] is True
+    assert _read_lock(lock_path)["pass_id"] == "contender"
+
+
+def test_cross_host_grace_requires_two_ttls(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    now = _dt("2026-05-21T12:00:00Z")
+
+    def _write_foreign_lock(age_seconds: float) -> None:
+        payload = {
+            "owner": LOCK_OWNER,
+            "schema_version": LOCK_SCHEMA_VERSION,
+            "pass_id": "foreign",
+            "lease_token": "foreign-token",
+            "pid": 1,
+            "host": "other-host.example",
+            "heartbeat_seq": 3,
+            "started_at": "2026-05-21T11:00:00Z",
+        }
+        lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        ts = now.timestamp() - age_seconds
+        os.utime(lock_path, (ts, ts))
+
+    # ttl < age < 2*ttl -> probe None -> NOT reclaimed (grace).
+    _write_foreign_lock(age_seconds=15)
+    a = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    res_grace = a.acquire(pass_id="contender", started_at=now)
+    assert res_grace["acquired"] is False
+    assert _read_lock(lock_path)["pass_id"] == "foreign"
+
+    # age > 2*ttl -> reclaimed.
+    _write_foreign_lock(age_seconds=25)
+    b = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    res_reclaim = b.acquire(pass_id="contender", started_at=now)
+    assert res_reclaim["acquired"] is True
+    assert _read_lock(lock_path)["pass_id"] == "contender"
+
+
+def test_cas_aborts_reclaim_when_holder_renews_concurrently(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    holder = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
+    holder.acquire(pass_id="holder", started_at=_dt("2026-05-21T12:00:00Z"))
+    os.utime(lock_path, (1, 1))
+
+    contender = FileSchedulerLease(
+        lock_path,
+        ttl_seconds=1,
+        workspace_root=tmp_path,
+        # Force the stale decision (probe says dead) so we reach the CAS gate.
+        owner_liveness_probe=lambda _payload: False,
+    )
+
+    # Stale decision saw heartbeat_seq=0; the holder renews between that and the
+    # pre-unlink CAS re-read. We must NOT call holder.renew() here because it
+    # takes the same guard flock the contender already holds (would deadlock);
+    # instead rewrite the lock file in place to advance heartbeat_seq, exactly
+    # what a renew would persist.
+    real_read = contender._read_existing_lock
+    calls = {"n": 0}
+
+    def _read_with_concurrent_renew(*, parent_fd: int) -> dict[str, Any]:
+        calls["n"] += 1
+        # First read = stale-state read (seq0). Before the CAS re-read (2nd)
+        # returns, advance the on-disk heartbeat_seq as a concurrent renew would.
+        if calls["n"] == 2:
+            payload = _read_lock(lock_path)
+            payload["heartbeat_seq"] = int(payload.get("heartbeat_seq", 0)) + 1
+            lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        return real_read(parent_fd=parent_fd)
+
+    contender._read_existing_lock = _read_with_concurrent_renew  # type: ignore[method-assign]
+    result = contender.acquire(pass_id="contender", started_at=_dt("2026-05-21T12:10:00Z"))
+
+    assert result["acquired"] is False
+    assert result["contention"] is True
+    # Holder's lock is intact (not unlinked) and bumped.
+    assert _read_lock(lock_path)["pass_id"] == "holder"
+    assert _read_lock(lock_path)["heartbeat_seq"] == 1
+
+
+def test_default_owner_liveness_probe(tmp_path: Path) -> None:
+    import socket as _socket
+
+    me = {"host": _socket.gethostname(), "pid": os.getpid()}
+    assert _default_owner_liveness_probe(me) is True
+
+    dead = {"host": _socket.gethostname(), "pid": 2_000_000_000}
+    assert _default_owner_liveness_probe(dead) is False
+
+    cross = {"host": "other-host", "pid": 1}
+    assert _default_owner_liveness_probe(cross) is None
+
+    no_pid = {"host": _socket.gethostname()}
+    assert _default_owner_liveness_probe(no_pid) is None
+
+
+def test_lease_heartbeat_advances_then_detects_takeover(tmp_path: Path) -> None:
+    import time
+
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    lease.acquire(pass_id="hb", started_at=_dt("2026-05-21T12:00:00Z"))
+
+    heartbeat = _LeaseHeartbeat(lease, "hb", interval_seconds=0.05)
+    heartbeat.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while _read_lock(lock_path)["heartbeat_seq"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert _read_lock(lock_path)["heartbeat_seq"] >= 1
+        assert heartbeat.lost is False
+
+        # Externally take over -> heartbeat renew fails -> lost flips True.
+        payload = _read_lock(lock_path)
+        payload["lease_token"] = "stolen"
+        lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        deadline = time.monotonic() + 2.0
+        while not heartbeat.lost and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert heartbeat.lost is True
+    finally:
+        heartbeat.stop()
+    assert heartbeat._thread is None
+
+
+def test_normal_acquire_release_cycle_and_release_cas_noop(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    assert lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))["acquired"] is True
+    assert lock_path.exists()
+
+    # release CAS no-ops when the on-disk token no longer matches ours.
+    payload = _read_lock(lock_path)
+    payload["lease_token"] = "different"
+    lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    lease.release(pass_id="p1")
+    assert lock_path.exists()  # not unlinked because token mismatched
+
+    # A fresh, matching acquire/release pair fully cleans up.
+    lock_path.unlink()
+    lease2 = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    assert lease2.acquire(pass_id="p2", started_at=_dt("2026-05-21T12:00:00Z"))["acquired"] is True
+    lease2.release(pass_id="p2")
+    assert not lock_path.exists()
