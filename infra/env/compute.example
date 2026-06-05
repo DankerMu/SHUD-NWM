@@ -78,6 +78,13 @@ NHMS_DOWNLOAD_BBOX_EAST=145
 # injection (only valid where the system already provides cdo+libeccodes).
 NHMS_GRIB_ENV_ROOT=/scratch/frd_muziyao/nhms-grib
 
+# §4.5 preflight defaults to NO fence: the control node can't probe a compute
+# node's libs without a job, so an empty NHMS_GRIB_ENV_ROOT passes by default
+# (assumes the partition provides cdo+eccodes). On a partition whose nodes LACK
+# them, either set NHMS_GRIB_ENV_ROOT above (preferred) or set
+# NHMS_GRIB_SYSTEM_ECCODES=false to make an empty root fail loud at preflight.
+# NHMS_GRIB_SYSTEM_ECCODES=false
+
 # Forecast-data retention: each scheduler pass prunes raw + compute intermediates
 # whose cycle_time is older than NHMS_RETENTION_DAYS. Published artifacts and
 # static grids are always preserved. Opt-in by design; for first production runs

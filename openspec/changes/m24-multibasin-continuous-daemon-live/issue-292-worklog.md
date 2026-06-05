@@ -19,11 +19,12 @@ Branch: `feat/issue-292-continuous-daemon`. Node-22 receipts under
 `services/orchestrator/scheduler.py` `_slurm_grib_env_check(config, *, probe=None)`, wired into
 `_slurm_preflight` (the per-submission fail-loud gate, same as gateway/shud blockers). Blocks before
 any sbatch when the compute node would lack GRIB libs:
-- `NHMS_GRIB_ENV_ROOT` set but `<root>/bin|lib` missing → `GRIB_ENV_ROOT_INVALID`.
-- root unset + system eccodes not asserted (injectable probe; fail-safe BLOCKED on probe error) →
-  `GRIB_ENV_UNAVAILABLE`.
-Only a valid root or an explicit `NHMS_GRIB_SYSTEM_ECCODES` assertion passes → the #291-class silent
-GRIB skip is impossible. 7 deterministic tests.
+- `NHMS_GRIB_ENV_ROOT` set but `<root>/bin|lib` missing → `GRIB_ENV_ROOT_INVALID` (unconditional).
+- root unset defaults to NO fence (the control node can't probe a compute node's libs without a job);
+  blocking is opt-in via `NHMS_GRIB_SYSTEM_ECCODES=false` (operator asserts nodes lack eccodes) →
+  `GRIB_ENV_UNAVAILABLE`. Injectable probe; fail-safe BLOCKED on probe error.
+Valid root, or empty root absent a `false` assertion, passes → high-value `GRIB_ENV_ROOT_INVALID`
+catch retained without fencing every unconfigured run (never-break-userspace). 8 deterministic tests.
 
 ### §4.2 — Lease heartbeat + CAS reclaim (commit 5880d09)
 `FileSchedulerLease.renew()` (CAS on `pass_id`+`lease_token`, rewrites with `heartbeat_seq+1` +
@@ -46,7 +47,8 @@ lease. 9 deterministic tests.
   TTL (owner-liveness reconcile).
 
 ### §4.5 GRIB preflight proof — `artifacts/m24/m24-daemon-5880d09/grib_preflight.json` → **PASS**
-`scripts/m24_grib_preflight_proof.py`: root unset → `GRIB_ENV_UNAVAILABLE` (loud); real root
+`scripts/m24_grib_preflight_proof.py`: root unset + no assertion → no blocker (no-fence default);
+root unset + `NHMS_GRIB_SYSTEM_ECCODES=false` → `GRIB_ENV_UNAVAILABLE` (opt-in loud); real root
 `/scratch/frd_muziyao/nhms-grib` (bin+lib present) → no blocker; non-existent root →
 `GRIB_ENV_ROOT_INVALID` (loud).
 
