@@ -953,6 +953,42 @@ class ProductionScheduler:
             mutation_candidate_count = len(candidates) + len(pending_cancel_candidates) + len(
                 pending_status_sync_candidates
             )
+            # §4.2 lease: if the heartbeat reports our lease was taken over
+            # mid-pass, short-circuit BEFORE any submission/cancellation so we
+            # never race the new holder at the DB layer. The #290 DB reservation
+            # would still prevent a real double-submit, but executing a doomed
+            # pass wastes work and muddies evidence. Fall through to finally,
+            # which stops the heartbeat and token-CAS releases the lock (a no-op
+            # if it was already reclaimed).
+            if heartbeat.lost:
+                finished_at = _now(self.config)
+                evidence = self._base_evidence(pass_id, started_at)
+                evidence.update(
+                    {
+                        "status": "lease_lost",
+                        "finished_at": _format_utc(finished_at),
+                        "lock": lock_result,
+                        "counts": _empty_counts(),
+                        "candidates": [],
+                        "blocked_candidates": [],
+                        "skipped_candidates": [],
+                        "duplicate_exclusions": list(self.config.source_exclusions),
+                        "model_discovery": _empty_model_discovery(),
+                        "source_cycles": [],
+                        "no_mutation_proof": _no_mutation_proof(),
+                        "execution_boundary": "lease_lost",
+                    }
+                )
+                if root_preflight["status"] != "not_required":
+                    evidence["root_preflight"] = root_preflight
+                artifact_path = self._write_evidence(pass_id, evidence)
+                status = _evidence_status(evidence, "lease_lost")
+                return SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                )
             if not self.config.dry_run and mutation_candidate_count:
                 evidence_reservation = self._reserve_pre_execution_evidence(
                     pass_id,
@@ -2950,22 +2986,48 @@ class FileSchedulerLease:
             return False
 
     def _rewrite_lock_in_place(self, payload: Mapping[str, Any], *, parent_fd: int) -> None:
-        flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        # Crash-atomic renew: write the new payload to a sibling temp file then
+        # rename it over the live lock. The truncate-then-write form left an
+        # empty lock if write/utime raised after truncation; an atomic same-dir
+        # rename never exposes a half-written or empty lock file.
+        tmp_name = f"{self.lock_path.name}.renew.tmp"
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
-            fd = os.open(self.lock_path.name, flags, dir_fd=parent_fd)
+            fd = os.open(tmp_name, flags, 0o644, dir_fd=parent_fd)
         except OSError as error:
             if error.errno in {ELOOP, ENOTDIR}:
                 raise UnsafeSchedulerLockError("unsafe_lock_symlink") from error
             raise
         try:
-            lock_stat = os.fstat(fd)
-            if not stat.S_ISREG(lock_stat.st_mode):
-                raise UnsafeSchedulerLockError("unsafe_lock_not_regular_file")
             os.write(fd, json.dumps(dict(payload), sort_keys=True).encode("utf-8"))
             # Refresh st_mtime explicitly for coarse-mtime filesystems.
             os.utime(fd)
-        finally:
             os.close(fd)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+        try:
+            os.rename(
+                tmp_name,
+                self.lock_path.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        except OSError as error:
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            if error.errno in {ELOOP, ENOTDIR}:
+                raise UnsafeSchedulerLockError("unsafe_lock_symlink") from error
+            raise
 
     def _acquire_locked(
         self,

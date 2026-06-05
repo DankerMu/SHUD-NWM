@@ -10996,6 +10996,60 @@ def test_renew_returns_false_after_lease_taken_over(tmp_path: Path) -> None:
     assert lease.renew(pass_id="p1") is False
 
 
+def test_renew_never_leaves_lock_empty_and_keeps_valid_json(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    acquired = lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))
+    assert acquired["acquired"] is True
+    before = _read_lock(lock_path)
+
+    assert lease.renew(pass_id="p1") is True
+
+    # The lock must always be non-empty, parseable JSON with the bumped seq and
+    # preserved identity — never the empty/half-written window the old
+    # truncate-then-write form exposed.
+    raw = lock_path.read_text(encoding="utf-8")
+    assert raw != ""
+    after = json.loads(raw)
+    assert after["heartbeat_seq"] == 1
+    for key in ("pass_id", "lease_token", "pid", "host", "started_at", "owner"):
+        assert after[key] == before[key]
+    # No stray temp file left behind by the atomic swap.
+    assert not (tmp_path / f"{lock_path.name}.renew.tmp").exists()
+
+
+def test_renew_failing_mid_write_leaves_original_lock_intact(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    assert lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))["acquired"] is True
+    original = lock_path.read_text(encoding="utf-8")
+    assert original != ""
+
+    real_write = os.write
+
+    def _boom(fd: int, data: bytes) -> int:
+        # Fail only the renew payload write, not the guard's own bookkeeping.
+        if b'"heartbeat_seq": 1' in data:
+            raise OSError("simulated write failure")
+        return real_write(fd, data)
+
+    monkeypatch.setattr("services.orchestrator.scheduler.os.write", _boom)
+
+    # renew swallows UnsafeSchedulerLockError-style failures by returning False;
+    # a raw OSError propagates out of _rewrite_lock_in_place. Either way the
+    # ORIGINAL lock must be untouched and no temp file should survive.
+    try:
+        result = lease.renew(pass_id="p1")
+    except OSError:
+        result = False
+    assert result is False
+
+    assert lock_path.read_text(encoding="utf-8") == original
+    assert not (tmp_path / f"{lock_path.name}.renew.tmp").exists()
+
+
 def test_live_long_running_holder_is_not_reclaimed(tmp_path: Path) -> None:
     lock_path = tmp_path / "scheduler.lock"
     holder = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
@@ -11150,6 +11204,82 @@ def test_lease_heartbeat_advances_then_detects_takeover(tmp_path: Path) -> None:
     finally:
         heartbeat.stop()
     assert heartbeat._thread is None
+
+
+def test_run_once_skips_submission_when_lease_lost_mid_pass(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    # A holder whose lease was reclaimed mid-pass must stop before submitting:
+    # heartbeat.lost short-circuits the pass to a lease_lost result with no
+    # orchestration, no submission, and no mutation.
+    #
+    # The orchestrator factory must NEVER be invoked once the lease is lost, so
+    # we wire a factory that explodes if called — proving the short-circuit ran
+    # strictly before any orchestration. (This also sidesteps the env-fragile
+    # LocalObjectStore root that FakeProductionOrchestrator builds at /tmp.)
+    factory_calls: list[str] = []
+
+    def _exploding_factory(source_id: str) -> Any:
+        factory_calls.append(source_id)
+        raise AssertionError("orchestrator must not be built after lease lost")
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=FakeForcingProducer(),
+        orchestrator_factory=_exploding_factory,
+    )
+
+    # Force the heartbeat to report the lease as lost the instant it starts,
+    # without spinning a real thread (deterministic).
+    def _start_lost(self: Any) -> None:
+        self.lost = True
+
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._LeaseHeartbeat.start", _start_lost
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "lease_lost"
+    assert result.evidence["status"] == "lease_lost"
+    assert result.evidence["pass_id"] == result.pass_id
+    assert result.evidence["execution_boundary"] == "lease_lost"
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    # No submission/orchestration happened once the lease was known lost.
+    assert factory_calls == []
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+
+
+def test_run_once_does_not_fence_healthy_pass_when_lease_held(tmp_path: Path) -> None:
+    # Common path: lease held (heartbeat.lost stays False) -> the §4.2 guard
+    # must NOT fence the pass; it proceeds past the guard into candidate
+    # planning + orchestration. (expose_object_store=False keeps the fixture off
+    # the env-fragile /tmp LocalObjectStore root so this stays deterministic.)
+    orchestrator = FakeProductionOrchestrator(expose_object_store=False)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=FakeForcingProducer(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    # The §4.2 guard must NOT fire on a held lease: the pass is never fenced as
+    # lease_lost and proceeds past the guard into candidate planning. (The final
+    # status downstream depends on the slurm/db preflight, which is env-specific
+    # on this box; FIX 1 only governs the lease_lost short-circuit.)
+    assert result.status != "lease_lost"
+    assert result.evidence["execution_boundary"] != "lease_lost"
+    assert result.evidence["candidates"], "guard must not fence away planned candidates"
 
 
 def test_normal_acquire_release_cycle_and_release_cas_noop(tmp_path: Path) -> None:
