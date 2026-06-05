@@ -32,6 +32,7 @@ EXPECTED_MIGRATIONS = [
     "000026_ops_strict_identity_indexes.sql",
     "000027_cycle_status_canonical_incomplete.sql",
     "000028_state_lineage.sql",
+    "000029_pipeline_reservation.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -640,6 +641,32 @@ def test_active_manual_retry_guard_predicate_matches_runtime_guard() -> None:
     assert "PipelineJob.manual_retry_marker.is_(True)" in persistence_source
     assert "PipelineJob.run_id.is_not(None)" in persistence_source
     assert "PipelineJob.status.in_(ACTIVE_MANUAL_RETRY_STATUSES)" in persistence_source
+
+
+def test_pipeline_reservation_partial_unique_index_matches_runtime_orm() -> None:
+    """Migration 000029's partial unique index on ``idempotency_key`` must match
+    the runtime ORM Index in persistence.py exactly: same index name, same
+    ``idempotency_key IS NOT NULL`` predicate. If the migration and the ORM
+    drift, the reservation protocol's at-most-once guard differs between fresh
+    schema and migrated schema.
+    """
+
+    migration = dict(_migration_sql())["000029_pipeline_reservation.sql"]
+    persistence_source = (
+        Path(__file__).resolve().parents[1] / "services" / "orchestrator" / "persistence.py"
+    ).read_text(encoding="utf-8")
+
+    index_source = migration[migration.index("CREATE UNIQUE INDEX IF NOT EXISTS") :]
+    # Partial unique index, predicate idempotency_key IS NOT NULL, shared name.
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS pipeline_job_idempotency_key_uidx" in migration
+    assert "ON ops.pipeline_job (idempotency_key)" in index_source
+    assert "WHERE idempotency_key IS NOT NULL" in index_source
+
+    # Runtime ORM Index mirrors the same name + partial predicate.
+    assert '"pipeline_job_idempotency_key_uidx"' in persistence_source
+    assert "PipelineJob.idempotency_key," in persistence_source
+    assert "unique=True" in persistence_source
+    assert "PipelineJob.idempotency_key.is_not(None)" in persistence_source
 
 
 def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:

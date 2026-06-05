@@ -63,8 +63,10 @@
 
 ```bash
 set -a; . infra/env/compute.host.env; set +a   # 提供 DATABASE_URL
-uv run python -m packages.common.migrate        # 26 迁移；已应用则全部 skip
+uv run python -m packages.common.migrate        # 全量迁移；已应用则全部 skip
 ```
+
+> **部署顺序义务（m24 §3A / #290）**：迁移 `000029_pipeline_reservation`（`ops.pipeline_job` 预留列 `idempotency_key`/`candidate_id` + 部分唯一索引 `pipeline_job_idempotency_key_uidx`）**必须在并发预留代码上线前、且在 #292 连续守护进程 go-live 前 apply**。psycopg `reserve_pipeline_job` 引用这两列；列缺失则 reserve 抛 `UndefinedColumn`（被 submit 路径吞为 `submission_failed`，可恢复但退化）。迁移纯 additive + 幂等（`ADD COLUMN IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`），可安全先于代码 apply。node-22 prod DB **尚未 apply 000029**。
 
 ### 2.4 Basins 数据 ✅
 
@@ -191,7 +193,7 @@ psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 de
 7. 🔀 **转连续 = m24**（不再沿用本诊断脚本转连续）：正式守护走通用 scheduler/chain daemon，由 **m24** 落地。三道硬坎(均为 m24 任务)：
    - ① Slurm HTTP gateway 在 node-22 部署(#288，通用 chain 只走 gateway、从未 live)；
    - ② 跨周期暖启动 path(b) 短 analysis 段(#289，现状每周期从固定打包标定态起跑、无水文记忆)；
-   - ③ 并发 submit-and-return + durable reservation(#290)。daemon live = #292，依赖 #287(验 m23 #255 鲜活摄取)。
+   - ③ 并发 submit-and-return + durable reservation(#290)。**代码已完成并合并**：锁内 sbatch 前写持久预留行(`pipeline_job.status='reserved'` + `idempotency_key`)、提交后原子 bind `slurm_job_id`(`WHERE slurm_job_id IS NULL`)、reclaim 原子接管死预留(`status IN ('submission_failed','reservation_lost')`)；双提交防护跨重叠 pass(partial unique index) + 提交崩溃窗口(crash-after-sbatch-before-bind)经 reconcile-by-comment 恢复(每 pass 开头 `_run_restart_reconcile`，`sacct --comment=nhms_idem:<key>` 匹配，array master 行 `<id>_<task>` 归一化到裸 `<id>`)；grace-gate 锚 `updated_at`(reserve/reclaim/bind 三路径刷新)防 slurmdbd 滞后误把 in-flight 预留降级 reservation_lost；reconcile 会话 commit 失败后 rollback 避免毒化后续 pass。**部署前置见 §2.3**（000029 必须先 apply）。**尚未 live**——overlapping-submit 实况 receipt 待 daemon live = #292，依赖 #287(验 m23 #255 鲜活摄取)。out-of-scope LOW 收尾 → #300。
 8. ⏳ **生产硬化**（并入 m24/后续）：独立生产 PostgreSQL（替换 e2e 容器）、固化 `compute.host.env`、`QHH_FORCE_UPSTREAM` 透传 sbatch（§6 #16，亦由 m24 改走 chain 自动重转消解）、source-trust/docker 预检、监控告警、诊断脚本退役护栏(#293)。
 9. ⏳ **洪频曲线对齐**：将来建 ERA5 hindcast 洪频曲线（hourly）后，5min 预报侧 return-period 窗口需按 12 行/小时折算（`flood_frequency/frequency.py` ROWS 窗口假设 hourly）。
 

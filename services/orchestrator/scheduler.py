@@ -38,6 +38,11 @@ from services.orchestrator.production_contract import (
     production_status_for,
     validate_compatible_production_identity,
 )
+from services.orchestrator.reservation import (
+    SubmitOverlapReceipt,
+    run_concurrent_submissions,
+    timed_submission,
+)
 from services.orchestrator.retention import RetentionConfig, run_retention
 from services.orchestrator.retry import classify_failure
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES
@@ -69,8 +74,19 @@ MAX_MODEL_RUN_STAGE_TASK_ROWS = 16
 CANDIDATE_STATE_TASK_RESULT_LIMIT = MAX_MODEL_RUN_STAGE_TASK_ROWS
 MAX_SLURM_ENV_VALUE_LENGTH = 1024
 DEFAULT_RETRY_LIMIT = 3
+DEFAULT_CONCURRENT_SUBMIT_BOUND = 4
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
+# Bound the restart-reconcile DB connect so a misconfigured/unreachable
+# database_url fails fast (best-effort reconcile swallows it and the pass
+# proceeds to the DB-host preflight) instead of hanging the daemon at pass
+# start. Mirrors readonly_db_validation's connect-timeout convention.
+RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = 5
+# Cap a post-connect query hang in restart reconcile (mirrors
+# VALIDATION_STATEMENT_TIMEOUT_MS): a reachable-but-slow DB must not stall the
+# pass at reconcile time; best-effort reconcile swallows the timeout and the
+# pass proceeds to the DB-host preflight.
+RECONCILE_DB_STATEMENT_TIMEOUT_MS = 10_000
 STATE_M23_COMPARISON_FIELDS = (
     "basin_id",
     "basin_version_id",
@@ -407,6 +423,15 @@ class ProductionSchedulerConfig:
     continuous: bool = False
     interval_seconds: float = 300.0
     retry_limit: int = field(default_factory=lambda: _env_int("NHMS_SCHEDULER_RETRY_LIMIT", DEFAULT_RETRY_LIMIT))
+    concurrent_submit_bound: int = field(
+        default_factory=lambda: _env_int("NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND", DEFAULT_CONCURRENT_SUBMIT_BOUND)
+    )
+    # M24 §3A: recover reserved-unbound (submit-crash window) and in-flight jobs
+    # at the start of each executing pass. Defaults on so a restarted scheduler
+    # always reconciles before submitting; disable only for planning-only runs.
+    restart_reconcile_enabled: bool = field(
+        default_factory=lambda: _env_flag("NHMS_SCHEDULER_RESTART_RECONCILE", default=True)
+    )
     candidate_state_job_limit: int = field(
         default_factory=lambda: _env_int("NHMS_CANDIDATE_STATE_JOB_LIMIT", DEFAULT_CANDIDATE_STATE_JOB_LIMIT)
     )
@@ -522,6 +547,7 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "basin_ids", tuple(str(basin_id) for basin_id in self.basin_ids if basin_id))
         object.__setattr__(self, "interval_seconds", max(float(self.interval_seconds), 1.0))
         object.__setattr__(self, "retry_limit", max(int(self.retry_limit), 0))
+        object.__setattr__(self, "concurrent_submit_bound", max(int(self.concurrent_submit_bound), 1))
         object.__setattr__(self, "candidate_state_job_limit", max(int(self.candidate_state_job_limit), 1))
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
         object.__setattr__(self, "lock_ttl_seconds", max(int(self.lock_ttl_seconds), 1))
@@ -729,8 +755,20 @@ class ProductionScheduler:
         forcing_producer: ForcingProducerRunner | None = None,
         orchestrator_factory: ProductionOrchestratorFactory | None = None,
         sleep: Callable[[float], None] | None = None,
+        reconcile_store: Any | None = None,
+        reconcile_comment_query: Callable[[str], Any] | None = None,
+        reconcile_sacct_query: Callable[[str], Any] | None = None,
     ) -> None:
         self.config = config or ProductionSchedulerConfig()
+        # M24 §3A restart reconcile: injectable so tests drive it without a real
+        # cluster/DB. ``None`` => build from env at pass time (production).
+        self._reconcile_store = reconcile_store
+        # Class name (secret-free) of the last reconcile-store build failure, so
+        # _run_restart_reconcile can report a build skip without surfacing the
+        # raw exception message (a malformed-URL error embeds the full DSN).
+        self._reconcile_store_build_error: str | None = None
+        self._reconcile_comment_query = reconcile_comment_query
+        self._reconcile_sacct_query = reconcile_sacct_query
         self.registry = registry if registry is not None else PsycopgModelRegistryStore.from_env()
         self.adapters = dict(adapters if adapters is not None else _default_adapters())
         self.active_repository = active_repository
@@ -863,6 +901,12 @@ class ProductionScheduler:
                     evidence=evidence,
                     artifact_path=artifact_path,
                 )
+            # M24 §3A: before planning/submitting this pass, recover any jobs
+            # stuck in the submit-crash window (reserved-unbound) and refresh
+            # in-flight statuses from accounting. Comment-reconcile finds back a
+            # crashed cohort's slurm_job_id so we never re-submit an already
+            # in-flight cohort.
+            restart_reconcile_evidence = self._run_restart_reconcile()
             models, model_evidence = self._discover_models()
             cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
             (
@@ -1114,6 +1158,14 @@ class ProductionScheduler:
                     "execution_boundary": execution_boundary,
                 }
             )
+            if restart_reconcile_evidence is not None:
+                evidence["restart_reconcile"] = restart_reconcile_evidence
+            overlap_receipt = getattr(self, "_last_submit_overlap_receipt", None)
+            if overlap_receipt is not None:
+                # M24 §3A Evidence Floor: archive the overlapping-submit receipt
+                # into the durable pass artifact (not just memory) so
+                # "receipt shows overlapping submits" has on-disk proof.
+                evidence["submit_overlap_receipt"] = overlap_receipt.to_dict()
             if slurm_preflight_evidence is not None:
                 evidence["slurm_preflight"] = slurm_preflight_evidence
             if (
@@ -1183,6 +1235,144 @@ class ProductionScheduler:
             )
         finally:
             lock.release(pass_id=pass_id)
+
+    def _run_restart_reconcile(self) -> dict[str, Any] | None:
+        """Recover submit-crash and in-flight jobs at the start of an exec pass.
+
+        Reconcile is read-only w.r.t. submission: it binds reserved-unbound rows
+        back to their real slurm_job_id via the idempotency ``--comment`` and
+        refreshes in-flight statuses from accounting. It NEVER re-submits, so an
+        already in-flight cohort is recovered, not duplicated. Best-effort:
+        failures are recorded but never abort the pass.
+        """
+
+        if self.config.dry_run or not self.config.restart_reconcile_enabled:
+            return None
+        store = self._restart_reconcile_store()
+        if store is None:
+            build_error = getattr(self, "_reconcile_store_build_error", None)
+            if build_error is not None:
+                return {
+                    "status": "skipped",
+                    "reason": "reconcile_store_build_failed",
+                    "error_type": build_error,
+                }
+            return {"status": "skipped", "reason": "reconcile_store_unavailable"}
+
+        from services.orchestrator.reconcile import (
+            reconcile_inflight_jobs,
+            reconcile_reserved_unbound_jobs,
+        )
+
+        evidence: dict[str, Any] = {"status": "completed"}
+        try:
+            comment_query = self._restart_reconcile_comment_query()
+            reserved = reconcile_reserved_unbound_jobs(store, comment_query=comment_query)
+            evidence["reserved_unbound"] = {
+                "count": len(reserved),
+                "outcomes": [
+                    {
+                        "job_id": o.job_id,
+                        "idempotency_key": o.idempotency_key,
+                        "action": o.action,
+                        "status": o.status,
+                        "slurm_job_id": o.slurm_job_id,
+                    }
+                    for o in reserved
+                ],
+            }
+        except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
+            evidence["status"] = "error"
+            evidence["reserved_unbound_error"] = str(error)
+            self._reset_reconcile_store_after_error()
+
+        try:
+            sacct_query = self._restart_reconcile_sacct_query()
+            inflight = reconcile_inflight_jobs(store, sacct_query=sacct_query)
+            evidence["inflight"] = {
+                "count": len(inflight),
+                "outcomes": [
+                    {
+                        "job_id": o.job_id,
+                        "slurm_job_id": o.slurm_job_id,
+                        "action": o.action,
+                        "status": o.status,
+                    }
+                    for o in inflight
+                ],
+            }
+        except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
+            evidence["status"] = "error"
+            evidence["inflight_error"] = str(error)
+            self._reset_reconcile_store_after_error()
+        return evidence
+
+    def _reset_reconcile_store_after_error(self) -> None:
+        """Recover the cached reconcile session after a write/commit failure.
+
+        persistence commits with no rollback, so a failed commit leaves the
+        cached session in pending-rollback state; reusing it next pass (or in
+        the same pass's inflight segment) raises PendingRollbackError and
+        silently kills crash recovery for the daemon's lifetime. Roll the
+        session back to keep its connection reusable; only if rollback itself
+        fails (the connection is truly dead) drop the cache so the next pass
+        rebuilds a clean store via _restart_reconcile_store.
+        """
+
+        store = self._reconcile_store
+        if store is None:
+            return
+        try:
+            store.session.rollback()
+        except Exception:  # noqa: BLE001 - poisoned/dead session: drop it so the
+            # next pass rebuilds a clean one via _restart_reconcile_store.
+            self._reconcile_store = None
+
+    def _restart_reconcile_store(self) -> Any | None:
+        if self._reconcile_store is not None:
+            return self._reconcile_store
+        database_url = (self.config.database_url or "").strip()
+        if not database_url:
+            return None
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+
+        from services.orchestrator.persistence import PipelineStore
+
+        # Best-effort: a malformed/unbuildable database_url must never abort the
+        # pass. make_url() raises synchronously inside create_engine for a bad
+        # DSN, so wrap the whole build. ZERO-LEAK: record only the exception
+        # class name (provably secret-free); the raw message embeds the DSN
+        # incl. password. The submit-path DB-host preflight still runs.
+        try:
+            engine = create_engine(
+                database_url,
+                future=True,
+                connect_args={
+                    "connect_timeout": RECONCILE_DB_CONNECT_TIMEOUT_SECONDS,
+                    "options": f"-c statement_timeout={RECONCILE_DB_STATEMENT_TIMEOUT_MS}",
+                },
+            )
+            self._reconcile_store = PipelineStore(Session(engine))
+        except Exception as error:  # noqa: BLE001 - build must never abort the pass.
+            self._reconcile_store_build_error = type(error).__name__
+            return None
+        self._reconcile_store_build_error = None
+        return self._reconcile_store
+
+    def _restart_reconcile_comment_query(self) -> Callable[[str], Any]:
+        if self._reconcile_comment_query is not None:
+            return self._reconcile_comment_query
+        from services.orchestrator.reconcile import default_comment_sacct_querier
+
+        return default_comment_sacct_querier()
+
+    def _restart_reconcile_sacct_query(self) -> Callable[[str], Any]:
+        if self._reconcile_sacct_query is not None:
+            return self._reconcile_sacct_query
+        from services.orchestrator.reconcile import default_sacct_querier
+
+        return default_sacct_querier()
 
     def _run_retention(self, started_at: datetime) -> dict[str, Any]:
         """Run forecast-data retention cleanup; never break the scheduling pass.
@@ -1351,7 +1541,21 @@ class ProductionScheduler:
         for candidate in candidates:
             grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
 
-        evidence: list[dict[str, Any]] = []
+        # M24 §3A: each cohort is an independent candidate (different
+        # basin/source/cycle). Build one submitter per cohort, then run them
+        # concurrently within the configured bound. Durable reservation (unique
+        # idempotency_key) is the correctness backstop against double-submit, so
+        # concurrency here is purely throughput; ordering is preserved in the
+        # collected evidence for determinism.
+        @dataclass
+        class _CohortUnit:
+            source_id: str
+            cycle_time: datetime
+            cycle_id: str
+            execution_candidates: list[SchedulerCandidate]
+            cohort_run_id: str | None
+
+        units: list[_CohortUnit] = []
         for (source_id, cycle_time), cycle_candidates in sorted(
             grouped.items(),
             key=lambda item: (item[0][0], item[0][1], [candidate.model_id for candidate in item[1]]),
@@ -1364,15 +1568,45 @@ class ProductionScheduler:
                     cohort_key,
                     cohort_candidates,
                 ):
-                    evidence.extend(
-                        self._execute_candidate_cohort(
-                            source_id,
-                            cycle_time,
-                            cycle_id,
-                            execution_candidates,
-                            orchestration_run_id=cohort_run_id,
+                    units.append(
+                        _CohortUnit(
+                            source_id=source_id,
+                            cycle_time=cycle_time,
+                            cycle_id=cycle_id,
+                            execution_candidates=list(execution_candidates),
+                            cohort_run_id=cohort_run_id,
                         )
                     )
+
+        receipt = SubmitOverlapReceipt()
+        self._last_submit_overlap_receipt = receipt
+
+        def _submitter(unit: "_CohortUnit") -> list[dict[str, Any]]:
+            key = f"{unit.source_id}:{unit.cycle_id}:{unit.cohort_run_id or 'full'}"
+            run = timed_submission(
+                lambda: self._execute_candidate_cohort(
+                    unit.source_id,
+                    unit.cycle_time,
+                    unit.cycle_id,
+                    unit.execution_candidates,
+                    orchestration_run_id=unit.cohort_run_id,
+                ),
+                receipt=receipt,
+                idempotency_key=key,
+                candidate_id=unit.cohort_run_id,
+            )
+            return run()
+
+        results = run_concurrent_submissions(
+            [(lambda u=unit: _submitter(u)) for unit in units],
+            max_workers=self.config.concurrent_submit_bound,
+        )
+
+        evidence: list[dict[str, Any]] = []
+        for result in results:
+            if isinstance(result, Exception):
+                raise result
+            evidence.extend(result)
         return evidence
 
     def _execute_candidate_cohort(
@@ -8716,10 +8950,10 @@ def _optional_config_path_relative_to(value: Path | str | None, base: Path) -> P
     return path.resolve()
 
 
-def _env_flag(name: str) -> bool:
+def _env_flag(name: str, *, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
-        return False
+        return default
     return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 

@@ -487,3 +487,109 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     assert states.json()["items"][0]["state_id"] == STATE_ID
     assert state_detail.json()["state_id"] == STATE_ID
     assert state_detail.json()["usable_flag"] is True
+
+
+def test_real_reserve_pipeline_job_absorbs_job_id_pk_conflict(
+    integration_database_url: str,
+) -> None:
+    """GAP-1 (real Postgres): the production reserve SQL's untargeted
+    ``ON CONFLICT DO NOTHING`` must absorb a job_id PRIMARY KEY clash — not just
+    an idempotency_key clash — against the real partial unique index from
+    migration 000029. A legacy row with the SAME job_id but NULL idempotency_key
+    slips past the partial idem index and hits the job_id PK; reserve must report
+    a clean loss (``None``) WITHOUT raising.
+
+    This replaces the fake-self-proving SQLite check with the real ON CONFLICT
+    semantics the production path actually runs.
+    """
+
+    from services.orchestrator.chain import PsycopgOrchestratorRepository
+
+    apply_migrations_from_zero(integration_database_url)
+    engine = sqlalchemy_engine(integration_database_url)
+    try:
+        with engine.begin() as connection:
+            # Legacy / non-reserve row: job_id present, idempotency_key NULL.
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO ops.pipeline_job (job_id, job_type, status, idempotency_key)
+                    VALUES ('dup-x', 'forcing', 'running', NULL)
+                    """
+                )
+            )
+    finally:
+        engine.dispose()
+
+    repository = PsycopgOrchestratorRepository(integration_database_url)
+    # New idempotency_key but the same job_id: the idem partial index does not
+    # cover the legacy NULL row, so the job_id PRIMARY KEY is what conflicts.
+    result = repository.reserve_pipeline_job(
+        {
+            "job_id": "dup-x",
+            "run_id": "run_1",
+            "cycle_id": "cycle_1",
+            "job_type": "forcing",
+            "model_id": "model_1",
+            "stage": "forcing",
+            "status": "reserved",
+            "idempotency_key": "gfs:cyc:basin:forcing",
+            "candidate_id": "run_1",
+        }
+    )
+    # Clean loss, never an exception.
+    assert result is None
+
+
+def test_real_reserve_candidate_reclaims_dead_reservation(
+    integration_database_url: str,
+) -> None:
+    """GAP-1 (real Postgres): a DEAD reservation (``submission_failed``,
+    ``slurm_job_id IS NULL``) that still occupies the idempotency_key partial
+    unique index is atomically taken over by ``reserve_candidate`` —
+    ``created=True`` and the row returns to ``reserved`` — proving the take-over
+    UPDATE works against real Postgres, not just the in-memory fakes.
+    """
+
+    from services.orchestrator.chain import PsycopgOrchestratorRepository
+    from services.orchestrator.reservation import reserve_candidate
+
+    apply_migrations_from_zero(integration_database_url)
+    engine = sqlalchemy_engine(integration_database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO ops.pipeline_job (
+                        job_id, run_id, cycle_id, job_type, model_id, stage,
+                        status, slurm_job_id, idempotency_key, candidate_id
+                    )
+                    VALUES (
+                        'dead-k', 'run_1', 'cycle_1', 'forcing', 'model_1', 'forcing',
+                        'submission_failed', NULL, 'K', 'run_1'
+                    )
+                    """
+                )
+            )
+    finally:
+        engine.dispose()
+
+    repository = PsycopgOrchestratorRepository(integration_database_url)
+    result = reserve_candidate(
+        repository,
+        idempotency_key="K",
+        job_id="dead-k",
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+        candidate_id="run_1",
+    )
+
+    assert result.created is True
+    state = repository.query_candidate_state("K")
+    assert state is not None
+    assert state["status"] == "reserved"
+    assert state["slurm_job_id"] is None

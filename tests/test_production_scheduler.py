@@ -10558,3 +10558,260 @@ def test_slurm_gateway_check_healthy_but_not_submit_capable_blocks(tmp_path: Pat
     assert "SLURM_GATEWAY_UNAVAILABLE" in codes
     assert checks["healthy"] is True
     assert checks["submit_capable"] is False
+
+
+# --- M24 §3A: concurrent submit-and-return with durable reservation ----------
+
+
+class _BarrierOrchestrator:
+    """Orchestrator whose ``orchestrate_cycle`` blocks on a shared barrier.
+
+    Two cohorts submitted concurrently both reach the barrier before either
+    returns, deterministically proving the submits overlap (neither waits for
+    the other's terminal state).
+    """
+
+    def __init__(self, barrier: Any) -> None:
+        self._barrier = barrier
+        self.object_store = None
+        self.calls: list[str] = []
+
+    def orchestrate_cycle(self, source: str, cycle_time: datetime, basins: list[dict[str, Any]]) -> PipelineResult:
+        self.calls.append(source)
+        # Block until BOTH cohorts have entered; if execution were sequential the
+        # barrier would deadlock and the test would time out.
+        self._barrier.wait(timeout=5.0)
+        stages = tuple(
+            StageRunResult(
+                stage=stage.stage,
+                job_type=stage.job_type,
+                pipeline_job_id=f"job_{stage.stage}",
+                slurm_job_id=f"slurm_{stage.stage}",
+                status="succeeded",
+            )
+            for stage in M3_STAGES
+        )
+        return PipelineResult(
+            run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+            cycle_id=cycle_id_for(source, cycle_time),
+            status="complete",
+            stages=stages,
+            candidate_outcomes=(),
+        )
+
+
+def _concurrency_candidate(source_id: str, model_id: str, basin_id: str) -> scheduler_module.SchedulerCandidate:
+    return scheduler_module._candidate_for(
+        discovery=CycleDiscovery(
+            cycle_id=f"{source_id}_2026052106",
+            source_id=source_id,
+            cycle_time=_dt("2026-05-21T06:00:00Z"),
+            cycle_hour=6,
+            available=True,
+            status="discovered",
+        ),
+        model=scheduler_module.RegisteredSchedulerModel(
+            model_id=model_id,
+            basin_id=basin_id,
+            basin_version_id=f"{basin_id}_v1",
+            river_network_version_id=f"{basin_id}_rivnet_v1",
+            segment_count=3,
+            output_segment_count=3,
+            model_package_uri=f"s3://nhms/models/{model_id}/package/",
+            shud_code_version="2.0",
+            resource_profile={"output_uri": f"s3://nhms/out/{model_id}/"},
+            resource_profile_summary={},
+            display_capabilities={},
+            frequency_capabilities={},
+        ),
+        horizon={},
+    )
+
+
+def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
+    import threading
+
+    barrier = threading.Barrier(2)
+    orchestrators: dict[str, _BarrierOrchestrator] = {}
+
+    def _factory(source_id: str) -> _BarrierOrchestrator:
+        orchestrators.setdefault(source_id, _BarrierOrchestrator(barrier))
+        return orchestrators[source_id]
+
+    config = _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=4)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
+        orchestrator_factory=_factory,
+    )
+
+    candidates = [
+        _concurrency_candidate("gfs", "model_a", "basin_a"),
+        _concurrency_candidate("IFS", "model_b", "basin_b"),
+    ]
+
+    evidence = scheduler._execute_candidates(candidates)
+
+    # Both cohorts ran (barrier did not deadlock) => submits overlapped.
+    assert len(evidence) == 2
+    receipt = scheduler._last_submit_overlap_receipt
+    assert receipt.overlapping is True
+    receipt_dict = receipt.to_dict()
+    assert receipt_dict["concurrent_submit_count"] == 2
+    assert receipt_dict["overlapping"] is True
+    # Two windows recorded, each with start/finish timestamps.
+    assert len(receipt_dict["submissions"]) == 2
+    for entry in receipt_dict["submissions"]:
+        assert entry["submit_finished_at"] >= entry["submit_started_at"]
+
+
+def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path) -> None:
+    """An executing scheduler pass MUST, at startup (after lock + root preflight,
+    before planning/submitting), run reserved-unbound reconcile so a submit-crash
+    reservation is bound back to its real slurm_job_id by the idempotency comment
+    — recovering, not duplicating, an already in-flight cohort (item 3 MAJOR).
+
+    Counterfactual: remove the ``reconcile_reserved_unbound_jobs`` call from
+    ``_run_restart_reconcile`` (or its invocation in the pass) and the reserved
+    row is never bound: ``bound_calls`` stays empty and the evidence assertion
+    on ``reserved_unbound`` goes red.
+    """
+
+    from services.orchestrator.reconcile import SacctRecord
+    from services.orchestrator.reservation import slurm_comment_for
+
+    key = "fcst_gfs_2026052106_model_a:forcing"
+
+    class _ReservedUnboundJob:
+        job_id = "job_reserved_crash"
+        idempotency_key = key
+        status = "reserved"
+        slurm_job_id = None
+        stage = "forcing"
+        job_type = "produce_forcing_array"
+
+    bound_calls: list[dict[str, Any]] = []
+
+    class _FakeReconcileStore:
+        def query_reserved_unbound_jobs(self) -> list[Any]:
+            # Drain after the first reconcile so a re-query returns nothing,
+            # mirroring the durable row transitioning out of reserved-unbound.
+            if bound_calls:
+                return []
+            return [_ReservedUnboundJob()]
+
+        def query_inflight_jobs(self) -> list[Any]:
+            return []
+
+        def bind_reservation(self, idem: str, *, slurm_job_id: str, status: str = "submitted") -> dict[str, Any]:
+            record = {"idempotency_key": idem, "slurm_job_id": slurm_job_id, "status": status}
+            bound_calls.append(record)
+            return record
+
+        def update_job_status(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    def _comment_query(idem: str) -> SacctRecord | None:
+        if idem == key:
+            return SacctRecord(
+                slurm_job_id="88123",
+                raw_state="RUNNING",
+                job_name="nhms_forcing",
+                comment=slurm_comment_for(key),
+            )
+        return None
+
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        # No discoverable cycles: the pass still reaches the startup reconcile
+        # hook (which runs before candidate discovery), so this isolates item 3.
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=_FakeReconcileStore(),
+        reconcile_comment_query=_comment_query,
+        reconcile_sacct_query=lambda _slurm_job_id: None,
+    )
+
+    result = scheduler.run_once()
+
+    # The crashed reservation was bound back by idempotency comment at pass start.
+    assert bound_calls == [
+        {"idempotency_key": key, "slurm_job_id": "88123", "status": "submitted"}
+    ]
+    reconcile_evidence = result.evidence["restart_reconcile"]
+    assert reconcile_evidence["status"] == "completed"
+    reserved = reconcile_evidence["reserved_unbound"]
+    assert reserved["count"] == 1
+    assert reserved["outcomes"][0]["action"] == "bound"
+    assert reserved["outcomes"][0]["slurm_job_id"] == "88123"
+    assert reserved["outcomes"][0]["idempotency_key"] == key
+
+
+def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
+    import threading
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class _CountingOrchestrator:
+        def __init__(self) -> None:
+            self.object_store = None
+
+        def orchestrate_cycle(self, source: str, cycle_time: datetime, basins: list[dict[str, Any]]) -> PipelineResult:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                import time as _time
+
+                _time.sleep(0.02)
+            finally:
+                with lock:
+                    active -= 1
+            stages = tuple(
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=f"job_{stage.stage}",
+                    slurm_job_id=f"slurm_{stage.stage}",
+                    status="succeeded",
+                )
+                for stage in M3_STAGES
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=stages,
+                candidate_outcomes=(),
+            )
+
+    config = _config(tmp_path, sources=("gfs", "IFS", "ERA5"), concurrent_submit_bound=2)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter("gfs", []),
+            "IFS": FakeAdapter("IFS", []),
+            "ERA5": FakeAdapter("ERA5", []),
+        },
+        orchestrator_factory=lambda _s: _CountingOrchestrator(),
+    )
+
+    candidates = [
+        _concurrency_candidate("gfs", "model_a", "basin_a"),
+        _concurrency_candidate("IFS", "model_b", "basin_b"),
+        _concurrency_candidate("ERA5", "model_c", "basin_c"),
+    ]
+
+    evidence = scheduler._execute_candidates(candidates)
+
+    assert len(evidence) == 3
+    # Never exceed the configured bound, but do run more than one at a time.
+    assert peak <= 2
+    assert peak >= 2

@@ -130,16 +130,17 @@ Verification: `uv run pytest -q tests/test_warm_start.py tests/test_orchestratio
 
 ## 3A. Concurrent submit-and-return with durable reservation
 
-- [ ] 3A.1 Implement concurrent multi-candidate submission with a two-phase protocol: inside the
+- [x] 3A.1 Implement concurrent multi-candidate submission with a two-phase protocol: inside the
   lock write a durable reservation/`pipeline_job`/idempotency key per candidate, atomically bind
   `slurm_job_id` on submit, queryable via `candidate_state` before lock release.
-- [ ] 3A.2 Tests: delayed gateway submit, two overlapping passes, scheduler kill/restart, `sacct`
+- [x] 3A.2 Tests: delayed gateway submit, two overlapping passes, scheduler kill/restart, `sacct`
   reconcile, kill-after-submit-before-bind, submit-timeout-unknown-result — at most one
   `pipeline_job` per idempotency key enters submitted/running; unknown submit reconciled via Slurm
   job name/comment/idempotency metadata, never blindly re-submitted; receipt shows overlapping
   submits.
-- [ ] 3A.3 De-scoping concurrency is NOT a valid close of this issue: it requires a separate change
-  to proposal/spec/design; §3A closes only on delivered concurrency.
+- [x] 3A.3 De-scoping concurrency is NOT a valid close of this issue: it requires a separate change
+  to proposal/spec/design; §3A closes only on delivered concurrency. (Honored: concurrency
+  delivered via the durable two-phase reservation, not de-scoped.)
 
 Evidence Floor: reservation/idempotency + crash-window test set PASS; overlapping-submit receipt
 (scope-decision records do NOT satisfy this Evidence Floor).

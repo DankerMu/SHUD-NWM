@@ -22,9 +22,12 @@ import logging
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
+from services.orchestrator.reservation import idempotency_key_from_comment
 from services.slurm_gateway.models import TERMINAL_STATUSES, SlurmJobStatus
 from services.slurm_gateway.real_backend import (
+    SLURM_JOB_ID_RE,
     SLURM_STATE_MAP,
     _normalize_slurm_state,
     map_slurm_error_code,
@@ -32,7 +35,44 @@ from services.slurm_gateway.real_backend import (
 
 LOGGER = logging.getLogger(__name__)
 
+# Conservative lookback for comment-based sacct recovery. The crash window
+# between sbatch acceptance and durable bind can outlive sacct's default
+# accounting horizon; a fixed 7-day floor keeps a just-submitted master job
+# visible to reconcile-by-comment instead of being misjudged reservation_lost.
+COMMENT_SACCT_LOOKBACK_DAYS = 7
+
 RECONCILE_UNVERIFIED_STATUS = "reconcile_unverified"
+# A reservation whose sbatch was never confirmed by accounting: sbatch did not
+# take, so the candidate may be safely re-submitted on a later pass. We mark it
+# typed rather than blindly re-submitting inside reconcile.
+RESERVATION_LOST_STATUS = "reservation_lost"
+
+# Minimum survival window a reserved-unbound row must clear before a *confirmed
+# absence* from accounting may demote it to reservation_lost. sacct/slurmdbd
+# accounting propagation lags sbatch acceptance: a job sbatch just accepted can
+# be momentarily invisible to sacct (returncode 0, no matching comment row).
+# Within this grace we treat that empty answer as "not yet propagated", keep the
+# row reserved, and defer to a later pass — preventing the misjudge→reclaim→
+# re-sbatch double-submit. 120s comfortably covers observed slurmdbd lag.
+RESERVATION_ABSENCE_GRACE = timedelta(seconds=120)
+
+# Typed action for a reserved-unbound row that queried absent but is younger
+# than RESERVATION_ABSENCE_GRACE: deliberately NOT demoted this pass.
+ABSENCE_UNCONFIRMED_ACTION = "absence_unconfirmed"
+
+
+class ReconcileQueryUnavailable(Exception):
+    """sacct could not be reached / did not answer authoritatively.
+
+    Distinguishes a *transient* query failure (sacct timed out, crashed, or
+    exited non-zero) from an authoritative "accounting has no such job" answer.
+    A transient failure MUST NOT be read as "job is gone": doing so would let a
+    crash-recovery reconcile mark an in-flight reservation ``reservation_lost``
+    and free a later pass to re-reserve+re-sbatch the very same candidate
+    (double submission). Callers must keep the row in its current state and let
+    a later reconcile pass retry, rather than acting on an absence we never
+    actually confirmed.
+    """
 
 
 @dataclass(frozen=True)
@@ -43,6 +83,7 @@ class SacctRecord:
     raw_state: str
     job_name: str
     exit_code: str | None = None
+    comment: str | None = None
 
 
 # A sacct querier maps a slurm_job_id to its accounting record (or None when the
@@ -66,7 +107,7 @@ def default_sacct_querier(slurm_bin_path: str = "") -> SacctQuerier:
             sacct,
             "--parsable2",
             "--noheader",
-            "--format=JobID,JobName,State,ExitCode",
+            "--format=JobID,JobName,State,ExitCode,Comment",
             f"--jobs={slurm_job_id}",
         ]
         try:
@@ -79,15 +120,109 @@ def default_sacct_querier(slurm_bin_path: str = "") -> SacctQuerier:
             )
         except (OSError, subprocess.SubprocessError) as error:
             LOGGER.warning("sacct query failed for %s: %s", slurm_job_id, error)
-            return None
+            raise ReconcileQueryUnavailable(
+                f"sacct query failed for {slurm_job_id}: {error}"
+            ) from error
         if result.returncode != 0:
             LOGGER.warning(
                 "sacct returned %s for %s", result.returncode, slurm_job_id
             )
-            return None
+            raise ReconcileQueryUnavailable(
+                f"sacct returned {result.returncode} for {slurm_job_id}"
+            )
+        # Query succeeded: a None here means accounting has no such row
+        # (confirmed-absent), not that we failed to ask.
         return _parse_master_sacct_row(result.stdout, slurm_job_id)
 
     return _query
+
+
+def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQuerier:
+    """Build a comment querier: idempotency_key -> the job sbatch recorded.
+
+    Queries ``sacct`` for the master row whose ``Comment`` is
+    ``nhms_idem:<idempotency_key>`` so a crashed reservation can be reconciled
+    back to the real ``slurm_job_id`` even though the durable bind never ran.
+    """
+
+    from services.orchestrator.reservation import slurm_comment_for
+
+    sacct = f"{slurm_bin_path.rstrip('/')}/sacct" if slurm_bin_path else "sacct"
+
+    def _query(idempotency_key: str) -> SacctRecord | None:
+        target_comment = slurm_comment_for(idempotency_key)
+        # --starttime: without it sacct only returns jobs inside its default
+        # (often same-day) window, so an in-flight master submitted just before a
+        # crash can be invisible and misjudged reservation_lost. Mirror
+        # real_backend.list_jobs by passing an explicit conservative floor.
+        start_time = (
+            datetime.now(UTC) - timedelta(days=COMMENT_SACCT_LOOKBACK_DAYS)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+        command = [
+            sacct,
+            "--parsable2",
+            "--noheader",
+            "--format=JobID,JobName,State,ExitCode,Comment",
+            "--allusers",
+            f"--starttime={start_time}",
+        ]
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed argv, no shell.
+                command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            LOGGER.warning("sacct comment query failed for %s: %s", idempotency_key, error)
+            raise ReconcileQueryUnavailable(
+                f"sacct comment query failed for {idempotency_key}: {error}"
+            ) from error
+        if result.returncode != 0:
+            LOGGER.warning("sacct comment query returned %s", result.returncode)
+            raise ReconcileQueryUnavailable(
+                f"sacct comment query returned {result.returncode}"
+            )
+        # Below: the query succeeded. A None here is the authoritative
+        # "accounting has no job for this comment" answer (confirmed-absent),
+        # which is the ONLY case allowed to mark reservation_lost. A transient
+        # failure never reaches here.
+        return _parse_comment_sacct_rows(result.stdout, target_comment)
+
+    return _query
+
+
+def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord | None:
+    """Find the sacct row whose Comment matches target_comment and return its
+    master job id. Array element/pending rows ("<master>_<task>",
+    "<master>_[<range>]") normalize down to the bare master id; step sub-rows
+    ("<id>.batch"/"<id>.extern") are skipped. Returns None when no row matches
+    (the authoritative confirmed-absent answer)."""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        fields = line.split("|")
+        if len(fields) < 5:
+            continue
+        raw_job_id = fields[0]
+        if "." in raw_job_id:
+            continue  # skip .batch/.extern step sub-rows
+        if fields[4].strip() != target_comment:
+            continue
+        # Normalize array element/pending rows to the bare master id so an
+        # array stage stamped with the idempotency --comment reconciles back
+        # to its master job id (single-job ids have no "_" and pass through).
+        job_id = raw_job_id.split("_", 1)[0]
+        return SacctRecord(
+            slurm_job_id=job_id,
+            job_name=fields[1],
+            raw_state=fields[2],
+            exit_code=fields[3] or None,
+            comment=fields[4].strip(),
+        )
+    return None
 
 
 def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | None:
@@ -111,6 +246,7 @@ def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | Non
             job_name=fields[1],
             raw_state=fields[2],
             exit_code=fields[3] if len(fields) > 3 else None,
+            comment=fields[4].strip() if len(fields) > 4 else None,
         )
     return None
 
@@ -119,7 +255,8 @@ def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | Non
 class ReconcileOutcome:
     job_id: str
     slurm_job_id: str
-    action: str  # "terminal" | "still_running" | "unverified"
+    # "terminal" | "still_running" | "unverified" | "query_unavailable"
+    action: str
     status: str
 
 
@@ -167,7 +304,28 @@ def reconcile_inflight_jobs(
         if not slurm_job_id:
             continue
 
-        record = sacct_query(str(slurm_job_id))
+        try:
+            record = sacct_query(str(slurm_job_id))
+        except ReconcileQueryUnavailable as error:
+            # Transient query failure (sacct timed out / non-zero exit): we did
+            # NOT confirm anything. Leave the durable status untouched and let a
+            # later reconcile pass retry. This path never resubmits, so the only
+            # harm of a misread would be a wrong terminal verdict — we avoid even
+            # that by recording a typed, non-terminal outcome.
+            LOGGER.warning(
+                "reconcile inflight query unavailable for %s: %s",
+                slurm_job_id,
+                error,
+            )
+            outcomes.append(
+                ReconcileOutcome(
+                    job_id=job.job_id,
+                    slurm_job_id=str(slurm_job_id),
+                    action="query_unavailable",
+                    status=str(job.status),
+                )
+            )
+            continue
         expected_token = _expected_job_name_token(job.stage, job.job_type)
 
         if record is None or not _identity_matches(record, expected_token):
@@ -223,6 +381,169 @@ def reconcile_inflight_jobs(
                 slurm_job_id=str(slurm_job_id),
                 action="still_running",
                 status=slurm_status.value,
+            )
+        )
+
+    return outcomes
+
+
+# A comment querier maps an idempotency_key to the accounting record of the job
+# sbatch accepted under that ``--comment`` (or None when accounting has no such
+# job). Injectable so tests need no real cluster.
+CommentSacctQuerier = Callable[[str], "SacctRecord | None"]
+
+
+@dataclass(frozen=True)
+class ReservationReconcileOutcome:
+    job_id: str
+    idempotency_key: str
+    # "bound" | "reservation_lost" | "query_unavailable" | "absence_unconfirmed".
+    # "absence_unconfirmed": accounting answered absent (query succeeded, no
+    # matching comment row) but the reservation is younger than
+    # RESERVATION_ABSENCE_GRACE, so the absence may merely be slurmdbd
+    # propagation lag for a just-accepted sbatch. We keep the row reserved and
+    # defer demotion to a later pass — NEVER mark reservation_lost here, which
+    # would let the reserve gate reclaim+re-sbatch an in-flight job.
+    action: str
+    status: str
+    slurm_job_id: str | None = None
+
+
+def reconcile_reserved_unbound_jobs(
+    store,
+    *,
+    comment_query: CommentSacctQuerier,
+    grace: timedelta = RESERVATION_ABSENCE_GRACE,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> list[ReservationReconcileOutcome]:
+    """Reconcile the submit-crash window: reserved rows with no slurm_job_id.
+
+    A crash after ``sbatch`` accepted a job but before the durable bind leaves a
+    ``status='reserved'`` row whose ``slurm_job_id`` is NULL. We recover the real
+    ``slurm_job_id`` by querying accounting for the job sbatch recorded under
+    ``--comment=nhms_idem:<idempotency_key>`` and bind it — never blindly
+    re-submitting, so at most one job per idempotency_key enters submitted.
+
+    If accounting *confirms* there is no job for that comment, sbatch did not
+    actually take; we mark the reservation ``reservation_lost`` (typed), leaving
+    a later pass free to reserve+submit again under the same idempotency_key.
+
+    Tri-state, NOT binary: a transient query failure (``sacct`` timed out /
+    exited non-zero, surfaced as ``ReconcileQueryUnavailable``) is NOT an
+    absence. We must not read it as ``reservation_lost`` — that would free a
+    later pass to re-reserve+re-sbatch a job that is in fact in flight (double
+    submission). On a transient failure we keep the row ``reserved`` and let a
+    later reconcile pass retry; only a *confirmed* absence marks
+    ``reservation_lost``.
+
+    Even a *confirmed* absence is gated by a minimum survival window
+    (``grace``): sacct/slurmdbd accounting propagation lags sbatch acceptance,
+    so a job just accepted can be momentarily invisible to the comment query
+    (returncode 0, no matching row). Demoting such a young reservation to
+    ``reservation_lost`` would let the reserve gate reclaim it and re-sbatch the
+    very job that is in fact in flight — the same double-submit failure mode as
+    the transient case. So a reserved-unbound row younger than ``grace`` whose
+    comment query confirms absence is emitted ``absence_unconfirmed`` and left
+    ``reserved`` for a later pass (where accounting will have caught up and
+    either binds it or, past grace, demotes it). A row with no ``created_at`` to
+    prove youth, or one already older than ``grace``, keeps the old behavior and
+    demotes to ``reservation_lost`` so liveness never regresses. ``now`` is
+    injectable for deterministic tests.
+    """
+
+    outcomes: list[ReservationReconcileOutcome] = []
+    for job in store.query_reserved_unbound_jobs():
+        idempotency_key = job.idempotency_key
+        if not idempotency_key:
+            continue
+
+        try:
+            record = comment_query(str(idempotency_key))
+        except ReconcileQueryUnavailable as error:
+            # Transient failure: we did NOT confirm absence. Keep the row
+            # reserved (do not touch status) and retry on a later pass. Never
+            # mark reservation_lost here — that is what would let a double
+            # submit slip through.
+            LOGGER.warning(
+                "reconcile reservation query unavailable for idempotency_key=%s: %s",
+                idempotency_key,
+                error,
+            )
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="query_unavailable",
+                    status=str(job.status),
+                )
+            )
+            continue
+        # Confirm the accounting row truly carries our idempotency comment AND
+        # that its slurm_job_id has a valid Slurm shape (``\d+`` or ``\d+_\d+``)
+        # before binding — symmetric with the identity guard in
+        # reconcile_inflight_jobs, guarding against a malformed/garbage JobID
+        # being durably bound onto the reservation.
+        if (
+            record is None
+            or idempotency_key_from_comment(record.comment) != idempotency_key
+            or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id))
+        ):
+            # Confirmed-absent BUT possibly just slurmdbd propagation lag: if the
+            # reservation's last sbatch attempt is younger than `grace`, defer
+            # demotion to a later pass rather than risk demoting an in-flight job
+            # into a reclaim+re-sbatch double-submit. Anchor on updated_at —
+            # refreshed by the reserve INSERT, the reclaim takeover, AND bind — so
+            # a reclaimed+re-submitted reservation keeps grace coverage; created_at
+            # is left stale by reclaim and would silently drop that protection.
+            # (updated_at is NOT NULL by DB default; created_at is a legacy fallback.)
+            anchor = getattr(job, "updated_at", None)
+            if anchor is None:
+                anchor = getattr(job, "created_at", None)
+            if anchor is not None:
+                if anchor.tzinfo is None:
+                    anchor = anchor.replace(tzinfo=UTC)
+                if now() - anchor < grace:
+                    outcomes.append(
+                        ReservationReconcileOutcome(
+                            job_id=job.job_id,
+                            idempotency_key=str(idempotency_key),
+                            action=ABSENCE_UNCONFIRMED_ACTION,
+                            status=str(job.status),
+                        )
+                    )
+                    continue
+            store.update_job_status(
+                job.job_id,
+                RESERVATION_LOST_STATUS,
+                error_code="SLURM_RESERVATION_LOST",
+                error_message=(
+                    "sbatch acceptance for reservation "
+                    f"idempotency_key={idempotency_key} could not be confirmed in accounting."
+                ),
+            )
+            outcomes.append(
+                ReservationReconcileOutcome(
+                    job_id=job.job_id,
+                    idempotency_key=str(idempotency_key),
+                    action="reservation_lost",
+                    status=RESERVATION_LOST_STATUS,
+                )
+            )
+            continue
+
+        bound = store.bind_reservation(
+            str(idempotency_key),
+            slurm_job_id=record.slurm_job_id,
+            status="submitted",
+        )
+        bound_status = "submitted" if bound is not None else str(job.status)
+        outcomes.append(
+            ReservationReconcileOutcome(
+                job_id=job.job_id,
+                idempotency_key=str(idempotency_key),
+                action="bound",
+                status=bound_status,
+                slurm_job_id=record.slurm_job_id,
             )
         )
 

@@ -39,6 +39,12 @@ from services.orchestrator.production_contract import (
     production_stage_for,
     production_status_for,
 )
+from services.orchestrator.reservation import (
+    ReservationResult,
+    bind_reservation,
+    reserve_candidate,
+    slurm_comment_for,
+)
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.orchestrator.time_consistency import check_three_way_time_consistency
 from services.slurm_gateway.config import SlurmGatewaySettings
@@ -729,6 +735,22 @@ class OrchestratorRepository(Protocol):
     def upsert_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
 
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def bind_pipeline_job_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        status: str = "submitted",
+        array_task_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def query_candidate_state(self, idempotency_key: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
     def update_pipeline_job_status(
         self,
         job_id: str,
@@ -883,6 +905,11 @@ class ForecastOrchestrator:
         self.retry_service = retry_service
         self.retry_config = getattr(retry_service, "config", None) or RetryConfig()
         self._active_cycles: set[str] = set()
+        # M24 §3A: evidence of submits skipped because a concurrent pass already
+        # held an active reservation (proof the reserve gate prevented a double
+        # submission). Consumed by the scheduler when it persists the overlap
+        # receipt artifact.
+        self.duplicate_submission_skips: list[dict[str, Any]] = []
 
     @classmethod
     def from_env(cls) -> ForecastOrchestrator:
@@ -1540,6 +1567,20 @@ class ForecastOrchestrator:
             )
 
         self._before_cycle_stage_submit(stage, context)
+
+        # M24 §3A phase 1: durable reservation BEFORE sbatch. Idempotent across
+        # overlapping passes and the submit-crash window. Best-effort against
+        # repositories that predate the reservation methods.
+        idempotency_key = _cycle_stage_idempotency_key(context, stage)
+        reservation = self._reserve_cycle_stage(stage, context, pipeline_job_id, idempotency_key)
+
+        # M24 §3A reserve gate: when a concurrent pass already holds an active
+        # reservation for this candidate+stage, skip sbatch entirely (no double
+        # submission). Only a pass that truly won the reservation (created) — or
+        # a legacy repo without the reservation surface — proceeds to sbatch.
+        if self._reservation_already_inflight(reservation):
+            return self._skip_duplicate_submission(stage, context, pipeline_job_id, reservation), None
+
         submitted: dict[str, Any]
         manifest_index_path: Path | None = None
         stage_manifest = self._build_cycle_stage_manifest(stage, context)
@@ -1551,6 +1592,9 @@ class ForecastOrchestrator:
                 tasks = self._reindexed_manifest_entries(context.active_basins)
                 manifest_index_path = self._write_cycle_manifest_index(context, stage, tasks)
                 stage_manifest["manifest_index_path"] = str(manifest_index_path)
+                # Array path must carry the same idempotency --comment as the
+                # single-job path so crash-recovery can reconcile array masters.
+                stage_manifest["comment"] = slurm_comment_for(idempotency_key)
                 submitted = self._submit_array_stage(stage, context, tasks, stage_manifest)
             else:
                 submitted = _coerce_mapping(
@@ -1560,6 +1604,7 @@ class ForecastOrchestrator:
                             "model_id": _cycle_payload_model_id(context),
                             "job_type": stage.job_type,
                             "manifest": self._slurm_submission_manifest(stage_manifest),
+                            "comment": slurm_comment_for(idempotency_key),
                         }
                     )
                 )
@@ -1574,6 +1619,14 @@ class ForecastOrchestrator:
             return result, None
 
         slurm_job_id = str(submitted["job_id"])
+        # M24 §3A phase 2: atomically bind slurm_job_id onto the reservation
+        # (no-op if a concurrent pass already bound it). The full upsert below
+        # remains authoritative for status/metadata.
+        self._bind_cycle_stage_reservation(
+            idempotency_key,
+            slurm_job_id=slurm_job_id,
+            array_task_id=_coerce_array_task_id(submitted.get("array_task_id")),
+        )
         log_publication = self._display_log_publication_for_stage(
             source_id=context.source_id,
             cycle_time=context.cycle_time,
@@ -1610,6 +1663,7 @@ class ForecastOrchestrator:
                 "model_id": _cycle_pipeline_job_model_id(context),
                 "status": submitted_status,
                 "stage": stage.stage,
+                "idempotency_key": idempotency_key,
                 "submitted_at": _parse_gateway_time(submitted.get("submitted_at")) or _utcnow(),
                 "started_at": _parse_gateway_time(submitted.get("started_at")),
                 "finished_at": _parse_gateway_time(submitted.get("finished_at")),
@@ -1971,13 +2025,20 @@ class ForecastOrchestrator:
     ) -> dict[str, Any]:
         submit_job_array = getattr(self.slurm_client, "submit_job_array", None)
         if callable(submit_job_array):
+            # Carry the idempotency --comment into the array submission manifest
+            # so the array master sbatch is stamped; real_backend.submit_job_array
+            # reads ``manifest["comment"]`` and threads it to sbatch --comment,
+            # making array-stage crash recovery reconcile-by-comment work.
+            submission_manifest = self._slurm_submission_manifest(manifest)
+            if manifest.get("comment"):
+                submission_manifest["comment"] = manifest["comment"]
             return _coerce_mapping(
                 submit_job_array(
                     stage.job_type,
                     cycle_id=context.cycle_id,
                     stage_name=stage.stage,
                     tasks=tasks,
-                    manifest=self._slurm_submission_manifest(manifest),
+                    manifest=submission_manifest,
                 )
             )
         raise SlurmClientError(
@@ -2280,6 +2341,70 @@ class ForecastOrchestrator:
             error_message=error_message,
         )
 
+    def _reserve_cycle_stage(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        pipeline_job_id: str,
+        idempotency_key: str,
+    ) -> ReservationResult | None:
+        """Phase 1 durable reservation; best-effort for legacy repositories.
+
+        Returns the ``ReservationResult`` so the submit path can gate sbatch on
+        the DB win/lose signal (skip when a concurrent pass already reserved an
+        active candidate). ``None`` only for legacy repositories without the
+        reservation surface (gate is a no-op there).
+        """
+
+        if not hasattr(self.repository, "reserve_pipeline_job"):
+            return None
+        return reserve_candidate(
+            self.repository,
+            idempotency_key=idempotency_key,
+            job_id=pipeline_job_id,
+            run_id=context.run_id,
+            cycle_id=context.cycle_id,
+            job_type=stage.job_type,
+            model_id=_cycle_pipeline_job_model_id(context),
+            stage=stage.stage,
+            candidate_id=context.run_id,
+        )
+
+    def _reservation_already_inflight(self, reservation: ReservationResult | None) -> bool:
+        """True when THIS pass lost the reservation and must NOT sbatch.
+
+        Gate for the submit path: a loss (``created=False``) means this pass
+        neither inserted a fresh reservation nor reclaimed a dead one, so another
+        row genuinely holds the idempotency_key in a live state (or a concurrent
+        take-over won) — this pass skips submission. A dead, re-submittable row
+        (``submission_failed`` / ``reservation_lost``, never bound) is instead
+        taken over atomically inside ``reserve_candidate`` (via
+        ``reclaim_pipeline_job_reservation``), turning that case into
+        ``created=True`` — so it never reaches this gate. No re-read status is
+        consulted here, hence no TOCTOU double-submit.
+        """
+
+        return reservation is not None and reservation.already_inflight and not reservation.created
+
+    def _bind_cycle_stage_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        array_task_id: int | None,
+    ) -> None:
+        """Phase 2 atomic bind; best-effort for legacy repositories."""
+
+        if not hasattr(self.repository, "bind_pipeline_job_reservation"):
+            return
+        bind_reservation(
+            self.repository,
+            idempotency_key=idempotency_key,
+            slurm_job_id=slurm_job_id,
+            status="submitted",
+            array_task_id=array_task_id,
+        )
+
     def _before_cycle_stage_submit(self, stage: StageDefinition, context: CycleOrchestrationContext) -> None:
         if stage.stage == "download":
             self.repository.update_forecast_cycle_status(
@@ -2349,6 +2474,62 @@ class ForecastOrchestrator:
             status="submission_failed",
             error_code=error_code,
             error_message=message,
+            task_results=(),
+        )
+
+    def _skip_duplicate_submission(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        pipeline_job_id: str,
+        reservation: ReservationResult | None,
+    ) -> StageRunResult:
+        """Record skip evidence and return without sbatch (candidate in flight).
+
+        Invoked when the reserve gate proves another pass already holds an active
+        reservation for this candidate+stage. We emit a durable skip event so the
+        overlap receipt can prove the double-submission was prevented, then
+        return a typed ``skipped_duplicate_submission`` result; no sbatch runs.
+        """
+
+        idempotency_key = reservation.idempotency_key if reservation is not None else ""
+        active_status = reservation.status if reservation is not None else None
+        skip = {
+            "stage": stage.stage,
+            "job_type": stage.job_type,
+            "idempotency_key": idempotency_key,
+            "pipeline_job_id": pipeline_job_id,
+            "reservation_status": active_status,
+            "reason": "candidate_already_inflight",
+        }
+        self.duplicate_submission_skips.append(skip)
+        try:
+            self.repository.insert_pipeline_event(
+                entity_type="pipeline_job",
+                entity_id=pipeline_job_id,
+                event_type="submission_skipped",
+                status_from=active_status,
+                status_to="skipped_duplicate_submission",
+                message=(
+                    f"{stage.stage} sbatch skipped: candidate already in flight "
+                    f"(idempotency_key={idempotency_key}, status={active_status})."
+                ),
+                details=_safe_pipeline_event_details(skip),
+            )
+        except OrchestratorError:
+            # Evidence emission must never abort a correct skip decision.
+            pass
+        return StageRunResult(
+            stage=stage.stage,
+            job_type=stage.job_type,
+            pipeline_job_id=pipeline_job_id,
+            slurm_job_id="",
+            status="skipped_duplicate_submission",
+            error_code=None,
+            error_message=(
+                f"Skipped duplicate submission for idempotency_key={idempotency_key}; "
+                "candidate already in flight."
+            ),
             task_results=(),
         )
 
@@ -5163,6 +5344,145 @@ class PsycopgOrchestratorRepository:
             ),
         )
 
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        """Phase 1: durable reservation row keyed by idempotency_key.
+
+        ``ON CONFLICT DO NOTHING RETURNING`` (absorbing any unique conflict) is
+        the authoritative win/lose signal: a returned row means THIS call
+        inserted the reservation (won the race); ``None`` means a row already
+        existed (lost / already in-flight). The caller never decides the winner
+        by comparing a deterministic job_id — only the presence of the RETURNING
+        row counts.
+
+        The conflict target is deliberately omitted. A narrow
+        ``ON CONFLICT (idempotency_key)`` only absorbs idempotency_key clashes;
+        a pre-existing row carrying the SAME job_id but a NULL idempotency_key
+        (a legacy / non-reserve row) would slip past the partial index and hit
+        the job_id primary key instead, raising and aborting the whole pass. The
+        protocol contract is "reserve never raises; RETURNING decides" — so we
+        absorb ANY unique conflict (idempotency_key unique index OR job_id PK):
+        any clash → DO NOTHING → zero rows → ``None`` → judged a loss, never an
+        exception.
+
+        A plain reserve can only INSERT, so it loses forever to a DEAD reservation
+        row that still occupies the idempotency_key unique index (one that was
+        reserved but never bound — sbatch rejected it into ``submission_failed``,
+        or a crashed pass had it demoted to ``reservation_lost`` by reconcile).
+        Reclaiming such a dead row is NOT this method's job; it is handled by
+        ``reclaim_pipeline_job_reservation`` (C1 + m3), which atomically takes the
+        dead row back to ``reserved`` so this pass can re-submit.
+
+        ``submitted_at`` is deliberately left NULL at reserve time; it is stamped
+        only when the reservation is bound to a real slurm_job_id (phase 2).
+        """
+
+        return self._fetch_optional(
+            """
+            INSERT INTO ops.pipeline_job (
+                job_id, run_id, cycle_id, job_type, model_id, stage,
+                status, idempotency_key, candidate_id
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            RETURNING *
+            """,
+            (
+                record["job_id"],
+                record.get("run_id"),
+                record.get("cycle_id"),
+                record["job_type"],
+                record.get("model_id"),
+                record.get("stage"),
+                record.get("status", "reserved"),
+                record["idempotency_key"],
+                record.get("candidate_id"),
+            ),
+        )
+
+    def reclaim_pipeline_job_reservation(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        """Atomically take over a DEAD reservation (reserved-but-never-bound).
+
+        A row is dead when ``slurm_job_id IS NULL AND status IN
+        ('submission_failed','reservation_lost')`` — it was reserved but never got
+        a live slurm job (sbatch rejected, or the pass crashed and reconcile
+        demoted it). Such a row keeps the idempotency_key and therefore occupies
+        the partial unique index, so a plain ``reserve`` would lose to it forever.
+        This UPDATE re-claims it back to ``reserved`` so THIS pass can re-submit.
+
+        Race-safe: the predicate matches ONLY the dead statuses, so two concurrent
+        take-overs cannot both win — the loser sees ``status='reserved'`` (set by
+        the winner) and the WHERE no longer matches, returning zero rows. A
+        genuinely in-flight ``reserved``/``submitted``/``running`` row is never
+        matched, so no double-submit. ``job_id`` (the PK) is deliberately NOT
+        overwritten — the dead row already carries the deterministic job_id for
+        this identity, so there is no PK-collision risk. Lifecycle fields are
+        reset; identity columns are filled only when previously NULL via COALESCE.
+        """
+
+        return self._fetch_optional(
+            """
+            UPDATE ops.pipeline_job
+            SET status = 'reserved',
+                slurm_job_id = NULL,
+                array_task_id = NULL,
+                submitted_at = NULL,
+                started_at = NULL,
+                finished_at = NULL,
+                exit_code = NULL,
+                error_code = NULL,
+                error_message = NULL,
+                run_id = COALESCE(run_id, %s),
+                cycle_id = COALESCE(cycle_id, %s),
+                model_id = COALESCE(model_id, %s),
+                stage = COALESCE(stage, %s),
+                candidate_id = COALESCE(candidate_id, %s),
+                updated_at = now()
+            WHERE idempotency_key = %s
+              AND slurm_job_id IS NULL
+              AND status IN ('submission_failed', 'reservation_lost')
+            RETURNING *
+            """,
+            (
+                record.get("run_id"),
+                record.get("cycle_id"),
+                record.get("model_id"),
+                record.get("stage"),
+                record.get("candidate_id"),
+                record["idempotency_key"],
+            ),
+        )
+
+    def bind_pipeline_job_reservation(
+        self,
+        idempotency_key: str,
+        *,
+        slurm_job_id: str,
+        status: str = "submitted",
+        array_task_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Phase 2: atomically bind slurm_job_id; no-op if already bound."""
+
+        return self._fetch_optional(
+            """
+            UPDATE ops.pipeline_job
+            SET slurm_job_id = %s,
+                array_task_id = COALESCE(%s, array_task_id),
+                status = %s,
+                submitted_at = COALESCE(submitted_at, now()),
+                updated_at = now()
+            WHERE idempotency_key = %s
+              AND slurm_job_id IS NULL
+            RETURNING *
+            """,
+            (slurm_job_id, array_task_id, status, idempotency_key),
+        )
+
+    def query_candidate_state(self, idempotency_key: str) -> dict[str, Any] | None:
+        return self._fetch_optional(
+            "SELECT * FROM ops.pipeline_job WHERE idempotency_key = %s",
+            (idempotency_key,),
+        )
+
     def update_pipeline_job_status(
         self,
         job_id: str,
@@ -6726,6 +7046,17 @@ def _parse_slurm_exit_code(raw_exit_code: str) -> int | None:
 
 def _pipeline_job_id(run_id: str, stage: str) -> str:
     return f"job_{run_id}_{stage}"
+
+
+def _cycle_stage_idempotency_key(context: CycleOrchestrationContext, stage: StageDefinition) -> str:
+    """Stable idempotency key for a cohort's cycle-level stage submission.
+
+    ``run_id`` deterministically encodes source/cycle/basin-cohort, so
+    ``run_id:stage`` is the equivalent of the per-candidate
+    ``source:cycle:basin:stage`` key and is constant across passes.
+    """
+
+    return f"{context.run_id}:{stage.stage}"
 
 
 def _published_artifact_root_configured() -> bool:
