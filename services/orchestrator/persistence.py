@@ -263,7 +263,13 @@ class PipelineStore:
         status: str = "submitted",
         array_task_id: int | None = None,
     ) -> PipelineJob | None:
-        """Atomically bind slurm_job_id onto a reservation; no-op if bound."""
+        """Bind slurm_job_id onto a reservation; no-op if already bound.
+
+        Read-then-write across two statements, NOT a single atomic conditional
+        UPDATE, so it is not concurrency-safe on its own. Only the
+        single-threaded reconcile session and tests call this; the production
+        submit path uses the psycopg-level atomic conditional UPDATE.
+        """
 
         job = self.query_candidate_state(idempotency_key)
         if job is None or job.slurm_job_id is not None:
@@ -336,13 +342,17 @@ class PipelineStore:
         stage: str | None = None,
         candidate_id: str | None = None,
     ) -> PipelineJob | None:
-        """Atomically take over a DEAD reservation back to ``reserved``.
+        """Take over a DEAD reservation back to ``reserved``.
 
-        Mirrors the production conditional UPDATE: only a row that is dead
-        (``slurm_job_id IS NULL`` and ``status IN ('submission_failed',
-        'reservation_lost')``) is re-claimed. A live row (reserved/submitted/
-        running) never matches, so a take-over can never steal an in-flight
-        candidate. Identity columns are filled only when previously NULL.
+        Read-then-write across two statements (NOT a single atomic conditional
+        UPDATE), so it is not concurrency-safe on its own; only the
+        single-threaded reconcile session and tests call this, while the
+        production submit path uses the psycopg-level atomic conditional UPDATE.
+        Only a row that is dead (``slurm_job_id IS NULL`` and ``status IN
+        ('submission_failed', 'reservation_lost')``) is re-claimed. A live row
+        (reserved/submitted/running) never matches, so a take-over can never
+        steal an in-flight candidate. Identity columns are filled only when
+        previously NULL.
         """
 
         job = self.query_candidate_state(idempotency_key)
