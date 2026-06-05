@@ -170,9 +170,22 @@ Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_or
 - [ ] 4.3 Safe enable/disable (no new submit after a bounded pass exits; evidence stays queryable).
 - [ ] 4.4 Node-22 live daemon receipt proving the m20/m23 chain ran via the generic scheduler (not
   diagnostic scripts), binding identity/statuses/counts/gateway receipt/warm-start quality/URIs.
+- [ ] 4.5 GRIB-env preflight on daemon startup (fail-loud, not silent). The sbatch canonical-convert
+  injection (`chain.py:7571-7579`) is conditional on `NHMS_GRIB_ENV_ROOT` being present in the
+  daemon's process env at render time; if the daemon is started without sourcing the env, `getenv`
+  returns None, injection is silently skipped, and `nhms-canonical convert` then fails ON THE COMPUTE
+  NODE (cn01-24 lack system libeccodes) with `unrecognized engine cfgrib` inside an automated job —
+  no loud signal at startup. Add a startup preflight: if the target partition's compute nodes do not
+  ship libeccodes AND `NHMS_GRIB_ENV_ROOT` is unset (or its `lib`/`bin` missing), fail-loud at daemon
+  start instead of letting the first canonical job die mysteriously. Note `compute.example:66-68`
+  documents leaving the root EMPTY where the system already provides cdo+eccodes — so the guard keys
+  on "node lacks libeccodes" not on "var is empty". (Recurrence vector from #291 live bring-up: a
+  manual login-node convert bypassed the injection and was misdiagnosed as a broken package; runbook
+  manual recipe now also patched to export `LD_LIBRARY_PATH=$NHMS_GRIB_ENV_ROOT/lib`.)
 
 Evidence Floor: NFS two-process heartbeat lock proof; daemon pass receipt PASS/BLOCKED with full
-schema; evidence it did not invoke QHH scripts. (Requires P closed.)
+schema; evidence it did not invoke QHH scripts; GRIB-env preflight fail-loud proof (unset root vs
+healthy injection). (Requires P closed.)
 Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_monitoring_api.py` + `uv run ruff check .` + node-22 daemon live receipt or BLOCKED.
 
 ## 5. Diagnostic retirement and documentation

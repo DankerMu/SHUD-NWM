@@ -100,7 +100,11 @@ uv run python -m packages.common.migrate        # 全量迁移；已应用则全
 export QHH_RUN_ROOT=/scratch/frd_muziyao/nhms-prod/qhh-continuous
 export OBJECT_STORE_ROOT=$QHH_RUN_ROOT          # 必须 = RUN_ROOT
 export QHH_ECCODES_RUNTIME=/scratch/frd_muziyao/nhms-grib
-export PATH=/scratch/frd_muziyao/nhms-grib/bin:$PATH
+export PATH=/scratch/frd_muziyao/nhms-grib/bin:$PATH                 # cdo 二进制
+# cfgrib(Python) 需经 libeccodes.so 读 GRIB2；手动跑 canonical 必须显式注入 lib，
+# 否则报 "unrecognized engine cfgrib"。sbatch 路径由 chain.py:7571-7579 自动注入，
+# 手动/登录节点路径无此 hook，故此处补全（缺它会被误诊为"包坏了"）。
+export LD_LIBRARY_PATH=/scratch/frd_muziyao/nhms-grib/lib:${LD_LIBRARY_PATH:-}
 export SHUD_TIMEOUT_SECONDS=21600               # 6h，留给 5min×7天
 export QHH_CONTINUOUS_SOURCES=gfs               # GFS 先跑通，再加 IFS
 export QHH_CONTINUOUS_LOOKBACK_HOURS=48
