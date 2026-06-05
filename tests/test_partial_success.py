@@ -71,6 +71,45 @@ def test_array_aggregation_all_fail() -> None:
     assert result.failed == 2
 
 
+def test_same_named_segment_in_different_networks_is_not_merged() -> None:
+    # Two basins whose river networks each contain a segment named "seg_main" but live in
+    # DIFFERENT river_network_version_ids. Identity must be keyed by the composite
+    # (river_network_version_id, river_segment_id), NOT by segment name alone, so a row from
+    # network-1 is never attributed to network-2.
+    manifest = [
+        {
+            "task_id": 0,
+            "model_id": "a",
+            "basin_version_id": "basin_a",
+            "run_id": "run_a",
+            "river_network_version_id": "river_v1",
+            "river_segment_id": "seg_main",
+        },
+        {
+            "task_id": 1,
+            "model_id": "b",
+            "basin_version_id": "basin_b",
+            "run_id": "run_b",
+            "river_network_version_id": "river_v2",
+            "river_segment_id": "seg_main",
+        },
+    ]
+
+    reindexed = build_reindexed_manifest(manifest, [0, 1])
+
+    composite_keys = [(entry["river_network_version_id"], entry["river_segment_id"]) for entry in reindexed]
+    # Same segment name, but the composite keys stay distinct -> no merge.
+    assert composite_keys == [("river_v1", "seg_main"), ("river_v2", "seg_main")]
+    assert len(set(composite_keys)) == 2
+    # Name-only keying would collapse to one entry; prove it would have lost a row.
+    assert len({entry["river_segment_id"] for entry in reindexed}) == 1
+    # Each network keeps its own basin/run identity; nothing from network-1 leaks into network-2.
+    by_network = {entry["river_network_version_id"]: entry for entry in reindexed}
+    assert by_network["river_v1"]["run_id"] == "run_a"
+    assert by_network["river_v2"]["run_id"] == "run_b"
+    assert by_network["river_v1"]["basin_version_id"] != by_network["river_v2"]["basin_version_id"]
+
+
 def test_cumulative_partial_preserves_original_task_id() -> None:
     first_manifest = [
         {"task_id": 0, "model_id": "a", "basin_version_id": "basin_a", "run_id": "run_a"},

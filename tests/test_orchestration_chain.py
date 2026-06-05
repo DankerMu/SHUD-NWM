@@ -2410,6 +2410,154 @@ def test_array_partial_success_records_task_accounting_and_reduces_downstream_ma
     assert repository.cycle_statuses[-1] == "parsed_partial"
 
 
+def _publish_submission(client: "FakeCycleSlurmClient") -> dict[str, Any]:
+    return next(submission for submission in client.submissions if submission["stage"] == "publish")
+
+
+def _downstream_submissions(client: "FakeCycleSlurmClient", stages: tuple[str, ...]) -> list[dict[str, Any]]:
+    return [submission for submission in client.submissions if submission["stage"] in stages]
+
+
+def _array_partial_typed_failure(repository: "FakeCycleRepository", stage: str) -> dict[str, Any]:
+    event = next(
+        event
+        for event in repository.events
+        if event["entity_id"] == f"job_cycle_gfs_2026050100_{stage}"
+        and event["status_to"] == "partially_failed"
+    )
+    return next(task for task in event["details"]["task_results"] if task["status"] == "failed")
+
+
+def test_forecast_stage_partial_isolates_failed_basin_and_keeps_b_publishing(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(array_results_by_stage={"forecast": ["succeeded", "failed", "succeeded"]})
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+
+    publish = _publish_submission(client)
+    assert result.status == "parsed_partial"
+    assert repository.cycle_statuses[-1] == "parsed_partial"
+    # B basins (0, 2) proceed to publish; A (basin_1/model_1/run_1) is excluded everywhere downstream.
+    for submission in _downstream_submissions(client, ("parse", "frequency")):
+        assert [(task["task_id"], task["original_task_id"], task["model_id"]) for task in submission["tasks"]] == [
+            (0, 0, "model_0"),
+            (1, 2, "model_2"),
+        ]
+    assert publish["metadata"]["excluded_basins"] == ["basin_1"]
+    assert [basin["model_id"] for basin in publish["basins"]] == ["model_0", "model_2"]
+    assert publish["identity_contract"]["run_ids"] == ["run_0", "run_2"]
+    # A records a typed failure and its identity is never attributed to B.
+    failure = _array_partial_typed_failure(repository, "forecast")
+    assert failure["model_id"] == "model_1"
+    assert failure["run_id"] == "run_1"
+    assert failure["status"] == "failed"
+    assert failure["exit_code"] == 1
+    assert failure["error_code"]
+    assert "model_1" not in publish["identity_contract"]["model_ids"]
+    assert "run_1" not in publish["identity_contract"]["run_ids"]
+    assert "basin_v1" not in [state["basin_version_id"] for state in publish["metadata"]["quality_states"]]
+
+
+def test_parse_stage_partial_isolates_failed_basin_and_keeps_b_publishing(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(array_results_by_stage={"parse": ["succeeded", "failed", "succeeded"]})
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+
+    publish = _publish_submission(client)
+    assert result.status == "parsed_partial"
+    assert repository.cycle_statuses[-1] == "parsed_partial"
+    # Failed basin_1 is dropped from the downstream frequency array; survivors reindex with original_task_id.
+    assert [
+        (task["task_id"], task["original_task_id"], task["model_id"])
+        for submission in _downstream_submissions(client, ("frequency",))
+        for task in submission["tasks"]
+    ] == [(0, 0, "model_0"), (1, 2, "model_2")]
+    assert publish["metadata"]["excluded_basins"] == ["basin_1"]
+    assert [basin["model_id"] for basin in publish["basins"]] == ["model_0", "model_2"]
+    failure = _array_partial_typed_failure(repository, "parse")
+    assert failure["model_id"] == "model_1"
+    assert failure["run_id"] == "run_1"
+    assert failure["error_code"]
+    assert "model_1" not in publish["identity_contract"]["model_ids"]
+    assert "run_1" not in publish["identity_contract"]["run_ids"]
+
+
+def test_frequency_stage_partial_isolates_failed_basin_and_keeps_b_publishing(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(array_results_by_stage={"frequency": ["succeeded", "failed", "succeeded"]})
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+
+    publish = _publish_submission(client)
+    assert result.status == "parsed_partial"
+    assert repository.cycle_statuses[-1] == "parsed_partial"
+    assert publish["metadata"]["excluded_basins"] == ["basin_1"]
+    assert [basin["model_id"] for basin in publish["basins"]] == ["model_0", "model_2"]
+    assert publish["identity_contract"]["run_ids"] == ["run_0", "run_2"]
+    failure = _array_partial_typed_failure(repository, "frequency")
+    assert failure["model_id"] == "model_1"
+    assert failure["run_id"] == "run_1"
+    assert failure["error_code"]
+    assert "model_1" not in publish["identity_contract"]["model_ids"]
+    assert "run_1" not in publish["identity_contract"]["run_ids"]
+
+
+def test_publish_manifest_excludes_basin_failed_at_last_array_stage(tmp_path: Path) -> None:
+    # §3B.4 case 5: the publish-MANIFEST isolation surface. A fails at the last array stage
+    # before publish (frequency); the single non-array publish job must then publish only the
+    # survivors. Publish is all-or-nothing per JOB, so per-basin isolation is expressed purely
+    # through the manifest the publish job receives. No production change is required.
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient(array_results_by_stage={"frequency": ["succeeded", "failed", "succeeded"]})
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(3))
+
+    publish = _publish_submission(client)
+    assert result.status == "parsed_partial"
+    assert repository.cycle_statuses[-1] == "parsed_partial"
+    # The publish job's manifest excludes the failed basin and publishes only survivors.
+    assert publish["metadata"]["excluded_basins"] == ["basin_1"]
+    assert publish["metadata"]["published_basins"] == 2
+    assert [basin["model_id"] for basin in publish["basins"]] == ["model_0", "model_2"]
+    # The failed basin's identity (model_1/run_1/basin_v1) appears in NO published state.
+    published_states = publish["metadata"]["quality_states"]
+    assert [state["model_id"] for state in published_states] == ["model_0", "model_2"]
+    assert "run_1" not in [state["run_id"] for state in published_states]
+    assert "basin_v1" not in [state["basin_version_id"] for state in published_states]
+    assert "model_1" not in publish["identity_contract"]["model_ids"]
+    assert "run_1" not in publish["identity_contract"]["run_ids"]
+
+
+def test_two_basin_happy_path_reports_per_basin_identity_in_published_evidence(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    publish = _publish_submission(client)
+    assert result.status == "complete"
+    assert publish["metadata"]["published_basins"] == 2
+    assert publish["metadata"]["excluded_basins"] == []
+    # Per-basin run identity is individually addressable in the published evidence.
+    assert publish["identity_contract"]["run_ids"] == ["run_0", "run_1"]
+    assert publish["identity_contract"]["model_ids"] == ["model_0", "model_1"]
+    identity_triples = [
+        (state["model_id"], state["run_id"], state["basin_version_id"], state["river_network_version_id"])
+        for state in publish["metadata"]["quality_states"]
+    ]
+    assert identity_triples == [
+        ("model_0", "run_0", "basin_v0", "river_v0"),
+        ("model_1", "run_1", "basin_v1", "river_v1"),
+    ]
+    assert [basin["model_id"] for basin in publish["basins"]] == ["model_0", "model_1"]
+
+
 def test_array_task_result_events_redact_signed_log_uri_and_secret_error_text(tmp_path: Path) -> None:
     secret_log_uri = "s3://nhms/runs/cycle/logs/2003_0.out?X-Amz-Signature=supersecret"
     secret_error = "failed callback https://user:pass@example.test/log?token=rawsecret"
