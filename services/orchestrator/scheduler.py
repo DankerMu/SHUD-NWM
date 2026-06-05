@@ -1361,8 +1361,9 @@ class ProductionScheduler:
         the same pass's inflight segment) raises PendingRollbackError and
         silently kills crash recovery for the daemon's lifetime. Roll the
         session back to keep its connection reusable; only if rollback itself
-        fails (the connection is truly dead) drop the cache so the next pass
-        rebuilds a clean store via _restart_reconcile_store.
+        fails (the connection is truly dead) dispose the engine pool and drop
+        the cache so the next pass rebuilds a clean store via
+        _restart_reconcile_store.
         """
 
         store = self._reconcile_store
@@ -1370,8 +1371,15 @@ class ProductionScheduler:
             return
         try:
             store.session.rollback()
-        except Exception:  # noqa: BLE001 - poisoned/dead session: drop it so the
-            # next pass rebuilds a clean one via _restart_reconcile_store.
+        except Exception:  # noqa: BLE001 - poisoned/dead session: dispose + drop so
+            # the next pass rebuilds a clean one via _restart_reconcile_store.
+            try:
+                bind = store.session.get_bind()
+                store.session.close()
+                if hasattr(bind, "dispose"):
+                    bind.dispose()
+            except Exception:  # noqa: BLE001 - cleanup is best-effort; never abort the pass.
+                pass
             self._reconcile_store = None
 
     def _restart_reconcile_store(self) -> Any | None:

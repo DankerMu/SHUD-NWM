@@ -70,6 +70,7 @@
 - **F2/C5**（REFUTED 为活 race）SQLAlchemy reclaim/bind 非原子但仅被串行 reconcile 调用；docstring 措辞夸大 → follow-up **#300**。
 - **F3/C6**（REFUTED 为 bug）`upsert_pipeline_job` 省 idempotency_key/candidate_id 列但 reserve 行已存在走 DO UPDATE 保留 → 无需动作。
 - **结论：零 in-scope CONFIRMED、零 merge-blocking PLAUSIBLE = CLEAN。** 有界循环 round-4 收敛，未触 5 轮硬门。
+- **收尾（#300，已解决）**：LOW-1 drop 前 `session.close()`+`engine.dispose()`；LOW-2 归一化后 `SLURM_JOB_ID_RE.fullmatch` 校验、非法 `continue` 跳过（不再 short-circuit）；C5 收紧 reclaim/bind docstring（去 "atomically"/"mirrors"，注明 read-then-write 仅串行 reconcile 安全）。+5 测试。
 
 ## 5. 部署顺序义务（F1，强制）
 

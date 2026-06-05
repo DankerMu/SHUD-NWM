@@ -215,6 +215,12 @@ def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord |
         # array stage stamped with the idempotency --comment reconciles back
         # to its master job id (single-job ids have no "_" and pass through).
         job_id = raw_job_id.split("_", 1)[0]
+        # Shape-validate the normalized master id (bare digits). A malformed
+        # JobID (e.g. leading "_") normalizes to "" or non-numeric; skip it
+        # and keep scanning so it can't short-circuit past a real array row
+        # into a bogus empty-id record / false confirmed-absent.
+        if not SLURM_JOB_ID_RE.fullmatch(job_id):
+            continue
         return SacctRecord(
             slurm_job_id=job_id,
             job_name=fields[1],
