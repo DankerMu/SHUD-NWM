@@ -22,16 +22,24 @@ import logging
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from services.orchestrator.reservation import idempotency_key_from_comment
 from services.slurm_gateway.models import TERMINAL_STATUSES, SlurmJobStatus
 from services.slurm_gateway.real_backend import (
+    SLURM_JOB_ID_RE,
     SLURM_STATE_MAP,
     _normalize_slurm_state,
     map_slurm_error_code,
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# Conservative lookback for comment-based sacct recovery. The crash window
+# between sbatch acceptance and durable bind can outlive sacct's default
+# accounting horizon; a fixed 7-day floor keeps a just-submitted master job
+# visible to reconcile-by-comment instead of being misjudged reservation_lost.
+COMMENT_SACCT_LOOKBACK_DAYS = 7
 
 RECONCILE_UNVERIFIED_STATUS = "reconcile_unverified"
 # A reservation whose sbatch was never confirmed by accounting: sbatch did not
@@ -110,12 +118,20 @@ def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQueri
 
     def _query(idempotency_key: str) -> SacctRecord | None:
         target_comment = slurm_comment_for(idempotency_key)
+        # --starttime: without it sacct only returns jobs inside its default
+        # (often same-day) window, so an in-flight master submitted just before a
+        # crash can be invisible and misjudged reservation_lost. Mirror
+        # real_backend.list_jobs by passing an explicit conservative floor.
+        start_time = (
+            datetime.now(UTC) - timedelta(days=COMMENT_SACCT_LOOKBACK_DAYS)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
         command = [
             sacct,
             "--parsable2",
             "--noheader",
             "--format=JobID,JobName,State,ExitCode,Comment",
             "--allusers",
+            f"--starttime={start_time}",
         ]
         try:
             result = subprocess.run(  # noqa: S603 - fixed argv, no shell.
@@ -335,8 +351,16 @@ def reconcile_reserved_unbound_jobs(
             continue
 
         record = comment_query(str(idempotency_key))
-        # Confirm the accounting row truly carries our idempotency comment.
-        if record is None or idempotency_key_from_comment(record.comment) != idempotency_key:
+        # Confirm the accounting row truly carries our idempotency comment AND
+        # that its slurm_job_id has a valid Slurm shape (``\d+`` or ``\d+_\d+``)
+        # before binding — symmetric with the identity guard in
+        # reconcile_inflight_jobs, guarding against a malformed/garbage JobID
+        # being durably bound onto the reservation.
+        if (
+            record is None
+            or idempotency_key_from_comment(record.comment) != idempotency_key
+            or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id))
+        ):
             store.update_job_status(
                 job.job_id,
                 RESERVATION_LOST_STATUS,

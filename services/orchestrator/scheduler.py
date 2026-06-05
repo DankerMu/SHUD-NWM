@@ -416,6 +416,12 @@ class ProductionSchedulerConfig:
     concurrent_submit_bound: int = field(
         default_factory=lambda: _env_int("NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND", DEFAULT_CONCURRENT_SUBMIT_BOUND)
     )
+    # M24 §3A: recover reserved-unbound (submit-crash window) and in-flight jobs
+    # at the start of each executing pass. Defaults on so a restarted scheduler
+    # always reconciles before submitting; disable only for planning-only runs.
+    restart_reconcile_enabled: bool = field(
+        default_factory=lambda: _env_flag("NHMS_SCHEDULER_RESTART_RECONCILE", default=True)
+    )
     candidate_state_job_limit: int = field(
         default_factory=lambda: _env_int("NHMS_CANDIDATE_STATE_JOB_LIMIT", DEFAULT_CANDIDATE_STATE_JOB_LIMIT)
     )
@@ -739,8 +745,16 @@ class ProductionScheduler:
         forcing_producer: ForcingProducerRunner | None = None,
         orchestrator_factory: ProductionOrchestratorFactory | None = None,
         sleep: Callable[[float], None] | None = None,
+        reconcile_store: Any | None = None,
+        reconcile_comment_query: Callable[[str], Any] | None = None,
+        reconcile_sacct_query: Callable[[str], Any] | None = None,
     ) -> None:
         self.config = config or ProductionSchedulerConfig()
+        # M24 §3A restart reconcile: injectable so tests drive it without a real
+        # cluster/DB. ``None`` => build from env at pass time (production).
+        self._reconcile_store = reconcile_store
+        self._reconcile_comment_query = reconcile_comment_query
+        self._reconcile_sacct_query = reconcile_sacct_query
         self.registry = registry if registry is not None else PsycopgModelRegistryStore.from_env()
         self.adapters = dict(adapters if adapters is not None else _default_adapters())
         self.active_repository = active_repository
@@ -873,6 +887,12 @@ class ProductionScheduler:
                     evidence=evidence,
                     artifact_path=artifact_path,
                 )
+            # M24 §3A: before planning/submitting this pass, recover any jobs
+            # stuck in the submit-crash window (reserved-unbound) and refresh
+            # in-flight statuses from accounting. Comment-reconcile finds back a
+            # crashed cohort's slurm_job_id so we never re-submit an already
+            # in-flight cohort.
+            restart_reconcile_evidence = self._run_restart_reconcile()
             models, model_evidence = self._discover_models()
             cycles, source_cycle_evidence = self._discover_cycles(started_at, models=models)
             (
@@ -1124,6 +1144,14 @@ class ProductionScheduler:
                     "execution_boundary": execution_boundary,
                 }
             )
+            if restart_reconcile_evidence is not None:
+                evidence["restart_reconcile"] = restart_reconcile_evidence
+            overlap_receipt = getattr(self, "_last_submit_overlap_receipt", None)
+            if overlap_receipt is not None:
+                # M24 §3A Evidence Floor: archive the overlapping-submit receipt
+                # into the durable pass artifact (not just memory) so
+                # "receipt shows overlapping submits" has on-disk proof.
+                evidence["submit_overlap_receipt"] = overlap_receipt.to_dict()
             if slurm_preflight_evidence is not None:
                 evidence["slurm_preflight"] = slurm_preflight_evidence
             if (
@@ -1193,6 +1221,97 @@ class ProductionScheduler:
             )
         finally:
             lock.release(pass_id=pass_id)
+
+    def _run_restart_reconcile(self) -> dict[str, Any] | None:
+        """Recover submit-crash and in-flight jobs at the start of an exec pass.
+
+        Reconcile is read-only w.r.t. submission: it binds reserved-unbound rows
+        back to their real slurm_job_id via the idempotency ``--comment`` and
+        refreshes in-flight statuses from accounting. It NEVER re-submits, so an
+        already in-flight cohort is recovered, not duplicated. Best-effort:
+        failures are recorded but never abort the pass.
+        """
+
+        if self.config.dry_run or not self.config.restart_reconcile_enabled:
+            return None
+        store = self._restart_reconcile_store()
+        if store is None:
+            return {"status": "skipped", "reason": "reconcile_store_unavailable"}
+
+        from services.orchestrator.reconcile import (
+            reconcile_inflight_jobs,
+            reconcile_reserved_unbound_jobs,
+        )
+
+        evidence: dict[str, Any] = {"status": "completed"}
+        try:
+            comment_query = self._restart_reconcile_comment_query()
+            reserved = reconcile_reserved_unbound_jobs(store, comment_query=comment_query)
+            evidence["reserved_unbound"] = {
+                "count": len(reserved),
+                "outcomes": [
+                    {
+                        "job_id": o.job_id,
+                        "idempotency_key": o.idempotency_key,
+                        "action": o.action,
+                        "status": o.status,
+                        "slurm_job_id": o.slurm_job_id,
+                    }
+                    for o in reserved
+                ],
+            }
+        except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
+            evidence["status"] = "error"
+            evidence["reserved_unbound_error"] = str(error)
+
+        try:
+            sacct_query = self._restart_reconcile_sacct_query()
+            inflight = reconcile_inflight_jobs(store, sacct_query=sacct_query)
+            evidence["inflight"] = {
+                "count": len(inflight),
+                "outcomes": [
+                    {
+                        "job_id": o.job_id,
+                        "slurm_job_id": o.slurm_job_id,
+                        "action": o.action,
+                        "status": o.status,
+                    }
+                    for o in inflight
+                ],
+            }
+        except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
+            evidence["status"] = "error"
+            evidence["inflight_error"] = str(error)
+        return evidence
+
+    def _restart_reconcile_store(self) -> Any | None:
+        if self._reconcile_store is not None:
+            return self._reconcile_store
+        database_url = (self.config.database_url or "").strip()
+        if not database_url:
+            return None
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+
+        from services.orchestrator.persistence import PipelineStore
+
+        engine = create_engine(database_url, future=True)
+        self._reconcile_store = PipelineStore(Session(engine))
+        return self._reconcile_store
+
+    def _restart_reconcile_comment_query(self) -> Callable[[str], Any]:
+        if self._reconcile_comment_query is not None:
+            return self._reconcile_comment_query
+        from services.orchestrator.reconcile import default_comment_sacct_querier
+
+        return default_comment_sacct_querier()
+
+    def _restart_reconcile_sacct_query(self) -> Callable[[str], Any]:
+        if self._reconcile_sacct_query is not None:
+            return self._reconcile_sacct_query
+        from services.orchestrator.reconcile import default_sacct_querier
+
+        return default_sacct_querier()
 
     def _run_retention(self, started_at: datetime) -> dict[str, Any]:
         """Run forecast-data retention cleanup; never break the scheduling pass.
@@ -8770,10 +8889,10 @@ def _optional_config_path_relative_to(value: Path | str | None, base: Path) -> P
     return path.resolve()
 
 
-def _env_flag(name: str) -> bool:
+def _env_flag(name: str, *, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
-        return False
+        return default
     return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 

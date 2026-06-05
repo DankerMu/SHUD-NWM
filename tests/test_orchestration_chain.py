@@ -5289,6 +5289,65 @@ def test_chain_stage_reserves_before_submit_and_binds_after(tmp_path: Path) -> N
         assert job["slurm_job_id"] is not None
 
 
+def test_array_stage_submission_threads_idempotency_comment(tmp_path: Path) -> None:
+    """Every ARRAY-stage submission carries the idempotency ``--comment`` through
+    ``_submit_array_stage`` → ``submit_job_array(manifest=...)`` so array-master
+    crash recovery can reconcile-by-comment (item 2 BLOCKER).
+
+    Counterfactual: drop the array comment injection (chain.py ``stage_manifest[
+    "comment"] = slurm_comment_for(...)`` at submit, or the manifest pass-through
+    in ``_submit_array_stage``) and the array manifests carry no comment, so the
+    per-array assertion below goes red — while the non-array path is unaffected.
+    """
+
+    from services.orchestrator.reservation import (
+        SLURM_COMMENT_PREFIX,
+        idempotency_key_from_comment,
+    )
+
+    array_comments: dict[str, str | None] = {}
+
+    class _ArrayCommentCapturingClient(FakeCycleSlurmClient):
+        def submit_job_array(
+            self,
+            job_type: str,
+            *,
+            cycle_id: str,
+            stage_name: str,
+            tasks: list[dict[str, Any]],
+            manifest: dict[str, Any],
+        ) -> dict[str, Any]:
+            array_comments[stage_name] = manifest.get("comment")
+            return super().submit_job_array(
+                job_type,
+                cycle_id=cycle_id,
+                stage_name=stage_name,
+                tasks=tasks,
+                manifest=manifest,
+            )
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    client = _ArrayCommentCapturingClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+    assert result.status == "complete"
+
+    array_stages = [stage.stage for stage in M3_STAGES if stage.is_array]
+    assert array_stages, "expected array stages in M3 pipeline"
+    for stage_name in array_stages:
+        comment = array_comments.get(stage_name)
+        assert comment is not None, f"array stage {stage_name} submitted without --comment"
+        assert comment.startswith(SLURM_COMMENT_PREFIX)
+        # The threaded comment must recover the candidate's idempotency_key so the
+        # array master can be reconciled-by-comment after a crash before bind.
+        assert (
+            idempotency_key_from_comment(comment)
+            == f"cycle_gfs_2026050100:{stage_name}"
+        )
+
+
 def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -> None:
     """Re-running the same cycle reuses the reservation (same idempotency_key,
     no duplicate durable row)."""
@@ -5303,5 +5362,101 @@ def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -
     assert first is not None
 
     # A second pass over the same cycle must not create a second row for the key.
+    rows = [j for j in store.session.query(PipelineJob).all() if j.idempotency_key == key]
+    assert len(rows) == 1
+
+
+class _RaceSemanticsCycleRepository(StoreBackedCycleRepository):
+    """Reserve with production INSERT...ON CONFLICT DO NOTHING RETURNING.
+
+    Returns the inserted row on a win, ``None`` on a conflict (a row already
+    exists) — the DB RETURNING win/lose signal the reserve gate depends on.
+    """
+
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        job = self.store.reserve_job(
+            job_id=record["job_id"],
+            run_id=record.get("run_id"),
+            cycle_id=record.get("cycle_id"),
+            job_type=record["job_type"],
+            model_id=record.get("model_id"),
+            stage=record.get("stage"),
+            status=record.get("status", "reserved"),
+            idempotency_key=record["idempotency_key"],
+            candidate_id=record.get("candidate_id"),
+        )
+        if job is None:
+            return None
+        result = self._job_to_dict(job)
+        self.jobs[record["job_id"]] = result
+        return dict(result)
+
+
+def test_overlapping_pass_does_not_double_submit_real_submit_path(tmp_path: Path) -> None:
+    """An overlapping pass drives the REAL submit path for a candidate stage that
+    a prior pass already has IN FLIGHT; the reserve gate makes sbatch fire zero
+    times — the skip happens BEFORE manifest build / sbatch.
+
+    The prior pass is modelled by a durable, active (running, slurm-bound)
+    reservation row under the candidate's idempotency_key — exactly what a
+    concurrent pass would have written via reserve+bind.
+
+    Counterfactual: revert the gate (drop ``_reservation_already_inflight`` /
+    ``_skip_duplicate_submission``) and this overlapping pass proceeds to build
+    the manifest and call submit_job → submit_calls becomes non-empty → red.
+    """
+
+    from services.orchestrator.chain import _cycle_stage_idempotency_key
+
+    store = _pipeline_store()
+    repository = _RaceSemanticsCycleRepository(store)
+
+    submit_calls: list[str] = []
+
+    class _CountingSubmitClient(FakeCycleSlurmClient):
+        def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+            submit_calls.append(payload["manifest"]["stage"])
+            return super().submit_job(payload)
+
+        def submit_job_array(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            submit_calls.append(kwargs.get("stage_name", "array"))
+            return super().submit_job_array(*args, **kwargs)
+
+    client = _CountingSubmitClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    stage = M3_STAGES[0]  # download: non-array, single submit_job.
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=_basins(2),
+        active_basins=_basins(2),
+    )
+
+    # Prior overlapping pass already reserved AND bound this candidate (active,
+    # in flight). reserve_job wins; bind stamps a slurm_job_id + 'running'.
+    key = _cycle_stage_idempotency_key(context, stage)
+    store.reserve_job(
+        job_id="prior_pass_job",
+        run_id=context.run_id,
+        cycle_id=context.cycle_id,
+        job_type=stage.job_type,
+        model_id=None,
+        stage=stage.stage,
+        idempotency_key=key,
+    )
+    store.bind_reservation(key, slurm_job_id="90099", status="running")
+
+    # This (overlapping) pass goes through the real submit entry point; the
+    # reserve gate must short-circuit to a typed skip with NO sbatch.
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(stage, context)
+
+    assert result.status == "skipped_duplicate_submission"
+    assert aggregation is None
+    assert submit_calls == []  # gate fired before any sbatch.
+    assert any(skip["idempotency_key"] == key for skip in orchestrator.duplicate_submission_skips)
+    # No second durable row was created for the key.
     rows = [j for j in store.session.query(PipelineJob).all() if j.idempotency_key == key]
     assert len(rows) == 1

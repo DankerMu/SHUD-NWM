@@ -37,23 +37,22 @@ class _StoreRepo:
         job = self.store.query_candidate_state(idempotency_key)
         return _job_dict(job) if job is not None else None
 
-    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
-        existing = self.store.query_candidate_state(record["idempotency_key"])
-        if existing is not None:
-            return _job_dict(existing)
-        job = self.store.create_job(
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        # Mirror the production contract: INSERT ... ON CONFLICT DO NOTHING
+        # RETURNING. A returned row == this caller won; None == a row already
+        # existed. The unique idempotency_key index is the race backstop.
+        job = self.store.reserve_job(
             job_id=record["job_id"],
             run_id=record.get("run_id"),
             cycle_id=record.get("cycle_id"),
             job_type=record["job_type"],
-            slurm_job_id=None,
             model_id=record.get("model_id"),
             stage=record.get("stage"),
             status=record.get("status", "reserved"),
             idempotency_key=record["idempotency_key"],
             candidate_id=record.get("candidate_id"),
         )
-        return _job_dict(job)
+        return _job_dict(job) if job is not None else None
 
     def bind_pipeline_job_reservation(
         self,
@@ -302,6 +301,130 @@ def test_idempotency_key_unique_constraint() -> None:
     # Exactly one durable row carries that key.
     rows = [j for j in store.store.session.query(PipelineJob).all() if j.idempotency_key == "gfs:cyc:basin:forcing"]
     assert len(rows) == 1
+
+
+def test_idempotency_key_unique_constraint_concurrent(tmp_path: Any) -> None:
+    """Concurrent reserve of the SAME key (each thread its own session against a
+    shared SQLite file + unique index): exactly one wins (created=True), exactly
+    one durable row exists.
+
+    Counterfactual: if reserve_pipeline_job returned the existing row instead of
+    None on conflict (losing the DB RETURNING win/lose signal), >1 pass would
+    report created=True and the ``exactly one created`` assertion goes red.
+    """
+
+    import threading
+
+    from services.orchestrator.reservation import reserve_candidate
+
+    # File-backed engine so each thread holds an independent connection/session
+    # contending on the SAME physical unique idempotency_key index.
+    db_path = tmp_path / "reserve_race.sqlite"
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _attach_schemas(dbapi_connection: Any, _record: Any) -> None:
+        dbapi_connection.execute(f"ATTACH DATABASE '{db_path}' AS ops")
+
+    Base.metadata.create_all(engine)
+
+    key = "gfs:cyc:basin:forcing"
+    common = dict(
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+
+    n = 8
+    barrier = threading.Barrier(n)
+    results: list[Any] = [None] * n
+
+    def _attempt(index: int) -> None:
+        repo = _StoreRepo(PipelineStore(Session(engine)))
+        barrier.wait()  # release all threads into reserve at once.
+        try:
+            results[index] = reserve_candidate(
+                repo, idempotency_key=key, job_id=f"job_{index}", **common
+            )
+        finally:
+            repo.store.session.close()
+
+    threads = [threading.Thread(target=_attempt, args=(i,)) for i in range(n)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    created = [r for r in results if r is not None and r.created]
+    assert len(created) == 1, f"exactly one creator expected, got {len(created)}"
+    # And every loser observes the same winning row id.
+    winner_job_id = created[0].job_id
+    losers = [r for r in results if r is not None and not r.created]
+    assert len(losers) == n - 1
+    assert all(r.job_id == winner_job_id for r in losers)
+    # Exactly one durable row carries that key (unique constraint held).
+    verify = PipelineStore(Session(engine))
+    rows = [
+        j
+        for j in verify.session.query(PipelineJob).all()
+        if j.idempotency_key == key
+    ]
+    assert len(rows) == 1
+
+
+def test_array_stage_kill_before_bind_reconciles_by_comment() -> None:
+    """Array-stage crash after sbatch (array master accepted, comment recorded)
+    but before bind: reconcile recovers the array master slurm_job_id by the
+    idempotency comment and binds it — no array resubmission.
+
+    Counterfactual: if the array submit path did NOT thread ``--comment`` (item 2
+    BLOCKER), accounting could not be matched back by idempotency_key, the guard
+    would mark the reservation reservation_lost, and the ``action == 'bound'``
+    assertion goes red.
+    """
+
+    from services.orchestrator.reconcile import (
+        SacctRecord,
+        reconcile_reserved_unbound_jobs,
+    )
+    from services.orchestrator.reservation import reserve_candidate, slurm_comment_for
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:run_shud_forecast_array"
+    reserve_candidate(
+        store,
+        idempotency_key=key,
+        job_id="job_array_crash",
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="run_shud_forecast_array",
+        model_id="model_1",
+        stage="run_shud_forecast_array",
+    )
+    assert store.query_candidate_state(key)["slurm_job_id"] is None
+
+    # The array master sbatch accepted (it recorded our comment). Array job ids
+    # take the ``<master>`` form in sacct for the master record.
+    def _comment_query(idem: str) -> SacctRecord | None:
+        if idem == key:
+            return SacctRecord(
+                slurm_job_id="77042",
+                raw_state="RUNNING",
+                job_name="nhms_run_shud_forecast_array",
+                comment=slurm_comment_for(key),
+            )
+        return None
+
+    outcomes = reconcile_reserved_unbound_jobs(store.store, comment_query=_comment_query)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == "bound"
+    assert outcomes[0].slurm_job_id == "77042"
+    bound = store.query_candidate_state(key)
+    assert bound["slurm_job_id"] == "77042"
+    assert bound["status"] == "submitted"
 
 
 def test_reservation_written_before_submit_and_queryable() -> None:

@@ -17,6 +17,11 @@ RESERVED_STATUS = "reserved"
 RESERVATION_ACTIVE_STATUSES = ("reserved", "submitted", "running", "queued", "pending")
 
 
+# Sentinel so create_job can distinguish "caller wants NULL submitted_at" (a
+# reservation) from "caller omitted it" (stamp now()).
+_UNSET_SUBMITTED_AT = object()
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -119,8 +124,13 @@ class PipelineStore:
         manual_retry_marker: bool = False,
         idempotency_key: str | None = None,
         candidate_id: str | None = None,
+        submitted_at: datetime | None = _UNSET_SUBMITTED_AT,
         commit: bool = True,
     ) -> PipelineJob:
+        # Default to now() for ordinary creates; reservations pass
+        # ``submitted_at=None`` so the column stays NULL until phase-2 bind.
+        if submitted_at is _UNSET_SUBMITTED_AT:
+            submitted_at = _utcnow()
         job = PipelineJob(
             job_id=job_id,
             run_id=run_id,
@@ -134,7 +144,7 @@ class PipelineStore:
             manual_retry_marker=manual_retry_marker,
             idempotency_key=idempotency_key,
             candidate_id=candidate_id,
-            submitted_at=_utcnow(),
+            submitted_at=submitted_at,
         )
         self.session.add(job)
         if commit:
@@ -262,8 +272,56 @@ class PipelineStore:
         job.status = status
         if array_task_id is not None:
             job.array_task_id = array_task_id
+        if job.submitted_at is None:
+            job.submitted_at = _utcnow()
         job.updated_at = _utcnow()
         self.session.add(job)
+        self.session.commit()
+        self.session.refresh(job)
+        return job
+
+    def reserve_job(
+        self,
+        *,
+        job_id: str,
+        run_id: str | None,
+        cycle_id: str | None,
+        job_type: str,
+        model_id: str | None,
+        stage: str | None,
+        status: str = RESERVED_STATUS,
+        idempotency_key: str,
+        candidate_id: str | None = None,
+    ) -> PipelineJob | None:
+        """Phase-1 reserve guarded by the unique idempotency_key index.
+
+        Returns the new row when THIS call inserted it (won), or ``None`` when a
+        row already existed under the same idempotency_key (lost). The partial
+        unique index is the race backstop: a concurrent loser's INSERT raises
+        ``IntegrityError`` which we translate to ``None`` so exactly one caller
+        ever sees ``created=True``. ``submitted_at`` stays NULL until bind.
+        """
+
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            with self.session.begin_nested():
+                job = self.create_job(
+                    job_id=job_id,
+                    run_id=run_id,
+                    cycle_id=cycle_id,
+                    job_type=job_type,
+                    slurm_job_id=None,
+                    model_id=model_id,
+                    stage=stage,
+                    status=status,
+                    idempotency_key=idempotency_key,
+                    candidate_id=candidate_id,
+                    submitted_at=None,
+                    commit=False,
+                )
+        except IntegrityError:
+            return None
         self.session.commit()
         self.session.refresh(job)
         return job

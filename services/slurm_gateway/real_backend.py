@@ -143,12 +143,31 @@ def map_slurm_error_code(raw_state: str) -> str:
     return "SLURM_JOB_FAILED"
 
 
+# Defense-in-depth whitelist for the sbatch ``--comment`` value: the
+# orchestrator only stamps ``nhms_idem:<safe-key>``, but validate here too so a
+# pipe/newline/shell metacharacter can never reach the sbatch argv even if an
+# untrusted manifest supplies a comment directly.
+_SLURM_COMMENT_RE = re.compile(r"^[A-Za-z0-9:._\- ]+$")
+
+
+def _sanitize_comment(comment: str | None) -> str | None:
+    """Return the comment if it passes the whitelist, else None (drop it)."""
+
+    if comment is None:
+        return None
+    comment = str(comment)
+    if not comment or not _SLURM_COMMENT_RE.fullmatch(comment):
+        LOGGER.warning("dropping unsafe sbatch comment: %r", comment)
+        return None
+    return comment
+
+
 def _request_comment(request: SubmitJobRequest) -> str | None:
     """The idempotency ``--comment`` carried on a submit request, if any."""
 
     extra = request.model_extra or {}
     comment = extra.get("comment") or request.normalized_manifest().get("comment")
-    return str(comment) if comment else None
+    return _sanitize_comment(str(comment) if comment else None)
 
 
 def _sacct_metric_fields(fields: Sequence[str]) -> dict[str, Any]:
@@ -871,10 +890,11 @@ class RealSlurmGateway(SlurmGateway):
         command = [self._slurm_command("sbatch")]
         if array_spec:
             command.append(f"--array={array_spec}")
-        if comment:
+        safe_comment = _sanitize_comment(comment)
+        if safe_comment:
             # M24 §3A: stamp the idempotency comment so restart reconcile can
             # match an unbound reservation back to the accepted job via sacct.
-            command.append(f"--comment={comment}")
+            command.append(f"--comment={safe_comment}")
         command.append(str(script_path))
         try:
             result = self._run_command(command)

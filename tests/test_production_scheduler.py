@@ -10666,6 +10666,90 @@ def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
         assert entry["submit_finished_at"] >= entry["submit_started_at"]
 
 
+def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path) -> None:
+    """An executing scheduler pass MUST, at startup (after lock + root preflight,
+    before planning/submitting), run reserved-unbound reconcile so a submit-crash
+    reservation is bound back to its real slurm_job_id by the idempotency comment
+    — recovering, not duplicating, an already in-flight cohort (item 3 MAJOR).
+
+    Counterfactual: remove the ``reconcile_reserved_unbound_jobs`` call from
+    ``_run_restart_reconcile`` (or its invocation in the pass) and the reserved
+    row is never bound: ``bound_calls`` stays empty and the evidence assertion
+    on ``reserved_unbound`` goes red.
+    """
+
+    from services.orchestrator.reconcile import SacctRecord
+    from services.orchestrator.reservation import slurm_comment_for
+
+    key = "fcst_gfs_2026052106_model_a:forcing"
+
+    class _ReservedUnboundJob:
+        job_id = "job_reserved_crash"
+        idempotency_key = key
+        status = "reserved"
+        slurm_job_id = None
+        stage = "forcing"
+        job_type = "produce_forcing_array"
+
+    bound_calls: list[dict[str, Any]] = []
+
+    class _FakeReconcileStore:
+        def query_reserved_unbound_jobs(self) -> list[Any]:
+            # Drain after the first reconcile so a re-query returns nothing,
+            # mirroring the durable row transitioning out of reserved-unbound.
+            if bound_calls:
+                return []
+            return [_ReservedUnboundJob()]
+
+        def query_inflight_jobs(self) -> list[Any]:
+            return []
+
+        def bind_reservation(self, idem: str, *, slurm_job_id: str, status: str = "submitted") -> dict[str, Any]:
+            record = {"idempotency_key": idem, "slurm_job_id": slurm_job_id, "status": status}
+            bound_calls.append(record)
+            return record
+
+        def update_job_status(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    def _comment_query(idem: str) -> SacctRecord | None:
+        if idem == key:
+            return SacctRecord(
+                slurm_job_id="88123",
+                raw_state="RUNNING",
+                job_name="nhms_forcing",
+                comment=slurm_comment_for(key),
+            )
+        return None
+
+    scheduler = _RealProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        # No discoverable cycles: the pass still reaches the startup reconcile
+        # hook (which runs before candidate discovery), so this isolates item 3.
+        adapters={"gfs": FakeAdapter("gfs", [])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        reconcile_store=_FakeReconcileStore(),
+        reconcile_comment_query=_comment_query,
+        reconcile_sacct_query=lambda _slurm_job_id: None,
+    )
+
+    result = scheduler.run_once()
+
+    # The crashed reservation was bound back by idempotency comment at pass start.
+    assert bound_calls == [
+        {"idempotency_key": key, "slurm_job_id": "88123", "status": "submitted"}
+    ]
+    reconcile_evidence = result.evidence["restart_reconcile"]
+    assert reconcile_evidence["status"] == "completed"
+    reserved = reconcile_evidence["reserved_unbound"]
+    assert reserved["count"] == 1
+    assert reserved["outcomes"][0]["action"] == "bound"
+    assert reserved["outcomes"][0]["slurm_job_id"] == "88123"
+    assert reserved["outcomes"][0]["idempotency_key"] == key
+
+
 def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
     import threading
 

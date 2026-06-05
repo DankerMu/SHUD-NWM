@@ -26,6 +26,7 @@ for the same candidate+stage across passes:
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -41,6 +42,27 @@ from services.orchestrator.persistence import (
 # sbatch actually accepted, by idempotency rather than a never-recorded job id.
 SLURM_COMMENT_PREFIX = "nhms_idem:"
 
+# An idempotency_key is built from stable identity tokens
+# (``source:cycle:basin:stage``). Restrict it to a safe charset so the value
+# stamped into a shell-adjacent ``--comment`` can never carry a pipe, newline,
+# or shell metacharacter. This makes "idempotency_key is clean" an explicit
+# guard rather than an implicit assumption.
+IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9:._-]+$")
+
+
+class InvalidIdempotencyKeyError(ValueError):
+    """Raised when an idempotency_key contains disallowed characters."""
+
+
+def validate_idempotency_key(idempotency_key: str) -> str:
+    """Return the key if it matches the safe charset; else raise."""
+
+    if not idempotency_key or not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+        raise InvalidIdempotencyKeyError(
+            f"idempotency_key contains disallowed characters: {idempotency_key!r}"
+        )
+    return idempotency_key
+
 
 def candidate_idempotency_key(
     *,
@@ -55,9 +77,13 @@ def candidate_idempotency_key(
 
 
 def slurm_comment_for(idempotency_key: str) -> str:
-    """The ``--comment`` value sbatch records so reconcile can match by key."""
+    """The ``--comment`` value sbatch records so reconcile can match by key.
 
-    return f"{SLURM_COMMENT_PREFIX}{idempotency_key}"
+    Validates the key against the safe charset first, so a malformed key can
+    never reach the sbatch ``--comment`` argument.
+    """
+
+    return f"{SLURM_COMMENT_PREFIX}{validate_idempotency_key(idempotency_key)}"
 
 
 def idempotency_key_from_comment(comment: str | None) -> str | None:
@@ -153,16 +179,15 @@ def reserve_candidate(
 
     Idempotent: if the idempotency_key already maps to a row, that row is reused
     (no second row, no re-submit when it is already active).
-    """
 
-    existing = repository.query_candidate_state(idempotency_key)
-    if existing is not None:
-        return ReservationResult(
-            idempotency_key=idempotency_key,
-            job_id=str(existing["job_id"]),
-            status=str(existing["status"]),
-            created=False,
-        )
+    The win/lose signal comes from the DB, NOT from comparing a deterministic
+    job_id. ``reserve_pipeline_job`` performs ``INSERT ... ON CONFLICT
+    (idempotency_key) DO NOTHING RETURNING``: a returned row means THIS pass
+    inserted it (won → ``created=True``); ``None`` means a row already existed
+    (lost). On a loss we re-read the existing row to report its status so an
+    overlapping pass can tell ``already_inflight`` (active) from a stale
+    terminal/``reservation_lost`` row that may be safely re-submitted.
+    """
 
     record = repository.reserve_pipeline_job(
         {
@@ -177,13 +202,31 @@ def reserve_candidate(
             "candidate_id": candidate_id,
         }
     )
+    if record is not None:
+        # Won the race: this pass is the unique creator of the reservation.
+        return ReservationResult(
+            idempotency_key=idempotency_key,
+            job_id=str(record["job_id"]),
+            status=str(record["status"]),
+            created=True,
+        )
+
+    # Lost the race / row already present: re-read to classify the existing row.
+    existing = repository.query_candidate_state(idempotency_key)
+    if existing is None:
+        # Conflict reported but row vanished (e.g. concurrent cleanup): treat as
+        # not-created with reserved status so the caller does not double-submit.
+        return ReservationResult(
+            idempotency_key=idempotency_key,
+            job_id=job_id,
+            status=RESERVED_STATUS,
+            created=False,
+        )
     return ReservationResult(
         idempotency_key=idempotency_key,
-        job_id=str(record["job_id"]),
-        status=str(record["status"]),
-        # DO NOTHING under a race returns the pre-existing row: created only when
-        # the returned row is still ``reserved`` and carries our job_id.
-        created=str(record["job_id"]) == job_id and str(record["status"]) == RESERVED_STATUS,
+        job_id=str(existing["job_id"]),
+        status=str(existing["status"]),
+        created=False,
     )
 
 
