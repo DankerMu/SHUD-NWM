@@ -3750,6 +3750,9 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setenv("FORECAST_SOURCE_ID", "IFS")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
+    # GRIB env injection is not under test here; assert system eccodes so the
+    # §4.5 GRIB preflight stays green (empty NHMS_GRIB_ENV_ROOT + asserted).
+    monkeypatch.setenv("NHMS_GRIB_SYSTEM_ECCODES", "1")
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathOrchestrator)
     config = _config(
         roots["workspace_root"],
@@ -10279,6 +10282,9 @@ def test_slurm_preflight_ready_with_healthy_gateway_adds_no_blocker(
 ) -> None:
     roots = _slurm_roots(tmp_path)
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    # GRIB env injection is not under test here; assert system eccodes so the
+    # §4.5 GRIB preflight stays green (empty NHMS_GRIB_ENV_ROOT + asserted).
+    monkeypatch.setenv("NHMS_GRIB_SYSTEM_ECCODES", "1")
     config = _gateway_config(
         roots["workspace_root"],
         slurm_gateway_url="http://gw-node22.internal:8000",
@@ -10363,6 +10369,130 @@ def test_slurm_gateway_check_self_reference_blocks_schemeless_localhost(
     codes = {b["code"] for b in blockers}
     assert "SLURM_GATEWAY_SELF_REFERENCE" in codes
     assert checks["self_reference"] is True
+
+
+# --- M24-4 §4.5 (#292): GRIB-env preflight fail-loud -------------------------
+
+
+def _clear_grib_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ambient operator env must never bleed into these checks.
+    monkeypatch.delenv("NHMS_GRIB_ENV_ROOT", raising=False)
+    monkeypatch.delenv("NHMS_GRIB_SYSTEM_ECCODES", raising=False)
+
+
+def test_grib_env_check_valid_root_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    root = tmp_path / "nhms-grib"
+    (root / "bin").mkdir(parents=True)
+    (root / "lib").mkdir(parents=True)
+    config = _config(tmp_path, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
+
+    checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    assert blockers == []
+    assert checks["bin_present"] is True
+    assert checks["lib_present"] is True
+
+
+def test_grib_env_check_root_missing_bin_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    root = tmp_path / "nhms-grib"
+    (root / "lib").mkdir(parents=True)  # bin/ absent
+    config = _config(tmp_path, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
+
+    _checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    codes = {b["code"] for b in blockers}
+    assert "GRIB_ENV_ROOT_INVALID" in codes
+
+
+def test_grib_env_check_root_missing_lib_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    root = tmp_path / "nhms-grib"
+    (root / "bin").mkdir(parents=True)  # lib/ absent
+    config = _config(tmp_path, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
+
+    _checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    codes = {b["code"] for b in blockers}
+    assert "GRIB_ENV_ROOT_INVALID" in codes
+
+
+def test_grib_env_check_empty_root_with_system_eccodes_asserted_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    config = _config(
+        tmp_path,
+        slurm_env={"NHMS_GRIB_ENV_ROOT": "", "NHMS_GRIB_SYSTEM_ECCODES": "1"},
+    )
+
+    checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    assert blockers == []
+    assert checks["system_eccodes_available"] is True
+
+
+def test_grib_env_check_empty_root_without_assertion_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The #291 silent-skip case, now loud.
+    _clear_grib_env(monkeypatch)
+    config = _config(tmp_path, slurm_env={})
+
+    checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    codes = {b["code"] for b in blockers}
+    assert "GRIB_ENV_UNAVAILABLE" in codes
+    assert checks["system_eccodes_available"] is False
+
+
+def test_grib_env_check_probe_exception_fails_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    config = _config(tmp_path, slurm_env={})
+
+    def boom(_config: ProductionSchedulerConfig) -> dict[str, Any]:
+        raise RuntimeError("cannot reach compute node")
+
+    checks, blockers = scheduler_module._slurm_grib_env_check(config, probe=boom)
+
+    codes = {b["code"] for b in blockers}
+    assert "GRIB_ENV_UNAVAILABLE" in codes
+    assert checks["system_eccodes_available"] is False
+
+
+def test_slurm_preflight_surfaces_grib_blocker_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    roots = _slurm_roots(tmp_path)
+    # Keep gateway healthy so the only blocker is the GRIB one.
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        slurm_env={},  # empty GRIB root, no system-eccodes assertion
+    )
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    codes = {b["code"] for b in preflight["blockers"]}
+    assert "GRIB_ENV_UNAVAILABLE" in codes
+    assert preflight["checks"]["grib_env"]["system_eccodes_available"] is False
 
 
 class _FakeHttpResponse:

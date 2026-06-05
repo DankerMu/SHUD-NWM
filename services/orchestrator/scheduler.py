@@ -6969,6 +6969,10 @@ def _slurm_preflight(config: ProductionSchedulerConfig) -> dict[str, Any]:
     checks["gateway"] = gateway_check
     blockers.extend(gateway_blockers)
 
+    grib_check, grib_blockers = _slurm_grib_env_check(config)
+    checks["grib_env"] = grib_check
+    blockers.extend(grib_blockers)
+
     return {
         "status": "blocked" if blockers else "ready",
         "enabled": True,
@@ -7344,6 +7348,125 @@ def _slurm_gateway_check(
                 ),
                 "host": endpoint.get("host"),
                 "port": endpoint.get("port"),
+                **({"reason": str(result["reason"])} if result.get("reason") else {}),
+            }
+        )
+
+    return redact_payload(checks), redact_payload(blockers)
+
+
+def _scheduler_grib_env_root(config: ProductionSchedulerConfig) -> str:
+    env_value = (
+        config.slurm_env.get("NHMS_GRIB_ENV_ROOT")
+        if isinstance(config.slurm_env, Mapping)
+        else None
+    )
+    return str(env_value or os.getenv("NHMS_GRIB_ENV_ROOT") or "").strip()
+
+
+def _default_grib_system_eccodes_probe(
+    config: ProductionSchedulerConfig,
+) -> Mapping[str, Any]:
+    """Model whether compute nodes ship system cdo+libeccodes.
+
+    The control node cannot probe a compute node's shared libraries without a
+    job, so node-eccodes-availability is asserted by the operator via
+    ``NHMS_GRIB_SYSTEM_ECCODES``. Absent that assertion we report unavailable so
+    an empty ``NHMS_GRIB_ENV_ROOT`` (which skips PATH injection) fails loud
+    instead of silently breaking GRIB at runtime on a node that lacks eccodes.
+    """
+
+    asserted = (
+        config.slurm_env.get("NHMS_GRIB_SYSTEM_ECCODES")
+        if isinstance(config.slurm_env, Mapping)
+        else None
+    )
+    asserted = str(asserted or os.getenv("NHMS_GRIB_SYSTEM_ECCODES") or "").strip()
+    if asserted.lower() in {"1", "true", "yes"}:
+        return {"system_eccodes_available": True}
+    return {
+        "system_eccodes_available": False,
+        "reason": "NHMS_GRIB_ENV_ROOT unset and system eccodes not asserted",
+    }
+
+
+def _slurm_grib_env_check(
+    config: ProductionSchedulerConfig,
+    *,
+    probe: Callable[[ProductionSchedulerConfig], Mapping[str, Any]] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Fail loud when GRIB tooling will be unavailable on the compute node.
+
+    Compute nodes lack system cdo/libeccodes; GRIB clip/read only works when
+    ``NHMS_GRIB_ENV_ROOT`` (a shared conda env with bin/ + lib/) is injected into
+    the sbatch PATH/LD_LIBRARY_PATH. That injection is truthiness-only and never
+    validates the directory, so a typo'd root silently injects a broken PATH and
+    an empty root silently skips injection -- both break GRIB at runtime with no
+    fail-loud (this bit us in #291). Two gates, both required by spec §4.5:
+
+    1. **Root SET:** ``<root>/bin`` AND ``<root>/lib`` must both exist as dirs,
+       else ``GRIB_ENV_ROOT_INVALID``.
+    2. **Root UNSET/empty:** injection is skipped, which is safe ONLY where the
+       compute node already ships system eccodes. ``probe`` (injectable, default
+       ``_default_grib_system_eccodes_probe``) models that; unavailable or
+       indeterminate -> ``GRIB_ENV_UNAVAILABLE``. A probe that raises fails safe
+       as BLOCKED rather than faking PASS.
+
+    Only valid root with real bin+lib, or empty root with asserted system
+    eccodes, PASS. When genuinely OK this adds NO blocker so it never fences a
+    healthy run (never-break-userspace).
+    """
+
+    checks: dict[str, Any] = {}
+    blockers: list[dict[str, Any]] = []
+
+    root = _scheduler_grib_env_root(config)
+    checks["root"] = root or None
+
+    if root:
+        root_path = Path(root)
+        bin_ok = (root_path / "bin").is_dir()
+        lib_ok = (root_path / "lib").is_dir()
+        checks["bin_present"] = bin_ok
+        checks["lib_present"] = lib_ok
+        if not (bin_ok and lib_ok):
+            blockers.append(
+                {
+                    "code": "GRIB_ENV_ROOT_INVALID",
+                    "field": "NHMS_GRIB_ENV_ROOT",
+                    "message": (
+                        f"NHMS_GRIB_ENV_ROOT set but {root}/bin or {root}/lib "
+                        "missing; GRIB tooling would not be injected on the "
+                        "compute node."
+                    ),
+                    "root": root,
+                    "bin_present": bin_ok,
+                    "lib_present": lib_ok,
+                }
+            )
+        return redact_payload(checks), redact_payload(blockers)
+
+    probe_fn = probe or _default_grib_system_eccodes_probe
+    try:
+        result = dict(probe_fn(config))
+    except Exception as error:  # noqa: BLE001 - injected probe must not break the pass.
+        result = {
+            "system_eccodes_available": False,
+            "reason": str(redact_payload(str(error))),
+        }
+
+    available = bool(result.get("system_eccodes_available"))
+    checks["system_eccodes_available"] = available
+    if not available:
+        blockers.append(
+            {
+                "code": "GRIB_ENV_UNAVAILABLE",
+                "field": "NHMS_GRIB_ENV_ROOT",
+                "message": (
+                    "NHMS_GRIB_ENV_ROOT is empty so GRIB env injection is "
+                    "skipped, and compute-node system eccodes is not confirmed; "
+                    "GRIB clip/read would fail at runtime on the node."
+                ),
                 **({"reason": str(result["reason"])} if result.get("reason") else {}),
             }
         )
