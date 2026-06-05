@@ -7593,10 +7593,12 @@ def _default_grib_system_eccodes_probe(
     """Model whether compute nodes ship system cdo+libeccodes.
 
     The control node cannot probe a compute node's shared libraries without a
-    job, so node-eccodes-availability is asserted by the operator via
-    ``NHMS_GRIB_SYSTEM_ECCODES``. Absent that assertion we report unavailable so
-    an empty ``NHMS_GRIB_ENV_ROOT`` (which skips PATH injection) fails loud
-    instead of silently breaking GRIB at runtime on a node that lacks eccodes.
+    job, so absent an explicit operator assertion to the contrary we do NOT
+    fence a submission: node-eccodes-availability DEFAULTS to available. Set
+    ``NHMS_GRIB_SYSTEM_ECCODES=false`` on a partition whose nodes lack system
+    cdo/eccodes when you intentionally leave ``NHMS_GRIB_ENV_ROOT`` empty to
+    restore the fail-loud (an empty root skips PATH injection, which only breaks
+    GRIB at runtime where the node genuinely lacks eccodes).
     """
 
     asserted = (
@@ -7605,12 +7607,13 @@ def _default_grib_system_eccodes_probe(
         else None
     )
     asserted = str(asserted or os.getenv("NHMS_GRIB_SYSTEM_ECCODES") or "").strip()
-    if asserted.lower() in {"1", "true", "yes"}:
-        return {"system_eccodes_available": True}
-    return {
-        "system_eccodes_available": False,
-        "reason": "NHMS_GRIB_ENV_ROOT unset and system eccodes not asserted",
-    }
+    if asserted.lower() in {"0", "false", "no"}:
+        return {
+            "system_eccodes_available": False,
+            "reason": "operator asserted compute nodes lack system cdo/eccodes",
+        }
+    # Truthy ("1"/"true"/"yes") OR unset/empty/unknown -> available (no fence).
+    return {"system_eccodes_available": True}
 
 
 def _slurm_grib_env_check(
@@ -7629,15 +7632,16 @@ def _slurm_grib_env_check(
 
     1. **Root SET:** ``<root>/bin`` AND ``<root>/lib`` must both exist as dirs,
        else ``GRIB_ENV_ROOT_INVALID``.
-    2. **Root UNSET/empty:** injection is skipped, which is safe ONLY where the
-       compute node already ships system eccodes. ``probe`` (injectable, default
-       ``_default_grib_system_eccodes_probe``) models that; unavailable or
-       indeterminate -> ``GRIB_ENV_UNAVAILABLE``. A probe that raises fails safe
-       as BLOCKED rather than faking PASS.
+    2. **Root UNSET/empty:** injection is skipped. The default (no assertion)
+       does NOT block -- only an explicit operator assertion that nodes lack
+       eccodes (``NHMS_GRIB_SYSTEM_ECCODES=false``) does. ``probe`` (injectable,
+       default ``_default_grib_system_eccodes_probe``) models that; only when it
+       reports unavailable -> ``GRIB_ENV_UNAVAILABLE``, else NO blocker. A probe
+       that raises fails safe as BLOCKED rather than faking PASS.
 
-    Only valid root with real bin+lib, or empty root with asserted system
-    eccodes, PASS. When genuinely OK this adds NO blocker so it never fences a
-    healthy run (never-break-userspace).
+    Valid root with real bin+lib, or empty root absent an operator assertion
+    that nodes lack eccodes, PASS. When genuinely OK this adds NO blocker so it
+    never fences a healthy run (never-break-userspace).
     """
 
     checks: dict[str, Any] = {}

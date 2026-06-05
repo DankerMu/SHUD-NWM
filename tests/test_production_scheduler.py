@@ -3752,9 +3752,6 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setenv("FORECAST_SOURCE_ID", "IFS")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
-    # GRIB env injection is not under test here; assert system eccodes so the
-    # §4.5 GRIB preflight stays green (empty NHMS_GRIB_ENV_ROOT + asserted).
-    monkeypatch.setenv("NHMS_GRIB_SYSTEM_ECCODES", "1")
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathOrchestrator)
     config = _config(
         roots["workspace_root"],
@@ -10284,9 +10281,6 @@ def test_slurm_preflight_ready_with_healthy_gateway_adds_no_blocker(
 ) -> None:
     roots = _slurm_roots(tmp_path)
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
-    # GRIB env injection is not under test here; assert system eccodes so the
-    # §4.5 GRIB preflight stays green (empty NHMS_GRIB_ENV_ROOT + asserted).
-    monkeypatch.setenv("NHMS_GRIB_SYSTEM_ECCODES", "1")
     config = _gateway_config(
         roots["workspace_root"],
         slurm_gateway_url="http://gw-node22.internal:8000",
@@ -10441,12 +10435,30 @@ def test_grib_env_check_empty_root_with_system_eccodes_asserted_passes(
     assert checks["system_eccodes_available"] is True
 
 
-def test_grib_env_check_empty_root_without_assertion_blocks(
+def test_grib_env_check_empty_root_without_assertion_passes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The #291 silent-skip case, now loud.
+    # Default no-fence: empty root + nothing asserted -> no GRIB blocker.
     _clear_grib_env(monkeypatch)
     config = _config(tmp_path, slurm_env={})
+
+    checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    codes = {b["code"] for b in blockers}
+    assert "GRIB_ENV_UNAVAILABLE" not in codes
+    assert "GRIB_ENV_ROOT_INVALID" not in codes
+    assert checks["system_eccodes_available"] is True
+
+
+def test_grib_env_check_empty_root_nodes_lacking_eccodes_asserted_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Opt-in fail-loud: operator asserts nodes lack eccodes -> empty root blocks.
+    _clear_grib_env(monkeypatch)
+    config = _config(
+        tmp_path,
+        slurm_env={"NHMS_GRIB_ENV_ROOT": "", "NHMS_GRIB_SYSTEM_ECCODES": "false"},
+    )
 
     checks, blockers = scheduler_module._slurm_grib_env_check(config)
 
@@ -10486,7 +10498,8 @@ def test_slurm_preflight_surfaces_grib_blocker_end_to_end(
         runtime_root=roots["runtime_root"],
         allowed_storage_roots=(tmp_path,),
         slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
-        slurm_env={},  # empty GRIB root, no system-eccodes assertion
+        # Empty GRIB root + operator asserts nodes lack eccodes -> fail-loud.
+        slurm_env={"NHMS_GRIB_ENV_ROOT": "", "NHMS_GRIB_SYSTEM_ECCODES": "false"},
     )
 
     preflight = scheduler_module._slurm_preflight(config)
