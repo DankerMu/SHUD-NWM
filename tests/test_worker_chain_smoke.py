@@ -100,7 +100,10 @@ def test_worker_chain_smoke_uses_real_schema_and_local_object_store(
     assert store.exists(rivqdown_uri)
     assert b"seg_0001" in store.read_bytes(rivqdown_uri)
     assert store.exists(state_uri)
-    assert b"STATE_TIME" in store.read_bytes(state_uri)
+    ic_content = store.read_bytes(state_uri)
+    # warm-start restart state: header (mesh_count, river_count, minute-time) + per-element state rows
+    assert ic_content.split(b"\n")[0].count(b"\t") == 2
+    assert b"\t0.010\t0.000\t0.050\t0.200\t0.500" in ic_content
     assert store.exists(stdout_uri)
     assert b"mock_shud_omp wrote" in store.read_bytes(stdout_uri)
     assert store.exists(stderr_uri)
