@@ -114,7 +114,21 @@ class ReservationResult:
 
     @property
     def already_inflight(self) -> bool:
-        return (not self.created) and reservation_is_active(self.status)
+        """True when THIS pass must NOT sbatch (it did not win the reservation).
+
+        Conservative by design: a loss (``created=False``) means another row
+        already held the idempotency_key, so this pass skips submission —
+        UNCONDITIONALLY, regardless of the status the (non-atomic) re-read
+        observed. The re-read can race the row into a stale terminal /
+        ``reservation_lost`` state between our INSERT-conflict and the SELECT
+        (TOCTOU); trusting it to decide "this stale row is re-submittable right
+        now" would let two passes sbatch the same candidate. Stale rows are
+        instead reclaimed by a later, clean pass whose own INSERT re-attempts
+        the reservation. ``status`` is still reported for logs/evidence; it just
+        never gates re-submission within this pass.
+        """
+
+        return not self.created
 
 
 @dataclass
@@ -181,12 +195,16 @@ def reserve_candidate(
     (no second row, no re-submit when it is already active).
 
     The win/lose signal comes from the DB, NOT from comparing a deterministic
-    job_id. ``reserve_pipeline_job`` performs ``INSERT ... ON CONFLICT
-    (idempotency_key) DO NOTHING RETURNING``: a returned row means THIS pass
+    job_id. ``reserve_pipeline_job`` performs ``INSERT ... ON CONFLICT DO
+    NOTHING RETURNING`` (absorbing ANY unique conflict — the idempotency_key
+    unique index or the job_id primary key): a returned row means THIS pass
     inserted it (won → ``created=True``); ``None`` means a row already existed
-    (lost). On a loss we re-read the existing row to report its status so an
-    overlapping pass can tell ``already_inflight`` (active) from a stale
-    terminal/``reservation_lost`` row that may be safely re-submitted.
+    (lost), and reserve never raises. On a loss we re-read the existing row only
+    to *report* its status/job_id (useful for logs/evidence); the loss itself
+    is final for THIS pass — the caller treats it as already-inflight and does
+    not re-submit. A stale terminal/``reservation_lost`` row is reclaimed by a
+    later, clean pass (whose own INSERT re-attempts the reservation), never by
+    re-submitting off a non-atomic re-read inside this same pass.
     """
 
     record = repository.reserve_pipeline_job(
@@ -211,7 +229,14 @@ def reserve_candidate(
             created=True,
         )
 
-    # Lost the race / row already present: re-read to classify the existing row.
+    # Lost the race / row already present. We re-read ONLY to report the
+    # existing row's status/job_id (logs/evidence). The loss is final for this
+    # pass either way: ``created=False`` makes ``already_inflight`` True
+    # unconditionally, so this pass never sbatches. A stale terminal /
+    # reservation_lost row is left for a later, clean pass to reclaim (its own
+    # INSERT re-attempts the reservation); active reclaim of stale rows that
+    # still occupy the idempotency_key unique index is deliberately left as a
+    # follow-up to avoid a non-atomic re-read deciding re-submission here.
     existing = repository.query_candidate_state(idempotency_key)
     if existing is None:
         # Conflict reported but row vanished (e.g. concurrent cleanup): treat as

@@ -2371,13 +2371,15 @@ class ForecastOrchestrator:
         )
 
     def _reservation_already_inflight(self, reservation: ReservationResult | None) -> bool:
-        """True when an active reservation exists that THIS pass did not create.
+        """True when THIS pass lost the reservation and must NOT sbatch.
 
-        Gate for the submit path: when another pass already holds an active
-        reservation (reserved/submitted/running/queued/pending) we must NOT
-        sbatch again. A non-active prior row (terminal / reservation_lost) does
-        not block — ``already_inflight`` is False there, so re-submission of a
-        lost candidate stays possible.
+        Gate for the submit path: a loss (``created=False``) means another row
+        already holds the idempotency_key, so this pass skips submission. The
+        decision is conservative — it does not consult the (non-atomic) re-read
+        status, so a stale terminal / ``reservation_lost`` row still blocks
+        re-submission within THIS pass (avoiding a TOCTOU double-submit). Such a
+        stale candidate is reclaimed by a later, clean pass whose own reserve
+        re-attempts the INSERT, never by re-submitting off this pass's re-read.
         """
 
         return reservation is not None and reservation.already_inflight and not reservation.created
@@ -5343,11 +5345,22 @@ class PsycopgOrchestratorRepository:
     def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
         """Phase 1: durable reservation row keyed by idempotency_key.
 
-        ``ON CONFLICT (idempotency_key) DO NOTHING RETURNING`` is the authoritative
-        win/lose signal: a returned row means THIS call inserted the reservation
-        (won the race); ``None`` means a row already existed (lost / already
-        in-flight). The caller never decides the winner by comparing a
-        deterministic job_id — only the presence of the RETURNING row counts.
+        ``ON CONFLICT DO NOTHING RETURNING`` (absorbing any unique conflict) is
+        the authoritative win/lose signal: a returned row means THIS call
+        inserted the reservation (won the race); ``None`` means a row already
+        existed (lost / already in-flight). The caller never decides the winner
+        by comparing a deterministic job_id — only the presence of the RETURNING
+        row counts.
+
+        The conflict target is deliberately omitted. A narrow
+        ``ON CONFLICT (idempotency_key)`` only absorbs idempotency_key clashes;
+        a pre-existing row carrying the SAME job_id but a NULL idempotency_key
+        (a legacy / non-reserve row) would slip past the partial index and hit
+        the job_id primary key instead, raising and aborting the whole pass. The
+        protocol contract is "reserve never raises; RETURNING decides" — so we
+        absorb ANY unique conflict (idempotency_key unique index OR job_id PK):
+        any clash → DO NOTHING → zero rows → ``None`` → judged a loss, never an
+        exception.
 
         ``submitted_at`` is deliberately left NULL at reserve time; it is stamped
         only when the reservation is bound to a real slurm_job_id (phase 2).
@@ -5360,8 +5373,7 @@ class PsycopgOrchestratorRepository:
                 status, idempotency_key, candidate_id
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
-                DO NOTHING
+            ON CONFLICT DO NOTHING
             RETURNING *
             """,
             (
