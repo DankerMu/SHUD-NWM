@@ -422,11 +422,11 @@ def read_qhh_tsd_forc(
         if not (-180.0 <= longitude <= 180.0 and -90.0 <= latitude <= 90.0):
             malformed_rows.append({"line_number": line_number, "reason": "invalid_lon_lat"})
             continue
-        station_id = f"qhh_forc_{forcing_index:03d}"
+        station_id = f"{project_name}_forc_{forcing_index:03d}"
         stations.append(
             QhhForcingStation(
                 station_id=station_id,
-                station_name=f"QHH forcing station {forcing_index:03d}",
+                station_name=f"{project_name.upper()} forcing station {forcing_index:03d}",
                 forcing_index=forcing_index,
                 longitude=longitude,
                 latitude=latitude,

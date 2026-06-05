@@ -57,8 +57,36 @@ def test_read_qhh_tsd_forc_reports_created_station_identity(tmp_path: Path) -> N
 
     assert checksum
     assert [station.station_id for station in stations] == ["qhh_forc_001", "qhh_forc_002"]
+    assert stations[0].station_name == "QHH forcing station 001"
     assert stations[0].elevation_m == 0.0
     assert stations[1].forcing_filename == "X000002.csv"
+
+
+def test_read_qhh_tsd_forc_namespaces_station_identity_by_project(tmp_path: Path) -> None:
+    # Second-basin (#291 §3B.1): non-qhh project_name must NOT collide with qhh PKs.
+    input_dir = tmp_path / "heihe" / "input" / "heihe"
+    input_dir.mkdir(parents=True)
+    tsd_forc = input_dir / "heihe.tsd.forc"
+    tsd_forc.write_text(
+        "2 6\n"
+        "/forcing\n"
+        "ID Lon Lat X Y Z Filename\n"
+        "1 100.1 30.1 1 2 -9999 X000001.csv\n"
+        "2 100.2 30.2 3 4 12.5 X000002.csv\n",
+        encoding="utf-8",
+    )
+
+    heihe_stations, _ = read_qhh_tsd_forc(tsd_forc, input_dir, project_name="heihe")
+    assert [s.station_id for s in heihe_stations] == ["heihe_forc_001", "heihe_forc_002"]
+    assert heihe_stations[0].station_name == "HEIHE forcing station 001"
+
+    # qhh path unchanged: default and explicit project_name="qhh" still yield qhh_forc_NNN.
+    qhh_stations, _ = read_qhh_tsd_forc(tsd_forc, input_dir, project_name="qhh")
+    assert [s.station_id for s in qhh_stations] == ["qhh_forc_001", "qhh_forc_002"]
+    assert qhh_stations[0].station_name == "QHH forcing station 001"
+    assert {s.station_id for s in qhh_stations}.isdisjoint(
+        {s.station_id for s in heihe_stations}
+    )
 
 
 @pytest.mark.parametrize(
