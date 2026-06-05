@@ -1263,6 +1263,7 @@ class ProductionScheduler:
         except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
             evidence["status"] = "error"
             evidence["reserved_unbound_error"] = str(error)
+            self._reset_reconcile_store_after_error()
 
         try:
             sacct_query = self._restart_reconcile_sacct_query()
@@ -1282,7 +1283,29 @@ class ProductionScheduler:
         except Exception as error:  # noqa: BLE001 - recovery must never abort the pass.
             evidence["status"] = "error"
             evidence["inflight_error"] = str(error)
+            self._reset_reconcile_store_after_error()
         return evidence
+
+    def _reset_reconcile_store_after_error(self) -> None:
+        """Recover the cached reconcile session after a write/commit failure.
+
+        persistence commits with no rollback, so a failed commit leaves the
+        cached session in pending-rollback state; reusing it next pass (or in
+        the same pass's inflight segment) raises PendingRollbackError and
+        silently kills crash recovery for the daemon's lifetime. Roll the
+        session back to keep its connection reusable; only if rollback itself
+        fails (the connection is truly dead) drop the cache so the next pass
+        rebuilds a clean store via _restart_reconcile_store.
+        """
+
+        store = self._reconcile_store
+        if store is None:
+            return
+        try:
+            store.session.rollback()
+        except Exception:  # noqa: BLE001 - poisoned/dead session: drop it so the
+            # next pass rebuilds a clean one via _restart_reconcile_store.
+            self._reconcile_store = None
 
     def _restart_reconcile_store(self) -> Any | None:
         if self._reconcile_store is not None:

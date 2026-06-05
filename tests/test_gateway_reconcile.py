@@ -1416,3 +1416,184 @@ def test_malformed_record_young_defers() -> None:
     state = store.query_candidate_state(key)
     assert state["status"] == "reserved"
     assert state["slurm_job_id"] is None
+
+
+# --- FINDING-2: real comment-row parsing + array-master normalization ----------
+
+
+def test_parse_comment_sacct_rows_resolves_array_master() -> None:
+    """Real (non-mock) parse of multi-row sacct output: an array stage stamped
+    with the idempotency --comment reconciles back to its BARE master id. Array
+    element rows (``<master>_<task>``) normalize to ``<master>``, ``.batch`` step
+    sub-rows are skipped, and an unrelated Comment never false-matches.
+    """
+
+    from services.orchestrator.reconcile import SacctRecord, _parse_comment_sacct_rows
+    from services.slurm_gateway.real_backend import SLURM_JOB_ID_RE
+
+    stdout = (
+        "77042_0|stageA|RUNNING|0:0|nhms_idem:K\n"
+        "77042_1|stageA|RUNNING|0:0|nhms_idem:K\n"
+        "77042.batch|batch|RUNNING|0:0|nhms_idem:K\n"
+        "99999|other|RUNNING|0:0|nhms_idem:OTHER\n"
+    )
+
+    record = _parse_comment_sacct_rows(stdout, "nhms_idem:K")
+
+    assert record is not None
+    assert isinstance(record, SacctRecord)
+    assert record.slurm_job_id == "77042"  # array element → bare master id.
+    # The normalized id must pass the master/single-job id shape guard.
+    assert SLURM_JOB_ID_RE.fullmatch("77042")
+
+
+def test_parse_comment_sacct_rows_single_job() -> None:
+    """A single (non-array) job with a matching Comment passes through unchanged;
+    its ``.batch`` step sub-row is skipped.
+    """
+
+    from services.orchestrator.reconcile import _parse_comment_sacct_rows
+
+    stdout = (
+        "88001|stage|RUNNING|0:0|nhms_idem:K\n"
+        "88001.batch|batch|RUNNING|0:0|nhms_idem:K\n"
+    )
+
+    record = _parse_comment_sacct_rows(stdout, "nhms_idem:K")
+
+    assert record is not None
+    assert record.slurm_job_id == "88001"  # no "_" → original id, untouched.
+
+
+def test_parse_comment_sacct_rows_no_match_returns_none() -> None:
+    """No row's Comment equals the target → None, the authoritative
+    confirmed-absent answer that crash-recovery reconcile relies on.
+    """
+
+    from services.orchestrator.reconcile import _parse_comment_sacct_rows
+
+    stdout = (
+        "12345|stage|RUNNING|0:0|nhms_idem:OTHER\n"
+        "12345.batch|batch|RUNNING|0:0|nhms_idem:OTHER\n"
+        "67890_0|stage|RUNNING|0:0|nhms_idem:DIFFERENT\n"
+    )
+
+    assert _parse_comment_sacct_rows(stdout, "nhms_idem:K") is None
+
+
+# --- FINDING-1: cached reconcile session rollback on crash recovery ------------
+
+
+def _reconcile_store_shell(store: Any) -> Any:
+    """A minimal carrier exposing only ``_reconcile_store`` so the unbound
+    ProductionScheduler method can be bound onto it without the heavy ctor.
+    """
+
+    import types
+
+    from services.orchestrator.scheduler import ProductionScheduler
+
+    shell = types.SimpleNamespace(_reconcile_store=store)
+    ProductionScheduler._reset_reconcile_store_after_error.__get__(
+        shell, ProductionScheduler
+    )()
+    return shell
+
+
+def test_reset_reconcile_store_after_error_rolls_back_session() -> None:
+    """A failed commit leaves the cached session pending-rollback; recovery rolls
+    it back so the connection stays reusable, and KEEPS the cached store (the
+    common, recoverable case — no needless rebuild).
+    """
+
+    import types
+
+    rollback_calls: list[int] = []
+    session = types.SimpleNamespace(rollback=lambda: rollback_calls.append(1))
+    store = types.SimpleNamespace(session=session)
+
+    shell = _reconcile_store_shell(store)
+
+    assert rollback_calls == [1]  # rolled back exactly once.
+    assert shell._reconcile_store is store  # cache preserved, not dropped.
+
+
+def test_reset_reconcile_store_after_error_drops_store_when_rollback_fails() -> None:
+    """If rollback itself raises (the connection is truly dead) the cache is
+    dropped so the next pass rebuilds a clean store via _restart_reconcile_store.
+    """
+
+    import types
+
+    def _boom() -> None:
+        raise RuntimeError("connection dead")
+
+    session = types.SimpleNamespace(rollback=_boom)
+    store = types.SimpleNamespace(session=session)
+
+    shell = _reconcile_store_shell(store)
+
+    assert shell._reconcile_store is None  # poisoned/dead → dropped.
+
+
+def test_reset_reconcile_store_after_error_noop_when_no_store() -> None:
+    """No cached store → the reset is a clean no-op (no attribute access, no
+    raise). Guards the early-return guard.
+    """
+
+    shell = _reconcile_store_shell(None)
+
+    assert shell._reconcile_store is None
+
+
+# --- B-LOW: created_at fallback when updated_at is NULL still grants grace ------
+
+
+def test_young_by_created_at_fallback_when_updated_at_none_defers() -> None:
+    """A legacy reserved-unbound row whose ``updated_at`` is NULL but whose
+    ``created_at`` is fresh must still earn grace via the created_at fallback: a
+    confirmed-but-young absence is deferred (absence_unconfirmed), the row stays
+    ``reserved``, and update_job_status is never called → no reclaim → no double
+    submit. Locks the fallback so NULL updated_at on legacy rows doesn't regress
+    the grace protection.
+    """
+
+    from datetime import UTC, datetime
+
+    from services.orchestrator.reconcile import (
+        ABSENCE_UNCONFIRMED_ACTION,
+        reconcile_reserved_unbound_jobs,
+    )
+
+    fixed_now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC)
+
+    class _NoUpdatedAtJob:
+        job_id = "job_legacy_null_updated"
+        idempotency_key = "gfs:cyc:basin:forcing"
+        status = "reserved"
+        slurm_job_id = None
+        updated_at = None  # primary anchor absent (legacy NULL).
+        created_at = fixed_now  # fresh → grace via the fallback.
+
+    update_calls: list[tuple[str, str]] = []
+
+    class _FakeStore:
+        def query_reserved_unbound_jobs(self) -> list[Any]:
+            return [_NoUpdatedAtJob()]
+
+        def update_job_status(self, job_id: str, status: str, **_kwargs: Any) -> None:
+            update_calls.append((job_id, status))
+
+    def _comment_query(_idem: str) -> Any:
+        return None  # confirmed-absent (not yet visible in accounting).
+
+    outcomes = reconcile_reserved_unbound_jobs(
+        _FakeStore(),
+        comment_query=_comment_query,
+        now=lambda: fixed_now,
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == ABSENCE_UNCONFIRMED_ACTION
+    assert outcomes[0].status == "reserved"
+    assert update_calls == []  # young by created_at fallback → not demoted.

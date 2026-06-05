@@ -184,32 +184,45 @@ def default_comment_sacct_querier(slurm_bin_path: str = "") -> CommentSacctQueri
             raise ReconcileQueryUnavailable(
                 f"sacct comment query returned {result.returncode}"
             )
-        # Below: the query succeeded. Falling off the loop with no match is the
-        # authoritative "accounting has no job for this comment" answer
-        # (confirmed-absent), which is the ONLY case allowed to mark
-        # reservation_lost. A transient failure never reaches here.
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            fields = line.split("|")
-            if len(fields) < 5:
-                continue
-            job_id = fields[0]
-            if "_" in job_id or "." in job_id:
-                continue
-            if fields[4].strip() != target_comment:
-                continue
-            return SacctRecord(
-                slurm_job_id=job_id,
-                job_name=fields[1],
-                raw_state=fields[2],
-                exit_code=fields[3] or None,
-                comment=fields[4].strip(),
-            )
-        return None
+        # Below: the query succeeded. A None here is the authoritative
+        # "accounting has no job for this comment" answer (confirmed-absent),
+        # which is the ONLY case allowed to mark reservation_lost. A transient
+        # failure never reaches here.
+        return _parse_comment_sacct_rows(result.stdout, target_comment)
 
     return _query
+
+
+def _parse_comment_sacct_rows(stdout: str, target_comment: str) -> SacctRecord | None:
+    """Find the sacct row whose Comment matches target_comment and return its
+    master job id. Array element/pending rows ("<master>_<task>",
+    "<master>_[<range>]") normalize down to the bare master id; step sub-rows
+    ("<id>.batch"/"<id>.extern") are skipped. Returns None when no row matches
+    (the authoritative confirmed-absent answer)."""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        fields = line.split("|")
+        if len(fields) < 5:
+            continue
+        raw_job_id = fields[0]
+        if "." in raw_job_id:
+            continue  # skip .batch/.extern step sub-rows
+        if fields[4].strip() != target_comment:
+            continue
+        # Normalize array element/pending rows to the bare master id so an
+        # array stage stamped with the idempotency --comment reconciles back
+        # to its master job id (single-job ids have no "_" and pass through).
+        job_id = raw_job_id.split("_", 1)[0]
+        return SacctRecord(
+            slurm_job_id=job_id,
+            job_name=fields[1],
+            raw_state=fields[2],
+            exit_code=fields[3] or None,
+            comment=fields[4].strip(),
+        )
+    return None
 
 
 def _parse_master_sacct_row(stdout: str, slurm_job_id: str) -> SacctRecord | None:
