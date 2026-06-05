@@ -164,17 +164,32 @@ Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_or
 
 ## 4. Continuous daemon live operation
 
-- [ ] 4.1 Wire the daemon entrypoint for node-22 (systemd timer and/or `run_continuous`) using the
+- [x] 4.1 Wire the daemon entrypoint for node-22 (systemd timer and/or `run_continuous`) using the
   documented env contract (`NHMS_SCHEDULER_*`, `SLURM_GATEWAY_*`, `WORKSPACE_ROOT`, roots).
-- [ ] 4.2 Lease heartbeat/renewal with a token/generation (`lease_token`, `heartbeat_seq`/mtime,
+      — generic scheduler `plan-production --continuous` (`cli.py` → `run_continuous`); timer companion
+        units + env contract documented in `infra/systemd/nhms-compute-compose.service` (m23, pre-existing).
+- [x] 4.2 Lease heartbeat/renewal with a token/generation (`lease_token`, `heartbeat_seq`/mtime,
   owner pid-start/boot id); stale reclaim is compare-and-swap on that token after reconciling
   host/pid + candidate reservation + `sacct`/`squeue` (a contender must not unlink if the
   token/heartbeat changed). Prove on node-22 shared `/scratch` with two independent processes,
   TTL < pass duration, heartbeat crossing TTL without reclaim, no double-submit; record real fs type.
-- [ ] 4.3 Safe enable/disable (no new submit after a bounded pass exits; evidence stays queryable).
-- [ ] 4.4 Node-22 live daemon receipt proving the m20/m23 chain ran via the generic scheduler (not
+      — code: `FileSchedulerLease.renew()` + `_LeaseHeartbeat` + owner-liveness reconcile + CAS-on-reclaim
+        (commit 5880d09, 9 tests). Live NFS proof `artifacts/m24/m24-daemon-5880d09/lease_nfs.json` PASS
+        (host xnode, `/scratch`=nfs, TTL=2s: heartbeat across 6s/3×TTL `heartbeat_seq`=8, contender 10/10
+        not acquired; dead holder reclaimed). See issue-292-worklog.md.
+- [x] 4.3 Safe enable/disable (no new submit after a bounded pass exits; evidence stays queryable).
+      — m23 contract: `systemctl disable --now nhms-compute-scheduler.timer` + `reset-failed`; bounded
+        `--max-passes` pass exits with no further submit; `scheduler-once` manual proof path preserved.
+- [x] 4.4 Node-22 live daemon receipt proving the m20/m23 chain ran via the generic scheduler (not
   diagnostic scripts), binding identity/statuses/counts/gateway receipt/warm-start quality/URIs.
-- [ ] 4.5 GRIB-env preflight on daemon startup (fail-loud, not silent). The sbatch canonical-convert
+      — `artifacts/m24/m24-daemon-5880d09/daemon_pass.json`: `plan-production --continuous --submit`
+        (NOT `run_qhh_continuous.py`), `execution_mode=production_orchestration`, lock acquired, GRIB
+        preflight clean, candidate `gfs_2026060518/basins_qhh` full identity contract complete
+        (`output_segment_count=1633`). `submitted_count=0` BLOCKED on upstream `canonical_identity_mismatch`
+        (fresh cycle not yet m23-ingested — the P-gate dependency; spec's BLOCKED+exact-dependency).
+        End-to-end completion corroborated by #291's `gfs_2026060500` both-basins published receipt via
+        the same generic scheduler.
+- [x] 4.5 GRIB-env preflight on daemon startup (fail-loud, not silent). The sbatch canonical-convert
   injection (`chain.py:7571-7579`) is conditional on `NHMS_GRIB_ENV_ROOT` being present in the
   daemon's process env at render time; if the daemon is started without sourcing the env, `getenv`
   returns None, injection is silently skipped, and `nhms-canonical convert` then fails ON THE COMPUTE
@@ -186,6 +201,9 @@ Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_or
   on "node lacks libeccodes" not on "var is empty". (Recurrence vector from #291 live bring-up: a
   manual login-node convert bypassed the injection and was misdiagnosed as a broken package; runbook
   manual recipe now also patched to export `LD_LIBRARY_PATH=$NHMS_GRIB_ENV_ROOT/lib`.)
+      — code: `_slurm_grib_env_check` wired into `_slurm_preflight` (commit aa4aa46, 7 tests). Live proof
+        `artifacts/m24/m24-daemon-5880d09/grib_preflight.json` PASS (unset→`GRIB_ENV_UNAVAILABLE` loud;
+        real root bin+lib→pass; nonexistent→`GRIB_ENV_ROOT_INVALID` loud).
 
 Evidence Floor: NFS two-process heartbeat lock proof; daemon pass receipt PASS/BLOCKED with full
 schema; evidence it did not invoke QHH scripts; GRIB-env preflight fail-loud proof (unset root vs

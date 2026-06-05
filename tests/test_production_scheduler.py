@@ -40,6 +40,8 @@ from services.orchestrator.scheduler import (
     ProductionSchedulerConfig,
     SchedulerEvidenceWriteError,
     SchedulerPassResult,
+    _default_owner_liveness_probe,
+    _LeaseHeartbeat,
 )
 from services.orchestrator.scheduler import (
     ProductionScheduler as _RealProductionScheduler,
@@ -3750,6 +3752,9 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setenv("FORECAST_SOURCE_ID", "IFS")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
+    # GRIB env injection is not under test here; assert system eccodes so the
+    # §4.5 GRIB preflight stays green (empty NHMS_GRIB_ENV_ROOT + asserted).
+    monkeypatch.setenv("NHMS_GRIB_SYSTEM_ECCODES", "1")
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathOrchestrator)
     config = _config(
         roots["workspace_root"],
@@ -10279,6 +10284,9 @@ def test_slurm_preflight_ready_with_healthy_gateway_adds_no_blocker(
 ) -> None:
     roots = _slurm_roots(tmp_path)
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    # GRIB env injection is not under test here; assert system eccodes so the
+    # §4.5 GRIB preflight stays green (empty NHMS_GRIB_ENV_ROOT + asserted).
+    monkeypatch.setenv("NHMS_GRIB_SYSTEM_ECCODES", "1")
     config = _gateway_config(
         roots["workspace_root"],
         slurm_gateway_url="http://gw-node22.internal:8000",
@@ -10363,6 +10371,130 @@ def test_slurm_gateway_check_self_reference_blocks_schemeless_localhost(
     codes = {b["code"] for b in blockers}
     assert "SLURM_GATEWAY_SELF_REFERENCE" in codes
     assert checks["self_reference"] is True
+
+
+# --- M24-4 §4.5 (#292): GRIB-env preflight fail-loud -------------------------
+
+
+def _clear_grib_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Ambient operator env must never bleed into these checks.
+    monkeypatch.delenv("NHMS_GRIB_ENV_ROOT", raising=False)
+    monkeypatch.delenv("NHMS_GRIB_SYSTEM_ECCODES", raising=False)
+
+
+def test_grib_env_check_valid_root_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    root = tmp_path / "nhms-grib"
+    (root / "bin").mkdir(parents=True)
+    (root / "lib").mkdir(parents=True)
+    config = _config(tmp_path, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
+
+    checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    assert blockers == []
+    assert checks["bin_present"] is True
+    assert checks["lib_present"] is True
+
+
+def test_grib_env_check_root_missing_bin_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    root = tmp_path / "nhms-grib"
+    (root / "lib").mkdir(parents=True)  # bin/ absent
+    config = _config(tmp_path, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
+
+    _checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    codes = {b["code"] for b in blockers}
+    assert "GRIB_ENV_ROOT_INVALID" in codes
+
+
+def test_grib_env_check_root_missing_lib_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    root = tmp_path / "nhms-grib"
+    (root / "bin").mkdir(parents=True)  # lib/ absent
+    config = _config(tmp_path, slurm_env={"NHMS_GRIB_ENV_ROOT": str(root)})
+
+    _checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    codes = {b["code"] for b in blockers}
+    assert "GRIB_ENV_ROOT_INVALID" in codes
+
+
+def test_grib_env_check_empty_root_with_system_eccodes_asserted_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    config = _config(
+        tmp_path,
+        slurm_env={"NHMS_GRIB_ENV_ROOT": "", "NHMS_GRIB_SYSTEM_ECCODES": "1"},
+    )
+
+    checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    assert blockers == []
+    assert checks["system_eccodes_available"] is True
+
+
+def test_grib_env_check_empty_root_without_assertion_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The #291 silent-skip case, now loud.
+    _clear_grib_env(monkeypatch)
+    config = _config(tmp_path, slurm_env={})
+
+    checks, blockers = scheduler_module._slurm_grib_env_check(config)
+
+    codes = {b["code"] for b in blockers}
+    assert "GRIB_ENV_UNAVAILABLE" in codes
+    assert checks["system_eccodes_available"] is False
+
+
+def test_grib_env_check_probe_exception_fails_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    config = _config(tmp_path, slurm_env={})
+
+    def boom(_config: ProductionSchedulerConfig) -> dict[str, Any]:
+        raise RuntimeError("cannot reach compute node")
+
+    checks, blockers = scheduler_module._slurm_grib_env_check(config, probe=boom)
+
+    codes = {b["code"] for b in blockers}
+    assert "GRIB_ENV_UNAVAILABLE" in codes
+    assert checks["system_eccodes_available"] is False
+
+
+def test_slurm_preflight_surfaces_grib_blocker_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_grib_env(monkeypatch)
+    roots = _slurm_roots(tmp_path)
+    # Keep gateway healthy so the only blocker is the GRIB one.
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", _healthy_gateway_probe)
+    config = _gateway_config(
+        roots["workspace_root"],
+        slurm_gateway_url="http://gw-node22.internal:8000",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        slurm_env={},  # empty GRIB root, no system-eccodes assertion
+    )
+
+    preflight = scheduler_module._slurm_preflight(config)
+
+    assert preflight["status"] == "blocked"
+    codes = {b["code"] for b in preflight["blockers"]}
+    assert "GRIB_ENV_UNAVAILABLE" in codes
+    assert preflight["checks"]["grib_env"]["system_eccodes_available"] is False
 
 
 class _FakeHttpResponse:
@@ -10815,3 +10947,357 @@ def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
     # Never exceed the configured bound, but do run more than one at a time.
     assert peak <= 2
     assert peak >= 2
+
+
+# ---------------------------------------------------------------------------
+# Issue #292 §4.2: lease heartbeat / renewal + CAS-on-reclaim + liveness reconcile
+# ---------------------------------------------------------------------------
+
+
+def _read_lock(lock_path: Path) -> dict[str, Any]:
+    return json.loads(lock_path.read_text(encoding="utf-8"))
+
+
+def test_renew_bumps_heartbeat_seq_and_preserves_identity(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+
+    acquired = lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))
+    assert acquired["acquired"] is True
+    before = _read_lock(lock_path)
+    assert before["heartbeat_seq"] == 0
+
+    # Backdate mtime so we can prove renew refreshes it.
+    os.utime(lock_path, (1, 1))
+
+    assert lease.renew(pass_id="p1") is True
+    after1 = _read_lock(lock_path)
+    assert after1["heartbeat_seq"] == 1
+    assert os.stat(lock_path).st_mtime > 1
+    # Identity is unchanged.
+    for key in ("pass_id", "lease_token", "pid", "host", "started_at", "owner"):
+        assert after1[key] == before[key]
+
+    assert lease.renew(pass_id="p1") is True
+    assert _read_lock(lock_path)["heartbeat_seq"] == 2
+
+
+def test_renew_returns_false_after_lease_taken_over(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    acquired = lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))
+    assert acquired["acquired"] is True
+
+    # Externally take over: same pass_id but a different lease_token.
+    payload = _read_lock(lock_path)
+    payload["lease_token"] = "someone-else-token"
+    lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    assert lease.renew(pass_id="p1") is False
+
+
+def test_renew_never_leaves_lock_empty_and_keeps_valid_json(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    acquired = lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))
+    assert acquired["acquired"] is True
+    before = _read_lock(lock_path)
+
+    assert lease.renew(pass_id="p1") is True
+
+    # The lock must always be non-empty, parseable JSON with the bumped seq and
+    # preserved identity — never the empty/half-written window the old
+    # truncate-then-write form exposed.
+    raw = lock_path.read_text(encoding="utf-8")
+    assert raw != ""
+    after = json.loads(raw)
+    assert after["heartbeat_seq"] == 1
+    for key in ("pass_id", "lease_token", "pid", "host", "started_at", "owner"):
+        assert after[key] == before[key]
+    # No stray temp file left behind by the atomic swap.
+    assert not (tmp_path / f"{lock_path.name}.renew.tmp").exists()
+
+
+def test_renew_failing_mid_write_leaves_original_lock_intact(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    assert lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))["acquired"] is True
+    original = lock_path.read_text(encoding="utf-8")
+    assert original != ""
+
+    real_write = os.write
+
+    def _boom(fd: int, data: bytes) -> int:
+        # Fail only the renew payload write, not the guard's own bookkeeping.
+        if b'"heartbeat_seq": 1' in data:
+            raise OSError("simulated write failure")
+        return real_write(fd, data)
+
+    monkeypatch.setattr("services.orchestrator.scheduler.os.write", _boom)
+
+    # renew swallows UnsafeSchedulerLockError-style failures by returning False;
+    # a raw OSError propagates out of _rewrite_lock_in_place. Either way the
+    # ORIGINAL lock must be untouched and no temp file should survive.
+    try:
+        result = lease.renew(pass_id="p1")
+    except OSError:
+        result = False
+    assert result is False
+
+    assert lock_path.read_text(encoding="utf-8") == original
+    assert not (tmp_path / f"{lock_path.name}.renew.tmp").exists()
+
+
+def test_live_long_running_holder_is_not_reclaimed(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    holder = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
+    acquired = holder.acquire(pass_id="holder", started_at=_dt("2026-05-21T12:00:00Z"))
+    assert acquired["acquired"] is True
+    # Holder is THIS process (pid + host recorded), but lock has aged past TTL.
+    os.utime(lock_path, (1, 1))
+
+    contender = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
+    result = contender.acquire(pass_id="contender", started_at=_dt("2026-05-21T12:10:00Z"))
+
+    assert result["acquired"] is False
+    assert result["contention"] is True
+    assert _read_lock(lock_path)["pass_id"] == "holder"
+
+
+def test_dead_holder_is_reclaimed(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    holder = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
+    holder.acquire(pass_id="dead", started_at=_dt("2026-05-21T12:00:00Z"))
+    os.utime(lock_path, (1, 1))
+
+    contender = FileSchedulerLease(
+        lock_path,
+        ttl_seconds=1,
+        workspace_root=tmp_path,
+        owner_liveness_probe=lambda _payload: False,
+    )
+    result = contender.acquire(pass_id="contender", started_at=_dt("2026-05-21T12:10:00Z"))
+
+    assert result["acquired"] is True
+    assert _read_lock(lock_path)["pass_id"] == "contender"
+
+
+def test_cross_host_grace_requires_two_ttls(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    now = _dt("2026-05-21T12:00:00Z")
+
+    def _write_foreign_lock(age_seconds: float) -> None:
+        payload = {
+            "owner": LOCK_OWNER,
+            "schema_version": LOCK_SCHEMA_VERSION,
+            "pass_id": "foreign",
+            "lease_token": "foreign-token",
+            "pid": 1,
+            "host": "other-host.example",
+            "heartbeat_seq": 3,
+            "started_at": "2026-05-21T11:00:00Z",
+        }
+        lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        ts = now.timestamp() - age_seconds
+        os.utime(lock_path, (ts, ts))
+
+    # ttl < age < 2*ttl -> probe None -> NOT reclaimed (grace).
+    _write_foreign_lock(age_seconds=15)
+    a = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    res_grace = a.acquire(pass_id="contender", started_at=now)
+    assert res_grace["acquired"] is False
+    assert _read_lock(lock_path)["pass_id"] == "foreign"
+
+    # age > 2*ttl -> reclaimed.
+    _write_foreign_lock(age_seconds=25)
+    b = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    res_reclaim = b.acquire(pass_id="contender", started_at=now)
+    assert res_reclaim["acquired"] is True
+    assert _read_lock(lock_path)["pass_id"] == "contender"
+
+
+def test_cas_aborts_reclaim_when_holder_renews_concurrently(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    holder = FileSchedulerLease(lock_path, ttl_seconds=1, workspace_root=tmp_path)
+    holder.acquire(pass_id="holder", started_at=_dt("2026-05-21T12:00:00Z"))
+    os.utime(lock_path, (1, 1))
+
+    contender = FileSchedulerLease(
+        lock_path,
+        ttl_seconds=1,
+        workspace_root=tmp_path,
+        # Force the stale decision (probe says dead) so we reach the CAS gate.
+        owner_liveness_probe=lambda _payload: False,
+    )
+
+    # Stale decision saw heartbeat_seq=0; the holder renews between that and the
+    # pre-unlink CAS re-read. We must NOT call holder.renew() here because it
+    # takes the same guard flock the contender already holds (would deadlock);
+    # instead rewrite the lock file in place to advance heartbeat_seq, exactly
+    # what a renew would persist.
+    real_read = contender._read_existing_lock
+    calls = {"n": 0}
+
+    def _read_with_concurrent_renew(*, parent_fd: int) -> dict[str, Any]:
+        calls["n"] += 1
+        # First read = stale-state read (seq0). Before the CAS re-read (2nd)
+        # returns, advance the on-disk heartbeat_seq as a concurrent renew would.
+        if calls["n"] == 2:
+            payload = _read_lock(lock_path)
+            payload["heartbeat_seq"] = int(payload.get("heartbeat_seq", 0)) + 1
+            lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        return real_read(parent_fd=parent_fd)
+
+    contender._read_existing_lock = _read_with_concurrent_renew  # type: ignore[method-assign]
+    result = contender.acquire(pass_id="contender", started_at=_dt("2026-05-21T12:10:00Z"))
+
+    assert result["acquired"] is False
+    assert result["contention"] is True
+    # Holder's lock is intact (not unlinked) and bumped.
+    assert _read_lock(lock_path)["pass_id"] == "holder"
+    assert _read_lock(lock_path)["heartbeat_seq"] == 1
+
+
+def test_default_owner_liveness_probe(tmp_path: Path) -> None:
+    import socket as _socket
+
+    me = {"host": _socket.gethostname(), "pid": os.getpid()}
+    assert _default_owner_liveness_probe(me) is True
+
+    dead = {"host": _socket.gethostname(), "pid": 2_000_000_000}
+    assert _default_owner_liveness_probe(dead) is False
+
+    cross = {"host": "other-host", "pid": 1}
+    assert _default_owner_liveness_probe(cross) is None
+
+    no_pid = {"host": _socket.gethostname()}
+    assert _default_owner_liveness_probe(no_pid) is None
+
+
+def test_lease_heartbeat_advances_then_detects_takeover(tmp_path: Path) -> None:
+    import time
+
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    lease.acquire(pass_id="hb", started_at=_dt("2026-05-21T12:00:00Z"))
+
+    heartbeat = _LeaseHeartbeat(lease, "hb", interval_seconds=0.05)
+    heartbeat.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while _read_lock(lock_path)["heartbeat_seq"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert _read_lock(lock_path)["heartbeat_seq"] >= 1
+        assert heartbeat.lost is False
+
+        # Externally take over -> heartbeat renew fails -> lost flips True.
+        payload = _read_lock(lock_path)
+        payload["lease_token"] = "stolen"
+        lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+        deadline = time.monotonic() + 2.0
+        while not heartbeat.lost and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert heartbeat.lost is True
+    finally:
+        heartbeat.stop()
+    assert heartbeat._thread is None
+
+
+def test_run_once_skips_submission_when_lease_lost_mid_pass(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    # A holder whose lease was reclaimed mid-pass must stop before submitting:
+    # heartbeat.lost short-circuits the pass to a lease_lost result with no
+    # orchestration, no submission, and no mutation.
+    #
+    # The orchestrator factory must NEVER be invoked once the lease is lost, so
+    # we wire a factory that explodes if called — proving the short-circuit ran
+    # strictly before any orchestration. (This also sidesteps the env-fragile
+    # LocalObjectStore root that FakeProductionOrchestrator builds at /tmp.)
+    factory_calls: list[str] = []
+
+    def _exploding_factory(source_id: str) -> Any:
+        factory_calls.append(source_id)
+        raise AssertionError("orchestrator must not be built after lease lost")
+
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=FakeForcingProducer(),
+        orchestrator_factory=_exploding_factory,
+    )
+
+    # Force the heartbeat to report the lease as lost the instant it starts,
+    # without spinning a real thread (deterministic).
+    def _start_lost(self: Any) -> None:
+        self.lost = True
+
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._LeaseHeartbeat.start", _start_lost
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "lease_lost"
+    assert result.evidence["status"] == "lease_lost"
+    assert result.evidence["pass_id"] == result.pass_id
+    assert result.evidence["execution_boundary"] == "lease_lost"
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    # No submission/orchestration happened once the lease was known lost.
+    assert factory_calls == []
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+
+
+def test_run_once_does_not_fence_healthy_pass_when_lease_held(tmp_path: Path) -> None:
+    # Common path: lease held (heartbeat.lost stays False) -> the §4.2 guard
+    # must NOT fence the pass; it proceeds past the guard into candidate
+    # planning + orchestration. (expose_object_store=False keeps the fixture off
+    # the env-fragile /tmp LocalObjectStore root so this stays deterministic.)
+    orchestrator = FakeProductionOrchestrator(expose_object_store=False)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=FakeForcingProducer(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    # The §4.2 guard must NOT fire on a held lease: the pass is never fenced as
+    # lease_lost and proceeds past the guard into candidate planning. (The final
+    # status downstream depends on the slurm/db preflight, which is env-specific
+    # on this box; FIX 1 only governs the lease_lost short-circuit.)
+    assert result.status != "lease_lost"
+    assert result.evidence["execution_boundary"] != "lease_lost"
+    assert result.evidence["candidates"], "guard must not fence away planned candidates"
+
+
+def test_normal_acquire_release_cycle_and_release_cas_noop(tmp_path: Path) -> None:
+    lock_path = tmp_path / "scheduler.lock"
+    lease = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    assert lease.acquire(pass_id="p1", started_at=_dt("2026-05-21T12:00:00Z"))["acquired"] is True
+    assert lock_path.exists()
+
+    # release CAS no-ops when the on-disk token no longer matches ours.
+    payload = _read_lock(lock_path)
+    payload["lease_token"] = "different"
+    lock_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    lease.release(pass_id="p1")
+    assert lock_path.exists()  # not unlinked because token mismatched
+
+    # A fresh, matching acquire/release pair fully cleans up.
+    lock_path.unlink()
+    lease2 = FileSchedulerLease(lock_path, ttl_seconds=10, workspace_root=tmp_path)
+    assert lease2.acquire(pass_id="p2", started_at=_dt("2026-05-21T12:00:00Z"))["acquired"] is True
+    lease2.release(pass_id="p2")
+    assert not lock_path.exists()

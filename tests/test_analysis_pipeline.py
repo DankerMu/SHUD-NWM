@@ -435,8 +435,15 @@ def test_analysis_real_gateway_submission_uses_configured_era5_area(
             )
             self.rendered_script = ""
 
-        def _submit_rendered_script(self, rendered_script: str, array_spec: str | None = None) -> str:
+        def _submit_rendered_script(
+            self,
+            rendered_script: str,
+            array_spec: str | None = None,
+            *,
+            comment: str | None = None,
+        ) -> str:
             del array_spec
+            del comment
             self.rendered_script = rendered_script
             return "12345"
 

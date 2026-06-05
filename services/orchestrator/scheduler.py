@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import stat
+import threading
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
@@ -869,6 +871,10 @@ class ProductionScheduler:
                 artifact_path=artifact_path,
             )
 
+        heartbeat = _LeaseHeartbeat(
+            lock, pass_id, max(1, self.config.lock_ttl_seconds // 3)
+        )
+        heartbeat.start()
         try:
             root_preflight = _scheduler_runtime_root_preflight(self.config)
             if root_preflight["status"] == "blocked":
@@ -947,6 +953,42 @@ class ProductionScheduler:
             mutation_candidate_count = len(candidates) + len(pending_cancel_candidates) + len(
                 pending_status_sync_candidates
             )
+            # §4.2 lease: if the heartbeat reports our lease was taken over
+            # mid-pass, short-circuit BEFORE any submission/cancellation so we
+            # never race the new holder at the DB layer. The #290 DB reservation
+            # would still prevent a real double-submit, but executing a doomed
+            # pass wastes work and muddies evidence. Fall through to finally,
+            # which stops the heartbeat and token-CAS releases the lock (a no-op
+            # if it was already reclaimed).
+            if heartbeat.lost:
+                finished_at = _now(self.config)
+                evidence = self._base_evidence(pass_id, started_at)
+                evidence.update(
+                    {
+                        "status": "lease_lost",
+                        "finished_at": _format_utc(finished_at),
+                        "lock": lock_result,
+                        "counts": _empty_counts(),
+                        "candidates": [],
+                        "blocked_candidates": [],
+                        "skipped_candidates": [],
+                        "duplicate_exclusions": list(self.config.source_exclusions),
+                        "model_discovery": _empty_model_discovery(),
+                        "source_cycles": [],
+                        "no_mutation_proof": _no_mutation_proof(),
+                        "execution_boundary": "lease_lost",
+                    }
+                )
+                if root_preflight["status"] != "not_required":
+                    evidence["root_preflight"] = root_preflight
+                artifact_path = self._write_evidence(pass_id, evidence)
+                status = _evidence_status(evidence, "lease_lost")
+                return SchedulerPassResult(
+                    pass_id=pass_id,
+                    status=status,
+                    evidence=evidence,
+                    artifact_path=artifact_path,
+                )
             if not self.config.dry_run and mutation_candidate_count:
                 evidence_reservation = self._reserve_pre_execution_evidence(
                     pass_id,
@@ -1234,6 +1276,10 @@ class ProductionScheduler:
                 artifact_path=artifact_path,
             )
         finally:
+            try:
+                heartbeat.stop()
+            except Exception:
+                pass
             lock.release(pass_id=pass_id)
 
     def _run_restart_reconcile(self) -> dict[str, Any] | None:
@@ -2808,13 +2854,79 @@ class ProductionScheduler:
         return artifact_path
 
 
+def _default_owner_liveness_probe(payload: Mapping[str, Any]) -> bool | None:
+    """Probe whether the lock owner process is alive.
+
+    Same-host + valid pid -> os.kill(pid, 0): True if reachable, False on
+    ProcessLookupError (dead), True on PermissionError (alive, other user).
+    Different host or no pid -> None (cannot probe cross-host).
+    """
+
+    host = payload.get("host")
+    pid = payload.get("pid")
+    if host != socket.gethostname() or not isinstance(pid, int):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+class _LeaseHeartbeat:
+    """Background daemon thread that renews a lease until stopped or lost."""
+
+    def __init__(self, lease: FileSchedulerLease, pass_id: str, interval_seconds: float) -> None:
+        self._lease = lease
+        self._pass_id = pass_id
+        self._interval = max(0.001, float(interval_seconds))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.lost = False
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="lease-heartbeat", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                renewed = self._lease.renew(pass_id=self._pass_id)
+            except Exception:
+                renewed = False
+            if not renewed:
+                self.lost = True
+                return
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=self._interval + 1.0)
+        self._thread = None
+
+
 class FileSchedulerLease:
-    def __init__(self, lock_path: Path, *, ttl_seconds: int, workspace_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        lock_path: Path,
+        *,
+        ttl_seconds: int,
+        workspace_root: Path | None = None,
+        owner_liveness_probe: Callable[[Mapping[str, Any]], bool | None] | None = None,
+    ) -> None:
         self.lock_path = lock_path
         self.ttl_seconds = ttl_seconds
         self.workspace_root = workspace_root
         self.acquired = False
         self.lease_token: str | None = None
+        self._owner_liveness_probe = owner_liveness_probe or _default_owner_liveness_probe
 
     def acquire(self, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
         token = uuid4().hex
@@ -2824,6 +2936,9 @@ class FileSchedulerLease:
             "pass_id": pass_id,
             "lease_token": token,
             "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "heartbeat_seq": 0,
+            "heartbeat_at": _format_utc(started_at),
             "started_at": _format_utc(started_at),
             "lock_path": str(self.lock_path),
         }
@@ -2843,6 +2958,76 @@ class FileSchedulerLease:
                 "reason": error.reason,
                 "existing_lock": {"raw": None},
             }
+
+    def renew(self, *, pass_id: str) -> bool:
+        """Refresh our lease heartbeat in place (CAS on pass_id + lease_token).
+
+        Returns True only if we still own the lock and rewrote it. Returns
+        False if the lock is gone or was taken over (token/pass_id mismatch).
+        """
+
+        if not self.acquired or self.lease_token is None:
+            return False
+        try:
+            with self._guarded() as parent_fd:
+                existing = self._read_existing_lock(parent_fd=parent_fd)
+                if (
+                    existing.get("pass_id") != pass_id
+                    or existing.get("lease_token") != self.lease_token
+                ):
+                    return False
+                now = datetime.now(UTC)
+                payload = dict(existing)
+                payload["heartbeat_seq"] = int(existing.get("heartbeat_seq", 0)) + 1
+                payload["heartbeat_at"] = _format_utc(now)
+                self._rewrite_lock_in_place(payload, parent_fd=parent_fd)
+                return True
+        except UnsafeSchedulerLockError:
+            return False
+
+    def _rewrite_lock_in_place(self, payload: Mapping[str, Any], *, parent_fd: int) -> None:
+        # Crash-atomic renew: write the new payload to a sibling temp file then
+        # rename it over the live lock. The truncate-then-write form left an
+        # empty lock if write/utime raised after truncation; an atomic same-dir
+        # rename never exposes a half-written or empty lock file.
+        tmp_name = f"{self.lock_path.name}.renew.tmp"
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(tmp_name, flags, 0o644, dir_fd=parent_fd)
+        except OSError as error:
+            if error.errno in {ELOOP, ENOTDIR}:
+                raise UnsafeSchedulerLockError("unsafe_lock_symlink") from error
+            raise
+        try:
+            os.write(fd, json.dumps(dict(payload), sort_keys=True).encode("utf-8"))
+            # Refresh st_mtime explicitly for coarse-mtime filesystems.
+            os.utime(fd)
+            os.close(fd)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise
+        try:
+            os.rename(
+                tmp_name,
+                self.lock_path.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        except OSError as error:
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            if error.errno in {ELOOP, ENOTDIR}:
+                raise UnsafeSchedulerLockError("unsafe_lock_symlink") from error
+            raise
 
     def _acquire_locked(
         self,
@@ -2866,6 +3051,25 @@ class FileSchedulerLease:
                     "existing_lock": state["existing_lock"],
                 }
             if state["stale"]:
+                stale_existing = state["existing_lock"]
+                token0 = stale_existing.get("lease_token")
+                seq0 = stale_existing.get("heartbeat_seq")
+                # CAS: re-read under the same guard; a holder that renewed
+                # between the stale decision and now must never be unlinked.
+                try:
+                    os.stat(self.lock_path.name, dir_fd=parent_fd, follow_symlinks=False)
+                    lock_present = True
+                except FileNotFoundError:
+                    lock_present = False
+                if lock_present:
+                    reread = self._read_existing_lock(parent_fd=parent_fd)
+                    if (reread.get("lease_token"), reread.get("heartbeat_seq")) != (token0, seq0):
+                        return {
+                            "acquired": False,
+                            "contention": True,
+                            "lock_path": str(self.lock_path),
+                            "existing_lock": reread,
+                        }
                 _unlink_lock_file(self.lock_path.name, parent_fd=parent_fd)
                 return self._acquire_locked(
                     pass_id=pass_id,
@@ -2959,7 +3163,18 @@ class FileSchedulerLease:
             and existing.get("pass_id") not in (None, "")
         )
         mtime = datetime.fromtimestamp(lock_stat.st_mtime, tz=UTC)
-        stale = (now - mtime).total_seconds() > self.ttl_seconds
+        mtime_age = (now - mtime).total_seconds()
+        if mtime_age <= self.ttl_seconds:
+            stale = False  # fresh heartbeat / recent lock
+        else:
+            liveness = self._owner_liveness_probe(existing)
+            if liveness is True:
+                stale = False  # owner provably alive: live contention, never reclaim
+            elif liveness is False:
+                stale = True  # owner provably dead
+            else:
+                # Cross-host unknown: require 2x TTL silence before reclaiming.
+                stale = mtime_age > 2 * self.ttl_seconds
         if stale and not scheduler_owned:
             return {
                 "unsafe": True,
@@ -6969,6 +7184,10 @@ def _slurm_preflight(config: ProductionSchedulerConfig) -> dict[str, Any]:
     checks["gateway"] = gateway_check
     blockers.extend(gateway_blockers)
 
+    grib_check, grib_blockers = _slurm_grib_env_check(config)
+    checks["grib_env"] = grib_check
+    blockers.extend(grib_blockers)
+
     return {
         "status": "blocked" if blockers else "ready",
         "enabled": True,
@@ -7344,6 +7563,125 @@ def _slurm_gateway_check(
                 ),
                 "host": endpoint.get("host"),
                 "port": endpoint.get("port"),
+                **({"reason": str(result["reason"])} if result.get("reason") else {}),
+            }
+        )
+
+    return redact_payload(checks), redact_payload(blockers)
+
+
+def _scheduler_grib_env_root(config: ProductionSchedulerConfig) -> str:
+    env_value = (
+        config.slurm_env.get("NHMS_GRIB_ENV_ROOT")
+        if isinstance(config.slurm_env, Mapping)
+        else None
+    )
+    return str(env_value or os.getenv("NHMS_GRIB_ENV_ROOT") or "").strip()
+
+
+def _default_grib_system_eccodes_probe(
+    config: ProductionSchedulerConfig,
+) -> Mapping[str, Any]:
+    """Model whether compute nodes ship system cdo+libeccodes.
+
+    The control node cannot probe a compute node's shared libraries without a
+    job, so node-eccodes-availability is asserted by the operator via
+    ``NHMS_GRIB_SYSTEM_ECCODES``. Absent that assertion we report unavailable so
+    an empty ``NHMS_GRIB_ENV_ROOT`` (which skips PATH injection) fails loud
+    instead of silently breaking GRIB at runtime on a node that lacks eccodes.
+    """
+
+    asserted = (
+        config.slurm_env.get("NHMS_GRIB_SYSTEM_ECCODES")
+        if isinstance(config.slurm_env, Mapping)
+        else None
+    )
+    asserted = str(asserted or os.getenv("NHMS_GRIB_SYSTEM_ECCODES") or "").strip()
+    if asserted.lower() in {"1", "true", "yes"}:
+        return {"system_eccodes_available": True}
+    return {
+        "system_eccodes_available": False,
+        "reason": "NHMS_GRIB_ENV_ROOT unset and system eccodes not asserted",
+    }
+
+
+def _slurm_grib_env_check(
+    config: ProductionSchedulerConfig,
+    *,
+    probe: Callable[[ProductionSchedulerConfig], Mapping[str, Any]] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Fail loud when GRIB tooling will be unavailable on the compute node.
+
+    Compute nodes lack system cdo/libeccodes; GRIB clip/read only works when
+    ``NHMS_GRIB_ENV_ROOT`` (a shared conda env with bin/ + lib/) is injected into
+    the sbatch PATH/LD_LIBRARY_PATH. That injection is truthiness-only and never
+    validates the directory, so a typo'd root silently injects a broken PATH and
+    an empty root silently skips injection -- both break GRIB at runtime with no
+    fail-loud (this bit us in #291). Two gates, both required by spec §4.5:
+
+    1. **Root SET:** ``<root>/bin`` AND ``<root>/lib`` must both exist as dirs,
+       else ``GRIB_ENV_ROOT_INVALID``.
+    2. **Root UNSET/empty:** injection is skipped, which is safe ONLY where the
+       compute node already ships system eccodes. ``probe`` (injectable, default
+       ``_default_grib_system_eccodes_probe``) models that; unavailable or
+       indeterminate -> ``GRIB_ENV_UNAVAILABLE``. A probe that raises fails safe
+       as BLOCKED rather than faking PASS.
+
+    Only valid root with real bin+lib, or empty root with asserted system
+    eccodes, PASS. When genuinely OK this adds NO blocker so it never fences a
+    healthy run (never-break-userspace).
+    """
+
+    checks: dict[str, Any] = {}
+    blockers: list[dict[str, Any]] = []
+
+    root = _scheduler_grib_env_root(config)
+    checks["root"] = root or None
+
+    if root:
+        root_path = Path(root)
+        bin_ok = (root_path / "bin").is_dir()
+        lib_ok = (root_path / "lib").is_dir()
+        checks["bin_present"] = bin_ok
+        checks["lib_present"] = lib_ok
+        if not (bin_ok and lib_ok):
+            blockers.append(
+                {
+                    "code": "GRIB_ENV_ROOT_INVALID",
+                    "field": "NHMS_GRIB_ENV_ROOT",
+                    "message": (
+                        f"NHMS_GRIB_ENV_ROOT set but {root}/bin or {root}/lib "
+                        "missing; GRIB tooling would not be injected on the "
+                        "compute node."
+                    ),
+                    "root": root,
+                    "bin_present": bin_ok,
+                    "lib_present": lib_ok,
+                }
+            )
+        return redact_payload(checks), redact_payload(blockers)
+
+    probe_fn = probe or _default_grib_system_eccodes_probe
+    try:
+        result = dict(probe_fn(config))
+    except Exception as error:  # noqa: BLE001 - injected probe must not break the pass.
+        result = {
+            "system_eccodes_available": False,
+            "reason": str(redact_payload(str(error))),
+        }
+
+    available = bool(result.get("system_eccodes_available"))
+    checks["system_eccodes_available"] = available
+    if not available:
+        blockers.append(
+            {
+                "code": "GRIB_ENV_UNAVAILABLE",
+                "field": "NHMS_GRIB_ENV_ROOT",
+                "message": (
+                    "NHMS_GRIB_ENV_ROOT is empty so GRIB env injection is "
+                    "skipped, and compute-node system eccodes is not confirmed; "
+                    "GRIB clip/read would fail at runtime on the node."
+                ),
                 **({"reason": str(result["reason"])} if result.get("reason") else {}),
             }
         )

@@ -119,7 +119,11 @@ class TilePublisher:
             try:
                 result = self._publish_qdown_from_database(session, cycle_id)
             except PublishError as error:
-                if error.error_code in {"NO_PUBLISHABLE_QDOWN_PRODUCTS", "PUBLISH_IDENTITY_INCOMPLETE"}:
+                if error.error_code in {
+                    "NO_PUBLISHABLE_QDOWN_PRODUCTS",
+                    "PUBLISH_IDENTITY_INCOMPLETE",
+                    "DELIVERY_SCHEMA_MISSING",
+                }:
                     raise PublishError(
                         "NO_PUBLISHABLE_PRODUCTS",
                         "No publishable flood return-period or q_down display products "
