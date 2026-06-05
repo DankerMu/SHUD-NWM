@@ -476,13 +476,20 @@ def reconcile_reserved_unbound_jobs(
             or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id))
         ):
             # Confirmed-absent BUT possibly just slurmdbd propagation lag: if the
-            # reservation is younger than `grace`, defer demotion to a later pass
-            # rather than risk demoting an in-flight job into a reclaim+re-sbatch.
-            created = getattr(job, "created_at", None)
-            if created is not None:
-                if created.tzinfo is None:
-                    created = created.replace(tzinfo=UTC)
-                if now() - created < grace:
+            # reservation's last sbatch attempt is younger than `grace`, defer
+            # demotion to a later pass rather than risk demoting an in-flight job
+            # into a reclaim+re-sbatch double-submit. Anchor on updated_at —
+            # refreshed by the reserve INSERT, the reclaim takeover, AND bind — so
+            # a reclaimed+re-submitted reservation keeps grace coverage; created_at
+            # is left stale by reclaim and would silently drop that protection.
+            # (updated_at is NOT NULL by DB default; created_at is a legacy fallback.)
+            anchor = getattr(job, "updated_at", None)
+            if anchor is None:
+                anchor = getattr(job, "created_at", None)
+            if anchor is not None:
+                if anchor.tzinfo is None:
+                    anchor = anchor.replace(tzinfo=UTC)
+                if now() - anchor < grace:
                     outcomes.append(
                         ReservationReconcileOutcome(
                             job_id=job.job_id,
