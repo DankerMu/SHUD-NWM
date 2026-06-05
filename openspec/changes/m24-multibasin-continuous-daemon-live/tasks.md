@@ -212,16 +212,31 @@ Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_mo
 
 ## 5. Diagnostic retirement and documentation
 
-- [ ] 5.1 New guardrail test `test_production_scheduler_does_not_invoke_qhh_diagnostic_scripts`
+- [x] 5.1 New guardrail test `test_production_scheduler_does_not_invoke_qhh_diagnostic_scripts`
   asserting the production scheduler/chain path references/invokes none of `run_qhh_cycle.sh`,
   `run_qhh_continuous.py`, `create_qhh_shud_manifest.py` (existing `tests/test_qhh_scripts_static.py`
   covers the scripts themselves, not this production-path assertion).
-- [ ] 5.2 Label those scripts diagnostic-only in code headers + docs, with a concrete smoke command
+      — `tests/test_qhh_scripts_static.py::test_production_scheduler_does_not_invoke_qhh_diagnostic_scripts`
+        globs `services/orchestrator/*.py`, asserts none contain the three script basenames/paths or
+        import `create_qhh_shud_manifest`, and that runtime-manifest assembly
+        (`_build_forecast_runtime_manifest`) lives in chain.py. PASS (production path has zero refs).
+- [x] 5.2 Label those scripts diagnostic-only in code headers + docs, with a concrete smoke command
   and minimal pass condition if retained.
-- [ ] 5.3 Update `docs/runbooks/qhh-22-business-bringup.md` and `progress.md`: production = generic
+      — `DIAGNOSTIC-ONLY` header added to `scripts/run_qhh_cycle.sh` (comment block after
+        `set -euo pipefail`) and `scripts/run_qhh_continuous.py` (module docstring above
+        `from __future__`); both name the production daemon path + a `--once` smoke command + minimal
+        PASS (`frequency_done`/no failed candidate). `create_qhh_shud_manifest.py` already labelled.
+- [x] 5.3 Update `docs/runbooks/qhh-22-business-bringup.md` and `progress.md`: production = generic
   daemon; diagnostic lane is bring-up fallback.
-- [ ] 5.4 Update `infra/env/*.example`, `infra/compose.compute.yml`, systemd/timer docs for the
+      — runbook banner adds a "生产路径 = 通用守护进程 (M24)" subsection (daemon path + diagnostics =
+        fallback + guardrail test + #292 receipt `artifacts/m24/m24-daemon-5880d09/` + worklog);
+        `progress.md` adds an M24-§5 entry mirroring the existing QHH-live bullet style.
+- [x] 5.4 Update `infra/env/*.example`, `infra/compose.compute.yml`, systemd/timer docs for the
   daemon + gateway contract.
+      — `compute.example` gains comment blocks naming the generic daemon as production runner over
+        `NHMS_SCHEDULER_*` + gateway as submit path over `SLURM_GATEWAY_*`; `compose.compute.yml`
+        annotates `scheduler-once` as the production lane; systemd `.timer` doc adds the gateway +
+        #292 receipt pointer. No new env vars invented.
 
 Evidence Floor: guardrail test PASS; runbook/progress updated; env/compose/timer docs updated.
 Verification: `uv run pytest -q tests/test_qhh_scripts_static.py tests/test_orchestration_chain.py tests/test_production_scheduler.py` + `uv run ruff check .` + `openspec validate m24-multibasin-continuous-daemon-live --strict --no-interactive` + docs diff.

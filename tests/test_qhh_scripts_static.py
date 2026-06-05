@@ -9,6 +9,61 @@ from packages.common.object_store import LocalObjectStore, sha256_bytes
 from scripts import create_qhh_shud_manifest as qhh_manifest
 from workers.model_registry import qhh_production_bootstrap
 
+# M24 §5.1 diagnostic-retirement guardrail: the three QHH diagnostic scripts are
+# RETAINED for manual debugging but MUST NOT be referenced/invoked by the production
+# scheduler/chain cohort path. The supported production runner is the generic daemon
+# (`nhms-pipeline plan-production --continuous` -> services/orchestrator scheduler.run_continuous,
+# submitting through the standalone Slurm gateway). This static scan enforces that boundary.
+_QHH_DIAGNOSTIC_TOKENS = (
+    "run_qhh_cycle",
+    "run_qhh_continuous",
+    "create_qhh_shud_manifest",
+    "scripts/run_qhh_cycle.sh",
+    "scripts/run_qhh_continuous.py",
+    "scripts/create_qhh_shud_manifest.py",
+)
+
+
+def _production_cohort_sources() -> list[Path]:
+    """Production scheduler/chain modules that drive the cohort path.
+
+    Globs every services/orchestrator/*.py so new orchestrator modules are covered
+    automatically; the diagnostic scripts and this test file are NOT scanned (they
+    legitimately contain the diagnostic basenames).
+    """
+    return sorted(Path("services/orchestrator").glob("*.py"))
+
+
+def test_production_scheduler_does_not_invoke_qhh_diagnostic_scripts() -> None:
+    sources = _production_cohort_sources()
+    assert sources, "expected services/orchestrator/*.py production modules to scan"
+
+    for source_path in sources:
+        text = source_path.read_text(encoding="utf-8")
+        for token in _QHH_DIAGNOSTIC_TOKENS:
+            assert token not in text, (
+                f"production cohort module {source_path} references diagnostic token "
+                f"{token!r}; the three QHH scripts are diagnostic-only and must not be "
+                "wired into the production scheduler/chain path (M24 §5.1)"
+            )
+        # The manifest builder must be the chain's own runtime-manifest assembly,
+        # never an import of the diagnostic standalone builder.
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ")):
+                assert "create_qhh_shud_manifest" not in stripped, (
+                    f"production cohort module {source_path} imports the diagnostic "
+                    "manifest builder (create_qhh_shud_manifest); production manifests "
+                    "are assembled by services/orchestrator/chain.py (M24 §5.1)"
+                )
+
+    # Mirror the spec's "manifest builder is the chain" requirement: the production
+    # runtime-manifest assembly lives in the chain, not the diagnostic script.
+    chain_text = Path("services/orchestrator/chain.py").read_text(encoding="utf-8")
+    assert "_build_forecast_runtime_manifest" in chain_text, (
+        "production runtime-manifest assembly must live in services/orchestrator/chain.py"
+    )
+
 
 def test_backend_smoke_exports_package_version_before_seed_helpers() -> None:
     script = Path("scripts/run_qhh_backend_smoke.sh").read_text(encoding="utf-8")

@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DIAGNOSTIC-ONLY: standalone qhh single-cycle full-chain runner.
+#
+# This script is a developer diagnostic / bring-up fallback and is NOT the production
+# path. The supported production path is the generic continuous daemon
+# (`nhms-pipeline plan-production --continuous` -> services/orchestrator/scheduler.py
+# `run_continuous`), which submits through the standalone Slurm gateway and carries
+# multi-basin concurrency + cross-cycle warm-start that this script does not. Do not
+# wire this into the daemon; full retirement is tracked under M24 §5 / #293. Retained
+# only as a manual bring-up/triage lane and for the static reference test
+# (tests/test_qhh_scripts_static.py).
+#
+# Smoke (manual debugging) — single cycle via the diagnostic continuous runner:
+#   uv run python scripts/run_qhh_continuous.py --once --executor slurm
+# Minimal PASS condition: exits 0 and the cycle reaches the `frequency_done` status —
+# i.e. this script writes its terminal state file with status="frequency_done" after
+# create_qhh_shud_manifest -> SHUD runtime -> parse -> publish complete. See
+# docs/runbooks/qhh-22-business-bringup.md §3 for the documented bring-up invocation.
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 

@@ -86,6 +86,12 @@ services:
       - "8000"
     restart: unless-stopped
 
+  # scheduler-once: the generic production scheduler/daemon lane (M24). This runs
+  # `nhms-pipeline plan-production` (-> services/orchestrator/scheduler.py), which
+  # submits through the Slurm gateway. This is the production runner; the legacy
+  # run_qhh_* scripts are diagnostic-only fallbacks (M24 §5 / #293). Add
+  # `--continuous` (see nhms-compute-scheduler.timer in the systemd docs) for the
+  # bounded continuous daemon.
   scheduler-once:
     image: ${NHMS_APP_IMAGE:-nhms-app}:${NHMS_IMAGE_TAG:-m22-placeholder}
     profiles: ["manual"]

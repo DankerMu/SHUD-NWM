@@ -31,6 +31,12 @@
 #   Disable with:
 #     systemctl disable --now nhms-compute-scheduler.timer
 #     systemctl reset-failed nhms-compute-scheduler.service
+#   This timer lane is the production continuous daemon
+#   (nhms-pipeline plan-production --continuous -> services/orchestrator/scheduler.py),
+#   submitting via the Slurm gateway (SLURM_GATEWAY_* in compute.env); the legacy
+#   run_qhh_* scripts are diagnostic-only fallbacks (M24 §5 / #293). Live daemon
+#   receipt: artifacts/m24/m24-daemon-5880d09/ (lease_nfs.json / grib_preflight.json /
+#   daemon_pass.json).
 
 [Unit]
 Description=NHMS node 22 compute/control compose

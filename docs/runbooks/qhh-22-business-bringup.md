@@ -9,6 +9,17 @@
 > ⚠️ **架构转向（m24）**：本 runbook 记录的是 `run_qhh_continuous.py → run_qhh_cycle.sh` **诊断/bring-up 路径**，m23 `design.md` 已**否决其作为生产自动化**。
 > 正式"全持续守护"迁移到**通用编排器**（`services/orchestrator` scheduler/chain + Slurm HTTP gateway），由 **m24** 落地：多流域并发 + 跨周期暖启动承接 + 退役诊断脚本。
 > OpenSpec：`openspec/changes/m24-multibasin-continuous-daemon-live/`；跟踪 epic **#285**（子任务 #286–#293）。本文继续作为诊断/排障与 m24 bring-up 期回退手册。
+>
+> ✅ **生产路径 = 通用守护进程（M24，权威）**：正式业务运行是通用 daemon
+> `nhms-pipeline plan-production --continuous`（→ `services/orchestrator/scheduler.py` `run_continuous`），
+> 经**独立 Slurm gateway** 提交；多流域并发 + 两阶段预留 + 跨周期暖启动均在此路径。
+> 本 runbook 的 `run_qhh_continuous.py → run_qhh_cycle.sh` 诊断 lane **仅作 bring-up 回退/排障**，
+> **不**声称 production；M24 §5/#293 已加护栏测试
+> （`tests/test_qhh_scripts_static.py::test_production_scheduler_does_not_invoke_qhh_diagnostic_scripts`）
+> 静态断言生产 scheduler/chain 不引用这三个诊断脚本。
+> #292 daemon live receipt：`artifacts/m24/m24-daemon-5880d09/`
+> （`lease_nfs.json` 两进程心跳锁、`grib_preflight.json` GRIB 预检、`daemon_pass.json` 守护进程通过证据）；
+> worklog `openspec/changes/m24-multibasin-continuous-daemon-live/issue-292-worklog.md`。
 
 ---
 
