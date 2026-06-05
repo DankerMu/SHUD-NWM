@@ -47,6 +47,19 @@ RECONCILE_UNVERIFIED_STATUS = "reconcile_unverified"
 # typed rather than blindly re-submitting inside reconcile.
 RESERVATION_LOST_STATUS = "reservation_lost"
 
+# Minimum survival window a reserved-unbound row must clear before a *confirmed
+# absence* from accounting may demote it to reservation_lost. sacct/slurmdbd
+# accounting propagation lags sbatch acceptance: a job sbatch just accepted can
+# be momentarily invisible to sacct (returncode 0, no matching comment row).
+# Within this grace we treat that empty answer as "not yet propagated", keep the
+# row reserved, and defer to a later pass — preventing the misjudge→reclaim→
+# re-sbatch double-submit. 120s comfortably covers observed slurmdbd lag.
+RESERVATION_ABSENCE_GRACE = timedelta(seconds=120)
+
+# Typed action for a reserved-unbound row that queried absent but is younger
+# than RESERVATION_ABSENCE_GRACE: deliberately NOT demoted this pass.
+ABSENCE_UNCONFIRMED_ACTION = "absence_unconfirmed"
+
 
 class ReconcileQueryUnavailable(Exception):
     """sacct could not be reached / did not answer authoritatively.
@@ -371,7 +384,14 @@ CommentSacctQuerier = Callable[[str], "SacctRecord | None"]
 class ReservationReconcileOutcome:
     job_id: str
     idempotency_key: str
-    action: str  # "bound" | "reservation_lost" | "query_unavailable"
+    # "bound" | "reservation_lost" | "query_unavailable" | "absence_unconfirmed".
+    # "absence_unconfirmed": accounting answered absent (query succeeded, no
+    # matching comment row) but the reservation is younger than
+    # RESERVATION_ABSENCE_GRACE, so the absence may merely be slurmdbd
+    # propagation lag for a just-accepted sbatch. We keep the row reserved and
+    # defer demotion to a later pass — NEVER mark reservation_lost here, which
+    # would let the reserve gate reclaim+re-sbatch an in-flight job.
+    action: str
     status: str
     slurm_job_id: str | None = None
 
@@ -380,6 +400,8 @@ def reconcile_reserved_unbound_jobs(
     store,
     *,
     comment_query: CommentSacctQuerier,
+    grace: timedelta = RESERVATION_ABSENCE_GRACE,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> list[ReservationReconcileOutcome]:
     """Reconcile the submit-crash window: reserved rows with no slurm_job_id.
 
@@ -400,6 +422,20 @@ def reconcile_reserved_unbound_jobs(
     submission). On a transient failure we keep the row ``reserved`` and let a
     later reconcile pass retry; only a *confirmed* absence marks
     ``reservation_lost``.
+
+    Even a *confirmed* absence is gated by a minimum survival window
+    (``grace``): sacct/slurmdbd accounting propagation lags sbatch acceptance,
+    so a job just accepted can be momentarily invisible to the comment query
+    (returncode 0, no matching row). Demoting such a young reservation to
+    ``reservation_lost`` would let the reserve gate reclaim it and re-sbatch the
+    very job that is in fact in flight — the same double-submit failure mode as
+    the transient case. So a reserved-unbound row younger than ``grace`` whose
+    comment query confirms absence is emitted ``absence_unconfirmed`` and left
+    ``reserved`` for a later pass (where accounting will have caught up and
+    either binds it or, past grace, demotes it). A row with no ``created_at`` to
+    prove youth, or one already older than ``grace``, keeps the old behavior and
+    demotes to ``reservation_lost`` so liveness never regresses. ``now`` is
+    injectable for deterministic tests.
     """
 
     outcomes: list[ReservationReconcileOutcome] = []
@@ -439,6 +475,23 @@ def reconcile_reserved_unbound_jobs(
             or idempotency_key_from_comment(record.comment) != idempotency_key
             or not SLURM_JOB_ID_RE.fullmatch(str(record.slurm_job_id))
         ):
+            # Confirmed-absent BUT possibly just slurmdbd propagation lag: if the
+            # reservation is younger than `grace`, defer demotion to a later pass
+            # rather than risk demoting an in-flight job into a reclaim+re-sbatch.
+            created = getattr(job, "created_at", None)
+            if created is not None:
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
+                if now() - created < grace:
+                    outcomes.append(
+                        ReservationReconcileOutcome(
+                            job_id=job.job_id,
+                            idempotency_key=str(idempotency_key),
+                            action=ABSENCE_UNCONFIRMED_ACTION,
+                            status=str(job.status),
+                        )
+                    )
+                    continue
             store.update_job_status(
                 job.job_id,
                 RESERVATION_LOST_STATUS,

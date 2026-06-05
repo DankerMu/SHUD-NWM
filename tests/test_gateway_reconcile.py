@@ -151,6 +151,21 @@ def _fake_sacct(records: dict[str, SacctRecord | None]):
     return _query
 
 
+def _past_grace_now(store: _StoreRepo, grace: Any) -> Any:
+    """A tz-aware ``now`` just past ``grace`` for the sole reserved-unbound row.
+
+    SQLite returns naive ``created_at``; normalize to UTC so the injected clock
+    is comparable with the reconcile guard's tz-aware arithmetic.
+    """
+
+    from datetime import UTC, timedelta
+
+    created = store.store.query_reserved_unbound_jobs()[0].created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return created + grace + timedelta(seconds=1)
+
+
 def test_restart_reconcile_reads_pipeline_job_not_memory() -> None:
     # Durable in-flight job exists; gateway memory (_jobs) is irrelevant/empty.
     store = _store()
@@ -571,7 +586,16 @@ def test_submit_timeout_unknown_result_not_blindly_resubmitted() -> None:
         submit_attempts.append(idem)
         return None
 
-    outcomes = reconcile_reserved_unbound_jobs(store.store, comment_query=_comment_query)
+    # Drive a clock past the absence grace so the confirmed-absent verdict is
+    # authoritative (not deferred as slurmdbd propagation lag).
+    from services.orchestrator.reconcile import RESERVATION_ABSENCE_GRACE
+
+    past_grace = _past_grace_now(store, RESERVATION_ABSENCE_GRACE)
+    outcomes = reconcile_reserved_unbound_jobs(
+        store.store,
+        comment_query=_comment_query,
+        now=lambda: past_grace,
+    )
 
     # Reconcile queried accounting (did not re-submit) and marked it typed.
     assert submit_attempts == [key]
@@ -660,7 +684,15 @@ def test_confirmed_absent_marks_reservation_lost() -> None:
     def _comment_query(_idem: str) -> Any:
         return None  # query succeeded; accounting confirms no such job.
 
-    outcomes = reconcile_reserved_unbound_jobs(store.store, comment_query=_comment_query)
+    # Past the absence grace, a confirmed-absent answer is authoritative.
+    from services.orchestrator.reconcile import RESERVATION_ABSENCE_GRACE
+
+    past_grace = _past_grace_now(store, RESERVATION_ABSENCE_GRACE)
+    outcomes = reconcile_reserved_unbound_jobs(
+        store.store,
+        comment_query=_comment_query,
+        now=lambda: past_grace,
+    )
 
     assert len(outcomes) == 1
     assert outcomes[0].action == "reservation_lost"
@@ -983,3 +1015,239 @@ def test_repeated_transient_reconcile_keeps_reservation_reserved() -> None:
         assert state["status"] == "reserved"
         assert state["status"] != RESERVATION_LOST_STATUS
         assert state["slurm_job_id"] is None
+
+
+# --- Grace guard for confirmed-but-young absence (slurmdbd propagation lag) ----
+
+
+def _reserved_row(store: _StoreRepo, key: str, *, job_id: str) -> PipelineJob:
+    """Reserve a candidate and return its durable PipelineJob row."""
+
+    from services.orchestrator.reservation import reserve_candidate
+
+    reserve_candidate(
+        store,
+        idempotency_key=key,
+        job_id=job_id,
+        run_id="run_1",
+        cycle_id="cycle_1",
+        job_type="forcing",
+        model_id="model_1",
+        stage="forcing",
+    )
+    row = (
+        store.store.session.query(PipelineJob)
+        .filter(PipelineJob.idempotency_key == key)
+        .one()
+    )
+    assert row.slurm_job_id is None
+    return row
+
+
+def test_young_confirmed_absence_defers_not_reservation_lost() -> None:
+    """A reserved-unbound row younger than the absence grace whose comment query
+    confirms absence (returncode 0, no matching row) must NOT be demoted to
+    reservation_lost — it may merely be slurmdbd propagation lag for a job
+    sbatch just accepted. It is emitted ``absence_unconfirmed``, stays
+    ``reserved``, and store.update_job_status is never called for it (so the
+    reserve gate cannot reclaim+re-sbatch an in-flight job → no double submit).
+    """
+
+    from datetime import UTC, datetime
+
+    from services.orchestrator.reconcile import reconcile_reserved_unbound_jobs
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forcing"
+    fixed_now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC)
+    row = _reserved_row(store, key, job_id="job_young")
+    row.created_at = fixed_now  # reservation written exactly at `now`.
+    store.store.session.flush()
+
+    update_calls: list[tuple[str, str]] = []
+    original_update = store.store.update_job_status
+
+    def _spy_update(job_id: str, status: str, **kwargs: Any) -> Any:
+        update_calls.append((job_id, status))
+        return original_update(job_id, status, **kwargs)
+
+    store.store.update_job_status = _spy_update  # type: ignore[method-assign]
+
+    def _comment_query(_idem: str) -> Any:
+        return None  # query succeeded; accounting confirms no such job (yet).
+
+    outcomes = reconcile_reserved_unbound_jobs(
+        store.store,
+        comment_query=_comment_query,
+        now=lambda: fixed_now,
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == "absence_unconfirmed"
+    assert outcomes[0].status == "reserved"
+    assert update_calls == []  # never demoted → no reclaim → no double submit.
+    state = store.query_candidate_state(key)
+    assert state["status"] == "reserved"
+    assert state["slurm_job_id"] is None
+
+
+def test_old_confirmed_absence_marks_reservation_lost() -> None:
+    """A reserved-unbound row OLDER than the grace whose comment query confirms
+    absence keeps the legacy behavior: demote to reservation_lost. Past the
+    propagation window, an empty answer is authoritative — sbatch did not take.
+    """
+
+    from datetime import UTC, datetime, timedelta
+
+    from services.orchestrator.reconcile import (
+        RESERVATION_LOST_STATUS,
+        reconcile_reserved_unbound_jobs,
+    )
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forcing"
+    fixed_now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC)
+    row = _reserved_row(store, key, job_id="job_old")
+    row.created_at = fixed_now - timedelta(minutes=10)  # well past the grace.
+    store.store.session.flush()
+
+    def _comment_query(_idem: str) -> Any:
+        return None
+
+    outcomes = reconcile_reserved_unbound_jobs(
+        store.store,
+        comment_query=_comment_query,
+        now=lambda: fixed_now,
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == "reservation_lost"
+    state = store.query_candidate_state(key)
+    assert state["status"] == RESERVATION_LOST_STATUS
+    assert state["slurm_job_id"] is None
+
+
+def test_absent_with_no_created_at_marks_reservation_lost() -> None:
+    """A reserved-unbound row that cannot prove its youth (``created_at`` is None)
+    keeps the legacy demote-to-reservation_lost behavior. Liveness must never
+    regress: an un-aged absence is treated as authoritative rather than
+    indefinitely deferred.
+    """
+
+    from datetime import UTC, datetime
+
+    from services.orchestrator.reconcile import (
+        RESERVATION_LOST_STATUS,
+        reconcile_reserved_unbound_jobs,
+    )
+
+    class _NoCreatedAtJob:
+        job_id = "job_no_created"
+        idempotency_key = "gfs:cyc:basin:forcing"
+        status = "reserved"
+        slurm_job_id = None
+        created_at = None
+
+    demoted: list[tuple[str, str]] = []
+
+    class _FakeStore:
+        def query_reserved_unbound_jobs(self) -> list[Any]:
+            return [_NoCreatedAtJob()]
+
+        def update_job_status(self, job_id: str, status: str, **_kwargs: Any) -> None:
+            demoted.append((job_id, status))
+
+    def _comment_query(_idem: str) -> Any:
+        return None
+
+    outcomes = reconcile_reserved_unbound_jobs(
+        _FakeStore(),
+        comment_query=_comment_query,
+        now=lambda: datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC),
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == "reservation_lost"
+    assert demoted == [("job_no_created", RESERVATION_LOST_STATUS)]
+
+
+def test_young_with_valid_record_still_binds() -> None:
+    """Regression: the grace guard only gates the *absence* branch. A young
+    reserved-unbound row whose comment query returns a valid matching record is
+    still bound (action == "bound"); grace must not interfere with success.
+    """
+
+    from datetime import UTC, datetime
+
+    from services.orchestrator.reconcile import (
+        SacctRecord,
+        reconcile_reserved_unbound_jobs,
+    )
+    from services.orchestrator.reservation import slurm_comment_for
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forcing"
+    fixed_now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC)
+    row = _reserved_row(store, key, job_id="job_young_bound")
+    row.created_at = fixed_now
+    store.store.session.flush()
+
+    def _comment_query(idem: str) -> SacctRecord | None:
+        if idem == key:
+            return SacctRecord(
+                slurm_job_id="99123",
+                raw_state="RUNNING",
+                job_name="nhms_forcing",
+                comment=slurm_comment_for(key),
+            )
+        return None
+
+    outcomes = reconcile_reserved_unbound_jobs(
+        store.store,
+        comment_query=_comment_query,
+        now=lambda: fixed_now,
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == "bound"
+    assert outcomes[0].slurm_job_id == "99123"
+    bound = store.query_candidate_state(key)
+    assert bound["slurm_job_id"] == "99123"
+    assert bound["status"] == "submitted"
+
+
+def test_young_with_query_unavailable_still_query_unavailable() -> None:
+    """Regression: a young reserved-unbound row whose comment query raises
+    ReconcileQueryUnavailable yields action == "query_unavailable" (the
+    transient path), unaffected by the absence grace guard. The row stays
+    ``reserved``; the grace branch is never reached on a transient failure.
+    """
+
+    from datetime import UTC, datetime
+
+    from services.orchestrator.reconcile import (
+        ReconcileQueryUnavailable,
+        reconcile_reserved_unbound_jobs,
+    )
+
+    store = _store_repo()
+    key = "gfs:cyc:basin:forcing"
+    fixed_now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=UTC)
+    row = _reserved_row(store, key, job_id="job_young_transient")
+    row.created_at = fixed_now
+    store.store.session.flush()
+
+    def _comment_query(_idem: str) -> Any:
+        raise ReconcileQueryUnavailable("sacct timed out")
+
+    outcomes = reconcile_reserved_unbound_jobs(
+        store.store,
+        comment_query=_comment_query,
+        now=lambda: fixed_now,
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].action == "query_unavailable"
+    state = store.query_candidate_state(key)
+    assert state["status"] == "reserved"
+    assert state["slurm_job_id"] is None
