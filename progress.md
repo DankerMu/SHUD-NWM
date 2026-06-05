@@ -1,6 +1,6 @@
 # 项目进度
 
-最后更新：2026-06-04，node-22 业务化联调。
+最后更新：2026-06-04，node-22 业务化联调 + m24 §3A 并发预留代码合并。
 
 用途：作为跨 session 继承的项目真实进度索引。本文只保留当前完成态、仍需 live proof 的边界和常用验证入口；历史 review 细节以 GitHub issue、PR、OpenSpec 和 runbook 为准。
 
@@ -20,6 +20,7 @@
 - **架构转向（m24，已立项）**：上面的双源 live 跑通走的是 `run_qhh_continuous.py → run_qhh_cycle.sh` **诊断脚本**（m23 design.md 已否决其作生产自动化）；**通用编排器**（`services/orchestrator` scheduler/chain + Slurm HTTP gateway）虽代码就绪但**从未 live**（m20 0/33）。本轮"全持续守护"改造 = 把业务化迁到通用 daemon,瞄准**多流域通用 + 并行发起任务 + 跨周期暖启动承接**。
   - 三道硬坎:① Slurm HTTP gateway 在 node-22 从未部署(通用 chain 只走 gateway)② 暖启动 forecast→forecast 有时间语义缺口(`nhms-state save` 存预报窗末 `end_time`、非下周期 init time;现状每周期从固定打包标定态起跑、无水文记忆)→ m24 走 path(b) 短 analysis 段 ③ 并发 submit-and-return 是净新增(现状顺序 cohort)。
   - OpenSpec：[`openspec/changes/m24-multibasin-continuous-daemon-live/`](openspec/changes/m24-multibasin-continuous-daemon-live/)(`openspec validate --strict` 通过;经三轮 codex 复审含 full-output 并行收敛)。跟踪 **epic #285** + 子任务 #286–#293(§0 baseline→§P 依赖门→§1 gateway→§2 暖启动→§3A 并发→§3B 多流域 live→§4 daemon→§5 诊断退役)。
+  - **§3A 并发 submit-and-return + durable 两阶段预留(#290)代码已完成并合并**：锁内 sbatch 前写持久预留行(`pipeline_job` + `idempotency_key`,partial unique index)、提交后原子 bind `slurm_job_id`、reclaim 原子接管死预留；防双提交跨重叠 pass + 提交崩溃窗口(crash-after-sbatch-before-bind)经 reconcile-by-comment(`sacct --comment=nhms_idem:<key>`,array master 行归一化到裸 id)恢复;grace-gate 锚 `updated_at` 防 slurmdbd 滞后误把 in-flight 预留降级。**尚未 live**——overlapping-submit 实况 receipt 待 #292 daemon go-live。**部署前置**：迁移 `db/migrations/000029_pipeline_reservation.sql`(预留列 + 部分唯一索引)必须在预留代码上线 / #292 go-live 前 apply(node-22 prod DB 尚未 apply)。out-of-scope LOW 收尾 → #300。
   - **诊断脚本暂留作 bring-up 回退与排障**,不再以其声称 production;待 m24 落地后退役(护栏 #293)。
 - 运行手册：[`docs/runbooks/qhh-22-business-bringup.md`](docs/runbooks/qhh-22-business-bringup.md)(已标注诊断 lane + m24 转向)。
 - ⚠️ 运行纪律:作业运行中**禁止在 node-22 `git pull`**(会换 inode 触发 NFS stale handle 杀掉正在 exec 脚本的作业)。

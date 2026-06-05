@@ -8,6 +8,14 @@
 --
 -- All columns are NULLable with default NULL so existing rows are untouched and
 -- pre-reservation producers (which do not supply these fields) keep working.
+--
+-- DEPLOY ORDER (required): apply this migration BEFORE deploying the reservation
+-- code, and BEFORE the #292 (§4) continuous-daemon go-live. psycopg
+-- reserve_pipeline_job references idempotency_key/candidate_id; if the columns
+-- are absent at runtime the reserve raises UndefinedColumn (swallowed by the
+-- submit path as submission_failed -> recoverable but degraded). Forward-only
+-- and idempotent (ADD COLUMN IF NOT EXISTS / CREATE INDEX IF NOT EXISTS), so it
+-- is safe to apply ahead of the code rollout.
 
 ALTER TABLE ops.pipeline_job
   ADD COLUMN IF NOT EXISTS idempotency_key TEXT DEFAULT NULL;
