@@ -82,6 +82,11 @@ DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 # proceeds to the DB-host preflight) instead of hanging the daemon at pass
 # start. Mirrors readonly_db_validation's connect-timeout convention.
 RECONCILE_DB_CONNECT_TIMEOUT_SECONDS = 5
+# Cap a post-connect query hang in restart reconcile (mirrors
+# VALIDATION_STATEMENT_TIMEOUT_MS): a reachable-but-slow DB must not stall the
+# pass at reconcile time; best-effort reconcile swallows the timeout and the
+# pass proceeds to the DB-host preflight.
+RECONCILE_DB_STATEMENT_TIMEOUT_MS = 10_000
 STATE_M23_COMPARISON_FIELDS = (
     "basin_id",
     "basin_version_id",
@@ -758,6 +763,10 @@ class ProductionScheduler:
         # M24 §3A restart reconcile: injectable so tests drive it without a real
         # cluster/DB. ``None`` => build from env at pass time (production).
         self._reconcile_store = reconcile_store
+        # Class name (secret-free) of the last reconcile-store build failure, so
+        # _run_restart_reconcile can report a build skip without surfacing the
+        # raw exception message (a malformed-URL error embeds the full DSN).
+        self._reconcile_store_build_error: str | None = None
         self._reconcile_comment_query = reconcile_comment_query
         self._reconcile_sacct_query = reconcile_sacct_query
         self.registry = registry if registry is not None else PsycopgModelRegistryStore.from_env()
@@ -1241,6 +1250,13 @@ class ProductionScheduler:
             return None
         store = self._restart_reconcile_store()
         if store is None:
+            build_error = getattr(self, "_reconcile_store_build_error", None)
+            if build_error is not None:
+                return {
+                    "status": "skipped",
+                    "reason": "reconcile_store_build_failed",
+                    "error_type": build_error,
+                }
             return {"status": "skipped", "reason": "reconcile_store_unavailable"}
 
         from services.orchestrator.reconcile import (
@@ -1323,12 +1339,25 @@ class ProductionScheduler:
 
         from services.orchestrator.persistence import PipelineStore
 
-        engine = create_engine(
-            database_url,
-            future=True,
-            connect_args={"connect_timeout": RECONCILE_DB_CONNECT_TIMEOUT_SECONDS},
-        )
-        self._reconcile_store = PipelineStore(Session(engine))
+        # Best-effort: a malformed/unbuildable database_url must never abort the
+        # pass. make_url() raises synchronously inside create_engine for a bad
+        # DSN, so wrap the whole build. ZERO-LEAK: record only the exception
+        # class name (provably secret-free); the raw message embeds the DSN
+        # incl. password. The submit-path DB-host preflight still runs.
+        try:
+            engine = create_engine(
+                database_url,
+                future=True,
+                connect_args={
+                    "connect_timeout": RECONCILE_DB_CONNECT_TIMEOUT_SECONDS,
+                    "options": f"-c statement_timeout={RECONCILE_DB_STATEMENT_TIMEOUT_MS}",
+                },
+            )
+            self._reconcile_store = PipelineStore(Session(engine))
+        except Exception as error:  # noqa: BLE001 - build must never abort the pass.
+            self._reconcile_store_build_error = type(error).__name__
+            return None
+        self._reconcile_store_build_error = None
         return self._reconcile_store
 
     def _restart_reconcile_comment_query(self) -> Callable[[str], Any]:

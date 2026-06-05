@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -1609,6 +1610,7 @@ def test_restart_reconcile_store_bounds_db_connect_timeout(monkeypatch: Any) -> 
 
     from services.orchestrator.scheduler import (
         RECONCILE_DB_CONNECT_TIMEOUT_SECONDS,
+        RECONCILE_DB_STATEMENT_TIMEOUT_MS,
         ProductionScheduler,
     )
 
@@ -1638,3 +1640,98 @@ def test_restart_reconcile_store_bounds_db_connect_timeout(monkeypatch: Any) -> 
     connect_timeout = kwargs["connect_args"]["connect_timeout"]
     assert connect_timeout == RECONCILE_DB_CONNECT_TIMEOUT_SECONDS
     assert isinstance(connect_timeout, int) and connect_timeout > 0
+    # Post-connect slow-query bound: a reachable-but-slow DB must not stall the
+    # pass at reconcile time.
+    options = kwargs["connect_args"]["options"]
+    assert f"statement_timeout={RECONCILE_DB_STATEMENT_TIMEOUT_MS}" in options
+    assert "statement_timeout=10000" in options
+
+
+# --- FINDING-2: reconcile store build is best-effort to ANY database_url ------
+# A malformed/unbuildable database_url makes SQLAlchemy's make_url() raise
+# synchronously inside create_engine. That exception must NEVER propagate out of
+# _restart_reconcile_store / _run_restart_reconcile (which run at pass start,
+# before the submit-path DB-host preflight). It is swallowed as a best-effort
+# skip; the preflight still runs. Zero-leak: no raw error message (DSN incl.
+# password) may surface — only the exception class name.
+
+
+def _malformed_url_shell(database_url: str) -> Any:
+    """A minimal carrier exposing the attributes _restart_reconcile_store and
+    _run_restart_reconcile touch, so the unbound methods can be bound without the
+    heavy ctor. Mirrors the duck-typed shells used elsewhere in this file.
+    """
+
+    import types
+
+    config = types.SimpleNamespace(
+        database_url=database_url,
+        dry_run=False,
+        restart_reconcile_enabled=True,
+    )
+    return types.SimpleNamespace(
+        config=config,
+        _reconcile_store=None,
+        _reconcile_store_build_error=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://nhms:secret@bad::host/nhms",
+        "postgresql://nhms:secret@[::1/nhms",
+    ],
+)
+def test_restart_reconcile_store_swallows_malformed_database_url(
+    database_url: str,
+) -> None:
+    """A malformed database_url must make _restart_reconcile_store return None
+    (best-effort skip) WITHOUT raising, and must not stash the raw error message
+    (which embeds the password) — only the exception class name."""
+    from services.orchestrator.scheduler import ProductionScheduler
+
+    shell = _malformed_url_shell(database_url)
+    store = ProductionScheduler._restart_reconcile_store.__get__(
+        shell, ProductionScheduler
+    )()
+
+    assert store is None
+    assert shell._reconcile_store is None
+    # Class name only — provably secret-free.
+    assert shell._reconcile_store_build_error is not None
+    assert "secret" not in shell._reconcile_store_build_error
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://nhms:secret@bad::host/nhms",
+        "postgresql://nhms:secret@[::1/nhms",
+    ],
+)
+def test_run_restart_reconcile_skips_on_malformed_database_url(
+    database_url: str,
+) -> None:
+    """_run_restart_reconcile must not propagate a malformed-url build failure:
+    it returns a best-effort skip dict the pass tolerates, and that dict carries
+    zero credentials (zero-leak by construction — error_type is a class name)."""
+    import json
+
+    from services.orchestrator.scheduler import ProductionScheduler
+
+    shell = _malformed_url_shell(database_url)
+    # _run_restart_reconcile calls self._restart_reconcile_store() internally, so
+    # bind that helper onto the shell too.
+    shell._restart_reconcile_store = ProductionScheduler._restart_reconcile_store.__get__(
+        shell, ProductionScheduler
+    )
+    result = ProductionScheduler._run_restart_reconcile.__get__(
+        shell, ProductionScheduler
+    )()
+
+    assert result is not None
+    assert result["status"] == "skipped"
+    assert result["reason"] == "reconcile_store_build_failed"
+    assert "error_type" in result
+    assert "secret" not in json.dumps(result)
