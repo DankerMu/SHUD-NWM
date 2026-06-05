@@ -25,6 +25,12 @@ NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
 NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
 
+# Generic continuous daemon = the production runner (M24). The supported business
+# path is `nhms-pipeline plan-production --continuous`
+# (-> services/orchestrator/scheduler.py run_continuous); it submits through the
+# standalone Slurm gateway (SLURM_GATEWAY_* below). The legacy run_qhh_* scripts are
+# diagnostic-only bring-up fallbacks (M24 §5 / #293), not driven by these vars.
+# The NHMS_SCHEDULER_* keys configure that daemon's lock/evidence/roots + cohort.
 NHMS_SCHEDULER_LOCK_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/locks
 NHMS_SCHEDULER_EVIDENCE_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/evidence
 NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
@@ -46,6 +52,10 @@ NHMS_BASINS_ROOT=/volume/data/nwm/Basins
 NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets
 SHUD_EXECUTABLE=/opt/shud/bin/shud
 
+# Slurm gateway = the production submit path. The generic daemon (above) renders
+# sbatch from SLURM_GATEWAY_TEMPLATE_DIR and submits via SLURM_GATEWAY_URL; the chain
+# never calls sbatch directly. (Diagnostic run_qhh_* scripts bypass this and call
+# sbatch on the login node — that is the diagnostic lane, not production.)
 SLURM_GATEWAY_URL=http://127.0.0.1:8081
 SLURM_GATEWAY_BACKEND=slurm
 SLURM_GATEWAY_TEMPLATE_DIR=infra/sbatch

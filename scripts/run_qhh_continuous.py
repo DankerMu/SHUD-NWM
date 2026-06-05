@@ -1,3 +1,24 @@
+"""DIAGNOSTIC-ONLY: standalone qhh continuous full-chain runner.
+
+This script is a developer diagnostic / bring-up fallback and is NOT the production
+path. The supported production path is the generic continuous daemon
+(``nhms-pipeline plan-production --continuous`` -> ``services/orchestrator/scheduler.py``
+``run_continuous``), which submits through the standalone Slurm gateway and carries
+multi-basin concurrency + durable two-phase reservation + cross-cycle warm-start that
+this script does not. Do not wire this into the daemon; full retirement is tracked under
+M24 §5 / #293. Retained only as a manual bring-up/triage lane and for the static
+reference test (``tests/test_qhh_scripts_static.py``).
+
+Smoke (manual debugging) — run a single pass and exit:
+
+    uv run python scripts/run_qhh_continuous.py --once --executor slurm
+
+Minimal PASS condition: process exits 0 and the printed pass summary contains no failed
+candidate (``run_pass`` -> ``_has_failed`` is false), i.e. each discovered cycle reaches
+the terminal ``frequency_done``/``published`` status. See
+``docs/runbooks/qhh-22-business-bringup.md`` §3 for the documented bring-up invocation.
+"""
+
 from __future__ import annotations
 
 import argparse
