@@ -148,12 +148,16 @@ Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_or
 
 ## 3B. Multi-basin live identity + partial-success proof
 
-- [ ] 3B.1 Add or seed a second registered runnable model/basin (minimal fixture acceptable).
-- [ ] 3B.2 Prove ≥2 basins in one live pass to published products, per-basin identity in evidence.
-- [ ] 3B.3 Identity through array retry/reindex: `original_task_id` maps a reindexed task back to
+- [x] 3B.1 Add or seed a second registered runnable model/basin (minimal fixture acceptable).
+      — heihe registered + active on node-22 (4759 geom / 2352 `.sp.riv` output, output_segment_count=2352), discovered runnable alongside qhh.
+- [x] 3B.2 Prove ≥2 basins in one live pass to published products, per-basin identity in evidence.
+      — live receipt: cycle `gfs_2026060500` → `complete`, publish manifest `published_basins=2` `degraded_to_display=true`; q_down display for qhh (segment_count=1633) + heihe (2352); distinct run_id/river_network_version_id/forcing_version_id/basin_version_id per basin (zero leakage).
+- [x] 3B.3 Identity through array retry/reindex: `original_task_id` maps a reindexed task back to
   its basin/segment; same-name segments in different river networks are not merged.
-- [ ] 3B.4 Per-basin partial-success isolation: A fails (forcing/forecast/parse/frequency/publish),
+      — reindex identity tests in tests/test_partial_success.py; live array forecast routed per-basin (member _0 heihe / _1 qhh) with no cross-network merge.
+- [x] 3B.4 Per-basin partial-success isolation: A fails (forcing/forecast/parse/frequency/publish),
   B publishes; cycle aggregate reflects partial; B excludes A.
+      — 5-stage partial matrix tests; live-proven: failed publish manifest attributed qhh `OUTPUT_COLUMN_COUNT_MISMATCH` + heihe `RETURN_PERIOD_RESULT_UNAVAILABLE` independently (distinct run_ids), zero cross-basin contamination.
 
 Evidence Floor: ≥2-basin live pass receipt; reindex identity test; partial-success isolation test.
 Verification: `uv run pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py` + `uv run ruff check .` + node-22 multi-basin live receipt or BLOCKED.
