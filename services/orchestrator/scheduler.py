@@ -2629,7 +2629,15 @@ class ProductionScheduler:
                         candidate,
                         {"canonical_readiness": canonical_readiness},
                     )
-                if state_decision is not None and state_decision.action == "retry":
+                if (
+                    state_decision is not None
+                    and state_decision.action == "retry"
+                    and not _candidate_is_fresh_full_chain(candidate)
+                ):
+                    # Fresh full-chain candidates (zero canonical) must run
+                    # download->...->publish from scratch; absorbing a retry's
+                    # restart_stage evidence here would divert the chain to
+                    # restart from parse with no forcing/forecast to parse.
                     candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                 if has_active_orchestration is None:
                     has_active_orchestration = bool(
@@ -5820,7 +5828,9 @@ def _candidate_basin_manifest(
         state_evidence = _evidence_safe(candidate.state_evidence)
         manifest["state_evidence"] = state_evidence
         restart_stage = state_evidence.get("restart_stage") if isinstance(state_evidence, Mapping) else None
-        if restart_stage:
+        # Defense in depth: fresh full-chain ingestion never carries a basin
+        # restart_stage even if a residual marker survived upstream merges.
+        if restart_stage and not _candidate_is_fresh_full_chain(candidate):
             manifest["restart_stage"] = restart_stage
         if state_evidence.get("durable_shud_output_reused") is True:
             manifest["durable_shud_output_reused"] = True
