@@ -689,7 +689,10 @@ def test_fresh_cycle_with_active_slurm_job_does_not_double_submit(tmp_path: Path
     assert skipped["active_slurm_jobs"][0]["slurm_job_id"] == "9001"
 
 
-def test_fresh_cycle_download_stage_failure_does_not_fabricate_success(tmp_path: Path) -> None:
+def test_fresh_cycle_ingestion_stage_failure_does_not_fabricate_success(tmp_path: Path) -> None:
+    # The shared stage-evidence fixture emits a single chain stage that fails;
+    # the scheduler must record that ingestion-stage failure honestly instead of
+    # fabricating a terminal "submitted"/"complete" state.
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
@@ -697,7 +700,7 @@ def test_fresh_cycle_download_stage_failure_does_not_fabricate_success(tmp_path:
     orchestrator = FakeProductionOrchestratorWithStageEvidence(
         result_status="failed",
         stage_status="failed",
-        stage_error_message="download stage failed: upstream object missing",
+        stage_error_message="ingestion stage failed: upstream object missing",
     )
     scheduler = ProductionScheduler(
         _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
@@ -727,6 +730,292 @@ def test_fresh_cycle_download_stage_failure_does_not_fabricate_success(tmp_path:
     assert result.status != "submitted"
     model_evidence = result.evidence["model_run_evidence"][0]
     assert model_evidence["status"] == "failed"
+
+
+def _no_expected_leads_readiness_provider(cycle_time: datetime) -> FakeCanonicalReadinessProvider:
+    """Readiness for a broken horizon/policy: empty ``forecast_hours``.
+
+    ``evaluate_canonical_readiness`` yields ready=False,
+    candidate_row_count==0, status=canonical_incomplete,
+    reason="no_expected_leads". This is a config defect (hard block), NOT a
+    fresh zero-row cycle.
+    """
+
+    return FakeCanonicalReadinessProvider(
+        {
+            ("gfs", cycle_time): evaluate_canonical_readiness(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                products=[],
+                forecast_hours=(),
+                canonical_product_id="canon_gfs_2026052106",
+                model_id="model_a",
+                basin_id="basin_a",
+            ).evidence
+        }
+    )
+
+
+def test_no_expected_leads_readiness_is_not_fresh_zero_row() -> None:
+    # MAJOR-1: a broken horizon (empty forecast_hours) reports zero canonical
+    # rows but must keep the hard block, not be reclassified as fresh ingestion.
+    # The discriminator is an empty ``expected_leads`` (broken horizon/policy
+    # config), regardless of which downstream reason string the converter picks.
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    evidence = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=[],
+        forecast_hours=(),
+        canonical_product_id="canon_gfs_2026052106",
+        model_id="model_a",
+        basin_id="basin_a",
+    ).evidence
+    assert evidence["ready"] is False
+    assert evidence["candidate_row_count"] == 0
+    assert not evidence["expected_leads"]
+    # Real broken-horizon evidence is the only zero-row case the pre-fix guard
+    # would have mislabeled fresh; the expected_leads gate now blocks it.
+    assert scheduler_module._canonical_evidence_is_fresh_zero_row(evidence) is False
+    # Explicit no_expected_leads reason (e.g. a source with no required
+    # variables) is also blocked.
+    assert (
+        scheduler_module._canonical_evidence_is_fresh_zero_row(
+            {
+                "ready": False,
+                "status": "canonical_incomplete",
+                "candidate_row_count": 0,
+                "expected_leads": (),
+                "reason": "no_expected_leads",
+            }
+        )
+        is False
+    )
+
+
+def test_no_expected_leads_cycle_stays_blocked_not_fresh_full_chain(tmp_path: Path) -> None:
+    # MAJOR-1 end-to-end: empty-horizon readiness must hard-block; no
+    # fresh_ingestion marker, no orchestrator submission.
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    forcing_producer = FakeForcingProducer()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_no_expected_leads_readiness_provider(cycle_time),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert forcing_producer.calls == []
+    blocked = result.evidence["blocked_candidates"][0]
+    # Empty horizon over an empty product set surfaces as a hard block (the
+    # converter labels it missing_canonical_variables / no_expected_leads); the
+    # crucial guarantee is it is NOT reclassified as fresh full-chain ingestion.
+    assert blocked["reason"] in {"no_expected_leads", "missing_canonical_variables"}
+    assert "fresh_ingestion" not in blocked["state_evidence"]
+    readiness = blocked["state_evidence"]["canonical_readiness"]
+    assert not readiness["expected_leads"]
+
+
+def test_fresh_full_chain_candidate_forces_full_cohort_despite_residual_restart_stage() -> None:
+    # MAJOR-2: a fresh full-chain candidate that also carries a residual
+    # restart_stage (e.g. retention cleared canonical while a stale restart
+    # marker lingered) must still route into the (0, "full") cohort, not be
+    # diverted onto the restart path.
+    candidate = scheduler_module._candidate_with_state_evidence(
+        _scheduler_candidate_fixture(),
+        {
+            "fresh_ingestion": {"required": True, "mode": "full_chain"},
+            "restart_stage": "parse",
+        },
+    )
+    assert scheduler_module._candidate_is_fresh_full_chain(candidate) is True
+    # Single source of truth: fresh full-chain forces restart_stage None.
+    assert scheduler_module._candidate_restart_stage(candidate) is None
+    cohorts = scheduler_module._restart_compatible_candidate_cohorts([candidate])
+    assert len(cohorts) == 1
+    (cohort_key, cohort_candidates), = cohorts
+    assert cohort_key == (0, "full")
+    assert cohort_candidates == [candidate]
+
+
+def test_fresh_full_chain_residual_restart_stage_submits_single_full_chain(tmp_path: Path) -> None:
+    # MAJOR-2 end-to-end: even when a retry state_decision merges a restart_stage
+    # into a fresh candidate, the submitted basin runs the full chain from
+    # download (no restart_stage) via a single orchestrator call.
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    # A retry state with a residual downstream restart stage, but retention has
+    # cleared canonical (readiness provider reports zero rows -> fresh).
+    active_repository = PerModelCandidateStateRepository(
+        {
+            "model_a": {
+                "hydro_status": "succeeded",
+                "durable_shud_output_exists": True,
+                "output_uri": "s3://nhms/runs/fcst_gfs_2026052106_model_a/output/",
+                "pipeline_status": "failed",
+                "failed_stage": "parse",
+                "error_code": "FAILED_PARSE",
+                "retry_count": 1,
+                "retry_limit": 3,
+            },
+        }
+    )
+    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=active_repository,
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert len(orchestrator.calls) == 1
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    # Full chain from scratch: no restart_stage routes it off the full path.
+    assert "restart_stage" not in submitted_basin
+    assert "orchestration_run_id" not in submitted_basin
+    assert submitted_basin["state_evidence"]["fresh_ingestion"]["mode"] == "full_chain"
+
+
+def test_canonical_unavailable_evidence_is_not_fresh_zero_row() -> None:
+    # Highest-risk guardrail: provider-unavailable / query-failed evidence (no
+    # candidate_row_count key, or status=canonical_unavailable) must NEVER be
+    # treated as fresh zero-row -> otherwise a DB outage would flood full-chain
+    # ingestion submissions.
+    assert scheduler_module._canonical_evidence_is_fresh_zero_row(None) is False
+    assert scheduler_module._canonical_evidence_is_fresh_zero_row({}) is False
+    # Missing candidate_row_count key (e.g. provider failure evidence).
+    assert (
+        scheduler_module._canonical_evidence_is_fresh_zero_row(
+            {"ready": False, "status": "canonical_unavailable", "reason": "provider_unavailable"}
+        )
+        is False
+    )
+    # Explicit canonical_unavailable status even with a zero row count.
+    assert (
+        scheduler_module._canonical_evidence_is_fresh_zero_row(
+            {
+                "ready": False,
+                "status": "canonical_unavailable",
+                "candidate_row_count": 0,
+                "expected_leads": (0, 3),
+            }
+        )
+        is False
+    )
+    # A genuine zero-row evaluation with real expected leads IS fresh.
+    assert (
+        scheduler_module._canonical_evidence_is_fresh_zero_row(
+            {
+                "ready": False,
+                "status": "canonical_incomplete",
+                "candidate_row_count": 0,
+                "expected_leads": (0, 3),
+            }
+        )
+        is True
+    )
+
+
+def test_canonical_unavailable_cycle_stays_blocked_no_fresh_marker(tmp_path: Path) -> None:
+    # End-to-end guardrail: an unavailable-canonical readiness must hard-block
+    # the candidate with no fresh_ingestion marker and no submission.
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    forcing_producer = FakeForcingProducer()
+    orchestrator = FakeProductionOrchestrator()
+    unavailable_evidence = {
+        "source_id": "gfs",
+        "cycle_time": cycle_time.isoformat(),
+        "ready": False,
+        "status": "canonical_unavailable",
+        "reason": "canonical_unavailable",
+    }
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=FakeCanonicalReadinessProvider(
+            {("gfs", cycle_time): unavailable_evidence}
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert orchestrator.calls == []
+    assert forcing_producer.calls == []
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "canonical_unavailable"
+    assert "fresh_ingestion" not in blocked["state_evidence"]
+
+
+def test_multi_basin_fresh_cycle_merges_into_single_download(tmp_path: Path) -> None:
+    # Two fresh basins on the same source/cycle must merge into ONE full-chain
+    # submission (single download), not two duplicate chains.
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("qhh", "qhh_basin"), _model("heihe", "heihe_basin")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert result.evidence["counts"]["submitted_count"] == 2
+    # Single full-chain submission (one download) covering both basins.
+    assert len(orchestrator.calls) == 1
+    basins = orchestrator.calls[0]["basins"]
+    assert len(basins) == 2
+    assert {basin["model_id"] for basin in basins} == {"qhh", "heihe"}
+    for basin in basins:
+        assert "restart_stage" not in basin
+        assert basin["state_evidence"]["fresh_ingestion"]["mode"] == "full_chain"
 
 
 def test_canonical_readiness_provider_absent_blocks_candidate_with_unavailable_evidence(tmp_path: Path) -> None:

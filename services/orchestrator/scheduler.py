@@ -5335,12 +5335,21 @@ def _canonical_evidence_is_fresh_zero_row(canonical_readiness: Mapping[str, Any]
     Provider-unavailable / query-failed evidence (``canonical_unavailable``)
     carries no ``candidate_row_count`` key; such cases must keep the hard block
     and are never reclassified as fresh ingestion.
+
+    A readiness with no expected leads (``reason="no_expected_leads"`` /
+    empty ``expected_leads``) is a broken horizon/policy config, not a fresh
+    cycle. It also reports zero canonical rows, so it must keep the hard block
+    instead of being routed into a full-chain ingestion.
     """
     if not isinstance(canonical_readiness, Mapping):
         return False
     if "candidate_row_count" not in canonical_readiness:
         return False
     if str(canonical_readiness.get("status") or "") == "canonical_unavailable":
+        return False
+    if str(canonical_readiness.get("reason") or "") == "no_expected_leads":
+        return False
+    if not canonical_readiness.get("expected_leads"):
         return False
     return _canonical_candidate_row_count(canonical_readiness) == 0
 
@@ -5362,6 +5371,13 @@ def _candidate_is_fresh_full_chain(candidate: SchedulerCandidate) -> bool:
 
 
 def _candidate_restart_stage(candidate: SchedulerCandidate) -> str | None:
+    # Fresh full-chain ingestion routes on a single source of truth: it must
+    # always land in the (0, "full") cohort and run download->...->publish from
+    # scratch. A residual restart_stage merged from a retry state_decision (e.g.
+    # retention cleared canonical while a stale restart marker lingered) must not
+    # divert it off the full-chain path, so force None here.
+    if _candidate_is_fresh_full_chain(candidate):
+        return None
     state_evidence = candidate.state_evidence
     if not isinstance(state_evidence, Mapping):
         return None
