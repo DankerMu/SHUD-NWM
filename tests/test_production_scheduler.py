@@ -480,6 +480,255 @@ def test_scheduler_propagates_produced_forcing_identity_to_orchestration(tmp_pat
     assert orchestrator.calls[0]["basins"][0]["forcing_package_manifest_uri"].endswith("forcing_package.json")
 
 
+def _fresh_zero_row_readiness_provider(
+    cycle_time: datetime,
+    *,
+    policy: Mapping[str, Any],
+    source_object: Mapping[str, Any],
+) -> FakeCanonicalReadinessProvider:
+    """Readiness provider for a brand-new cycle with zero canonical rows.
+
+    ``evaluate_canonical_readiness`` over an empty product set yields
+    ``ready=False`` with ``candidate_row_count == 0`` -> fresh full-chain
+    ingestion (M23 §255), not a corrupt/partial canonical block.
+    """
+
+    return FakeCanonicalReadinessProvider(
+        {
+            ("gfs", cycle_time): evaluate_canonical_readiness(
+                source_id="gfs",
+                cycle_time=cycle_time,
+                products=[],
+                forecast_hours=(0, 3),
+                policy_identity=dict(policy),
+                source_object_identity=dict(source_object),
+                canonical_product_id="canon_gfs_2026052106",
+                model_id="model_a",
+                basin_id="basin_a",
+            ).evidence
+        }
+    )
+
+
+def test_fresh_cycle_with_zero_canonical_runs_full_chain_without_in_process_forcing(
+    tmp_path: Path,
+) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    # A forcing producer that would raise if ever invoked: fresh full-chain
+    # candidates must skip in-process forcing (the Slurm chain produces it).
+    forcing_producer = FakeForcingProducer(error=RuntimeError("in-process forcing must be skipped for fresh ingestion"))
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    # In-process forcing is skipped entirely for fresh full-chain ingestion.
+    assert forcing_producer.calls == []
+    # The full chain runs once through the orchestrator (download -> ... -> publish).
+    assert len(orchestrator.calls) == 1
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["blocked_candidates"] == []
+    candidate = result.evidence["candidates"][0]
+    fresh_marker = candidate["state_evidence"]["fresh_ingestion"]
+    assert fresh_marker["required"] is True
+    assert fresh_marker["mode"] == "full_chain"
+    # No restart_stage: the chain starts at download (restart_stage=None).
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert "restart_stage" not in submitted_basin
+    assert submitted_basin["state_evidence"]["fresh_ingestion"]["mode"] == "full_chain"
+
+
+def test_fresh_cycle_basin_manifest_carries_identity_contract_fields(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    # Identity contract must survive the fresh full-chain path.
+    assert submitted_basin["canonical_product_id"] == "canon_gfs_2026052106"
+    assert submitted_basin["run_id"] == "fcst_gfs_2026052106_model_a"
+    assert submitted_basin["forcing_version_id"] == "forc_gfs_2026052106_model_a"
+    assert submitted_basin["hydro_run_id"] == "fcst_gfs_2026052106_model_a"
+    assert submitted_basin["published_manifest_id"] == "manifest_fcst_gfs_2026052106_model_a"
+
+
+def test_partial_canonical_still_blocks_not_fresh_full_chain(tmp_path: Path) -> None:
+    # candidate_row_count > 0 but identity/variable incomplete must keep the
+    # existing hard block; it is NOT a fresh full-chain ingestion.
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    readiness_evidence = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=_canonical_rows(
+            source_id="gfs",
+            cycle_time=cycle_time,
+            variables=GFS_REQUIRED_STANDARD_VARIABLES,
+            forecast_hours=(0, 3),
+            policy_identity=policy,
+            source_object_identity=source_object,
+            omit_pairs={("shortwave_down", 3)},
+        ),
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+        canonical_product_id="canon_gfs_2026052106",
+        model_id="model_a",
+        basin_id="basin_a",
+    ).evidence
+    assert readiness_evidence["candidate_row_count"] > 0
+    forcing_producer = FakeForcingProducer()
+    orchestrator = FakeProductionOrchestrator()
+    adapter = FakeAdapter(
+        "gfs",
+        [("2026-05-21T06:00:00Z", True)],
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": adapter},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=FakeCanonicalReadinessProvider({("gfs", cycle_time): readiness_evidence}),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert forcing_producer.calls == []
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "missing_canonical_leads"
+    assert "fresh_ingestion" not in blocked["state_evidence"]
+
+
+def test_fresh_cycle_with_active_slurm_job_does_not_double_submit(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    active_repository = FakeSlurmActiveRepository(
+        active_jobs=[{"job_id": "job_download", "slurm_job_id": "9001", "stage": "download", "status": "running"}]
+    )
+    forcing_producer = FakeForcingProducer(error=RuntimeError("must not run when an active job exists"))
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=active_repository,
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert orchestrator.calls == []
+    assert forcing_producer.calls == []
+    assert result.evidence["counts"]["submitted_count"] == 0
+    skipped = result.evidence["skipped_candidates"][0]
+    assert skipped["reason"] == "active_slurm_job"
+    assert skipped["active_slurm_jobs"][0]["slurm_job_id"] == "9001"
+
+
+def test_fresh_cycle_download_stage_failure_does_not_fabricate_success(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    orchestrator = FakeProductionOrchestratorWithStageEvidence(
+        result_status="failed",
+        stage_status="failed",
+        stage_error_message="download stage failed: upstream object missing",
+    )
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert forcing_producer.calls == []
+    assert orchestrator.calls
+    # The chain ran but a stage failed: the scheduler must record the failure
+    # honestly (no fabricated "complete"/"submitted" terminal state).
+    assert result.status != "submitted"
+    model_evidence = result.evidence["model_run_evidence"][0]
+    assert model_evidence["status"] == "failed"
+
+
 def test_canonical_readiness_provider_absent_blocks_candidate_with_unavailable_evidence(tmp_path: Path) -> None:
     scheduler = ProductionScheduler(
         _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
