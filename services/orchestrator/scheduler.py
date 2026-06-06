@@ -1567,6 +1567,12 @@ class ProductionScheduler:
         blocked: list[SchedulerCandidate] = []
         evidence: list[dict[str, Any]] = []
         for candidate in candidates:
+            # M23 §255: fresh full-chain ingestion has no canonical to drive
+            # in-process forcing; the Slurm chain's forcing stage produces it.
+            # Pass the candidate straight through so it reaches the orchestrator.
+            if _candidate_is_fresh_full_chain(candidate):
+                ready.append(candidate)
+                continue
             try:
                 result = self.forcing_producer.produce(
                     source_id=candidate.source_id,
@@ -2589,23 +2595,49 @@ class ProductionScheduler:
                         continue
                 canonical_readiness = self._canonical_readiness_for_candidate(candidate, cycle)
                 if canonical_readiness is not None and not bool(canonical_readiness.get("ready")):
-                    state_evidence = {"canonical_readiness": canonical_readiness}
-                    if state_decision is not None:
-                        state_evidence["candidate_state"] = state_decision.evidence
-                    blocked.append(
-                        _blocked_candidate(
+                    # M23 §255: a brand-new cycle with zero canonical rows in
+                    # met.canonical_met_product is a fresh ingestion, not a
+                    # corrupt/partial canonical. Don't hard-block it; let the
+                    # generic chain run the full download->...->publish from
+                    # scratch (restart_stage=None). Only keep the hard block when
+                    # canonical rows already exist but fail identity/variable
+                    # checks (avoid swallowing bad/half-baked canonical). A
+                    # provider-unavailable / query-failed evidence carries no
+                    # row-count evaluation, so it is never treated as fresh.
+                    if _canonical_evidence_is_fresh_zero_row(canonical_readiness):
+                        candidate = _candidate_with_state_evidence(
                             candidate,
-                            str(canonical_readiness.get("reason") or "canonical_incomplete"),
-                            state_evidence=state_evidence,
+                            {
+                                "canonical_readiness": canonical_readiness,
+                                "fresh_ingestion": {"required": True, "mode": "full_chain"},
+                            },
                         )
-                    )
-                    continue
-                if canonical_readiness is not None:
+                    else:
+                        state_evidence = {"canonical_readiness": canonical_readiness}
+                        if state_decision is not None:
+                            state_evidence["candidate_state"] = state_decision.evidence
+                        blocked.append(
+                            _blocked_candidate(
+                                candidate,
+                                str(canonical_readiness.get("reason") or "canonical_incomplete"),
+                                state_evidence=state_evidence,
+                            )
+                        )
+                        continue
+                elif canonical_readiness is not None:
                     candidate = _candidate_with_state_evidence(
                         candidate,
                         {"canonical_readiness": canonical_readiness},
                     )
-                if state_decision is not None and state_decision.action == "retry":
+                if (
+                    state_decision is not None
+                    and state_decision.action == "retry"
+                    and not _candidate_is_fresh_full_chain(candidate)
+                ):
+                    # Fresh full-chain candidates (zero canonical) must run
+                    # download->...->publish from scratch; absorbing a retry's
+                    # restart_stage evidence here would divert the chain to
+                    # restart from parse with no forcing/forecast to parse.
                     candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                 if has_active_orchestration is None:
                     has_active_orchestration = bool(
@@ -5290,7 +5322,70 @@ def _restart_compatible_candidate_cohorts(
     )
 
 
+def _canonical_candidate_row_count(canonical_readiness: Mapping[str, Any] | None) -> int:
+    """Count of canonical rows already present for this cycle.
+
+    ``candidate_row_count`` from ``evaluate_canonical_readiness`` is every
+    canonical row matched to the cycle (before usability/identity filtering).
+    Zero means the cycle has no canonical at all -> fresh full-chain ingestion.
+    """
+    if not isinstance(canonical_readiness, Mapping):
+        return 0
+    try:
+        return int(canonical_readiness.get("candidate_row_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _canonical_evidence_is_fresh_zero_row(canonical_readiness: Mapping[str, Any] | None) -> bool:
+    """True only for a genuine readiness evaluation that found zero canonical rows.
+
+    Provider-unavailable / query-failed evidence (``canonical_unavailable``)
+    carries no ``candidate_row_count`` key; such cases must keep the hard block
+    and are never reclassified as fresh ingestion.
+
+    A readiness with no expected leads (``reason="no_expected_leads"`` /
+    empty ``expected_leads``) is a broken horizon/policy config, not a fresh
+    cycle. It also reports zero canonical rows, so it must keep the hard block
+    instead of being routed into a full-chain ingestion.
+    """
+    if not isinstance(canonical_readiness, Mapping):
+        return False
+    if "candidate_row_count" not in canonical_readiness:
+        return False
+    if str(canonical_readiness.get("status") or "") == "canonical_unavailable":
+        return False
+    if str(canonical_readiness.get("reason") or "") == "no_expected_leads":
+        return False
+    if not canonical_readiness.get("expected_leads"):
+        return False
+    return _canonical_candidate_row_count(canonical_readiness) == 0
+
+
+def _candidate_is_fresh_full_chain(candidate: SchedulerCandidate) -> bool:
+    """True when the candidate is a fresh ingestion that must start at download.
+
+    Fresh candidates carry no canonical to drive in-process forcing; the Slurm
+    chain's forcing stage produces it. Identified by the ``fresh_ingestion``
+    state_evidence marker stamped at the readiness gate.
+    """
+    state_evidence = candidate.state_evidence
+    if not isinstance(state_evidence, Mapping):
+        return False
+    marker = state_evidence.get("fresh_ingestion")
+    if not isinstance(marker, Mapping):
+        return False
+    return bool(marker.get("required")) and str(marker.get("mode") or "") == "full_chain"
+
+
 def _candidate_restart_stage(candidate: SchedulerCandidate) -> str | None:
+    # Fresh full-chain ingestion routes on a single source of truth: it must
+    # always land in the (0, "full") cohort and run download->...->publish from
+    # scratch. A residual restart_stage merged from a retry state_decision (e.g.
+    # retention cleared canonical while a stale restart marker lingered) must not
+    # divert it off the full-chain path, so force None here.
+    if _candidate_is_fresh_full_chain(candidate):
+        return None
     state_evidence = candidate.state_evidence
     if not isinstance(state_evidence, Mapping):
         return None
@@ -5733,7 +5828,9 @@ def _candidate_basin_manifest(
         state_evidence = _evidence_safe(candidate.state_evidence)
         manifest["state_evidence"] = state_evidence
         restart_stage = state_evidence.get("restart_stage") if isinstance(state_evidence, Mapping) else None
-        if restart_stage:
+        # Defense in depth: fresh full-chain ingestion never carries a basin
+        # restart_stage even if a residual marker survived upstream merges.
+        if restart_stage and not _candidate_is_fresh_full_chain(candidate):
             manifest["restart_stage"] = restart_stage
         if state_evidence.get("durable_shud_output_reused") is True:
             manifest["durable_shud_output_reused"] = True

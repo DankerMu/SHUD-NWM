@@ -29,9 +29,14 @@ Each accepted cycle SHALL download and canonicalize all required meteorological 
 - **AND** evidence includes per-variable valid-time counts, lead/horizon coverage, source, cycle, checksums or object references, and canonical status.
 
 #### Scenario: Variable coverage incomplete
-- **WHEN** one or more required variables or lead times are missing
+- **WHEN** one or more required variables or lead times are missing **for a cycle that already has canonical rows** (`candidate_row_count > 0`)
 - **THEN** canonical status is blocked or incomplete with safe missing-variable/lead details
 - **AND** forcing generation and SHUD submission do not proceed for that cycle.
+
+#### Scenario: Zero canonical rows trigger fresh full-chain ingestion
+- **WHEN** an accepted cycle has no canonical rows at all (`candidate_row_count == 0`) for the source/cycle and the source policy yields a non-empty expected lead horizon
+- **THEN** the generic production daemon treats it as a fresh ingestion rather than a hard block, and admits a full-chain cohort with no restart stage so the Slurm chain runs download → convert → forcing → forecast → parse → frequency → publish via the gateway
+- **AND** a cycle that already has canonical rows but fails identity/variable/lead checks keeps the hard block, and an empty expected horizon or provider-unavailable readiness keeps the hard block (never reclassified as fresh).
 
 #### Scenario: Source-specific horizon policy
 - **WHEN** source-specific lead availability differs, including shorter IFS horizons

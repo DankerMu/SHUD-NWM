@@ -1,6 +1,8 @@
 # 项目进度
 
-最后更新：2026-06-05，m24 §3B 多流域 live：通用编排器双流域并发链路打通 + 抓出并修掉 6 个真实缺陷，**已取得 qhh+heihe 双流域 published receipt**（流量 display 口径，cycle gfs_2026060500 → `complete`）。
+最后更新：2026-06-06，m23 §255 摄取接线收口：通用 daemon 现已**自驱全新 cycle 的 canonical 摄取**——scheduler 对零 canonical 行的全新 cycle 不再硬 block，而是放 `restart_stage=None` 整链 cohort 让 chain 从 download 起跑（download→convert→forcing→forecast→parse→frequency→publish，经 Slurm gateway）；有行但不完整仍硬 block，空 horizon/provider 不可用不误判 fresh。分支 `feat/m23-255-generic-canonical-ingestion`，node-22 oracle 626 passed；live 端到端 receipt 待 gateway 部署后补。这补上了 #287 当初乐观标注但实际缺失的 daemon 摄取自驱（#292 曾 `submitted_count=0` blocked）。
+
+上一里程碑：2026-06-05，m24 §3B 多流域 live：通用编排器双流域并发链路打通 + 抓出并修掉 6 个真实缺陷，**已取得 qhh+heihe 双流域 published receipt**（流量 display 口径，cycle gfs_2026060500 → `complete`）。
 
 用途：作为跨 session 继承的项目真实进度索引。本文只保留当前完成态、仍需 live proof 的边界和常用验证入口；历史 review 细节以 GitHub issue、PR、OpenSpec 和 runbook 为准。
 
