@@ -435,6 +435,22 @@ def test_direct_client_retrieval_enforces_max_size_before_object_store_write(tmp
     assert read_calls == []
 
 
+def test_cdo_clip_enforces_output_size_before_reading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = build_adapter(tmp_path, max_file_size_bytes=4)
+    raw = tmp_path / "raw.grib2"
+    raw.write_bytes(b"GRIB input")
+
+    def fake_run(argv: list[str], **_kwargs: Any) -> Any:
+        Path(argv[-1]).write_bytes(b"GRIB oversized clipped payload")
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr(ifs_module.shutil, "which", lambda _name: "/usr/bin/cdo")
+    monkeypatch.setattr(ifs_module.subprocess, "run", fake_run)
+
+    with pytest.raises(FileTooLargeError):
+        adapter._clip_grib_to_bbox(str(raw), "ecmwf-opendata://aws/ifs/file.grib2")
+
+
 def test_source_object_identity_changes_when_remote_or_policy_content_changes(tmp_path: Path) -> None:
     first = build_adapter(tmp_path / "first")
     second = build_adapter(tmp_path / "second")
@@ -593,7 +609,7 @@ def test_downloaded_manifest_identity_feeds_ifs_canonical_readiness_and_blocks_s
     assert stale_readiness.evidence["source_object_identity_matched"] is False
 
 
-def test_download_plan_rate_limit_honors_retry_after_and_switches_mirror(tmp_path: Path) -> None:
+def test_download_plan_rate_limit_switches_mirror_without_sleeping_first(tmp_path: Path) -> None:
     sleeps: list[float] = []
     calls: list[str] = []
 
@@ -616,7 +632,7 @@ def test_download_plan_rate_limit_honors_retry_after_and_switches_mirror(tmp_pat
     result = adapter.download_plan(single)
 
     assert result.status == "raw_complete"
-    assert sleeps == [120.0]
+    assert sleeps == []
     assert "://aws/" in calls[0]
     assert "://azure/" in calls[1]
 
@@ -805,6 +821,44 @@ def test_all_cloud_mirrors_rate_limited_falls_back_to_ecmwf(tmp_path: Path) -> N
     assert result.status == "raw_complete"
     assert "://ecmwf/" in calls[-1]
     assert any("://aws/" in url for url in calls)
+
+
+def test_all_sources_rate_limited_sleeps_once_before_failure(tmp_path: Path) -> None:
+    now = {"t": 1000.0}
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now["t"]
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        now["t"] += seconds
+
+    def downloader(_url: str) -> bytes:
+        raise http_503("SlowDown")
+
+    config = IFSAdapterConfig(
+        workspace_root=tmp_path,
+        preferred_source="aws",
+        fallback_sources=("azure",),
+        max_retries=0,
+        poll_interval_seconds=1,
+        max_wait_seconds=1,
+    )
+    adapter = IFSAdapter(
+        config=config,
+        repository=FakeMetRepository(),
+        object_store=LocalObjectStore(tmp_path),
+        downloader=downloader,
+        sleeper=sleeper,
+        clock=clock,
+    )
+
+    result = adapter.download_plan(_single_entry_manifest(adapter))
+
+    assert result.status == "failed_download"
+    assert result.files[0].error_code == "RATE_LIMITED"
+    assert sleeps == [1.0]
 
 
 def test_rate_limited_source_is_skipped_until_cooldown_expires(tmp_path: Path) -> None:

@@ -798,26 +798,16 @@ class IFSAdapter(DataSourceAdapter):
                     total_retries += error.attempts
                     saw_rate_limit = True
                     rate_limited_sources.add(source)
-                    _IFS_SOURCE_COOLDOWN_UNTIL[source] = (
-                        self.clock() + self.config.rate_limit_cooldown_seconds
-                    )
-                    LOGGER.warning("IFS source %s rate limited for %s", source, entry.local_key)
-                    requested_wait = (
+                    cooldown_seconds = (
                         error.retry_after_seconds
                         if error.retry_after_seconds is not None
-                        else self.config.poll_interval_seconds
+                        else self.config.rate_limit_cooldown_seconds
                     )
-                    wait_seconds = self._bounded_wait(requested_wait, waited_seconds, first_start)
-                    if wait_seconds <= 0:
-                        raise RateLimitedError(
-                            (
-                                f"IFS download rate limited across sources {', '.join(tried_sources)} "
-                                f"for {entry.local_key}"
-                            ),
-                            attempts=total_retries,
-                        ) from error
-                    self.sleeper(wait_seconds)
-                    waited_seconds += wait_seconds
+                    _IFS_SOURCE_COOLDOWN_UNTIL[source] = self.clock() + max(
+                        self.config.rate_limit_cooldown_seconds,
+                        cooldown_seconds,
+                    )
+                    LOGGER.warning("IFS source %s rate limited for %s", source, entry.local_key)
                     continue
                 except NetworkDownloadError as error:
                     total_retries += error.attempts
@@ -1109,6 +1099,12 @@ class IFSAdapter(DataSourceAdapter):
                 raise CdoClipError(
                     f"cdo failed to clip IFS file {self._safe_text(remote_url)} "
                     f"(exit {result.returncode}): {self._safe_text(stderr)}"
+                )
+            clipped_size = Path(clipped.name).stat().st_size
+            if clipped_size > self.config.max_file_size_bytes:
+                raise FileTooLargeError(
+                    f"Clipped IFS payload from {self._safe_text(remote_url)} exceeds maximum size "
+                    f"{self.config.max_file_size_bytes} bytes"
                 )
             return Path(clipped.name).read_bytes()
 

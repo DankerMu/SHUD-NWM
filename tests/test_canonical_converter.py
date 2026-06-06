@@ -846,7 +846,7 @@ def test_missing_required_variable_marks_cycle_failed_and_records_fail_product(t
     cycle = repository.cycles[("gfs", parse_cycle_time("2026050700"))]
     assert cycle["status"] == "failed_convert"
     assert cycle["error_code"] == "CONVERT_FAILED"
-    fail_product = repository.products["gfs_2026050700_shortwave_down_f000"]
+    fail_product = repository.products["gfs_2026050700_shortwave_down_f003"]
     assert fail_product["quality_flag"] == "fail"
     assert fail_product["lineage_json"]["conversion_params"]["missing_native_variable"] == "dswrf"
 

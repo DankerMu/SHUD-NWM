@@ -90,7 +90,11 @@ GFS_IDX_FIELD_LEVEL: dict[str, tuple[str, str]] = {
 }
 # apcp/dswrf are accumulated/averaged fields that are undefined at the f000 analysis
 # time; the cloud .idx omits them there, matching NOMADS which has no f000 APCP/DSWRF.
+# Keep f000 in the manifest for instantaneous fields. The forcing producer maps
+# f003 interval products back onto the cycle-start SHUD forcing row.
 GFS_F000_UNAVAILABLE_VARIABLES: frozenset[str] = frozenset({"apcp", "dswrf"})
+GFS_IDX_SELECTOR_SCHEMA_VERSION = "gfs-idx-selector-v2"
+GFS_APCP_SELECTOR_POLICY = "cycle_cumulative_stepRange_0_fhr"
 
 CDO_CLIP_TIMEOUT_SECONDS = 300
 
@@ -194,6 +198,12 @@ class AmbiguousIdxRecordError(GFSAdapterError):
     """Multiple .idx records remain after applying a variable-specific selector."""
 
     error_code = "IDX_AMBIGUOUS_RECORD"
+
+
+class IdxSelectorPolicyError(GFSAdapterError):
+    """A present .idx field violates the source-specific selector policy."""
+
+    error_code = "IDX_SELECTOR_POLICY_ERROR"
 
 
 class CdoMissingError(GFSAdapterError):
@@ -354,6 +364,7 @@ class GFSAdapter(DataSourceAdapter):
             self.config.object_store_root,
             object_store_prefix=self.config.object_store_prefix,
         )
+        self._has_injected_downloader = downloader is not None
         self.downloader = downloader or self._download_url
         self.availability_checker = availability_checker or self._url_exists
         self.sleeper = sleeper or time.sleep
@@ -400,37 +411,13 @@ class GFSAdapter(DataSourceAdapter):
                 tzinfo=UTC,
             )
             cycle_id = cycle_id_for(self.config.source_id, cycle_time)
-            remote_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0])
-            try:
-                available = self.availability_checker(remote_url)
-                status = "discovered" if available else "unavailable"
-                reason = None if available else "source_cycle_unavailable"
-                classifier = None if available else "unavailable"
-                retryable = None if available else True
-            except ForbiddenSourceError as error:
-                LOGGER.warning(
-                    "GFS availability check was forbidden for %s",
-                    self._safe_text(remote_url),
-                    exc_info=True,
-                )
-                available = False
-                status = "forbidden"
-                reason = "source_cycle_forbidden"
-                classifier = "forbidden"
-                # A 403 is a NOMADS-only rate-limit/block. With cloud mirrors now the
-                # primary source, NOMADS is no longer the cycle's gatekeeper: trip the
-                # persisted circuit breaker so subsequent passes skip NOMADS entirely,
-                # and mark this probe non-retryable (the breaker, not discovery retry,
-                # governs NOMADS recovery). The cloud mirrors remain the real source.
-                self._open_nomads_circuit(self._safe_text(remote_url), error.error_code)
-                retryable = False
-            except Exception:
-                LOGGER.exception("Failed to check GFS availability for %s", self._safe_text(remote_url))
-                available = False
-                status = "unavailable"
-                reason = "source_cycle_unavailable"
-                classifier = "unavailable"
-                retryable = True
+            probe = self._discover_cycle_availability(cycle_time)
+            available = bool(probe["available"])
+            status = str(probe["status"])
+            reason = probe.get("reason")
+            classifier = probe.get("classifier")
+            retryable = probe.get("retryable")
+            remote_url = str(probe["probe_uri"])
 
             discovery = CycleDiscovery(
                 cycle_id=cycle_id,
@@ -439,18 +426,11 @@ class GFSAdapter(DataSourceAdapter):
                 cycle_hour=cycle_hour,
                 available=available,
                 status=status,
-                reason=reason,
-                classifier=classifier,
-                retryable=retryable,
+                reason=str(reason) if reason is not None else None,
+                classifier=str(classifier) if classifier is not None else None,
+                retryable=bool(retryable) if retryable is not None else None,
                 probe_uri=self._safe_text(remote_url),
-                evidence={
-                    "source": self.config.source_id,
-                    "probe": {
-                        "uri": self._safe_text(remote_url),
-                        "forecast_hour": 0,
-                        "variable": self.config.variables[0],
-                    },
-                },
+                evidence=_mapping_value(probe.get("evidence")),
             )
             discoveries.append(discovery)
 
@@ -468,6 +448,97 @@ class GFSAdapter(DataSourceAdapter):
                     raise
 
         return discoveries
+
+    def _discover_cycle_availability(self, cycle_time: datetime) -> dict[str, Any]:
+        cloud_probes: list[dict[str, Any]] = []
+        for backend in self.config.cloud_backends():
+            idx_url = f"{self._mirror_grib_url(backend, cycle_time, forecast_hour=0)}.idx"
+            try:
+                available = self.availability_checker(idx_url)
+            except ForbiddenSourceError:
+                LOGGER.warning(
+                    "GFS cloud availability check was forbidden for %s",
+                    self._safe_text(idx_url),
+                    exc_info=True,
+                )
+                cloud_probes.append({"backend": backend, "uri": self._safe_text(idx_url), "status": "forbidden"})
+                continue
+            except Exception:
+                LOGGER.warning("Failed to check GFS cloud availability for %s", self._safe_text(idx_url), exc_info=True)
+                cloud_probes.append({"backend": backend, "uri": self._safe_text(idx_url), "status": "unavailable"})
+                continue
+            cloud_probes.append({
+                "backend": backend,
+                "uri": self._safe_text(idx_url),
+                "status": "available" if available else "unavailable",
+            })
+            if available:
+                return {
+                    "available": True,
+                    "status": "discovered",
+                    "probe_uri": self._safe_text(idx_url),
+                    "evidence": {
+                        "source": self.config.source_id,
+                        "probe": {
+                            "uri": self._safe_text(idx_url),
+                            "backend": backend,
+                            "forecast_hour": 0,
+                            "type": "cloud_idx",
+                        },
+                        "cloud_probes": cloud_probes,
+                    },
+                }
+
+        nomads_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0])
+        if self.config.uses_nomads():
+            try:
+                available = self.availability_checker(nomads_url)
+                return {
+                    "available": bool(available),
+                    "status": "discovered" if available else "unavailable",
+                    "reason": None if available else "source_cycle_unavailable",
+                    "classifier": None if available else "unavailable",
+                    "retryable": None if available else True,
+                    "probe_uri": self._safe_text(nomads_url),
+                    "evidence": {
+                        "source": self.config.source_id,
+                        "probe": {
+                            "uri": self._safe_text(nomads_url),
+                            "backend": GFS_NOMADS_BACKEND,
+                            "forecast_hour": 0,
+                            "variable": self.config.variables[0],
+                        },
+                        "cloud_probes": cloud_probes,
+                    },
+                }
+            except ForbiddenSourceError as error:
+                LOGGER.warning(
+                    "GFS NOMADS availability check was forbidden for %s",
+                    self._safe_text(nomads_url),
+                    exc_info=True,
+                )
+                self._open_nomads_circuit(self._safe_text(nomads_url), error.error_code)
+                return {
+                    "available": False,
+                    "status": "forbidden",
+                    "reason": "source_cycle_forbidden",
+                    "classifier": "forbidden",
+                    "retryable": False,
+                    "probe_uri": self._safe_text(nomads_url),
+                    "evidence": {"source": self.config.source_id, "cloud_probes": cloud_probes},
+                }
+            except Exception:
+                LOGGER.exception("Failed to check GFS NOMADS availability for %s", self._safe_text(nomads_url))
+
+        return {
+            "available": False,
+            "status": "unavailable",
+            "reason": "source_cycle_unavailable",
+            "classifier": "unavailable",
+            "retryable": True,
+            "probe_uri": self._safe_text(nomads_url),
+            "evidence": {"source": self.config.source_id, "cloud_probes": cloud_probes},
+        }
 
     def build_manifest(
         self,
@@ -487,8 +558,9 @@ class GFSAdapter(DataSourceAdapter):
         )
         entries: list[ManifestEntry] = []
 
-        for forecast_hour in hours:
-            for variable in self.config.variables:
+        effective_hours = self._effective_forecast_hours(hours)
+        for forecast_hour in effective_hours:
+            for variable in self._variables_for_forecast_hour(forecast_hour):
                 filename = self.raw_filename(parsed_cycle_time, forecast_hour, variable)
                 local_key = f"raw/{self.config.source_id}/{compact_cycle}/{filename}"
                 entries.append(
@@ -506,11 +578,12 @@ class GFSAdapter(DataSourceAdapter):
 
         metadata = {
             "cycle_time": parsed_cycle_time.isoformat(),
-            "first_forecast_hour": min(hours) if hours else None,
-            "last_forecast_hour": max(hours) if hours else None,
-            "forecast_hours": list(hours),
-            "source_policy": self.source_policy_identity(hours),
-            "source_object_identity": self.source_object_identity(parsed_cycle_time, hours),
+            "first_forecast_hour": min(effective_hours) if effective_hours else None,
+            "last_forecast_hour": max(effective_hours) if effective_hours else None,
+            "requested_forecast_hours": list(hours),
+            "forecast_hours": list(effective_hours),
+            "source_policy": self.source_policy_identity(effective_hours),
+            "source_object_identity": self.source_object_identity(parsed_cycle_time, effective_hours),
             "variable_count": len(self.config.variables),
             "total_file_count": len(entries),
         }
@@ -793,6 +866,7 @@ class GFSAdapter(DataSourceAdapter):
                 CdoMissingError,
                 CdoClipError,
                 AmbiguousIdxRecordError,
+                IdxSelectorPolicyError,
                 IdxParseError,
                 AllSourcesUnavailableError,
             ):
@@ -835,6 +909,8 @@ class GFSAdapter(DataSourceAdapter):
             except IdxRecordNotFoundError:
                 any_404 = True
                 continue
+            except IdxSelectorPolicyError:
+                raise
             except FileUnavailableError as error:
                 any_404 = True
                 total_retries += max(0, error.attempts - 1)
@@ -946,7 +1022,7 @@ class GFSAdapter(DataSourceAdapter):
         raise GFSAdapterError(f"Cannot determine cycle_time for entry {entry.local_key}")
 
     def _http_get_text(self, url: str) -> str:
-        payload = self.downloader(url) if self.downloader is not self._download_url else self._http_get_bytes(url)
+        payload = self.downloader(url) if self._has_injected_downloader else self._http_get_bytes(url)
         if isinstance(payload, DownloadedPayload):
             return payload.content.decode("utf-8", errors="replace")
         return bytes(payload).decode("utf-8", errors="replace")
@@ -954,19 +1030,40 @@ class GFSAdapter(DataSourceAdapter):
     def _http_get_range(self, url: str, start: int, end: int | None) -> bytes:
         # end is exclusive ([start, end)); HTTP Range is inclusive, hence end-1.
         range_header = f"bytes={start}-{end - 1}" if end is not None else f"bytes={start}-"
-        if self.downloader is not self._download_url:
+        if self._has_injected_downloader:
             payload = self.downloader(f"{url}#range={range_header}")
-            return payload.content if isinstance(payload, DownloadedPayload) else bytes(payload)
-        return self._http_get_bytes(url, range_header=range_header)
+            content = payload.content if isinstance(payload, DownloadedPayload) else bytes(payload)
+            if end is not None and len(content) > end - start:
+                raise FileTooLargeError(
+                    f"Injected range payload for {self._safe_text(url)} exceeded requested byte range"
+                )
+            return content
+        return self._http_get_bytes(url, range_header=range_header, expected_range=(start, end))
 
-    def _http_get_bytes(self, url: str, *, range_header: str | None = None) -> bytes:
+    def _http_get_bytes(
+        self,
+        url: str,
+        *,
+        range_header: str | None = None,
+        expected_range: tuple[int, int | None] | None = None,
+    ) -> bytes:
         headers = {"Range": range_header} if range_header else {}
         request = Request(url, method="GET", headers=headers)
         try:
             with urlopen(request, timeout=self.config.request_timeout_seconds) as response:
                 status = getattr(response, "status", 200)
-                self._raise_for_http_status(status, url, response=response)
-                return self._read_bounded(response, url)
+                if range_header is not None:
+                    self._validate_range_response(status, response, url, expected_range)
+                else:
+                    self._raise_for_http_status(status, url, response=response)
+                content = self._read_bounded(response, url)
+                if expected_range is not None and expected_range[1] is not None:
+                    expected_length = expected_range[1] - expected_range[0]
+                    if len(content) > expected_length:
+                        raise FileTooLargeError(
+                            f"Range response for {self._safe_text(url)} exceeded requested byte range"
+                        )
+                return content
         except HTTPError as error:
             self._raise_for_http_error(error, url)
         except (URLError, TimeoutError, OSError) as error:
@@ -974,6 +1071,49 @@ class GFSAdapter(DataSourceAdapter):
                 f"Network error while downloading {self._safe_text(url)}: {self._safe_text(str(error))}"
             ) from error
         raise NetworkDownloadError(f"Unreachable: {self._safe_text(url)}")
+
+    def _validate_range_response(
+        self,
+        status: int,
+        response: Any,
+        url: str,
+        expected_range: tuple[int, int | None] | None,
+    ) -> None:
+        if status != 206:
+            if status in (404, 403, 429, 503) or status >= 400:
+                self._raise_for_http_status(status, url, response=response)
+            raise NetworkDownloadError(
+                f"HTTP {status} for ranged GFS request {self._safe_text(url)}; expected 206 Partial Content",
+                attempts=1,
+            )
+        content_range = response.headers.get("Content-Range") if response is not None else None
+        if not content_range:
+            raise NetworkDownloadError(
+                f"Missing Content-Range for ranged GFS request {self._safe_text(url)}",
+                attempts=1,
+            )
+        if expected_range is None:
+            return
+        expected_start, expected_end = expected_range
+        parsed = _parse_content_range(content_range)
+        if parsed is None:
+            raise NetworkDownloadError(
+                f"Malformed Content-Range {content_range!r} for ranged GFS request {self._safe_text(url)}",
+                attempts=1,
+            )
+        actual_start, actual_end_inclusive = parsed
+        if actual_start != expected_start:
+            raise NetworkDownloadError(
+                f"Content-Range start mismatch for {self._safe_text(url)}: expected {expected_start}, "
+                f"observed {actual_start}",
+                attempts=1,
+            )
+        if expected_end is not None and actual_end_inclusive != expected_end - 1:
+            raise NetworkDownloadError(
+                f"Content-Range end mismatch for {self._safe_text(url)}: expected {expected_end - 1}, "
+                f"observed {actual_end_inclusive}",
+                attempts=1,
+            )
 
     def _raise_for_http_status(self, status: int, url: str, *, response: Any = None) -> None:
         if status in (200, 206):
@@ -1068,6 +1208,12 @@ class GFSAdapter(DataSourceAdapter):
                 raise CdoClipError(
                     f"cdo failed to clip GFS file {self._safe_text(source_url)} "
                     f"(exit {result.returncode}): {self._safe_text(stderr)}"
+                )
+            clipped_size = Path(clipped.name).stat().st_size
+            if clipped_size > self.config.max_file_size_bytes:
+                raise FileTooLargeError(
+                    f"Clipped GFS payload from {self._safe_text(source_url)} exceeds maximum size "
+                    f"{self.config.max_file_size_bytes} bytes"
                 )
             return Path(clipped.name).read_bytes()
 
@@ -1364,10 +1510,24 @@ class GFSAdapter(DataSourceAdapter):
             return [int(forecast_hour) for forecast_hour in forecast_hours]
         return sorted({int(entry.forecast_hour) for entry in manifest.entries})
 
+    def _variables_for_forecast_hour(self, forecast_hour: int) -> tuple[str, ...]:
+        return tuple(
+            variable
+            for variable in self.config.variables
+            if not (forecast_hour == 0 and variable in GFS_F000_UNAVAILABLE_VARIABLES)
+        )
+
+    def _effective_forecast_hours(self, forecast_hours: list[int]) -> list[int]:
+        return list(forecast_hours)
+
     def source_policy_identity(self, forecast_hours: list[int] | None = None) -> dict[str, Any]:
-        hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
+        requested_hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
+        hours = self._effective_forecast_hours(requested_hours)
         return {
             "source": self.config.source_id,
+            "policy_schema_version": "nhms.gfs.source_policy.v3",
+            "idx_selector_schema_version": GFS_IDX_SELECTOR_SCHEMA_VERSION,
+            "apcp_selector_policy": GFS_APCP_SELECTOR_POLICY,
             "cycle_hours_utc": list(self.config.cycle_hours_utc),
             "forecast_start_hour": self.config.forecast_start_hour,
             "forecast_end_hour": self.config.forecast_end_hour,
@@ -1377,8 +1537,13 @@ class GFSAdapter(DataSourceAdapter):
                 if self.config.forecast_resolution_segments
                 else None
             ),
+            "requested_forecast_hours": requested_hours,
             "forecast_hours": hours,
             "variables": list(self.config.variables),
+            "variable_availability": {
+                "f000_unavailable_variables": sorted(GFS_F000_UNAVAILABLE_VARIABLES),
+                "f000_keeps_available_instantaneous_variables": True,
+            },
             "max_retries": self.config.max_retries,
             "max_wait_seconds": self.config.max_wait_seconds,
             "bbox": self.config.bbox.as_dict(),
@@ -1394,15 +1559,19 @@ class GFSAdapter(DataSourceAdapter):
         forecast_hours: list[int] | None = None,
     ) -> dict[str, Any]:
         parsed_cycle_time = parse_cycle_time(cycle_time)
-        hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
+        requested_hours = list(forecast_hours if forecast_hours is not None else self.config.forecast_hours())
+        hours = self._effective_forecast_hours(requested_hours)
         entries = self._source_object_entry_identities(parsed_cycle_time, hours)
         entry_digest = _stable_digest(entries)
         return {
-            "identity_schema_version": "nhms.source_object_identity.v2",
+            "identity_schema_version": "nhms.source_object_identity.v3",
             "source": self.config.source_id,
             "cycle_time": parsed_cycle_time.isoformat(),
             "base_url": self._safe_text(self.config.base_url),
+            "idx_selector_schema_version": GFS_IDX_SELECTOR_SCHEMA_VERSION,
+            "apcp_selector_policy": GFS_APCP_SELECTOR_POLICY,
             "bbox": self.config.bbox.as_dict(),
+            "requested_forecast_hours": requested_hours,
             "first_forecast_hour": min(hours) if hours else None,
             "last_forecast_hour": max(hours) if hours else None,
             "forecast_hour_count": len(hours),
@@ -1434,7 +1603,7 @@ class GFSAdapter(DataSourceAdapter):
         compact_cycle = format_cycle_time(cycle_time)
         entries: list[dict[str, Any]] = []
         for forecast_hour in forecast_hours:
-            for variable in self.config.variables:
+            for variable in self._variables_for_forecast_hour(forecast_hour):
                 filename = self.raw_filename(cycle_time, forecast_hour, variable)
                 local_key = f"raw/{self.config.source_id}/{compact_cycle}/{filename}"
                 entries.append(
@@ -1443,12 +1612,26 @@ class GFSAdapter(DataSourceAdapter):
                         "remote_identity": self._safe_text(self.remote_url(cycle_time, forecast_hour, variable)),
                         "variable": variable,
                         "forecast_hour": forecast_hour,
+                        "selector_policy": self._entry_selector_policy(variable, forecast_hour),
                         "expected_checksum": None,
                         "expected_size_bytes": None,
                         "observed_raw_object": self._raw_object_observation(local_key),
                     }
                 )
         return entries
+
+    def _entry_selector_policy(self, variable: str, forecast_hour: int) -> dict[str, Any]:
+        if variable == "apcp":
+            return {
+                "idx_selector_schema_version": GFS_IDX_SELECTOR_SCHEMA_VERSION,
+                "accumulation_policy": "cumulative_since_cycle",
+                "preferred_step_range": f"0-{forecast_hour}",
+                "allow_duplicate_identical_step_range": True,
+            }
+        return {
+            "idx_selector_schema_version": GFS_IDX_SELECTOR_SCHEMA_VERSION,
+            "accumulation_policy": "default_unique_record",
+        }
 
     def _raw_object_observation(self, local_key: str) -> dict[str, Any]:
         try:
@@ -1616,6 +1799,20 @@ def _retry_after_seconds(value: str | None) -> float | None:
         return None
 
 
+def _parse_content_range(value: str) -> tuple[int, int] | None:
+    prefix = "bytes "
+    if not value.startswith(prefix):
+        return None
+    range_part = value[len(prefix) :].split("/", 1)[0]
+    start_text, separator, end_text = range_part.partition("-")
+    if not separator:
+        return None
+    try:
+        return int(start_text), int(end_text)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class IdxRecord:
     record_number: int
@@ -1701,12 +1898,11 @@ def _select_apcp_idx_match(records: list[IdxRecord], matches: list[int], forecas
     preferred = [index for index in matches if _idx_step_range(records[index]) == preferred_step_range]
     if not preferred:
         descriptions = "; ".join(f"{records[i].field}:{records[i].level}:{records[i].forecast}" for i in matches)
-        raise IdxRecordNotFoundError(
+        raise IdxSelectorPolicyError(
             (
                 f"No GFS APCP cumulative .idx record with stepRange={preferred_step_range} "
                 f"at f{forecast_hour:03d}; matched records: {descriptions}"
-            ),
-            attempts=1,
+            )
         )
     if len(preferred) == 1:
         return preferred[0]
@@ -1760,6 +1956,10 @@ def _select_idx_byte_range(
 
 def _stable_digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def _mapping_value(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _entry_samples(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:

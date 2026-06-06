@@ -397,8 +397,12 @@ class ForcingProducer:
                 canonical_identity=canonical_identity,
             )
             lead_window = _lead_window_from_products(products_by_variable, parsed_cycle_time)
-            valid_times = _valid_times(products_by_variable)
-            self._enforce_limit("timestep_count", len(valid_times), self.config.max_timestep_count)
+            expected_valid_times = _expected_forcing_valid_times(
+                resolved_source_id,
+                products_by_variable,
+                cycle_time=parsed_cycle_time,
+            )
+            self._enforce_limit("timestep_count", len(expected_valid_times), self.config.max_timestep_count)
             station_signature = _station_signature(stations)
             scheduler_canonical_identity = _scheduler_canonical_identity_manifest(
                 canonical_product_id=canonical_product_id,
@@ -412,19 +416,24 @@ class ForcingProducer:
                 canonical_input_signature=canonical_input_signature,
                 scheduler_canonical_identity=scheduler_canonical_identity,
                 expected_station_ids=station_signature["station_ids"],
-                expected_valid_times=valid_times,
+                expected_valid_times=expected_valid_times,
                 expected_variables=self.config.output_variables,
                 expected_component_ids=_canonical_product_ids(products_by_variable),
             ):
+                existing_coverage_end = _forcing_coverage_end_time(
+                    resolved_source_id,
+                    products_by_variable,
+                    row_times=expected_valid_times,
+                )
                 return ForcingProductionResult(
                     status="already_done",
                     forcing_version_id=str(existing["forcing_version_id"]),
                     forcing_package_uri=str(existing["forcing_package_uri"]),
                     checksum=str(existing["checksum"]),
                     station_count=int(existing["station_count"]),
-                    timestep_count=len(valid_times),
+                    timestep_count=len(expected_valid_times),
                     variable_count=len(self.config.output_variables),
-                    time_range=_time_range_manifest(valid_times),
+                    time_range=_time_range_manifest([expected_valid_times[0], existing_coverage_end]),
                     units={variable: OUTPUT_UNITS[variable] for variable in self.config.output_variables},
                     file_uris={
                         "package_manifest": _package_manifest_uri(
@@ -459,6 +468,7 @@ class ForcingProducer:
             )
             values, components = self._generate_timeseries_streaming(
                 source_id=resolved_source_id,
+                cycle_time=parsed_cycle_time,
                 forcing_version_id=forcing_version_id,
                 basin_version_id=resolved_basin_version_id,
                 products_by_variable=products_by_variable,
@@ -662,6 +672,15 @@ class ForcingProducer:
         required_variables: Sequence[str],
     ) -> None:
         missing = _missing_product_details(products_by_variable, required_variables)
+        missing = [
+            item
+            for item in missing
+            if not _is_allowed_gfs_forcing_time_gap(
+                item,
+                products_by_variable,
+                required_variables=required_variables,
+            )
+        ]
         if missing:
             raise ForcingProductionError(f"Missing required canonical products: {', '.join(missing)}")
 
@@ -1025,6 +1044,7 @@ class ForcingProducer:
         self,
         *,
         source_id: str,
+        cycle_time: datetime,
         forcing_version_id: str,
         basin_version_id: str,
         products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
@@ -1033,7 +1053,17 @@ class ForcingProducer:
         grid_points_by_source_grid: Mapping[tuple[str, str], Sequence[GridPoint]],
         canonical_to_forcing: Mapping[str, str],
     ) -> tuple[tuple[ForcingTimeseriesRow, ...], tuple[ForcingComponent, ...]]:
-        valid_times = _valid_times(products_by_variable)
+        forcing_times = _expected_forcing_valid_times(
+            source_id,
+            products_by_variable,
+            cycle_time=cycle_time,
+        )
+        product_time_plan = _forcing_product_time_plan(
+            source_id,
+            products_by_variable,
+            forcing_times=forcing_times,
+            cycle_time=cycle_time,
+        )
         weights_by_source_grid_station_variable = {
             source_grid: _weights_by_station_variable(source_grid_weights)
             for source_grid, source_grid_weights in weights.items()
@@ -1043,14 +1073,15 @@ class ForcingProducer:
         radiation_variable = _canonical_variable_for_forcing("Rn", canonical_to_forcing)
         pressure_variable = _canonical_variable_for_forcing("Press", canonical_to_forcing)
 
-        for valid_time in valid_times:
+        for valid_time in forcing_times:
             field_cache: dict[str, CanonicalField] = {}
 
             def field_for(variable: str) -> CanonicalField:
                 cached = field_cache.get(variable)
                 if cached is not None:
                     return cached
-                product = products_by_variable[variable][valid_time]
+                product_valid_time = product_time_plan[variable][valid_time]
+                product = products_by_variable[variable][product_valid_time]
                 source_grid = (product.source_id, product.grid_id)
                 expected_grid_points = tuple(grid_points_by_source_grid[source_grid])
                 field = self._read_canonical_field(
@@ -1062,7 +1093,9 @@ class ForcingProducer:
                 field_cache[variable] = field
                 return field
 
-            precip_product = products_by_variable["prcp_rate_or_amount"][valid_time]
+            precip_product = products_by_variable["prcp_rate_or_amount"][
+                product_time_plan["prcp_rate_or_amount"][valid_time]
+            ]
             precip_factor = self._precip_to_timestep_factor(source_id, precip_product)
             station_values: dict[str, dict[str, float]] = {
                 "PRCP": {
@@ -1126,12 +1159,14 @@ class ForcingProducer:
                     products_by_variable,
                     valid_time,
                     canonical_to_forcing,
+                    product_time_plan=product_time_plan,
                 )
                 row_source_id = _source_id_for_output_variable(
                     variable,
                     products_by_variable,
                     valid_time,
                     canonical_to_forcing,
+                    product_time_plan=product_time_plan,
                 )
                 for station in stations:
                     value = station_values[variable][station.station_id]
@@ -1249,6 +1284,7 @@ class ForcingProducer:
         source_segment = _object_source_segment(source_id)
         forcing_version_id = rows[0].forcing_version_id
         valid_times = sorted({row.valid_time for row in rows})
+        coverage_end_time = _forcing_coverage_end_time(source_id, products_by_variable, row_times=valid_times)
         self._enforce_limit("timeseries_row_count", len(rows), self.config.max_timeseries_row_count)
         _validate_package_filenames(
             forcing_filename=self.config.forcing_filename,
@@ -1269,7 +1305,7 @@ class ForcingProducer:
         csv_uri = self.object_store.uri_for_key(csv_key)
         tsd_checksum = sha256_bytes(tsd_content)
         csv_checksum = sha256_bytes(csv_content)
-        shud_files = format_shud_forcing_package(rows, stations=stations)
+        shud_files = format_shud_forcing_package(rows, stations=stations, coverage_end_time=coverage_end_time)
         shud_file_payloads: list[tuple[str, bytes]] = []
         shud_file_entries: list[dict[str, str]] = []
         for relative_path, content in shud_files.items():
@@ -1289,6 +1325,7 @@ class ForcingProducer:
         variable_set = list(self.config.output_variables)
         units = {variable: OUTPUT_UNITS[variable] for variable in variable_set}
         time_range = _time_range_manifest(valid_times)
+        coverage_time_range = _time_range_manifest([valid_times[0], coverage_end_time])
         station_order = _station_order_manifest(stations)
         quality_flags = _quality_flags_manifest(rows, products_by_variable)
         canonical_product_ids = _canonical_product_ids(products_by_variable)
@@ -1314,7 +1351,8 @@ class ForcingProducer:
             "variable_set": variable_set,
             "units": units,
             "variable_count": len(variable_set),
-            "time_range": time_range,
+            "time_range": coverage_time_range,
+            "row_time_range": time_range,
             "quality_flags": quality_flags,
             "station_order": station_order,
             "canonical_product_ids": canonical_product_ids,
@@ -1335,7 +1373,7 @@ class ForcingProducer:
             "source_id": source_id,
             "cycle_time": _format_time(cycle_time),
             "start_time": _format_time(valid_times[0]),
-            "end_time": _format_time(valid_times[-1]),
+            "end_time": _format_time(coverage_end_time),
             "basin_id": basin_id,
             "basin_version_id": basin_version_id,
             "river_network_version_id": river_network_version_id,
@@ -1343,7 +1381,8 @@ class ForcingProducer:
             "station_count": len(stations),
             "timestep_count": len(valid_times),
             "variable_count": len(variable_set),
-            "time_range": time_range,
+            "time_range": coverage_time_range,
+            "row_time_range": time_range,
             "variable_set": variable_set,
             "units": units,
             "quality_flags": quality_flags,
@@ -1365,7 +1404,7 @@ class ForcingProducer:
             "source_id": source_id,
             "cycle_time": cycle_time,
             "start_time": valid_times[0],
-            "end_time": valid_times[-1],
+            "end_time": coverage_end_time,
             "station_count": len(stations),
             "forcing_package_uri": package_uri,
             "checksum": None,
@@ -1651,6 +1690,7 @@ def format_shud_forcing_package(
     rows: Sequence[ForcingTimeseriesRow],
     *,
     stations: Sequence[MetStation],
+    coverage_end_time: datetime | None = None,
 ) -> dict[str, str]:
     if not rows or not stations:
         return {}
@@ -1660,7 +1700,7 @@ def format_shud_forcing_package(
         rows_by_station_time.setdefault((row.station_id, row.valid_time), {})[row.variable] = row.value
     valid_times = sorted({row.valid_time for row in rows})
     start_time = _ensure_utc(valid_times[0])
-    end_time = _ensure_utc(valid_times[-1])
+    end_time = _ensure_utc(coverage_end_time or valid_times[-1])
     start_date = start_time.strftime("%Y%m%d")
     end_date = end_time.strftime("%Y%m%d")
     start_day = start_time.timestamp() / 86_400.0
@@ -2196,6 +2236,40 @@ def _missing_product_details(
     return missing
 
 
+def _is_allowed_gfs_forcing_time_gap(
+    missing_detail: str,
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    *,
+    required_variables: Sequence[str],
+) -> bool:
+    if not required_variables:
+        return False
+    source_ids = {
+        normalize_source_id(product.source_id)
+        for products_for_variable in products_by_variable.values()
+        for product in products_for_variable.values()
+    }
+    if source_ids != {"gfs"} or ":" not in missing_detail:
+        return False
+    variable, time_text = missing_detail.split(":", maxsplit=1)
+    if time_text == "*":
+        return False
+    try:
+        valid_time = parse_cycle_time(time_text)
+    except ValueError:
+        return False
+    interval_variables = {"prcp_rate_or_amount", "shortwave_down"}
+    if variable in interval_variables:
+        cycle_time = _cycle_time_from_products(products_by_variable)
+        return valid_time == cycle_time
+    if variable in set(required_variables) - interval_variables:
+        interval_times = set(products_by_variable.get("prcp_rate_or_amount", {})) | set(
+            products_by_variable.get("shortwave_down", {})
+        )
+        return bool(interval_times) and valid_time == max(interval_times)
+    return False
+
+
 def _validate_canonical_product_units(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
 ) -> None:
@@ -2223,6 +2297,101 @@ def _valid_times(products_by_variable: Mapping[str, Mapping[datetime, CanonicalP
             }
         )
     )
+
+
+def _cycle_time_from_products(
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]]
+) -> datetime:
+    cycle_times = {
+        product.cycle_time
+        for products_for_variable in products_by_variable.values()
+        for product in products_for_variable.values()
+    }
+    if not cycle_times:
+        raise ForcingProductionError("No canonical products are available.")
+    if len(cycle_times) != 1:
+        raise ForcingProductionError("Canonical products span multiple cycle_time values.")
+    return next(iter(cycle_times))
+
+
+def _expected_forcing_valid_times(
+    source_id: str,
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    *,
+    cycle_time: datetime,
+) -> tuple[datetime, ...]:
+    valid_times = _valid_times(products_by_variable)
+    if normalize_source_id(source_id) != "gfs":
+        return valid_times
+    interval_times = sorted(
+        set(products_by_variable.get("prcp_rate_or_amount", {}))
+        & set(products_by_variable.get("shortwave_down", {}))
+    )
+    if not interval_times:
+        return valid_times
+    interval_row_times = _gfs_interval_row_times(interval_times, cycle_time=cycle_time)
+    point_times = set(products_by_variable.get("air_temperature_2m", {}))
+    return tuple(valid_time for valid_time in interval_row_times if valid_time in point_times)
+
+
+def _forcing_product_time_plan(
+    source_id: str,
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    *,
+    forcing_times: Sequence[datetime],
+    cycle_time: datetime,
+) -> dict[str, dict[datetime, datetime]]:
+    normalized_source = normalize_source_id(source_id)
+    plan: dict[str, dict[datetime, datetime]] = {
+        variable: {valid_time: valid_time for valid_time in forcing_times}
+        for variable in products_by_variable
+    }
+    if normalized_source != "gfs":
+        return plan
+
+    interval_times = sorted(
+        set(products_by_variable.get("prcp_rate_or_amount", {}))
+        & set(products_by_variable.get("shortwave_down", {}))
+    )
+    if not interval_times:
+        return plan
+    row_by_interval_end = dict(zip(interval_times, _gfs_interval_row_times(interval_times, cycle_time=cycle_time)))
+    for variable in ("prcp_rate_or_amount", "shortwave_down"):
+        plan[variable] = {
+            row_time: interval_end
+            for interval_end, row_time in row_by_interval_end.items()
+            if row_time in set(forcing_times)
+        }
+    return plan
+
+
+def _gfs_interval_row_times(interval_times: Sequence[datetime], *, cycle_time: datetime) -> tuple[datetime, ...]:
+    ordered = tuple(sorted(interval_times))
+    if not ordered:
+        return ()
+    row_times: list[datetime] = []
+    previous_end = cycle_time
+    for interval_end in ordered:
+        row_times.append(previous_end)
+        previous_end = interval_end
+    return tuple(row_times)
+
+
+def _forcing_coverage_end_time(
+    source_id: str,
+    products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
+    *,
+    row_times: Sequence[datetime],
+) -> datetime:
+    if not row_times:
+        raise ForcingProductionError("No forcing row times are available.")
+    if normalize_source_id(source_id) != "gfs":
+        return sorted(row_times)[-1]
+    interval_times = sorted(
+        set(products_by_variable.get("prcp_rate_or_amount", {}))
+        & set(products_by_variable.get("shortwave_down", {}))
+    )
+    return interval_times[-1] if interval_times else sorted(row_times)[-1]
 
 
 def _limit_products_by_max_lead_hours(
@@ -2398,11 +2567,15 @@ def _source_id_for_output_variable(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
     valid_time: datetime,
     canonical_to_forcing: Mapping[str, str],
+    *,
+    product_time_plan: Mapping[str, Mapping[datetime, datetime]] | None = None,
 ) -> str:
     if variable == "wind":
-        return products_by_variable["wind_u_10m"][valid_time].source_id
+        product_time = _planned_product_time("wind_u_10m", valid_time, product_time_plan)
+        return products_by_variable["wind_u_10m"][product_time].source_id
     canonical_variable = _canonical_variable_for_forcing(variable, canonical_to_forcing)
-    return products_by_variable[canonical_variable][valid_time].source_id
+    product_time = _planned_product_time(canonical_variable, valid_time, product_time_plan)
+    return products_by_variable[canonical_variable][product_time].source_id
 
 
 def _weights_cover(
@@ -2459,11 +2632,25 @@ def _native_resolution_for_output(
     products_by_variable: Mapping[str, Mapping[datetime, CanonicalProduct]],
     valid_time: datetime,
     canonical_to_forcing: Mapping[str, str],
+    *,
+    product_time_plan: Mapping[str, Mapping[datetime, datetime]] | None = None,
 ) -> str | None:
     if variable == "wind":
-        return products_by_variable["wind_u_10m"][valid_time].native_time_resolution
+        product_time = _planned_product_time("wind_u_10m", valid_time, product_time_plan)
+        return products_by_variable["wind_u_10m"][product_time].native_time_resolution
     canonical_variable = _canonical_variable_for_forcing(variable, canonical_to_forcing)
-    return products_by_variable[canonical_variable][valid_time].native_time_resolution
+    product_time = _planned_product_time(canonical_variable, valid_time, product_time_plan)
+    return products_by_variable[canonical_variable][product_time].native_time_resolution
+
+
+def _planned_product_time(
+    variable: str,
+    valid_time: datetime,
+    product_time_plan: Mapping[str, Mapping[datetime, datetime]] | None,
+) -> datetime:
+    if product_time_plan is None:
+        return valid_time
+    return product_time_plan.get(variable, {}).get(valid_time, valid_time)
 
 
 

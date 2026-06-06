@@ -159,41 +159,79 @@ def test_cycle_discovery_upserts_four_available_cycles(tmp_path: Path) -> None:
     assert repository.data_sources["gfs"]["adapter_name"] == "gfs_adapter"
 
 
-def test_forbidden_discovery_trips_circuit_and_is_not_retryable(tmp_path: Path) -> None:
-    # With cloud mirrors now the primary GFS source, a NOMADS 403 no longer governs
-    # cycle availability. The probe trips the persisted circuit breaker (so later
-    # passes skip NOMADS) and is marked non-retryable: breaker cooldown, not discovery
-    # retry, drives NOMADS recovery. The cloud mirrors remain the real source.
-    def forbidden_checker(_url: str) -> bool:
+def test_forbidden_nomads_discovery_does_not_gate_available_cloud_cycle(tmp_path: Path) -> None:
+    def checker(url: str) -> bool:
+        if url.endswith(".idx") and "s3.amazonaws.com" in url:
+            return True
         raise ForbiddenSourceError("rate-limited", attempts=1)
 
-    adapter = build_adapter(tmp_path, availability_checker=forbidden_checker)
+    adapter = GFSAdapter(
+        config=GFSAdapterConfig(
+            workspace_root=tmp_path,
+            source_backends=("s3", "nomads"),
+        ),
+        repository=FakeMetRepository(),
+        object_store=LocalObjectStore(tmp_path),
+        downloader=lambda _url: b"GRIB mock bytes 7777",
+        availability_checker=checker,
+        sleeper=lambda _seconds: None,
+    )
 
     cycles = adapter.discover_cycles("2026-05-07")
 
     assert cycles, "expected at least one discovered cycle"
     for cycle in cycles:
-        assert cycle.status == "forbidden"
-        assert cycle.classifier == "forbidden"
-        assert cycle.available is False
-        assert cycle.retryable is False
-    # The 403 opened the persisted NOMADS circuit breaker.
-    assert adapter._nomads_circuit_open() is True
+        assert cycle.status == "discovered"
+        assert cycle.available is True
+        assert "s3.amazonaws.com" in cycle.probe_uri
 
 
-def test_manifest_contains_57_forecast_hours_times_7_variables(tmp_path: Path) -> None:
+def test_manifest_keeps_f000_instantaneous_fields_and_omits_f000_interval_fields(tmp_path: Path) -> None:
     repository = FakeMetRepository()
     adapter = build_adapter(tmp_path, repository=repository)
 
     manifest = adapter.build_manifest("2026050700")
 
-    assert len(manifest.entries) == 57 * 7
-    assert manifest.metadata["total_file_count"] == 399
+    assert len(manifest.entries) == 56 * 7 + 5
+    assert manifest.metadata["total_file_count"] == 397
     assert manifest.metadata["variable_count"] == 7
+    assert manifest.metadata["requested_forecast_hours"][0] == 0
+    assert manifest.metadata["forecast_hours"][0] == 0
     assert manifest.metadata["first_forecast_hour"] == 0
     assert manifest.metadata["last_forecast_hour"] == 168
+    assert not any(entry.forecast_hour == 0 and entry.variable in {"apcp", "dswrf"} for entry in manifest.entries)
+    assert sorted(entry.variable for entry in manifest.entries if entry.forecast_hour == 0) == [
+        "pressfc",
+        "rh2m",
+        "tmp2m",
+        "u10m",
+        "v10m",
+    ]
     assert manifest.manifest_uri == "raw/gfs/2026050700/manifest.json"
     assert adapter.object_store.exists("raw/gfs/2026050700/manifest.json")
+
+
+def test_manifest_keeps_f000_when_configured_variables_are_available(tmp_path: Path) -> None:
+    adapter = GFSAdapter(
+        config=GFSAdapterConfig(
+            workspace_root=tmp_path,
+            variables=("tmp2m",),
+            forecast_end_hour=3,
+        ),
+        repository=FakeMetRepository(),
+        object_store=LocalObjectStore(tmp_path),
+        downloader=lambda _url: b"GRIB mock bytes 7777",
+        availability_checker=lambda _url: True,
+        sleeper=lambda _seconds: None,
+    )
+
+    manifest = adapter.build_manifest("2026050700")
+
+    assert [entry.forecast_hour for entry in manifest.entries] == [0, 3]
+    assert manifest.metadata["forecast_hours"] == [0, 3]
+    assert manifest.metadata["source_policy"]["variable_availability"][
+        "f000_keeps_available_instantaneous_variables"
+    ] is True
 
 
 def test_forecast_hours_can_be_limited_from_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -238,6 +276,7 @@ def test_native_resolution_segments_drive_variable_step_hours(
 
     forecast_hours = sorted({entry.forecast_hour for entry in manifest.entries})
     assert forecast_hours == [0, 1, 2, 3, 4, 5, 6, 9, 12]
+    assert manifest.metadata["requested_forecast_hours"] == [0, 1, 2, 3, 4, 5, 6, 9, 12]
     assert manifest.metadata["forecast_hours"] == [0, 1, 2, 3, 4, 5, 6, 9, 12]
     assert manifest.metadata["source_policy"]["forecast_resolution_segments"] == [[6, 1], [168, 3]]
 
@@ -286,7 +325,7 @@ def test_download_plan_polling_timeout_records_failure(tmp_path: Path) -> None:
         max_retries=1,
         max_wait_seconds=0,
     )
-    manifest = adapter.build_manifest("2026050700", forecast_hours=[0])
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[3])
 
     result = adapter.download_plan(
         DownloadManifest(source_id="gfs", cycle_time=manifest.cycle_time, entries=(manifest.entries[0],))
@@ -381,11 +420,14 @@ def test_raw_complete_trusted_existing_object_reuses_already_done(tmp_path: Path
         downloads += 1
         return b"GRIB should not download"
 
-    adapter, manifest = one_entry_manifest(tmp_path)
+    adapter = build_adapter(tmp_path)
+    built_manifest = adapter.build_manifest("2026050700", forecast_hours=[3])
+    entry = built_manifest.entries[0]
+    manifest = DownloadManifest(source_id="gfs", cycle_time=built_manifest.cycle_time, entries=(entry,))
     adapter.downloader = downloader
-    adapter.object_store.write_bytes_atomic(manifest.entries[0].local_key, content)
-    manifest.metadata["source_policy"] = adapter.source_policy_identity([0])
-    manifest.metadata["source_object_identity"] = adapter.source_object_identity(manifest.cycle_time, [0])
+    adapter.object_store.write_bytes_atomic(entry.local_key, content)
+    manifest.metadata["source_policy"] = adapter.source_policy_identity([3])
+    manifest.metadata["source_object_identity"] = adapter.source_object_identity(manifest.cycle_time, [3])
     manifest = replace(manifest, manifest_uri="raw/gfs/2026050700/prior_manifest.json")
     adapter.object_store.write_bytes_atomic(
         manifest.manifest_uri,
@@ -404,6 +446,60 @@ def test_raw_complete_trusted_existing_object_reuses_already_done(tmp_path: Path
     assert result.files[0].status == "already_done"
     assert result.files[0].checksum == sha256_bytes(content)
     assert downloads == 0
+
+
+def test_selector_policy_change_invalidates_prior_raw_complete_manifest(tmp_path: Path) -> None:
+    stale = b"GRIB stale apcp bucket bytes"
+    fresh = b"GRIB fresh cumulative bytes"
+    downloads = 0
+
+    def downloader(_url: str) -> bytes:
+        nonlocal downloads
+        downloads += 1
+        return fresh
+
+    adapter = build_adapter(tmp_path, downloader=downloader)
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[3])
+    apcp_entry = next(entry for entry in manifest.entries if entry.variable == "apcp")
+    adapter.object_store.write_bytes_atomic(apcp_entry.local_key, stale)
+
+    old_manifest = replace(manifest, entries=(apcp_entry,), manifest_uri="raw/gfs/2026050700/old_manifest.json")
+    old_manifest.metadata["source_policy"] = {
+        "source": "gfs",
+        "forecast_hours": [3],
+        "variables": ["apcp"],
+    }
+    old_manifest.metadata["source_object_identity"] = {
+        "identity_schema_version": "nhms.source_object_identity.v2",
+        "source": "gfs",
+        "cycle_time": manifest.cycle_time.isoformat(),
+        "raw_entry_observation_digest_by_key": {
+            apcp_entry.local_key: {
+                "status": "present",
+                "checksum": sha256_bytes(stale),
+                "size_bytes": len(stale),
+            }
+        },
+    }
+    adapter.object_store.write_bytes_atomic(
+        old_manifest.manifest_uri or "",
+        json.dumps(old_manifest.as_dict(), sort_keys=True).encode("utf-8"),
+    )
+    adapter.repository.cycles[("gfs", manifest.cycle_time)] = {
+        "source_id": "gfs",
+        "cycle_time": manifest.cycle_time,
+        "status": "raw_complete",
+        "manifest_uri": old_manifest.manifest_uri,
+    }
+
+    result = adapter.download_plan(
+        DownloadManifest(source_id="gfs", cycle_time=manifest.cycle_time, entries=(apcp_entry,))
+    )
+
+    assert result.status == "raw_complete"
+    assert result.files[0].status == "downloaded"
+    assert adapter.object_store.read_bytes(apcp_entry.local_key) == fresh
+    assert downloads == 1
 
 
 def test_data_source_initialization_is_upserted_not_duplicated(tmp_path: Path) -> None:
@@ -432,7 +528,7 @@ def test_network_failure_records_error_code_and_retry_count(tmp_path: Path) -> N
         max_retries=2,
         max_wait_seconds=0,
     )
-    manifest = adapter.build_manifest("2026050700", forecast_hours=[0])
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[3])
 
     result = adapter.download_plan(
         DownloadManifest(source_id="gfs", cycle_time=manifest.cycle_time, entries=(manifest.entries[0],))
@@ -479,6 +575,57 @@ def test_url_download_reads_bounded_chunks_and_enforces_max_size(
     assert response.read_sizes == [2, 2]
 
 
+def test_http_get_range_rejects_200_ok_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class FullResponse:
+        status = 200
+        headers: dict[str, str] = {}
+
+        def __enter__(self) -> FullResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _size: int = -1) -> bytes:
+            return b"GRIB full object"
+
+    adapter = build_adapter(tmp_path)
+    adapter.downloader = adapter._download_url
+    adapter._has_injected_downloader = False
+    monkeypatch.setattr(gfs_module, "urlopen", lambda *_args, **_kwargs: FullResponse())
+
+    with pytest.raises(gfs_module.NetworkDownloadError, match="expected 206"):
+        adapter._http_get_range("https://example.test/gfs.grib2", 0, 10)
+
+
+def test_http_get_range_accepts_matching_content_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class RangeResponse:
+        status = 206
+        headers = {"Content-Range": "bytes 0-9/100"}
+
+        def __init__(self) -> None:
+            self.sent = False
+
+        def __enter__(self) -> RangeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _size: int = -1) -> bytes:
+            if self.sent:
+                return b""
+            self.sent = True
+            return b"0123456789"
+
+    adapter = build_adapter(tmp_path)
+    adapter.downloader = adapter._download_url
+    adapter._has_injected_downloader = False
+    monkeypatch.setattr(gfs_module, "urlopen", lambda *_args, **_kwargs: RangeResponse())
+
+    assert adapter._http_get_range("https://example.test/gfs.grib2", 0, 10) == b"0123456789"
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -488,7 +635,7 @@ def test_url_download_reads_bounded_chunks_and_enforces_max_size(
 )
 def test_injected_payload_enforces_max_size_before_object_store_write(tmp_path: Path, payload: Any) -> None:
     adapter = build_adapter(tmp_path, downloader=lambda _url: payload, max_file_size_bytes=4)
-    manifest = adapter.build_manifest("2026050700", forecast_hours=[0])
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[3])
     entry = manifest.entries[0]
 
     result = adapter.download_plan(DownloadManifest(source_id="gfs", cycle_time=manifest.cycle_time, entries=(entry,)))
@@ -511,24 +658,25 @@ def test_source_object_identity_changes_when_remote_or_policy_content_changes(tm
     second_identity = second.source_object_identity("2026050700", [0, 3])
     changed_policy_identity = first.source_object_identity("2026050700", [0])
 
-    assert first_identity["identity_schema_version"] == "nhms.source_object_identity.v2"
+    assert first_identity["identity_schema_version"] == "nhms.source_object_identity.v3"
+    assert first_identity["apcp_selector_policy"] == "cycle_cumulative_stepRange_0_fhr"
     assert first_identity["manifest_digest"] != second_identity["manifest_digest"]
     assert first_identity["raw_entry_digest"] != second_identity["raw_entry_digest"]
     assert first_identity["manifest_digest"] != changed_policy_identity["manifest_digest"]
-    assert first_identity["raw_entry_count"] == 14
+    assert first_identity["raw_entry_count"] == 12
     assert len(first_identity["raw_entry_samples"]) == 2
 
 
 def test_source_object_identity_changes_when_same_key_content_changes(tmp_path: Path) -> None:
     adapter = build_adapter(tmp_path)
-    manifest = adapter.build_manifest("2026050700", forecast_hours=[0])
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[3])
     entry = manifest.entries[0]
 
-    before = adapter.source_object_identity("2026050700", [0])
+    before = adapter.source_object_identity("2026050700", [3])
     adapter.object_store.write_bytes_atomic(entry.local_key, b"GRIB first payload 7777")
-    first = adapter.source_object_identity("2026050700", [0])
+    first = adapter.source_object_identity("2026050700", [3])
     adapter.object_store.write_bytes_atomic(entry.local_key, b"GRIB second payload 7777")
-    second = adapter.source_object_identity("2026050700", [0])
+    second = adapter.source_object_identity("2026050700", [3])
 
     assert before["raw_entry_digest"] != first["raw_entry_digest"]
     assert first["raw_entry_digest"] != second["raw_entry_digest"]
@@ -540,7 +688,7 @@ def test_source_object_identity_changes_when_same_key_content_changes(tmp_path: 
 
 def test_source_object_identity_blocks_oversized_raw_before_checksum(tmp_path: Path) -> None:
     adapter = build_adapter(tmp_path, max_file_size_bytes=4)
-    manifest = adapter.build_manifest("2026050700", forecast_hours=[0])
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[3])
     entry = manifest.entries[0]
     adapter.object_store.write_bytes_atomic(entry.local_key, b"GRIB oversized raw payload")
     original_store = adapter.object_store
@@ -558,7 +706,7 @@ def test_source_object_identity_blocks_oversized_raw_before_checksum(tmp_path: P
 
     adapter.object_store = NoChecksumStore()  # type: ignore[assignment]
 
-    identity = adapter.source_object_identity(manifest.cycle_time, [0])
+    identity = adapter.source_object_identity(manifest.cycle_time, [3])
     observation = identity["raw_entry_observation_digest_by_key"][entry.local_key]
 
     assert observation["status"] == "oversized"
@@ -579,7 +727,8 @@ def test_downloaded_manifest_identity_feeds_gfs_canonical_readiness_and_blocks_s
 
     download = adapter.download_plan(manifest)
 
-    observed_identity = adapter.source_object_identity(manifest.cycle_time, [0, 3])
+    effective_forecast_hours = manifest.metadata["forecast_hours"]
+    observed_identity = adapter.source_object_identity(manifest.cycle_time, effective_forecast_hours)
     persisted_manifest = adapter.load_manifest(manifest.manifest_uri or "")
     assert download.status == "raw_complete"
     assert manifest.metadata["source_object_identity"] == observed_identity
@@ -596,7 +745,7 @@ def test_downloaded_manifest_identity_feeds_gfs_canonical_readiness_and_blocks_s
     conversion = converter.convert_manifest(manifest.as_dict())
     readiness = converter.canonical_readiness(
         cycle_time=manifest.cycle_time,
-        forecast_hours=[0, 3],
+        forecast_hours=[3],
         policy_identity=manifest.metadata["source_policy"],
         source_object_identity=observed_identity,
         canonical_product_id="canon_gfs_2026050700",
@@ -606,7 +755,7 @@ def test_downloaded_manifest_identity_feeds_gfs_canonical_readiness_and_blocks_s
 
     assert conversion.status == "canonical_ready"
     assert readiness.ready is True
-    lineage_identity = repository.products["gfs_2026050700_air_temperature_2m_f000"]["lineage_json"][
+    lineage_identity = repository.products["gfs_2026050700_air_temperature_2m_f003"]["lineage_json"][
         "source_object_identity"
     ]
     assert lineage_identity == observed_identity
@@ -617,10 +766,10 @@ def test_downloaded_manifest_identity_feeds_gfs_canonical_readiness_and_blocks_s
         changed_entry.local_key,
         encode_test_netcdf4(changed_entry.variable, changed_entry.forecast_hour, values=[999.0]),
     )
-    changed_identity = adapter.source_object_identity(manifest.cycle_time, [0, 3])
+    changed_identity = adapter.source_object_identity(manifest.cycle_time, effective_forecast_hours)
     stale_readiness = converter.canonical_readiness(
         cycle_time=manifest.cycle_time,
-        forecast_hours=[0, 3],
+        forecast_hours=[3],
         policy_identity=manifest.metadata["source_policy"],
         source_object_identity=changed_identity,
         canonical_product_id="canon_gfs_2026050700",
@@ -657,6 +806,7 @@ def test_cli_download_exits_nonzero_on_failed_download(
 IdxParseError = gfs_module.IdxParseError
 AmbiguousIdxRecordError = gfs_module.AmbiguousIdxRecordError
 IdxRecordNotFoundError = gfs_module.IdxRecordNotFoundError
+IdxSelectorPolicyError = gfs_module.IdxSelectorPolicyError
 CdoMissingError = gfs_module.CdoMissingError
 CdoClipError = gfs_module.CdoClipError
 AllSourcesUnavailableError = gfs_module.AllSourcesUnavailableError
@@ -698,12 +848,36 @@ F006_IDX_DUP_APCP = "\n".join(
         "4:4500:d=2026050700:DSWRF:surface:0-6 hour ave fcst:",
     ]
 )
+F009_IDX_MIXED_APCP = "\n".join(
+    [
+        "1:0:d=2026050700:TMP:2 m above ground:9 hour fcst:",
+        "2:1500:d=2026050700:APCP:surface:6-9 hour acc fcst:",
+        "3:3000:d=2026050700:APCP:surface:0-9 hour acc fcst:",
+        "4:4500:d=2026050700:DSWRF:surface:6-9 hour ave fcst:",
+    ]
+)
+F009_IDX_DUP_APCP = "\n".join(
+    [
+        "1:0:d=2026050700:TMP:2 m above ground:9 hour fcst:",
+        "2:1500:d=2026050700:APCP:surface:0-9 hour acc fcst:",
+        "3:3000:d=2026050700:APCP:surface:0-9 hour acc fcst:",
+        "4:4500:d=2026050700:DSWRF:surface:6-9 hour ave fcst:",
+    ]
+)
 F012_IDX_MIXED_APCP = "\n".join(
     [
         "1:0:d=2026050700:TMP:2 m above ground:12 hour fcst:",
         "2:1500:d=2026050700:APCP:surface:6-12 hour acc fcst:",
         "3:3000:d=2026050700:APCP:surface:0-12 hour acc fcst:",
         "4:4500:d=2026050700:DSWRF:surface:6-12 hour ave fcst:",
+    ]
+)
+F003_IDX_DUP_TMP = "\n".join(
+    [
+        "1:0:d=2026050700:TMP:2 m above ground:3 hour fcst:",
+        "2:1500:d=2026050700:TMP:2 m above ground:3 hour fcst:",
+        "3:3000:d=2026050700:RH:2 m above ground:3 hour fcst:",
+        "4:4500:d=2026050700:APCP:surface:0-3 hour acc fcst:",
     ]
 )
 F012_IDX_BUCKET_ONLY_APCP = "\n".join(
@@ -826,10 +1000,48 @@ def test_idx_apcp_prefers_cycle_cumulative_record_over_bucket_record() -> None:
     assert (start, end) == (3000, 4500)
 
 
+def test_idx_apcp_f009_prefers_cycle_cumulative_record_over_bucket_record() -> None:
+    records = gfs_module._parse_gfs_idx(F009_IDX_MIXED_APCP)
+    start, end = gfs_module._select_idx_byte_range(records, "apcp", 9)
+
+    assert (start, end) == (3000, 4500)
+
+
+def test_idx_apcp_f009_duplicate_identical_cumulative_windows_choose_deterministically() -> None:
+    records = gfs_module._parse_gfs_idx(F009_IDX_DUP_APCP)
+    start, end = gfs_module._select_idx_byte_range(records, "apcp", 9)
+
+    assert (start, end) == (1500, 3000)
+
+
 def test_idx_apcp_fails_when_cumulative_record_is_absent() -> None:
     records = gfs_module._parse_gfs_idx(F012_IDX_BUCKET_ONLY_APCP)
-    with pytest.raises(IdxRecordNotFoundError, match="stepRange=0-12"):
+    with pytest.raises(IdxSelectorPolicyError, match="stepRange=0-12"):
         gfs_module._select_idx_byte_range(records, "apcp", 12)
+
+
+def test_bucket_only_apcp_idx_fails_without_nomads_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grib = _mirror_grib_bytes()
+    s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f012"
+    adapter, calls = _cloud_adapter(
+        tmp_path,
+        idx_by_url={f"{s3_grib}.idx": F012_IDX_BUCKET_ONLY_APCP},
+        grib_bytes=grib,
+        backends=("s3", "nomads"),
+    )
+    _patch_cdo(monkeypatch)
+
+    with pytest.raises(IdxSelectorPolicyError):
+        adapter._download_entry(_entry("apcp", 12))
+
+    assert calls["nomads"] == []
+    assert calls["range"] == []
+
+
+def test_idx_non_apcp_duplicate_records_remain_ambiguous() -> None:
+    records = gfs_module._parse_gfs_idx(F003_IDX_DUP_TMP)
+    with pytest.raises(AmbiguousIdxRecordError):
+        gfs_module._select_idx_byte_range(records, "tmp2m", 3)
 
 
 def test_idx_f000_omits_apcp_and_dswrf() -> None:
@@ -919,20 +1131,6 @@ def test_mirror_fallback_to_azure(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert any("blob.core.windows.net" in url for url in calls["idx"])
 
 
-def test_f000_apcp_falls_through_mirrors_to_nomads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # apcp/dswrf are undefined at f000 on the mirrors; the chain must fall through to
-    # NOMADS rather than silently dropping the variable.
-    grib = _mirror_grib_bytes()
-    s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f000"
-    adapter, calls = _cloud_adapter(tmp_path, idx_by_url={f"{s3_grib}.idx": F000_IDX}, grib_bytes=grib)
-    _patch_cdo(monkeypatch)
-
-    result, _retries = adapter._download_entry(_entry("apcp", 0))
-
-    assert result.status == "downloaded"
-    assert calls["nomads"], "NOMADS must serve f000 apcp after mirrors decline it"
-
-
 # ---- cdo fail-loud ---------------------------------------------------------------
 
 def test_mirror_clip_fails_loud_when_cdo_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -964,6 +1162,30 @@ def test_mirror_clip_fails_loud_on_cdo_error(tmp_path: Path, monkeypatch: pytest
     with pytest.raises(CdoClipError) as exc:
         adapter._download_entry(_entry("tmp2m", 3))
     assert exc.value.error_code == "CDO_CLIP_FAILED"
+
+
+def test_mirror_clip_fails_before_reading_oversized_cdo_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grib = _mirror_grib_bytes()
+    s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f003"
+    adapter, _calls = _cloud_adapter(
+        tmp_path,
+        idx_by_url={f"{s3_grib}.idx": F003_IDX},
+        grib_bytes=grib,
+        backends=("s3",),
+    )
+    adapter.config = replace(adapter.config, max_file_size_bytes=4)
+
+    def fake_run(argv: list[str], **_kwargs: Any) -> Any:
+        Path(argv[-1]).write_bytes(b"GRIB oversized clipped payload")
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr(gfs_module.shutil, "which", lambda _name: "/usr/bin/cdo")
+    monkeypatch.setattr(gfs_module.subprocess, "run", fake_run)
+
+    with pytest.raises(FileTooLargeError):
+        adapter._download_entry(_entry("tmp2m", 3))
 
 
 # ---- NOMADS 403 circuit breaker --------------------------------------------------

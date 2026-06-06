@@ -101,6 +101,9 @@ GFS_REQUIRED_STANDARD_VARIABLES: tuple[str, ...] = (
     "pressure_surface",
     "shortwave_down",
 )
+GFS_F000_OPTIONAL_INTERVAL_STANDARD_VARIABLES: frozenset[str] = frozenset(
+    {"prcp_rate_or_amount", "shortwave_down"}
+)
 IFS_REQUIRED_STANDARD_VARIABLES: tuple[str, ...] = (
     "prcp_rate_or_amount",
     "air_temperature_2m",
@@ -460,17 +463,22 @@ def evaluate_canonical_readiness(
             lead_counts_by_valid_time[valid_time_text] = lead_counts_by_valid_time.get(valid_time_text, 0) + 1
 
     missing_variables = [variable for variable in required_variables if counts_by_variable.get(variable, 0) == 0]
-    missing_leads = [
-        {
-            "lead_time_hours": lead_hour,
-            "valid_time": (parsed_cycle_time + timedelta(hours=lead_hour)).isoformat(),
-            "missing_variables": sorted(set(required_variables) - variables_by_hour.get(lead_hour, set())),
-            "present_variable_count": len(variables_by_hour.get(lead_hour, set())),
-            "required_variable_count": len(required_variables),
-        }
-        for lead_hour in expected_hours
-        if variables_by_hour.get(lead_hour, set()) != set(required_variables)
-    ]
+    missing_leads = []
+    for lead_hour in expected_hours:
+        required_for_lead = set(required_variables)
+        if normalized_source == "gfs" and lead_hour == 0:
+            required_for_lead -= set(GFS_F000_OPTIONAL_INTERVAL_STANDARD_VARIABLES)
+        present_for_lead = variables_by_hour.get(lead_hour, set())
+        if not required_for_lead.issubset(present_for_lead):
+            missing_leads.append(
+                {
+                    "lead_time_hours": lead_hour,
+                    "valid_time": (parsed_cycle_time + timedelta(hours=lead_hour)).isoformat(),
+                    "missing_variables": sorted(required_for_lead - present_for_lead),
+                    "present_variable_count": len(present_for_lead),
+                    "required_variable_count": len(required_for_lead),
+                }
+            )
     identity_mismatch = bool(
         (expected_policy_id and not policy_identities) or (expected_object_id and not object_identities)
         or (identity_rejected_row_count and (missing_variables or missing_leads))
@@ -1390,6 +1398,12 @@ class CanonicalConverter:
         for forecast_hour in forecast_hours:
             for native_variable, standard_variable in sorted(self.config.variable_mapping.items()):
                 if standard_variable not in required_standard_variables:
+                    continue
+                if (
+                    normalize_source_id(self.config.source_id) == "gfs"
+                    and forecast_hour == 0
+                    and standard_variable in GFS_F000_OPTIONAL_INTERVAL_STANDARD_VARIABLES
+                ):
                     continue
                 if (native_variable, forecast_hour) not in covered:
                     missing.append(
