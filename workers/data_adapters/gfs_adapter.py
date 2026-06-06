@@ -191,7 +191,7 @@ class IdxRecordNotFoundError(GFSAdapterError):
 
 
 class AmbiguousIdxRecordError(GFSAdapterError):
-    """Multiple .idx records match a variable selector (e.g. duplicate APCP windows)."""
+    """Multiple .idx records remain after applying a variable-specific selector."""
 
     error_code = "IDX_AMBIGUOUS_RECORD"
 
@@ -1677,6 +1677,57 @@ def _idx_forecast_matches(record: IdxRecord, variable: str, forecast_hour: int) 
     return forecast == f"{forecast_hour} hour fcst"
 
 
+def _idx_step_range(record: IdxRecord) -> str | None:
+    head, separator, _tail = record.forecast.partition(" hour")
+    if not separator or "-" not in head:
+        return None
+    start, separator, end = head.partition("-")
+    if not separator:
+        return None
+    try:
+        return f"{int(start.strip())}-{int(end.strip())}"
+    except ValueError:
+        return None
+
+
+def _idx_byte_range_for_match(records: list[IdxRecord], index: int) -> tuple[int, int | None]:
+    start = records[index].start_byte
+    end = records[index + 1].start_byte if index + 1 < len(records) else None
+    return start, end
+
+
+def _select_apcp_idx_match(records: list[IdxRecord], matches: list[int], forecast_hour: int) -> int:
+    preferred_step_range = f"0-{forecast_hour}"
+    preferred = [index for index in matches if _idx_step_range(records[index]) == preferred_step_range]
+    if not preferred:
+        descriptions = "; ".join(f"{records[i].field}:{records[i].level}:{records[i].forecast}" for i in matches)
+        raise IdxRecordNotFoundError(
+            (
+                f"No GFS APCP cumulative .idx record with stepRange={preferred_step_range} "
+                f"at f{forecast_hour:03d}; matched records: {descriptions}"
+            ),
+            attempts=1,
+        )
+    if len(preferred) == 1:
+        return preferred[0]
+
+    # FV3-GFS can carry two APCP records with the same 0-fhr text in early lead
+    # times. They are equivalent for the cumulative-since-cycle policy; keep the
+    # selection deterministic and visible instead of failing the whole cycle.
+    descriptions = "; ".join(
+        f"record={records[i].record_number}:{records[i].field}:{records[i].level}:{records[i].forecast}"
+        for i in preferred
+    )
+    LOGGER.warning(
+        "Duplicate GFS APCP cumulative .idx records at f%03d with stepRange=%s; choosing record %s (%s)",
+        forecast_hour,
+        preferred_step_range,
+        records[preferred[0]].record_number,
+        descriptions,
+    )
+    return preferred[0]
+
+
 def _select_idx_byte_range(
     records: list[IdxRecord],
     variable: str,
@@ -1697,17 +1748,14 @@ def _select_idx_byte_range(
             f"No GFS .idx record for {variable} ({field}:{level}) at f{forecast_hour:03d}",
             attempts=1,
         )
+    if variable == "apcp":
+        return _idx_byte_range_for_match(records, _select_apcp_idx_match(records, matches, forecast_hour))
     if len(matches) > 1:
-        # Duplicate windows (e.g. APCP 0-6 and 3-6 at f006) are an ambiguous selector;
-        # fail loud rather than silently picking one and diverging from NOMADS.
         descriptions = "; ".join(f"{records[i].field}:{records[i].level}:{records[i].forecast}" for i in matches)
         raise AmbiguousIdxRecordError(
             f"Ambiguous GFS .idx selection for {variable} at f{forecast_hour:03d}: {descriptions}"
         )
-    index = matches[0]
-    start = records[index].start_byte
-    end = records[index + 1].start_byte if index + 1 < len(records) else None
-    return start, end
+    return _idx_byte_range_for_match(records, matches[0])
 
 
 def _stable_digest(value: Any) -> str:

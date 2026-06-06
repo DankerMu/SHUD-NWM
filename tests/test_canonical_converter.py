@@ -535,42 +535,40 @@ def test_gfs_apcp_first_frame_nonzero_start_uses_forecast_hour_step() -> None:
     assert result.values[0] != pytest.approx(576.0)
 
 
-def test_gfs_apcp_cross_bucket_reset_has_no_spurious_negative() -> None:
-    # GFS APCP resets every 6h: f006 is the full 0-6h bucket (6.0mm), f009 is the
-    # 6-9h bucket-relative accumulation (1.0mm). Differencing across the reset would
-    # give -5.0mm (spurious warn); the current value IS the increment over fh-bucket
-    # start (3h) -> 1.0 * 24 / 3 = 8.0 mm/day, quality ok.
+def test_gfs_apcp_cycle_cumulative_deaccumulation_differences_across_leads() -> None:
+    # The GFS adapter resolves APCP to the 0-fhr cycle-cumulative record, so f009
+    # subtracts f006 directly: (9.0 - 6.0)mm over 3h -> 24.0 mm/day.
     result = convert_units_with_metadata(
-        "apcp", [1.0], [6.0], forecast_hour=9, previous_forecast_hour=6
+        "apcp", [9.0], [6.0], forecast_hour=9, previous_forecast_hour=6
     )
-    assert result.values == pytest.approx((8.0,))
+    assert result.values == pytest.approx((24.0,))
     assert result.quality_flag == "ok"
 
 
-def test_gfs_apcp_within_bucket_differences_normally() -> None:
-    # f009 (6-9h, 1.0mm) and f012 (6-12h, 3.0mm) are in the same bucket -> normal
-    # differencing: delta 2.0mm over 3h -> 2.0 * 24 / 3 = 16.0 mm/day.
+def test_gfs_apcp_cycle_cumulative_differences_normally() -> None:
+    # f009 (0-9h, 9.0mm) and f012 (0-12h, 12.0mm) are cycle-cumulative -> normal
+    # differencing: delta 3.0mm over 3h -> 3.0 * 24 / 3 = 24.0 mm/day.
     result = convert_units_with_metadata(
-        "apcp", [3.0], [1.0], forecast_hour=12, previous_forecast_hour=9
+        "apcp", [12.0], [9.0], forecast_hour=12, previous_forecast_hour=9
     )
-    assert result.values == pytest.approx((16.0,))
+    assert result.values == pytest.approx((24.0,))
     assert result.quality_flag == "ok"
 
 
-def test_gfs_apcp_within_bucket_negative_still_warns() -> None:
-    # A genuine decrease inside one bucket remains an anomaly worth flagging.
+def test_gfs_apcp_cycle_cumulative_negative_still_warns() -> None:
+    # A genuine decrease in the cumulative series remains an anomaly worth flagging.
     result = convert_units_with_metadata(
-        "apcp", [1.0], [3.0], forecast_hour=12, previous_forecast_hour=9
+        "apcp", [9.0], [12.0], forecast_hour=12, previous_forecast_hour=9
     )
     assert result.quality_flag == "warn"
     assert result.values == pytest.approx((0.0,))
 
 
-def test_gfs_apcp_within_bucket_small_negative_stays_ok() -> None:
-    # 桶内 -0.005mm 的量化噪声(<0.01mm)按 SHUD precip 钳零约定与 0 等价,记 anomaly
+def test_gfs_apcp_cycle_cumulative_small_negative_stays_ok() -> None:
+    # 累计序列 -0.005mm 的量化噪声(<0.01mm)按 SHUD precip 钳零约定与 0 等价,记 anomaly
     # 但保持 quality_flag=ok,避免被 forcing 当不可用剔除。
     result = convert_units_with_metadata(
-        "apcp", [2.995], [3.0], forecast_hour=12, previous_forecast_hour=9
+        "apcp", [11.995], [12.0], forecast_hour=12, previous_forecast_hour=9
     )
     assert result.quality_flag == "ok"
     assert result.values == pytest.approx((0.0,))

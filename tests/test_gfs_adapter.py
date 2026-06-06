@@ -688,13 +688,29 @@ F003_IDX = "\n".join(
         "7:9000:d=2026050700:DSWRF:surface:0-3 hour ave fcst:",
     ]
 )
-# f006 with a duplicate APCP (0-6 and 3-6 windows) to exercise the ambiguous selector.
+# f006/f012 carry FV3-GFS APCP dual semantics: old interval/bucket records and
+# cycle-cumulative 0-fhr records may coexist in the same .idx.
 F006_IDX_DUP_APCP = "\n".join(
     [
         "1:0:d=2026050700:TMP:2 m above ground:6 hour fcst:",
         "2:1500:d=2026050700:APCP:surface:0-6 hour acc fcst:",
-        "3:3000:d=2026050700:APCP:surface:3-6 hour acc fcst:",
+        "3:3000:d=2026050700:APCP:surface:0-6 hour acc fcst:",
         "4:4500:d=2026050700:DSWRF:surface:0-6 hour ave fcst:",
+    ]
+)
+F012_IDX_MIXED_APCP = "\n".join(
+    [
+        "1:0:d=2026050700:TMP:2 m above ground:12 hour fcst:",
+        "2:1500:d=2026050700:APCP:surface:6-12 hour acc fcst:",
+        "3:3000:d=2026050700:APCP:surface:0-12 hour acc fcst:",
+        "4:4500:d=2026050700:DSWRF:surface:6-12 hour ave fcst:",
+    ]
+)
+F012_IDX_BUCKET_ONLY_APCP = "\n".join(
+    [
+        "1:0:d=2026050700:TMP:2 m above ground:12 hour fcst:",
+        "2:1500:d=2026050700:APCP:surface:6-12 hour acc fcst:",
+        "3:3000:d=2026050700:DSWRF:surface:6-12 hour ave fcst:",
     ]
 )
 
@@ -796,10 +812,24 @@ def test_idx_parser_rejects_malformed_lines() -> None:
         gfs_module._parse_gfs_idx("1:0:d=2026050700:TMP\n")
 
 
-def test_idx_apcp_duplicate_windows_fail_loud() -> None:
+def test_idx_apcp_duplicate_identical_cumulative_windows_choose_deterministically() -> None:
     records = gfs_module._parse_gfs_idx(F006_IDX_DUP_APCP)
-    with pytest.raises(AmbiguousIdxRecordError):
-        gfs_module._select_idx_byte_range(records, "apcp", 6)
+    start, end = gfs_module._select_idx_byte_range(records, "apcp", 6)
+
+    assert (start, end) == (1500, 3000)
+
+
+def test_idx_apcp_prefers_cycle_cumulative_record_over_bucket_record() -> None:
+    records = gfs_module._parse_gfs_idx(F012_IDX_MIXED_APCP)
+    start, end = gfs_module._select_idx_byte_range(records, "apcp", 12)
+
+    assert (start, end) == (3000, 4500)
+
+
+def test_idx_apcp_fails_when_cumulative_record_is_absent() -> None:
+    records = gfs_module._parse_gfs_idx(F012_IDX_BUCKET_ONLY_APCP)
+    with pytest.raises(IdxRecordNotFoundError, match="stepRange=0-12"):
+        gfs_module._select_idx_byte_range(records, "apcp", 12)
 
 
 def test_idx_f000_omits_apcp_and_dswrf() -> None:
