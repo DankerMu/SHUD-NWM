@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -106,7 +106,12 @@ def build_adapter(
 ) -> GFSAdapter:
     config = GFSAdapterConfig(
         workspace_root=tmp_path,
+        # NOMADS-only chain keeps these tests focused on the grib-filter download
+        # semantics (server-side subset, polling, retries). The cloud-mirror idx+Range
+        # path is exercised by the dedicated mirror tests below.
+        source_backends=("nomads",),
         poll_interval_seconds=0,
+        nomads_min_interval_seconds=0,
         max_wait_seconds=max_wait_seconds,
         max_retries=max_retries,
         retry_backoff_seconds=(0,),
@@ -154,11 +159,11 @@ def test_cycle_discovery_upserts_four_available_cycles(tmp_path: Path) -> None:
     assert repository.data_sources["gfs"]["adapter_name"] == "gfs_adapter"
 
 
-def test_forbidden_discovery_stays_retryable(tmp_path: Path) -> None:
-    # NOMADS public endpoints have no auth; a 403 is a transient rate-limit that
-    # recovers within minutes. The forbidden cycle must remain retryable so the
-    # next discovery pass re-attempts instead of permanently dropping an
-    # available forecast cycle (regression guard for #291).
+def test_forbidden_discovery_trips_circuit_and_is_not_retryable(tmp_path: Path) -> None:
+    # With cloud mirrors now the primary GFS source, a NOMADS 403 no longer governs
+    # cycle availability. The probe trips the persisted circuit breaker (so later
+    # passes skip NOMADS) and is marked non-retryable: breaker cooldown, not discovery
+    # retry, drives NOMADS recovery. The cloud mirrors remain the real source.
     def forbidden_checker(_url: str) -> bool:
         raise ForbiddenSourceError("rate-limited", attempts=1)
 
@@ -171,7 +176,9 @@ def test_forbidden_discovery_stays_retryable(tmp_path: Path) -> None:
         assert cycle.status == "forbidden"
         assert cycle.classifier == "forbidden"
         assert cycle.available is False
-        assert cycle.retryable is True
+        assert cycle.retryable is False
+    # The 403 opened the persisted NOMADS circuit breaker.
+    assert adapter._nomads_circuit_open() is True
 
 
 def test_manifest_contains_57_forecast_hours_times_7_variables(tmp_path: Path) -> None:
@@ -643,3 +650,390 @@ def test_cli_download_exits_nonzero_on_failed_download(
 
     assert error.value.code == 1
     assert "Download failed for gfs 2026050700: NETWORK_ERROR" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- cloud mirror chain
+
+IdxParseError = gfs_module.IdxParseError
+AmbiguousIdxRecordError = gfs_module.AmbiguousIdxRecordError
+IdxRecordNotFoundError = gfs_module.IdxRecordNotFoundError
+CdoMissingError = gfs_module.CdoMissingError
+CdoClipError = gfs_module.CdoClipError
+AllSourcesUnavailableError = gfs_module.AllSourcesUnavailableError
+RateLimitedError = gfs_module.RateLimitedError
+
+
+# A wgrib2 .idx for cycle 2026050700. f000 carries the instantaneous fields (anl) but
+# NOT apcp/dswrf (undefined at analysis time); the fNNN form is "<fh> hour fcst"; the
+# accumulated/averaged fields carry a window token "0-<fh> hour acc/ave fcst".
+F000_IDX = "\n".join(
+    [
+        "1:0:d=2026050700:PRMSL:mean sea level:anl:",
+        "2:1000:d=2026050700:TMP:2 m above ground:anl:",
+        "3:2000:d=2026050700:RH:2 m above ground:anl:",
+        "4:3000:d=2026050700:UGRD:10 m above ground:anl:",
+        "5:4000:d=2026050700:VGRD:10 m above ground:anl:",
+        "6:5000:d=2026050700:PRES:surface:anl:",
+        "7:6000:d=2026050700:HGT:surface:anl:",
+    ]
+)
+F003_IDX = "\n".join(
+    [
+        "1:0:d=2026050700:TMP:2 m above ground:3 hour fcst:",
+        "2:1500:d=2026050700:RH:2 m above ground:3 hour fcst:",
+        "3:3000:d=2026050700:UGRD:10 m above ground:3 hour fcst:",
+        "4:4500:d=2026050700:VGRD:10 m above ground:3 hour fcst:",
+        "5:6000:d=2026050700:PRES:surface:3 hour fcst:",
+        "6:7500:d=2026050700:APCP:surface:0-3 hour acc fcst:",
+        "7:9000:d=2026050700:DSWRF:surface:0-3 hour ave fcst:",
+    ]
+)
+# f006 with a duplicate APCP (0-6 and 3-6 windows) to exercise the ambiguous selector.
+F006_IDX_DUP_APCP = "\n".join(
+    [
+        "1:0:d=2026050700:TMP:2 m above ground:6 hour fcst:",
+        "2:1500:d=2026050700:APCP:surface:0-6 hour acc fcst:",
+        "3:3000:d=2026050700:APCP:surface:3-6 hour acc fcst:",
+        "4:4500:d=2026050700:DSWRF:surface:0-6 hour ave fcst:",
+    ]
+)
+
+
+def _mirror_grib_bytes() -> bytes:
+    # 7000 bytes of deterministic content so Range slices are distinguishable.
+    return bytes((i % 251) for i in range(7000))
+
+
+def _cloud_adapter(
+    tmp_path: Path,
+    *,
+    idx_by_url: dict[str, str],
+    grib_bytes: bytes,
+    backends: tuple[str, ...] = ("s3", "gcs", "azure", "nomads"),
+    failing_idx_urls: dict[str, Exception] | None = None,
+    wall_clock: Any | None = None,
+) -> tuple[GFSAdapter, dict[str, list[str]]]:
+    calls: dict[str, list[str]] = {"idx": [], "range": [], "nomads": []}
+    failing = failing_idx_urls or {}
+
+    def downloader(url: str) -> bytes:
+        if "#range=" in url:
+            base, _, rng = url.partition("#range=")
+            calls["range"].append(rng)
+            # parse "bytes=start-end" inclusive
+            spec = rng.split("=", 1)[1]
+            start_s, _, end_s = spec.partition("-")
+            start = int(start_s)
+            end = int(end_s) + 1 if end_s else len(grib_bytes)
+            return grib_bytes[start:end]
+        if url.endswith(".idx"):
+            calls["idx"].append(url)
+            if url in failing:
+                raise failing[url]
+            if url not in idx_by_url:
+                raise FileUnavailableError("no idx", attempts=1)
+            return idx_by_url[url].encode("utf-8")
+        calls["nomads"].append(url)
+        return b"GRIB nomads subset payload"
+
+    config = GFSAdapterConfig(
+        workspace_root=tmp_path,
+        source_backends=backends,
+        poll_interval_seconds=0,
+        nomads_min_interval_seconds=0,
+        max_wait_seconds=0,
+        max_retries=1,
+        retry_backoff_seconds=(0,),
+    )
+    adapter = GFSAdapter(
+        config=config,
+        repository=FakeMetRepository(),
+        object_store=LocalObjectStore(tmp_path),
+        downloader=downloader,
+        availability_checker=lambda _url: True,
+        sleeper=lambda _seconds: None,
+        wall_clock=wall_clock,
+    )
+    return adapter, calls
+
+
+def _entry(variable: str, forecast_hour: int) -> ManifestEntry:
+    return ManifestEntry(
+        remote_url="https://nomads.example/grib-filter",
+        local_key=f"raw/gfs/2026050700/gfs.t00z.pgrb2.0p25.f{forecast_hour:03d}.{variable}.grib2",
+        variable=variable,
+        forecast_hour=forecast_hour,
+        metadata={"cycle_time": parse_cycle_time("2026050700").isoformat()},
+    )
+
+
+def _patch_cdo(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any] | None = None) -> None:
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        if captured is not None:
+            captured["argv"] = argv
+        Path(argv[-1]).write_bytes(b"GRIB clipped payload")
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr(gfs_module.shutil, "which", lambda _name: "/usr/bin/cdo")
+    monkeypatch.setattr(gfs_module.subprocess, "run", fake_run)
+
+
+# ---- idx parser -----------------------------------------------------------------
+
+def test_idx_parser_computes_byte_ranges_and_last_record_open_ended() -> None:
+    records = gfs_module._parse_gfs_idx(F003_IDX)
+    assert len(records) == 7
+    # TMP f003 -> record 1 [0, 1500)
+    start, end = gfs_module._select_idx_byte_range(records, "tmp2m", 3)
+    assert (start, end) == (0, 1500)
+    # DSWRF f003 -> last record, open-ended end
+    start, end = gfs_module._select_idx_byte_range(records, "dswrf", 3)
+    assert (start, end) == (9000, None)
+
+
+def test_idx_parser_rejects_malformed_lines() -> None:
+    with pytest.raises(IdxParseError):
+        gfs_module._parse_gfs_idx("1:0:d=2026050700:TMP\n")
+
+
+def test_idx_apcp_duplicate_windows_fail_loud() -> None:
+    records = gfs_module._parse_gfs_idx(F006_IDX_DUP_APCP)
+    with pytest.raises(AmbiguousIdxRecordError):
+        gfs_module._select_idx_byte_range(records, "apcp", 6)
+
+
+def test_idx_f000_omits_apcp_and_dswrf() -> None:
+    records = gfs_module._parse_gfs_idx(F000_IDX)
+    with pytest.raises(IdxRecordNotFoundError):
+        gfs_module._select_idx_byte_range(records, "apcp", 0)
+    with pytest.raises(IdxRecordNotFoundError):
+        gfs_module._select_idx_byte_range(records, "dswrf", 0)
+
+
+def test_idx_matches_all_seven_variables_at_f003() -> None:
+    records = gfs_module._parse_gfs_idx(F003_IDX)
+    for variable in ("tmp2m", "rh2m", "u10m", "v10m", "pressfc", "apcp", "dswrf"):
+        start, end = gfs_module._select_idx_byte_range(records, variable, 3)
+        assert start >= 0
+    # f000 instantaneous fields match anl, not fcst
+    f000 = gfs_module._parse_gfs_idx(F000_IDX)
+    for variable in ("tmp2m", "rh2m", "u10m", "v10m", "pressfc"):
+        start, end = gfs_module._select_idx_byte_range(f000, variable, 0)
+        assert start >= 0
+
+
+# ---- s3 happy path + Range -------------------------------------------------------
+
+def test_s3_happy_path_uses_idx_byte_range_and_clips(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grib = _mirror_grib_bytes()
+    s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f003"
+    idx_by_url = {f"{s3_grib}.idx": F003_IDX}
+    adapter, calls = _cloud_adapter(tmp_path, idx_by_url=idx_by_url, grib_bytes=grib)
+    captured: dict[str, Any] = {}
+    _patch_cdo(monkeypatch, captured)
+
+    result, _retries = adapter._download_entry(_entry("tmp2m", 3))
+
+    assert result.status == "downloaded"
+    assert adapter.object_store.exists("raw/gfs/2026050700/gfs.t00z.pgrb2.0p25.f003.tmp2m.grib2")
+    # TMP f003 -> [0, 1500): Range bytes=0-1499
+    assert calls["range"] == ["bytes=0-1499"]
+    assert calls["idx"] == [f"{s3_grib}.idx"]
+    assert calls["nomads"] == []
+    # cdo clip invoked with sellonlatbox in W,E,S,N order
+    assert any(arg.startswith("sellonlatbox,") for arg in captured["argv"])
+    assert captured["argv"][1:3] == ["-f", "grb2"]
+
+
+def test_s3_clip_uses_bbox_west_east_south_north_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grib = _mirror_grib_bytes()
+    s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f003"
+    adapter, _calls = _cloud_adapter(tmp_path, idx_by_url={f"{s3_grib}.idx": F003_IDX}, grib_bytes=grib)
+    captured: dict[str, Any] = {}
+    _patch_cdo(monkeypatch, captured)
+
+    adapter._download_entry(_entry("pressfc", 3))
+
+    bbox = adapter.config.bbox
+    expected = f"sellonlatbox,{bbox.west:g},{bbox.east:g},{bbox.south:g},{bbox.north:g}"
+    assert expected in captured["argv"]
+
+
+# ---- multi-mirror fallback -------------------------------------------------------
+
+def test_mirror_fallback_s3_idx_404_falls_through_to_gcs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grib = _mirror_grib_bytes()
+    gcs_grib = "https://storage.googleapis.com/global-forecast-system/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f003"
+    # Only GCS has the idx; S3 idx is absent (404), azure absent too.
+    adapter, calls = _cloud_adapter(tmp_path, idx_by_url={f"{gcs_grib}.idx": F003_IDX}, grib_bytes=grib)
+    _patch_cdo(monkeypatch)
+
+    result, _retries = adapter._download_entry(_entry("rh2m", 3))
+
+    assert result.status == "downloaded"
+    # both s3 and gcs idx were probed; gcs succeeded; nomads never reached.
+    assert any("s3.amazonaws.com" in url for url in calls["idx"])
+    assert any("googleapis.com" in url for url in calls["idx"])
+    assert calls["nomads"] == []
+
+
+def test_mirror_fallback_to_azure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grib = _mirror_grib_bytes()
+    azure_grib = "https://noaagfs.blob.core.windows.net/gfs/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f003"
+    adapter, calls = _cloud_adapter(tmp_path, idx_by_url={f"{azure_grib}.idx": F003_IDX}, grib_bytes=grib)
+    _patch_cdo(monkeypatch)
+
+    result, _retries = adapter._download_entry(_entry("u10m", 3))
+
+    assert result.status == "downloaded"
+    assert any("blob.core.windows.net" in url for url in calls["idx"])
+
+
+def test_f000_apcp_falls_through_mirrors_to_nomads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # apcp/dswrf are undefined at f000 on the mirrors; the chain must fall through to
+    # NOMADS rather than silently dropping the variable.
+    grib = _mirror_grib_bytes()
+    s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f000"
+    adapter, calls = _cloud_adapter(tmp_path, idx_by_url={f"{s3_grib}.idx": F000_IDX}, grib_bytes=grib)
+    _patch_cdo(monkeypatch)
+
+    result, _retries = adapter._download_entry(_entry("apcp", 0))
+
+    assert result.status == "downloaded"
+    assert calls["nomads"], "NOMADS must serve f000 apcp after mirrors decline it"
+
+
+# ---- cdo fail-loud ---------------------------------------------------------------
+
+def test_mirror_clip_fails_loud_when_cdo_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grib = _mirror_grib_bytes()
+    s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f003"
+    adapter, _calls = _cloud_adapter(
+        tmp_path, idx_by_url={f"{s3_grib}.idx": F003_IDX}, grib_bytes=grib, backends=("s3",)
+    )
+    monkeypatch.setattr(gfs_module.shutil, "which", lambda _name: None)
+
+    with pytest.raises(CdoMissingError) as exc:
+        adapter._download_entry(_entry("tmp2m", 3))
+    assert exc.value.error_code == "CDO_MISSING"
+
+
+def test_mirror_clip_fails_loud_on_cdo_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grib = _mirror_grib_bytes()
+    s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f003"
+    adapter, _calls = _cloud_adapter(
+        tmp_path, idx_by_url={f"{s3_grib}.idx": F003_IDX}, grib_bytes=grib, backends=("s3",)
+    )
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        return type("R", (), {"returncode": 1, "stderr": b"cdo sellonlatbox: boom"})()
+
+    monkeypatch.setattr(gfs_module.shutil, "which", lambda _name: "/usr/bin/cdo")
+    monkeypatch.setattr(gfs_module.subprocess, "run", fake_run)
+
+    with pytest.raises(CdoClipError) as exc:
+        adapter._download_entry(_entry("tmp2m", 3))
+    assert exc.value.error_code == "CDO_CLIP_FAILED"
+
+
+# ---- NOMADS 403 circuit breaker --------------------------------------------------
+
+def test_nomads_403_trips_breaker_without_retry_or_backoff(tmp_path: Path) -> None:
+    sleeps: list[float] = []
+    nomads_calls = {"n": 0}
+
+    def downloader(url: str) -> bytes:
+        if url.endswith(".idx"):
+            raise FileUnavailableError("no mirror idx", attempts=1)
+        nomads_calls["n"] += 1
+        raise ForbiddenSourceError("nomads 403", attempts=1)
+
+    config = GFSAdapterConfig(
+        workspace_root=tmp_path,
+        source_backends=("s3", "nomads"),
+        poll_interval_seconds=0,
+        nomads_min_interval_seconds=0,
+        max_wait_seconds=0,
+        max_retries=3,
+        retry_backoff_seconds=(5, 5, 5),
+    )
+    adapter = GFSAdapter(
+        config=config,
+        repository=FakeMetRepository(),
+        object_store=LocalObjectStore(tmp_path),
+        downloader=downloader,
+        sleeper=sleeps.append,
+    )
+
+    with pytest.raises(AllSourcesUnavailableError):
+        adapter._download_entry(_entry("tmp2m", 3))
+
+    # NOMADS hit exactly once: no _download_with_retries loop, no backoff sleep.
+    assert nomads_calls["n"] == 1
+    assert sleeps == []
+    assert adapter._nomads_circuit_open() is True
+
+
+def test_breaker_open_skips_nomads_until_cooldown_expires(tmp_path: Path) -> None:
+    now = {"t": datetime(2026, 5, 7, 0, 0, tzinfo=UTC)}
+
+    def wall_clock() -> datetime:
+        return now["t"]
+
+    grib = _mirror_grib_bytes()
+    nomads_hits = {"n": 0}
+
+    def downloader(url: str) -> bytes:
+        if "#range=" in url:
+            spec = url.split("=", 2)[-1]
+            start_s, _, end_s = spec.partition("-")
+            start = int(start_s)
+            end = int(end_s) + 1 if end_s else len(grib)
+            return grib[start:end]
+        if url.endswith(".idx"):
+            raise FileUnavailableError("no mirror idx", attempts=1)
+        nomads_hits["n"] += 1
+        raise ForbiddenSourceError("nomads 403", attempts=1)
+
+    config = GFSAdapterConfig(
+        workspace_root=tmp_path,
+        source_backends=("s3", "nomads"),
+        poll_interval_seconds=0,
+        nomads_min_interval_seconds=0,
+        nomads_cooldown_minutes=60,
+        max_wait_seconds=0,
+        max_retries=1,
+        retry_backoff_seconds=(0,),
+    )
+    adapter = GFSAdapter(
+        config=config,
+        repository=FakeMetRepository(),
+        object_store=LocalObjectStore(tmp_path),
+        downloader=downloader,
+        sleeper=lambda _s: None,
+        wall_clock=wall_clock,
+    )
+
+    # First pass: mirror 404 + NOMADS 403 -> breaker opens, persisted to disk.
+    with pytest.raises(AllSourcesUnavailableError):
+        adapter._download_entry(_entry("tmp2m", 3))
+    assert nomads_hits["n"] == 1
+    circuit_file = tmp_path / "state" / "source_circuit" / "gfs_nomads.json"
+    assert circuit_file.exists()
+
+    # Second pass within cooldown (fresh adapter = fresh process): NOMADS skipped.
+    adapter2 = GFSAdapter(
+        config=config,
+        repository=FakeMetRepository(),
+        object_store=LocalObjectStore(tmp_path),
+        downloader=downloader,
+        sleeper=lambda _s: None,
+        wall_clock=wall_clock,
+    )
+    with pytest.raises(AllSourcesUnavailableError):
+        adapter2._download_entry(_entry("tmp2m", 3))
+    assert nomads_hits["n"] == 1  # NOMADS not hit again during cooldown
+
+    # Advance past cooldown: NOMADS eligible again, idx now present so mirror succeeds.
+    now["t"] = now["t"] + timedelta(minutes=61)
+    assert adapter2._nomads_circuit_open() is False

@@ -17,6 +17,10 @@ GeoBBox = region_module.GeoBBox
 china_buffered_bbox_from_env = region_module.china_buffered_bbox_from_env
 GFSAdapter = gfs_module.GFSAdapter
 GFSAdapterConfig = gfs_module.GFSAdapterConfig
+GFSCdoMissingError = gfs_module.CdoMissingError
+GFSCdoClipError = gfs_module.CdoClipError
+GFSManifestEntry = importlib.import_module("workers.data_adapters.base").ManifestEntry
+parse_cycle_time = importlib.import_module("workers.data_adapters.base").parse_cycle_time
 IFSAdapter = ifs_module.IFSAdapter
 IFSAdapterConfig = ifs_module.IFSAdapterConfig
 CdoMissingError = ifs_module.CdoMissingError
@@ -110,6 +114,115 @@ def test_gfs_identity_digest_changes_with_bbox(tmp_path: Path) -> None:
     digest_a = gfs_module._stable_digest(a.source_object_identity("2026050100"))
     digest_b = gfs_module._stable_digest(b.source_object_identity("2026050100"))
     assert digest_a != digest_b
+
+
+# ----------------------------------------------------------------- GFS cloud-mirror clip
+
+_GFS_F003_IDX = (
+    "1:0:d=2026050100:TMP:2 m above ground:3 hour fcst:\n"
+    "2:1500:d=2026050100:RH:2 m above ground:3 hour fcst:\n"
+)
+
+
+def _gfs_mirror_adapter(tmp_path: Path, bbox: GeoBBox | None = None) -> GFSAdapter:
+    grib = bytes((i % 251) for i in range(3000))
+    s3_idx = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260501/00/atmos/gfs.t00z.pgrb2.0p25.f003.idx"
+
+    def downloader(url: str) -> bytes:
+        if "#range=" in url:
+            spec = url.split("=", 2)[-1]
+            start_s, _, end_s = spec.partition("-")
+            start = int(start_s)
+            end = int(end_s) + 1 if end_s else len(grib)
+            return grib[start:end]
+        if url.endswith(".idx"):
+            if url == s3_idx:
+                return _GFS_F003_IDX.encode("utf-8")
+            raise gfs_module.FileUnavailableError("no idx", attempts=1)
+        raise AssertionError("mirror path must not hit NOMADS grib-filter here")
+
+    config = GFSAdapterConfig(
+        workspace_root=tmp_path,
+        bbox=bbox or GeoBBox(south=8, north=64, west=63, east=145),
+        source_backends=("s3",),
+        nomads_min_interval_seconds=0,
+        max_retries=1,
+        retry_backoff_seconds=(0,),
+    )
+    return GFSAdapter(
+        config=config,
+        object_store=LocalObjectStore(tmp_path),
+        downloader=downloader,
+        sleeper=lambda _s: None,
+    )
+
+
+def _gfs_entry() -> Any:
+    return GFSManifestEntry(
+        remote_url="https://nomads.example/grib-filter",
+        local_key="raw/gfs/2026050100/gfs.t00z.pgrb2.0p25.f003.tmp2m.grib2",
+        variable="tmp2m",
+        forecast_hour=3,
+        metadata={"cycle_time": parse_cycle_time("2026050100").isoformat()},
+    )
+
+
+def test_gfs_mirror_clip_invokes_cdo_with_sellonlatbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        captured["argv"] = argv
+        Path(argv[-1]).write_bytes(b"GRIB clipped payload")
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr(gfs_module.shutil, "which", lambda _name: "/usr/bin/cdo")
+    monkeypatch.setattr(gfs_module.subprocess, "run", fake_run)
+
+    adapter = _gfs_mirror_adapter(tmp_path)
+    result, _retries = adapter._download_entry(_gfs_entry())
+
+    assert result.status == "downloaded"
+    argv = captured["argv"]
+    assert argv[0] == "/usr/bin/cdo"
+    assert argv[1:3] == ["-f", "grb2"]
+    assert "sellonlatbox,63,145,8,64" in argv
+
+
+def test_gfs_mirror_clip_uses_env_overridden_bbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        captured["argv"] = argv
+        Path(argv[-1]).write_bytes(b"GRIB clipped payload")
+        return type("R", (), {"returncode": 0, "stderr": b""})()
+
+    monkeypatch.setattr(gfs_module.shutil, "which", lambda _name: "/usr/bin/cdo")
+    monkeypatch.setattr(gfs_module.subprocess, "run", fake_run)
+
+    adapter = _gfs_mirror_adapter(tmp_path, GeoBBox(south=10, north=55, west=70, east=140))
+    adapter._download_entry(_gfs_entry())
+    assert "sellonlatbox,70,140,10,55" in captured["argv"]
+
+
+def test_gfs_mirror_clip_fails_loud_when_cdo_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gfs_module.shutil, "which", lambda _name: None)
+    adapter = _gfs_mirror_adapter(tmp_path)
+    with pytest.raises(GFSCdoMissingError) as exc:
+        adapter._download_entry(_gfs_entry())
+    assert exc.value.error_code == "CDO_MISSING"
+
+
+def test_gfs_mirror_clip_fails_loud_on_cdo_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        return type("R", (), {"returncode": 1, "stderr": b"cdo sellonlatbox: boom"})()
+
+    monkeypatch.setattr(gfs_module.shutil, "which", lambda _name: "/usr/bin/cdo")
+    monkeypatch.setattr(gfs_module.subprocess, "run", fake_run)
+
+    adapter = _gfs_mirror_adapter(tmp_path)
+    with pytest.raises(GFSCdoClipError) as exc:
+        adapter._download_entry(_gfs_entry())
+    assert exc.value.error_code == "CDO_CLIP_FAILED"
 
 
 # --------------------------------------------------------------------------- IFS
