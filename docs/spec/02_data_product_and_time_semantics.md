@@ -75,7 +75,7 @@ lineage_json
 
 | 标准变量 | SHUD forcing 对应 | 推荐单位 | 备注 |
 |---|---|---|---|
-| `prcp_rate_or_amount` | `PRCP` | `mm/day` 或按 SHUD 配置换算 | 累计降水必须转时段量。 |
+| `prcp_rate_or_amount` | `PRCP` | `mm/day` | 累计降水在 canonical converter 内差分并按真实步长换算为日率；forcing 生产原样透传。 |
 | `air_temperature_2m` | `TEMP` | `degC` | K 转 ℃。 |
 | `relative_humidity_2m` | `RH` | `0-1` | 百分数转 0–1。 |
 | `wind_speed_10m` | `wind` | `m/s` | 可由 U/V 分量合成。 |
@@ -86,9 +86,9 @@ lineage_json
 
 ### 7.1 降水 PRCP
 
-系统内部 canonical 标准为 `prcp_amount_mm_per_step`（时段降水量 mm），forcing 输出为 `mm/day`。
+系统内部 canonical 标准为 `prcp_rate_or_amount`，单位固定为 `mm/day`。forcing 输出 `PRCP` 也是 `mm/day`，生产器只做空间插值和格式化，不再从 `mm/step` 二次换算。
 
-降水转换的核心原则：**转换器不硬编码累计窗口假设**，由各 data_source adapter 在 canonical metadata 中声明累计语义。
+降水转换的核心原则：**raw 选择器先明确累计口径，canonical converter 再用真实相邻时效步长换算日率**。各 data_source adapter 必须在 source policy / lineage 中声明累计语义，避免 forcing producer 依赖静态 `native_time_resolution` 重新推导。
 
 Canonical metadata 中降水相关字段：
 
@@ -104,19 +104,24 @@ Canonical metadata 中降水相关字段：
 GFS APCP 转换流程：
 
 ```text
-1. GFS adapter 标记 accumulation_type = 'since_cycle'。
-2. 转换器按 accumulation metadata 做相邻 forecast hour 差分得到时段降水量。
+1. GFS adapter 对 FV3-GFS APCP 双记录执行 selector policy：优先选择 stepRange = 0-fhr 的 cumulative_since_cycle 记录；f000 只保留点值变量，APCP/DSWRF 这类区间变量没有 f000 entry。
+2. 转换器对相邻 forecast hour 的 0-fhr 累计值做差分，得到本时段降水量。
 3. 负差分处理：
-   a. |负值| < 0.01 mm → 置零，quality_flag = 'ok'
-   b. |负值| ≥ 0.01 mm → 置零，quality_flag = 'warning_negative_precip'
-   c. 连续 ≥3 步负差分 → quality_flag = 'error_precip_accumulation'，阻断该站该变量
-4. 时段降水量（mm/step）→ SHUD PRCP（mm/day）：
-   PRCP_mm_day = prcp_mm_per_step × (24 / step_hours)
+   a. |负值| < 0.05 mm → 置零，quality_flag = 'ok'
+   b. |负值| ≥ 0.05 mm → 置零，quality_flag = 'warn' / source-specific warning
+   c. 连续或显著异常由 source-specific converter 标记，forcing 只消费 usable canonical 产品
+4. 转换器立即换算并持久化 canonical `mm/day`：
+   prcp_mm_day = delta_mm × (24 / step_hours)
+5. forcing producer 要求 canonical 降水 unit == `mm/day`。对 GFS，SHUD forcing 行时间表示区间起点：`cycle+0h` 行使用 f000 点值变量和 f003 区间变量，`cycle+3h` 行使用 f003 点值变量和 f006 区间变量，依此类推。
 ```
 
-ERA5 转换流程：ERA5 降水变量由 ERA5 adapter 标准化为 `prcp_amount_mm_per_step`；是否需要差分由 adapter 的 `accumulation_type` 决定，避免不同 ERA5 产品（ERA5、ERA5-Land、小时聚合）之间语义混淆。
+GFS forcing package 的 `start_time/end_time` 表示覆盖窗口，不等同于最后一行时间。168h 预报应写成 `row_time_range = 0..165h`、`time_range/end_time = 168h`；最后一行 `165h` 覆盖 `165-168h`。
 
-CLDAS 转换流程：CLDAS adapter 标记 `accumulation_type = 'instant'`（瞬时降水率 mm/h），直接累加为时段量再转 mm/day。
+SHUD `qhh.tsd.forc` 引用的单站 forcing CSV 中，`Time_Day` 必须使用相对 forcing `start_time` 的天数：首行是 `0`，3 小时步长下一行是 `0.125`。不得写成 Unix epoch day 或绝对儒略日；绝对日期只保留在文件头的 `start_date/end_date` 和 package manifest 中。
+
+ERA5 转换流程：ERA5 降水变量由 converter 按产品累计语义差分并换算为 `mm/day`；是否需要差分由 adapter/source policy 的 `accumulation_type` 决定，避免不同 ERA5 产品（ERA5、ERA5-Land、小时聚合）之间语义混淆。
+
+CLDAS 转换流程：CLDAS adapter 标记 `accumulation_type = 'instant'`（瞬时降水率 mm/h），由 converter 标准化为 `mm/day` 后进入 canonical。
 
 ### 7.2 净辐射 Rn
 
