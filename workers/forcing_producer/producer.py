@@ -278,7 +278,7 @@ class ForcingProducerConfig:
     idw_power: float = 2.0
     idw_neighbors: int = 4
     rn_shortwave_factor: float = 1.0
-    producer_version: str = "m2.0"
+    producer_version: str = "m2.1"
     forcing_filename: str = "forcing.tsd.forc"
     csv_filename: str = "forcing_debug.csv"
     package_manifest_filename: str = "forcing_package.json"
@@ -1703,7 +1703,6 @@ def format_shud_forcing_package(
     end_time = _ensure_utc(coverage_end_time or valid_times[-1])
     start_date = start_time.strftime("%Y%m%d")
     end_date = end_time.strftime("%Y%m%d")
-    start_day = start_time.timestamp() / 86_400.0
 
     files: dict[str, str] = {}
     tsd = io.StringIO()
@@ -1733,7 +1732,7 @@ def format_shud_forcing_package(
         csv_buffer.write("Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n")
         for valid_time in valid_times:
             values = rows_by_station_time[(station.station_id, valid_time)]
-            time_day = start_day + (_ensure_utc(valid_time) - start_time).total_seconds() / 86_400.0
+            time_day = (_ensure_utc(valid_time) - start_time).total_seconds() / 86_400.0
             csv_buffer.write(
                 "\t".join(
                     [

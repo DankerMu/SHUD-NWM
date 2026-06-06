@@ -292,6 +292,7 @@ class CanonicalProductResult:
     checksum: str
     status: str
     quality_flag: str = "ok"
+    lineage_json: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -606,6 +607,7 @@ def _canonical_product_result_readiness_row(
         "object_uri": product.object_uri,
         "checksum": product.checksum,
         "quality_flag": product.quality_flag,
+        "lineage_json": dict(product.lineage_json),
     }
 
 
@@ -1568,6 +1570,7 @@ class CanonicalConverter:
                 checksum=existing["checksum"],
                 status="already_done",
                 quality_flag=existing.get("quality_flag", "ok"),
+                lineage_json=_mapping_value(existing.get("lineage_json")),
             )
 
         try:
@@ -1603,6 +1606,7 @@ class CanonicalConverter:
             checksum=checksum,
             status="updated" if existing else "created",
             quality_flag=conversion.quality_flag,
+            lineage_json=lineage_json,
         )
 
     def _ensure_grid_definition(self, record: RawRecord) -> None:
@@ -2073,6 +2077,7 @@ class ERA5CanonicalConverter(CanonicalConverter):
                 checksum=existing["checksum"],
                 status="already_done",
                 quality_flag=existing.get("quality_flag", "ok"),
+                lineage_json=_mapping_value(existing.get("lineage_json")),
             )
 
         try:
@@ -2109,6 +2114,7 @@ class ERA5CanonicalConverter(CanonicalConverter):
             checksum=checksum,
             status="updated" if existing else "created",
             quality_flag=quality_flag,
+            lineage_json=lineage_json,
         )
 
     def _record_missing_products(
@@ -2578,6 +2584,7 @@ class IFSCanonicalConverter(CanonicalConverter):
                 checksum=existing["checksum"],
                 status="already_done",
                 quality_flag=existing.get("quality_flag", "ok"),
+                lineage_json=_mapping_value(existing.get("lineage_json")),
             )
 
         try:
@@ -2614,6 +2621,7 @@ class IFSCanonicalConverter(CanonicalConverter):
             checksum=checksum,
             status="updated" if existing else "created",
             quality_flag=quality_flag,
+            lineage_json=lineage_json,
         )
 
     def _record_missing_products(

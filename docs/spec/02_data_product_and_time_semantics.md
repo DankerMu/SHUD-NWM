@@ -107,8 +107,8 @@ GFS APCP 转换流程：
 1. GFS adapter 对 FV3-GFS APCP 双记录执行 selector policy：优先选择 stepRange = 0-fhr 的 cumulative_since_cycle 记录；f000 只保留点值变量，APCP/DSWRF 这类区间变量没有 f000 entry。
 2. 转换器对相邻 forecast hour 的 0-fhr 累计值做差分，得到本时段降水量。
 3. 负差分处理：
-   a. |负值| < 0.01 mm → 置零，quality_flag = 'ok'
-   b. |负值| ≥ 0.01 mm → 置零，quality_flag = 'warn' / source-specific warning
+   a. |负值| < 0.05 mm → 置零，quality_flag = 'ok'
+   b. |负值| ≥ 0.05 mm → 置零，quality_flag = 'warn' / source-specific warning
    c. 连续或显著异常由 source-specific converter 标记，forcing 只消费 usable canonical 产品
 4. 转换器立即换算并持久化 canonical `mm/day`：
    prcp_mm_day = delta_mm × (24 / step_hours)
@@ -116,6 +116,8 @@ GFS APCP 转换流程：
 ```
 
 GFS forcing package 的 `start_time/end_time` 表示覆盖窗口，不等同于最后一行时间。168h 预报应写成 `row_time_range = 0..165h`、`time_range/end_time = 168h`；最后一行 `165h` 覆盖 `165-168h`。
+
+SHUD `qhh.tsd.forc` 引用的单站 forcing CSV 中，`Time_Day` 必须使用相对 forcing `start_time` 的天数：首行是 `0`，3 小时步长下一行是 `0.125`。不得写成 Unix epoch day 或绝对儒略日；绝对日期只保留在文件头的 `start_date/end_date` 和 package manifest 中。
 
 ERA5 转换流程：ERA5 降水变量由 converter 按产品累计语义差分并换算为 `mm/day`；是否需要差分由 adapter/source policy 的 `accumulation_type` 决定，避免不同 ERA5 产品（ERA5、ERA5-Land、小时聚合）之间语义混淆。
 

@@ -565,7 +565,7 @@ def test_gfs_apcp_cycle_cumulative_negative_still_warns() -> None:
 
 
 def test_gfs_apcp_cycle_cumulative_small_negative_stays_ok() -> None:
-    # 累计序列 -0.005mm 的量化噪声(<0.01mm)按 SHUD precip 钳零约定与 0 等价,记 anomaly
+    # 累计序列 -0.005mm 的量化噪声(<0.05mm)按 SHUD precip 钳零约定与 0 等价,记 anomaly
     # 但保持 quality_flag=ok,避免被 forcing 当不可用剔除。
     result = convert_units_with_metadata(
         "apcp", [11.995], [12.0], forecast_hour=12, previous_forecast_hour=9
@@ -691,6 +691,28 @@ def test_convert_manifest_streams_without_reading_all_records(tmp_path: Path, mo
 
     assert result.status == "canonical_ready"
     assert len(result.products) == 14
+
+
+def test_conversion_without_repository_preserves_lineage_for_identity_readiness(tmp_path: Path) -> None:
+    policy = {"source": "gfs", "forecast_hours": [0, 3], "selector": "fixture"}
+    source_object = {"source": "gfs", "manifest_digest": "fixture-digest"}
+    _, manifest = build_raw_manifest(tmp_path)
+    manifest["metadata"] = {
+        "source_policy": policy,
+        "source_object_identity": source_object,
+    }
+    converter = CanonicalConverter(
+        config=CanonicalConverterConfig(workspace_root=tmp_path),
+        repository=None,
+        object_store=LocalObjectStore(tmp_path),
+    )
+
+    result = converter.convert_manifest(manifest)
+
+    assert result.status == "canonical_ready"
+    assert len(result.products) == 14
+    assert all(product.lineage_json["policy_identity"] == policy for product in result.products)
+    assert all(product.lineage_json["source_object_identity"] == source_object for product in result.products)
 
 
 def test_quality_flag_fail_triggers_reconversion(tmp_path: Path) -> None:

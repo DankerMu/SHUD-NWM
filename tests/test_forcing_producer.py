@@ -30,6 +30,7 @@ from workers.forcing_producer.producer import (
     OUTPUT_UNITS,
     ForcingComponent,
     ForcingTimeseriesRow,
+    format_shud_forcing_package,
 )
 
 
@@ -443,6 +444,35 @@ def test_gfs_forcing_rows_use_cycle_start_with_next_interval_products(tmp_path: 
     assert lineage["forcing_package_manifest_checksum"] == result.checksum
 
 
+def test_shud_station_csv_time_day_is_relative_to_forcing_start(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    products = _write_canonical_products(store, forecast_hours=(0, 3, 6))
+    repository = FakeForcingRepository(
+        stations=(
+            MetStation(
+                "station_1",
+                "basin_v1",
+                -74.7,
+                40.1,
+                50.0,
+                "forcing_grid",
+                properties_json={"shud_forcing_index": 1, "forcing_filename": "station_1.csv"},
+            ),
+        ),
+        products=products,
+    )
+    producer = _build_producer(tmp_path, repository, store)
+
+    result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+
+    station_csv = (
+        tmp_path / result.forcing_package_uri.strip("/") / "shud" / "station_1.csv"
+    ).read_text(encoding="utf-8").splitlines()
+    assert station_csv[0] == "2\t6\t20260507\t20260507"
+    assert station_csv[2].split("\t")[0] == "0"
+    assert station_csv[3].split("\t")[0] == "0.125"
+
+
 def test_produce_uses_only_forcing_grid_stations_for_qhh_package(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
     stations = (
@@ -612,13 +642,13 @@ def test_existing_forcing_version_not_reused_when_producer_version_is_stale(tmp_
 
     first = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
     assert first.status == "forcing_ready"
-    assert producer.config.producer_version == "m2.0"
+    assert producer.config.producer_version == "m2.1"
 
     # Downgrade only the producer_version on the stored lineage to mimic a pre-#266 record;
     # all other signatures stay byte-identical to the current inputs.
     record = repository.forcing_versions[first.forcing_version_id]
     lineage = dict(record["lineage_json"])
-    assert lineage["producer_version"] == "m2.0"
+    assert lineage["producer_version"] == "m2.1"
     lineage["producer_version"] = "m1.0"
     record["lineage_json"] = lineage
 
@@ -629,7 +659,7 @@ def test_existing_forcing_version_not_reused_when_producer_version_is_stale(tmp_
     assert second.forcing_version_id == first.forcing_version_id
     assert repository.upsert_count == 2
     # The recompute restamps the lineage with the current producer_version.
-    assert repository.forcing_versions[second.forcing_version_id]["lineage_json"]["producer_version"] == "m2.0"
+    assert repository.forcing_versions[second.forcing_version_id]["lineage_json"]["producer_version"] == "m2.1"
 
 
 def test_scheduler_basin_identity_mismatch_blocks_before_records(tmp_path: Path) -> None:
@@ -1846,9 +1876,9 @@ def _lead_time_sort_key(product: CanonicalProduct) -> tuple[int, Any, str]:
 # conversion branch behavior, and rn_shortwave_factor default). See
 # test_output_semantics_fingerprint_pins_producer_version for the contract.
 EXPECTED_OUTPUT_SEMANTICS_FINGERPRINT = (
-    "8171ed72d3cbd29f034623b06220765ad46e7422a0851fb647871d54e6caf735"
+    "445888eeefbf5b2ae453866e5d4dfa81ddf4a9fe04e75c7b0b49a5de3e28e6bd"
 )
-EXPECTED_PRODUCER_VERSION = "m2.0"
+EXPECTED_PRODUCER_VERSION = "m2.1"
 
 
 def _precip_product(unit: str) -> CanonicalProduct:
@@ -1880,11 +1910,38 @@ def _compute_output_semantics_fingerprint(producer: ForcingProducer) -> str:
         other_rejected = False
     except ForcingProductionError:
         other_rejected = True
+    shud_rows = (
+        ForcingTimeseriesRow(
+            forcing_version_id="forc",
+            basin_version_id="basin",
+            station_id="station_1",
+            valid_time=datetime(2026, 5, 7, hour, tzinfo=UTC),
+            source_id="gfs",
+            variable=variable,
+            value=1.0,
+            unit=OUTPUT_UNITS[variable],
+            native_resolution="3h",
+        )
+        for hour in (0, 3)
+        for variable in FORCING_VARIABLES
+    )
+    shud_station = MetStation(
+        "station_1",
+        "basin",
+        100.0,
+        35.0,
+        1.0,
+        "forcing_grid",
+        properties_json={"shud_forcing_index": 1, "forcing_filename": "station_1.csv"},
+    )
+    shud_csv = format_shud_forcing_package(tuple(shud_rows), stations=(shud_station,))["shud/station_1.csv"]
+    shud_time_day_values = tuple(line.split("\t", maxsplit=1)[0] for line in shud_csv.splitlines()[2:])
     parts = [
         "OUTPUT_UNITS=" + repr(sorted(OUTPUT_UNITS.items())),
         f"precip_mmday_factor={mmday_factor!r}",
         f"precip_other_rejected={other_rejected!r}",
         f"rn_shortwave_factor={producer.config.rn_shortwave_factor!r}",
+        f"shud_time_day_values={shud_time_day_values!r}",
     ]
     blob = "|".join(parts).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
