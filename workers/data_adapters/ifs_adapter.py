@@ -43,8 +43,24 @@ from .region import GeoBBox, china_buffered_bbox_from_env
 LOGGER = logging.getLogger(__name__)
 
 IFS_VARIABLES: tuple[str, ...] = ("2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str")
-IFS_FALLBACK_SOURCES: tuple[str, ...] = ("aws", "azure", "google")
+# Cloud mirrors are the same data published four ways; they carry no 500-concurrent
+# cap and are the production primary. The ECMWF Open-Data Portal direct connection is
+# kept strictly as the last-resort fallback (sources() pins it to the tail).
+IFS_FALLBACK_SOURCES: tuple[str, ...] = ("aws", "azure", "google", "ecmwf")
+IFS_TERMINAL_FALLBACK_SOURCE = "ecmwf"
 CDO_CLIP_TIMEOUT_SECONDS = 300
+
+# Process-local per-source rate-limit cooldown table: source -> clock() epoch until
+# which the source must be skipped. Not persisted across processes (future work).
+# Tests must reset this between cases via IFSAdapter.reset_source_cooldowns().
+_IFS_SOURCE_COOLDOWN_UNTIL: dict[str, float] = {}
+
+
+def _parse_source_csv(value: str | None) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    parsed = tuple(item.strip() for item in value.split(",") if item.strip())
+    return parsed or None
 
 
 class ForecastCycleRepository(Protocol):
@@ -164,10 +180,16 @@ class IFSAdapterConfig:
     forecast_resolution_segments: tuple[tuple[int, int], ...] | None = field(
         default_factory=lambda: parse_resolution_segments(os.getenv("IFS_FORECAST_RESOLUTION_SEGMENTS"))
     )
-    preferred_source: str = field(default_factory=lambda: os.getenv("IFS_OPEN_DATA_SOURCE", "ecmwf"))
-    fallback_sources: tuple[str, ...] = IFS_FALLBACK_SOURCES
+    preferred_source: str = field(default_factory=lambda: os.getenv("IFS_OPEN_DATA_SOURCE", "aws"))
+    fallback_sources: tuple[str, ...] = field(
+        default_factory=lambda: _parse_source_csv(os.getenv("IFS_OPEN_DATA_FALLBACK_SOURCES"))
+        or IFS_FALLBACK_SOURCES
+    )
     poll_interval_seconds: float = 600.0
     max_wait_seconds: float = 14400.0
+    rate_limit_cooldown_seconds: int = field(
+        default_factory=lambda: int(os.getenv("IFS_SOURCE_COOLDOWN_SECONDS", "1800"))
+    )
     max_retries: int = 3
     retry_backoff_seconds: tuple[float, ...] = (1.0, 2.0, 4.0)
     request_timeout_seconds: float = 60.0
@@ -220,10 +242,21 @@ class IFSAdapterConfig:
         return list(range(self.forecast_start_hour, end_hour + 1, self.forecast_step_hours))
 
     def sources(self) -> tuple[str, ...]:
+        # Collect every configured non-ecmwf source (dedup, order-preserving), then
+        # append ecmwf only if it was explicitly configured -- pinning the rate-capped
+        # direct portal to the tail without ever forcing it in when omitted.
         ordered: list[str] = []
+        terminal_present = False
         for source in (self.preferred_source, *self.fallback_sources):
-            if source and source not in ordered:
+            if not source:
+                continue
+            if source == IFS_TERMINAL_FALLBACK_SOURCE:
+                terminal_present = True
+                continue
+            if source not in ordered:
                 ordered.append(source)
+        if terminal_present:
+            ordered.append(IFS_TERMINAL_FALLBACK_SOURCE)
         return tuple(ordered)
 
     def as_data_source_config(self) -> dict[str, Any]:
@@ -275,6 +308,15 @@ class IFSAdapter(DataSourceAdapter):
     def from_env(cls) -> IFSAdapter:
         config = IFSAdapterConfig()
         return cls(config=config, repository=PsycopgMetStore.from_env())
+
+    @staticmethod
+    def reset_source_cooldowns() -> None:
+        """Clear the process-local per-source rate-limit cooldown table.
+
+        The table is module-level and would otherwise leak between tests; call this
+        from test setup/teardown to keep cases isolated.
+        """
+        _IFS_SOURCE_COOLDOWN_UNTIL.clear()
 
     def initialize_data_source(self) -> dict[str, Any] | None:
         if self.repository is None:
@@ -711,6 +753,14 @@ class IFSAdapter(DataSourceAdapter):
             saw_rate_limit = False
 
             for source in sources:
+                # Skip any source still inside its rate-limit cooldown so a daemon
+                # that just got 503/SlowDown from (e.g.) AWS does not keep hammering
+                # it on the next file or pass. Treat it as a rate-limited source so a
+                # fully-cooling roster still falls through to the bounded wait below.
+                if self.clock() < _IFS_SOURCE_COOLDOWN_UNTIL.get(source, 0.0):
+                    saw_rate_limit = True
+                    rate_limited_sources.add(source)
+                    continue
                 if source not in tried_sources:
                     tried_sources.append(source)
                 source_url = self._remote_url_for_source(entry, source)
@@ -748,6 +798,9 @@ class IFSAdapter(DataSourceAdapter):
                     total_retries += error.attempts
                     saw_rate_limit = True
                     rate_limited_sources.add(source)
+                    _IFS_SOURCE_COOLDOWN_UNTIL[source] = (
+                        self.clock() + self.config.rate_limit_cooldown_seconds
+                    )
                     LOGGER.warning("IFS source %s rate limited for %s", source, entry.local_key)
                     requested_wait = (
                         error.retry_after_seconds
@@ -857,7 +910,11 @@ class IFSAdapter(DataSourceAdapter):
                         f"Remote IFS file is forbidden: {self._safe_text(remote_url)}",
                         attempts=attempt,
                     ) from error
-                if error.code == 429:
+                # AWS s3://ecmwf-forecasts is known to emit 503 SlowDown under load;
+                # treat 503 SlowDown / Service Unavailable as rate limiting so it
+                # routes through the source-switch + cooldown path, not a plain
+                # network error.
+                if error.code == 429 or (error.code == 503 and _looks_like_slow_down_text(error)):
                     raise RateLimitedError(
                         f"IFS source rate limited while downloading {self._safe_text(remote_url)}",
                         retry_after_seconds=_retry_after_seconds(error.headers.get("Retry-After")),
@@ -865,6 +922,11 @@ class IFSAdapter(DataSourceAdapter):
                     ) from error
                 last_error = error
             except Exception as error:
+                if _is_slow_down(error):
+                    raise RateLimitedError(
+                        f"IFS source rate limited while downloading {self._safe_text(remote_url)}",
+                        attempts=attempt - 1,
+                    ) from error
                 last_error = error
 
             if attempt >= max_attempts:
@@ -980,7 +1042,7 @@ class IFSAdapter(DataSourceAdapter):
                         f"Remote IFS file is forbidden: {self._safe_text(remote_url)}",
                         attempts=1,
                     ) from error
-                if error.code == 429:
+                if error.code == 429 or (error.code == 503 and _looks_like_slow_down_text(error)):
                     raise RateLimitedError(
                         f"IFS source rate limited while downloading {self._safe_text(remote_url)}",
                         retry_after_seconds=_retry_after_seconds(error.headers.get("Retry-After")),
@@ -994,6 +1056,14 @@ class IFSAdapter(DataSourceAdapter):
                     f"Network error while downloading {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
                 ) from error
             except Exception as error:
+                # ecmwf.opendata / requests wrap 503 SlowDown in their own exception
+                # types; surface those as rate limiting too so the mirror switch and
+                # per-source cooldown engage.
+                if _is_slow_down(error):
+                    raise RateLimitedError(
+                        f"IFS source rate limited while downloading {self._safe_text(remote_url)}",
+                        attempts=0,
+                    ) from error
                 raise NetworkDownloadError(
                     f"Failed to retrieve IFS Open Data {self._safe_text(remote_url)}: {self._safe_text(str(error))}"
                 ) from error
@@ -1411,6 +1481,24 @@ def _parse_ifs_url(remote_url: str) -> dict[str, Any]:
         "step": forecast_hour,
         "variable": variable,
     }
+
+
+def _looks_like_slow_down_text(error: BaseException) -> bool:
+    text = str(error).lower()
+    return "slowdown" in text or "slow down" in text or "service unavailable" in text
+
+
+def _is_slow_down(error: BaseException) -> bool:
+    """Detect a 503 SlowDown / Service Unavailable signal on a wrapped error.
+
+    Used for the generic ``except Exception`` paths where ecmwf.opendata / requests
+    hide the status: a ``response.status_code == 503`` or a SlowDown / Service
+    Unavailable message both qualify as rate limiting.
+    """
+    response = getattr(error, "response", None)
+    if response is not None and getattr(response, "status_code", None) == 503:
+        return True
+    return _looks_like_slow_down_text(error)
 
 
 def _retry_after_seconds(value: str | None) -> float | None:

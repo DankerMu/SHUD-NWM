@@ -28,6 +28,17 @@ FileTooLargeError = ifs_module.FileTooLargeError
 IFSAdapter = ifs_module.IFSAdapter
 IFSAdapterConfig = ifs_module.IFSAdapterConfig
 DownloadedPayload = ifs_module.DownloadedPayload
+RateLimitedError = ifs_module.RateLimitedError
+NetworkDownloadError = ifs_module.NetworkDownloadError
+
+
+@pytest.fixture(autouse=True)
+def _reset_source_cooldowns() -> Any:
+    # The per-source cooldown table is module-level; reset around every test so a
+    # rate-limit case cannot leak a cooldown into an unrelated case.
+    IFSAdapter.reset_source_cooldowns()
+    yield
+    IFSAdapter.reset_source_cooldowns()
 
 
 class FakeMetRepository:
@@ -104,6 +115,8 @@ def build_adapter(
     poll_interval_seconds: float = 0,
     max_file_size_bytes: int = 500 * 1024 * 1024,
     sleeper: Any | None = None,
+    clock: Any | None = None,
+    rate_limit_cooldown_seconds: int = 1800,
 ) -> IFSAdapter:
     config = IFSAdapterConfig(
         workspace_root=tmp_path,
@@ -112,6 +125,7 @@ def build_adapter(
         max_retries=max_retries,
         retry_backoff_seconds=(0,),
         max_file_size_bytes=max_file_size_bytes,
+        rate_limit_cooldown_seconds=rate_limit_cooldown_seconds,
     )
     return IFSAdapter(
         config=config,
@@ -120,6 +134,7 @@ def build_adapter(
         downloader=downloader or (lambda _url: b"GRIB IFS mock bytes 7777"),
         availability_checker=availability_checker or (lambda _url: True),
         sleeper=sleeper or (lambda _seconds: None),
+        clock=clock,
     )
 
 
@@ -271,7 +286,7 @@ def test_download_plan_normal_idempotent_retry_and_mirror_switch(tmp_path: Path)
     assert result.status == "raw_complete"
     assert result.retry_count == 1
     assert result.files[0].status == "downloaded"
-    assert calls == ["ecmwf-opendata://ecmwf/ifs/2026050100/ifs.t00z.f000.2t.grib2"] * 2
+    assert calls == ["ecmwf-opendata://aws/ifs/2026050100/ifs.t00z.f000.2t.grib2"] * 2
 
     repository = adapter.repository
     repository.cycles[("IFS", manifest.cycle_time)] = {
@@ -290,7 +305,9 @@ def test_download_plan_normal_idempotent_retry_and_mirror_switch(tmp_path: Path)
 
     def mirror_downloader(url: str) -> bytes:
         mirror_calls.append(url)
-        if "://ecmwf/" in url:
+        # AWS is now the default primary; fail it so the switch to the next cloud
+        # mirror (azure) is exercised.
+        if "://aws/" in url:
             raise RuntimeError("primary failed")
         return b"GRIB mirror payload 7777"
 
@@ -299,9 +316,9 @@ def test_download_plan_normal_idempotent_retry_and_mirror_switch(tmp_path: Path)
     mirror_result = mirror_adapter.download_plan(mirror_manifest)
 
     assert mirror_result.status == "raw_complete"
-    assert "://ecmwf/" in mirror_calls[0]
-    assert mirror_calls[:2] == ["ecmwf-opendata://ecmwf/ifs/2026050100/ifs.t00z.f000.2t.grib2"] * 2
-    assert "://aws/" in mirror_calls[2]
+    assert "://aws/" in mirror_calls[0]
+    assert mirror_calls[:2] == ["ecmwf-opendata://aws/ifs/2026050100/ifs.t00z.f000.2t.grib2"] * 2
+    assert "://azure/" in mirror_calls[2]
 
 
 def test_raw_complete_untrusted_existing_object_is_redownloaded_not_already_done(tmp_path: Path) -> None:
@@ -582,7 +599,7 @@ def test_download_plan_rate_limit_honors_retry_after_and_switches_mirror(tmp_pat
 
     def downloader(url: str) -> bytes:
         calls.append(url)
-        if "://ecmwf/" in url:
+        if "://aws/" in url:
             raise http_429("120")
         return b"GRIB rate limit fallback 7777"
 
@@ -600,7 +617,8 @@ def test_download_plan_rate_limit_honors_retry_after_and_switches_mirror(tmp_pat
 
     assert result.status == "raw_complete"
     assert sleeps == [120.0]
-    assert "://aws/" in calls[1]
+    assert "://aws/" in calls[0]
+    assert "://azure/" in calls[1]
 
 
 def test_download_plan_polling_timeout_records_failure(tmp_path: Path) -> None:
@@ -701,3 +719,139 @@ def test_initialize_data_source_registers_correctly_and_is_idempotent(tmp_path: 
     assert source["native_format"] == "GRIB2"
     assert source["adapter_name"] == "ifs_adapter"
     assert source["config_json"]["lead_time_policy"]["06"] == 144
+
+
+def http_503(message: str = "SlowDown") -> HTTPError:
+    return HTTPError("mock://ifs", 503, message, Message(), None)
+
+
+def _single_entry_manifest(adapter: IFSAdapter) -> DownloadManifest:
+    manifest = adapter.build_manifest("2026050100", forecast_hours=[0])
+    return DownloadManifest(source_id="IFS", cycle_time=manifest.cycle_time, entries=(manifest.entries[0],))
+
+
+def test_sources_default_order_is_cloud_first_ecmwf_last() -> None:
+    assert IFSAdapterConfig().sources() == ("aws", "azure", "google", "ecmwf")
+
+
+def test_sources_env_override_preserves_ecmwf_tail_with_all_four(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IFS_OPEN_DATA_SOURCE", "azure")
+    monkeypatch.setenv("IFS_OPEN_DATA_FALLBACK_SOURCES", "google,aws,ecmwf")
+
+    assert IFSAdapterConfig().sources() == ("azure", "google", "aws", "ecmwf")
+
+
+def test_sources_pins_ecmwf_last_even_when_configured_first() -> None:
+    config = IFSAdapterConfig(preferred_source="ecmwf", fallback_sources=("aws", "azure"))
+
+    assert config.sources() == ("aws", "azure", "ecmwf")
+
+
+def test_sources_omits_ecmwf_when_not_configured() -> None:
+    # Explicit config without ecmwf must be respected; ecmwf is never force-injected.
+    config = IFSAdapterConfig(preferred_source="aws", fallback_sources=("azure", "google"))
+
+    assert config.sources() == ("aws", "azure", "google")
+    assert "ecmwf" not in config.sources()
+
+
+@pytest.mark.parametrize(
+    "raise_value",
+    [http_503("SlowDown"), RuntimeError("503 SlowDown: please reduce your request rate")],
+)
+def test_http_503_or_slowdown_text_switches_mirror(tmp_path: Path, raise_value: Exception) -> None:
+    calls: list[str] = []
+
+    def downloader(url: str) -> bytes:
+        calls.append(url)
+        if "://aws/" in url:
+            raise raise_value
+        return b"GRIB slowdown fallback 7777"
+
+    adapter = build_adapter(
+        tmp_path,
+        downloader=downloader,
+        max_retries=0,
+        max_wait_seconds=300,
+        poll_interval_seconds=1,
+    )
+
+    result = adapter.download_plan(_single_entry_manifest(adapter))
+
+    assert result.status == "raw_complete"
+    assert "://aws/" in calls[0]
+    assert "://azure/" in calls[1]
+
+
+def test_all_cloud_mirrors_rate_limited_falls_back_to_ecmwf(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def downloader(url: str) -> bytes:
+        calls.append(url)
+        if "://ecmwf/" in url:
+            return b"GRIB ecmwf last-resort 7777"
+        raise http_503("SlowDown")
+
+    adapter = build_adapter(
+        tmp_path,
+        downloader=downloader,
+        max_retries=0,
+        max_wait_seconds=300,
+        poll_interval_seconds=1,
+    )
+
+    result = adapter.download_plan(_single_entry_manifest(adapter))
+
+    assert result.status == "raw_complete"
+    assert "://ecmwf/" in calls[-1]
+    assert any("://aws/" in url for url in calls)
+
+
+def test_rate_limited_source_is_skipped_until_cooldown_expires(tmp_path: Path) -> None:
+    now = {"t": 1000.0}
+
+    def clock() -> float:
+        return now["t"]
+
+    calls: list[str] = []
+
+    def downloader(url: str) -> bytes:
+        calls.append(url)
+        if "://aws/" in url:
+            raise http_503("SlowDown")
+        return b"GRIB cooldown fallback 7777"
+
+    adapter = build_adapter(
+        tmp_path,
+        downloader=downloader,
+        max_retries=0,
+        max_wait_seconds=300,
+        poll_interval_seconds=1,
+        clock=clock,
+        rate_limit_cooldown_seconds=1800,
+    )
+
+    first = adapter.download_plan(_single_entry_manifest(adapter))
+    assert first.status == "raw_complete"
+    assert calls[0].endswith("ifs.t00z.f000.2t.grib2")
+    assert "://aws/" in calls[0]
+
+    # Second pass while still inside cooldown: aws must be skipped entirely.
+    calls.clear()
+    second_manifest = adapter.build_manifest("2026050106", forecast_hours=[0])
+    second = adapter.download_plan(
+        DownloadManifest(source_id="IFS", cycle_time=second_manifest.cycle_time, entries=(second_manifest.entries[0],))
+    )
+    assert second.status == "raw_complete"
+    assert all("://aws/" not in url for url in calls)
+    assert "://azure/" in calls[0]
+
+    # Advance the clock past cooldown: aws is tried again (and 503s, then falls back).
+    now["t"] += 1801.0
+    calls.clear()
+    third_manifest = adapter.build_manifest("2026050112", forecast_hours=[0])
+    third = adapter.download_plan(
+        DownloadManifest(source_id="IFS", cycle_time=third_manifest.cycle_time, entries=(third_manifest.entries[0],))
+    )
+    assert third.status == "raw_complete"
+    assert "://aws/" in calls[0]
