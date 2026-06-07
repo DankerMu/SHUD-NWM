@@ -22,10 +22,10 @@
 
 ## 3. 气象代站 clustered-GeoJSON 图层（met-station-cluster-layer）
 
-- [ ] 3.1 `lib/m11/queryState.ts` 新增 `M11Layer` 值 `met-stations`；`pages/m11/M11Controls.tsx` 把 `meteorologyPlaceholders` 中代站项转为可切换图层。
-- [ ] 3.2 新建 `stores/stationLayerData.ts`：薄 store 复用 `loadHydroMetBootstrap`→`fetchHydroMetStations`，按选中流域 latest-product 严格身份取数；单次 `limit≤500`，**站点超 500 的流域（Heihe 1709）分页（offset）拉取至明确 client cap，暴露 `total/loaded/truncated`** 供 UI/receipt 诚实标注；源为 best/compare 先经 `resolvedSource` 落 GFS/IFS，未解析不取数；**全国总览无 basinId 时不取数、显示"选择流域"honest 空态**。
-- [ ] 3.3 `components/map/M11MapLibreSurface.tsx` 新增 `M11StationClusterPrimitive`：`<Source type="geojson" cluster clusterRadius clusterMaxZoom>` + `clusters`/`cluster-count`/`met-stations-point` 三层；`interactiveLayerIds` 纳入 point/clusters；点 cluster→`getSource().getClusterExpansionZoom`+`flyTo`（运行时，测试 stub）；以 `layerId`/`source` 抽象预留 station-MVT 切换。
-- [ ] 3.4 测试：`M11Shell.test.tsx` 扩展 cluster source/layer 注册断言、关闭不渲染、未解析源不取数、超 500 流域 truncation 标注、无 basinId honest 空态；`AppRoutes.test.tsx` 加 met-stations toggle。
+- [x] 3.1 `lib/m11/queryState.ts` 新增 `M11Layer` 值 `met-stations`；`pages/m11/M11Controls.tsx` 把 `meteorologyPlaceholders` 中代站项转为可切换图层。
+- [x] 3.2 新建 `stores/stationLayerData.ts`：薄 store 复用 `loadHydroMetBootstrap`→`fetchHydroMetStations`，按选中流域 latest-product 严格身份取数；单次 `limit≤500`，**站点超 500 的流域（Heihe 1709）分页（offset）拉取至明确 client cap，暴露 `total/loaded/truncated`** 供 UI/receipt 诚实标注；源为 best/compare 先经 `resolvedSource` 落 GFS/IFS，未解析不取数；**全国总览无 basinId 时不取数、显示"选择流域"honest 空态**。
+- [x] 3.3 `components/map/M11MapLibreSurface.tsx` 新增 `M11StationClusterPrimitive`：`<Source type="geojson" cluster clusterRadius clusterMaxZoom>` + `clusters`/`cluster-count`/`met-stations-point` 三层；`interactiveLayerIds` 纳入 point/clusters；点 cluster→`getSource().getClusterExpansionZoom`+`flyTo`（运行时，测试 stub）；以 `layerId`/`source` 抽象预留 station-MVT 切换。
+- [x] 3.4 测试：`M11Shell.test.tsx` 扩展 cluster source/layer 注册断言、关闭不渲染、未解析源不取数、超 500 流域 truncation 标注、无 basinId honest 空态；`AppRoutes.test.tsx` 加 met-stations toggle。
 
 ## 4. 两类地图 popup（map-feature-popups）
 

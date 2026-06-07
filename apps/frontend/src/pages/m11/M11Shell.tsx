@@ -8,7 +8,12 @@ import type { M11QueryPatch, M11QueryState } from '@/lib/m11/queryState'
 import { serializeM11QueryState } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 import { type M11TimelineDerivedTimes, M11MapSurface, M11Timeline } from '@/pages/m11/M11Controls'
-import type { M11MapCameraFit, M11MapCameraFlyTo, M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
+import type {
+  M11MapCameraFit,
+  M11MapCameraFlyTo,
+  M11MapOverlayInteraction,
+  M11StationFeatureCollection,
+} from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
 
 interface M11LayoutProps {
@@ -26,6 +31,7 @@ interface M11LayoutProps {
   basinSegments?: BasinSegmentRow[]
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
+  stationFeatureCollection?: M11StationFeatureCollection | null
   sourceSelection?: SourceScenarioSelectionState | null
   derivedTimeline?: M11TimelineDerivedTimes | null
   fitTo?: M11MapCameraFit | null
@@ -51,6 +57,7 @@ export function M11Layout({
   basinSegments = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
+  stationFeatureCollection = null,
   sourceSelection = null,
   derivedTimeline = null,
   fitTo = null,
@@ -101,6 +108,7 @@ export function M11Layout({
           basinSegments={basinSegments}
           selectedSegmentId={selectedSegmentId}
           selectedSegmentGeometry={selectedSegmentGeometry}
+          stationFeatureCollection={stationFeatureCollection}
           onQueryChange={onQueryChange}
           fitTo={fitTo}
           flyTo={flyTo}

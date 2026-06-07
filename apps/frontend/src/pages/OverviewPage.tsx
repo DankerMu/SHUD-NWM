@@ -16,6 +16,7 @@ import {
   serializeM11QueryState,
 } from '@/lib/m11/queryState'
 import { LayerGroupControls, LayerLegendPanel, SourceScenarioControls, resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
+import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { overviewSnapshotMatchesQuery, overviewSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
 
 const NONE_VISIBLE_SENTINEL = '__none__'
@@ -197,6 +198,13 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       : null
   const monitoringHandoff = contextHandoff('/monitoring', state, sourceSelection)
   const floodAlertsHandoff = contextHandoff('/flood-alerts', state, sourceSelection)
+  // 全国总览（无 basinId）：开启代站图层时不取数、不拉全量，给 honest "请选择流域" 空态。
+  const stationLayer = useMetStationLayer({
+    active: state.layer === 'met-stations',
+    basinId: null,
+    resolvedSource: sourceSelection?.resolvedSource ?? null,
+    cycle: state.cycle,
+  })
   const partialErrors = summary?.partialErrors ?? []
   const unavailableBasinCount = basins.filter((basin) => basin.unavailableReason).length
   const boundaryCount = basins.filter((basin) => basin.boundary).length
@@ -211,6 +219,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       basins={basins}
       visibleBasinIds={visibleBasinIdList}
       sourceSelection={sourceSelection}
+      stationFeatureCollection={stationLayer.featureCollection}
       fitTo={mapFitTo}
       onMapOverlayHover={handleMapOverlayHover}
       onMapOverlayClick={handleMapOverlayClick}
@@ -269,6 +278,15 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
           {loading || error ? <ScopedNotice>{loading ? '总览数据加载中' : error}</ScopedNotice> : null}
           {partialErrors.length > 0 ? (
             <ScopedNotice tone="warning">{partialErrors[0]}</ScopedNotice>
+          ) : null}
+          {stationLayer.statusNote ? (
+            <div
+              className="rounded-md border border-warning/40 bg-primary-50 p-3 text-xs text-neutral-700"
+              role="status"
+              data-testid="m11-met-station-status"
+            >
+              {stationLayer.statusNote}
+            </div>
           ) : null}
           <LayerLegendPanel state={state} layers={layers} />
           <div className="space-y-2">

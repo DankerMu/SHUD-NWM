@@ -23,6 +23,7 @@ import {
 } from '@/lib/m11/queryState'
 import { cn } from '@/lib/cn'
 import { LayerGroupControls, LayerLegendPanel, SourceScenarioControls, resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
+import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { basinSnapshotMatchesQuery, basinSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
 
 const BASIN_NOT_FOUND_REASON = 'Basin was not found.'
@@ -154,6 +155,14 @@ export function useBasinDetailMode({
 
   const backToOverview = useCallback(() => onQueryChange({ basinId: null, segmentId: null }), [onQueryChange])
 
+  // 代站图层（M26-3）：详情模式以该 basin detail 的 resolvedSource 取数；best 未解析时 honest 空态，不取数。
+  const stationLayer = useMetStationLayer({
+    active: state.layer === 'met-stations',
+    basinId,
+    resolvedSource: sourceSelection?.resolvedSource ?? null,
+    cycle: state.cycle,
+  })
+
   return {
     title: '流域分析',
     subtitle: `当前流域 ${basinDisplayName}`,
@@ -171,6 +180,7 @@ export function useBasinDetailMode({
     basinSegments: currentBasinData?.segments ?? [],
     selectedSegmentId,
     selectedSegmentGeometry: selectedSegment?.geometry ?? null,
+    stationFeatureCollection: stationLayer.featureCollection,
     onMapOverlayHover: handleMapOverlayHover,
     onMapOverlayClick: handleMapOverlayClick,
     left: (
@@ -216,6 +226,15 @@ export function useBasinDetailMode({
           </>
         )}
         <LayerLegendPanel state={state} layers={layers} />
+        {stationLayer.statusNote ? (
+          <div
+            className="rounded-md border border-warning/40 bg-primary-50 p-3 text-xs text-neutral-700"
+            role="status"
+            data-testid="m11-met-station-status"
+          >
+            {stationLayer.statusNote}
+          </div>
+        ) : null}
         {loading || error ? (
           <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
             {loading ? '流域数据加载中' : error}
