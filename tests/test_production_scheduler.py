@@ -5856,13 +5856,13 @@ def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reu
     assert result.evidence["counts"]["submitted_count"] == 1
 
 
-def test_warm_start_checkpoint_retry_submits_full_forecast_long_run(tmp_path: Path) -> None:
+def test_warm_start_checkpoint_repair_does_not_auto_retry_in_production(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
         {
             "hydro_status": "failed",
             "error_code": "WARM_START_CHECKPOINT_RETRY",
-            "error_message": "Checkpoint capture policy changed; rerun full forecast long run.",
+            "error_message": "Checkpoint capture policy changed; manual repair may rerun a full forecast long run.",
             "retry_count": 0,
             "retry_limit": 3,
         }
@@ -5878,15 +5878,16 @@ def test_warm_start_checkpoint_retry_submits_full_forecast_long_run(tmp_path: Pa
 
     result = scheduler.run_once()
 
-    state = result.evidence["candidates"][0]["state_evidence"]
-    submitted = orchestrator.calls[0]["basins"][0]
-    assert result.evidence["blocked_candidates"] == []
-    assert state["decision"] == "retry_failed"
+    blocked = result.evidence["blocked_candidates"][0]
+    state = blocked["state_evidence"]
+    assert orchestrator.calls == []
+    assert result.evidence["candidates"] == []
+    assert blocked["reason"] == "permanent_failure_guard"
+    assert state["decision"] == "permanent_failure"
     assert state["failure"]["classifier"] == "warm_start_checkpoint_repair"
-    assert state["failure"]["retryable"] is True
-    assert submitted["forecast_horizon_hours"] == 168
-    assert submitted.get("restart_stage") is None
-    assert result.evidence["counts"]["submitted_count"] == 1
+    assert state["failure"]["retryable"] is False
+    assert state["failure"]["permanent"] is True
+    assert result.evidence["counts"]["submitted_count"] == 0
 
 
 @pytest.mark.parametrize(
