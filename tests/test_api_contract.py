@@ -1195,10 +1195,10 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
 
     assert operation["operationId"] == "getQhhLatestProduct"
-    assert set(parameters) == {"source", "run_id", "cycle_time", "model_id"}
+    assert set(parameters) == {"source", "basin_id", "run_id", "cycle_time", "model_id"}
     assert parameters["source"]["required"] is True
     assert parameters["source"]["schema"] == {"type": "string", "enum": ["GFS", "IFS"]}
-    for parameter_name in ("run_id", "cycle_time", "model_id"):
+    for parameter_name in ("basin_id", "run_id", "cycle_time", "model_id"):
         assert parameters[parameter_name]["required"] is False
         assert parameters[parameter_name]["schema"]["type"] == "string"
     assert parameters["cycle_time"]["schema"]["format"] == "date-time"
@@ -1599,6 +1599,7 @@ class _RunStore:
         self,
         source: str,
         *,
+        basin_id: str = "basins_qhh",
         run_id: str | None = None,
         cycle_time: datetime | str | None = None,
         model_id: str | None = None,
