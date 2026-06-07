@@ -23,19 +23,28 @@ from packages.common.state_qc import MAX_STATE_IC_BYTES
 class FakeStateSnapshotRepository:
     def __init__(self) -> None:
         self.snapshots: dict[str, StateSnapshot] = {}
-        self.by_model_time: dict[tuple[str, datetime], str] = {}
+        self.by_model_time: dict[tuple[str, str | None, datetime], str] = {}
         self.qc_results: list[dict[str, Any]] = []
 
     def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
         return self.snapshots.get(state_id)
 
-    def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
-        state_id = self.by_model_time.get((model_id, _dt(valid_time)))
+    def get_state_snapshot_by_model_time(
+        self,
+        *,
+        model_id: str,
+        valid_time: datetime,
+        source_id: str | None = None,
+    ) -> StateSnapshot | None:
+        state_id = self.by_model_time.get((model_id, source_id, _dt(valid_time)))
+        if state_id is None and source_id is None:
+            state_id = self.by_model_time.get((model_id, None, _dt(valid_time)))
         return self.snapshots.get(state_id) if state_id is not None else None
 
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
         valid_time = _dt(snapshot.valid_time)
-        existing_state_id = self.by_model_time.get((snapshot.model_id, valid_time))
+        key = (snapshot.model_id, snapshot.source_id, valid_time)
+        existing_state_id = self.by_model_time.get(key)
         if existing_state_id is not None and existing_state_id != snapshot.state_id:
             self.snapshots.pop(existing_state_id, None)
         saved = StateSnapshot(
@@ -47,9 +56,15 @@ class FakeStateSnapshotRepository:
             checksum=snapshot.checksum,
             usable_flag=snapshot.usable_flag,
             created_at=snapshot.created_at or _dt("2026-05-08T00:00:00Z"),
+            source_id=snapshot.source_id,
+            cycle_id=snapshot.cycle_id,
+            lead_hours=snapshot.lead_hours,
+            model_package_version=snapshot.model_package_version,
+            model_package_checksum=snapshot.model_package_checksum,
+            original_shud_filename=snapshot.original_shud_filename,
         )
         self.snapshots[saved.state_id] = saved
-        self.by_model_time[(saved.model_id, saved.valid_time)] = saved.state_id
+        self.by_model_time[(saved.model_id, saved.source_id, saved.valid_time)] = saved.state_id
         return saved
 
     def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None:
@@ -65,6 +80,12 @@ class FakeStateSnapshotRepository:
             checksum=snapshot.checksum,
             usable_flag=usable_flag,
             created_at=snapshot.created_at,
+            source_id=snapshot.source_id,
+            cycle_id=snapshot.cycle_id,
+            lead_hours=snapshot.lead_hours,
+            model_package_version=snapshot.model_package_version,
+            model_package_checksum=snapshot.model_package_checksum,
+            original_shud_filename=snapshot.original_shud_filename,
         )
         self.snapshots[state_id] = updated
         return updated
@@ -254,6 +275,47 @@ def test_conflicting_checksum_overwrites_snapshot_as_superseded(
     assert snapshot.run_id == "run_002"
     assert snapshot.checksum == sha256_bytes(_valid_ic_bytes(b"second"))
     assert snapshot.usable_flag is False
+
+
+def test_source_specific_snapshots_do_not_supersede_each_other(
+    tmp_path: Path,
+    manager: StateManager,
+    repository: FakeStateSnapshotRepository,
+) -> None:
+    gfs_path = tmp_path / "gfs.cfg.ic"
+    ifs_path = tmp_path / "ifs.cfg.ic"
+    gfs_path.write_bytes(_valid_ic_bytes(b"gfs"))
+    ifs_path.write_bytes(_valid_ic_bytes(b"ifs"))
+    valid_time = _dt("2026-04-30T00:00:00Z")
+
+    gfs = manager.save_state_snapshot(
+        model_id="demo_model",
+        run_id="run_gfs",
+        valid_time=valid_time,
+        ic_file_path=gfs_path,
+        source_id="gfs",
+    )
+    ifs = manager.save_state_snapshot(
+        model_id="demo_model",
+        run_id="run_ifs",
+        valid_time=valid_time,
+        ic_file_path=ifs_path,
+        source_id="IFS",
+    )
+
+    assert gfs.status == "created"
+    assert ifs.status == "created"
+    assert gfs.state_id == "state_gfs_demo_model_2026043000"
+    assert ifs.state_id == "state_IFS_demo_model_2026043000"
+    assert len(repository.snapshots) == 2
+    assert repository.get_state_snapshot_by_model_time(
+        model_id="demo_model", valid_time=valid_time, source_id="gfs"
+    ).state_id == gfs.state_id
+    assert repository.get_state_snapshot_by_model_time(
+        model_id="demo_model", valid_time=valid_time, source_id="IFS"
+    ).state_id == ifs.state_id
+    assert gfs.snapshot.state_uri == "states/gfs/demo_model/2026043000/state.cfg.ic"
+    assert ifs.snapshot.state_uri == "states/IFS/demo_model/2026043000/state.cfg.ic"
 
 
 def test_same_checksum_save_is_idempotent(

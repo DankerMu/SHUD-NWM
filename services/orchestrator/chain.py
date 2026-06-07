@@ -4491,7 +4491,12 @@ class ForecastOrchestrator:
         # Fallback loop: reject incompatible-lineage / failed-QC candidates and try
         # the next older usable state, never failing the cycle for a missing successor.
         for _ in range(_MAX_STATE_FALLBACK_CANDIDATES):
-            state = self._exact_or_latest_usable_state(model_id=model_id, cycle_time=cycle_time, before_time=cursor)
+            state = self._exact_or_latest_usable_state(
+                model_id=model_id,
+                cycle_time=cycle_time,
+                before_time=cursor,
+                source_id=source_id,
+            )
             if state is None:
                 return InitialStateSelection(
                     None, None, None, None, "cold_start_no_state", rejection_code=last_rejection_code
@@ -4552,13 +4557,14 @@ class ForecastOrchestrator:
         model_id: str,
         cycle_time: datetime,
         before_time: datetime,
+        source_id: str | None,
     ) -> StateSnapshot | None:
         if self.state_manager is None:
             return None
         repository = getattr(self.state_manager, "repository", None)
         exact_provider = getattr(repository, "get_state_snapshot_by_model_time", None)
         if callable(exact_provider) and _ensure_utc(before_time) == _ensure_utc(cycle_time):
-            exact = exact_provider(model_id=model_id, valid_time=_ensure_utc(cycle_time))
+            exact = exact_provider(model_id=model_id, valid_time=_ensure_utc(cycle_time), source_id=source_id)
             if exact is not None and exact.usable_flag:
                 return exact
         return self.state_manager.get_latest_usable_state(model_id=model_id, before_time=before_time)

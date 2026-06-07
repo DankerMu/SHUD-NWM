@@ -356,9 +356,19 @@ class E2ERepository:
     def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
         return self.state_snapshots.get(state_id)
 
-    def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
+    def get_state_snapshot_by_model_time(
+        self,
+        *,
+        model_id: str,
+        valid_time: datetime,
+        source_id: str | None = None,
+    ) -> StateSnapshot | None:
         for snapshot in self.state_snapshots.values():
-            if snapshot.model_id == model_id and snapshot.valid_time == _utc(valid_time):
+            if (
+                snapshot.model_id == model_id
+                and snapshot.valid_time == _utc(valid_time)
+                and (source_id is None or snapshot.source_id == source_id)
+            ):
                 return snapshot
         return None
 

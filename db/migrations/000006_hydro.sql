@@ -30,8 +30,16 @@ CREATE TABLE IF NOT EXISTS hydro.state_snapshot (
   checksum TEXT NOT NULL,
   usable_flag BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (model_id, valid_time)
+  source_id TEXT,
+  cycle_id TEXT,
+  lead_hours INTEGER,
+  model_package_version TEXT,
+  model_package_checksum TEXT,
+  original_shud_filename TEXT
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS state_snapshot_model_source_valid_time_key
+  ON hydro.state_snapshot (model_id, COALESCE(source_id, ''), valid_time);
 
 CREATE TABLE IF NOT EXISTS hydro.river_timeseries (
   run_id TEXT NOT NULL,

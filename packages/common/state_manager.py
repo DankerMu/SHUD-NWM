@@ -64,7 +64,13 @@ class StateSnapshotSaveResult:
 class StateSnapshotRepository(Protocol):
     def get_state_snapshot(self, state_id: str) -> StateSnapshot | None: ...
 
-    def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None: ...
+    def get_state_snapshot_by_model_time(
+        self,
+        *,
+        model_id: str,
+        valid_time: datetime,
+        source_id: str | None = None,
+    ) -> StateSnapshot | None: ...
 
     def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot: ...
 
@@ -114,7 +120,7 @@ class StateManager:
         original_shud_filename: str | None = None,
     ) -> StateSnapshotSaveResult:
         parsed_valid_time = _ensure_utc(valid_time)
-        state_id = state_snapshot_id(model_id, parsed_valid_time)
+        state_id = state_snapshot_id(model_id, parsed_valid_time, source_id=source_id)
         path = Path(ic_file_path)
         try:
             content = path.read_bytes()
@@ -125,11 +131,12 @@ class StateManager:
         existing = self.repository.get_state_snapshot_by_model_time(
             model_id=model_id,
             valid_time=parsed_valid_time,
+            source_id=source_id,
         )
         if existing is not None and existing.checksum == checksum:
             return StateSnapshotSaveResult(status="already_done", state_id=existing.state_id, snapshot=existing)
 
-        state_key = _state_object_key(model_id, parsed_valid_time)
+        state_key = _state_object_key(model_id, parsed_valid_time, source_id=source_id)
         try:
             state_uri = self.object_store.write_bytes_atomic(state_key, content)
         except (OSError, ObjectStoreError, ValueError) as error:
@@ -358,7 +365,25 @@ class PsycopgStateSnapshotRepository:
         )
         return _snapshot_from_row(row) if row is not None else None
 
-    def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
+    def get_state_snapshot_by_model_time(
+        self,
+        *,
+        model_id: str,
+        valid_time: datetime,
+        source_id: str | None = None,
+    ) -> StateSnapshot | None:
+        if source_id is not None:
+            row = self._fetch_optional(
+                """
+                SELECT *
+                FROM hydro.state_snapshot
+                WHERE model_id = %s
+                  AND source_id = %s
+                  AND valid_time = %s
+                """,
+                (model_id, source_id, _ensure_utc(valid_time)),
+            )
+            return _snapshot_from_row(row) if row is not None else None
         row = self._fetch_optional(
             """
             SELECT *
@@ -389,7 +414,7 @@ class PsycopgStateSnapshotRepository:
                 original_shud_filename
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (model_id, valid_time) DO UPDATE SET
+            ON CONFLICT (model_id, (COALESCE(source_id, ''::text)), valid_time) DO UPDATE SET
                 state_id = EXCLUDED.state_id,
                 run_id = EXCLUDED.run_id,
                 state_uri = EXCLUDED.state_uri,
@@ -562,8 +587,9 @@ class PsycopgStateSnapshotRepository:
                 connection.close()
 
 
-def state_snapshot_id(model_id: str, valid_time: datetime) -> str:
-    return f"state_{_safe_path_component(model_id)}_{_ensure_utc(valid_time):%Y%m%d%H}"
+def state_snapshot_id(model_id: str, valid_time: datetime, *, source_id: str | None = None) -> str:
+    source_part = f"{_safe_path_component(source_id)}_" if source_id not in (None, "") else ""
+    return f"state_{source_part}{_safe_path_component(model_id)}_{_ensure_utc(valid_time):%Y%m%d%H}"
 
 
 def assess_freshness(
@@ -588,7 +614,12 @@ def state_snapshot_to_dict(snapshot: StateSnapshot) -> dict[str, Any]:
     return _snapshot_to_dict(snapshot)
 
 
-def _state_object_key(model_id: str, valid_time: datetime) -> str:
+def _state_object_key(model_id: str, valid_time: datetime, *, source_id: str | None = None) -> str:
+    if source_id not in (None, ""):
+        return (
+            f"states/{_safe_path_component(source_id)}/{_safe_path_component(model_id)}/"
+            f"{_ensure_utc(valid_time):%Y%m%d%H}/state.cfg.ic"
+        )
     return f"states/{_safe_path_component(model_id)}/{_ensure_utc(valid_time):%Y%m%d%H}/state.cfg.ic"
 
 

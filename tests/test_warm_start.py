@@ -45,9 +45,19 @@ class FakeStateManager:
     def repository(self) -> "FakeStateManager":
         return self
 
-    def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
+    def get_state_snapshot_by_model_time(
+        self,
+        *,
+        model_id: str,
+        valid_time: datetime,
+        source_id: str | None = None,
+    ) -> StateSnapshot | None:
         for snapshot in self.snapshots.values():
-            if snapshot.model_id == model_id and snapshot.valid_time == _dt(valid_time):
+            if (
+                snapshot.model_id == model_id
+                and snapshot.valid_time == _dt(valid_time)
+                and (source_id is None or snapshot.source_id == source_id)
+            ):
                 return snapshot
         return None
 

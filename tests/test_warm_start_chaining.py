@@ -170,7 +170,9 @@ def test_saved_state_valid_time_equals_next_cycle_init(tmp_path: Path) -> None:
         def __init__(self) -> None:  # noqa: D401 - test double
             pass
 
-        def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
+        def get_state_snapshot_by_model_time(
+            self, *, model_id: str, valid_time: datetime, source_id: str | None = None
+        ) -> StateSnapshot | None:
             return None
 
         def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
@@ -235,7 +237,9 @@ def test_saved_state_finds_restart_from_object_store_output_directory_uri(tmp_pa
         def __init__(self) -> None:  # noqa: D401 - test double
             pass
 
-        def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
+        def get_state_snapshot_by_model_time(
+            self, *, model_id: str, valid_time: datetime, source_id: str | None = None
+        ) -> StateSnapshot | None:
             return None
 
         def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
@@ -319,7 +323,9 @@ def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: 
         def __init__(self) -> None:
             pass
 
-        def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
+        def get_state_snapshot_by_model_time(
+            self, *, model_id: str, valid_time: datetime, source_id: str | None = None
+        ) -> StateSnapshot | None:
             del model_id, valid_time
             return None
 

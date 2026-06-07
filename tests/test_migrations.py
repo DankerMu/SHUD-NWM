@@ -35,6 +35,7 @@ EXPECTED_MIGRATIONS = [
     "000029_pipeline_reservation.sql",
     "000030_qhh_latest_display_parsed_status_index.sql",
     "000031_search_discovery_return_period_performance.sql",
+    "000032_source_specific_state_snapshot.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}

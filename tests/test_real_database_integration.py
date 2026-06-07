@@ -157,7 +157,7 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
             }
             assert "river_segment_pkey" in constraints
             assert "return_period_result_pkey" in constraints
-            assert "state_snapshot_model_id_valid_time_key" in constraints
+            assert "state_snapshot_model_source_valid_time_key" in indexes
 
             return_period_key_columns = [
                 row["column_name"]
