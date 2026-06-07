@@ -819,6 +819,49 @@ function hydroMetRiverForecastResponse(
   }
 }
 
+function applyMockStationServerFilter(
+  response: unknown,
+  query: { search?: string; variables?: string | string[] } | undefined,
+) {
+  if (!response || typeof response !== 'object' || !Array.isArray((response as { items?: unknown }).items)) {
+    return response
+  }
+  const page = response as { items: Array<{ station_id: string; station_name?: string | null }>; total_count?: number }
+  const search = query?.search?.trim().toLowerCase()
+  if (!search) return page
+  const items = page.items.filter((station) => {
+    const label = `${station.station_id} ${station.station_name ?? ''}`.toLowerCase()
+    return label.includes(search)
+  })
+  return { ...page, items, total_count: items.length }
+}
+
+function applyMockRiverServerFilter(
+  response: unknown,
+  query: { search?: string; stream_order_min?: number; stream_order_max?: number } | undefined,
+) {
+  if (!response || typeof response !== 'object' || !Array.isArray((response as { features?: unknown }).features)) {
+    return response
+  }
+  const collection = response as {
+    features: Array<{ properties: { river_segment_id?: string; segment_id?: string; name?: string; stream_order?: number } }>
+    total?: number
+    feature_total?: number
+  }
+  const search = query?.search?.trim().toLowerCase()
+  const features = collection.features.filter((feature) => {
+    const props = feature.properties
+    if (search) {
+      const label = `${props.river_segment_id ?? props.segment_id ?? ''} ${props.name ?? ''}`.toLowerCase()
+      if (!label.includes(search)) return false
+    }
+    if (Number.isFinite(query?.stream_order_min) && (props.stream_order ?? -Infinity) < (query?.stream_order_min as number)) return false
+    if (Number.isFinite(query?.stream_order_max) && (props.stream_order ?? Infinity) > (query?.stream_order_max as number)) return false
+    return true
+  })
+  return { ...collection, features, total: features.length, feature_total: features.length }
+}
+
 function mockHydroMetRouteClient(options: {
   product?: Record<string, unknown>
   stationResponse?: unknown | (() => unknown)
@@ -875,11 +918,16 @@ function mockHydroMetRouteClient(options: {
     if (path === '/api/v1/met/stations') {
       if (options.stationError) return { data: undefined, error: { error: { message: options.stationError } } } as never
       const response = typeof options.stationResponse === 'function' ? options.stationResponse() : options.stationResponse ?? hydroMetStationPage
-      return { data: success(response), error: undefined } as never
+      const query = (requestOptions as { params?: { query?: { search?: string; variables?: string | string[] } } })?.params?.query
+      // Simulate the backend search/variable filtering so server-driven UI behaviour is exercised.
+      const filtered = applyMockStationServerFilter(response, query)
+      return { data: success(filtered), error: undefined } as never
     }
     if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') {
       if (options.riverError) return { data: undefined, error: { error: { message: options.riverError } } } as never
-      return { data: success(options.riverResponse ?? hydroMetRiverSegments), error: undefined } as never
+      const query = (requestOptions as { params?: { query?: { search?: string; stream_order_min?: number; stream_order_max?: number } } })?.params?.query
+      const filtered = applyMockRiverServerFilter(options.riverResponse ?? hydroMetRiverSegments, query)
+      return { data: success(filtered), error: undefined } as never
     }
     return { data: success({}), error: undefined } as never
   })
@@ -1249,7 +1297,7 @@ describe('App route state', () => {
       params: { query: { source: 'GFS' } },
     })
     expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/met/stations', {
-      params: { query: { model_id: 'basins_qhh_shud', limit: 500, offset: 0 } },
+      params: { query: { model_id: 'basins_qhh_shud', basin_version_id: 'basins_qhh_vbasins', limit: 500, offset: 0 } },
     })
     expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/basin-versions/{basin_version_id}/river-segments', {
       params: {
@@ -1457,16 +1505,20 @@ describe('App route state', () => {
     expect(screen.getAllByTestId('hydro-met-station-marker')).toHaveLength(2)
     expect(screen.getByTestId('hydro-met-station-map')).not.toHaveTextContent('qhh_forc_no_coord')
 
+    // Search is server-driven: typing triggers a backend met/stations request with `search`.
     await user.type(screen.getByLabelText('搜索气象站点'), 'North')
+    await waitFor(() => expect(screen.getByTestId('hydro-met-station-list')).not.toHaveTextContent('qhh_forc_001'))
     expect(screen.getByTestId('hydro-met-station-list')).toHaveTextContent('qhh_forc_002')
-    expect(screen.getByTestId('hydro-met-station-list')).not.toHaveTextContent('qhh_forc_001')
     expect(screen.getByTestId('hydro-met-station-marker-count')).toHaveTextContent('markers 1')
     expect(screen.getByTestId('hydro-met-station-marker')).toHaveAttribute('data-station-id', 'qhh_forc_002')
     expect(screen.queryByRole('button', { name: '选择站点 qhh_forc_001' })).not.toBeInTheDocument()
+    expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/met/stations', expect.objectContaining({
+      params: expect.objectContaining({ query: expect.objectContaining({ search: 'North', offset: 0 }) }),
+    }))
 
     await user.clear(screen.getByLabelText('搜索气象站点'))
     await user.type(screen.getByLabelText('搜索气象站点'), 'not-a-real-station')
-    expect(screen.getByTestId('hydro-met-station-no-results')).toHaveTextContent('没有匹配的真实站点')
+    await waitFor(() => expect(screen.getByTestId('hydro-met-station-no-results')).toHaveTextContent('没有匹配的真实站点'))
     expect(screen.getByTestId('hydro-met-station-marker-count')).toHaveTextContent('markers 0')
     expect(screen.queryAllByTestId('hydro-met-station-marker')).toHaveLength(0)
     expect(screen.queryByRole('button', { name: '选择站点 qhh_forc_002' })).not.toBeInTheDocument()
@@ -1488,6 +1540,7 @@ describe('App route state', () => {
     expect(screen.getByTestId('hydro-met-variable-PRCP-chart')).toHaveTextContent('PRCP')
 
     await user.type(screen.getByLabelText('搜索气象站点'), 'no_coord')
+    await waitFor(() => expect(screen.getAllByTestId('hydro-met-station-row')).toHaveLength(1))
     await user.click(screen.getByTestId('hydro-met-station-row'))
     expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent('qhh_forc_no_coord')
     expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/met/stations/{station_id}/series', expect.objectContaining({
@@ -1495,6 +1548,7 @@ describe('App route state', () => {
     }))
 
     await user.clear(screen.getByLabelText('搜索气象站点'))
+    await waitFor(() => expect(screen.getAllByTestId('hydro-met-station-row').length).toBeGreaterThan(1))
     const firstRow = screen.getAllByTestId('hydro-met-station-row')[0]
     await user.click(firstRow)
     expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent('qhh_forc_001')
@@ -2226,7 +2280,7 @@ describe('App route state', () => {
 
     expect(await screen.findByTestId('hydro-met-station-partial-failure')).toHaveTextContent('station inventory timeout')
     expect(screen.getByTestId('hydro-met-river-partial-failure')).toHaveTextContent('river segment timeout')
-    expect(screen.getByTestId('hydro-met-empty-stations')).toHaveTextContent('不会自动切换到其他产品')
+    expect(await screen.findByTestId('hydro-met-station-no-results')).toHaveTextContent('不会自动切换到其他产品')
     expect(screen.getByTestId('hydro-met-empty-rivers')).toHaveTextContent('不会填充假河段')
 
     cleanup()
@@ -2239,7 +2293,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByTestId('hydro-met-empty-stations')).toHaveTextContent('站点列表为空')
+    expect(await screen.findByTestId('hydro-met-station-no-results')).toHaveTextContent('没有匹配的真实站点')
     expect(screen.getByTestId('hydro-met-empty-rivers')).toHaveTextContent('河段列表为空')
   })
 

@@ -63,13 +63,45 @@ async function getLatestProduct(request: HydroMetBootstrapRequest) {
   return product
 }
 
-async function getStationInventory(product: QhhLatestProduct, limit: number) {
+export interface HydroMetStationQuery {
+  search?: string
+  variables?: string[]
+  qcStatus?: string
+  limit?: number
+  offset?: number
+}
+
+export interface HydroMetRiverSegmentQuery {
+  search?: string
+  streamOrderMin?: number
+  streamOrderMax?: number
+  limit?: number
+  offset?: number
+}
+
+function trimmedOrUndefined(value: string | undefined | null) {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : undefined
+}
+
+/**
+ * Station inventory query. All identity (model_id/basin_version_id) is derived from the
+ * latest-product so server-side search/variable filtering never breaks strict identity.
+ */
+export async function fetchHydroMetStations(product: QhhLatestProduct, query: HydroMetStationQuery = {}) {
+  const search = trimmedOrUndefined(query.search)
+  const variables = query.variables?.length ? query.variables : undefined
+  const qcStatus = trimmedOrUndefined(query.qcStatus)
   const { data, error } = await client.GET('/api/v1/met/stations', {
     params: {
       query: {
         model_id: product.model_id,
-        limit,
-        offset: 0,
+        basin_version_id: product.basin_version_id,
+        ...(search ? { search } : {}),
+        ...(variables ? { variables } : {}),
+        ...(qcStatus ? { qc_status: qcStatus } : {}),
+        limit: query.limit ?? HYDRO_MET_STATION_LIMIT,
+        offset: query.offset ?? 0,
       },
     },
   })
@@ -79,7 +111,12 @@ async function getStationInventory(product: QhhLatestProduct, limit: number) {
   return { ...page, items: page.items.map((station) => normalizeHydroMetStation(station)) }
 }
 
-async function getRiverSegments(product: QhhLatestProduct, limit: number) {
+/**
+ * River segment candidates query. basin_version_id (path) and river_network_version_id come
+ * from the latest-product, so search/stream_order filtering keeps the same product identity.
+ */
+export async function fetchHydroMetRiverSegments(product: QhhLatestProduct, query: HydroMetRiverSegmentQuery = {}) {
+  const search = trimmedOrUndefined(query.search)
   const { data, error } = await client.GET('/api/v1/basin-versions/{basin_version_id}/river-segments', {
     params: {
       path: {
@@ -87,8 +124,11 @@ async function getRiverSegments(product: QhhLatestProduct, limit: number) {
       },
       query: {
         river_network_version_id: product.river_network_version_id,
-        limit,
-        offset: 0,
+        ...(search ? { search } : {}),
+        ...(Number.isFinite(query.streamOrderMin) ? { stream_order_min: query.streamOrderMin } : {}),
+        ...(Number.isFinite(query.streamOrderMax) ? { stream_order_max: query.streamOrderMax } : {}),
+        limit: query.limit ?? HYDRO_MET_RIVER_SEGMENT_LIMIT,
+        offset: query.offset ?? 0,
       },
     },
   })
@@ -100,6 +140,36 @@ async function getRiverSegments(product: QhhLatestProduct, limit: number) {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Per-filter availability from the station page `filters.available` block. The backend reports
+ * each advanced filter honestly so the UI can hide controls instead of erroring. Defaults to
+ * unavailable for qc_status / variables when the block is missing, and search defaults available.
+ */
+export function hydroMetStationFilterAvailability(page: HydroMetStationPage | null) {
+  const filters = isRecordValue(page?.filters) ? page.filters : null
+  const available = filters && isRecordValue(filters.available) ? filters.available : null
+  const flag = (key: string, fallback: boolean) =>
+    available && typeof available[key] === 'boolean' ? (available[key] as boolean) : fallback
+  return {
+    search: flag('search', true),
+    variables: flag('variables', false),
+    qcStatus: flag('qc_status', false),
+  }
+}
+
+/**
+ * stream_order filtering is an optional enhancement: only offer it when the river segment data
+ * actually carries a finite stream_order field. The river-segments collection has no filters
+ * block, so availability is inferred from the returned features (honest, no schema fabrication).
+ */
+export function hydroMetStreamOrderAvailable(features: HydroMetRiverSegmentFeature[]) {
+  return features.some((feature) => Number.isFinite(feature.properties?.stream_order))
 }
 
 function productAvailabilityReasons(product: QhhLatestProduct) {
@@ -212,8 +282,8 @@ export async function loadHydroMetBootstrap(request: HydroMetBootstrapRequest): 
   }
 
   const [stationResult, riverResult] = await Promise.allSettled([
-    getStationInventory(product, stationLimit),
-    getRiverSegments(product, riverSegmentLimit),
+    fetchHydroMetStations(product, { limit: stationLimit }),
+    fetchHydroMetRiverSegments(product, { limit: riverSegmentLimit }),
   ])
 
   const stationPage = stationResult.status === 'fulfilled' ? stationResult.value : null

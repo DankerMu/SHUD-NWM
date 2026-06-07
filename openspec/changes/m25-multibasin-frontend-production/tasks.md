@@ -29,25 +29,25 @@
 
 ## 4. 后端：河段/站点列表生产契约（hydromet 列表前置依赖）
 
-- [ ] 4.1 `GET /api/v1/basin-versions/{id}/river-segments`（`forecast.py:30`）增加 `search` 参数（按 segment 标识/名称），保持 limit/offset 分页；`stream_order` 过滤仅在 `0.4` 确认字段存在时实现。
-- [ ] 4.2 站点 inventory 接口增加 `search` + `variable` 覆盖筛选参数；QC 状态筛选仅在字段存在时实现。
-- [ ] 4.3 更新 `openapi/nhms.v1.yaml` 两接口参数 + regen 前端类型。
-- [ ] 4.4 后端测试：河段 search 命中/分页不全量、站点 search/variable 覆盖筛选、stream_order/QC 在字段缺失时优雅降级（标注不可用而非报错）。
+- [x] 4.1 `GET /api/v1/basin-versions/{id}/river-segments`（`forecast.py:30`）增加 `search` 参数（按 segment 标识/名称），保持 limit/offset 分页；`stream_order` 过滤仅在 `0.4` 确认字段存在时实现。
+- [x] 4.2 站点 inventory 接口增加 `search` + `variable` 覆盖筛选参数；QC 状态筛选仅在字段存在时实现。
+- [x] 4.3 更新 `openapi/nhms.v1.yaml` 两接口参数 + regen 前端类型。
+- [x] 4.4 后端测试：河段 search 命中/分页不全量、站点 search/variable 覆盖筛选、stream_order/QC 在字段缺失时优雅降级（标注不可用而非报错）。
 
 ## 5. 前端：/hydro-met 多流域主展示（hydromet-multibasin-display）
 
 - [ ] 5.1 流域选择器组件：消费 `GET /api/v1/basins?has_display_product=true`，数据驱动渲染，无硬编码白名单；切流域以 `basin_id` 重拉 latest-product/河段/站点（`apps/frontend/src/pages/hydroMet/`）。依赖 #1、#2。
-- [ ] 5.2 河段列表走后端 search/limit/offset（依赖 #4.1），选中高亮加载 q_down，不全量加载；stream_order 过滤项按字段可用性显隐。
-- [ ] 5.3 站点列表走后端 search/variable 筛选（依赖 #4.2）+ forcing 六变量展示或明确 unavailable；QC 筛选项按字段可用性显隐。
-- [ ] 5.4 产品状态条：消费 latest-product availability，展示 q_down/forcing 的 ready·degraded·unavailable 与 return-period 的独立 `return_period_status`（依赖 #3）。
-- [ ] 5.5 strict identity 前端一致性：所有请求参数派生自同一 latest-product 产品身份（basin_id + 现有 basin_version_id/segment_id/issue_time），不手输、不绘假曲线、不新增后端 identity 参数。
-- [ ] 5.6 前端单测：流域选择器数据驱动/新流域自动出现、河段 search 分页、站点 search/variable 筛选、状态条三态（含 return_period_status）、degraded 显示、strict identity 一致（`apps/frontend/src/pages/hydroMet/__tests__/`）。
+- [x] 5.2 河段列表走后端 search/limit/offset（依赖 #4.1），选中高亮加载 q_down，不全量加载；stream_order 过滤项按字段可用性显隐。
+- [x] 5.3 站点列表走后端 search/variable 筛选（依赖 #4.2）+ forcing 六变量展示或明确 unavailable；QC 筛选项按字段可用性显隐。
+- [x] 5.4 产品状态条：消费 latest-product availability，展示 q_down/forcing 的 ready·degraded·unavailable 与 return-period 的独立 `return_period_status`（依赖 #3）。
+- [x] 5.5 strict identity 前端一致性：所有请求参数派生自同一 latest-product 产品身份（basin_id + 现有 basin_version_id/segment_id/issue_time），不手输、不绘假曲线、不新增后端 identity 参数。
+- [x] 5.6 前端单测：流域选择器数据驱动/新流域自动出现、河段 search 分页、站点 search/variable 筛选、状态条三态（含 return_period_status）、degraded 显示、strict identity 一致（`apps/frontend/src/pages/hydroMet/__tests__/`）。
 
 ## 6. 前端：洪水重现期静态图例区（return-period-legend-preview）
 
-- [ ] 6.1 `/hydro-met` 内嵌 return-period 区块：`return_period_status=unavailable` 时显示"暂未发布正式产品" + 静态分级图例（2y…100y），不渲染产品数据。
-- [ ] 6.2 守红线：无真实数据时不出现"正式产品已发布"文案、不渲染假河段、不调用 preview/status 排除接口。
-- [ ] 6.3 前端测试：unavailable 占位 + 图例展示、断言无"已发布正式产品"文案、断言不请求排除接口。
+- [x] 6.1 `/hydro-met` 内嵌 return-period 区块：`return_period_status=unavailable` 时显示"暂未发布正式产品" + 静态分级图例（2y…100y），不渲染产品数据。
+- [x] 6.2 守红线：无真实数据时不出现"正式产品已发布"文案、不渲染假河段、不调用 preview/status 排除接口。
+- [x] 6.3 前端测试：unavailable 占位 + 图例展示、断言无"已发布正式产品"文案、断言不请求排除接口。
 
 ## 7. 前端：/ops + /monitoring display 降级（ops-display-downgrade）
 

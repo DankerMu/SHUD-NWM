@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { AlertTriangle, CloudRain, GitBranch, Loader2, MapPin, RadioTower, Route, Search, Waves, type LucideIcon } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -45,10 +45,16 @@ import {
 import {
   HYDRO_MET_RIVER_SEGMENT_LIMIT,
   HYDRO_MET_STATION_LIMIT,
+  fetchHydroMetRiverSegments,
+  fetchHydroMetStations,
+  hydroMetStationFilterAvailability,
+  hydroMetStreamOrderAvailable,
   loadHydroMetBootstrap,
   type HydroMetBootstrapResult,
+  type HydroMetRiverSegmentCollection,
   type HydroMetRiverSegmentFeature,
   type HydroMetStation,
+  type HydroMetStationPage,
   type QhhLatestProduct,
 } from '@/pages/hydroMet/bootstrap'
 import { BasinSelector } from '@/pages/hydroMet/BasinSelector'
@@ -302,15 +308,248 @@ function HydroMetContent({ result }: { result: HydroMetBootstrapResult }) {
   return <ReadyHydroMetContent result={result} product={product} />
 }
 
+const HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS = 300
+const HYDRO_MET_FORCING_VARIABLES = HYDRO_MET_STATION_VARIABLES
+
+type StationInventoryState = {
+  stations: HydroMetStation[]
+  page: HydroMetStationPage | null
+  totalCount: number
+  loading: boolean
+  error: string | null
+  search: string
+  setSearch: (value: string) => void
+  selectedVariables: HydroMetStationSeriesVariable[]
+  toggleVariable: (variable: HydroMetStationSeriesVariable) => void
+  offset: number
+  limit: number
+  goToOffset: (offset: number) => void
+  filterAvailability: ReturnType<typeof hydroMetStationFilterAvailability>
+}
+
+type RiverSegmentInventoryState = {
+  riverSegments: HydroMetRiverSegmentFeature[]
+  collection: HydroMetRiverSegmentCollection | null
+  total: number
+  loading: boolean
+  error: string | null
+  search: string
+  setSearch: (value: string) => void
+  streamOrderMin: string
+  streamOrderMax: string
+  setStreamOrderMin: (value: string) => void
+  setStreamOrderMax: (value: string) => void
+  streamOrderAvailable: boolean
+  offset: number
+  limit: number
+  goToOffset: (offset: number) => void
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number) {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const handle = setTimeout(() => setDebounced(value), delayMs)
+    return () => clearTimeout(handle)
+  }, [value, delayMs])
+  return debounced
+}
+
+function parseStreamOrderInput(value: string): number | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function useStationInventory(
+  product: QhhLatestProduct,
+  initialPage: HydroMetStationPage | null,
+  initialStations: HydroMetStation[],
+): StationInventoryState {
+  const [search, setSearch] = useState('')
+  const [selectedVariables, setSelectedVariables] = useState<HydroMetStationSeriesVariable[]>([])
+  const [offset, setOffset] = useState(0)
+  const [page, setPage] = useState<HydroMetStationPage | null>(initialPage)
+  const [stations, setStations] = useState<HydroMetStation[]>(initialStations)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const debouncedSearch = useDebouncedValue(search, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
+  // The bootstrap already served the default query (no search/variables, offset 0) for this
+  // product identity, so we mark it as served to avoid a duplicate request on mount. Any other
+  // query (search / variables / page) is fetched. This is robust to effect double-invocation.
+  const servedKeyRef = useRef(`${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|||0`)
+
+  // Reset to the bootstrap page whenever the product identity changes.
+  useEffect(() => {
+    setSearch('')
+    setSelectedVariables([])
+    setOffset(0)
+    setPage(initialPage)
+    setStations(initialStations)
+    setError(null)
+    servedKeyRef.current = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|||0`
+  }, [product.forcing_version_id, product.source_id, product.cycle_time, initialPage, initialStations])
+
+  // Reset paging when filters change.
+  useEffect(() => {
+    setOffset(0)
+  }, [debouncedSearch, selectedVariables])
+
+  useEffect(() => {
+    const queryKey = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|${debouncedSearch}|${selectedVariables.join(',')}|${offset}`
+    if (queryKey === servedKeyRef.current) return
+    servedKeyRef.current = queryKey
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    void fetchHydroMetStations(product, {
+      search: debouncedSearch,
+      variables: selectedVariables,
+      limit: HYDRO_MET_STATION_LIMIT,
+      offset,
+    }).then(
+      (nextPage) => {
+        if (cancelled) return
+        setPage(nextPage)
+        setStations(nextPage.items)
+        setLoading(false)
+      },
+      (loadError) => {
+        if (cancelled) return
+        setError(formatHydroMetStatusMessage(loadError, '站点 inventory 加载失败'))
+        setLoading(false)
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [product, debouncedSearch, selectedVariables, offset])
+
+  const filterAvailability = useMemo(() => hydroMetStationFilterAvailability(page), [page])
+
+  const toggleVariable = (variable: HydroMetStationSeriesVariable) => {
+    setSelectedVariables((current) =>
+      current.includes(variable) ? current.filter((item) => item !== variable) : [...current, variable],
+    )
+  }
+
+  return {
+    stations,
+    page,
+    totalCount: page?.total_count ?? product.station_count,
+    loading,
+    error,
+    search,
+    setSearch,
+    selectedVariables,
+    toggleVariable,
+    offset,
+    limit: page?.limit ?? HYDRO_MET_STATION_LIMIT,
+    goToOffset: setOffset,
+    filterAvailability,
+  }
+}
+
+function useRiverSegmentInventory(
+  product: QhhLatestProduct,
+  initialCollection: HydroMetRiverSegmentCollection | null,
+  initialFeatures: HydroMetRiverSegmentFeature[],
+): RiverSegmentInventoryState {
+  const [search, setSearch] = useState('')
+  const [streamOrderMin, setStreamOrderMin] = useState('')
+  const [streamOrderMax, setStreamOrderMax] = useState('')
+  const [offset, setOffset] = useState(0)
+  const [collection, setCollection] = useState<HydroMetRiverSegmentCollection | null>(initialCollection)
+  const [riverSegments, setRiverSegments] = useState<HydroMetRiverSegmentFeature[]>(initialFeatures)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const debouncedSearch = useDebouncedValue(search, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
+  const debouncedMin = useDebouncedValue(streamOrderMin, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
+  const debouncedMax = useDebouncedValue(streamOrderMax, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
+  const servedKeyRef = useRef(`${product.forcing_version_id}|${product.source_id}|${product.cycle_time}||||0`)
+
+  useEffect(() => {
+    setSearch('')
+    setStreamOrderMin('')
+    setStreamOrderMax('')
+    setOffset(0)
+    setCollection(initialCollection)
+    setRiverSegments(initialFeatures)
+    setError(null)
+    servedKeyRef.current = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}||||0`
+  }, [product.forcing_version_id, product.source_id, product.cycle_time, initialCollection, initialFeatures])
+
+  useEffect(() => {
+    setOffset(0)
+  }, [debouncedSearch, debouncedMin, debouncedMax])
+
+  useEffect(() => {
+    const minValue = parseStreamOrderInput(debouncedMin)
+    const maxValue = parseStreamOrderInput(debouncedMax)
+    const queryKey = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|${debouncedSearch}|${minValue ?? ''}|${maxValue ?? ''}|${offset}`
+    if (queryKey === servedKeyRef.current) return
+    servedKeyRef.current = queryKey
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    void fetchHydroMetRiverSegments(product, {
+      search: debouncedSearch,
+      streamOrderMin: minValue,
+      streamOrderMax: maxValue,
+      limit: HYDRO_MET_RIVER_SEGMENT_LIMIT,
+      offset,
+    }).then(
+      (nextCollection) => {
+        if (cancelled) return
+        setCollection(nextCollection)
+        setRiverSegments(nextCollection.features)
+        setLoading(false)
+      },
+      (loadError) => {
+        if (cancelled) return
+        setError(formatHydroMetStatusMessage(loadError, '河段流量候选加载失败'))
+        setLoading(false)
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [product, debouncedSearch, debouncedMin, debouncedMax, offset])
+
+  // stream_order is only offered when the underlying river data carries the field.
+  const streamOrderAvailable = useMemo(() => hydroMetStreamOrderAvailable(riverSegments), [riverSegments])
+
+  return {
+    riverSegments,
+    collection,
+    total: collection?.total ?? product.segment_count,
+    loading,
+    error,
+    search,
+    setSearch,
+    streamOrderMin,
+    streamOrderMax,
+    setStreamOrderMin,
+    setStreamOrderMax,
+    streamOrderAvailable,
+    offset,
+    limit: collection?.limit ?? HYDRO_MET_RIVER_SEGMENT_LIMIT,
+    goToOffset: setOffset,
+  }
+}
+
 export function ReadyHydroMetContent({ result, product }: { result: HydroMetBootstrapResult; product: QhhLatestProduct }) {
-  const [stationQuery, setStationQuery] = useState('')
   const [selectedStationId, setSelectedStationId] = useState<string | null>(null)
   const [seriesState, setSeriesState] = useState<StationSeriesLoadState>({ kind: 'idle' })
   const [selectedRiverSegmentId, setSelectedRiverSegmentId] = useState<string | null>(null)
   const [riverForecastState, setRiverForecastState] = useState<RiverForecastLoadState>({ kind: 'idle' })
 
+  const stationInventory = useStationInventory(product, result.stationPage, result.stations)
+  const riverInventory = useRiverSegmentInventory(product, result.riverSegmentCollection, result.riverSegments)
+  const stations = stationInventory.stations
+  const riverSegments = riverInventory.riverSegments
+
   useEffect(() => {
-    setStationQuery('')
     setSelectedStationId(null)
     setSeriesState({ kind: 'idle' })
     setSelectedRiverSegmentId(null)
@@ -319,21 +558,21 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
 
   useEffect(() => {
     if (selectedStationId !== null) return
-    setSelectedStationId(result.stations[0]?.station_id ?? null)
-  }, [result.stations, selectedStationId])
+    setSelectedStationId(stations[0]?.station_id ?? null)
+  }, [stations, selectedStationId])
 
   useEffect(() => {
     if (selectedRiverSegmentId !== null) return
-    setSelectedRiverSegmentId(firstRiverSegmentId(result.riverSegments))
-  }, [result.riverSegments, selectedRiverSegmentId])
+    setSelectedRiverSegmentId(firstRiverSegmentId(riverSegments))
+  }, [riverSegments, selectedRiverSegmentId])
 
   const selectedStation = useMemo(
-    () => result.stations.find((station) => station.station_id === selectedStationId) ?? null,
-    [result.stations, selectedStationId],
+    () => stations.find((station) => station.station_id === selectedStationId) ?? null,
+    [stations, selectedStationId],
   )
   const selectedRiverSegment = useMemo(
-    () => result.riverSegments.find((feature) => riverSegmentId(feature) === selectedRiverSegmentId) ?? null,
-    [result.riverSegments, selectedRiverSegmentId],
+    () => riverSegments.find((feature) => riverSegmentId(feature) === selectedRiverSegmentId) ?? null,
+    [riverSegments, selectedRiverSegmentId],
   )
 
   useEffect(() => {
@@ -411,31 +650,16 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
       <section className="space-y-3">
         <StationInventoryPanel
           product={product}
-          stations={result.stations}
-          totalCount={result.stationPage?.total_count ?? product.station_count}
-          query={stationQuery}
+          inventory={stationInventory}
           selectedStationId={selectedStationId}
-          onQueryChange={setStationQuery}
           onSelectStation={setSelectedStationId}
         />
 
-        <InventoryPanel
-          title="河段流量候选"
-          icon={GitBranch}
-          summary={`${result.riverSegments.length} / ${result.riverSegmentCollection?.total ?? product.segment_count} river segments`}
-          emptyText="河段列表为空：没有可展示的河段流量候选，且不会填充假河段。"
-          testId="hydro-met-river-list"
-          emptyTestId="hydro-met-empty-rivers"
-        >
-          {result.riverSegments.slice(0, 12).map((feature) => (
-            <RiverSegmentRow
-              key={riverSegmentId(feature)}
-              feature={feature}
-              selected={riverSegmentId(feature) === selectedRiverSegmentId}
-              onSelect={setSelectedRiverSegmentId}
-            />
-          ))}
-        </InventoryPanel>
+        <RiverSegmentInventoryPanel
+          inventory={riverInventory}
+          selectedRiverSegmentId={selectedRiverSegmentId}
+          onSelectRiverSegment={setSelectedRiverSegmentId}
+        />
       </section>
 
       <aside className="space-y-3">
@@ -509,73 +733,19 @@ function ProductPanel({ product }: { product: QhhLatestProduct }) {
   )
 }
 
-function InventoryPanel({
-  title,
-  icon: Icon,
-  summary,
-  children,
-  emptyText,
-  testId,
-  emptyTestId,
-}: {
-  title: string
-  icon: LucideIcon
-  summary: string
-  children: ReactNode
-  emptyText: string
-  testId: string
-  emptyTestId: string
-}) {
-  const isEmpty = Array.isArray(children) && children.length === 0
-
-  return (
-    <section className="rounded-md border border-neutral-300 bg-white p-4" data-testid={testId}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Icon className="h-4 w-4 text-primary-600" aria-hidden="true" />
-          <h2 className="text-base font-semibold text-neutral-900">{title}</h2>
-        </div>
-        <span className="shrink-0 rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700">{summary}</span>
-      </div>
-      <div className="mt-3 space-y-2">
-        {isEmpty ? (
-          <div className="rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700" data-testid={emptyTestId}>
-            {emptyText}
-          </div>
-        ) : (
-          children
-        )}
-      </div>
-    </section>
-  )
-}
-
 function StationInventoryPanel({
   product,
-  stations,
-  totalCount,
-  query,
+  inventory,
   selectedStationId,
-  onQueryChange,
   onSelectStation,
 }: {
   product: QhhLatestProduct
-  stations: HydroMetStation[]
-  totalCount: number
-  query: string
+  inventory: StationInventoryState
   selectedStationId: string | null
-  onQueryChange: (value: string) => void
   onSelectStation: (stationId: string) => void
 }) {
-  const normalizedQuery = query.trim().toLowerCase()
-  const filteredStations = useMemo(() => {
-    if (!normalizedQuery) return stations
-    return stations.filter((station) => {
-      const label = `${station.station_id} ${station.station_name ?? ''}`.toLowerCase()
-      return label.includes(normalizedQuery)
-    })
-  }, [normalizedQuery, stations])
-  const markerStations = filteredStations.filter((station) => getHydroMetStationCoordinates(station))
+  const { stations, totalCount, loading, error, search, filterAvailability } = inventory
+  const markerStations = stations.filter((station) => getHydroMetStationCoordinates(station))
 
   return (
     <section className="rounded-md border border-neutral-300 bg-white p-4" data-testid="hydro-met-station-panel">
@@ -585,7 +755,7 @@ function StationInventoryPanel({
           <h2 className="text-base font-semibold text-neutral-900">气象 forcing 站点</h2>
         </div>
         <span className="shrink-0 rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700" data-testid="hydro-met-station-summary">
-          {filteredStations.length} / {totalCount} stations
+          {stations.length} / {totalCount} stations
         </span>
       </div>
 
@@ -600,23 +770,68 @@ function StationInventoryPanel({
         <input
           aria-label="搜索气象站点"
           className="min-w-0 flex-1 bg-transparent text-sm text-neutral-900 outline-none"
-          placeholder="搜索 station id / name"
-          value={query}
-          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder="搜索 station id / name（后端 search）"
+          value={search}
+          onChange={(event) => inventory.setSearch(event.target.value)}
         />
       </label>
 
-      {stations.length === 0 ? (
-        <div className="mt-3 rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700" data-testid="hydro-met-empty-stations">
-          站点列表为空：未生成替代站点，也不会自动切换到其他产品。
-        </div>
-      ) : filteredStations.length === 0 ? (
-        <div className="mt-3 rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700" data-testid="hydro-met-station-no-results">
-          没有匹配的真实站点：{query}
+      {filterAvailability.variables ? (
+        <div className="mt-3" data-testid="hydro-met-station-variable-filter">
+          <span className="block text-xs font-medium text-neutral-700">按 forcing 变量覆盖筛选</span>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {HYDRO_MET_FORCING_VARIABLES.map((variable) => {
+              const active = inventory.selectedVariables.includes(variable)
+              return (
+                <button
+                  key={variable}
+                  type="button"
+                  className={cn(
+                    'h-8 cursor-pointer rounded border px-2 text-xs font-medium transition-colors',
+                    active ? 'border-primary-600 bg-primary-600 text-white' : 'border-neutral-300 text-neutral-700 hover:bg-neutral-100',
+                  )}
+                  onClick={() => inventory.toggleVariable(variable)}
+                  aria-pressed={active}
+                  data-testid={`hydro-met-station-variable-${variable}`}
+                >
+                  {variable}
+                </button>
+              )
+            })}
+          </div>
         </div>
       ) : (
+        <div className="mt-3 rounded border border-dashed border-neutral-300 bg-neutral-50 p-2 text-xs text-neutral-600" data-testid="hydro-met-station-variable-unavailable">
+          变量覆盖筛选不可用：当前产品身份未提供 model_id，无法按变量覆盖筛选站点。
+        </div>
+      )}
+
+      {filterAvailability.qcStatus ? null : (
+        <div className="mt-2 rounded border border-dashed border-neutral-300 bg-neutral-50 p-2 text-xs text-neutral-600" data-testid="hydro-met-station-qc-unavailable">
+          QC 状态筛选不可用：站点 inventory 不含 QC 字段。
+        </div>
+      )}
+
+      {loading ? (
+        <div className="mt-3 flex items-center gap-2 rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700" role="status" data-testid="hydro-met-station-loading">
+          <Loader2 className="h-4 w-4 animate-spin text-primary-600" aria-hidden="true" />
+          正在按后端 search/筛选加载站点...
+        </div>
+      ) : null}
+
+      {error ? (
+        <StatusPanel tone="danger" title="站点 inventory 加载失败" messages={[error]} testId="hydro-met-station-load-error" />
+      ) : null}
+
+      {!loading && !error && stations.length === 0 ? (
+        <div className="mt-3 rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700" data-testid="hydro-met-station-no-results">
+          没有匹配的真实站点：{search || '当前筛选'}（不会生成替代站点，也不会自动切换到其他产品）。
+        </div>
+      ) : null}
+
+      {stations.length > 0 ? (
         <div className="mt-3 max-h-[26rem] space-y-2 overflow-auto pr-1" data-testid="hydro-met-station-list">
-          {filteredStations.slice(0, HYDRO_MET_STATION_LIMIT).map((station) => (
+          {stations.map((station) => (
             <StationRow
               key={station.station_id}
               station={station}
@@ -626,8 +841,186 @@ function StationInventoryPanel({
             />
           ))}
         </div>
-      )}
+      ) : null}
+
+      <InventoryPagination
+        offset={inventory.offset}
+        limit={inventory.limit}
+        totalCount={totalCount}
+        loaded={stations.length}
+        loading={loading}
+        onGoToOffset={inventory.goToOffset}
+        testId="hydro-met-station-pagination"
+      />
     </section>
+  )
+}
+
+function RiverSegmentInventoryPanel({
+  inventory,
+  selectedRiverSegmentId,
+  onSelectRiverSegment,
+}: {
+  inventory: RiverSegmentInventoryState
+  selectedRiverSegmentId: string | null
+  onSelectRiverSegment: (riverSegmentId: string) => void
+}) {
+  const { riverSegments, total, loading, error, search, streamOrderAvailable } = inventory
+
+  return (
+    <section className="rounded-md border border-neutral-300 bg-white p-4" data-testid="hydro-met-river-list">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <GitBranch className="h-4 w-4 text-primary-600" aria-hidden="true" />
+          <h2 className="text-base font-semibold text-neutral-900">河段流量候选</h2>
+        </div>
+        <span className="shrink-0 rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700" data-testid="hydro-met-river-summary">
+          {riverSegments.length} / {total} river segments
+        </span>
+      </div>
+
+      <label className="mt-3 flex h-10 items-center gap-2 rounded border border-neutral-300 px-3 focus-within:border-primary-500" data-testid="hydro-met-river-search">
+        <Search className="h-4 w-4 text-neutral-500" aria-hidden="true" />
+        <input
+          aria-label="搜索河段"
+          className="min-w-0 flex-1 bg-transparent text-sm text-neutral-900 outline-none"
+          placeholder="搜索 segment id / name（后端 search）"
+          value={search}
+          onChange={(event) => inventory.setSearch(event.target.value)}
+        />
+      </label>
+
+      {streamOrderAvailable ? (
+        <div className="mt-3 flex flex-wrap items-end gap-2" data-testid="hydro-met-river-stream-order-filter">
+          <label className="space-y-1">
+            <span className="block text-xs font-medium text-neutral-700">stream order ≥</span>
+            <input
+              aria-label="stream order 最小值"
+              type="number"
+              className="h-9 w-24 rounded border border-neutral-300 px-2 text-sm"
+              value={inventory.streamOrderMin}
+              onChange={(event) => inventory.setStreamOrderMin(event.target.value)}
+              data-testid="hydro-met-river-stream-order-min"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="block text-xs font-medium text-neutral-700">stream order ≤</span>
+            <input
+              aria-label="stream order 最大值"
+              type="number"
+              className="h-9 w-24 rounded border border-neutral-300 px-2 text-sm"
+              value={inventory.streamOrderMax}
+              onChange={(event) => inventory.setStreamOrderMax(event.target.value)}
+              data-testid="hydro-met-river-stream-order-max"
+            />
+          </label>
+        </div>
+      ) : (
+        <div className="mt-3 rounded border border-dashed border-neutral-300 bg-neutral-50 p-2 text-xs text-neutral-600" data-testid="hydro-met-river-stream-order-unavailable">
+          stream order 过滤不可用：底层河段数据不含 stream_order 字段。
+        </div>
+      )}
+
+      {loading ? (
+        <div className="mt-3 flex items-center gap-2 rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700" role="status" data-testid="hydro-met-river-loading">
+          <Loader2 className="h-4 w-4 animate-spin text-primary-600" aria-hidden="true" />
+          正在按后端 search/分页加载河段...
+        </div>
+      ) : null}
+
+      {error ? (
+        <StatusPanel tone="danger" title="河段流量候选加载失败" messages={[error]} testId="hydro-met-river-load-error" />
+      ) : null}
+
+      {!loading && !error && riverSegments.length === 0 ? (
+        <div className="mt-3 rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700" data-testid="hydro-met-empty-rivers">
+          河段列表为空：没有匹配的河段流量候选，且不会填充假河段。
+        </div>
+      ) : null}
+
+      {riverSegments.length > 0 ? (
+        <div className="mt-3 max-h-[26rem] space-y-2 overflow-auto pr-1" data-testid="hydro-met-river-segment-list">
+          {riverSegments.map((feature) => (
+            <RiverSegmentRow
+              key={riverSegmentId(feature)}
+              feature={feature}
+              selected={riverSegmentId(feature) === selectedRiverSegmentId}
+              onSelect={onSelectRiverSegment}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      <InventoryPagination
+        offset={inventory.offset}
+        limit={inventory.limit}
+        totalCount={total}
+        loaded={riverSegments.length}
+        loading={loading}
+        onGoToOffset={inventory.goToOffset}
+        testId="hydro-met-river-pagination"
+      />
+    </section>
+  )
+}
+
+function InventoryPagination({
+  offset,
+  limit,
+  totalCount,
+  loaded,
+  loading,
+  onGoToOffset,
+  testId,
+}: {
+  offset: number
+  limit: number
+  totalCount: number
+  loaded: number
+  loading: boolean
+  onGoToOffset: (offset: number) => void
+  testId: string
+}) {
+  const safeLimit = Math.max(1, limit)
+  const pageStart = totalCount === 0 ? 0 : offset + 1
+  const pageEnd = offset + loaded
+  const hasPrev = offset > 0
+  const hasNext = offset + safeLimit < totalCount
+
+  if (totalCount <= safeLimit && offset === 0) {
+    return (
+      <div className="mt-3 text-xs text-neutral-600" data-testid={testId}>
+        共 {totalCount} 条，已按页加载（limit {safeLimit}，不全量加载）。
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-neutral-700" data-testid={testId}>
+      <span data-testid={`${testId}-range`}>
+        显示 {pageStart}-{pageEnd} / 共 {totalCount}（limit {safeLimit}，按页加载）
+      </span>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          className="h-8 cursor-pointer rounded border border-neutral-300 px-3 text-neutral-700 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={!hasPrev || loading}
+          onClick={() => onGoToOffset(Math.max(0, offset - safeLimit))}
+          data-testid={`${testId}-prev`}
+        >
+          上一页
+        </button>
+        <button
+          type="button"
+          className="h-8 cursor-pointer rounded border border-neutral-300 px-3 text-neutral-700 transition-colors hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={!hasNext || loading}
+          onClick={() => onGoToOffset(offset + safeLimit)}
+          data-testid={`${testId}-next`}
+        >
+          下一页
+        </button>
+      </div>
+    </div>
   )
 }
 
