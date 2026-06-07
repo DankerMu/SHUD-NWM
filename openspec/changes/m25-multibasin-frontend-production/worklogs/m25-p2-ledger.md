@@ -45,3 +45,24 @@
 - **bk-05**：`_flood_product_quality_join` 全表 `GROUP BY run_id` 无 run 维下推，latest-product 高频路径随表增长有放大风险（建议下推候选 run 集合或 LATERAL + 确认 return_period_result 有 run_id 索引）。
 - 二者均需新迁移 + node-22 真 DB EXPLAIN，生产运行期 BLOCKED → 独立 **#334** 跟踪，不在本批修。
   > 原拟并入 #330，但 #330（及 #321/#329/#331/#332 整批 B 层）已由 @DankerMu 关闭、在生产环境接管；#330 为 #334 的 parsed 索引子集。
+
+## cc-cx-workflow 复审-修复循环（PR #335，分支 M25-code-review）
+
+深度 review 修复批次提交为 PR #335 后，按 cc-cx-workflow 跑 Codex 4-reviewer 综合复审循环（每轮 spec-compliance / correctness / integration / security-perf 并行），loop 至 clean：
+
+| 轮次 | 发现 | 修复 | 验证 |
+|---|---|---|---|
+| round-1 | 1 major（F-1 stream_order 参数仍随 debounce 漏发后端，我先前的 F-1 仅做了粘滞 UI 未门控 fetch 参数） | productKey reset 清空 search/min/max + short-circuit fetch 直到 reset 就绪 + 河段请求按 stream_order 可用性门控 min/max；补 AppRoutes 回归测试。另修 T-2 真 DB 断言 ready 口径、data_sources/models route 描述对齐 YAML | ruff 0 / 后端 79+skip / 前端 609 |
+| round-2 | 2 major + 1 minor：①returnPeriodTone/ReturnPeriodSection 未门控 productReady（违反 116 行红线，与 forcing/q_down 不一致）②`return_period_rows` ELSE 兜底在无 peak 行时统计非空 non-peak 行 → 违反 tasks 3.4③/design「非空 peak 行」口径（M25 自身勾选未达）③basins has_display_product OpenAPI 描述未同步 M-1 口径 | ①returnPeriodTone 加 `!productReady` 早返回 + section unavailable 加门控 + 红线测试 ②`return_period_rows` 改纯 peak-only（result_rows/warning 兜底不动）+ 真 DB case③ 反例测试 ③OpenAPI 描述更新 + types.ts 同步（JSDoc-only） | ruff 0 / 后端 79+skip(+case③) / 前端 610 |
+| round-3 | 全 None（4 路 clean） | — | — |
+
+- **Phase 7 独立终检（clean-context general-purpose agent）**：CLEAN。重点核实最高风险项（共享 `_flood_product_quality_join` 口径改动）——4 个调用点（best-available//runs/latest-product）均为 spec 期望口径；既有 `test_forecast_api.py` 用 `SqlCaptureForecastStore` 注入预算 rows，走未改的 `_flood_product_quality_from_row`，**不碰 SQL 聚合**，无破坏；`flood_alerts.py` 独立查询未触及；函数 hoisting、逗号分隔 variables 向后兼容、测试覆盖均 None。
+
+### 与 master #334 实现的合并（关键）
+复审期间 master 前进两 commit：`b84f714 test(ci): align baseline` + `733b6ea perf(db): cover discovery and return-period queries`——@DankerMu 已在生产侧**实现了本批延到 #334 的 S-1+bk-05**：`_flood_product_quality_join` 改 `LEFT JOIN LATERAL (...WHERE fpr.run_id=h.run_id)`（run 维下推）+ pg_trgm/display-product/return-period 索引 + `model_registry` `status::text=ANY(%s)` → `status=ANY(%s::hydro.run_status[])`（去强转走索引）。与本分支同文件同区域冲突。
+
+合并解法（取 master 结构 + 叠加本批语义修复，二者意图正交）：
+- `_flood_product_quality_join`：保留 master LATERAL/`fpr.` 结构 + 索引 advice 项，`return_period_rows` 取本批 peak-only（`SUM(CASE WHEN fpr.max_over_window=true AND fpr.return_period IS NOT NULL THEN 1 ELSE 0 END)`，去 ELSE 兜底）——master 纯 perf 未动口径，本批补 spec 3.4③ 正确性。
+- `model_registry.list_basins` EXISTS：master 的 `status=ANY(%s::hydro.run_status[])` + 本批 `AND run_type='forecast' AND cycle_time IS NOT NULL`。
+- `test_real_basin_discovery_integration.py`：master 注释更新 + 本批新测试自动合并。
+- 合并后：ruff 0 / 后端 82 passed+6skip / 前端 610 / api-types 无 drift。
