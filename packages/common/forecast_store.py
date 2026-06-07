@@ -48,6 +48,43 @@ def default_database_url() -> str:
     return database_url
 
 
+def _escape_like(value: str) -> str:
+    """Escape LIKE/ILIKE wildcards so user search input matches literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _station_variable_filter_tokens(values: Sequence[str] | str | None) -> list[str]:
+    """Parse requested coverage variables for the inventory filter.
+
+    Unlike ``_station_variable_tokens`` this returns an empty list when nothing is
+    requested (no filter), so the default behaviour is "no variable filtering".
+    """
+    if not values:
+        return []
+    aliases = {variable.lower(): variable for variable in MVP_STATION_VARIABLES}
+    raw_values: Sequence[str] = [values] if isinstance(values, str) else values
+    tokens: list[str] = []
+    rejected: list[str] = []
+    for value in raw_values:
+        for token in str(value).split(","):
+            raw = token.strip()
+            if not raw:
+                continue
+            canonical = aliases.get(raw.lower())
+            if canonical is None:
+                rejected.append(raw)
+            elif canonical not in tokens:
+                tokens.append(canonical)
+    if rejected:
+        raise ForecastStoreError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Invalid station forcing variable.",
+            details={"field": "variables", "rejected_values": rejected, "allowed_values": list(MVP_STATION_VARIABLES)},
+        )
+    return tokens
+
+
 @dataclass(frozen=True)
 class PsycopgForecastStore:
     database_url: str
@@ -784,6 +821,9 @@ class PsycopgForecastStore:
         *,
         basin_version_id: str | None,
         model_id: str | None,
+        search: str | None = None,
+        variables: Sequence[str] | str | None = None,
+        qc_status: str | None = None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
@@ -794,6 +834,17 @@ class PsycopgForecastStore:
                 message="At least one of basin_version_id or model_id is required.",
                 details={"required": ["basin_version_id", "model_id"]},
             )
+
+        # Variable coverage lands only when the interp_weight join is present, which
+        # requires model_id. Without it, coverage isn't reachable from the inventory
+        # query, so we degrade gracefully (annotate unavailable, no error, no filter).
+        coverage_filter = _station_variable_filter_tokens(variables)
+        variable_filter_available = model_id is not None
+        # quality_flag does not exist on met.met_station or met.interp_weight; it lives
+        # on the forcing/canonical hypertables that the inventory query never reaches.
+        # QC filtering therefore degrades: annotate unavailable rather than 500.
+        qc_filter_available = False
+        filters_applied: dict[str, Any] = {}
 
         if model_id is not None:
             from_sql = """
@@ -811,6 +862,28 @@ class PsycopgForecastStore:
             clauses = ["ms.basin_version_id = %s", "ms.active_flag = true"]
             params = [basin_version_id]
             distinct = ""
+
+        normalized_search = search.strip() if search is not None else ""
+        if normalized_search:
+            like_pattern = f"%{_escape_like(normalized_search)}%"
+            clauses.append(
+                "(ms.station_id ILIKE %s ESCAPE '\\' "
+                "OR COALESCE(ms.station_name, '') ILIKE %s ESCAPE '\\')"
+            )
+            params.extend([like_pattern, like_pattern])
+            filters_applied["search"] = normalized_search
+
+        if coverage_filter and variable_filter_available:
+            # Require the station to carry every requested variable in interp_weight.
+            clauses.append(
+                "ms.station_id IN ("
+                "SELECT station_id FROM met.interp_weight "
+                "WHERE model_id = %s AND variable = ANY(%s) "
+                "GROUP BY station_id "
+                "HAVING COUNT(DISTINCT variable) = %s)"
+            )
+            params.extend([model_id, coverage_filter, len(coverage_filter)])
+            filters_applied["variables"] = coverage_filter
 
         where = f"WHERE {' AND '.join(clauses)}"
         with self._transaction() as cursor:
@@ -844,6 +917,23 @@ class PsycopgForecastStore:
             "items": [_station_response(row) for row in rows],
             "limit": limit,
             "offset": offset,
+            "filters": {
+                "applied": filters_applied,
+                "available": {
+                    "search": True,
+                    "variables": variable_filter_available,
+                    "qc_status": qc_filter_available,
+                },
+                "qc_status": {
+                    "available": qc_filter_available,
+                    "reason": (
+                        None
+                        if qc_filter_available
+                        else "quality_flag is not present on the station inventory; QC filtering unavailable."
+                    ),
+                    "requested": qc_status,
+                },
+            },
         }
 
     def station_series(

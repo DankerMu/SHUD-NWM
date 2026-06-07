@@ -320,6 +320,26 @@ paths:
           required: false
           schema:
             type: string
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Case-insensitive substring match over river_segment_id and name (backend-applied).
+        - name: stream_order_min
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+          description: Inclusive lower bound on stream order (river_segment.segment_order).
+        - name: stream_order_max
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+          description: Inclusive upper bound on stream order (river_segment.segment_order).
         - name: limit
           in: query
           required: false
@@ -544,6 +564,35 @@ paths:
       parameters:
         - $ref: "#/components/parameters/BasinVersionIdQuery"
         - $ref: "#/components/parameters/ModelIdQuery"
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Case-insensitive substring match over station_id and station name (backend-applied).
+        - name: variables
+          in: query
+          required: false
+          style: form
+          explode: true
+          schema:
+            oneOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+          description: >
+            Variable coverage filter. Repeat or comma-separate values
+            (PRCP, TEMP, RH, wind, Rn, Press). Applied only when model_id is set;
+            otherwise reported unavailable in the response filters block.
+        - name: qc_status
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >
+            QC status filter (advisory). Reported unavailable in the response
+            filters block because QC fields are not present on the station inventory.
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
       responses:
@@ -2584,6 +2633,12 @@ components:
           type: integer
         offset:
           type: integer
+        filters:
+          type: object
+          description: >
+            Applied filters plus per-filter availability so the UI can degrade
+            advanced filters honestly (e.g. qc_status unavailable) without errors.
+          additionalProperties: true
     StationSeriesPoint:
       type: object
       required: [valid_time, value, quality_flag]

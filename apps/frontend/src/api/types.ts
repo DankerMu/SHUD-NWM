@@ -978,6 +978,10 @@ export interface components {
             total_count: number;
             limit: number;
             offset: number;
+            /** @description Applied filters plus per-filter availability so the UI can degrade advanced filters honestly (e.g. qc_status unavailable) without errors. */
+            filters?: {
+                [key: string]: unknown;
+            };
         };
         StationSeriesPoint: {
             /** Format: date-time */
@@ -2153,6 +2157,12 @@ export interface operations {
         parameters: {
             query?: {
                 river_network_version_id?: string;
+                /** @description Case-insensitive substring match over river_segment_id and name (backend-applied). */
+                search?: string;
+                /** @description Inclusive lower bound on stream order (river_segment.segment_order). */
+                stream_order_min?: number;
+                /** @description Inclusive upper bound on stream order (river_segment.segment_order). */
+                stream_order_max?: number;
                 limit?: number;
                 offset?: components["parameters"]["Offset"];
             };
@@ -2347,6 +2357,12 @@ export interface operations {
             query?: {
                 basin_version_id?: components["parameters"]["BasinVersionIdQuery"];
                 model_id?: components["parameters"]["ModelIdQuery"];
+                /** @description Case-insensitive substring match over station_id and station name (backend-applied). */
+                search?: string;
+                /** @description Variable coverage filter. Repeat or comma-separate values (PRCP, TEMP, RH, wind, Rn, Press). Applied only when model_id is set; otherwise reported unavailable in the response filters block. */
+                variables?: string | string[];
+                /** @description QC status filter (advisory). Reported unavailable in the response filters block because QC fields are not present on the station inventory. */
+                qc_status?: string;
                 limit?: components["parameters"]["Limit"];
                 offset?: components["parameters"]["Offset"];
             };
