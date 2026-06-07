@@ -1554,6 +1554,7 @@ def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_reject
 
     rendered = gateway.render_template("download_source_cycle", manifest)
 
+    assert f"export PATH={shlex.quote(str((Path.cwd() / '.venv' / 'bin').resolve()))}:$PATH" in rendered
     assert "export NHMS_PROFILE=prod/gfs_00" in rendered
     assert "export NHMS_RUN_LABEL=prod_gfs_00" in rendered
     with pytest.raises(ManifestValidationError):
@@ -1576,6 +1577,21 @@ def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_reject
             "download_source_cycle",
             {**manifest, "slurm_env": {"NHMS_PROFILE": "https://user:supersecret@example.com/profile"}},
         )
+
+
+def test_standalone_gateway_injects_grib_runtime_env_for_download_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = "/scratch/frd_muziyao/nhms-grib"
+    monkeypatch.setenv("NHMS_GRIB_ENV_ROOT", root)
+    gateway = _production_gateway(tmp_path)
+
+    rendered = gateway.render_template("download_source_cycle", _production_manifest(tmp_path, "download_source_cycle"))
+
+    quoted = shlex.quote(root)
+    assert f"export PATH={quoted}/bin:$PATH" in rendered
+    assert f"export LD_LIBRARY_PATH={quoted}/lib:${{LD_LIBRARY_PATH:-}}" in rendered
 
 
 def test_safe_slurm_env_reaches_rendered_array_template_and_secret_is_rejected(tmp_path: Path) -> None:

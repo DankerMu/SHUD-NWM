@@ -181,6 +181,75 @@ def test_schedule_auto_retry() -> None:
         assert event.status_to == "pending"
 
 
+def test_schedule_auto_retry_reuses_submission_failed_retry_without_slurm_binding() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="NODE_FAILURE", retry_count=1)
+        stale_retry = _create_job(
+            store,
+            job_id="job_1_retry_2",
+            run_id=job.run_id,
+            status="submission_failed",
+            error_code="SUBMIT_INTERRUPTED",
+            retry_count=2,
+        )
+        stale_retry.slurm_job_id = None
+        stale_retry.array_task_id = None
+        stale_retry.started_at = datetime(2026, 5, 1, 1, tzinfo=UTC)
+        stale_retry.finished_at = datetime(2026, 5, 1, 2, tzinfo=UTC)
+        stale_retry.exit_code = 1
+        stale_retry.error_message = "submission interrupted"
+        stale_retry.log_uri = "s3://logs/stale"
+        store.session.add(stale_retry)
+        store.session.commit()
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.schedule_auto_retry(job)
+
+        assert retry.job_id == "job_1_retry_2"
+        assert retry.status == "pending"
+        assert retry.retry_count == 2
+        assert retry.slurm_job_id is None
+        assert retry.array_task_id is None
+        assert retry.started_at is None
+        assert retry.finished_at is None
+        assert retry.exit_code is None
+        assert retry.error_code is None
+        assert retry.error_message is None
+        assert retry.log_uri is None
+        assert [candidate.job_id for candidate in store.query_jobs_by_run(job.run_id)] == [
+            "job_1",
+            "job_1_retry_2",
+        ]
+        event = _events(store)[0]
+        assert event.event_type == "retry"
+        assert event.details["reused_existing_retry_job"] is True
+        assert event.details["previous_job_id"] == "job_1"
+
+
+def test_schedule_auto_retry_does_not_reuse_retry_with_slurm_binding() -> None:
+    with _store() as store:
+        job = _create_job(store, error_code="NODE_FAILURE", retry_count=1)
+        existing_retry = _create_job(
+            store,
+            job_id="job_1_retry_2",
+            run_id=job.run_id,
+            status="submission_failed",
+            error_code="SUBMIT_INTERRUPTED",
+            retry_count=2,
+        )
+        existing_retry.slurm_job_id = "slurm_existing_retry"
+        store.session.add(existing_retry)
+        store.session.commit()
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        with pytest.raises(RetryError) as exc_info:
+            service.schedule_auto_retry(job)
+
+        assert exc_info.value.code == "AUTO_RETRY_JOB_CONFLICT"
+        assert exc_info.value.details["retry_job_id"] == "job_1_retry_2"
+        assert exc_info.value.details["existing_slurm_job_id"] == "slurm_existing_retry"
+
+
 def test_mark_permanently_failed() -> None:
     with _store() as store:
         job = _create_job(store, error_code="SLURM_TIMEOUT", retry_count=3)

@@ -131,7 +131,7 @@ def _plan_production(
     *,
     sources: Sequence[str],
     lookback_hours: int | None,
-    cycle_lag_hours: int,
+    cycle_lag_hours: int | None,
     max_cycles_per_source: int | None,
     model_ids: Sequence[str],
     basin_ids: Sequence[str],
@@ -188,11 +188,16 @@ def _plan_production(
         if lookback_hours is not None
         else _env_int("NHMS_SCHEDULER_LOOKBACK_HOURS", 24)
     )
+    resolved_cycle_lag = (
+        cycle_lag_hours
+        if cycle_lag_hours is not None
+        else _env_int("NHMS_SCHEDULER_CYCLE_LAG_HOURS", 0)
+    )
     config_kwargs: dict[str, object] = {
         "workspace_root": resolved_workspace_root,
         "sources": resolved_sources,
         "lookback_hours": resolved_lookback,
-        "cycle_lag_hours": cycle_lag_hours,
+        "cycle_lag_hours": resolved_cycle_lag,
         "max_cycles_per_source": resolved_max_cycles,
         "model_ids": resolved_model_ids,
         "basin_ids": resolved_basin_ids,
@@ -275,7 +280,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         help="Forecast source id. Repeat or pass comma-separated values.",
     )
     @click.option("--lookback-hours", default=None, type=int)
-    @click.option("--cycle-lag-hours", default=0, show_default=True, type=int)
+    @click.option("--cycle-lag-hours", default=None, type=int)
     @click.option("--max-cycles-per-source", default=None, type=int)
     @click.option(
         "--model-id",
@@ -301,7 +306,7 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
     def plan_production(
         sources: Sequence[str],
         lookback_hours: int,
-        cycle_lag_hours: int,
+        cycle_lag_hours: int | None,
         max_cycles_per_source: int | None,
         model_ids: Sequence[str],
         basin_ids: Sequence[str],
@@ -362,7 +367,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     plan_parser = subparsers.add_parser("plan-production")
     plan_parser.add_argument("--source", action="append", default=[])
     plan_parser.add_argument("--lookback-hours", type=int, default=None)
-    plan_parser.add_argument("--cycle-lag-hours", type=int, default=0)
+    plan_parser.add_argument("--cycle-lag-hours", type=int, default=None)
     plan_parser.add_argument("--max-cycles-per-source", type=int, default=None)
     plan_parser.add_argument("--model-id", action="append", default=[])
     plan_parser.add_argument("--basin-id", action="append", default=[])

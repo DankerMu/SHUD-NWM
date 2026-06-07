@@ -877,7 +877,10 @@ class RealSlurmGateway(SlurmGateway):
             "SHUD_THREADS": context.get("shud_threads", ""),
             "OMP_NUM_THREADS": context.get("shud_threads", ""),
         }
-        return [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
+        lines = [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
+        lines.extend(_python_runtime_export_lines())
+        lines.extend(_grib_runtime_export_lines())
+        return lines
 
     def _submit_rendered_script(
         self,
@@ -1577,6 +1580,41 @@ class RealSlurmGateway(SlurmGateway):
     @staticmethod
     def _now() -> datetime:
         return datetime.now(UTC)
+
+
+def _python_runtime_export_lines() -> list[str]:
+    explicit_bin = os.getenv("NHMS_PYTHON_VENV_BIN")
+    candidates: list[Path] = []
+    if explicit_bin:
+        candidates.append(Path(explicit_bin))
+    virtual_env = os.getenv("VIRTUAL_ENV")
+    if virtual_env:
+        candidates.append(Path(virtual_env) / "bin")
+    candidates.append(Path.cwd() / ".venv" / "bin")
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        quoted = shlex.quote(str(resolved))
+        return [f"export PATH={quoted}:$PATH"]
+    return []
+
+
+def _grib_runtime_export_lines() -> list[str]:
+    grib_env_root = os.getenv("NHMS_GRIB_ENV_ROOT")
+    if not grib_env_root:
+        return []
+    quoted_root = shlex.quote(grib_env_root)
+    return [
+        f"export PATH={quoted_root}/bin:$PATH",
+        f"export LD_LIBRARY_PATH={quoted_root}/lib:${{LD_LIBRARY_PATH:-}}",
+    ]
 
 
 def _safe_output_detail(value: str, *, truncated: bool) -> dict[str, Any]:

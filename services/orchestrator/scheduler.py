@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from packages.common.model_registry import PsycopgModelRegistryStore
+from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload
 from packages.common.shud_preflight import check_shud_executable
 from packages.common.slurm_env import (
@@ -29,7 +31,13 @@ from packages.common.slurm_env import (
     secret_manifest_value_reason,
 )
 from packages.common.source_identity import normalize_source_id
-from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, PipelineResult, scenario_for_source
+from services.orchestrator.chain import (
+    ForecastOrchestrator,
+    OrchestratorConfig,
+    PipelineResult,
+    _retry_service_from_env,
+    scenario_for_source,
+)
 from services.orchestrator.production_contract import (
     PRODUCTION_EVIDENCE_CORRELATION_FIELDS,
     PRODUCTION_IDENTITY_FIELDS,
@@ -115,6 +123,28 @@ SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "frequency"}
 SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
+PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS = (
+    "GFS_NOMADS_BASE_URL",
+    "GFS_FORECAST_START_HOUR",
+    "GFS_FORECAST_END_HOUR",
+    "GFS_FORECAST_STEP_HOURS",
+    "GFS_FORECAST_RESOLUTION_SEGMENTS",
+    "IFS_OPEN_DATA_SOURCE",
+    "IFS_OPEN_DATA_FALLBACK_SOURCES",
+    "IFS_FORECAST_START_HOUR",
+    "IFS_FORECAST_END_HOUR",
+    "IFS_FORECAST_STEP_HOURS",
+    "IFS_FORECAST_RESOLUTION_SEGMENTS",
+    "IFS_SOURCE_COOLDOWN_SECONDS",
+    "IFS_DOWNLOAD_CHUNK_SIZE_BYTES",
+    "IFS_MAX_FILE_SIZE_BYTES",
+    "NHMS_DOWNLOAD_BBOX_SOUTH",
+    "NHMS_DOWNLOAD_BBOX_NORTH",
+    "NHMS_DOWNLOAD_BBOX_WEST",
+    "NHMS_DOWNLOAD_BBOX_EAST",
+    "NHMS_GRIB_ENV_ROOT",
+    "NHMS_GRIB_SYSTEM_ECCODES",
+)
 LOCALHOST_NAMES = {
     "localhost",
     "localhost.localdomain",
@@ -440,6 +470,7 @@ class ProductionSchedulerConfig:
     candidate_state_event_limit: int = field(
         default_factory=lambda: _env_int("NHMS_CANDIDATE_STATE_EVENT_LIMIT", DEFAULT_CANDIDATE_STATE_EVENT_LIMIT)
     )
+    scheduler_lock_backend: str = field(default_factory=lambda: os.getenv("NHMS_SCHEDULER_LOCK_BACKEND", "file"))
     lock_path: Path | str | None = None
     evidence_dir: Path | str | None = None
     lock_ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS
@@ -524,7 +555,7 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "allowed_storage_roots", allowed_roots)
         templates = dict(self.slurm_job_type_templates or DEFAULT_JOB_TYPE_TEMPLATES)
         object.__setattr__(self, "slurm_job_type_templates", templates)
-        object.__setattr__(self, "slurm_env", {str(key): str(value) for key, value in dict(self.slurm_env).items()})
+        object.__setattr__(self, "slurm_env", _production_slurm_env(dict(self.slurm_env)))
         object.__setattr__(self, "slurm_gateway_url", str(self.slurm_gateway_url or "").strip())
         object.__setattr__(self, "service_port", int(self.service_port))
         if len(self.sources) > MAX_SOURCES:
@@ -553,6 +584,10 @@ class ProductionSchedulerConfig:
         object.__setattr__(self, "candidate_state_job_limit", max(int(self.candidate_state_job_limit), 1))
         object.__setattr__(self, "candidate_state_event_limit", max(int(self.candidate_state_event_limit), 1))
         object.__setattr__(self, "lock_ttl_seconds", max(int(self.lock_ttl_seconds), 1))
+        lock_backend = str(self.scheduler_lock_backend or "file").strip().lower()
+        if lock_backend not in {"file", "postgres"}:
+            raise ValueError("production scheduler scheduler_lock_backend must be 'file' or 'postgres'")
+        object.__setattr__(self, "scheduler_lock_backend", lock_backend)
         if self.lock_path is None:
             lock_root = (
                 Path(self.scheduler_lock_root)
@@ -637,7 +672,7 @@ class RegisteredSchedulerModel:
     frequency_capabilities: Mapping[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "model_id": self.model_id,
             "basin_id": self.basin_id,
             "basin_version_id": self.basin_version_id,
@@ -650,6 +685,20 @@ class RegisteredSchedulerModel:
             "display_capabilities": dict(self.display_capabilities),
             "frequency_capabilities": dict(self.frequency_capabilities),
         }
+        project_identity = _resource_profile_project_identity(self.resource_profile)
+        if project_identity is not None:
+            payload.update(project_identity)
+        return payload
+
+
+def _resource_profile_project_identity(resource_profile: Mapping[str, Any]) -> dict[str, str] | None:
+    project_name = resource_profile.get("project_name")
+    shud_input_name = resource_profile.get("shud_input_name")
+    project = str(project_name) if project_name not in (None, "") else None
+    shud_input = str(shud_input_name) if shud_input_name not in (None, "") else None
+    if project is None and shud_input is None:
+        return None
+    return {"project_name": project or shud_input or "", "shud_input_name": shud_input or project or ""}
 
 
 @dataclass(frozen=True)
@@ -842,11 +891,7 @@ class ProductionScheduler:
                 evidence=evidence,
                 artifact_path=artifact_path,
             )
-        lock = FileSchedulerLease(
-            Path(self.config.lock_path),
-            ttl_seconds=self.config.lock_ttl_seconds,
-            workspace_root=Path(self.config.workspace_root),
-        )
+        lock = self._build_scheduler_lease()
         lock_result = lock.acquire(pass_id=pass_id, started_at=started_at)
         if not lock_result["acquired"]:
             evidence = self._base_evidence(pass_id, started_at)
@@ -1282,6 +1327,20 @@ class ProductionScheduler:
                 pass
             lock.release(pass_id=pass_id)
 
+    def _build_scheduler_lease(self) -> Any:
+        database_url = (self.config.database_url or "").strip()
+        if self.config.scheduler_lock_backend == "postgres" and database_url:
+            return PostgresSchedulerLease(
+                database_url,
+                lock_name=f"nhms:production-scheduler:{Path(self.config.lock_path)}",
+                display_lock_path=str(self.config.lock_path),
+            )
+        return FileSchedulerLease(
+            Path(self.config.lock_path),
+            ttl_seconds=self.config.lock_ttl_seconds,
+            workspace_root=Path(self.config.workspace_root),
+        )
+
     def _run_restart_reconcile(self) -> dict[str, Any] | None:
         """Recover submit-crash and in-flight jobs at the start of an exec pass.
 
@@ -1615,10 +1674,16 @@ class ProductionScheduler:
             execution_candidates: list[SchedulerCandidate]
             cohort_run_id: str | None
 
+        source_order = {source_id.lower(): index for index, source_id in enumerate(self.config.sources)}
         units: list[_CohortUnit] = []
         for (source_id, cycle_time), cycle_candidates in sorted(
             grouped.items(),
-            key=lambda item: (item[0][0], item[0][1], [candidate.model_id for candidate in item[1]]),
+            key=lambda item: (
+                item[0][1],
+                source_order.get(item[0][0].lower(), 999),
+                item[0][0].lower(),
+                [candidate.model_id for candidate in item[1]],
+            ),
         ):
             cycle_id = cycle_id_for(source_id, cycle_time)
             for cohort_key, cohort_candidates in _restart_compatible_candidate_cohorts(cycle_candidates):
@@ -1954,6 +2019,7 @@ class ProductionScheduler:
             config=config,
             repository=_orchestrator_repository_from_env(),
             state_manager=None,
+            retry_service=_retry_service_from_env(),
         )
 
     def _base_evidence(self, pass_id: str, started_at: datetime) -> dict[str, Any]:
@@ -2061,18 +2127,60 @@ class ProductionScheduler:
         self,
         discovery: CycleDiscovery,
         models: Sequence[RegisteredSchedulerModel],
+        *,
+        horizon: Mapping[str, Any] | None = None,
     ) -> str:
         """Return 'complete' if every model's full pipeline is done for this cycle, else 'gap'."""
 
-        provider = (
+        completed_provider = (
             getattr(self.active_repository, "has_completed_pipeline", None)
             if self.active_repository is not None
             else None
         )
-        if not callable(provider) or not models:
+        if callable(completed_provider) and models:
+            if all(
+                completed_provider(
+                    source_id=discovery.source_id,
+                    cycle_time=discovery.cycle_time,
+                    model_id=model.model_id,
+                )
+                for model in models
+            ):
+                return "complete"
+
+        state_provider = (
+            getattr(self.active_repository, "candidate_state", None)
+            if self.active_repository is not None
+            else None
+        )
+        if callable(state_provider) and models:
+            cycle_horizon = dict(horizon or {})
+            for model in models:
+                candidate = _candidate_for(discovery=discovery, model=model, horizon=cycle_horizon)
+                state = _call_candidate_state_provider(
+                    state_provider,
+                    source_id=candidate.source_id,
+                    cycle_time=candidate.cycle_time_utc,
+                    model_id=candidate.model_id,
+                    run_id=candidate.run_id,
+                    forcing_version_id=candidate.forcing_version_id,
+                    candidate_id=candidate.candidate_id,
+                    retry_limit=self.config.retry_limit,
+                    job_limit=self.config.candidate_state_job_limit,
+                    event_limit=self.config.candidate_state_event_limit,
+                )
+                decision = _candidate_state_decision(candidate, state)
+                if decision is None or decision.reason not in {
+                    "terminal_hydro_success",
+                    "terminal_pipeline_success",
+                }:
+                    return "gap"
+            return "complete"
+
+        if not callable(completed_provider) or not models:
             return "gap"
         for model in models:
-            if not provider(
+            if not completed_provider(
                 source_id=discovery.source_id,
                 cycle_time=discovery.cycle_time,
                 model_id=model.model_id,
@@ -2085,12 +2193,16 @@ class ProductionScheduler:
         started_at: datetime,
         models: Sequence[RegisteredSchedulerModel] = (),
     ) -> tuple[list[SchedulerSourceCycle], list[dict[str, Any]]]:
-        end_time = started_at - timedelta(hours=self.config.cycle_lag_hours)
-        start_time = end_time - timedelta(hours=self.config.lookback_hours)
+        raw_end_time = started_at - timedelta(hours=self.config.cycle_lag_hours)
+        end_time = _floor_to_source_cycle_boundary(raw_end_time, self.config.sources)
+        start_time = _floor_to_source_cycle_boundary(
+            end_time - timedelta(hours=self.config.lookback_hours),
+            self.config.sources,
+        )
         source_cycles: list[SchedulerSourceCycle] = []
         evidence: list[dict[str, Any]] = []
         seen_cycles: set[tuple[str, str]] = set()
-        source_order = {source_id: index for index, source_id in enumerate(self.config.sources)}
+        source_order = {source_id.lower(): index for index, source_id in enumerate(self.config.sources)}
         backfill_mode = bool(self.config.backfill_enabled and models)
 
         for source_id in self.config.sources:
@@ -2118,7 +2230,7 @@ class ProductionScheduler:
                 for discovery in discoveries
                 if discovery.source_id == source_id and start_time <= _ensure_utc(discovery.cycle_time) <= end_time
             ]
-            discoveries.sort(key=lambda discovery: discovery.cycle_time, reverse=True)
+            discoveries.sort(key=lambda discovery: discovery.cycle_time, reverse=not backfill_mode)
             deduped: list[CycleDiscovery] = []
             for discovery in discoveries:
                 cycle_key = (source_id, cycle_id_for(source_id, discovery.cycle_time))
@@ -2132,16 +2244,33 @@ class ProductionScheduler:
                 complete_count = 0
                 gaps: list[CycleDiscovery] = []
                 for discovery in deduped:
-                    status = self._cycle_completion_status(discovery, models)
+                    horizon = _source_horizon_metadata(discovery, adapter)
+                    status = self._cycle_completion_status(discovery, models, horizon=horizon)
                     if status == "complete":
                         complete_count += 1
                         continue
                     gaps.append(discovery)
-                selected_for_source = gaps[: self.config.max_cycles_per_source]
-                deferred = gaps[self.config.max_cycles_per_source :]
+                available_gaps = [discovery for discovery in gaps if discovery.available]
+                unavailable_gaps = [discovery for discovery in gaps if not discovery.available]
+                # Backfill cycles feed cross-cycle warm start state. Even when
+                # operators raise max_cycles_per_source for discovery breadth,
+                # only the oldest available incomplete cycle may execute in this
+                # pass; later available gaps wait until the prior window has
+                # produced a usable state. Unavailable source cycles are evidence
+                # only and must not consume the execution slot.
+                selected_for_source = available_gaps[:1]
+                deferred = available_gaps[1:]
+                for discovery in unavailable_gaps:
+                    item = _source_cycle_evidence(discovery, horizon=_source_horizon_metadata(discovery, adapter))
+                    item["selection_status"] = "not_selected"
+                    item["selection_reason"] = "source_cycle_unavailable_does_not_consume_source_budget"
+                    evidence.append(item)
                 for discovery in deferred:
                     evidence.append(
-                        _backfill_deferred_evidence(discovery, reason="backfill_deferred_over_budget")
+                        _backfill_deferred_evidence(
+                            discovery,
+                            reason="backfill_deferred_waiting_for_prior_cycle",
+                        )
                     )
                 evidence.append(
                     {
@@ -2150,12 +2279,30 @@ class ProductionScheduler:
                         "discovered_count": len(deduped),
                         "complete_count": complete_count,
                         "gap_count": len(gaps),
+                        "available_gap_count": len(available_gaps),
+                        "unavailable_gap_count": len(unavailable_gaps),
                         "selected_count": len(selected_for_source),
                         "deferred_count": len(deferred),
                     }
                 )
             else:
-                selected_for_source = deduped[: self.config.max_cycles_per_source]
+                available: list[CycleDiscovery] = []
+                unavailable_deferred: list[CycleDiscovery] = []
+                for discovery in deduped:
+                    if discovery.available:
+                        available.append(discovery)
+                    else:
+                        unavailable_deferred.append(discovery)
+                if available:
+                    selected_for_source = available[: self.config.max_cycles_per_source]
+                else:
+                    selected_for_source = unavailable_deferred[: self.config.max_cycles_per_source]
+                selected_ids = {discovery.cycle_id for discovery in selected_for_source}
+                for discovery in [item for item in unavailable_deferred if item.cycle_id not in selected_ids]:
+                    item = _source_cycle_evidence(discovery, horizon=_source_horizon_metadata(discovery, adapter))
+                    item["selection_status"] = "not_selected"
+                    item["selection_reason"] = "source_cycle_unavailable_does_not_consume_source_budget"
+                    evidence.append(item)
 
             for discovery in selected_for_source:
                 horizon = _source_horizon_metadata(discovery, adapter)
@@ -2164,11 +2311,27 @@ class ProductionScheduler:
 
         source_cycles.sort(
             key=lambda item: (
-                source_order.get(item.discovery.source_id, 999),
                 item.discovery.cycle_time,
+                source_order.get(item.discovery.source_id.lower(), 999),
                 item.discovery.cycle_hour,
             )
         )
+        if backfill_mode and source_cycles:
+            earliest_cycle_time = min(item.discovery.cycle_time for item in source_cycles)
+            deferred_later_cycles = [
+                item for item in source_cycles if item.discovery.cycle_time > earliest_cycle_time
+            ]
+            if deferred_later_cycles:
+                source_cycles = [
+                    item for item in source_cycles if item.discovery.cycle_time == earliest_cycle_time
+                ]
+                for item in deferred_later_cycles:
+                    evidence.append(
+                        _backfill_deferred_evidence(
+                            item.discovery,
+                            reason="backfill_deferred_waiting_for_global_prior_cycle",
+                        )
+                    )
         return source_cycles, evidence
 
     def _discover_source_window(
@@ -2605,12 +2768,18 @@ class ProductionScheduler:
                     # provider-unavailable / query-failed evidence carries no
                     # row-count evaluation, so it is never treated as fresh.
                     if _canonical_evidence_is_fresh_zero_row(canonical_readiness):
-                        candidate = _candidate_with_state_evidence(
-                            candidate,
+                        state_evidence = {}
+                        if state_decision is not None and state_decision.action == "retry":
+                            state_evidence.update(state_decision.evidence)
+                        state_evidence.update(
                             {
                                 "canonical_readiness": canonical_readiness,
                                 "fresh_ingestion": {"required": True, "mode": "full_chain"},
-                            },
+                            }
+                        )
+                        candidate = _candidate_with_state_evidence(
+                            candidate,
+                            state_evidence,
                         )
                     else:
                         state_evidence = {"canonical_readiness": canonical_readiness}
@@ -3249,6 +3418,103 @@ class FileSchedulerLease:
         return dict(value) if isinstance(value, Mapping) else {"raw": value}
 
 
+class PostgresSchedulerLease:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        lock_name: str,
+        display_lock_path: str,
+    ) -> None:
+        self.database_url = database_url
+        self.lock_name = lock_name
+        self.display_lock_path = display_lock_path
+        self.connection: Any | None = None
+        self.acquired = False
+        self.lock_key = _postgres_advisory_lock_key(lock_name)
+
+    def acquire(self, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
+        import psycopg2
+
+        del started_at
+        try:
+            connection = psycopg2.connect(
+                self.database_url,
+                connect_timeout=RECONCILE_DB_CONNECT_TIMEOUT_SECONDS,
+            )
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_try_advisory_lock(%s)", (self.lock_key,))
+                row = cursor.fetchone()
+            if not row or row[0] is not True:
+                connection.close()
+                return {
+                    "acquired": False,
+                    "contention": True,
+                    "lock_path": self.display_lock_path,
+                    "lock_type": "postgres_advisory",
+                    "reason": "postgres_advisory_lock_contended",
+                    "existing_lock": {"raw": None},
+                }
+        except Exception as error:
+            try:
+                connection.close()  # type: ignore[possibly-undefined]
+            except Exception:
+                pass
+            return {
+                "acquired": False,
+                "contention": True,
+                "lock_path": self.display_lock_path,
+                "lock_type": "postgres_advisory",
+                "reason": "postgres_advisory_lock_unavailable",
+                "error_type": type(error).__name__,
+                "existing_lock": {"raw": None},
+            }
+        self.connection = connection
+        self.acquired = True
+        return {
+            "acquired": True,
+            "contention": False,
+            "lock_path": self.display_lock_path,
+            "lock_type": "postgres_advisory",
+            "lease": {
+                "pass_id": pass_id,
+                "lock_key": self.lock_key,
+                "lock_name": self.lock_name,
+                "owner": LOCK_OWNER,
+                "schema_version": LOCK_SCHEMA_VERSION,
+            },
+        }
+
+    def renew(self, *, pass_id: str) -> bool:
+        del pass_id
+        return self.acquired and self.connection is not None
+
+    def release(self, *, pass_id: str) -> None:
+        del pass_id
+        connection = self.connection
+        self.connection = None
+        self.acquired = False
+        if connection is None:
+            return
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_unlock(%s)", (self.lock_key,))
+        except Exception:
+            pass
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+
+def _postgres_advisory_lock_key(value: str) -> int:
+    digest = hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest()
+    unsigned = int.from_bytes(digest, byteorder="big", signed=False)
+    return unsigned - (1 << 64) if unsigned >= (1 << 63) else unsigned
+
+
 def _fetch_active_model_details(registry: ModelRegistryReader) -> list[Mapping[str, Any]]:
     rows: list[Mapping[str, Any]] = []
     offset = 0
@@ -3276,6 +3542,34 @@ def _fetch_active_model_details(registry: ModelRegistryReader) -> list[Mapping[s
         if len(items) == 0 or offset >= total:
             break
     return rows
+
+
+def _floor_to_source_cycle_boundary(value: datetime, sources: Sequence[str]) -> datetime:
+    normalized = _ensure_utc(value).replace(minute=0, second=0, microsecond=0)
+    cycle_hours = sorted(_cycle_hours_for_sources(sources))
+    candidates: list[datetime] = []
+    for hour in cycle_hours:
+        candidate = normalized.replace(hour=hour)
+        if candidate > normalized:
+            candidate -= timedelta(days=1)
+        candidates.append(candidate)
+    return max(candidates) if candidates else normalized
+
+
+def _cycle_hours_for_sources(sources: Sequence[str]) -> set[int]:
+    hours: set[int] = set()
+    for source in sources:
+        try:
+            normalized = normalize_source_id(str(source))
+        except ValueError:
+            normalized = str(source)
+        if normalized in {"gfs", "IFS"}:
+            hours.update({0, 6, 12, 18})
+        elif normalized == "ERA5":
+            hours.add(0)
+    if not hours:
+        hours.update({0, 6, 12, 18})
+    return hours
 
 
 def _fetch_scheduler_model_detail(registry: ModelRegistryReader, model_id: str) -> Mapping[str, Any]:
@@ -3775,6 +4069,18 @@ def _candidate_state_decision(
     if downstream_retry is not None:
         return CandidateStateDecision("retry", "resume_downstream_after_durable_shud", downstream_retry)
 
+    manifest_repair = _missing_raw_manifest_repair_evidence(candidate, decision_state, evidence)
+    if manifest_repair is not None:
+        return CandidateStateDecision("retry", "repair_missing_raw_manifest", manifest_repair)
+
+    downstream_after_raw_repair = _repaired_raw_manifest_downstream_retry_evidence(
+        candidate,
+        decision_state,
+        evidence,
+    )
+    if downstream_after_raw_repair is not None:
+        return CandidateStateDecision("retry", "retry_downstream_after_raw_repair", downstream_after_raw_repair)
+
     permanent = _permanent_failure_evidence(candidate, decision_state, evidence)
     if permanent is not None:
         return CandidateStateDecision(
@@ -3956,6 +4262,24 @@ def _candidate_state_decision_event(
     details = event.get("details")
     if isinstance(details, Mapping):
         details_payload: dict[str, Any] = {}
+        retry_binding_id = _first_nonempty(details, "previous_job_id", "failed_job_id", "job_id", "pipeline_job_id")
+        if event.get("event_type") in {"retry", "manual_retry"} and retry_binding_id not in (None, ""):
+            sanitized["event_type"] = event.get("event_type")
+            for key in (
+                "trigger",
+                "manual_retry_marker",
+                "retry_count",
+                "new_attempt",
+                "previous_job_id",
+                "failed_job_id",
+                "job_id",
+                "pipeline_job_id",
+                "prior_failure_reason",
+                "slurm_job_id",
+            ):
+                value = details.get(key)
+                if value not in (None, ""):
+                    details_payload[key] = value
         for key in ("stage", "job_type"):
             value = details.get(key)
             if value not in (None, ""):
@@ -4957,6 +5281,8 @@ def _manual_retry_blocker_record(
 def _manual_retry_marker_overrides_blocker(marker: Mapping[str, Any], blocker: Mapping[str, Any]) -> bool:
     if blocker.get("active") is True:
         return False
+    if _manual_retry_marker_bound_to_blocker(marker, blocker):
+        return True
     marker_timestamp = marker.get("timestamp")
     blocker_timestamp = blocker.get("timestamp")
     if isinstance(marker_timestamp, datetime) and isinstance(blocker_timestamp, datetime):
@@ -4965,8 +5291,6 @@ def _manual_retry_marker_overrides_blocker(marker: Mapping[str, Any], blocker: M
         if marker_timestamp == blocker_timestamp and _state_truth_sequence(marker) > _state_truth_sequence(blocker):
             return True
         return False
-    if _manual_retry_marker_bound_to_blocker(marker, blocker):
-        return True
     if isinstance(marker_timestamp, datetime) and blocker_timestamp is None:
         return True
     if marker_timestamp is None and blocker_timestamp is None:
@@ -5484,6 +5808,184 @@ def _downstream_failure_restartable(failure: Mapping[str, Any]) -> bool:
     return True
 
 
+def _missing_raw_manifest_repair_evidence(
+    candidate: SchedulerCandidate,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not _state_has_failure_signal(state):
+        return None
+    failed_stage = str(_failed_stage(state) or "")
+    if failed_stage in {"", "download"}:
+        return None
+    manifest_uri = _forecast_cycle_manifest_uri(candidate, state)
+    if manifest_uri in (None, ""):
+        return None
+    if not _has_successful_download_stage(state):
+        return None
+    if not _object_manifest_is_missing(candidate, str(manifest_uri)):
+        return None
+    failure = _failure_policy_payload(state)
+    failure = {
+        **failure,
+        "retryable": True,
+        "permanent": False,
+        "limit_exhausted": False,
+        "classifier": "recoverable_missing_raw_manifest",
+    }
+    return {
+        **base_evidence,
+        "decision": "retry_failed",
+        "reason": "repair_missing_raw_manifest",
+        "restart_stage": None,
+        "restart_from_stage": "download",
+        "fresh_ingestion": {"required": True, "mode": "full_chain"},
+        "stage": failed_stage,
+        "task_identity": _state_task_identity(state),
+        "failure": failure,
+        "raw_manifest_repair": {
+            "manifest_uri": str(manifest_uri),
+            "manifest_exists": False,
+            "successful_download_stage": True,
+            "downstream_failed_stage": failed_stage,
+        },
+        "retry_policy": {
+            "automatic_retry_allowed": True,
+            "manual_retry_required": False,
+            "attempt": failure["attempt"],
+            "retry_limit": failure["retry_limit"],
+        },
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
+    }
+
+
+def _repaired_raw_manifest_downstream_retry_evidence(
+    candidate: SchedulerCandidate,
+    state: Mapping[str, Any],
+    base_evidence: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not _state_has_failure_signal(state):
+        return None
+    failed_stage = str(_failed_stage(state) or "")
+    if failed_stage in {"", "download"}:
+        return None
+    manifest_uri = _forecast_cycle_manifest_uri(candidate, state)
+    if manifest_uri in (None, ""):
+        return None
+    if _object_manifest_is_missing(candidate, str(manifest_uri)):
+        return None
+    repair_download = _latest_successful_download_stage(state)
+    if repair_download is None:
+        return None
+    failed_job = _latest_failed_job_for_stage(state, failed_stage)
+    if failed_job is None:
+        return None
+    repair_time = _job_terminal_time(repair_download)
+    failed_time = _job_terminal_time(failed_job)
+    if repair_time is not None and failed_time is not None and repair_time <= failed_time:
+        return None
+    failure = _failure_policy_payload(state)
+    failure = {
+        **failure,
+        "retryable": True,
+        "permanent": False,
+        "limit_exhausted": False,
+        "classifier": "recoverable_downstream_after_raw_repair",
+    }
+    return {
+        **base_evidence,
+        "decision": "retry_failed",
+        "reason": "retry_downstream_after_raw_repair",
+        "restart_stage": None,
+        "restart_from_stage": "download",
+        "fresh_ingestion": {"required": False, "mode": "reuse_repaired_raw_then_full_chain"},
+        "stage": failed_stage,
+        "task_identity": _state_task_identity(state),
+        "failure": failure,
+        "raw_manifest_repair": {
+            "manifest_uri": str(manifest_uri),
+            "manifest_exists": True,
+            "successful_download_stage": True,
+            "successful_download_job_id": repair_download.get("job_id") or repair_download.get("pipeline_job_id"),
+            "downstream_failed_stage": failed_stage,
+            "downstream_failed_job_id": failed_job.get("job_id") or failed_job.get("pipeline_job_id"),
+        },
+        "retry_policy": {
+            "automatic_retry_allowed": True,
+            "manual_retry_required": False,
+            "attempt": failure["attempt"],
+            "retry_limit": failure["retry_limit"],
+        },
+        "identity": {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+        },
+    }
+
+
+def _forecast_cycle_manifest_uri(candidate: SchedulerCandidate, state: Mapping[str, Any]) -> str | None:
+    forecast_cycle = state.get("forecast_cycle")
+    if isinstance(forecast_cycle, Mapping):
+        value = forecast_cycle.get("manifest_uri")
+        if value not in (None, ""):
+            return str(value)
+    value = state.get("manifest_uri") or state.get("raw_manifest_uri")
+    if value not in (None, ""):
+        return str(value)
+    return f"raw/{candidate.source_id}/{format_cycle_time(candidate.cycle_time_utc)}/manifest.json"
+
+
+def _has_successful_download_stage(state: Mapping[str, Any]) -> bool:
+    return _latest_successful_download_stage(state) is not None
+
+
+def _latest_successful_download_stage(state: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    matches: list[Mapping[str, Any]] = []
+    for job in _state_jobs(state):
+        stage = str(job.get("stage") or job.get("job_type") or "")
+        status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+        if stage in {"download", "download_source_cycle"} and status in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+            matches.append(job)
+    if not matches:
+        return None
+    return max(matches, key=_job_terminal_sort_key)
+
+
+def _latest_failed_job_for_stage(state: Mapping[str, Any], stage_name: str) -> Mapping[str, Any] | None:
+    normalized_stage = _canonical_downstream_stage(stage_name) or stage_name
+    matches: list[Mapping[str, Any]] = []
+    for job in _state_jobs(state):
+        stage = str(job.get("stage") or job.get("job_type") or "")
+        status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+        if stage in {normalized_stage, stage_name} and status in FAILED_PIPELINE_STATUSES:
+            matches.append(job)
+    if not matches:
+        return None
+    return max(matches, key=_job_terminal_sort_key)
+
+
+def _job_terminal_sort_key(job: Mapping[str, Any]) -> tuple[int, datetime]:
+    value = _job_terminal_time(job)
+    if value is None:
+        return (0, datetime.min.replace(tzinfo=UTC))
+    return (1, value)
+
+
+def _job_terminal_time(job: Mapping[str, Any]) -> datetime | None:
+    return _first_state_datetime(job, "finished_at", "updated_at", "submitted_at", "started_at", "created_at")
+
+
+def _object_manifest_is_missing(candidate: SchedulerCandidate, manifest_uri: str) -> bool:
+    object_root = candidate.resource_profile.get("object_store_root") or os.getenv("OBJECT_STORE_ROOT")
+    if object_root in (None, ""):
+        return False
+    prefix = str(candidate.resource_profile.get("object_store_prefix") or os.getenv("OBJECT_STORE_PREFIX", ""))
+    return not LocalObjectStore(str(object_root), object_store_prefix=prefix).exists(manifest_uri)
+
+
 def _retry_failure_evidence(
     candidate: SchedulerCandidate,
     state: Mapping[str, Any],
@@ -5835,6 +6337,10 @@ def _candidate_basin_manifest(
         if state_evidence.get("durable_shud_output_reused") is True:
             manifest["durable_shud_output_reused"] = True
             manifest["native_shud_resubmitted"] = False
+        retry_attempt = _candidate_manual_retry_attempt(candidate)
+        if retry_attempt is not None:
+            manifest["manual_retry_attempt"] = retry_attempt
+            manifest["retry_attempt"] = retry_attempt
     forcing_metadata = resource_profile.get("forcing_station_metadata")
     if isinstance(forcing_metadata, Mapping):
         manifest["forcing_station_metadata"] = dict(forcing_metadata)
@@ -5853,6 +6359,25 @@ def _candidate_basin_manifest(
     if source_inventory_checksum not in (None, ""):
         manifest["source_inventory_checksum"] = str(source_inventory_checksum)
     return manifest
+
+
+def _candidate_manual_retry_attempt(candidate: SchedulerCandidate) -> int | None:
+    state_evidence = candidate.state_evidence
+    if not isinstance(state_evidence, Mapping):
+        return None
+    manual_retry = state_evidence.get("manual_retry")
+    if not isinstance(manual_retry, Mapping):
+        return None
+    if manual_retry.get("allowed") is False:
+        return None
+    for key in ("new_attempt", "attempt", "retry_count"):
+        try:
+            value = int(manual_retry.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
 
 
 def _apply_candidate_warm_start_fields(manifest: dict[str, Any], candidate: SchedulerCandidate) -> None:
@@ -8153,6 +8678,17 @@ def _slurm_env_check(env: Mapping[str, str]) -> tuple[dict[str, Any], list[dict[
     return {"count": len(env), "sanitized": sanitized}, blockers
 
 
+def _production_slurm_env(explicit_env: Mapping[str, Any]) -> dict[str, str]:
+    env = {str(key): str(value) for key, value in dict(explicit_env).items()}
+    for key in PRODUCTION_SLURM_ENV_PASSTHROUGH_KEYS:
+        if key in env:
+            continue
+        value = os.getenv(key)
+        if value not in (None, ""):
+            env[key] = str(value)
+    return env
+
+
 def _scheduler_cancellation_status(cancelled_jobs: Sequence[Mapping[str, Any]]) -> str:
     if not cancelled_jobs:
         return "blocked"
@@ -9225,6 +9761,8 @@ def _scheduler_runtime_config_evidence(config: ProductionSchedulerConfig) -> dic
         "sources": list(config.sources),
         "model_ids": list(config.model_ids),
         "basin_ids": list(config.basin_ids),
+        "lookback_hours": config.lookback_hours,
+        "cycle_lag_hours": config.cycle_lag_hours,
         "max_cycles_per_source": config.max_cycles_per_source,
         "retry_limit": config.retry_limit,
     }

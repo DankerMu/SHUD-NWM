@@ -285,15 +285,64 @@ class FakeCycleRepository:
         self.jobs[record["job_id"]] = merged
         return dict(merged)
 
-    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
         key = record["idempotency_key"]
         for job in self.jobs.values():
             if job.get("idempotency_key") == key:
-                return dict(job)
+                return None
+        if record["job_id"] in self.jobs:
+            return None
         stored = dict(record)
         stored.setdefault("slurm_job_id", None)
         self.jobs[record["job_id"]] = stored
         return dict(stored)
+
+    def reclaim_pipeline_job_reservation(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        key = record["idempotency_key"]
+        for job in self.jobs.values():
+            if (
+                job.get("idempotency_key") == key
+                and job.get("slurm_job_id") is None
+                and job.get("status") in {"submission_failed", "reservation_lost"}
+            ):
+                job.update(
+                    {
+                        "status": "reserved",
+                        "slurm_job_id": None,
+                        "array_task_id": None,
+                        "submitted_at": None,
+                        "started_at": None,
+                        "finished_at": None,
+                        "exit_code": None,
+                        "error_code": None,
+                        "error_message": None,
+                        "run_id": job.get("run_id") or record.get("run_id"),
+                        "cycle_id": job.get("cycle_id") or record.get("cycle_id"),
+                        "model_id": job.get("model_id") or record.get("model_id"),
+                        "stage": job.get("stage") or record.get("stage"),
+                        "candidate_id": job.get("candidate_id") or record.get("candidate_id"),
+                    }
+                )
+                return dict(job)
+        pending = self.jobs.get(record["job_id"])
+        if (
+            pending is not None
+            and pending.get("idempotency_key") in (None, "")
+            and pending.get("slurm_job_id") is None
+            and pending.get("status") == "pending"
+            and not any(job.get("idempotency_key") == key for job in self.jobs.values())
+        ):
+            pending["status"] = "reserved"
+            pending["idempotency_key"] = key
+            pending["candidate_id"] = pending.get("candidate_id") or record.get("candidate_id")
+            pending["submitted_at"] = None
+            pending["started_at"] = None
+            pending["finished_at"] = None
+            pending["exit_code"] = None
+            pending["error_code"] = None
+            pending["error_message"] = None
+            return dict(pending)
+        return None
 
     def bind_pipeline_job_reservation(
         self,
@@ -509,22 +558,20 @@ class StoreBackedCycleRepository(FakeCycleRepository):
         self.jobs[job_id] = record
         return previous, dict(record)
 
-    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any]:
-        existing = self.store.query_candidate_state(record["idempotency_key"])
-        if existing is not None:
-            return self._job_to_dict(existing)
-        job = self.store.create_job(
+    def reserve_pipeline_job(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        job = self.store.reserve_job(
             job_id=record["job_id"],
             run_id=record.get("run_id"),
             cycle_id=record.get("cycle_id"),
             job_type=record["job_type"],
-            slurm_job_id=None,
             model_id=record.get("model_id"),
             stage=record.get("stage"),
             status=record.get("status", "reserved"),
             idempotency_key=record["idempotency_key"],
             candidate_id=record.get("candidate_id"),
         )
+        if job is None:
+            return None
         result = self._job_to_dict(job)
         self.jobs[record["job_id"]] = result
         return dict(result)
@@ -555,6 +602,7 @@ class StoreBackedCycleRepository(FakeCycleRepository):
         # back to 'reserved'; a live row never matches.
         job = self.store.reclaim_reservation(
             record["idempotency_key"],
+            job_id=record.get("job_id"),
             run_id=record.get("run_id"),
             cycle_id=record.get("cycle_id"),
             model_id=record.get("model_id"),
@@ -695,6 +743,7 @@ class FakeRetryService:
             return job
         retry_count += 1
         self.retry_counts[job.job_id] = retry_count
+        job.job_id = f"{job.job_id}_retry_{retry_count}"
         job.retry_count = retry_count
         job.status = "pending"
         return job
@@ -740,6 +789,109 @@ def test_non_array_stage_submissions_carry_slurm_template_and_env_contract(tmp_p
             "NHMS_PROFILE": "prod/gfs_00",
             "NHMS_RUN_LABEL": "prod_gfs_00",
         }
+
+
+def test_cycle_download_success_without_raw_manifest_is_resubmitted(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    repository.jobs["job_cycle_ifs_2026050100_download"] = {
+        "job_id": "job_cycle_ifs_2026050100_download",
+        "run_id": "cycle_ifs_2026050100",
+        "cycle_id": "ifs_2026050100",
+        "job_type": "download_source_cycle",
+        "slurm_job_id": "6084",
+        "model_id": None,
+        "status": "succeeded",
+        "stage": "download",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+        "exit_code": 0,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": "s3://nhms/runs/cycle_ifs_2026050100/logs/download.log",
+    }
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("IFS", "2026050100", _basins(1))
+
+    assert result.status == "complete"
+    assert client.submissions[0]["stage"] == "download"
+    assert client.submissions[0]["source_id"] == "IFS"
+    assert result.stages[0].pipeline_job_id == "job_cycle_ifs_2026050100_download_retry_1"
+    assert repository.jobs["job_cycle_ifs_2026050100_download"]["slurm_job_id"] == "6084"
+    assert repository.jobs["job_cycle_ifs_2026050100_download_retry_1"]["slurm_job_id"] == "2001"
+    assert repository.jobs["job_cycle_ifs_2026050100_download_retry_1"]["status"] == "succeeded"
+
+
+def test_download_repair_retries_stale_failed_downstream_stage(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    repository.jobs["job_cycle_ifs_2026050100_download_retry_1"] = {
+        "job_id": "job_cycle_ifs_2026050100_download_retry_1",
+        "run_id": "cycle_ifs_2026050100",
+        "cycle_id": "ifs_2026050100",
+        "job_type": "download_source_cycle",
+        "slurm_job_id": "6097",
+        "model_id": None,
+        "status": "succeeded",
+        "stage": "download",
+        "submitted_at": _fmt(_dt("2026-05-01T00:10:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:11:00Z")),
+        "finished_at": _fmt(_dt("2026-05-01T00:20:00Z")),
+        "exit_code": 0,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": "s3://nhms/runs/cycle_ifs_2026050100/logs/download_retry_1.log",
+    }
+    repository.jobs["job_cycle_ifs_2026050100_convert"] = {
+        "job_id": "job_cycle_ifs_2026050100_convert",
+        "run_id": "cycle_ifs_2026050100",
+        "cycle_id": "ifs_2026050100",
+        "job_type": "convert_canonical",
+        "slurm_job_id": "6085",
+        "model_id": None,
+        "status": "failed",
+        "stage": "convert",
+        "submitted_at": _fmt(_dt("2026-05-01T00:03:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:04:00Z")),
+        "finished_at": _fmt(_dt("2026-05-01T00:05:00Z")),
+        "exit_code": 1,
+        "error_code": "SLURM_JOB_FAILED",
+        "error_message": "old convert failed against missing raw manifest",
+        "log_uri": "s3://nhms/runs/cycle_ifs_2026050100/logs/convert.log",
+    }
+    repository.jobs["job_cycle_ifs_2026050100_download"] = {
+        "job_id": "job_cycle_ifs_2026050100_download",
+        "run_id": "cycle_ifs_2026050100",
+        "cycle_id": "ifs_2026050100",
+        "job_type": "download_source_cycle",
+        "slurm_job_id": "6084",
+        "model_id": None,
+        "status": "succeeded",
+        "stage": "download",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+        "started_at": _fmt(_dt("2026-05-01T00:01:00Z")),
+        "finished_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+        "exit_code": 0,
+        "error_code": None,
+        "error_message": None,
+        "log_uri": "s3://nhms/runs/cycle_ifs_2026050100/logs/download.log",
+    }
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.object_store.write_bytes_atomic(
+        "raw/IFS/2026050100/manifest.json",
+        b'{"source_id":"IFS"}',
+    )
+
+    result = orchestrator.orchestrate_cycle("IFS", "2026050100", _basins(1))
+
+    assert result.status == "complete"
+    assert [submission["stage"] for submission in client.submissions[:2]] == ["convert", "forcing"]
+    assert result.stages[0].pipeline_job_id == "job_cycle_ifs_2026050100_download_retry_1"
+    assert result.stages[1].pipeline_job_id == "job_cycle_ifs_2026050100_convert_retry_1"
+    assert repository.jobs["job_cycle_ifs_2026050100_convert"]["status"] == "failed"
+    assert repository.jobs["job_cycle_ifs_2026050100_convert_retry_1"]["status"] == "succeeded"
 
 
 def test_array_pipeline_jobs_are_persisted_as_cycle_level_rows(tmp_path: Path) -> None:
@@ -5444,7 +5596,8 @@ def test_template_export_lines_omits_grib_env_when_unset(monkeypatch):
     monkeypatch.delenv("NHMS_GRIB_ENV_ROOT", raising=False)
     lines = _template_export_lines({"workspace_dir": "/work"})
 
-    assert not any(line.startswith("export PATH=") for line in lines)
+    expected_venv = shlex.quote(str((Path.cwd() / ".venv" / "bin").resolve()))
+    assert f"export PATH={expected_venv}:$PATH" in lines
     assert not any(line.startswith("export LD_LIBRARY_PATH=") for line in lines)
 
 
@@ -5598,6 +5751,68 @@ def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -
     # A second pass over the same cycle must not create a second row for the key.
     rows = [j for j in store.session.query(PipelineJob).all() if j.idempotency_key == key]
     assert len(rows) == 1
+
+
+def test_manual_retry_terminal_stage_submits_new_attempt_identity(tmp_path: Path) -> None:
+    """A manual retry must not reuse the old terminal stage job/idempotency key.
+
+    Production hit this with ``job_cycle_gfs_..._download`` already failed and
+    bound to an old Slurm job: reusing the same idempotency key made the reserve
+    gate skip sbatch and evidence kept pointing at the stale failure.
+    """
+
+    from services.orchestrator.reservation import idempotency_key_from_comment
+
+    store = _pipeline_store()
+    repository = StoreBackedCycleRepository(store)
+    old_job = store.create_job(
+        job_id="job_cycle_gfs_2026050100_download",
+        run_id="cycle_gfs_2026050100",
+        cycle_id="gfs_2026050100",
+        job_type="download_source_cycle",
+        slurm_job_id="6051",
+        model_id=None,
+        stage="download",
+        status="failed",
+        idempotency_key="cycle_gfs_2026050100:download",
+    )
+    old_job.exit_code = 127
+    old_job.error_code = "SLURM_JOB_FAILED"
+    store.session.add(old_job)
+    store.session.commit()
+
+    comments: list[str | None] = []
+
+    class _CommentCapturingClient(FakeCycleSlurmClient):
+        def submit_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+            comments.append(payload.get("comment"))
+            return super().submit_job(payload)
+
+    client = _CommentCapturingClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basins = _basins(1)
+    basins[0]["manual_retry_attempt"] = 4
+    basins[0]["state_evidence"] = {
+        "decision": "manual_retry",
+        "manual_retry": {"allowed": True, "new_attempt": 4},
+        "fresh_ingestion": {"required": True, "mode": "full_chain"},
+    }
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", basins)
+
+    retry_job_id = "job_cycle_gfs_2026050100_download_retry_4"
+    assert result.status == "complete"
+    assert result.stages[0].pipeline_job_id == retry_job_id
+    persisted_old_job = store.get_job("job_cycle_gfs_2026050100_download")
+    assert persisted_old_job is not None
+    assert persisted_old_job.slurm_job_id == "6051"
+    assert persisted_old_job.status == "failed"
+    retry_job = repository.jobs[retry_job_id]
+    assert retry_job["status"] == "succeeded"
+    assert retry_job["slurm_job_id"] == "2001"
+    assert retry_job["idempotency_key"] == "cycle_gfs_2026050100:download:retry_4"
+    assert idempotency_key_from_comment(comments[0]) == "cycle_gfs_2026050100:download:retry_4"
+    assert client.submissions[0]["stage"] == "download"
 
 
 class _RaceSemanticsCycleRepository(StoreBackedCycleRepository):

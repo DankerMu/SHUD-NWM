@@ -32,6 +32,7 @@ NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
 # diagnostic-only bring-up fallbacks (M24 §5 / #293), not driven by these vars.
 # The NHMS_SCHEDULER_* keys configure that daemon's lock/evidence/roots + cohort.
 NHMS_SCHEDULER_LOCK_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/locks
+NHMS_SCHEDULER_LOCK_BACKEND=postgres
 NHMS_SCHEDULER_EVIDENCE_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/evidence
 NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
 NHMS_SCHEDULER_TEMP_ROOT=/scratch/frd_muziyao/nhms-production/tmp
@@ -41,6 +42,7 @@ NHMS_SCHEDULER_MODEL_IDS=basins_qhh_shud
 NHMS_SCHEDULER_BASIN_IDS=basins_qhh
 NHMS_SCHEDULER_INTERVAL_SECONDS=300
 NHMS_SCHEDULER_MAX_PASSES=1
+NHMS_SCHEDULER_CYCLE_LAG_HOURS=6
 # Backfill: each pass scans the past LOOKBACK_HOURS window and re-drives every
 # incomplete cycle's full pipeline (completed cycles are skipped, do not consume
 # budget). MAX_CYCLES_PER_SOURCE is the per-pass per-source backfill budget.

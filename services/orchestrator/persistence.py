@@ -336,6 +336,7 @@ class PipelineStore:
         self,
         idempotency_key: str,
         *,
+        job_id: str | None = None,
         run_id: str | None = None,
         cycle_id: str | None = None,
         model_id: str | None = None,
@@ -356,12 +357,22 @@ class PipelineStore:
         """
 
         job = self.query_candidate_state(idempotency_key)
-        if (
-            job is None
-            or job.slurm_job_id is not None
-            or job.status not in ("submission_failed", "reservation_lost")
-        ):
-            return None
+        if job is not None:
+            if job.slurm_job_id is not None or job.status not in ("submission_failed", "reservation_lost"):
+                return None
+        else:
+            if job_id in (None, ""):
+                return None
+            statement = select(PipelineJob).where(PipelineJob.job_id == job_id)
+            job = self.session.scalars(statement).first()
+            if (
+                job is None
+                or job.idempotency_key is not None
+                or job.slurm_job_id is not None
+                or job.status != "pending"
+            ):
+                return None
+            job.idempotency_key = idempotency_key
         job.status = RESERVED_STATUS
         job.slurm_job_id = None
         job.array_task_id = None

@@ -45,6 +45,7 @@ MANUAL_RETRY_SOURCE_STATUSES = FAILED_RETRY_STATUSES | {"cancelled"}
 TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
 DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published"}
 PARTIAL_OR_FAILED_HYDRO_STATUSES = {"failed", "cancelled", "partially_failed"}
+REUSABLE_AUTO_RETRY_STATUSES = {"pending", "submission_failed"}
 
 
 def is_transient_error(error_code: str | None) -> bool:
@@ -219,18 +220,37 @@ class RetryService:
         )
         next_retry_count = job.retry_count + 1
         backoff_seconds = compute_backoff_seconds(job.retry_count, self.config.backoff_schedule)
+        retry_job_id = f"{job.job_id}_retry_{next_retry_count}"
+        reused_existing_retry_job = False
 
-        retry_job = self.store.create_job(
-            job_id=f"{job.job_id}_retry_{next_retry_count}",
-            run_id=job.run_id,
-            cycle_id=job.cycle_id,
-            job_type=job.job_type,
-            slurm_job_id=None,
-            model_id=job.model_id,
-            stage=job.stage,
-            status="pending",
-            commit=False,
-        )
+        retry_job = self._auto_retry_job_for_update(retry_job_id)
+        if retry_job is None:
+            retry_job = self.store.create_job(
+                job_id=retry_job_id,
+                run_id=job.run_id,
+                cycle_id=job.cycle_id,
+                job_type=job.job_type,
+                slurm_job_id=None,
+                model_id=job.model_id,
+                stage=job.stage,
+                status="pending",
+                commit=False,
+            )
+        elif not _auto_retry_job_can_be_reused(retry_job):
+            raise RetryError(
+                "AUTO_RETRY_JOB_CONFLICT",
+                "Existing auto retry job cannot be reset safely.",
+                {
+                    "retry_job_id": retry_job_id,
+                    "existing_status": retry_job.status,
+                    "existing_slurm_job_id": retry_job.slurm_job_id,
+                    "existing_array_task_id": retry_job.array_task_id,
+                    "previous_job_id": job.job_id,
+                },
+            )
+        else:
+            reused_existing_retry_job = True
+            self._reset_auto_retry_job(retry_job, source_job=job, retry_count=next_retry_count)
         retry_job.retry_count = next_retry_count
         self.store.session.add(retry_job)
         self.store.insert_event(
@@ -247,6 +267,7 @@ class RetryService:
                 "previous_job_id": job.job_id,
                 "slurm_job_id": retry_job.slurm_job_id,
                 "failure": classification,
+                "reused_existing_retry_job": reused_existing_retry_job,
             },
             commit=False,
         )
@@ -582,6 +603,34 @@ class RetryService:
                 {"run_id": run_id},
             ) from error
 
+    def _auto_retry_job_for_update(self, job_id: str) -> PipelineJob | None:
+        statement = select(PipelineJob).where(PipelineJob.job_id == job_id).with_for_update()
+        return self.store.session.scalars(statement).first()
+
+    @staticmethod
+    def _reset_auto_retry_job(retry_job: PipelineJob, *, source_job: PipelineJob, retry_count: int) -> None:
+        now = datetime.now(UTC)
+        retry_job.run_id = source_job.run_id
+        retry_job.cycle_id = source_job.cycle_id
+        retry_job.job_type = source_job.job_type
+        retry_job.model_id = source_job.model_id
+        retry_job.stage = source_job.stage
+        retry_job.status = "pending"
+        retry_job.slurm_job_id = None
+        retry_job.array_task_id = None
+        retry_job.submitted_at = now
+        retry_job.started_at = None
+        retry_job.finished_at = None
+        retry_job.exit_code = None
+        retry_job.retry_count = retry_count
+        retry_job.manual_retry_marker = False
+        retry_job.idempotency_key = None
+        retry_job.candidate_id = None
+        retry_job.error_code = None
+        retry_job.error_message = None
+        retry_job.log_uri = None
+        retry_job.updated_at = now
+
 
 def _jobs_by_truth_time(jobs: list[PipelineJob]) -> list[PipelineJob]:
     return sorted(
@@ -617,6 +666,14 @@ def _active_retry_job_for_run(store: PipelineStore, run_id: str) -> PipelineJob 
         return store.session.scalars(statement).first()
     except SQLAlchemyError:
         return None
+
+
+def _auto_retry_job_can_be_reused(retry_job: PipelineJob) -> bool:
+    if retry_job.manual_retry_marker:
+        return False
+    if retry_job.slurm_job_id is not None or retry_job.array_task_id is not None:
+        return False
+    return retry_job.status in REUSABLE_AUTO_RETRY_STATUSES
 
 
 def _next_manual_retry_job_id_for_run(store: PipelineStore, run_id: str) -> str:

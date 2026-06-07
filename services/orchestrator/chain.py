@@ -546,6 +546,7 @@ class StageRunResult:
     log_uri: str | None = None
     accounting: Mapping[str, Any] = field(default_factory=dict)
     task_results: tuple[Mapping[str, Any], ...] = ()
+    finished_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -633,6 +634,7 @@ class CycleOrchestrationContext:
     had_partial: bool = False
     last_partial_status: str | None = None
     task_outcomes: dict[int, dict[str, Any]] = field(default_factory=dict)
+    retry_attempt: int | None = None
 
 
 @dataclass(frozen=True)
@@ -971,6 +973,7 @@ class ForecastOrchestrator:
                 all_basins=normalized_basins,
                 active_basins=list(normalized_basins),
                 restart_stage=_restart_stage_from_basins(normalized_basins),
+                retry_attempt=_retry_attempt_from_basins(normalized_basins),
             )
             return self._run_cycle_chain(context)
         finally:
@@ -1233,6 +1236,7 @@ class ForecastOrchestrator:
         stage_results: list[StageRunResult] = []
         start_stage_index = _restart_stage_index(context.restart_stage, self.stages)
         existing_jobs = self._query_pipeline_jobs_for_cycle_context(context)
+        refreshed_upstream_finished_at: datetime | None = None
         for stage_index, stage in enumerate(self.stages):
             if stage_index < start_stage_index:
                 continue
@@ -1242,17 +1246,37 @@ class ForecastOrchestrator:
             retry_attempts = 0
             retry_pipeline_job_id: str | None = None
             while True:
-                existing_job = self._find_existing_stage_job(existing_jobs, stage)
+                existing_job = self._find_existing_stage_job(existing_jobs, stage, context=context)
+                if (
+                    existing_job is not None
+                    and retry_pipeline_job_id is None
+                    and self._cycle_download_success_missing_raw_manifest(stage, context, existing_job)
+                ):
+                    retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_job)
+                if (
+                    existing_job is not None
+                    and retry_pipeline_job_id is None
+                    and self._terminal_stage_can_retry_after_upstream_refresh(
+                        existing_job,
+                        refreshed_upstream_finished_at=refreshed_upstream_finished_at,
+                    )
+                ):
+                    retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_job)
                 if (
                     existing_job is not None
                     and retry_pipeline_job_id is None
                     and not self._job_needs_submission(existing_job)
+                    and not self._terminal_stage_needs_manual_retry(context, existing_job)
                 ):
                     result, aggregation = self._resume_cycle_stage(stage, context, existing_job)
                 else:
                     pipeline_job_id = retry_pipeline_job_id
                     if pipeline_job_id is None and existing_job is not None:
-                        pipeline_job_id = str(existing_job["job_id"])
+                        pipeline_job_id = (
+                            self._retry_cycle_stage_job_id(context, stage, existing_job)
+                            if str(existing_job.get("status")) in TERMINAL_JOB_STATUSES
+                            else str(existing_job["job_id"])
+                        )
                     result, aggregation = self._submit_and_wait_cycle_stage(
                         stage,
                         context,
@@ -1307,6 +1331,11 @@ class ForecastOrchestrator:
                         stage_results[-1] = result
                 break
 
+            if result.status in TERMINAL_PIPELINE_SUCCESS_STATUSES and result.pipeline_job_id != _pipeline_job_id(
+                context.run_id, stage.stage
+            ):
+                refreshed_upstream_finished_at = _stage_result_finished_at(result)
+
             if stage.is_array and aggregation is not None:
                 self._apply_array_progress(stage, context, aggregation)
 
@@ -1318,6 +1347,46 @@ class ForecastOrchestrator:
             tuple(stage_results),
             _candidate_outcomes(context, final_status=final_status or self.final_pipeline_status),
         )
+
+    def _retry_cycle_stage_job_id(
+        self,
+        context: CycleOrchestrationContext,
+        stage: StageDefinition,
+        _existing_job: Mapping[str, Any],
+    ) -> str:
+        base_job_id = _pipeline_job_id(context.run_id, stage.stage)
+        attempt = context.retry_attempt or _next_retry_attempt_for_stage(
+            self._query_pipeline_jobs_for_cycle_context(context),
+            base_job_id=base_job_id,
+            stage=stage,
+        )
+        if attempt <= 0:
+            attempt = 1
+        return _pipeline_retry_job_id(base_job_id, attempt)
+
+    @staticmethod
+    def _terminal_stage_needs_manual_retry(
+        context: CycleOrchestrationContext,
+        job: Mapping[str, Any],
+    ) -> bool:
+        if context.retry_attempt is None:
+            return False
+        status = str(job.get("status") or "")
+        return status in {"failed", "submission_failed", "permanently_failed", "cancelled", "partially_failed"}
+
+    @staticmethod
+    def _terminal_stage_can_retry_after_upstream_refresh(
+        job: Mapping[str, Any],
+        *,
+        refreshed_upstream_finished_at: datetime | None,
+    ) -> bool:
+        if refreshed_upstream_finished_at is None:
+            return False
+        status = str(job.get("status") or "")
+        if status not in {"failed", "submission_failed", "partially_failed"}:
+            return False
+        terminal_time = _pipeline_job_terminal_time(job)
+        return terminal_time is None or terminal_time <= refreshed_upstream_finished_at
 
     def _schedule_cycle_stage_retry(self, result: StageRunResult, _failure_number: int) -> str | None:
         if self.retry_service is None:
@@ -1571,7 +1640,7 @@ class ForecastOrchestrator:
         # M24 §3A phase 1: durable reservation BEFORE sbatch. Idempotent across
         # overlapping passes and the submit-crash window. Best-effort against
         # repositories that predate the reservation methods.
-        idempotency_key = _cycle_stage_idempotency_key(context, stage)
+        idempotency_key = _cycle_stage_idempotency_key(context, stage, pipeline_job_id=pipeline_job_id)
         reservation = self._reserve_cycle_stage(stage, context, pipeline_job_id, idempotency_key)
 
         # M24 §3A reserve gate: when a concurrent pass already holds an active
@@ -1758,6 +1827,7 @@ class ForecastOrchestrator:
                 log_uri=log_uri,
                 accounting=_slurm_accounting_from_payload(terminal),
                 task_results=_stage_task_result_evidence(aggregation, context=context),
+                finished_at=_parse_gateway_time(terminal.get("finished_at")),
             ),
             aggregation,
         )
@@ -1856,6 +1926,7 @@ class ForecastOrchestrator:
                 log_uri=result_log_uri,
                 accounting=_slurm_accounting_from_payload(terminal),
                 task_results=_stage_task_result_evidence(aggregation, context=context),
+                finished_at=_parse_gateway_time(terminal.get("finished_at") or job.get("finished_at")),
             ),
             aggregation,
         )
@@ -3149,13 +3220,33 @@ class ForecastOrchestrator:
             ]
         return self._query_pipeline_jobs_by_cycle(context.cycle_id)
 
-    @staticmethod
-    def _find_existing_stage_job(jobs: Sequence[Mapping[str, Any]], stage: StageDefinition) -> dict[str, Any] | None:
+    def _find_existing_stage_job(
+        self,
+        jobs: Sequence[Mapping[str, Any]],
+        stage: StageDefinition,
+        *,
+        context: CycleOrchestrationContext,
+    ) -> dict[str, Any] | None:
         matches = [dict(job) for job in jobs if ForecastOrchestrator._job_matches_stage(job, stage)]
         if not matches:
             return None
         active_matches = [job for job in matches if str(job.get("status")) not in TERMINAL_JOB_STATUSES]
-        return dict((active_matches or matches)[-1])
+        return dict(max(active_matches or matches, key=lambda job: _stage_job_sort_key(job, stage)))
+
+    def _cycle_download_success_missing_raw_manifest(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        job: Mapping[str, Any],
+    ) -> bool:
+        if stage.stage != "download":
+            return False
+        if str(job.get("status") or "") not in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+            return False
+        manifest_uri = self.object_store.uri_for_key(
+            f"raw/{context.source_id}/{format_cycle_time(context.cycle_time)}/manifest.json"
+        )
+        return not self.object_store.exists(manifest_uri)
 
     @staticmethod
     def _job_matches_stage(job: Mapping[str, Any], stage: StageDefinition) -> bool:
@@ -5421,26 +5512,54 @@ class PsycopgOrchestratorRepository:
 
         return self._fetch_optional(
             """
-            UPDATE ops.pipeline_job
-            SET status = 'reserved',
-                slurm_job_id = NULL,
-                array_task_id = NULL,
-                submitted_at = NULL,
-                started_at = NULL,
-                finished_at = NULL,
-                exit_code = NULL,
-                error_code = NULL,
-                error_message = NULL,
-                run_id = COALESCE(run_id, %s),
-                cycle_id = COALESCE(cycle_id, %s),
-                model_id = COALESCE(model_id, %s),
-                stage = COALESCE(stage, %s),
-                candidate_id = COALESCE(candidate_id, %s),
-                updated_at = now()
-            WHERE idempotency_key = %s
-              AND slurm_job_id IS NULL
-              AND status IN ('submission_failed', 'reservation_lost')
-            RETURNING *
+            WITH reclaimed_by_key AS (
+                UPDATE ops.pipeline_job
+                SET status = 'reserved',
+                    slurm_job_id = NULL,
+                    array_task_id = NULL,
+                    submitted_at = NULL,
+                    started_at = NULL,
+                    finished_at = NULL,
+                    exit_code = NULL,
+                    error_code = NULL,
+                    error_message = NULL,
+                    run_id = COALESCE(run_id, %s),
+                    cycle_id = COALESCE(cycle_id, %s),
+                    model_id = COALESCE(model_id, %s),
+                    stage = COALESCE(stage, %s),
+                    candidate_id = COALESCE(candidate_id, %s),
+                    updated_at = now()
+                WHERE idempotency_key = %s
+                  AND slurm_job_id IS NULL
+                  AND status IN ('submission_failed', 'reservation_lost')
+                RETURNING *
+            ), reclaimed_pending AS (
+                UPDATE ops.pipeline_job
+                SET status = 'reserved',
+                    idempotency_key = %s,
+                    candidate_id = COALESCE(candidate_id, %s),
+                    submitted_at = NULL,
+                    started_at = NULL,
+                    finished_at = NULL,
+                    exit_code = NULL,
+                    error_code = NULL,
+                    error_message = NULL,
+                    updated_at = now()
+                WHERE job_id = %s
+                  AND idempotency_key IS NULL
+                  AND slurm_job_id IS NULL
+                  AND status = 'pending'
+                  AND NOT EXISTS (SELECT 1 FROM reclaimed_by_key)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ops.pipeline_job
+                      WHERE idempotency_key = %s
+                  )
+                RETURNING *
+            )
+            SELECT * FROM reclaimed_by_key
+            UNION ALL
+            SELECT * FROM reclaimed_pending
+            LIMIT 1
             """,
             (
                 record.get("run_id"),
@@ -5448,6 +5567,10 @@ class PsycopgOrchestratorRepository:
                 record.get("model_id"),
                 record.get("stage"),
                 record.get("candidate_id"),
+                record["idempotency_key"],
+                record["idempotency_key"],
+                record.get("candidate_id"),
+                record["job_id"],
                 record["idempotency_key"],
             ),
         )
@@ -6075,6 +6198,59 @@ def _restart_stage_from_basins(basins: Sequence[Mapping[str, Any]]) -> str | Non
         return None
     stage_order = {stage.stage: index for index, stage in enumerate(STAGES)}
     return min(restart_stages, key=lambda stage: stage_order.get(stage, len(stage_order)))
+
+
+def _retry_attempt_from_basins(basins: Sequence[Mapping[str, Any]]) -> int | None:
+    attempts: list[int] = []
+    for basin in basins:
+        for value in (
+            basin.get("retry_attempt"),
+            basin.get("manual_retry_attempt"),
+        ):
+            attempt = _coerce_positive_int(value)
+            if attempt is not None:
+                attempts.append(attempt)
+        state_evidence = basin.get("state_evidence")
+        if isinstance(state_evidence, Mapping):
+            manual_retry = state_evidence.get("manual_retry")
+            if isinstance(manual_retry, Mapping):
+                attempt = _coerce_positive_int(
+                    manual_retry.get("new_attempt")
+                    or manual_retry.get("attempt")
+                    or manual_retry.get("retry_count")
+                )
+                if attempt is not None:
+                    attempts.append(attempt)
+    if not attempts:
+        return None
+    return max(attempts)
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _stage_result_finished_at(result: StageRunResult) -> datetime | None:
+    if result.finished_at is not None:
+        return result.finished_at
+    for key in ("finished_at", "updated_at"):
+        value = result.accounting.get(key)
+        parsed = _parse_gateway_time(value)
+        if parsed is not None:
+            return parsed
+    return _utcnow()
+
+
+def _pipeline_job_terminal_time(job: Mapping[str, Any]) -> datetime | None:
+    for key in ("finished_at", "updated_at", "submitted_at", "started_at", "created_at"):
+        parsed = _parse_gateway_time(job.get(key))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _canonical_restart_stage(value: Any) -> str | None:
@@ -7048,7 +7224,55 @@ def _pipeline_job_id(run_id: str, stage: str) -> str:
     return f"job_{run_id}_{stage}"
 
 
-def _cycle_stage_idempotency_key(context: CycleOrchestrationContext, stage: StageDefinition) -> str:
+def _pipeline_retry_job_id(base_job_id: str, attempt: int) -> str:
+    return f"{base_job_id}_retry_{max(int(attempt), 1)}"
+
+
+def _stage_job_sort_key(job: Mapping[str, Any], stage: StageDefinition) -> tuple[int, int, datetime, datetime]:
+    job_id = str(job.get("job_id") or "")
+    base_job_id = str(job_id).removesuffix("_retry_0")
+    attempt = 0
+    marker = "_retry_"
+    if marker in job_id:
+        try:
+            attempt = int(job_id.rsplit(marker, maxsplit=1)[1])
+        except ValueError:
+            attempt = 0
+        base_job_id = job_id.rsplit(marker, maxsplit=1)[0]
+    expected_suffix = f"_{stage.stage}"
+    stage_match = 1 if base_job_id.endswith(expected_suffix) else 0
+    terminal_time = _pipeline_job_terminal_time(job) or datetime.min.replace(tzinfo=UTC)
+    created_time = _parse_gateway_time(job.get("created_at")) or datetime.min.replace(tzinfo=UTC)
+    return stage_match, attempt, terminal_time, created_time
+
+
+def _next_retry_attempt_for_stage(
+    jobs: Sequence[Mapping[str, Any]],
+    *,
+    base_job_id: str,
+    stage: StageDefinition,
+) -> int:
+    prefix = f"{base_job_id}_retry_"
+    attempts: list[int] = []
+    for job in jobs:
+        if not ForecastOrchestrator._job_matches_stage(job, stage):
+            continue
+        job_id = str(job.get("job_id") or "")
+        if not job_id.startswith(prefix):
+            continue
+        try:
+            attempts.append(int(job_id.removeprefix(prefix)))
+        except ValueError:
+            continue
+    return max(attempts, default=0) + 1
+
+
+def _cycle_stage_idempotency_key(
+    context: CycleOrchestrationContext,
+    stage: StageDefinition,
+    *,
+    pipeline_job_id: str | None = None,
+) -> str:
     """Stable idempotency key for a cohort's cycle-level stage submission.
 
     ``run_id`` deterministically encodes source/cycle/basin-cohort, so
@@ -7056,6 +7280,11 @@ def _cycle_stage_idempotency_key(context: CycleOrchestrationContext, stage: Stag
     ``source:cycle:basin:stage`` key and is constant across passes.
     """
 
+    base_job_id = _pipeline_job_id(context.run_id, stage.stage)
+    if pipeline_job_id and pipeline_job_id != base_job_id:
+        suffix = str(pipeline_job_id).removeprefix(f"{base_job_id}_")
+        if suffix:
+            return f"{context.run_id}:{stage.stage}:{suffix}"
     return f"{context.run_id}:{stage.stage}"
 
 
@@ -7568,6 +7797,7 @@ def _template_export_lines(context: Mapping[str, Any]) -> list[str]:
         "OMP_NUM_THREADS": context.get("shud_threads", ""),
     }
     lines = [f"export {key}={shlex.quote(str(value or ''))}" for key, value in export_fields.items()]
+    lines.extend(_python_runtime_export_lines())
     grib_env_root = os.getenv("NHMS_GRIB_ENV_ROOT")
     if grib_env_root:
         # Compute nodes (cn01-24) lack cdo/libeccodes; inject the shared conda
@@ -7578,6 +7808,30 @@ def _template_export_lines(context: Mapping[str, Any]) -> list[str]:
         lines.append(f"export PATH={quoted_root}/bin:$PATH")
         lines.append(f"export LD_LIBRARY_PATH={quoted_root}/lib:${{LD_LIBRARY_PATH:-}}")
     return lines
+
+
+def _python_runtime_export_lines() -> list[str]:
+    explicit_bin = os.getenv("NHMS_PYTHON_VENV_BIN")
+    candidates: list[Path] = []
+    if explicit_bin:
+        candidates.append(Path(explicit_bin))
+    virtual_env = os.getenv("VIRTUAL_ENV")
+    if virtual_env:
+        candidates.append(Path(virtual_env) / "bin")
+    candidates.append(Path.cwd() / ".venv" / "bin")
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved in seen or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        quoted = shlex.quote(str(resolved))
+        return [f"export PATH={quoted}:$PATH"]
+    return []
 
 
 def _response_json_or_text(response: httpx.Response) -> dict[str, Any] | str:

@@ -37,6 +37,7 @@ from services.orchestrator.scheduler import (
     SCHEDULER_EVIDENCE_GITHUB_ISSUE,
     SCHEDULER_EVIDENCE_SCHEMA_VERSION,
     FileSchedulerLease,
+    PostgresSchedulerLease,
     ProductionSchedulerConfig,
     SchedulerEvidenceWriteError,
     SchedulerPassResult,
@@ -145,6 +146,28 @@ class ProductionScheduler(_RealProductionScheduler):
         if self._test_canonical_readiness_omitted:
             return None
         return super()._canonical_readiness_for_candidate(candidate, cycle)
+
+
+def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
+    model = scheduler_module.RegisteredSchedulerModel(
+        model_id="basins_heihe_shud",
+        basin_id="basins_heihe",
+        basin_version_id="basins_heihe_vbasins",
+        river_network_version_id="basins_heihe_rivnet_vbasins",
+        segment_count=4759,
+        output_segment_count=2352,
+        model_package_uri="s3://nhms/models/basins_heihe_shud/package/",
+        shud_code_version="shud",
+        resource_profile={"project_name": "heihe", "shud_input_name": "heihe", "memory_gb": 8},
+        resource_profile_summary={"memory_gb": 8},
+        display_capabilities={},
+        frequency_capabilities={},
+    )
+
+    payload = model.to_dict()
+
+    assert payload["project_name"] == "heihe"
+    assert payload["shud_input_name"] == "heihe"
 
 
 def test_all_active_models_and_gfs_ifs_window_produce_stable_candidate_ids(tmp_path: Path) -> None:
@@ -556,6 +579,76 @@ def test_fresh_cycle_with_zero_canonical_runs_full_chain_without_in_process_forc
     submitted_basin = orchestrator.calls[0]["basins"][0]
     assert "restart_stage" not in submitted_basin
     assert submitted_basin["state_evidence"]["fresh_ingestion"]["mode"] == "full_chain"
+
+
+def test_fresh_cycle_manual_retry_preserves_retry_state_and_runs_full_chain(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": "failed",
+            "failed_stage": "download",
+            "error_code": "SLURM_JOB_FAILED",
+            "retry_count": 0,
+            "retry_limit": 3,
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_download",
+                    "status": "failed",
+                    "stage": "download",
+                    "retry_count": 0,
+                    "error_code": "SLURM_JOB_FAILED",
+                    "updated_at": "2026-05-21T06:20:00Z",
+                }
+            ],
+            "pipeline_events": [
+                {
+                    "event_id": 5,
+                    "event_type": "retry",
+                    "entity_id": "job_cycle_gfs_2026052106_download",
+                    "created_at": "2026-05-21T06:30:00Z",
+                    "details": {
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "retry_count": 1,
+                        "previous_job_id": "job_cycle_gfs_2026052106_download",
+                    },
+                }
+            ],
+        }
+    )
+    forcing_producer = FakeForcingProducer(error=RuntimeError("fresh ingestion skips in-process forcing"))
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [("2026-05-21T06:00:00Z", True)],
+                policy_identity=policy,
+                source_object_identity=source_object,
+            )
+        },
+        active_repository=active_repository,
+        canonical_readiness_provider=_fresh_zero_row_readiness_provider(
+            cycle_time, policy=policy, source_object=source_object
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.status == "submitted"
+    assert result.evidence["blocked_candidates"] == []
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    state_evidence = submitted_basin["state_evidence"]
+    assert state_evidence["fresh_ingestion"]["mode"] == "full_chain"
+    assert state_evidence["decision"] == "manual_retry"
+    assert state_evidence["manual_retry"]["marker"] is True
+    assert "restart_stage" not in submitted_basin
 
 
 def test_fresh_cycle_basin_manifest_carries_identity_contract_fields(tmp_path: Path) -> None:
@@ -4244,6 +4337,62 @@ def test_slurm_preflight_allows_safe_template_env_and_submits_through_orchestrat
     }
 
 
+def test_slurm_preflight_passes_download_source_env_to_compute_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = _slurm_roots(tmp_path)
+    monkeypatch.setenv("IFS_OPEN_DATA_SOURCE", "aws")
+    monkeypatch.setenv("IFS_OPEN_DATA_FALLBACK_SOURCES", "azure,google,ecmwf")
+    monkeypatch.setenv("GFS_NOMADS_BASE_URL", "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod")
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_SOUTH", "8")
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_NORTH", "64")
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_WEST", "63")
+    monkeypatch.setenv("NHMS_DOWNLOAD_BBOX_EAST", "145")
+    monkeypatch.setenv("NHMS_GRIB_ENV_ROOT", str(tmp_path / "nhms-grib"))
+    (tmp_path / "nhms-grib" / "bin").mkdir(parents=True)
+    (tmp_path / "nhms-grib" / "lib").mkdir(parents=True)
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    expected = {
+        "GFS_NOMADS_BASE_URL": "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod",
+        "IFS_OPEN_DATA_SOURCE": "aws",
+        "IFS_OPEN_DATA_FALLBACK_SOURCES": "azure,google,ecmwf",
+        "NHMS_DOWNLOAD_BBOX_SOUTH": "8",
+        "NHMS_DOWNLOAD_BBOX_NORTH": "64",
+        "NHMS_DOWNLOAD_BBOX_WEST": "63",
+        "NHMS_DOWNLOAD_BBOX_EAST": "145",
+        "NHMS_GRIB_ENV_ROOT": str(tmp_path / "nhms-grib"),
+    }
+    assert result.status == "submitted"
+    sanitized = result.evidence["slurm_preflight"]["checks"]["environment"]["sanitized"]
+    for key, value in expected.items():
+        assert sanitized[key] == value
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    for key, value in expected.items():
+        assert submitted_basin["slurm_env"][key] == value
+
+
 def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     monkeypatch: Any,
     tmp_path: Path,
@@ -4255,8 +4404,15 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     class DefaultPathOrchestrator:
         stages = M3_STAGES
 
-        def __init__(self, *, config: Any, repository: Any, state_manager: Any) -> None:
-            constructed.append({"config": config, "repository": repository, "state_manager": state_manager})
+        def __init__(self, *, config: Any, repository: Any, state_manager: Any, retry_service: Any = None) -> None:
+            constructed.append(
+                {
+                    "config": config,
+                    "repository": repository,
+                    "state_manager": state_manager,
+                    "retry_service": retry_service,
+                }
+            )
             self.config = config
             self.object_store = LocalObjectStore(config.object_store_root, config.object_store_prefix)
 
@@ -4290,6 +4446,7 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setenv("FORECAST_SOURCE_ID", "IFS")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
+    monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathOrchestrator)
     config = _config(
         roots["workspace_root"],
@@ -4314,6 +4471,7 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     assert scheduler.orchestrator_factory is None
     assert result.status == "submitted"
     assert result.evidence["execution_boundary"] == "slurm_gateway_orchestration"
+    assert constructed[0]["retry_service"] == "retry-service-from-env"
     assert result.evidence["counts"]["submitted_count"] == 1
     assert result.evidence["slurm_preflight"]["status"] == "ready"
     assert len(constructed) == 1
@@ -4531,8 +4689,15 @@ def test_cancel_active_slurm_calls_gateway_contract_without_replacement_submissi
     class DefaultPathCancelOrchestrator:
         stages = M3_STAGES
 
-        def __init__(self, *, config: Any, repository: Any, state_manager: Any) -> None:
-            constructed.append({"config": config, "repository": repository, "state_manager": state_manager})
+        def __init__(self, *, config: Any, repository: Any, state_manager: Any, retry_service: Any = None) -> None:
+            constructed.append(
+                {
+                    "config": config,
+                    "repository": repository,
+                    "state_manager": state_manager,
+                    "retry_service": retry_service,
+                }
+            )
 
         def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
             reservation_seen_before_cancel.append(bool(list(roots["workspace_root"].glob("scheduler/evidence/*.pre_execution.json"))))
@@ -4764,12 +4929,20 @@ def test_cancel_active_slurm_runs_before_cycle_level_active_skip(
 ) -> None:
     roots = _slurm_roots(tmp_path)
     cancel_calls: list[tuple[str, str]] = []
+    constructed: list[dict[str, Any]] = []
 
     class DefaultPathCancelOrchestrator:
         stages = M3_STAGES
 
-        def __init__(self, *, config: Any, repository: Any, state_manager: Any) -> None:
-            del config, repository, state_manager
+        def __init__(self, *, config: Any, repository: Any, state_manager: Any, retry_service: Any = None) -> None:
+            constructed.append(
+                {
+                    "config": config,
+                    "repository": repository,
+                    "state_manager": state_manager,
+                    "retry_service": retry_service,
+                }
+            )
 
         def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
             cancel_calls.append((cycle_id, reason))
@@ -4792,6 +4965,7 @@ def test_cancel_active_slurm_runs_before_cycle_level_active_skip(
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
+    monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathCancelOrchestrator)
     config = _config(
         roots["workspace_root"],
@@ -4816,6 +4990,7 @@ def test_cancel_active_slurm_runs_before_cycle_level_active_skip(
     assert result.evidence["counts"]["submitted_count"] == 0
     assert result.evidence["slurm_cancellation_evidence"][0]["replacement_submitted"] is False
     assert cancel_calls == [("gfs_2026052106", "scheduler_cancel_requested")]
+    assert constructed[0]["retry_service"] == "retry-service-from-env"
 
 
 def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
@@ -4827,8 +5002,8 @@ def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
     class GapCancelOrchestrator:
         stages = M3_STAGES
 
-        def __init__(self, *, config: Any, repository: Any, state_manager: Any) -> None:
-            del config, repository, state_manager
+        def __init__(self, *, config: Any, repository: Any, state_manager: Any, retry_service: Any = None) -> None:
+            del config, repository, state_manager, retry_service
 
         def cancel_active_cycle_jobs(self, cycle_id: str, *, reason: str) -> list[dict[str, Any]]:
             del reason
@@ -4848,6 +5023,7 @@ def test_cancel_active_slurm_gap_blocks_top_level_cancelled_status(
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(roots["object_store_root"]))
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
+    monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", GapCancelOrchestrator)
     config = _config(
         roots["workspace_root"],
@@ -5668,6 +5844,178 @@ def test_candidate_state_permanent_or_exhausted_failure_blocks_auto_retry(
     assert state["failure"]["permanent"] is True
     assert result.evidence["counts"]["submitted_count"] == 0
     assert orchestrator.calls == []
+
+
+def test_missing_raw_manifest_after_successful_download_repairs_from_full_chain(tmp_path: Path) -> None:
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("IFS",), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "forecast_cycle": {
+                "cycle_id": "ifs_2026052106",
+                "source_id": "IFS",
+                "cycle_time": _dt("2026-05-21T06:00:00Z"),
+                "status": "discovered",
+                "manifest_uri": "s3://nhms/raw/IFS/2026052106/manifest.json",
+            },
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_ifs_2026052106_download",
+                    "run_id": "cycle_ifs_2026052106",
+                    "cycle_id": "ifs_2026052106",
+                    "status": "succeeded",
+                    "stage": "download",
+                    "job_type": "download_source_cycle",
+                    "updated_at": "2026-05-21T06:02:00Z",
+                },
+                {
+                    "job_id": "job_cycle_ifs_2026052106_convert",
+                    "run_id": "cycle_ifs_2026052106",
+                    "cycle_id": "ifs_2026052106",
+                    "status": "failed",
+                    "stage": "convert",
+                    "job_type": "convert_canonical",
+                    "error_code": "INVALID_MANIFEST",
+                    "retry_count": 3,
+                    "updated_at": "2026-05-21T06:03:00Z",
+                },
+            ],
+            "pipeline_status": "failed",
+            "failed_stage": "convert",
+            "error_code": "INVALID_MANIFEST",
+            "retry_count": 3,
+            "retry_limit": 3,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry(
+            [
+                _model(
+                    "model_a",
+                    "basin_a",
+                    resource_profile={
+                        "runnable": True,
+                        "memory_gb": 8,
+                        "display_capabilities": {"tiles": True},
+                        "frequency_capabilities": {"return_periods": True},
+                        "object_store_root": str(object_store_root),
+                    },
+                )
+            ]
+        ),
+        adapters={"IFS": FakeAdapter("IFS", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert state["decision"] == "retry_failed"
+    assert state["reason"] == "repair_missing_raw_manifest"
+    assert state["restart_from_stage"] == "download"
+    assert state["fresh_ingestion"] == {"required": True, "mode": "full_chain"}
+    assert state["raw_manifest_repair"]["manifest_exists"] is False
+    assert state["failure"]["classifier"] == "recoverable_missing_raw_manifest"
+    assert state["retry_policy"]["manual_retry_required"] is False
+    assert orchestrator.calls
+
+
+def test_repaired_raw_manifest_allows_stale_downstream_failure_retry(tmp_path: Path) -> None:
+    object_store_root = tmp_path / "object-store"
+    LocalObjectStore(str(object_store_root), object_store_prefix="s3://nhms").write_bytes_atomic(
+        "raw/IFS/2026052106/manifest.json",
+        b'{"source_id":"IFS"}',
+    )
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), sources=("IFS",), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "forecast_cycle": {
+                "cycle_id": "ifs_2026052106",
+                "source_id": "IFS",
+                "cycle_time": "2026-05-21T06:00:00Z",
+                "status": "failed_convert",
+                "manifest_uri": "s3://nhms/raw/IFS/2026052106/manifest.json",
+                "error_code": "SLURM_JOB_FAILED",
+                "error_message": "Stage convert ended with failed.",
+            },
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_ifs_2026052106_download",
+                    "run_id": "cycle_ifs_2026052106",
+                    "cycle_id": "ifs_2026052106",
+                    "status": "succeeded",
+                    "stage": "download",
+                    "job_type": "download_source_cycle",
+                    "finished_at": "2026-05-21T06:02:00Z",
+                },
+                {
+                    "job_id": "job_cycle_ifs_2026052106_convert",
+                    "run_id": "cycle_ifs_2026052106",
+                    "cycle_id": "ifs_2026052106",
+                    "status": "failed",
+                    "stage": "convert",
+                    "job_type": "convert_canonical",
+                    "error_code": "SLURM_JOB_FAILED",
+                    "finished_at": "2026-05-21T06:03:00Z",
+                },
+                {
+                    "job_id": "job_cycle_ifs_2026052106_download_retry_1",
+                    "run_id": "cycle_ifs_2026052106",
+                    "cycle_id": "ifs_2026052106",
+                    "status": "succeeded",
+                    "stage": "download",
+                    "job_type": "download_source_cycle",
+                    "finished_at": "2026-05-21T06:20:00Z",
+                },
+            ],
+            "pipeline_status": "failed",
+            "failed_stage": "convert",
+            "error_code": "SLURM_JOB_FAILED",
+            "retry_count": 0,
+            "retry_limit": 3,
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry(
+            [
+                _model(
+                    "model_a",
+                    "basin_a",
+                    resource_profile={
+                        "runnable": True,
+                        "memory_gb": 8,
+                        "display_capabilities": {"tiles": True},
+                        "frequency_capabilities": {"return_periods": True},
+                        "object_store_root": str(object_store_root),
+                    },
+                )
+            ]
+        ),
+        adapters={"IFS": FakeAdapter("IFS", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    state = result.evidence["candidates"][0]["state_evidence"]
+    assert state["decision"] == "retry_failed"
+    assert state["reason"] == "retry_downstream_after_raw_repair"
+    assert state["restart_from_stage"] == "download"
+    assert state["raw_manifest_repair"]["manifest_exists"] is True
+    assert state["failure"]["classifier"] == "recoverable_downstream_after_raw_repair"
+    assert state["retry_policy"]["manual_retry_required"] is False
+    assert orchestrator.calls
 
 
 def test_candidate_state_manual_retry_marker_allows_blocked_candidate_and_preserves_prior_reason(
@@ -6620,6 +6968,348 @@ def test_newer_manual_retry_marker_does_not_override_active_truth(
     assert orchestrator.calls == []
 
 
+def test_latest_unavailable_cycle_does_not_consume_source_budget_when_older_cycle_is_runnable(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T18:00:00Z"),
+        dry_run=False,
+        max_cycles_per_source=1,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    (
+                        "2026-05-21T12:00:00Z",
+                        False,
+                        {"reason": "source_cycle_unavailable", "retryable": True},
+                    ),
+                    ("2026-05-21T06:00:00Z", True),
+                ],
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls[0]["cycle_time"] == _dt("2026-05-21T06:00:00Z")
+    unavailable = next(item for item in result.evidence["source_cycles"] if item["cycle_id"] == "gfs_2026052112")
+    assert unavailable["selection_status"] == "not_selected"
+    assert unavailable["selection_reason"] == "source_cycle_unavailable_does_not_consume_source_budget"
+
+
+def test_backfill_selects_oldest_incomplete_cycle_and_defers_later_gaps_for_warm_start(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T18:00:00Z"),
+        dry_run=False,
+        backfill_enabled=True,
+        max_cycles_per_source=8,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    ("2026-05-21T00:00:00Z", True),
+                    ("2026-05-21T06:00:00Z", True),
+                    ("2026-05-21T12:00:00Z", True),
+                ],
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["counts"]["source_cycle_count"] == 1
+    assert orchestrator.calls[0]["cycle_time"] == _dt("2026-05-21T00:00:00Z")
+    selected_cycles = [
+        item["cycle_id"]
+        for item in result.evidence["source_cycles"]
+        if "cycle_id" in item
+        and item.get("type") != "backfill_deferred"
+        and item.get("status") != "excluded"
+    ]
+    assert selected_cycles == ["gfs_2026052100"]
+    deferred = [
+        item
+        for item in result.evidence["source_cycles"]
+        if item.get("type") == "backfill_deferred"
+    ]
+    assert [item["cycle_id"] for item in deferred] == ["gfs_2026052106", "gfs_2026052112"]
+    assert {item["reason"] for item in deferred} == {"backfill_deferred_waiting_for_prior_cycle"}
+    audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "gfs")
+    assert audit["gap_count"] == 3
+    assert audit["available_gap_count"] == 3
+    assert audit["unavailable_gap_count"] == 0
+    assert audit["selected_count"] == 1
+    assert audit["deferred_count"] == 2
+
+
+def test_backfill_floor_lookback_window_to_cycle_boundary_for_warm_start_order(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-06-06T16:24:00Z"),
+        dry_run=False,
+        backfill_enabled=True,
+        lookback_hours=168,
+        cycle_lag_hours=16,
+        max_cycles_per_source=8,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    ("2026-05-30T00:00:00Z", True),
+                    ("2026-05-30T06:00:00Z", True),
+                ],
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls[0]["cycle_time"] == _dt("2026-05-30T00:00:00Z")
+    selected = [
+        item["cycle_id"]
+        for item in result.evidence["source_cycles"]
+        if "cycle_id" in item and item.get("type") != "backfill_deferred"
+    ]
+    deferred = [
+        item["cycle_id"]
+        for item in result.evidence["source_cycles"]
+        if item.get("type") == "backfill_deferred"
+    ]
+    assert selected == ["gfs_2026053000"]
+    assert deferred == ["gfs_2026053006"]
+
+
+def test_backfill_selects_global_oldest_cycle_across_sources_and_defers_later_cycles(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-06-06T16:24:00Z"),
+        sources=("gfs", "IFS"),
+        dry_run=False,
+        backfill_enabled=True,
+        lookback_hours=168,
+        cycle_lag_hours=16,
+        max_cycles_per_source=8,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    ("2026-05-30T00:00:00Z", True),
+                ],
+            ),
+            "IFS": FakeAdapter(
+                "IFS",
+                [
+                    ("2026-05-30T00:00:00Z", True),
+                ],
+            ),
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 2
+    assert [
+        (call["source"], call["cycle_time"])
+        for call in orchestrator.calls
+    ] == [("gfs", _dt("2026-05-30T00:00:00Z")), ("IFS", _dt("2026-05-30T00:00:00Z"))]
+
+
+def test_backfill_defers_later_source_cycle_until_global_oldest_cycle_is_done(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-06-06T16:24:00Z"),
+        sources=("gfs", "IFS"),
+        dry_run=False,
+        backfill_enabled=True,
+        lookback_hours=168,
+        cycle_lag_hours=16,
+        max_cycles_per_source=8,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter("gfs", [("2026-05-30T00:00:00Z", True)]),
+            "IFS": FakeAdapter("IFS", [("2026-05-30T06:00:00Z", True)]),
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert [
+        (call["source"], call["cycle_time"])
+        for call in orchestrator.calls
+    ] == [("gfs", _dt("2026-05-30T00:00:00Z"))]
+    deferred = [
+        item
+        for item in result.evidence["source_cycles"]
+        if item.get("type") == "backfill_deferred"
+        and item.get("reason") == "backfill_deferred_waiting_for_global_prior_cycle"
+    ]
+    assert [item["cycle_id"] for item in deferred] == ["ifs_2026053006"]
+
+
+def test_backfill_selects_earliest_durable_incomplete_cycle_before_later_download_gap(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-06-06T16:24:00Z"),
+        dry_run=False,
+        backfill_enabled=True,
+        lookback_hours=168,
+        cycle_lag_hours=16,
+        max_cycles_per_source=8,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    model = _model("model_a", "basin_a")
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([model]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    ("2026-05-30T00:00:00Z", True),
+                    ("2026-05-30T06:00:00Z", True),
+                    ("2026-05-30T18:00:00Z", True),
+                ],
+            )
+        },
+        active_repository=PerCycleCandidateStateRepository(
+            {
+                "2026-05-30T00:00:00+00:00": {"hydro_status": "frequency_done"},
+                "2026-05-30T06:00:00+00:00": {"forecast_cycle_status": "forcing_ready"},
+            }
+        ),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert orchestrator.calls[0]["cycle_time"] == _dt("2026-05-30T06:00:00Z")
+    selected = [
+        item["cycle_id"]
+        for item in result.evidence["source_cycles"]
+        if "cycle_id" in item and item.get("type") != "backfill_deferred"
+    ]
+    deferred = [
+        item["cycle_id"]
+        for item in result.evidence["source_cycles"]
+        if item.get("type") == "backfill_deferred"
+    ]
+    assert selected == ["gfs_2026053006"]
+    assert deferred == ["gfs_2026053018"]
+
+
+def test_backfill_skips_unavailable_gap_and_selects_oldest_available_for_warm_start(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-21T18:00:00Z"),
+        dry_run=False,
+        backfill_enabled=True,
+        max_cycles_per_source=8,
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    (
+                        "2026-05-21T00:00:00Z",
+                        False,
+                        {"reason": "source_cycle_unavailable", "retryable": True},
+                    ),
+                    ("2026-05-21T06:00:00Z", True),
+                    ("2026-05-21T12:00:00Z", True),
+                ],
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert result.evidence["counts"]["source_cycle_count"] == 1
+    assert orchestrator.calls[0]["cycle_time"] == _dt("2026-05-21T06:00:00Z")
+    unavailable = next(item for item in result.evidence["source_cycles"] if item["cycle_id"] == "gfs_2026052100")
+    assert unavailable["selection_status"] == "not_selected"
+    assert unavailable["selection_reason"] == "source_cycle_unavailable_does_not_consume_source_budget"
+    deferred = [
+        item
+        for item in result.evidence["source_cycles"]
+        if item.get("type") == "backfill_deferred"
+    ]
+    assert [item["cycle_id"] for item in deferred] == ["gfs_2026052112"]
+    audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "gfs")
+    assert audit["gap_count"] == 3
+    assert audit["available_gap_count"] == 2
+    assert audit["unavailable_gap_count"] == 1
+    assert audit["selected_count"] == 1
+    assert audit["deferred_count"] == 1
+
+
 def test_manual_retry_marker_override_helper_never_overrides_active_blocker() -> None:
     assert (
         scheduler_module._manual_retry_marker_overrides_blocker(
@@ -6636,6 +7326,25 @@ def test_manual_retry_marker_override_helper_never_overrides_active_blocker() ->
             },
         )
         is False
+    )
+
+
+def test_manual_retry_marker_bound_to_terminal_blocker_overrides_newer_blocker_timestamp() -> None:
+    assert (
+        scheduler_module._manual_retry_marker_overrides_blocker(
+            {
+                "timestamp": _dt("2026-05-21T06:30:00Z"),
+                "attempt": 2,
+                "previous_job_id": "job_failed",
+            },
+            {
+                "timestamp": _dt("2026-05-21T06:31:00Z"),
+                "attempt": 0,
+                "job_id": "job_failed",
+                "active": False,
+            },
+        )
+        is True
     )
 
 
@@ -8689,6 +9398,8 @@ def test_plan_production_no_flag_uses_env_roots_and_records_runtime_evidence(
     assert runtime_config["sources"] == ["gfs"]
     assert runtime_config["model_ids"] == ["model_a"]
     assert runtime_config["basin_ids"] == ["basin_a"]
+    assert runtime_config["lookback_hours"] == 24
+    assert runtime_config["cycle_lag_hours"] == 0
     assert payload["counts"]["submitted_count"] == 0
     assert not (tmp_path / ".nhms-workspace").exists()
 
@@ -9600,6 +10311,64 @@ def test_plan_production_cli_explicit_max_cycles_one_overrides_scheduler_env(
     assert captured["config"].max_cycles_per_source == 1
 
 
+def test_plan_production_cli_uses_scheduler_env_cycle_lag_when_omitted(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned"})
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_CYCLE_LAG_HOURS", "16")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production"])
+
+    assert rc == 0
+    assert captured["config"].cycle_lag_hours == 16
+
+
+def test_plan_production_cli_explicit_cycle_lag_overrides_scheduler_env(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, ProductionSchedulerConfig] = {}
+
+    class FakeScheduler:
+        def __init__(self, config: ProductionSchedulerConfig) -> None:
+            captured["config"] = config
+
+        @classmethod
+        def from_env(cls, config: ProductionSchedulerConfig) -> FakeScheduler:
+            return cls(config)
+
+        def run_once(self) -> SimpleResult:
+            return SimpleResult({"status": "planned"})
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("NHMS_SCHEDULER_CYCLE_LAG_HOURS", "16")
+    monkeypatch.setattr(cli, "ProductionScheduler", FakeScheduler)
+
+    rc = cli.main(["plan-production", "--cycle-lag-hours", "6"])
+
+    assert rc == 0
+    assert captured["config"].cycle_lag_hours == 6
+
+
 def test_plan_production_cli_rejects_non_positive_explicit_max_cycles(
     monkeypatch: Any,
     tmp_path: Path,
@@ -10072,6 +10841,43 @@ class PerModelCandidateStateRepository(FakeActiveRepository):
     ) -> dict[str, Any] | None:
         del source_id, cycle_time
         state = self.states.get(model_id)
+        if state is None:
+            return None
+        return {
+            **dict(state),
+            "run_id": run_id,
+            "forcing_version_id": forcing_version_id,
+            "candidate_id": candidate_id,
+        }
+
+
+class PerCycleCandidateStateRepository(FakeActiveRepository):
+    def __init__(self, states: dict[str, dict[str, Any] | None]) -> None:
+        super().__init__(active=False, completed=False)
+        self.states = states
+        self.queries: list[dict[str, Any]] = []
+
+    def candidate_state(
+        self,
+        *,
+        source_id: str,
+        cycle_time: datetime,
+        model_id: str,
+        run_id: str,
+        forcing_version_id: str,
+        candidate_id: str,
+    ) -> dict[str, Any] | None:
+        self.queries.append(
+            {
+                "source_id": source_id,
+                "cycle_time": cycle_time,
+                "model_id": model_id,
+                "run_id": run_id,
+                "forcing_version_id": forcing_version_id,
+                "candidate_id": candidate_id,
+            }
+        )
+        state = self.states.get(cycle_time.isoformat())
         if state is None:
             return None
         return {
@@ -11507,6 +12313,56 @@ def test_concurrency_stays_within_configured_bound(tmp_path: Path) -> None:
 
 def _read_lock(lock_path: Path) -> dict[str, Any]:
     return json.loads(lock_path.read_text(encoding="utf-8"))
+
+
+def test_scheduler_config_accepts_postgres_lock_backend(tmp_path: Path) -> None:
+    config = _config(tmp_path, scheduler_lock_backend="postgres")
+
+    assert config.scheduler_lock_backend == "postgres"
+
+
+def test_postgres_lock_backend_does_not_touch_file_guard(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    config = _config(
+        tmp_path,
+        dry_run=False,
+        database_url="postgresql://nhms:secret@db.prod.example/nhms",
+        scheduler_lock_backend="postgres",
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=FakeForcingProducer(),
+        orchestrator_factory=lambda _source_id: FakeProductionOrchestrator(expose_object_store=False),
+    )
+
+    def _unexpected_file_lock(self: Any, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
+        del self, pass_id, started_at
+        raise AssertionError("postgres lock backend must not use the file guard")
+
+    def _contended_postgres_lock(self: Any, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
+        del self, pass_id, started_at
+        return {
+            "acquired": False,
+            "contention": True,
+            "lock_path": str(config.lock_path),
+            "lock_type": "postgres_advisory",
+            "reason": "postgres_advisory_lock_contended",
+            "existing_lock": {"raw": None},
+        }
+
+    monkeypatch.setattr(FileSchedulerLease, "acquire", _unexpected_file_lock)
+    monkeypatch.setattr(PostgresSchedulerLease, "acquire", _contended_postgres_lock)
+
+    result = scheduler.run_once()
+
+    assert result.status == "lock_contended"
+    assert result.evidence["lock"]["lock_type"] == "postgres_advisory"
+    assert result.evidence["lock"]["reason"] == "postgres_advisory_lock_contended"
 
 
 def test_renew_bumps_heartbeat_seq_and_preserves_identity(tmp_path: Path) -> None:
