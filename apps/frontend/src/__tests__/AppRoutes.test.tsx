@@ -6043,7 +6043,7 @@ describe('App route state', () => {
 
       render(<App />)
 
-      expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+      expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
       await waitFor(() =>
         expect(useMonitoringStore.getState()).toMatchObject({
           source: 'IFS',
@@ -6051,7 +6051,7 @@ describe('App route state', () => {
         }),
       )
       expect(screen.queryByText('权限不足')).not.toBeInTheDocument()
-      expect(screen.getByRole('link', { name: /系统运维/ })).toHaveClass('border-accent')
+      expect(screen.getByRole('link', { name: /内部诊断/ })).toHaveClass('border-accent')
       expect(screen.getByRole('link', { name: /产品监控/ })).toHaveAttribute('href', '/monitoring')
       expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
       expect(screen.getByTestId('ops-manual-recovery-guidance')).not.toHaveTextContent(/display_readonly|27/)
@@ -6135,7 +6135,7 @@ describe('App route state', () => {
 
       render(<App />)
 
-      expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+      expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
       expect(screen.getAllByText(/display_readonly/).some((node) =>
         node.textContent?.includes('重试、取消和 Slurm 控制请求已禁用'),
       )).toBe(true)
@@ -6258,7 +6258,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() => expect(useMonitoringStore.getState().runtimeConfig).toMatchObject({
       service_role: 'display_readonly',
       control_mutations_enabled: false,
@@ -6340,7 +6340,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.queryByRole('row', { name: /stage-only-job/ })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /预报.*forecast.*failed/ }))
     expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
@@ -6450,7 +6450,7 @@ describe('App route state', () => {
 
       render(<App />)
 
-      expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+      expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
       const row = await screen.findByRole('row', { name: new RegExp(`run-ops-${status}`) })
       expect(within(row).getByRole('button', { name: /查看日志/ })).toBeVisible()
       expect(within(row).getByRole('button', { name: /重试/ })).toBeVisible()
@@ -6498,7 +6498,7 @@ describe('App route state', () => {
 
       render(<App />)
 
-      expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+      expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
       await user.click(await screen.findByRole('button', { name: /重试/ }))
 
       await waitFor(() => expect(vi.mocked(client.POST)).toHaveBeenCalledTimes(1))
@@ -6572,7 +6572,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.getByText(/当前 source\/cycle 的流水线阶段不可用：ops fixture API error/)).toBeInTheDocument()
   })
 
@@ -6613,7 +6613,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /重试/ })).toBeVisible()
     expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /查看日志/ })).toBeVisible()
@@ -6646,7 +6646,7 @@ describe('App route state', () => {
 
       render(<App />)
 
-      expect(await screen.findByRole('heading', { name: url.startsWith('/ops') ? '运维工作台' : '监控工作台' })).toBeInTheDocument()
+      expect(await screen.findByRole('heading', { name: url.startsWith('/ops') ? '内部诊断' : '监控工作台' })).toBeInTheDocument()
       await waitFor(() =>
         expect(useMonitoringStore.getState()).toMatchObject({
           source: 'ERA5',
@@ -6884,7 +6884,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect((await screen.findAllByText(new RegExp(`source=${unsupportedSource} 不支持`))).length).toBeGreaterThan(0)
     expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
     expect(fetchAll).not.toHaveBeenCalled()
@@ -6942,7 +6942,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect((await screen.findAllByText(errorPattern)).length).toBeGreaterThan(0)
     await waitFor(() => expect(screen.queryByRole('row', { name: /stale-default-run/ })).not.toBeInTheDocument())
 
@@ -7107,7 +7107,7 @@ describe('App route state', () => {
     render(<App />)
 
     expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
     await waitFor(() =>
       expect(useMonitoringStore.getState()).toMatchObject({
@@ -7237,7 +7237,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.queryByText('stale-running')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /预报.*forecast.*failed/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('row', { name: /stale-cycle-run/ })).not.toBeInTheDocument()
@@ -7353,7 +7353,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() =>
       expect(useMonitoringStore.getState()).toMatchObject({
         source: 'IFS',
@@ -7397,7 +7397,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() =>
       expect(useMonitoringStore.getState()).toMatchObject({
         source: 'GFS',
@@ -7491,7 +7491,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect((await screen.findAllByText(/严格 identity 参数不完整/)).length).toBeGreaterThan(0)
     expect(screen.queryByText('stale-running')).not.toBeInTheDocument()
     expect(screen.queryByRole('row', { name: /stale-strict-run/ })).not.toBeInTheDocument()
@@ -7531,7 +7531,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() =>
       expect(contexts).toEqual(expect.arrayContaining([
         { type: 'all', source: 'GFS', cycleTime: '2026-05-18T00:00:00.000Z', runId: 'run-strict', modelId: 'model-strict' },
@@ -7613,7 +7613,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
     render(<App />)
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() => expect(useMonitoringStore.getState().fetchAll).toHaveBeenCalled())
     contexts.length = 0
 
@@ -7775,7 +7775,7 @@ describe('App route state', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: '运维工作台' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /stale-retry-run/ })).toBeInTheDocument()
     expect(screen.getAllByText('old-stage').length).toBeGreaterThan(0)
 
@@ -7831,7 +7831,7 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByRole('alert')).toHaveTextContent('权限不足')
-    expect(screen.queryByRole('heading', { name: '运维工作台' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '内部诊断' })).not.toBeInTheDocument()
   })
 
   it.each(['model_admin', 'sys_admin'] as const)('routes /system/model-assets for %s and restores URL-selected detail', async (role) => {
