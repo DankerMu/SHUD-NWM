@@ -14,6 +14,7 @@ Requirement-driven tests for ``cross-cycle-warm-start-chaining`` spec:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,10 @@ def _dt(value: str) -> datetime:
 
 def _minute_time(value: str) -> float:
     return _dt(value).timestamp() / 60.0
+
+
+def _format_time_for_test(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +273,107 @@ def test_saved_state_finds_restart_from_object_store_output_directory_uri(tmp_pa
 
     assert captured["snapshot"].valid_time == _dt(t_next)
     assert captured["snapshot"].original_shud_filename == "demo.cfg.ic.update"
+    assert result["valid_time"] == t_next
+
+
+def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: Path) -> None:
+    from packages.common.state_cli import StateRunContext, save_state_for_run
+    from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager
+
+    object_root = tmp_path / "object-store"
+    workspace = tmp_path / "workspace"
+    run_id = "fcst_gfs_2026050100_demo_model"
+    output_dir = workspace / "runs" / run_id / "output" / "state_checkpoints"
+    output_dir.mkdir(parents=True)
+    t6 = _dt("2026-05-01T06:00:00Z")
+    t12 = _dt("2026-05-01T12:00:00Z")
+    f006 = output_dir / "demo.f006.cfg.ic.update"
+    f012 = output_dir / "demo.f012.cfg.ic.update"
+    f006.write_text(f"2 1 {_minute_time('2026-05-01T06:00:00Z'):.6f}\n1 0.1\n2 0.2\n1 0.0\n", encoding="utf-8")
+    f012.write_text(f"2 1 {_minute_time('2026-05-01T12:00:00Z'):.6f}\n1 0.3\n2 0.4\n1 0.0\n", encoding="utf-8")
+    (output_dir / "state_checkpoints.json").write_text(
+        json.dumps(
+            {
+                "checkpoints": [
+                    {
+                        "lead_hours": 6,
+                        "valid_time": _format_time_for_test(t6),
+                        "relative_path": "state_checkpoints/demo.f006.cfg.ic.update",
+                        "checkpoint_filename": "demo.f006.cfg.ic.update",
+                    },
+                    {
+                        "lead_hours": 12,
+                        "valid_time": _format_time_for_test(t12),
+                        "relative_path": "state_checkpoints/demo.f012.cfg.ic.update",
+                        "checkpoint_filename": "demo.f012.cfg.ic.update",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, Any] = {"snapshots": []}
+
+    class _Repo(PsycopgStateSnapshotRepository):
+        def __init__(self) -> None:
+            pass
+
+        def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
+            del model_id, valid_time
+            return None
+
+        def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
+            captured["snapshots"].append(snapshot)
+            return snapshot
+
+        def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
+            return next((item for item in captured["snapshots"] if item.state_id == state_id), None)
+
+        def insert_qc_result(self, record: Any) -> dict[str, Any]:
+            captured.setdefault("qc_records", []).append(record)
+            return {}
+
+        def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None:
+            del usable_flag
+            return self.get_state_snapshot(state_id)
+
+    class _RunRepo:
+        def load_run_context(self, _run_id: str) -> StateRunContext:
+            return StateRunContext(
+                run_id=run_id,
+                model_id="demo_model",
+                end_time=_dt("2026-05-08T00:00:00Z"),
+                output_uri=None,
+                source_id="GFS",
+                cycle_time=_dt("2026-05-01T00:00:00Z"),
+                model_package_version="s3://nhms/models/demo_model/package/",
+                model_package_checksum="package-sha-1",
+            )
+
+    manager = StateManager(repository=_Repo(), object_store=LocalObjectStore(object_root, ""))
+
+    result = save_state_for_run(run_id, manager=manager, repository=_RunRepo(), workspace_root=workspace)
+
+    snapshots = captured["snapshots"]
+    assert [snapshot.valid_time for snapshot in snapshots] == [t6, t12]
+    assert [snapshot.original_shud_filename for snapshot in snapshots] == [
+        "demo.f006.cfg.ic.update",
+        "demo.f012.cfg.ic.update",
+    ]
+    assert [snapshot.source_id for snapshot in snapshots] == ["GFS", "GFS"]
+    assert [snapshot.cycle_id for snapshot in snapshots] == ["gfs_2026050100", "gfs_2026050100"]
+    assert [snapshot.lead_hours for snapshot in snapshots] == [6, 12]
+    assert [snapshot.model_package_version for snapshot in snapshots] == [
+        "s3://nhms/models/demo_model/package/",
+        "s3://nhms/models/demo_model/package/",
+    ]
+    assert [snapshot.model_package_checksum for snapshot in snapshots] == ["package-sha-1", "package-sha-1"]
+    assert [item["valid_time"] for item in result["checkpoints"]] == [
+        "2026-05-01T06:00:00Z",
+        "2026-05-01T12:00:00Z",
+    ]
+    assert [item["lead_hours"] for item in result["checkpoints"]] == [6, 12]
     assert result["state_uri"].endswith("state.cfg.ic")
 
 

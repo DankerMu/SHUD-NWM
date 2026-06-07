@@ -3029,6 +3029,10 @@ class ForecastOrchestrator:
             "residual_blockers": [dict(item) for item in assembly.residual_blockers],
         }
         manifest["runtime"]["init_mode"] = 3 if basin.get("init_state_id") or basin.get("init_state_uri") else 1
+        checkpoint_hours = _forecast_state_checkpoint_hours(manifest["forecast_horizon_hours"])
+        if checkpoint_hours:
+            manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours
+            manifest["runtime"]["update_ic_step_minutes"] = min(checkpoint_hours) * 60
         return manifest
 
     def _validate_forecast_runtime_manifest(
@@ -4399,7 +4403,7 @@ class ForecastOrchestrator:
         return scenario_for_source(source_id)
 
     def _build_run_manifest(self, context: ForecastRunContext) -> dict[str, Any]:
-        return {
+        manifest = {
             "run_id": context.run_id,
             "run_type": "forecast",
             "scenario_id": context.scenario_id,
@@ -4447,6 +4451,11 @@ class ForecastOrchestrator:
                 "gis_segment_count": context.segment_count,
             },
         }
+        checkpoint_hours = _forecast_state_checkpoint_hours(context.forecast_horizon_hours)
+        if checkpoint_hours:
+            manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours
+            manifest["runtime"]["update_ic_step_minutes"] = min(checkpoint_hours) * 60
+        return manifest
 
     def _state_passes_qc(self, state: StateSnapshot) -> bool:
         """Selection-time QC gate for a warm-start candidate.
@@ -4482,7 +4491,7 @@ class ForecastOrchestrator:
         # Fallback loop: reject incompatible-lineage / failed-QC candidates and try
         # the next older usable state, never failing the cycle for a missing successor.
         for _ in range(_MAX_STATE_FALLBACK_CANDIDATES):
-            state = self.state_manager.get_latest_usable_state(model_id=model_id, before_time=cursor)
+            state = self._exact_or_latest_usable_state(model_id=model_id, cycle_time=cycle_time, before_time=cursor)
             if state is None:
                 return InitialStateSelection(
                     None, None, None, None, "cold_start_no_state", rejection_code=last_rejection_code
@@ -4536,6 +4545,23 @@ class ForecastOrchestrator:
         return InitialStateSelection(
             None, None, None, None, "cold_start_no_state", rejection_code=last_rejection_code
         )
+
+    def _exact_or_latest_usable_state(
+        self,
+        *,
+        model_id: str,
+        cycle_time: datetime,
+        before_time: datetime,
+    ) -> StateSnapshot | None:
+        if self.state_manager is None:
+            return None
+        repository = getattr(self.state_manager, "repository", None)
+        exact_provider = getattr(repository, "get_state_snapshot_by_model_time", None)
+        if callable(exact_provider) and _ensure_utc(before_time) == _ensure_utc(cycle_time):
+            exact = exact_provider(model_id=model_id, valid_time=_ensure_utc(cycle_time))
+            if exact is not None and exact.usable_flag:
+                return exact
+        return self.state_manager.get_latest_usable_state(model_id=model_id, before_time=before_time)
 
     def _write_run_manifest(self, context: ForecastRunContext | AnalysisRunContext, manifest: dict[str, Any]) -> None:
         content = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
@@ -7558,6 +7584,14 @@ def _ifs_max_lead_hours_for_cycle(cycle_time: datetime) -> int | None:
     if hour in {0, 12}:
         return 168
     return None
+
+
+def _forecast_state_checkpoint_hours(forecast_horizon_hours: Any) -> list[int]:
+    try:
+        horizon = int(forecast_horizon_hours)
+    except (TypeError, ValueError):
+        return []
+    return [hour for hour in (6, 12) if hour <= horizon]
 
 
 def _elapsed_hours(start_time: datetime, end_time: datetime) -> int | None:

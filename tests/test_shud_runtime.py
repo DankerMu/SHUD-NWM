@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import sys
 import tarfile
@@ -12,7 +13,7 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
-from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, SHUDRuntimeError
+from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, SHUDRuntimeError, _StateCheckpointTracker
 
 
 class FakeHydroRunRepository:
@@ -229,6 +230,36 @@ def test_runtime_executes_mock_shud_and_updates_statuses(tmp_path: Path) -> None
     assert "MODEL_OUTPUT_INTERVAL = 1440" in cfg
     assert "INIT_MODE = 1" in cfg
     assert ".cfg.ic" not in cfg
+
+
+def test_state_checkpoint_tracker_captures_t6_t12_from_long_run_update(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest["end_time"] = "2026-05-08T00:00:00Z"
+    manifest["forecast_horizon_hours"] = 168
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    update_file = output_dir / "demo.cfg.ic.update"
+    tracker = _StateCheckpointTracker(manifest, output_dir)
+
+    update_file.write_text("2 1 29626920.000000\n1 0.1\n2 0.2\n1 0\n", encoding="utf-8")
+    tracker.capture_available()
+    update_file.write_text("2 1 29627280.000000\n1 0.3\n2 0.4\n1 0\n", encoding="utf-8")
+    tracker.capture_available()
+    tracker.write_manifest()
+
+    checkpoint_dir = output_dir / "state_checkpoints"
+    f006 = checkpoint_dir / "demo.f006.cfg.ic.update"
+    f012 = checkpoint_dir / "demo.f012.cfg.ic.update"
+    payload = json.loads((checkpoint_dir / "state_checkpoints.json").read_text(encoding="utf-8"))
+
+    assert f006.read_text(encoding="utf-8").startswith("2 1 29626920.000000")
+    assert f012.read_text(encoding="utf-8").startswith("2 1 29627280.000000")
+    assert [item["lead_hours"] for item in payload["checkpoints"]] == [6, 12]
+    assert [item["valid_time"] for item in payload["checkpoints"]] == [
+        "2026-05-01T06:00:00Z",
+        "2026-05-01T12:00:00Z",
+    ]
 
 
 def test_runtime_manifest_path_missing_raises_stable_manifest_error(tmp_path: Path) -> None:
@@ -800,12 +831,30 @@ def test_subprocess_timeout_bytes_are_decoded(tmp_path: Path, monkeypatch: pytes
     log_dir.mkdir(parents=True)
     cfg_path = workspace / "input" / "demo.cfg.para"
     cfg_path.parent.mkdir(parents=True)
-    cfg_path.write_text("START_TIME = 2026-05-01T00:00:00Z\n", encoding="utf-8")
+    cfg_path.write_text(
+        "START_TIME = 2026-05-01T00:00:00Z\n"
+        "END_TIME = 2026-05-04T00:00:00Z\n"
+        f"OUTPUT_DIR = {output_dir}\n"
+        "MODEL_OUTPUT_INTERVAL = 1440\n"
+        "SEGMENT_COUNT = 2\n"
+        "INIT_MODE = 1\n",
+        encoding="utf-8",
+    )
 
     def raise_timeout(*_args: Any, **_kwargs: Any) -> None:
-        raise subprocess.TimeoutExpired(["shud"], 1, output=b"stdout bytes", stderr=b"stderr bytes")
+        raise subprocess.TimeoutExpired(["shud"], 1)
 
-    monkeypatch.setattr("workers.shud_runtime.runtime.subprocess.run", raise_timeout)
+    monkeypatch.setattr(SHUDRuntime, "_wait_for_shud_process", raise_timeout)
+    def fake_popen(*_args: Any, **kwargs: Any) -> SimpleNamespace:
+        kwargs["stdout"].write("stdout bytes")
+        kwargs["stderr"].write("stderr bytes")
+        return SimpleNamespace(
+            args=["shud"],
+            kill=lambda: None,
+            wait=lambda timeout=None: None,
+        )
+
+    monkeypatch.setattr("workers.shud_runtime.runtime.subprocess.Popen", fake_popen)
 
     with pytest.raises(SHUDRuntimeError) as exc_info:
         runtime.run_shud(_manifest(), cfg_path, workspace, output_dir, log_dir)
@@ -905,7 +954,15 @@ def _run_shud_dirs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     log_dir.mkdir(parents=True)
     cfg_path = workspace / "input" / "demo.cfg.para"
     cfg_path.parent.mkdir(parents=True)
-    cfg_path.write_text("START_TIME = 2026-05-01T00:00:00Z\n", encoding="utf-8")
+    cfg_path.write_text(
+        "START_TIME = 2026-05-01T00:00:00Z\n"
+        "END_TIME = 2026-05-04T00:00:00Z\n"
+        f"OUTPUT_DIR = {output_dir}\n"
+        "MODEL_OUTPUT_INTERVAL = 1440\n"
+        "SEGMENT_COUNT = 2\n"
+        "INIT_MODE = 1\n",
+        encoding="utf-8",
+    )
     return workspace, output_dir, log_dir, cfg_path
 
 
@@ -998,17 +1055,12 @@ def test_run_shud_allows_valid_python_runtime_script(tmp_path: Path, monkeypatch
     repository = FakeHydroRunRepository()
     runtime = _runtime(tmp_path, repository)  # tests/mock_shud_omp.py
     workspace, output_dir, log_dir, cfg_path = _run_shud_dirs(tmp_path)
-    calls: list[list[str]] = []
-
-    def _ok(command: list[str], *_a: Any, **_k: Any) -> SimpleNamespace:
-        calls.append(command)
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
-
-    monkeypatch.setattr("workers.shud_runtime.runtime.subprocess.run", _ok)
+    del monkeypatch
 
     runtime.run_shud(_manifest(), cfg_path, workspace, output_dir, log_dir)
 
-    assert calls, "valid python runtime script must reach subprocess"
+    assert (output_dir / "demo.rivqdown").exists()
+    assert (log_dir / "shud_stdout.log").read_text(encoding="utf-8")
 
 
 def test_prepare_workspace_blocks_missing_project_inputs(tmp_path: Path) -> None:

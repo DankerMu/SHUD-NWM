@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat as stat_module
 import subprocess
 import sys
@@ -432,38 +433,56 @@ class SHUDRuntime:
             command_style=self.config.command_style,
             output_interval_minutes=self.config.output_interval_minutes,
         )
+        checkpoint_tracker = _StateCheckpointTracker(manifest, output_dir)
+        stdout_path = log_dir / "shud_stdout.log"
+        stderr_path = log_dir / "shud_stderr.log"
+        _ensure_directory(log_dir, containment_root=workspace)
         try:
-            completed = subprocess.run(
-                command,
-                cwd=workspace,
-                capture_output=True,
-                text=True,
-                timeout=self.config.timeout_seconds,
-                check=False,
-            )
+            with _open_log_file_no_follow(stdout_path, containment_root=log_dir) as stdout_file, (
+                _open_log_file_no_follow(stderr_path, containment_root=log_dir)
+            ) as stderr_file:
+                process = subprocess.Popen(
+                    command,
+                    cwd=workspace,
+                    text=True,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                )
+                self._wait_for_shud_process(process, manifest, checkpoint_tracker)
+        except OSError as error:
+            raise SHUDRuntimeError("SHUD_EXECUTION_FAILED", f"Failed to start SHUD executable: {error}") from error
         except subprocess.TimeoutExpired as error:
-            _write_text_no_follow(
-                log_dir / "shud_stdout.log",
-                _subprocess_output_text(error.stdout),
-                containment_root=log_dir,
-            )
-            _write_text_no_follow(
-                log_dir / "shud_stderr.log",
-                _subprocess_output_text(error.stderr),
-                containment_root=log_dir,
-            )
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
             message = f"SHUD executable timed out after {self.config.timeout_seconds}s"
             raise SHUDRuntimeError("SHUD_TIMEOUT", message) from error
 
-        _write_text_no_follow(log_dir / "shud_stdout.log", completed.stdout or "", containment_root=log_dir)
-        _write_text_no_follow(log_dir / "shud_stderr.log", completed.stderr or "", containment_root=log_dir)
-        if completed.returncode != 0:
-            detail = _last_lines(completed.stderr or "", 50)
+        if process.returncode != 0:
+            detail = _last_lines(_read_text_no_follow(stderr_path, containment_root=log_dir), 50)
             raise SHUDRuntimeError(
-                f"SHUD_EXIT_{completed.returncode}",
-                f"SHUD executable exited with code {completed.returncode}: {detail}",
+                f"SHUD_EXIT_{process.returncode}",
+                f"SHUD executable exited with code {process.returncode}: {detail}",
             )
+        checkpoint_tracker.capture_final()
+        checkpoint_tracker.write_manifest()
         _ensure_directory(output_dir)
+
+    def _wait_for_shud_process(
+        self,
+        process: subprocess.Popen[str],
+        manifest: dict[str, Any],
+        checkpoint_tracker: "_StateCheckpointTracker",
+    ) -> None:
+        deadline = time.monotonic() + self.config.timeout_seconds
+        while process.poll() is None:
+            checkpoint_tracker.capture_available()
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(process.args, self.config.timeout_seconds)
+            time.sleep(_state_checkpoint_poll_seconds(manifest))
+        checkpoint_tracker.capture_available()
 
     def _preflight_shud_executable(self) -> None:
         """Reject stub/missing SHUD executables before invoking the solver.
@@ -1130,6 +1149,19 @@ def _read_text_no_follow(path: Path, *, containment_root: Path) -> str:
     return _read_staged_bytes(path, root=containment_root).decode("utf-8")
 
 
+def _open_log_file_no_follow(path: Path, *, containment_root: Path) -> Any:
+    try:
+        _ensure_relative_to_root(path, containment_root)
+    except SafeFilesystemError as error:
+        raise SHUDRuntimeError("WORKSPACE_PATH_UNSAFE", f"Unsafe workspace log target {path}: {error}") from error
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o644)
+    except OSError as error:
+        raise SHUDRuntimeError("WORKSPACE_PATH_UNSAFE", f"Unsafe workspace log target {path}: {error}") from error
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
 def _read_runtime_manifest_text_no_follow(path: Path) -> str:
     try:
         return _read_text_no_follow(path, containment_root=path.parent)
@@ -1672,6 +1704,102 @@ def _shift_cfg_ic_time(path: Path, start_time: datetime) -> None:
     header[minute_index] = f"{_ensure_utc(start_time).timestamp() / 60.0:.6f}"
     lines[0] = "\t".join(header)
     _write_text_no_follow(path, "\n".join(lines) + "\n", containment_root=path.parent)
+
+
+class _StateCheckpointTracker:
+    def __init__(self, manifest: dict[str, Any], output_dir: Path) -> None:
+        self.manifest = manifest
+        self.output_dir = output_dir
+        self.start_time = _parse_time(manifest["start_time"])
+        self.project_name = _project_name(manifest)
+        self.source_path = output_dir / f"{self.project_name}.cfg.ic.update"
+        self.checkpoint_dir = output_dir / "state_checkpoints"
+        self.targets = {
+            int(hour): self.start_time + timedelta(hours=int(hour))
+            for hour in _state_checkpoint_hours(manifest)
+        }
+        self.captured: dict[int, dict[str, Any]] = {}
+
+    def capture_available(self) -> None:
+        if not self.targets:
+            return
+        header_minute = _read_cfg_ic_header_minute(self.source_path)
+        if header_minute is None:
+            return
+        for hour, valid_time in self.targets.items():
+            if hour in self.captured:
+                continue
+            if round(header_minute) != round(valid_time.timestamp() / 60.0):
+                continue
+            self._capture(hour, valid_time)
+
+    def capture_final(self) -> None:
+        self.capture_available()
+
+    def write_manifest(self) -> None:
+        if not self.captured:
+            return
+        _ensure_directory(self.checkpoint_dir, containment_root=self.output_dir)
+        checkpoints = [self.captured[hour] for hour in sorted(self.captured)]
+        _write_text_no_follow(
+            self.checkpoint_dir / "state_checkpoints.json",
+            json.dumps({"checkpoints": checkpoints}, indent=2, sort_keys=True) + "\n",
+            containment_root=self.output_dir,
+        )
+
+    def _capture(self, hour: int, valid_time: datetime) -> None:
+        _ensure_directory(self.checkpoint_dir, containment_root=self.output_dir)
+        target = self.checkpoint_dir / f"{self.project_name}.f{hour:03d}.cfg.ic.update"
+        shutil.copyfile(self.source_path, target)
+        self.captured[hour] = {
+            "lead_hours": hour,
+            "valid_time": _format_time(valid_time),
+            "path": str(target),
+            "relative_path": str(target.relative_to(self.output_dir)),
+            "original_shud_filename": self.source_path.name,
+            "checkpoint_filename": target.name,
+            "checksum": sha256_bytes(_read_staged_bytes(target, root=self.output_dir)),
+        }
+
+
+def _state_checkpoint_hours(manifest: dict[str, Any]) -> list[int]:
+    runtime = manifest.get("runtime") or {}
+    raw = runtime.get("state_checkpoint_hours") or runtime.get("state_checkpoints_hours") or []
+    if isinstance(raw, str):
+        values = [item.strip() for item in raw.split(",")]
+    elif isinstance(raw, list | tuple):
+        values = list(raw)
+    else:
+        values = []
+    hours: list[int] = []
+    horizon = _forecast_horizon_hours(manifest)
+    for value in values:
+        try:
+            hour = int(value)
+        except (TypeError, ValueError):
+            continue
+        if hour > 0 and (horizon is None or hour <= horizon) and hour not in hours:
+            hours.append(hour)
+    return sorted(hours)
+
+
+def _forecast_horizon_hours(manifest: dict[str, Any]) -> int | None:
+    value = manifest.get("forecast_horizon_hours") or (manifest.get("identity") or {}).get("forecast_horizon_hours")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _state_checkpoint_poll_seconds(manifest: dict[str, Any]) -> float:
+    runtime = manifest.get("runtime") or {}
+    value = runtime.get("state_checkpoint_poll_seconds")
+    if value in (None, ""):
+        return 5.0
+    try:
+        return max(float(value), 0.1)
+    except (TypeError, ValueError):
+        return 5.0
 
 
 def _shud_forcing_station(manifest: dict[str, Any]) -> dict[str, Any]:

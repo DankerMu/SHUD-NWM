@@ -41,6 +41,16 @@ class FakeStateManager:
         ]
         return max(candidates, key=lambda snapshot: snapshot.valid_time) if candidates else None
 
+    @property
+    def repository(self) -> "FakeStateManager":
+        return self
+
+    def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
+        for snapshot in self.snapshots.values():
+            if snapshot.model_id == model_id and snapshot.valid_time == _dt(valid_time):
+                return snapshot
+        return None
+
     def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
         return self.snapshots.get(state_id)
 
@@ -108,6 +118,20 @@ def test_forecast_cold_starts_when_no_state_is_available(tmp_path: Path) -> None
     assert manifest["initial_state"]["state_id"] is None
     assert manifest["initial_state"]["quality"] == "cold_start_no_state"
     assert manifest["runtime"]["init_mode"] == 1
+
+
+def test_forecast_manifest_keeps_product_horizon_and_enables_state_checkpoints(tmp_path: Path) -> None:
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager())
+
+    orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    context, manifest = repository.created_runs[0]
+    assert context.forecast_horizon_hours == 168
+    assert manifest["forecast_horizon_hours"] == 168
+    assert manifest["end_time"] == "2026-05-08T00:00:00Z"
+    assert manifest["runtime"]["state_checkpoint_hours"] == [6, 12]
+    assert manifest["runtime"]["update_ic_step_minutes"] == 360
 
 
 def test_forecast_marks_soft_stale_state_as_degraded(tmp_path: Path) -> None:
