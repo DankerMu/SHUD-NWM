@@ -33,6 +33,7 @@ EXPECTED_MIGRATIONS = [
     "000027_cycle_status_canonical_incomplete.sql",
     "000028_state_lineage.sql",
     "000029_pipeline_reservation.sql",
+    "000030_qhh_latest_display_parsed_status_index.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -440,6 +441,7 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
 
 def test_qhh_latest_display_product_migration_matches_candidate_and_window_queries() -> None:
     migration = dict(_migration_sql())["000024_qhh_latest_display_product_indexes.sql"]
+    parsed_status_migration = dict(_migration_sql())["000030_qhh_latest_display_parsed_status_index.sql"]
     store_source = (
         Path(__file__).resolve().parents[1] / "packages" / "common" / "forecast_store.py"
     ).read_text(encoding="utf-8")
@@ -462,6 +464,15 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "hydro_run_ops_strict_identity_candidates_idx" not in migration
     assert "WHERE cycle_time IS NOT NULL" in migration
     assert "AND status IN ('frequency_done', 'published')" in migration
+    assert _index_columns_by_name(parsed_status_migration, "hydro_run_qhh_latest_candidate_parsed_idx") == (
+        "LOWER(source_id)",
+        "run_type",
+        "basin_version_id",
+        "cycle_time DESC",
+        "run_id DESC",
+    )
+    assert "WHERE cycle_time IS NOT NULL" in parsed_status_migration
+    assert "AND status IN ('parsed', 'frequency_done', 'published')" in parsed_status_migration
     assert _index_columns_by_name(migration, "basin_version_qhh_latest_lookup_idx") == (
         "basin_id",
         "basin_version_id",
@@ -499,8 +510,8 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
 
     assert "LOWER(h.source_id) = LOWER(%s)" in query_source
     assert "h.run_type = 'forecast'" in query_source
-    assert "h.status IN ('frequency_done', 'published')" in query_source
-    assert "h.status NOT IN ('frequency_done', 'published')" in query_source
+    assert "h.status IN ('parsed', 'frequency_done', 'published')" in query_source
+    assert "h.status NOT IN ('parsed', 'frequency_done', 'published')" in query_source
     assert "h.cycle_time IS NOT NULL" in query_source
     assert "QHH_LATEST_SEARCH_LIMIT" in query_source
     assert "QHH_LATEST_CONTEXT_LIMIT" in query_source

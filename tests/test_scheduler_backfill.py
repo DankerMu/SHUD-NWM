@@ -107,7 +107,8 @@ def test_backfill_selects_older_gap_over_newest_completed(tmp_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Requirement: budget cap -> newest N gaps selected, rest deferred.
+# Requirement: production backfill advances the oldest gap first so warm-start
+# state dependencies stay ordered; later gaps wait for the prior cycle.
 # ---------------------------------------------------------------------------
 def test_backfill_budget_cap_defers_excess_gaps(tmp_path: Path) -> None:
     now = _dt("2026-05-21T18:00:00Z")
@@ -130,13 +131,15 @@ def test_backfill_budget_cap_defers_excess_gaps(tmp_path: Path) -> None:
 
     cycles, evidence = scheduler._discover_cycles(now, models=models)
     selected = [scheduler_module._format_utc(c.discovery.cycle_time) for c in cycles]
-    assert selected == ["2026-05-21T06:00:00Z", "2026-05-21T12:00:00Z"]  # sorted ascending by time
+    assert selected == ["2026-05-21T00:00:00Z"]
 
     deferred = [item for item in evidence if item.get("type") == "backfill_deferred"]
-    assert len(deferred) == 1
-    assert deferred[0]["cycle_time_utc"] == "2026-05-21T00:00:00Z"
-    assert deferred[0]["reason"] == "backfill_deferred_over_budget"
-    assert deferred[0]["status"] == "gap"
+    assert [item["cycle_time_utc"] for item in deferred] == [
+        "2026-05-21T06:00:00Z",
+        "2026-05-21T12:00:00Z",
+    ]
+    assert {item["reason"] for item in deferred} == {"backfill_deferred_waiting_for_prior_cycle"}
+    assert {item["status"] for item in deferred} == {"gap"}
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +253,7 @@ def test_run_once_backfill_disabled_evidence(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Requirement: no provider -> all treated as gap, newest-N, no exception.
+# Requirement: no provider -> all treated as gap, still oldest-first, no exception.
 # ---------------------------------------------------------------------------
 def test_backfill_without_completion_provider_treats_all_as_gap(tmp_path: Path) -> None:
     now = _dt("2026-05-21T18:00:00Z")
@@ -271,11 +274,13 @@ def test_backfill_without_completion_provider_treats_all_as_gap(tmp_path: Path) 
 
     cycles, evidence = scheduler._discover_cycles(now, models=models)
     selected = [scheduler_module._format_utc(c.discovery.cycle_time) for c in cycles]
-    assert selected == ["2026-05-21T06:00:00Z", "2026-05-21T12:00:00Z"]
+    assert selected == ["2026-05-21T00:00:00Z"]
 
     audit = next(item for item in evidence if item.get("type") == "backfill_audit")
     assert audit["complete_count"] == 0
     assert audit["gap_count"] == 3
+    assert audit["selected_count"] == 1
+    assert audit["deferred_count"] == 2
 
 
 def test_cycle_completion_status_without_models_is_gap(tmp_path: Path) -> None:
@@ -293,7 +298,8 @@ def test_cycle_completion_status_without_models_is_gap(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Requirement: 7-day window (lookback=168) spans multi-day discoveries.
+# Requirement: 7-day window (lookback=168) spans multi-day discoveries but
+# submits only the earliest gap until warm-start dependencies advance.
 # ---------------------------------------------------------------------------
 def test_backfill_seven_day_window_spans_multiple_days(tmp_path: Path) -> None:
     now = _dt("2026-05-21T00:00:00Z")
@@ -318,14 +324,18 @@ def test_backfill_seven_day_window_spans_multiple_days(tmp_path: Path) -> None:
     cycles, evidence = scheduler._discover_cycles(now, models=models)
     selected = {scheduler_module._format_utc(c.discovery.cycle_time) for c in cycles}
 
-    assert selected == {
-        "2026-05-20T12:00:00Z",
-        "2026-05-17T00:00:00Z",
-        "2026-05-15T00:00:00Z",
-    }
+    assert selected == {"2026-05-15T00:00:00Z"}
     assert "2026-05-13T00:00:00Z" not in selected
+    deferred = [item for item in evidence if item.get("type") == "backfill_deferred"]
+    assert [item["cycle_time_utc"] for item in deferred] == [
+        "2026-05-17T00:00:00Z",
+        "2026-05-20T12:00:00Z",
+    ]
+    assert {item["reason"] for item in deferred} == {"backfill_deferred_waiting_for_prior_cycle"}
     audit = next(item for item in evidence if item.get("type") == "backfill_audit")
     assert audit["discovered_count"] == 3
+    assert audit["selected_count"] == 1
+    assert audit["deferred_count"] == 2
 
 
 # ---------------------------------------------------------------------------

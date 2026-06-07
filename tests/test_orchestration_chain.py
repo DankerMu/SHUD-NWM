@@ -250,6 +250,30 @@ class PublishFailureSlurmClient(FakeCycleSlurmClient):
         return super().get_job_status(job_id)
 
 
+def _successful_control_node_publisher(calls: list[dict[str, Any]] | None = None) -> type:
+    class _PublishedResult:
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "cycle_id": "gfs_2026050100",
+                "status": "published",
+                "layers": [{"layer_id": "q-down:gfs_2026050100"}],
+                "artifacts": [],
+                "lineage": {"cycle_id": "gfs_2026050100"},
+            }
+
+    class _ControlNodePublisher:
+        def __init__(self, **kwargs: Any) -> None:
+            if calls is not None:
+                calls.append({"init": dict(kwargs)})
+
+        def publish_cycle(self, cycle_id: str) -> _PublishedResult:
+            if calls is not None:
+                calls.append({"cycle_id": cycle_id})
+            return _PublishedResult()
+
+    return _ControlNodePublisher
+
+
 class FakeCycleRepository:
     def __init__(self, *, active: bool = False) -> None:
         self.active = active
@@ -3695,6 +3719,7 @@ def test_direct_submit_success_with_immediate_terminal_publish_root_advertises_r
 ) -> None:
     published_root = tmp_path / "published"
     monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(published_root))
+    monkeypatch.setattr("services.orchestrator.chain.TilePublisher", _successful_control_node_publisher())
     repository = FakeCycleRepository()
     client = ImmediateTerminalSlurmClient()
     orchestrator = _orchestrator(tmp_path, repository, client)
@@ -4726,26 +4751,7 @@ def test_publish_stage_runs_on_control_node_when_published_root_configured(
     monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://")
 
     calls: list[dict[str, Any]] = []
-
-    class _PublishedResult:
-        def to_dict(self) -> dict[str, Any]:
-            return {
-                "cycle_id": "gfs_2026050100",
-                "status": "published",
-                "layers": [{"layer_id": "q-down:gfs_2026050100"}],
-                "artifacts": [],
-                "lineage": {"cycle_id": "gfs_2026050100"},
-            }
-
-    class _ControlNodePublisher:
-        def __init__(self, **kwargs: Any) -> None:
-            calls.append({"init": dict(kwargs)})
-
-        def publish_cycle(self, cycle_id: str) -> _PublishedResult:
-            calls.append({"cycle_id": cycle_id})
-            return _PublishedResult()
-
-    monkeypatch.setattr("services.orchestrator.chain.TilePublisher", _ControlNodePublisher)
+    monkeypatch.setattr("services.orchestrator.chain.TilePublisher", _successful_control_node_publisher(calls))
 
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()

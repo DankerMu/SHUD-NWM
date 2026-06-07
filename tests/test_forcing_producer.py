@@ -1411,7 +1411,7 @@ def test_canonical_unit_mismatch_blocks_generation_before_forcing_records(tmp_pa
     assert repository.timeseries == []
 
 
-def test_warn_precipitation_or_radiation_products_do_not_enter_ok_forcing(tmp_path: Path) -> None:
+def test_warn_precipitation_or_radiation_products_enter_forcing_with_quality_evidence(tmp_path: Path) -> None:
     for variable in ("prcp_rate_or_amount", "shortwave_down"):
         store, repository = _build_repository(tmp_path / variable)
         repository.products = tuple(
@@ -1420,10 +1420,15 @@ def test_warn_precipitation_or_radiation_products_do_not_enter_ok_forcing(tmp_pa
         )
         producer = _build_producer(tmp_path / variable, repository, store)
 
-        with pytest.raises(ForcingProductionError, match=variable):
-            producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
+        result = producer.produce(source_id="gfs", cycle_time="2026050700", model_id="demo_model")
 
-        assert repository.forcing_versions == {}
+        assert result.status == "forcing_ready"
+        assert result.forcing_version_id in repository.forcing_versions
+        package_root = tmp_path / variable / result.forcing_package_uri.strip("/")
+        manifest = json.loads((package_root / "forcing_package.json").read_text(encoding="utf-8"))
+        assert manifest["quality_flags"]["canonical_products"] == ["ok", "warn"]
+        lineage = repository.forcing_versions[result.forcing_version_id]["lineage_json"]
+        assert lineage["quality_flags"]["canonical_products"] == ["ok", "warn"]
 
 
 def test_streaming_field_read_retains_only_required_interpolation_cells(tmp_path: Path) -> None:
