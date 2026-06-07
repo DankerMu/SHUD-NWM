@@ -2,7 +2,17 @@
 
 > 跨 session 继承的进度索引：只记**当前到哪了 + 边界 + 入口**。逐 commit/逐缺陷细节以 GitHub issue、PR、OpenSpec、runbook 为准，不在此重复。
 
-## 最新（2026-06-06）
+## 最新（2026-06-07）
+
+**node-27 开发地基就位**（master 直推 `661da44`）——22 业务化稳定后转入 27（`display_readonly`）前端生产化开发，先把流程/文档/CI 铺稳：
+
+1. **m25 change**（`openspec/changes/m25-multibasin-frontend-production/`，多流域前端生产化）已 spec 化并过 codex 三路审核——**P0 修正**：洪水重现期可用性从"进 blocking reasons"改为 `availability.return_period_status` **独立 supplemental 字段**（否则有 q_down 无洪频基线的产品会整体掉 ready/404）；已拆 GitHub issue（并行起点 #310/#311/#313/#317）。
+2. **三节点协作固化**：`CLAUDE.md` 双端→三端（27=`nwm@…27:/home/nwm/NWM`），新增**验证 oracle 路由**（后端→22 真 DB pytest / display→27 live receipt / 本地→ruff·openspec·pnpm）+ 远端 ff-only 同步纪律；`dual-end-issue-workflow` skill 同步扩成"双 oracle"（含 node-27 recipes：**开发期本地起服务非 docker、fail-closed ff 恢复**）。
+3. **CI 按路径 scope**（`ci.yml`，`dorny/paths-filter`）：纯前端/docs PR 跳过 16min 后端 pytest；**draft PR=定向快速通道 / ready·master=全量合并门**（忘标 draft→默认全量，fail-safe）；`concurrency` cancel-in-progress；暂停遗留 `frontend-m15-visual`。master 无 branch protection=**人工合并门**。约定见 `CLAUDE.md`「CI 范围与门控」。
+4. **node-27 已追平 master**（`/home/nwm/NWM`），2026-05-27 生产 E2E 记录已 `git stash` 保全。
+5. **27 上线 = C1–C4 live receipt**（部署/只读 DB denied-write/cross-plane identity/浏览器 e2e），清单见 `docs/runbooks/node-27-bringup-checklist.md`。
+
+## 2026-06-06
 
 **业务化运行韧性硬化批次**（master 直推 + PR #308）——node-22 业务化运行后回传一批生产化改造：
 
