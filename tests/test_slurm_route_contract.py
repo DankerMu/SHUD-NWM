@@ -231,6 +231,8 @@ def test_object_store_roots_exported_to_template(monkeypatch, tmp_path):
                 "manifest": {
                     "object_store_root": "/durable/object-store",
                     "object_store_prefix": "forecast/cycle_001",
+                    "published_artifact_root": "/published",
+                    "published_artifact_uri_prefix": "published://",
                 },
             },
         )
@@ -238,6 +240,8 @@ def test_object_store_roots_exported_to_template(monkeypatch, tmp_path):
     assert response.status_code == 201
     assert "export OBJECT_STORE_ROOT=/durable/object-store" in captured["script"]
     assert "export OBJECT_STORE_PREFIX=forecast/cycle_001" in captured["script"]
+    assert "export NHMS_PUBLISHED_ARTIFACT_ROOT=/published" in captured["script"]
+    assert "export NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://" in captured["script"]
 
 
 def test_route_object_store_prefix_quote_breakout_is_shell_quoted(monkeypatch, tmp_path):

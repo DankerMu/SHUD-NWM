@@ -2169,6 +2169,10 @@ def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> No
         "payload": {"tasks": [{}, {}]},
     }
     orchestrator = _orchestrator(tmp_path, repository, client)
+    orchestrator.object_store.write_bytes_atomic(
+        "raw/gfs/2026050100/manifest.json",
+        b'{"source_id":"GFS"}',
+    )
 
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
@@ -5138,7 +5142,7 @@ def test_trigger_ready_forecasts_rejects_non_ok_canonical_row_before_submission(
         for row in canonical_products
         if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 3
     )
-    rejected["quality_flag"] = "warn"
+    rejected["quality_flag"] = "fail"
     repository = ReadyForecastRepository(cycle_time=cycle_time, canonical_products=canonical_products)
     client = ImmediateTerminalSlurmClient()
     _patch_auto_trigger_identity(monkeypatch, policy=current_policy, source_object=current_object)
@@ -5153,7 +5157,7 @@ def test_trigger_ready_forecasts_rejects_non_ok_canonical_row_before_submission(
     assert outcome["reason"] == "missing_canonical_leads"
     evidence = outcome["state_evidence"]["canonical_readiness"]
     assert evidence["ready"] is False
-    assert evidence["rejected_quality_flags"] == {"warn": 1}
+    assert evidence["rejected_quality_flags"] == {"fail": 1}
     assert evidence["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
 
 
@@ -5599,6 +5603,22 @@ def test_template_export_lines_omits_grib_env_when_unset(monkeypatch):
     expected_venv = shlex.quote(str((Path.cwd() / ".venv" / "bin").resolve()))
     assert f"export PATH={expected_venv}:$PATH" in lines
     assert not any(line.startswith("export LD_LIBRARY_PATH=") for line in lines)
+
+
+def test_template_export_lines_includes_published_artifact_root(monkeypatch):
+    from services.orchestrator.chain import _template_export_lines
+
+    monkeypatch.delenv("NHMS_GRIB_ENV_ROOT", raising=False)
+    lines = _template_export_lines(
+        {
+            "workspace_dir": "/work",
+            "published_artifact_root": "/ghdc/data/nwm/published",
+            "published_artifact_uri_prefix": "published://",
+        }
+    )
+
+    assert "export NHMS_PUBLISHED_ARTIFACT_ROOT=/ghdc/data/nwm/published" in lines
+    assert "export NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://" in lines
 
 
 def test_template_export_lines_quotes_grib_env_with_special_chars(monkeypatch):

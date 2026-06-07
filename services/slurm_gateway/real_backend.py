@@ -859,6 +859,8 @@ class RealSlurmGateway(SlurmGateway):
             "WORKSPACE_ROOT": context.get("workspace_dir", ""),
             "OBJECT_STORE_ROOT": context.get("object_store_root", context.get("workspace_dir", "")),
             "OBJECT_STORE_PREFIX": context.get("object_store_prefix", ""),
+            "NHMS_PUBLISHED_ARTIFACT_ROOT": context.get("published_artifact_root", ""),
+            "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX": context.get("published_artifact_uri_prefix", "published://"),
             "NHMS_RUN_ID": context.get("run_id", ""),
             "NHMS_MODEL_ID": context.get("model_id", ""),
             "NHMS_SOURCE_ID": context.get("source_id", "GFS"),

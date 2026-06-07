@@ -1123,6 +1123,8 @@ def test_safe_resource_profile_renders_manifest_identity_unchanged(monkeypatch, 
             "workspace_dir": str(tmp_path / "workspace"),
             "object_store_root": "/durable/object-store",
             "object_store_prefix": "prod/gfs",
+            "published_artifact_root": "/published",
+            "published_artifact_uri_prefix": "published://",
             "slurm_job_type_templates": dict(DEFAULT_JOB_TYPE_TEMPLATES),
         },
     )
@@ -1135,6 +1137,8 @@ def test_safe_resource_profile_renders_manifest_identity_unchanged(monkeypatch, 
     assert "export NHMS_CYCLE_ID=cycle_manifest" in captured["script"]
     assert "export OBJECT_STORE_ROOT=/durable/object-store" in captured["script"]
     assert "export OBJECT_STORE_PREFIX=prod/gfs" in captured["script"]
+    assert "export NHMS_PUBLISHED_ARTIFACT_ROOT=/published" in captured["script"]
+    assert "export NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://" in captured["script"]
 
 
 def test_resource_profile_safe_account_and_day_walltime_render(monkeypatch, tmp_path):
