@@ -390,13 +390,20 @@ function useStationInventory(
     servedKeyRef.current = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|||0`
   }, [product.forcing_version_id, product.source_id, product.cycle_time, initialPage, initialStations])
 
-  // Reset paging when filters change.
-  useEffect(() => {
-    setOffset(0)
-  }, [debouncedSearch, selectedVariables])
+  // Reset paging inline on filter change so a single effect issues exactly one request, instead of
+  // a separate reset effect firing a stale-offset request that gets immediately cancelled.
+  const filterKey = `${debouncedSearch}|${selectedVariables.join(',')}`
+  const filterKeyRef = useRef(filterKey)
+  const filterChanged = filterKeyRef.current !== filterKey
+  if (filterChanged) filterKeyRef.current = filterKey
+  const effectiveOffset = filterChanged ? 0 : offset
 
   useEffect(() => {
-    const queryKey = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|${debouncedSearch}|${selectedVariables.join(',')}|${offset}`
+    if (filterChanged && offset !== 0) setOffset(0)
+  }, [filterChanged, offset])
+
+  useEffect(() => {
+    const queryKey = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|${debouncedSearch}|${selectedVariables.join(',')}|${effectiveOffset}`
     if (queryKey === servedKeyRef.current) return
     servedKeyRef.current = queryKey
     let cancelled = false
@@ -406,7 +413,7 @@ function useStationInventory(
       search: debouncedSearch,
       variables: selectedVariables,
       limit: HYDRO_MET_STATION_LIMIT,
-      offset,
+      offset: effectiveOffset,
     }).then(
       (nextPage) => {
         if (cancelled) return
@@ -423,7 +430,7 @@ function useStationInventory(
     return () => {
       cancelled = true
     }
-  }, [product, debouncedSearch, selectedVariables, offset])
+  }, [product, debouncedSearch, selectedVariables, effectiveOffset])
 
   const filterAvailability = useMemo(() => hydroMetStationFilterAvailability(page), [page])
 
@@ -463,6 +470,10 @@ function useRiverSegmentInventory(
   const [riverSegments, setRiverSegments] = useState<HydroMetRiverSegmentFeature[]>(initialFeatures)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Sticky availability: once stream_order has been seen for this product identity, keep the
+  // filter control mounted even if the user filters the list down to an empty result — otherwise
+  // unmounting the control while min/max state persists would lock the user out of clearing it.
+  const [streamOrderSeen, setStreamOrderSeen] = useState(() => hydroMetStreamOrderAvailable(initialFeatures))
   const debouncedSearch = useDebouncedValue(search, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
   const debouncedMin = useDebouncedValue(streamOrderMin, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
   const debouncedMax = useDebouncedValue(streamOrderMax, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
@@ -476,17 +487,27 @@ function useRiverSegmentInventory(
     setCollection(initialCollection)
     setRiverSegments(initialFeatures)
     setError(null)
+    setStreamOrderSeen(hydroMetStreamOrderAvailable(initialFeatures))
     servedKeyRef.current = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}||||0`
   }, [product.forcing_version_id, product.source_id, product.cycle_time, initialCollection, initialFeatures])
 
+  // Filter signature drives paging reset. We compute the effective offset inline (resetting to 0
+  // when the filter changed) so a single effect issues exactly one request — instead of one effect
+  // resetting offset and a second effect firing a now-stale request that gets immediately cancelled.
+  const filterKey = `${debouncedSearch}|${debouncedMin}|${debouncedMax}`
+  const filterKeyRef = useRef(filterKey)
+  const filterChanged = filterKeyRef.current !== filterKey
+  if (filterChanged) filterKeyRef.current = filterKey
+  const effectiveOffset = filterChanged ? 0 : offset
+
   useEffect(() => {
-    setOffset(0)
-  }, [debouncedSearch, debouncedMin, debouncedMax])
+    if (filterChanged && offset !== 0) setOffset(0)
+  }, [filterChanged, offset])
 
   useEffect(() => {
     const minValue = parseStreamOrderInput(debouncedMin)
     const maxValue = parseStreamOrderInput(debouncedMax)
-    const queryKey = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|${debouncedSearch}|${minValue ?? ''}|${maxValue ?? ''}|${offset}`
+    const queryKey = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|${debouncedSearch}|${minValue ?? ''}|${maxValue ?? ''}|${effectiveOffset}`
     if (queryKey === servedKeyRef.current) return
     servedKeyRef.current = queryKey
     let cancelled = false
@@ -497,12 +518,13 @@ function useRiverSegmentInventory(
       streamOrderMin: minValue,
       streamOrderMax: maxValue,
       limit: HYDRO_MET_RIVER_SEGMENT_LIMIT,
-      offset,
+      offset: effectiveOffset,
     }).then(
       (nextCollection) => {
         if (cancelled) return
         setCollection(nextCollection)
         setRiverSegments(nextCollection.features)
+        if (hydroMetStreamOrderAvailable(nextCollection.features)) setStreamOrderSeen(true)
         setLoading(false)
       },
       (loadError) => {
@@ -514,10 +536,11 @@ function useRiverSegmentInventory(
     return () => {
       cancelled = true
     }
-  }, [product, debouncedSearch, debouncedMin, debouncedMax, offset])
+  }, [product, debouncedSearch, debouncedMin, debouncedMax, effectiveOffset])
 
-  // stream_order is only offered when the underlying river data carries the field.
-  const streamOrderAvailable = useMemo(() => hydroMetStreamOrderAvailable(riverSegments), [riverSegments])
+  // stream_order filter stays available once seen for this product identity (sticky), so filtering
+  // down to an empty result never unmounts the control and locks the user out of clearing it.
+  const streamOrderAvailable = streamOrderSeen || hydroMetStreamOrderAvailable(riverSegments)
 
   return {
     riverSegments,
@@ -556,16 +579,6 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
     setRiverForecastState({ kind: 'idle' })
   }, [product.forcing_version_id, product.source_id, product.cycle_time])
 
-  useEffect(() => {
-    if (selectedStationId !== null) return
-    setSelectedStationId(stations[0]?.station_id ?? null)
-  }, [stations, selectedStationId])
-
-  useEffect(() => {
-    if (selectedRiverSegmentId !== null) return
-    setSelectedRiverSegmentId(firstRiverSegmentId(riverSegments))
-  }, [riverSegments, selectedRiverSegmentId])
-
   const selectedStation = useMemo(
     () => stations.find((station) => station.station_id === selectedStationId) ?? null,
     [stations, selectedStationId],
@@ -574,6 +587,19 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
     () => riverSegments.find((feature) => riverSegmentId(feature) === selectedRiverSegmentId) ?? null,
     [riverSegments, selectedRiverSegmentId],
   )
+
+  // 自动补选基于"解析出的选中对象是否存在"，而非"id 是否为 null"。后端分页整页替换后，
+  // 上页选中项不在新页（selectedStation=null 但 id 非 null）时也会落到当前页首项，
+  // 不绘假数据、不跨页保留无效选中。
+  useEffect(() => {
+    if (selectedStation) return
+    setSelectedStationId(stations[0]?.station_id ?? null)
+  }, [stations, selectedStation])
+
+  useEffect(() => {
+    if (selectedRiverSegment) return
+    setSelectedRiverSegmentId(firstRiverSegmentId(riverSegments))
+  }, [riverSegments, selectedRiverSegment])
 
   useEffect(() => {
     if (!selectedStation) {
@@ -914,10 +940,23 @@ function RiverSegmentInventoryPanel({
               data-testid="hydro-met-river-stream-order-max"
             />
           </label>
+          {inventory.streamOrderMin || inventory.streamOrderMax ? (
+            <button
+              type="button"
+              className="h-9 cursor-pointer rounded border border-neutral-300 px-3 text-xs text-neutral-700 transition-colors hover:bg-neutral-100"
+              onClick={() => {
+                inventory.setStreamOrderMin('')
+                inventory.setStreamOrderMax('')
+              }}
+              data-testid="hydro-met-river-stream-order-clear"
+            >
+              清除筛选
+            </button>
+          ) : null}
         </div>
       ) : (
         <div className="mt-3 rounded border border-dashed border-neutral-300 bg-neutral-50 p-2 text-xs text-neutral-600" data-testid="hydro-met-river-stream-order-unavailable">
-          stream order 过滤不可用：底层河段数据不含 stream_order 字段。
+          stream order 过滤不可用：当前产品身份的河段数据未携带 stream_order 字段。
         </div>
       )}
 

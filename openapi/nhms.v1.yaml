@@ -709,7 +709,6 @@ paths:
           required: false
           schema:
             type: string
-            minLength: 1
           description: Target basin id for the latest display product. Defaults to basins_qhh when omitted, preserving backward compatibility for /api/v1/mvp/qhh/latest-product and M22 cross-plane callers.
         - name: run_id
           in: query

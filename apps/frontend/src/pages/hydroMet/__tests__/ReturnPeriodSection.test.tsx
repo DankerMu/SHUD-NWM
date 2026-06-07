@@ -157,4 +157,38 @@ describe('ProductStatusBar (#316)', () => {
     render(<ProductStatusBar product={product()} />)
     expect(client.GET).not.toHaveBeenCalled()
   })
+
+  it('does not mark cells ready when an unknown unavailable reason code is present (M-2)', () => {
+    // 未被任何桶（FORCING_ / RIVER|Q_DOWN|RUN_STATUS）认领的 reason code 不得静默落入绿色 ready。
+    render(
+      <ProductStatusBar
+        product={product({
+          availability: {
+            ...product().availability,
+            ready: true,
+            unavailable_reasons: [{ code: 'STRICT_IDENTITY_X', message: 'unknown reason' }],
+          },
+        })}
+      />,
+    )
+
+    const qDown = screen.getByTestId('hydro-met-status-q_down')
+    expect(qDown).not.toHaveAttribute('data-tone', 'ready')
+    expect(qDown).toHaveAttribute('data-tone', 'unavailable')
+    // The unknown reason code is surfaced honestly in the cell's detail (title) attribute.
+    expect(qDown.getAttribute('title')).toContain('STRICT_IDENTITY_X')
+  })
+
+  it('does not mark forcing/q_down ready when overall availability.ready is false (M-2)', () => {
+    render(
+      <ProductStatusBar
+        product={product({
+          availability: { ...product().availability, ready: false, unavailable_reasons: [] },
+        })}
+      />,
+    )
+
+    expect(screen.getByTestId('hydro-met-status-forcing')).not.toHaveAttribute('data-tone', 'ready')
+    expect(screen.getByTestId('hydro-met-status-q_down')).not.toHaveAttribute('data-tone', 'ready')
+  })
 })

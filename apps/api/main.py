@@ -329,6 +329,7 @@ def _custom_openapi_factory(api: FastAPI) -> Any:
         _patch_flood_duration_openapi(schema)
         _patch_station_series_openapi(schema)
         _patch_qhh_latest_product_openapi(schema)
+        _patch_met_stations_list_openapi(schema)
         _patch_layer_metadata_openapi(schema)
         _patch_pipeline_openapi(schema)
         _patch_runtime_openapi(schema)
@@ -351,6 +352,7 @@ def custom_openapi() -> dict[str, Any]:
     _patch_flood_duration_openapi(schema)
     _patch_station_series_openapi(schema)
     _patch_qhh_latest_product_openapi(schema)
+    _patch_met_stations_list_openapi(schema)
     _patch_layer_metadata_openapi(schema)
     _patch_pipeline_openapi(schema)
     _patch_runtime_openapi(schema)
@@ -455,6 +457,30 @@ def _patch_flood_duration_openapi(schema: dict) -> None:
         }
 
 
+def _patch_met_stations_list_openapi(schema: dict) -> None:
+    """Align the list-stations ``variables`` query schema with the static contract.
+
+    The route declares ``variables: list[str] | None`` so FastAPI binds repeated
+    params correctly, but it emits ``anyOf: [array, null]``. The published
+    contract advertises ``oneOf: [string, array]`` (repeat or comma-separate), so
+    we restore that documented form without touching the static spec / types.ts.
+    """
+    operation = schema.get("paths", {}).get("/api/v1/met/stations", {}).get("get")
+    if not operation:
+        return
+    for parameter in operation.get("parameters", []):
+        if parameter.get("name") != "variables":
+            continue
+        parameter["style"] = "form"
+        parameter["explode"] = True
+        parameter["schema"] = {
+            "oneOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}},
+            ]
+        }
+
+
 def _patch_layer_metadata_openapi(schema: dict) -> None:
     components = schema.setdefault("components", {}).setdefault("schemas", {})
     components.pop("Layer", None)
@@ -556,7 +582,7 @@ def _patch_qhh_latest_product_openapi(schema: dict) -> None:
             "name": "basin_id",
             "in": "query",
             "required": False,
-            "schema": {"type": "string", "minLength": 1},
+            "schema": {"type": "string"},
             "description": (
                 "Target basin id for the latest display product. Defaults to basins_qhh when omitted, "
                 "preserving backward compatibility for /api/v1/mvp/qhh/latest-product and M22 cross-plane callers."

@@ -27,8 +27,8 @@ async function loadDisplayBasins(): Promise<Basin[]> {
 interface BasinSelectorProps {
   /** Currently selected basin_id from URL/state; null means backend default basin. */
   selectedBasinId: string | null
-  /** Invoked with the chosen basin_id when the user switches basins. */
-  onSelect: (basinId: string) => void
+  /** Invoked with the chosen basin_id, or null to fall back to the backend default basin. */
+  onSelect: (basinId: string | null) => void
 }
 
 export function BasinSelector({ selectedBasinId, onSelect }: BasinSelectorProps) {
@@ -69,7 +69,12 @@ export function BasinSelector({ selectedBasinId, onSelect }: BasinSelectorProps)
           {state.message}
         </span>
       ) : null}
-      {state.kind === 'loaded' ? (
+      {state.kind === 'loaded' && state.basins.length === 0 ? (
+        <span className="text-xs text-neutral-600" data-testid="hydro-met-basin-empty">
+          暂无可展示流域（后端未返回任何 display 流域）。
+        </span>
+      ) : null}
+      {state.kind === 'loaded' && state.basins.length > 0 ? (
         <select
           aria-label="水文气象流域"
           data-testid="hydro-met-basin-select"
@@ -79,11 +84,15 @@ export function BasinSelector({ selectedBasinId, onSelect }: BasinSelectorProps)
           value={selectedBasinId ?? ''}
           onChange={(event) => {
             const next = event.target.value
-            if (next) onSelect(next)
+            // Empty value = explicit fall-back to backend default basin.
+            onSelect(next ? next : null)
           }}
         >
-          {selectedBasinId === null ? (
-            <option value="">默认流域</option>
+          {/* 始终保留默认流域空选项，允许从任意流域显式回退后端缺省。 */}
+          <option value="">默认流域</option>
+          {/* 陈旧/无效 id 不在已加载列表时渲染占位 option，避免受控 select 显示空白错位；不伪造身份。 */}
+          {selectedBasinId !== null && !state.basins.some((basin) => basin.basin_id === selectedBasinId) ? (
+            <option value={selectedBasinId}>未知流域: {selectedBasinId}</option>
           ) : null}
           {state.basins.map((basin) => (
             <option key={basin.basin_id} value={basin.basin_id}>

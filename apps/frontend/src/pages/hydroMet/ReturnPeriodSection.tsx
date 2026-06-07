@@ -105,11 +105,28 @@ function reasonCodes(reasons: { code?: string }[] | undefined): string[] {
   return (reasons ?? []).map((reason) => reason?.code).filter((code): code is string => typeof code === 'string')
 }
 
+function isForcingCode(code: string): boolean {
+  return code.startsWith('FORCING_')
+}
+
+function isQDownCode(code: string): boolean {
+  return code.includes('RIVER') || code.includes('Q_DOWN') || code.includes('RUN_STATUS')
+}
+
+// 诚实展示红线：只有产品整体 availability.ready === true 时，任一维度才有资格显示 ready。
+// 任何未被识别的 reason code（既不属 forcing 桶也不属 q_down 桶）不得静默落入绿色 ready，
+// 而是归入 q_down 桶显示为不可用——宁可保守标"不可用/未知"，绝不虚假肯定。
+function productReady(product: QhhLatestProduct): boolean {
+  return product.availability?.ready === true
+}
+
 function forcingTone(product: QhhLatestProduct): ProductStatusEntry {
-  // 产品被返回即整体 ready；shorter_horizon 是时效降级的诚实信号。
-  const reasons = reasonCodes(product.availability?.unavailable_reasons).filter((code) => code.startsWith('FORCING_'))
+  const reasons = reasonCodes(product.availability?.unavailable_reasons).filter(isForcingCode)
   if (reasons.length > 0) {
     return { key: 'forcing', label: '气象 forcing', tone: 'unavailable', detail: reasons.join(', ') }
+  }
+  if (!productReady(product)) {
+    return { key: 'forcing', label: '气象 forcing', tone: 'unavailable', detail: '产品整体不可用' }
   }
   if (product.shorter_horizon) {
     return { key: 'forcing', label: '气象 forcing', tone: 'degraded', detail: '可用时效短于预期' }
@@ -118,11 +135,15 @@ function forcingTone(product: QhhLatestProduct): ProductStatusEntry {
 }
 
 function qDownTone(product: QhhLatestProduct): ProductStatusEntry {
-  const reasons = reasonCodes(product.availability?.unavailable_reasons).filter(
-    (code) => code.includes('RIVER') || code.includes('Q_DOWN') || code.includes('RUN_STATUS'),
-  )
+  const allReasons = reasonCodes(product.availability?.unavailable_reasons)
+  // q_down 桶吸收自身明确 code，以及任何未被 forcing 桶认领的"未知" reason code，
+  // 避免未分类 code 漏到绿色 ready。
+  const reasons = allReasons.filter((code) => isQDownCode(code) || !isForcingCode(code))
   if (reasons.length > 0) {
     return { key: 'q_down', label: '河段流量 q_down', tone: 'unavailable', detail: reasons.join(', ') }
+  }
+  if (!productReady(product)) {
+    return { key: 'q_down', label: '河段流量 q_down', tone: 'unavailable', detail: '产品整体不可用' }
   }
   if (product.segment_count <= 0) {
     return { key: 'q_down', label: '河段流量 q_down', tone: 'degraded', detail: '无河段流量候选' }

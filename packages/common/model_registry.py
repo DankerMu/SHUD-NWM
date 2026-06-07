@@ -263,9 +263,17 @@ class PsycopgModelRegistryStore:
         self, *, limit: int, offset: int, has_display_product: bool = False
     ) -> list[dict[str, Any]]:
         # When has_display_product is true, restrict to basins that have at least
-        # one run in a display-ready status. The ready status set reuses the same
-        # single source of truth as latest-product (QHH_LATEST_READY_RUN_STATUSES)
-        # so discovery and availability never diverge.
+        # one run that the latest-product candidate query could surface. We align
+        # discovery with availability on the three run-level dimensions the
+        # candidate query also filters on (forecast_store latest-product):
+        #   - status ∈ QHH_LATEST_READY_RUN_STATUSES (single source of truth)
+        #   - run_type = 'forecast'
+        #   - cycle_time IS NOT NULL
+        # The source (GFS/IFS) and run_id dimensions are intentionally NOT pushed
+        # down here: discovery is source-agnostic (a basin with any forecast run
+        # should be discoverable); the concrete source/run_id is resolved later by
+        # the latest-product query. So this stays a superset on source but is exact
+        # on status/run_type/cycle_time.
         display_filter = ""
         parameters: tuple[Any, ...] = (limit, offset)
         if has_display_product:
@@ -277,6 +285,8 @@ class PsycopgModelRegistryStore:
                         ON hr.basin_version_id = bv.basin_version_id
                     WHERE bv.basin_id = core.basin.basin_id
                       AND hr.status::text = ANY(%s)
+                      AND hr.run_type = 'forecast'
+                      AND hr.cycle_time IS NOT NULL
                 )
                 """
             parameters = (list(QHH_LATEST_READY_RUN_STATUSES), limit, offset)

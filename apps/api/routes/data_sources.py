@@ -72,7 +72,7 @@ def list_met_stations(
         default=None,
         description="Case-insensitive substring match over station_id and station name.",
     ),
-    variables: str | list[str] | None = Query(
+    variables: list[str] | None = Query(
         default=None,
         description=(
             "Variable coverage filter. Repeat or comma-separate values "

@@ -47,9 +47,10 @@ describe('BasinSelector (#314)', () => {
     render(<BasinSelector selectedBasinId="basins_qhh" onSelect={vi.fn()} />)
 
     const select = await screen.findByTestId('hydro-met-basin-select')
-    // Options come from the response, not a hardcoded whitelist.
+    // Options come from the response, not a hardcoded whitelist. A persistent "default basin"
+    // empty option is always kept so the user can fall back to the backend default.
     const options = Array.from(select.querySelectorAll('option')).map((o) => o.getAttribute('value'))
-    expect(options).toEqual(['basins_qhh', 'basins_heihe'])
+    expect(options).toEqual(['', 'basins_qhh', 'basins_heihe'])
     expect(screen.getByRole('option', { name: '青海湖' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: '黑河' })).toBeInTheDocument()
 
@@ -108,5 +109,48 @@ describe('BasinSelector (#314)', () => {
     render(<BasinSelector selectedBasinId={null} onSelect={vi.fn()} />)
 
     await waitFor(() => expect(screen.getByTestId('hydro-met-basin-error')).toBeInTheDocument())
+  })
+
+  it('renders a placeholder option for a stale/unknown basin_id not in the loaded list (F-3)', async () => {
+    vi.mocked(client.GET).mockResolvedValueOnce({
+      data: success([basin()]),
+      error: undefined,
+    } as never)
+
+    render(<BasinSelector selectedBasinId="basins_gone" onSelect={vi.fn()} />)
+
+    const select = (await screen.findByTestId('hydro-met-basin-select')) as HTMLSelectElement
+    // The select stays on the stale id (no blank misalignment) via an explicit placeholder option.
+    expect(select.value).toBe('basins_gone')
+    expect(await screen.findByRole('option', { name: '未知流域: basins_gone' })).toBeInTheDocument()
+  })
+
+  it('keeps the default-basin option even after a basin is selected and allows falling back (F-3)', async () => {
+    vi.mocked(client.GET).mockResolvedValueOnce({
+      data: success([basin(), basin({ basin_id: 'basins_heihe', basin_name: '黑河' })]),
+      error: undefined,
+    } as never)
+    const onSelect = vi.fn()
+
+    render(<BasinSelector selectedBasinId="basins_heihe" onSelect={onSelect} />)
+
+    const select = await screen.findByTestId('hydro-met-basin-select')
+    // Default-basin option is still present even though a concrete basin is selected.
+    expect(screen.getByRole('option', { name: '默认流域' })).toBeInTheDocument()
+    // Selecting it falls back to the backend default via onSelect(null).
+    await userEvent.selectOptions(select, '')
+    expect(onSelect).toHaveBeenCalledWith(null)
+  })
+
+  it('shows an honest empty state when no display basins are returned (F-3)', async () => {
+    vi.mocked(client.GET).mockResolvedValueOnce({
+      data: success([]),
+      error: undefined,
+    } as never)
+
+    render(<BasinSelector selectedBasinId={null} onSelect={vi.fn()} />)
+
+    expect(await screen.findByTestId('hydro-met-basin-empty')).toBeInTheDocument()
+    expect(screen.queryByTestId('hydro-met-basin-select')).not.toBeInTheDocument()
   })
 })

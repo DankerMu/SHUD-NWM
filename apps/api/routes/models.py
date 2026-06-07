@@ -444,6 +444,17 @@ def list_river_segments(
     offset: int = Query(default=0, ge=0),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
+    if stream_order_min is not None and stream_order_max is not None and stream_order_min > stream_order_max:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="stream_order_min must be less than or equal to stream_order_max.",
+            details={
+                "field": "stream_order_min",
+                "stream_order_min": stream_order_min,
+                "stream_order_max": stream_order_max,
+            },
+        )
     try:
         data = store.list_river_segments(
             basin_version_id=basin_version_id,
