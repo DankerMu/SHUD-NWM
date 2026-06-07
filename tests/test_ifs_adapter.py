@@ -6,17 +6,21 @@ from dataclasses import replace
 from datetime import datetime
 from email.message import Message
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError
 
 import pytest
+import requests
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 
 base = importlib.import_module("workers.data_adapters.base")
 converter_module = importlib.import_module("workers.canonical_converter.converter")
+cli_module = importlib.import_module("workers.data_adapters.cli")
 ifs_module = importlib.import_module("workers.data_adapters.ifs_adapter")
 
+CycleDiscovery = base.CycleDiscovery
 DownloadManifest = base.DownloadManifest
 ManifestEntry = base.ManifestEntry
 parse_cycle_time = base.parse_cycle_time
@@ -183,6 +187,48 @@ def test_discover_cycles_normal_date_range_and_all_day_unavailable(tmp_path: Pat
     assert unavailable_repository.cycles == {}
 
 
+def test_ifs_cli_unavailable_cycle_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cycle_time = parse_cycle_time("2026053000")
+
+    class UnavailableIFSAdapter:
+        @classmethod
+        def from_env(cls) -> "UnavailableIFSAdapter":
+            return cls()
+
+        def discover_cycles(self, _cycle_date: object) -> list[CycleDiscovery]:
+            return [
+                CycleDiscovery(
+                    cycle_id="ifs_2026053000",
+                    source_id="IFS",
+                    cycle_time=cycle_time,
+                    cycle_hour=0,
+                    available=False,
+                    status="unavailable",
+                    reason="source_cycle_unavailable",
+                    classifier="unavailable",
+                    retryable=True,
+                )
+            ]
+
+    monkeypatch.setattr(cli_module, "IFSAdapter", UnavailableIFSAdapter)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module._download_ifs("2026053000")
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert "IFS data not yet available for 2026053000" in captured.err
+    assert json.loads(captured.out) == {
+        "files": 0,
+        "retry_count": 0,
+        "status": "unavailable",
+        "total_bytes_written": 0,
+    }
+
+
 def test_build_manifest_uses_cycle_specific_lead_policy_and_custom_hours(tmp_path: Path) -> None:
     adapter = build_adapter(tmp_path)
 
@@ -190,10 +236,16 @@ def test_build_manifest_uses_cycle_specific_lead_policy_and_custom_hours(tmp_pat
     manifest_06 = adapter.build_manifest("2026050106")
     custom = adapter.build_manifest("2026050112", forecast_hours=[0, 3, 6])
 
-    assert len(manifest_00.entries) == 57 * 8
+    assert len(manifest_00.entries) == 53 * 8
     assert manifest_00.metadata["max_lead_hours"] == 168
     assert manifest_00.entries[0].local_key == "raw/IFS/2026050100/ifs.t00z.f000.2t.grib2"
     assert manifest_00.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f168.str.grib2"
+    assert sorted({entry.forecast_hour for entry in manifest_00.entries if entry.forecast_hour > 144}) == [
+        150,
+        156,
+        162,
+        168,
+    ]
     assert adapter.object_store.exists("raw/IFS/2026050100/manifest.json")
 
     assert len(manifest_06.entries) == 49 * 8
@@ -735,10 +787,19 @@ def test_initialize_data_source_registers_correctly_and_is_idempotent(tmp_path: 
     assert source["native_format"] == "GRIB2"
     assert source["adapter_name"] == "ifs_adapter"
     assert source["config_json"]["lead_time_policy"]["06"] == 144
+    assert source["config_json"]["lead_time_policy"]["resolution_segments"] == [[144, 3], [360, 6]]
 
 
 def http_503(message: str = "SlowDown") -> HTTPError:
     return HTTPError("mock://ifs", 503, message, Message(), None)
+
+
+def requests_http_error(status_code: int, reason: str = "Slow Down") -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status_code
+    response.reason = reason
+    response.url = "mock://ifs"
+    return requests.HTTPError(f"{status_code} {reason}", response=response)
 
 
 def _single_entry_manifest(adapter: IFSAdapter) -> DownloadManifest:
@@ -773,7 +834,11 @@ def test_sources_omits_ecmwf_when_not_configured() -> None:
 
 @pytest.mark.parametrize(
     "raise_value",
-    [http_503("SlowDown"), RuntimeError("503 SlowDown: please reduce your request rate")],
+    [
+        http_503("SlowDown"),
+        requests_http_error(503, "Slow Down"),
+        RuntimeError("503 SlowDown: please reduce your request rate"),
+    ],
 )
 def test_http_503_or_slowdown_text_switches_mirror(tmp_path: Path, raise_value: Exception) -> None:
     calls: list[str] = []
@@ -797,6 +862,38 @@ def test_http_503_or_slowdown_text_switches_mirror(tmp_path: Path, raise_value: 
     assert result.status == "raw_complete"
     assert "://aws/" in calls[0]
     assert "://azure/" in calls[1]
+
+
+def test_real_download_path_caps_multiurl_retries_for_outer_mirror_switch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    adapter = build_adapter(tmp_path)
+
+    class FakeClient:
+        use_sas_token = False
+        verify = True
+        session = object()
+        preserve_request_order = False
+
+        def _get_urls(self, _request: dict[str, Any], *, target: str, use_index: bool) -> Any:
+            assert use_index is True
+            return SimpleNamespace(urls=["https://example.test/file.grib2"], target=target)
+
+    def fake_download(urls: Any, target: str, **kwargs: Any) -> int:
+        calls.append({"urls": urls, "target": target, **kwargs})
+        Path(target).write_bytes(b"GRIB capped retry payload")
+        return 25
+
+    monkeypatch.setattr("multiurl.download", fake_download)
+    adapter._client_for_source = lambda _source: FakeClient()  # type: ignore[method-assign]
+
+    payload = adapter._download_url("ecmwf-opendata://aws/ifs/2026050100/ifs.t00z.f000.2t.grib2", clip=False)
+
+    assert payload.content == b"GRIB capped retry payload"
+    assert calls[0]["maximum_retries"] == 1
+    assert calls[0]["retry_after"] == 0
 
 
 def test_all_cloud_mirrors_rate_limited_falls_back_to_ecmwf(tmp_path: Path) -> None:

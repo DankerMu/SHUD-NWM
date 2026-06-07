@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -93,8 +94,8 @@ GFS_IDX_FIELD_LEVEL: dict[str, tuple[str, str]] = {
 # Keep f000 in the manifest for instantaneous fields. The forcing producer maps
 # f003 interval products back onto the cycle-start SHUD forcing row.
 GFS_F000_UNAVAILABLE_VARIABLES: frozenset[str] = frozenset({"apcp", "dswrf"})
-GFS_IDX_SELECTOR_SCHEMA_VERSION = "gfs-idx-selector-v2"
-GFS_APCP_SELECTOR_POLICY = "cycle_cumulative_stepRange_0_fhr"
+GFS_IDX_SELECTOR_SCHEMA_VERSION = "gfs-idx-selector-v3"
+GFS_APCP_SELECTOR_POLICY = "prefer_cycle_cumulative_else_unique_interval_bucket"
 
 CDO_CLIP_TIMEOUT_SECONDS = 300
 
@@ -223,6 +224,27 @@ class DownloadedPayload:
     content: bytes
     checksum: str
     bytes_written: int
+
+
+@dataclass(frozen=True)
+class IdxSelection:
+    byte_range: tuple[int, int | None]
+    step_range: str | None = None
+    accumulation_type: str | None = None
+    record_number: int | None = None
+    selector_warning: str | None = None
+
+    def as_metadata(self) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        if self.step_range is not None:
+            metadata["step_range"] = self.step_range
+        if self.accumulation_type is not None:
+            metadata["accumulation_type"] = self.accumulation_type
+        if self.record_number is not None:
+            metadata["idx_record_number"] = self.record_number
+        if self.selector_warning:
+            metadata["selector_warning"] = self.selector_warning
+        return metadata
 
 
 def _parse_source_backends(raw: str | None) -> tuple[str, ...]:
@@ -706,6 +728,7 @@ class GFSAdapter(DataSourceAdapter):
                 retry_count += retries
                 total_bytes_written += result.bytes_written
                 results.append(result)
+                self._persist_manifest_metadata(manifest)
             except GFSAdapterError as error:
                 retry_count += error.attempts
                 failure = DownloadFileResult(
@@ -992,8 +1015,15 @@ class GFSAdapter(DataSourceAdapter):
         idx_url = f"{grib_url}.idx"
         idx_text = self._http_get_text(idx_url)
         records = _parse_gfs_idx(idx_text)
-        byte_range = _select_idx_byte_range(records, entry.variable, entry.forecast_hour)
-        raw_bytes = self._http_get_range(grib_url, byte_range[0], byte_range[1])
+        selection = _select_idx_record(
+            records,
+            entry.variable,
+            entry.forecast_hour,
+            expected_interval_hours=self._expected_interval_hours(entry.forecast_hour),
+        )
+        if selection.accumulation_type is not None:
+            entry.metadata.setdefault("idx_selector", {}).update(selection.as_metadata())
+        raw_bytes = self._http_get_range(grib_url, selection.byte_range[0], selection.byte_range[1])
         clipped = self._clip_grib_to_bbox(raw_bytes, grib_url)
         if len(clipped) > self.config.max_file_size_bytes:
             raise FileTooLargeError(
@@ -1020,6 +1050,14 @@ class GFSAdapter(DataSourceAdapter):
             if len(part) == 10 and part.isdigit():
                 return parse_cycle_time(part)
         raise GFSAdapterError(f"Cannot determine cycle_time for entry {entry.local_key}")
+
+    def _expected_interval_hours(self, forecast_hour: int) -> int | None:
+        if forecast_hour <= 0:
+            return None
+        prior_hours = [hour for hour in self.config.forecast_hours() if hour < forecast_hour]
+        if not prior_hours:
+            return forecast_hour
+        return forecast_hour - max(prior_hours)
 
     def _http_get_text(self, url: str) -> str:
         payload = self.downloader(url) if self._has_injected_downloader else self._http_get_bytes(url)
@@ -1493,6 +1531,9 @@ class GFSAdapter(DataSourceAdapter):
     def _refresh_manifest_source_object_identity(self, manifest: DownloadManifest) -> None:
         hours = self._manifest_forecast_hours(manifest)
         manifest.metadata["source_object_identity"] = self.source_object_identity(manifest.cycle_time, hours)
+        self._persist_manifest_metadata(manifest)
+
+    def _persist_manifest_metadata(self, manifest: DownloadManifest) -> None:
         if manifest.manifest_uri is None:
             return
         try:
@@ -1624,8 +1665,9 @@ class GFSAdapter(DataSourceAdapter):
         if variable == "apcp":
             return {
                 "idx_selector_schema_version": GFS_IDX_SELECTOR_SCHEMA_VERSION,
-                "accumulation_policy": "cumulative_since_cycle",
+                "accumulation_policy": "prefer_cumulative_since_cycle_else_unique_interval_bucket",
                 "preferred_step_range": f"0-{forecast_hour}",
+                "allow_unique_interval_bucket_fallback": True,
                 "allow_duplicate_identical_step_range": True,
             }
         return {
@@ -1863,28 +1905,30 @@ def _idx_forecast_matches(record: IdxRecord, variable: str, forecast_hour: int) 
         keyword = "acc fcst" if variable == "apcp" else "ave fcst"
         if keyword not in forecast:
             return False
-        head = forecast.split(" hour", 1)[0]
-        end_hour = head.split("-")[-1].strip()
-        try:
-            return int(end_hour) == forecast_hour
-        except ValueError:
-            return False
+        bounds = _idx_forecast_window_bounds(record)
+        return bounds is not None and bounds[1] == forecast_hour
     if forecast_hour == 0:
         return forecast == "anl"
     return forecast == f"{forecast_hour} hour fcst"
 
 
 def _idx_step_range(record: IdxRecord) -> str | None:
-    head, separator, _tail = record.forecast.partition(" hour")
-    if not separator or "-" not in head:
+    bounds = _idx_forecast_window_bounds(record)
+    if bounds is None:
         return None
-    start, separator, end = head.partition("-")
-    if not separator:
+    return f"{bounds[0]}-{bounds[1]}"
+
+
+def _idx_forecast_window_bounds(record: IdxRecord) -> tuple[int, int] | None:
+    forecast = record.forecast.strip()
+    match = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s+(hour|hours|day|days)\b", forecast)
+    if match is None:
         return None
-    try:
-        return f"{int(start.strip())}-{int(end.strip())}"
-    except ValueError:
-        return None
+    start = int(match.group(1))
+    end = int(match.group(2))
+    unit = match.group(3)
+    multiplier = 24 if unit.startswith("day") else 1
+    return start * multiplier, end * multiplier
 
 
 def _idx_byte_range_for_match(records: list[IdxRecord], index: int) -> tuple[int, int | None]:
@@ -1893,42 +1937,128 @@ def _idx_byte_range_for_match(records: list[IdxRecord], index: int) -> tuple[int
     return start, end
 
 
-def _select_apcp_idx_match(records: list[IdxRecord], matches: list[int], forecast_hour: int) -> int:
+def _idx_step_range_bounds(step_range: str | None) -> tuple[int, int] | None:
+    if step_range is None:
+        return None
+    start, separator, end = step_range.partition("-")
+    if not separator:
+        return None
+    try:
+        return int(start), int(end)
+    except ValueError:
+        return None
+
+
+def _apcp_accumulation_type(step_range: str | None, forecast_hour: int) -> str | None:
+    bounds = _idx_step_range_bounds(step_range)
+    if bounds is None:
+        return None
+    start, end = bounds
+    if end != forecast_hour:
+        return None
+    return "cumulative_since_cycle" if start == 0 else "interval_bucket"
+
+
+def _select_apcp_idx_match(
+    records: list[IdxRecord],
+    matches: list[int],
+    forecast_hour: int,
+    *,
+    expected_interval_hours: int | None = None,
+) -> IdxSelection:
     preferred_step_range = f"0-{forecast_hour}"
     preferred = [index for index in matches if _idx_step_range(records[index]) == preferred_step_range]
-    if not preferred:
-        descriptions = "; ".join(f"{records[i].field}:{records[i].level}:{records[i].forecast}" for i in matches)
-        raise IdxSelectorPolicyError(
-            (
-                f"No GFS APCP cumulative .idx record with stepRange={preferred_step_range} "
-                f"at f{forecast_hour:03d}; matched records: {descriptions}"
-            )
-        )
     if len(preferred) == 1:
-        return preferred[0]
+        index = preferred[0]
+        return IdxSelection(
+            byte_range=_idx_byte_range_for_match(records, index),
+            step_range=preferred_step_range,
+            accumulation_type="cumulative_since_cycle",
+            record_number=records[index].record_number,
+        )
 
     # FV3-GFS can carry two APCP records with the same 0-fhr text in early lead
     # times. They are equivalent for the cumulative-since-cycle policy; keep the
     # selection deterministic and visible instead of failing the whole cycle.
-    descriptions = "; ".join(
-        f"record={records[i].record_number}:{records[i].field}:{records[i].level}:{records[i].forecast}"
-        for i in preferred
+    if len(preferred) > 1:
+        descriptions = "; ".join(
+            f"record={records[i].record_number}:{records[i].field}:{records[i].level}:{records[i].forecast}"
+            for i in preferred
+        )
+        warning = (
+            f"duplicate_identical_cumulative_step_range:{preferred_step_range}:"
+            f"chosen_record={records[preferred[0]].record_number}"
+        )
+        LOGGER.warning(
+            "Duplicate GFS APCP cumulative .idx records at f%03d with stepRange=%s; choosing record %s (%s)",
+            forecast_hour,
+            preferred_step_range,
+            records[preferred[0]].record_number,
+            descriptions,
+        )
+        return IdxSelection(
+            byte_range=_idx_byte_range_for_match(records, preferred[0]),
+            step_range=preferred_step_range,
+            accumulation_type="cumulative_since_cycle",
+            record_number=records[preferred[0]].record_number,
+            selector_warning=warning,
+        )
+
+    bucket_matches = [
+        index
+        for index in matches
+        if _apcp_accumulation_type(_idx_step_range(records[index]), forecast_hour) == "interval_bucket"
+        and (
+            expected_interval_hours is None
+            or (
+                (bounds := _idx_step_range_bounds(_idx_step_range(records[index]))) is not None
+                and bounds[1] - bounds[0] == expected_interval_hours
+            )
+        )
+    ]
+    if len(bucket_matches) == 1:
+        index = bucket_matches[0]
+        step_range = _idx_step_range(records[index])
+        LOGGER.warning(
+            "GFS APCP f%03d has no %s cumulative .idx record; using unique interval bucket %s record %s",
+            forecast_hour,
+            preferred_step_range,
+            step_range,
+            records[index].record_number,
+        )
+        return IdxSelection(
+            byte_range=_idx_byte_range_for_match(records, index),
+            step_range=step_range,
+            accumulation_type="interval_bucket",
+            record_number=records[index].record_number,
+            selector_warning=f"cumulative_absent_used_interval_bucket:{step_range}",
+        )
+
+    descriptions = "; ".join(f"{records[i].field}:{records[i].level}:{records[i].forecast}" for i in matches)
+    if bucket_matches:
+        raise IdxSelectorPolicyError(
+            (
+                f"No GFS APCP cumulative .idx record with stepRange={preferred_step_range} "
+                f"and multiple compatible interval bucket records at f{forecast_hour:03d}; "
+                f"expected_interval_hours={expected_interval_hours}; matched records: {descriptions}"
+            )
+        )
+    raise IdxSelectorPolicyError(
+        (
+            f"No GFS APCP cumulative .idx record with stepRange={preferred_step_range} "
+            f"or unique compatible interval bucket at f{forecast_hour:03d}; "
+            f"expected_interval_hours={expected_interval_hours}; matched records: {descriptions}"
+        )
     )
-    LOGGER.warning(
-        "Duplicate GFS APCP cumulative .idx records at f%03d with stepRange=%s; choosing record %s (%s)",
-        forecast_hour,
-        preferred_step_range,
-        records[preferred[0]].record_number,
-        descriptions,
-    )
-    return preferred[0]
 
 
-def _select_idx_byte_range(
+def _select_idx_record(
     records: list[IdxRecord],
     variable: str,
     forecast_hour: int,
-) -> tuple[int, int | None]:
+    *,
+    expected_interval_hours: int | None = None,
+) -> IdxSelection:
     if variable not in GFS_IDX_FIELD_LEVEL:
         raise ValueError(f"Unsupported GFS variable for idx selection: {variable}")
     field, level = GFS_IDX_FIELD_LEVEL[variable]
@@ -1945,13 +2075,30 @@ def _select_idx_byte_range(
             attempts=1,
         )
     if variable == "apcp":
-        return _idx_byte_range_for_match(records, _select_apcp_idx_match(records, matches, forecast_hour))
+        return _select_apcp_idx_match(
+            records,
+            matches,
+            forecast_hour,
+            expected_interval_hours=expected_interval_hours,
+        )
     if len(matches) > 1:
         descriptions = "; ".join(f"{records[i].field}:{records[i].level}:{records[i].forecast}" for i in matches)
         raise AmbiguousIdxRecordError(
             f"Ambiguous GFS .idx selection for {variable} at f{forecast_hour:03d}: {descriptions}"
         )
-    return _idx_byte_range_for_match(records, matches[0])
+    return IdxSelection(
+        byte_range=_idx_byte_range_for_match(records, matches[0]),
+        step_range=_idx_step_range(records[matches[0]]),
+        record_number=records[matches[0]].record_number,
+    )
+
+
+def _select_idx_byte_range(
+    records: list[IdxRecord],
+    variable: str,
+    forecast_hour: int,
+) -> tuple[int, int | None]:
+    return _select_idx_record(records, variable, forecast_hour).byte_range
 
 
 def _stable_digest(value: Any) -> str:

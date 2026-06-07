@@ -659,7 +659,7 @@ def test_source_object_identity_changes_when_remote_or_policy_content_changes(tm
     changed_policy_identity = first.source_object_identity("2026050700", [0])
 
     assert first_identity["identity_schema_version"] == "nhms.source_object_identity.v3"
-    assert first_identity["apcp_selector_policy"] == "cycle_cumulative_stepRange_0_fhr"
+    assert first_identity["apcp_selector_policy"] == "prefer_cycle_cumulative_else_unique_interval_bucket"
     assert first_identity["manifest_digest"] != second_identity["manifest_digest"]
     assert first_identity["raw_entry_digest"] != second_identity["raw_entry_digest"]
     assert first_identity["manifest_digest"] != changed_policy_identity["manifest_digest"]
@@ -887,6 +887,14 @@ F012_IDX_BUCKET_ONLY_APCP = "\n".join(
         "3:3000:d=2026050700:DSWRF:surface:6-12 hour ave fcst:",
     ]
 )
+F024_IDX_DAY_CUMULATIVE_APCP = "\n".join(
+    [
+        "1:0:d=2026050700:TMP:2 m above ground:24 hour fcst:",
+        "2:1500:d=2026050700:APCP:surface:18-24 hour acc fcst:",
+        "3:3000:d=2026050700:APCP:surface:0-1 day acc fcst:",
+        "4:4500:d=2026050700:DSWRF:surface:18-24 hour ave fcst:",
+    ]
+)
 
 
 def _mirror_grib_bytes() -> bytes:
@@ -1014,13 +1022,33 @@ def test_idx_apcp_f009_duplicate_identical_cumulative_windows_choose_determinist
     assert (start, end) == (1500, 3000)
 
 
-def test_idx_apcp_fails_when_cumulative_record_is_absent() -> None:
+def test_idx_apcp_rejects_bucket_when_window_does_not_match_expected_interval() -> None:
     records = gfs_module._parse_gfs_idx(F012_IDX_BUCKET_ONLY_APCP)
-    with pytest.raises(IdxSelectorPolicyError, match="stepRange=0-12"):
-        gfs_module._select_idx_byte_range(records, "apcp", 12)
+    with pytest.raises(IdxSelectorPolicyError, match="expected_interval_hours=3"):
+        gfs_module._select_idx_record(records, "apcp", 12, expected_interval_hours=3)
 
 
-def test_bucket_only_apcp_idx_fails_without_nomads_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_idx_apcp_accepts_bucket_when_window_matches_expected_interval() -> None:
+    records = gfs_module._parse_gfs_idx(F012_IDX_BUCKET_ONLY_APCP)
+    selection = gfs_module._select_idx_record(records, "apcp", 12, expected_interval_hours=6)
+
+    assert selection.byte_range == (1500, 3000)
+    assert selection.step_range == "6-12"
+    assert selection.accumulation_type == "interval_bucket"
+
+
+def test_idx_apcp_normalizes_day_cumulative_window_to_hours() -> None:
+    records = gfs_module._parse_gfs_idx(F024_IDX_DAY_CUMULATIVE_APCP)
+    selection = gfs_module._select_idx_record(records, "apcp", 24, expected_interval_hours=3)
+
+    assert selection.byte_range == (3000, 4500)
+    assert selection.step_range == "0-24"
+    assert selection.accumulation_type == "cumulative_since_cycle"
+
+
+def test_incompatible_bucket_only_apcp_idx_fails_without_nomads_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     grib = _mirror_grib_bytes()
     s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f012"
     adapter, calls = _cloud_adapter(
@@ -1031,11 +1059,33 @@ def test_bucket_only_apcp_idx_fails_without_nomads_fallback(tmp_path: Path, monk
     )
     _patch_cdo(monkeypatch)
 
-    with pytest.raises(IdxSelectorPolicyError):
+    with pytest.raises(IdxSelectorPolicyError, match="expected_interval_hours=3"):
         adapter._download_entry(_entry("apcp", 12))
 
     assert calls["nomads"] == []
     assert calls["range"] == []
+
+
+def test_cloud_apcp_day_cumulative_selection_persists_idx_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grib = _mirror_grib_bytes()
+    s3_grib = "https://noaa-gfs-bdp-pds.s3.amazonaws.com/gfs.20260507/00/atmos/gfs.t00z.pgrb2.0p25.f024"
+    adapter, calls = _cloud_adapter(
+        tmp_path,
+        idx_by_url={f"{s3_grib}.idx": F024_IDX_DAY_CUMULATIVE_APCP},
+        grib_bytes=grib,
+        backends=("s3",),
+    )
+    _patch_cdo(monkeypatch)
+    entry = _entry("apcp", 24)
+
+    result, _retries = adapter._download_entry(entry)
+
+    assert result.status == "downloaded"
+    assert calls["range"] == ["bytes=3000-4499"]
+    assert entry.metadata["idx_selector"]["step_range"] == "0-24"
+    assert entry.metadata["idx_selector"]["accumulation_type"] == "cumulative_since_cycle"
 
 
 def test_idx_non_apcp_duplicate_records_remain_ambiguous() -> None:

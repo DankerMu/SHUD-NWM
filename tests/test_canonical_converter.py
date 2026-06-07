@@ -24,6 +24,7 @@ compute_time_axis = converter_module.compute_time_axis
 convert_units = converter_module.convert_units
 convert_units_with_metadata = converter_module.convert_units_with_metadata
 convert_era5_precipitation_with_metadata = converter_module.convert_era5_precipitation_with_metadata
+canonical_product_is_forcing_usable = converter_module.canonical_product_is_forcing_usable
 evaluate_canonical_readiness = converter_module.evaluate_canonical_readiness
 map_variable = converter_module.map_variable
 parse_cycle_time = converter_module.parse_cycle_time
@@ -313,7 +314,7 @@ def test_canonical_readiness_blocks_missing_variable_and_missing_lead() -> None:
     assert result.evidence["missing_leads"][1]["missing_variables"] == ["pressure_surface", "shortwave_down"]
 
 
-@pytest.mark.parametrize("quality_flag", ["warn", "error_precip_accumulation"])
+@pytest.mark.parametrize("quality_flag", ["error_precip_accumulation"])
 def test_canonical_readiness_rejects_non_ok_required_rows(quality_flag: str) -> None:
     cycle_time = parse_cycle_time("2026050700")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
@@ -352,6 +353,43 @@ def test_canonical_readiness_rejects_non_ok_required_rows(quality_flag: str) -> 
         }
     ]
     assert result.evidence["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
+
+
+def test_canonical_readiness_accepts_warn_required_rows_with_checksum() -> None:
+    cycle_time = parse_cycle_time("2026050700")
+    policy = {"source": "gfs", "forecast_hours": [0, 3]}
+    source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026050700/manifest.json"}
+    rows = canonical_rows(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        variables=GFS_REQUIRED_STANDARD_VARIABLES,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+    warned = next(row for row in rows if row["variable"] == "shortwave_down" and row["lead_time_hours"] == 3)
+    warned["quality_flag"] = "warn"
+
+    result = evaluate_canonical_readiness(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        products=rows,
+        forecast_hours=(0, 3),
+        policy_identity=policy,
+        source_object_identity=source_object,
+    )
+
+    assert result.ready is True
+    assert result.evidence["status"] == "canonical_ready"
+    assert result.evidence["rejected_quality_flags"] == {}
+
+
+def test_warn_canonical_product_with_checksum_is_forcing_usable() -> None:
+    assert canonical_product_is_forcing_usable({"quality_flag": "warn", "checksum": "abc123"})
+    assert canonical_product_is_forcing_usable({"quality_flag": "ok", "checksum": "abc123"})
+    assert not canonical_product_is_forcing_usable({"quality_flag": "warn", "checksum": ""})
+    assert not canonical_product_is_forcing_usable({"quality_flag": "fail", "checksum": "abc123"})
+    assert not canonical_product_is_forcing_usable({"quality_flag": "error_precip_accumulation", "checksum": "abc123"})
 
 
 def test_canonical_readiness_rejects_missing_checksum_required_rows() -> None:
@@ -565,14 +603,31 @@ def test_gfs_apcp_cycle_cumulative_negative_still_warns() -> None:
 
 
 def test_gfs_apcp_cycle_cumulative_small_negative_stays_ok() -> None:
-    # 累计序列 -0.005mm 的量化噪声(<0.05mm)按 SHUD precip 钳零约定与 0 等价,记 anomaly
+    # 累计序列 -0.0625mm 的量化噪声(<0.1mm)按 SHUD precip 钳零约定与 0 等价,记 anomaly
     # 但保持 quality_flag=ok,避免被 forcing 当不可用剔除。
     result = convert_units_with_metadata(
-        "apcp", [11.995], [12.0], forecast_hour=12, previous_forecast_hour=9
+        "apcp", [11.9375], [12.0], forecast_hour=12, previous_forecast_hour=9
     )
     assert result.quality_flag == "ok"
     assert result.values == pytest.approx((0.0,))
     assert result.anomalies[0]["type"] == "small_negative_apcp_delta"
+
+
+def test_gfs_apcp_interval_bucket_uses_step_range_without_previous_delta() -> None:
+    # A compatible bucket record is already an interval accumulation. 6.0mm over
+    # 6h -> 24.0mm/day, and previous cumulative values must not be subtracted.
+    result = convert_units_with_metadata(
+        "apcp",
+        [6.0],
+        [100.0],
+        forecast_hour=24,
+        previous_forecast_hour=21,
+        accumulation_type="interval_bucket",
+        step_range="18-24",
+    )
+
+    assert result.values == pytest.approx((24.0,))
+    assert result.quality_flag == "ok"
 
 
 def test_gfs_rh2m_clamps_supersaturation_to_unit_range() -> None:

@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -48,6 +49,7 @@ IFS_VARIABLES: tuple[str, ...] = ("2t", "2d", "10u", "10v", "tp", "sp", "ssr", "
 # kept strictly as the last-resort fallback (sources() pins it to the tail).
 IFS_FALLBACK_SOURCES: tuple[str, ...] = ("aws", "azure", "google", "ecmwf")
 IFS_TERMINAL_FALLBACK_SOURCE = "ecmwf"
+IFS_DEFAULT_FORECAST_RESOLUTION_SEGMENTS: tuple[tuple[int, int], ...] = ((144, 3), (360, 6))
 CDO_CLIP_TIMEOUT_SECONDS = 300
 
 # Process-local per-source rate-limit cooldown table: source -> clock() epoch until
@@ -179,6 +181,7 @@ class IFSAdapterConfig:
     # 6-hourly beyond). When unset, the uniform forecast_step_hours grid is used.
     forecast_resolution_segments: tuple[tuple[int, int], ...] | None = field(
         default_factory=lambda: parse_resolution_segments(os.getenv("IFS_FORECAST_RESOLUTION_SEGMENTS"))
+        or IFS_DEFAULT_FORECAST_RESOLUTION_SEGMENTS
     )
     preferred_source: str = field(default_factory=lambda: os.getenv("IFS_OPEN_DATA_SOURCE", "aws"))
     fallback_sources: tuple[str, ...] = field(
@@ -268,6 +271,7 @@ class IFSAdapterConfig:
                 "12": 168,
                 "18": 144,
                 "step_hours": self.forecast_step_hours,
+                "resolution_segments": [list(segment) for segment in self.forecast_resolution_segments or ()],
             },
             "variables": list(self.variables),
             "preferred_source": self.preferred_source,
@@ -999,14 +1003,7 @@ class IFSAdapter(DataSourceAdapter):
         with tempfile.NamedTemporaryFile(suffix=".grib2") as target:
             try:
                 client = self._client_for_source(parsed["source"])
-                client.retrieve(
-                    date=parsed["date"],
-                    time=parsed["time"],
-                    step=parsed["step"],
-                    type="fc",
-                    param=parsed["variable"],
-                    target=target.name,
-                )
+                self._retrieve_with_adapter_retry_policy(client, parsed, target.name)
                 payload_size = Path(target.name).stat().st_size
                 if payload_size > self.config.max_file_size_bytes:
                     raise FileTooLargeError(
@@ -1049,9 +1046,21 @@ class IFSAdapter(DataSourceAdapter):
                 # ecmwf.opendata / requests wrap 503 SlowDown in their own exception
                 # types; surface those as rate limiting too so the mirror switch and
                 # per-source cooldown engage.
-                if _is_slow_down(error):
+                http_status = _http_status_code(error)
+                if http_status == 404:
+                    raise FileUnavailableError(
+                        f"Remote IFS file is unavailable: {self._safe_text(remote_url)}",
+                        attempts=1,
+                    ) from error
+                if http_status == 403:
+                    raise ForbiddenSourceError(
+                        f"Remote IFS file is forbidden: {self._safe_text(remote_url)}",
+                        attempts=1,
+                    ) from error
+                if http_status == 429 or _is_slow_down(error):
                     raise RateLimitedError(
                         f"IFS source rate limited while downloading {self._safe_text(remote_url)}",
+                        retry_after_seconds=_retry_after_seconds(_http_retry_after(error)),
                         attempts=0,
                     ) from error
                 raise NetworkDownloadError(
@@ -1065,6 +1074,83 @@ class IFSAdapter(DataSourceAdapter):
             )
         checksum = hashlib.sha256(payload).hexdigest()
         return DownloadedPayload(content=payload, checksum=checksum, bytes_written=len(payload))
+
+    def _retrieve_with_adapter_retry_policy(self, client: Any, parsed: Mapping[str, Any], target: str) -> None:
+        """Retrieve one IFS GRIB while leaving retry and mirror switching to this adapter."""
+        if not hasattr(client, "_get_urls"):
+            client.retrieve(
+                date=parsed["date"],
+                time=parsed["time"],
+                step=parsed["step"],
+                type="fc",
+                param=parsed["variable"],
+                target=target,
+            )
+            return
+        try:
+            from multiurl import download
+        except ImportError as error:
+            raise IFSAdapterError("multiurl is required for real IFS downloads.") from error
+
+        client.get_parts = lambda data_urls, for_index: self._get_ifs_parts_once(client, data_urls, for_index)
+        request = {
+            "date": parsed["date"],
+            "time": parsed["time"],
+            "step": parsed["step"],
+            "type": "fc",
+            "param": parsed["variable"],
+        }
+        result = client._get_urls(request, target=target, use_index=True)  # noqa: SLF001
+        if client.use_sas_token:
+            result.urls = client._apply_sas_to_urls(result.urls)  # noqa: SLF001
+        download(
+            result.urls,
+            target=result.target,
+            verify=client.verify,
+            session=client.session,
+            maximum_retries=1,
+            retry_after=0,
+        )
+
+    def _get_ifs_parts_once(self, client: Any, data_urls: list[str], for_index: Mapping[str, Any]) -> list[Any]:
+        result = []
+        possible_values: dict[str, set[Any]] = defaultdict(set)
+
+        for url in data_urls:
+            base, _ = os.path.splitext(url)
+            index_url = f"{base}.index"
+            with client.session.get(
+                index_url,
+                verify=client.verify,
+                timeout=self.config.request_timeout_seconds,
+            ) as response:
+                response.raise_for_status()
+
+                parts = []
+                for line in response.iter_lines():
+                    payload = json.loads(line)
+                    matches = []
+                    for position, (name, values) in enumerate(for_index.items()):
+                        idx = payload.get(name)
+                        if idx is not None:
+                            possible_values[name].add(idx)
+                        if idx in values:
+                            if client.preserve_request_order:
+                                for value_position, value in enumerate(values):
+                                    if value == idx:
+                                        matches.append((position, value_position))
+                            else:
+                                matches.append(payload["_offset"])
+
+                    if len(matches) == len(for_index):
+                        parts.append((tuple(matches), (payload["_offset"], payload["_length"])))
+
+            if parts:
+                result.append((url, tuple(part[1] for part in sorted(parts))))
+
+        if not result:
+            raise ValueError(f"Cannot find index entries matching {for_index!r}")
+        return result
 
     def _clip_grib_to_bbox(self, global_path: str, remote_url: str) -> bytes:
         """Clip a global GRIB2 file to the configured bbox via cdo, keeping GRIB2.
@@ -1495,6 +1581,24 @@ def _is_slow_down(error: BaseException) -> bool:
     if response is not None and getattr(response, "status_code", None) == 503:
         return True
     return _looks_like_slow_down_text(error)
+
+
+def _http_status_code(error: BaseException) -> int | None:
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    try:
+        return int(status)
+    except (TypeError, ValueError):
+        return None
+
+
+def _http_retry_after(error: BaseException) -> str | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    value = headers.get("Retry-After")
+    return str(value) if value is not None else None
 
 
 def _retry_after_seconds(value: str | None) -> float | None:

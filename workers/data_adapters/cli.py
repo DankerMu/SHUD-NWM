@@ -63,13 +63,15 @@ def _download_ifs(cycle_time: str) -> dict[str, object]:
     discoveries = adapter.discover_cycles(parsed_cycle_time.date())
     requested_cycle = next((cycle for cycle in discoveries if cycle.cycle_time == parsed_cycle_time), None)
     if requested_cycle is None or not requested_cycle.available:
-        print(f"IFS data not yet available for {cycle_time}")
-        return {
+        result = {
             "status": "unavailable",
             "total_bytes_written": 0,
             "retry_count": 0,
             "files": 0,
         }
+        print(f"IFS data not yet available for {cycle_time}", file=sys.stderr)
+        print(json.dumps(result, sort_keys=True))
+        raise SystemExit(1)
     manifest = adapter.build_manifest(parsed_cycle_time)
     result = adapter.download_plan(manifest)
     verification = adapter.verify_manifest(manifest) if result.status != "failed_download" else None

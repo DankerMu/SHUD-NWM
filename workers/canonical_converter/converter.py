@@ -39,9 +39,9 @@ IFS_SHORTWAVE_NEGATIVE_TOLERANCE_W_M2 = _float_env("IFS_SHORTWAVE_NEGATIVE_TOLER
 # 累积降水去累积的负 delta 噪声容差(mm/步)。IFS tp(米,GRIB 16-bit 打包)的量化步长
 # ≈1000×2⁻¹⁶=0.0153mm,会让晚时次(累积量大)出现伪负 delta;原 0.01mm 阈值比量化步长还
 # 小,把量化噪声误判为 warning_negative_precip → 被 forcing(只收 quality_flag==ok)剔除致缺产品。
-# SHUD 模型自身对 precip<0 即钳 0 并量化到 4 位,故亚阈值负值与 0 等价。默认 0.05mm 覆盖该步长
-# 并留 ~3× 余量;超阈值的负值仍标 warn 供诊断。IFS 降水与 GFS APCP 共用此常量。
-PRECIP_NEGATIVE_NOISE_TOLERANCE_MM = _float_env("PRECIP_NEGATIVE_NOISE_TOLERANCE_MM", 0.05)
+# SHUD 模型自身对 precip<0 即钳 0 并量化到 4 位,故亚阈值负值与 0 等价。默认 0.1mm 覆盖
+# IFS tp 量化步长和 GFS APCP 常见 1/16mm 量化噪声;超阈值的负值仍标 warn 供诊断。
+PRECIP_NEGATIVE_NOISE_TOLERANCE_MM = _float_env("PRECIP_NEGATIVE_NOISE_TOLERANCE_MM", 0.1)
 
 VARIABLE_MAPPING: dict[str, str] = {
     "tmp2m": "air_temperature_2m",
@@ -214,7 +214,7 @@ class CanonicalConverterConfig:
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
     object_store_root: Path | str = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT", ""))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
-    converter_version: str = "m1.2"
+    converter_version: str = "m1.4"
     grid_id: str = "gfs_0p25"
     grid_definition_uri: str = "canonical/gfs/grid/gfs_0p25/grid.json"
     native_time_resolution: str = "3h"
@@ -266,6 +266,7 @@ class RawRecord:
     longitudes: tuple[float, ...] = ()
     latitudes: tuple[float, ...] = ()
     shape: tuple[int, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -308,8 +309,12 @@ class CanonicalReadinessResult:
     evidence: dict[str, Any]
 
 
+FORCING_USABLE_CANONICAL_QUALITY_FLAGS = {"ok", "warn"}
+
+
 def canonical_product_is_forcing_usable(product: Mapping[str, Any]) -> bool:
-    return str(product.get("quality_flag") or "ok") == "ok" and bool(str(product.get("checksum") or "").strip())
+    quality_flag = str(product.get("quality_flag") or "ok")
+    return quality_flag in FORCING_USABLE_CANONICAL_QUALITY_FLAGS and bool(str(product.get("checksum") or "").strip())
 
 
 def ensure_utc(value: datetime) -> datetime:
@@ -394,11 +399,11 @@ def evaluate_canonical_readiness(
         cycle_rows.append(row)
         quality_flag = str(row.get("quality_flag") or "ok")
         checksum = str(row.get("checksum") or "").strip()
-        if quality_flag != "ok":
+        if quality_flag not in FORCING_USABLE_CANONICAL_QUALITY_FLAGS:
             rejected_quality_flags[quality_flag] = rejected_quality_flags.get(quality_flag, 0) + 1
             if len(rejected_quality_samples) < 10:
                 rejected_quality_samples.append(_readiness_rejected_row_sample(row, reason="quality_flag_not_ok"))
-        elif not checksum:
+        if quality_flag in FORCING_USABLE_CANONICAL_QUALITY_FLAGS and not checksum:
             checksum_missing_row_count += 1
             if len(checksum_missing_samples) < 10:
                 checksum_missing_samples.append(_readiness_rejected_row_sample(row, reason="checksum_missing"))
@@ -638,6 +643,32 @@ def _mapping_value(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _apcp_selector_metadata(metadata: Mapping[str, Any]) -> Mapping[str, Any]:
+    selector = metadata.get("idx_selector")
+    return selector if isinstance(selector, Mapping) else metadata
+
+
+def _apcp_accumulation_type_from_metadata(metadata: Mapping[str, Any]) -> str | None:
+    selector = _apcp_selector_metadata(metadata)
+    value = selector.get("accumulation_type")
+    if value is None:
+        value = selector.get("accumulation_policy")
+    if value is None:
+        return None
+    parsed = str(value)
+    if parsed in {"cumulative_since_cycle", "interval_bucket"}:
+        return parsed
+    return None
+
+
+def _apcp_step_range_from_metadata(metadata: Mapping[str, Any]) -> str | None:
+    selector = _apcp_selector_metadata(metadata)
+    value = selector.get("step_range") or selector.get("stepRange")
+    if value is None:
+        return None
+    return str(value)
+
+
 def _coord_values_by_name(dataset: Any, names: tuple[str, ...]) -> tuple[float, ...]:
     for name in names:
         if name in dataset.coords:
@@ -668,11 +699,47 @@ def convert_units_with_metadata(
     *,
     forecast_hour: int | None = None,
     previous_forecast_hour: int | None = None,
+    accumulation_type: str | None = None,
+    step_range: str | None = None,
 ) -> UnitConversionResult:
     current = tuple(float(value) for value in values)
     if native_variable in {"tmp2m", "2m_temperature", "2m_dewpoint_temperature", "2t", "2d"}:
         return UnitConversionResult(tuple(value - 273.15 for value in current))
     if native_variable == "apcp":
+        if accumulation_type == "interval_bucket":
+            _validate_finite_values(current, "APCP precipitation")
+            step_hours = _step_hours_from_step_range(step_range)
+            negative_values = tuple(value for value in current if value < 0.0)
+            anomalies_list: list[dict[str, Any]] = []
+            quality_flag = "ok"
+            if negative_values:
+                _tol = PRECIP_NEGATIVE_NOISE_TOLERANCE_MM
+                small_negatives = tuple(value for value in negative_values if -_tol < value < 0.0)
+                significant_negatives = tuple(value for value in negative_values if value <= -_tol)
+                if small_negatives:
+                    anomalies_list.append(
+                        {
+                            "type": "small_negative_apcp_bucket",
+                            "forecast_hour": forecast_hour,
+                            "step_range": step_range,
+                            "negative_count": len(small_negatives),
+                            "min_delta": min(small_negatives),
+                        }
+                    )
+                if significant_negatives:
+                    quality_flag = "warn"
+                    anomalies_list.append(
+                        {
+                            "type": "negative_apcp_bucket",
+                            "forecast_hour": forecast_hour,
+                            "step_range": step_range,
+                            "negative_count": len(significant_negatives),
+                            "min_delta": min(significant_negatives),
+                        }
+                    )
+            mm_per_day = tuple(max(0.0, value) * 24.0 / step_hours for value in current)
+            return UnitConversionResult(mm_per_day, quality_flag, tuple(anomalies_list))
+
         previous = (
             tuple(float(value) for value in previous_values) if previous_values is not None else (0.0,) * len(current)
         )
@@ -1007,6 +1074,22 @@ def _step_hours(forecast_hour: int | None, previous_forecast_hour: int | None) -
     return float(max(1, forecast_hour - previous_forecast_hour))
 
 
+def _step_hours_from_step_range(step_range: str | None) -> float:
+    if not step_range:
+        raise CanonicalConversionError("APCP interval bucket conversion requires step_range metadata.")
+    start_text, separator, end_text = step_range.partition("-")
+    if not separator:
+        raise CanonicalConversionError(f"Invalid APCP step_range metadata: {step_range!r}.")
+    try:
+        start = int(start_text)
+        end = int(end_text)
+    except ValueError as error:
+        raise CanonicalConversionError(f"Invalid APCP step_range metadata: {step_range!r}.") from error
+    if end <= start:
+        raise CanonicalConversionError(f"Invalid APCP step_range metadata: {step_range!r}.")
+    return float(end - start)
+
+
 def _normalize_longitude(longitude: float) -> float:
     value = float(longitude)
     while value > 180.0:
@@ -1125,8 +1208,21 @@ class CanonicalConverter:
                 previous_values: tuple[float, ...] | None = None
                 previous_source_file: str | None = None
                 previous_forecast_hour: int | None = None
+                apcp_cumulative_gap = False
                 for entry in native_entries:
                     record = self._read_record(entry)
+                    apcp_accumulation_type = _apcp_accumulation_type_from_metadata(record.metadata)
+                    if (
+                        record.native_variable == "apcp"
+                        and apcp_accumulation_type == "cumulative_since_cycle"
+                        and apcp_cumulative_gap
+                    ):
+                        raise CanonicalConversionError(
+                            (
+                                "Cannot convert GFS APCP cumulative record after an interval-bucket gap "
+                                f"at f{record.forecast_hour:03d}; exact interval de-accumulation would be ambiguous."
+                            )
+                        )
                     product = self._convert_record(
                         source_id=source_id,
                         cycle_time=cycle_time,
@@ -1139,9 +1235,17 @@ class CanonicalConverter:
                         source_object_identity=_mapping_value(manifest_metadata.get("source_object_identity")),
                     )
                     products.append(product)
+                    if record.native_variable == "apcp" and apcp_accumulation_type == "interval_bucket":
+                        previous_values = None
+                        previous_source_file = None
+                        previous_forecast_hour = None
+                        apcp_cumulative_gap = True
+                        continue
                     previous_values = record.values
                     previous_source_file = record.source_file
                     previous_forecast_hour = record.forecast_hour
+                    if record.native_variable == "apcp":
+                        apcp_cumulative_gap = False
 
             return self._complete_cycle_after_conversion(
                 source_id=source_id,
@@ -1296,6 +1400,7 @@ class CanonicalConverter:
                 longitudes=_coord_values_by_name(dataset, ("lon", "longitude")),
                 latitudes=_coord_values_by_name(dataset, ("lat", "latitude")),
                 shape=tuple(int(size) for size in getattr(data_array.values, "shape", ())),
+                metadata=dict(_mapping_value(entry.get("metadata"))),
             )
         except Exception as error:
             detail = f"Failed to parse raw file {local_key}: {error}"
@@ -1515,18 +1620,34 @@ class CanonicalConverter:
             previous_values,
             forecast_hour=record.forecast_hour,
             previous_forecast_hour=previous_forecast_hour,
+            accumulation_type=_apcp_accumulation_type_from_metadata(record.metadata),
+            step_range=_apcp_step_range_from_metadata(record.metadata),
         )
         valid_time = cycle_time + timedelta(hours=record.forecast_hour)
         compact_cycle = format_cycle_time(cycle_time)
         canonical_product_id = f"{source_id}_{compact_cycle}_{standard_variable}_f{record.forecast_hour:03d}"
         object_key = f"canonical/{source_id}/{compact_cycle}/{standard_variable}/{canonical_product_id}.nc"
         source_files = [record.source_file]
-        if record.native_variable == "apcp" and previous_source_file is not None:
+        apcp_accumulation_type = _apcp_accumulation_type_from_metadata(record.metadata)
+        if (
+            record.native_variable == "apcp"
+            and previous_source_file is not None
+            and apcp_accumulation_type != "interval_bucket"
+        ):
             source_files = [previous_source_file, record.source_file]
         conversion_params: dict[str, Any] = {
             "native_variable": record.native_variable,
             "operation": CONVERSION_PARAMS.get(record.native_variable, "pass_through"),
         }
+        if record.native_variable == "apcp":
+            conversion_params["accumulation_type"] = apcp_accumulation_type or "cumulative_since_cycle"
+            step_range = _apcp_step_range_from_metadata(record.metadata)
+            if step_range:
+                conversion_params["step_range"] = step_range
+            if apcp_accumulation_type == "interval_bucket":
+                conversion_params["operation"] = "interval_bucket_mm_to_mm_day"
+            if record.metadata:
+                conversion_params["raw_metadata"] = dict(record.metadata)
         if conversion.anomalies:
             conversion_params["anomalies"] = list(conversion.anomalies)
             conversion_params["negative_delta_forecast_hours"] = [
