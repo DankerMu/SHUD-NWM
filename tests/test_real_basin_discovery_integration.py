@@ -15,7 +15,7 @@ pytestmark = pytest.mark.integration
 # Scenario 3 of the multibasin-product-discovery spec: a freshly produced basin
 # with a published (display-ready) run must surface in has_display_product
 # discovery, while a basin whose only run is not display-ready must not. This is
-# the real-SQL oracle for the EXISTS / `status::text = ANY(%s)` / JOIN chain in
+# the real-SQL oracle for the EXISTS / `status = ANY(%s::hydro.run_status[])` / JOIN chain in
 # PsycopgModelRegistryStore.list_basins; the unit suite only covers shallow mocks.
 _PREFIX = "itbd"
 _BASIN_READY = f"{_PREFIX}_basin_ready"
@@ -116,7 +116,7 @@ def test_list_basins_has_display_product_reflects_real_run_status(integration_da
 
     store = PsycopgModelRegistryStore(integration_database_url)
     try:
-        # Real SQL must not raise: EXISTS + `status::text = ANY(%s)` on the enum
+        # Real SQL must not raise: EXISTS + `status = ANY(%s::hydro.run_status[])` on the enum
         # column + JOIN basin_version->hydro_run column names all resolve.
         display_only = {row["basin_id"] for row in store.list_basins(limit=100, offset=0, has_display_product=True)}
         assert _BASIN_READY in display_only
