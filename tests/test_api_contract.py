@@ -1458,6 +1458,54 @@ def test_river_series_threshold_schema_allows_null_and_empty_thresholds() -> Non
     }
 
 
+def test_display_control_plane_responses_have_no_static_runtime_drift() -> None:
+    static_spec = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8")
+    )
+    runtime_spec = app.openapi()
+
+    cases = [
+        ("/api/v1/runs/{run_id}/retry", "post", "409", "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"),
+        ("/api/v1/runs/{run_id}/cancel", "post", "409", "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"),
+        ("/api/v1/queue/depth", "get", "503", "CONTROL_PLANE_QUEUE_UNAVAILABLE"),
+    ]
+    for path, method, status_code, error_code in cases:
+        static_codes = _response_error_codes(static_spec, path, method, status_code)
+        runtime_codes = _response_error_codes(runtime_spec, path, method, status_code)
+        assert static_codes == [error_code], (path, status_code, static_codes)
+        assert runtime_codes == [error_code], (path, status_code, runtime_codes)
+        assert static_codes == runtime_codes, (path, status_code)
+
+
+def test_job_log_error_codes_are_declared_in_static_and_runtime_contract() -> None:
+    static_spec = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8")
+    )
+    runtime_spec = app.openapi()
+    expected = [
+        "JOB_LOG_NOT_PUBLISHED",
+        "JOB_LOG_URI_UNSUPPORTED",
+        "JOB_LOG_ACCESS_DENIED",
+        "JOB_LOG_NOT_FOUND",
+    ]
+    path, method = "/api/v1/jobs/{job_id}/logs", "get"
+    for status_code in ("400", "403", "404"):
+        static_codes = _response_error_codes(static_spec, path, method, status_code)
+        runtime_codes = _response_error_codes(runtime_spec, path, method, status_code)
+        assert static_codes == expected, (status_code, static_codes)
+        assert runtime_codes == expected, (status_code, runtime_codes)
+        assert static_codes == runtime_codes, status_code
+
+
+def _response_error_codes(spec: dict[str, Any], path: str, method: str, status_code: str) -> list[str]:
+    response = spec["paths"][path][method]["responses"][status_code]
+    if "$ref" in response:
+        component = response["$ref"].split("/")[-1]
+        response = spec["components"]["responses"][component]
+    schema = response["content"]["application/json"]["schema"]
+    return list(schema["properties"]["error"]["properties"]["code"]["enum"])
+
+
 def _assert_success_envelope(body: dict[str, Any]) -> Any:
     assert {"request_id", "status", "data"} <= set(body)
     assert body["request_id"]

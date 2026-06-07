@@ -618,6 +618,25 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         "description": "Error response",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
     }
+    responses["ControlPlaneManualActionRequired"] = _typed_error_response(
+        "Control-plane mutation is unavailable from a display_readonly API node; "
+        "the authorized actor must perform the action from the compute_control runbook on node 22.",
+        ["CONTROL_PLANE_MANUAL_ACTION_REQUIRED"],
+    )
+    responses["ControlPlaneQueueUnavailable"] = _typed_error_response(
+        "Queue depth is unavailable from a display_readonly API node; "
+        "the compute_control node exposes the live queue state.",
+        ["CONTROL_PLANE_QUEUE_UNAVAILABLE"],
+    )
+    responses["JobLogError"] = _typed_error_response(
+        "Pipeline job log retrieval failed using the canonical error envelope.",
+        [
+            "JOB_LOG_NOT_PUBLISHED",
+            "JOB_LOG_URI_UNSUPPORTED",
+            "JOB_LOG_ACCESS_DENIED",
+            "JOB_LOG_NOT_FOUND",
+        ],
+    )
 
     _patch_pipeline_operation(
         schema,
@@ -711,6 +730,11 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         ],
         data_schema={"$ref": "#/components/schemas/JobLogs"},
         description="Pipeline job logs",
+        extra_responses={
+            "400": {"$ref": "#/components/responses/JobLogError"},
+            "403": {"$ref": "#/components/responses/JobLogError"},
+            "404": {"$ref": "#/components/responses/JobLogError"},
+        },
     )
     _patch_pipeline_operation(
         schema,
@@ -730,6 +754,22 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         ],
         data_schema={"$ref": "#/components/schemas/RetryRunResult"},
         description="Retry request accepted",
+        extra_responses={"409": {"$ref": "#/components/responses/ControlPlaneManualActionRequired"}},
+    )
+    # Cancel and queue/depth keep FastAPI's generated success schema; only the
+    # display-mode error responses are injected so the runtime spec matches the
+    # static contract for those control-plane status codes.
+    _inject_operation_responses(
+        schema,
+        "/api/v1/runs/{run_id}/cancel",
+        "post",
+        {"409": {"$ref": "#/components/responses/ControlPlaneManualActionRequired"}},
+    )
+    _inject_operation_responses(
+        schema,
+        "/api/v1/queue/depth",
+        "get",
+        {"503": {"$ref": "#/components/responses/ControlPlaneQueueUnavailable"}},
     )
 
 
@@ -767,6 +807,49 @@ def _patch_runtime_openapi(schema: dict) -> None:
     }
 
 
+def _typed_error_response(description: str, codes: list[str]) -> dict[str, Any]:
+    return {
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["request_id", "status", "error"],
+                    "properties": {
+                        "request_id": {"type": "string"},
+                        "status": {"type": "string", "enum": ["error"]},
+                        "error": {
+                            "type": "object",
+                            "required": ["code", "message"],
+                            "properties": {
+                                "code": {"type": "string", "enum": codes},
+                                "message": {"type": "string"},
+                                "details": {
+                                    "type": "object",
+                                    "nullable": True,
+                                    "additionalProperties": True,
+                                },
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+
+def _inject_operation_responses(
+    schema: dict,
+    path: str,
+    method: str,
+    responses: dict[str, dict[str, Any]],
+) -> None:
+    operation = schema.get("paths", {}).get(path, {}).get(method)
+    if not operation:
+        return
+    operation.setdefault("responses", {}).update(responses)
+
+
 def _patch_pipeline_operation(
     schema: dict,
     path: str,
@@ -778,6 +861,7 @@ def _patch_pipeline_operation(
     parameters: list[dict[str, Any]],
     data_schema: dict[str, Any],
     description: str,
+    extra_responses: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     operation = schema.get("paths", {}).get(path, {}).get(method)
     if not operation:
@@ -791,6 +875,7 @@ def _patch_pipeline_operation(
             "description": description,
             "content": {"application/json": {"schema": _success_response_schema(data_schema)}},
         },
+        **(extra_responses or {}),
         "4XX": {"$ref": "#/components/responses/Error"},
         "5XX": {"$ref": "#/components/responses/Error"},
     }

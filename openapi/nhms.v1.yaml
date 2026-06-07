@@ -780,6 +780,8 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/RetryRunResult"
+        "409":
+          $ref: "#/components/responses/ControlPlaneManualActionRequired"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -805,6 +807,8 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/CancelRunResult"
+        "409":
+          $ref: "#/components/responses/ControlPlaneManualActionRequired"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1235,6 +1239,12 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/JobLogs"
+        "400":
+          $ref: "#/components/responses/JobLogError"
+        "403":
+          $ref: "#/components/responses/JobLogError"
+        "404":
+          $ref: "#/components/responses/JobLogError"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1257,6 +1267,8 @@ paths:
                     properties:
                       data:
                         $ref: "#/components/schemas/QueueDepth"
+        "503":
+          $ref: "#/components/responses/ControlPlaneQueueUnavailable"
         "4XX":
           $ref: "#/components/responses/Error"
         "5XX":
@@ -1716,6 +1728,97 @@ components:
                   code:
                     type: string
                     enum: [MVT_LIVE_POSTGIS_UNAVAILABLE]
+                  message:
+                    type: string
+                  details:
+                    type: object
+                    nullable: true
+                    additionalProperties: true
+    ControlPlaneManualActionRequired:
+      description: >
+        Control-plane mutation is unavailable from a display_readonly API node;
+        the authorized actor must perform the action from the compute_control
+        runbook on node 22.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [request_id, status, error]
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum: [error]
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code:
+                    type: string
+                    enum: [CONTROL_PLANE_MANUAL_ACTION_REQUIRED]
+                  message:
+                    type: string
+                  details:
+                    type: object
+                    nullable: true
+                    additionalProperties: true
+    ControlPlaneQueueUnavailable:
+      description: >
+        Queue depth is unavailable from a display_readonly API node; the
+        compute_control node exposes the live queue state.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [request_id, status, error]
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum: [error]
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code:
+                    type: string
+                    enum: [CONTROL_PLANE_QUEUE_UNAVAILABLE]
+                  message:
+                    type: string
+                  details:
+                    type: object
+                    nullable: true
+                    additionalProperties: true
+    JobLogError:
+      description: >
+        Pipeline job log retrieval failed. JOB_LOG_NOT_PUBLISHED and
+        JOB_LOG_URI_UNSUPPORTED are 400 client errors; JOB_LOG_ACCESS_DENIED is
+        403; JOB_LOG_NOT_FOUND is 404. All payloads use the canonical error
+        envelope with redacted log identity details.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [request_id, status, error]
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum: [error]
+              error:
+                type: object
+                required: [code, message]
+                properties:
+                  code:
+                    type: string
+                    enum:
+                      - JOB_LOG_NOT_PUBLISHED
+                      - JOB_LOG_URI_UNSUPPORTED
+                      - JOB_LOG_ACCESS_DENIED
+                      - JOB_LOG_NOT_FOUND
                   message:
                     type: string
                   details:

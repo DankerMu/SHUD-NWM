@@ -869,6 +869,158 @@ def test_display_cancel_manual_action_does_not_mutate_pipeline_or_terminal_state
         assert _events(store) == []
 
 
+@pytest.mark.parametrize(
+    ("role_header", "expected_status", "expected_code"),
+    [
+        (None, 401, "AUTH_REQUIRED"),
+        ({"X-User-Role": "viewer"}, 403, "RBAC_FORBIDDEN"),
+    ],
+)
+def test_retry_auth_rbac_denied_paths_make_no_gateway_or_state_writes(
+    role_header: dict[str, str] | None,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_retry_authz", status="failed")
+        _insert_forecast_cycle(store, "cycle_retry_authz", status="failed_run")
+        _create_job(
+            store,
+            job_id="job_retry_authz",
+            run_id="run_retry_authz",
+            cycle_id="cycle_retry_authz",
+            status="failed",
+            error_code="NODE_FAILURE",
+        )
+        gateway = _MockGateway()
+        service = RetryService(store, RetryConfig(max_retries=3))
+        with _client(store, gateway=gateway, retry_service=service) as client:
+            response = client.post("/api/v1/runs/run_retry_authz/retry", headers=role_header or {})
+
+        assert response.status_code == expected_status
+        assert response.json()["error"]["code"] == expected_code
+        assert gateway.submissions == []
+        assert gateway.cancelled == []
+        assert store.get_job("job_retry_authz").status == "failed"
+        assert _hydro_status(store, "run_retry_authz") == "failed"
+        assert _cycle_status(store, "cycle_retry_authz") == "failed_run"
+        assert _events(store) == []
+
+
+@pytest.mark.parametrize(
+    ("role_header", "expected_status", "expected_code"),
+    [
+        (None, 401, "AUTH_REQUIRED"),
+        ({"X-User-Role": "viewer"}, 403, "RBAC_FORBIDDEN"),
+    ],
+)
+def test_cancel_auth_rbac_denied_paths_make_no_gateway_or_state_writes(
+    role_header: dict[str, str] | None,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_cancel_authz", status="running")
+        _insert_forecast_cycle(store, "cycle_cancel_authz", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_cancel_authz",
+            run_id="run_cancel_authz",
+            cycle_id="cycle_cancel_authz",
+            status="running",
+            slurm_job_id="slurm_cancel_authz",
+        )
+        gateway = _MockGateway()
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_cancel_authz/cancel", headers=role_header or {})
+
+        assert response.status_code == expected_status
+        assert response.json()["error"]["code"] == expected_code
+        assert gateway.submissions == []
+        assert gateway.cancelled == []
+        assert store.get_job("job_cancel_authz").status == "running"
+        assert _hydro_status(store, "run_cancel_authz") == "running"
+        assert _cycle_status(store, "cycle_cancel_authz") == "forecast_running"
+        assert _events(store) == []
+
+
+def test_retry_authorized_compute_control_submits_via_gateway() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_retry_compute", status="failed")
+        _insert_forecast_cycle(store, "cycle_retry_compute", status="failed_run")
+        _create_job(
+            store,
+            job_id="job_retry_compute",
+            run_id="run_retry_compute",
+            cycle_id="cycle_retry_compute",
+            status="failed",
+            error_code="NODE_FAILURE",
+        )
+        gateway = _MockGateway()
+        service = RetryService(store, RetryConfig(max_retries=3))
+        app = create_app(_compute_env())
+        app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+        app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
+
+        previous = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/v1/runs/run_retry_compute/retry",
+                    headers=_operator_headers(),
+                )
+        finally:
+            if previous is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous
+
+        assert response.status_code == 200
+        assert response.json()["data"]["status"] == "submitted"
+        assert gateway.submissions
+        assert _hydro_status(store, "run_retry_compute") == "pending"
+
+
+def test_cancel_authorized_compute_control_cancels_via_gateway() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_cancel_compute", status="running")
+        _insert_forecast_cycle(store, "cycle_cancel_compute", status="forecast_running")
+        _create_job(
+            store,
+            job_id="job_cancel_compute",
+            run_id="run_cancel_compute",
+            cycle_id="cycle_cancel_compute",
+            status="running",
+            slurm_job_id="slurm_cancel_compute",
+        )
+        gateway = _MockGateway()
+        app = create_app(_compute_env())
+        app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+
+        previous = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/v1/runs/run_cancel_compute/cancel",
+                    headers=_operator_headers(),
+                )
+        finally:
+            if previous is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous
+
+        assert response.status_code == 200
+        assert response.json()["data"]["partial_failure"] is False
+        assert gateway.cancelled == ["slurm_cancel_compute"]
+        assert store.get_job("job_cancel_compute").status == "cancelled"
+        assert _hydro_status(store, "run_cancel_compute") == "cancelled"
+
+
 def test_retry_nonexistent_run_raises_not_found_without_enum_write() -> None:
     with _store() as store:
         gateway = _MockGateway()
@@ -928,6 +1080,13 @@ def _display_env() -> dict[str, str]:
     return {
         "NHMS_REQUIRE_SERVICE_ROLE": "true",
         "NHMS_SERVICE_ROLE": "display_readonly",
+    }
+
+
+def _compute_env() -> dict[str, str]:
+    return {
+        "NHMS_REQUIRE_SERVICE_ROLE": "true",
+        "NHMS_SERVICE_ROLE": "compute_control",
     }
 
 

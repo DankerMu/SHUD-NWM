@@ -1803,6 +1803,69 @@ export interface components {
                 };
             };
         };
+        /** @description Control-plane mutation is unavailable from a display_readonly API node; the authorized actor must perform the action from the compute_control runbook on node 22. */
+        ControlPlaneManualActionRequired: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "CONTROL_PLANE_MANUAL_ACTION_REQUIRED";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+        };
+        /** @description Queue depth is unavailable from a display_readonly API node; the compute_control node exposes the live queue state. */
+        ControlPlaneQueueUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "CONTROL_PLANE_QUEUE_UNAVAILABLE";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+        };
+        /** @description Pipeline job log retrieval failed. JOB_LOG_NOT_PUBLISHED and JOB_LOG_URI_UNSUPPORTED are 400 client errors; JOB_LOG_ACCESS_DENIED is 403; JOB_LOG_NOT_FOUND is 404. All payloads use the canonical error envelope with redacted log identity details. */
+        JobLogError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "JOB_LOG_NOT_PUBLISHED" | "JOB_LOG_URI_UNSUPPORTED" | "JOB_LOG_ACCESS_DENIED" | "JOB_LOG_NOT_FOUND";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+        };
     };
     parameters: {
         BasinId: string;
@@ -2451,6 +2514,7 @@ export interface operations {
                     };
                 };
             };
+            409: components["responses"]["ControlPlaneManualActionRequired"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -2479,6 +2543,7 @@ export interface operations {
                     };
                 };
             };
+            409: components["responses"]["ControlPlaneManualActionRequired"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -2786,6 +2851,9 @@ export interface operations {
                     };
                 };
             };
+            400: components["responses"]["JobLogError"];
+            403: components["responses"]["JobLogError"];
+            404: components["responses"]["JobLogError"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
@@ -2810,6 +2878,7 @@ export interface operations {
                     };
                 };
             };
+            503: components["responses"]["ControlPlaneQueueUnavailable"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
         };
