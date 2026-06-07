@@ -187,6 +187,30 @@ def test_discover_cycles_normal_date_range_and_all_day_unavailable(tmp_path: Pat
     assert unavailable_repository.cycles == {}
 
 
+def test_discover_cycles_switches_source_when_primary_probe_fails(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def checker(url: str) -> bool:
+        calls.append(url)
+        if "://aws/" in url:
+            raise NetworkDownloadError("aws index slowed down")
+        return "://azure/" in url
+
+    adapter = build_adapter(
+        tmp_path,
+        availability_checker=checker,
+        max_wait_seconds=0,
+    )
+
+    cycles = adapter.discover_cycles("2026-05-01")
+
+    assert all(cycle.available for cycle in cycles)
+    assert all(cycle.probe_uri.startswith("ecmwf-opendata://azure/") for cycle in cycles)
+    assert cycles[0].evidence["attempted_sources"] == ["aws", "azure"]
+    assert any("://aws/" in call for call in calls)
+    assert any("://azure/" in call for call in calls)
+
+
 def test_ifs_cli_unavailable_cycle_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

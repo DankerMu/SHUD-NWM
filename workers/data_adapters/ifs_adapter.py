@@ -373,31 +373,13 @@ class IFSAdapter(DataSourceAdapter):
                     tzinfo=UTC,
                 )
                 cycle_id = cycle_id_for(self.config.source_id, cycle_time)
-                remote_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0])
-                try:
-                    available = self.availability_checker(remote_url)
-                    status = "discovered" if available else "unavailable"
-                    reason = None if available else "source_cycle_unavailable"
-                    classifier = None if available else "unavailable"
-                    retryable = None if available else True
-                except ForbiddenSourceError:
-                    LOGGER.warning(
-                        "IFS availability check was forbidden for %s",
-                        self._safe_text(remote_url),
-                        exc_info=True,
-                    )
-                    available = False
-                    status = "forbidden"
-                    reason = "source_cycle_forbidden"
-                    classifier = "forbidden"
-                    retryable = False
-                except Exception:
-                    LOGGER.exception("Failed to check IFS availability for %s", self._safe_text(remote_url))
-                    available = False
-                    status = "unavailable"
-                    reason = "source_cycle_unavailable"
-                    classifier = "unavailable"
-                    retryable = True
+                availability = self._discover_cycle_availability(cycle_time)
+                remote_url = availability["probe_uri"]
+                available = bool(availability["available"])
+                status = str(availability["status"])
+                reason = availability["reason"]
+                classifier = availability["classifier"]
+                retryable = availability["retryable"]
 
                 discovery = CycleDiscovery(
                     cycle_id=cycle_id,
@@ -417,7 +399,9 @@ class IFSAdapter(DataSourceAdapter):
                             "forecast_hour": 0,
                             "variable": self.config.variables[0],
                             "preferred_source": self.config.preferred_source,
+                            "source": availability["source"],
                         },
+                        "attempted_sources": availability["attempted_sources"],
                     },
                 )
                 discoveries.append(discovery)
@@ -438,6 +422,57 @@ class IFSAdapter(DataSourceAdapter):
             current_date += timedelta(days=1)
 
         return discoveries
+
+    def _discover_cycle_availability(self, cycle_time: datetime) -> dict[str, Any]:
+        attempted_sources: list[str] = []
+        first_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0])
+        last_url = first_url
+        for source in self.config.sources():
+            remote_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0], source=source)
+            last_url = remote_url
+            attempted_sources.append(source)
+            try:
+                if self.availability_checker(remote_url):
+                    return {
+                        "available": True,
+                        "status": "discovered",
+                        "reason": None,
+                        "classifier": None,
+                        "retryable": None,
+                        "probe_uri": remote_url,
+                        "source": source,
+                        "attempted_sources": attempted_sources,
+                    }
+            except ForbiddenSourceError:
+                LOGGER.warning(
+                    "IFS availability check was forbidden for %s",
+                    self._safe_text(remote_url),
+                    exc_info=True,
+                )
+                return {
+                    "available": False,
+                    "status": "forbidden",
+                    "reason": "source_cycle_forbidden",
+                    "classifier": "forbidden",
+                    "retryable": False,
+                    "probe_uri": remote_url,
+                    "source": source,
+                    "attempted_sources": attempted_sources,
+                }
+            except Exception:
+                LOGGER.warning("Failed to check IFS availability for %s", self._safe_text(remote_url), exc_info=True)
+                continue
+
+        return {
+            "available": False,
+            "status": "unavailable",
+            "reason": "source_cycle_unavailable",
+            "classifier": "unavailable",
+            "retryable": True,
+            "probe_uri": last_url,
+            "source": attempted_sources[-1] if attempted_sources else self.config.preferred_source,
+            "attempted_sources": attempted_sources,
+        }
 
     def build_manifest(
         self,
