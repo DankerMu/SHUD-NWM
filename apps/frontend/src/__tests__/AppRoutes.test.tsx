@@ -859,6 +859,14 @@ function mockHydroMetRouteClient(options: {
         : options.stationSeriesResponse ?? hydroMetStationSeriesResponse(stationId)
       return { data: success(response), error: undefined } as never
     }
+    if (path === '/api/v1/basins') {
+      return {
+        data: success([
+          { basin_id: 'basins_qhh', basin_name: '青海湖', basin_group: null, description: null, created_at: '2026-01-01T00:00:00Z' },
+        ]),
+        error: undefined,
+      } as never
+    }
     if (path === '/api/v1/mvp/qhh/latest-product') {
       const source = (requestOptions as { params?: { query?: { source?: string } } })?.params?.query?.source ?? 'GFS'
       const sourceOverrides = source === 'IFS' ? { source_id: 'IFS', run_id: 'qhh_ifs_2026052100_smoke', forcing_version_id: 'forc_ifs_2026052100_basins_qhh_shud' } : {}
@@ -2083,7 +2091,12 @@ describe('App route state', () => {
     expect(unavailable).toHaveTextContent('过长内容已截断')
     expect(document.body.textContent ?? '').not.toContain(attackToken)
     expect(screen.queryByTestId('mock-echarts-option')).not.toBeInTheDocument()
-    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+    expect(
+      vi
+        .mocked(client.GET)
+        .mock.calls.map(([path]) => path)
+        .filter((path) => path !== '/api/v1/basins'),
+    ).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
   it('caps /hydro-met quality note lists and bounds overlong note code and message tokens before rendering', async () => {
@@ -2173,7 +2186,12 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByTestId('hydro-met-latest-unavailable')).toHaveTextContent('NO_READY_PRODUCT')
-    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+    expect(
+      vi
+        .mocked(client.GET)
+        .mock.calls.map(([path]) => path)
+        .filter((path) => path !== '/api/v1/basins'),
+    ).toEqual(['/api/v1/mvp/qhh/latest-product'])
 
     cleanup()
     vi.clearAllMocks()
@@ -2189,7 +2207,12 @@ describe('App route state', () => {
 
     expect(await screen.findByTestId('hydro-met-latest-incomplete')).toHaveTextContent('river_network_version_id 缺失')
     expect(screen.getByTestId('hydro-met-latest-incomplete')).toHaveTextContent('segment_count 不可展示')
-    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+    expect(
+      vi
+        .mocked(client.GET)
+        .mock.calls.map(([path]) => path)
+        .filter((path) => path !== '/api/v1/basins'),
+    ).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
   it('renders /hydro-met partial failures and empty inventory states explicitly', async () => {
@@ -2396,7 +2419,12 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByTestId('hydro-met-cycle-unavailable')).toHaveTextContent('避免混用产品')
-    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+    expect(
+      vi
+        .mocked(client.GET)
+        .mock.calls.map(([path]) => path)
+        .filter((path) => path !== '/api/v1/basins'),
+    ).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
   it('renders overview shared controls and drives URL/query reload state', async () => {

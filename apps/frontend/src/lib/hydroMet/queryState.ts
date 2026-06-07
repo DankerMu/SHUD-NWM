@@ -3,12 +3,13 @@ export type HydroMetSource = 'GFS' | 'IFS'
 export interface HydroMetQueryState {
   source: HydroMetSource
   cycle: string | null
+  basin: string | null
   strictIdentity: HydroMetStrictIdentity | null
   strictIdentityError: string | null
   validationReasons: string[]
 }
 
-export type HydroMetQueryPatch = Partial<Pick<HydroMetQueryState, 'source' | 'cycle'>>
+export type HydroMetQueryPatch = Partial<Pick<HydroMetQueryState, 'source' | 'cycle' | 'basin'>>
 
 export interface HydroMetStrictIdentity {
   source: HydroMetSource
@@ -22,6 +23,7 @@ export const hydroMetSources: HydroMetSource[] = ['GFS', 'IFS']
 export const defaultHydroMetQueryState: HydroMetQueryState = {
   source: 'GFS',
   cycle: null,
+  basin: null,
   strictIdentity: null,
   strictIdentityError: null,
   validationReasons: [],
@@ -103,6 +105,11 @@ function parseCycle(value: string | null, reasons: string[]) {
   return null
 }
 
+function parseBasin(value: string | null) {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : null
+}
+
 function parseStrictToken(value: string | null) {
   if (!value?.trim()) return null
   return value.trim()
@@ -156,10 +163,12 @@ export function parseHydroMetQueryState(input: string | URLSearchParams): HydroM
   const strictIdentity = parseStrictIdentity(params)
   const source = strictIdentity.identity?.source ?? parseSource(params.get('source'), validationReasons)
   const cycle = strictIdentity.identity?.cycleTime ?? parseCycle(params.get('cycle'), validationReasons)
+  const basin = parseBasin(params.get('basin'))
 
   return {
     source,
     cycle,
+    basin,
     strictIdentity: strictIdentity.identity,
     strictIdentityError: strictIdentity.error,
     validationReasons,
@@ -169,6 +178,7 @@ export function parseHydroMetQueryState(input: string | URLSearchParams): HydroM
 export function serializeHydroMetQueryState(state: HydroMetQueryState) {
   const params = new URLSearchParams()
   params.set('source', state.source)
+  if (state.basin) params.set('basin', state.basin)
   if (state.strictIdentity) {
     params.set('cycle_time', state.strictIdentity.cycleTime)
     params.set('run_id', state.strictIdentity.runId)
@@ -184,13 +194,8 @@ export function mergeHydroMetQueryState(state: HydroMetQueryState, patch: HydroM
   params.set('source', patch.source ?? state.source)
   const nextCycle = Object.prototype.hasOwnProperty.call(patch, 'cycle') ? patch.cycle : state.cycle
   if (nextCycle) params.set('cycle', nextCycle)
-  Object.entries(patch).forEach(([key, value]) => {
-    if (value === undefined || value === null || value === '') {
-      params.delete(key)
-    } else {
-      params.set(key, String(value))
-    }
-  })
+  const nextBasin = Object.prototype.hasOwnProperty.call(patch, 'basin') ? patch.basin : state.basin
+  if (nextBasin) params.set('basin', nextBasin)
   return parseHydroMetQueryState(params)
 }
 
