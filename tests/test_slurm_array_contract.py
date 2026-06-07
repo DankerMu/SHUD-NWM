@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from packages.common import state_cli
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from services.orchestrator import cli as orchestrator_cli
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
@@ -230,6 +231,10 @@ class _FakeParser:
         (
             "parse_output_array",
             'nhms-parse shud-output --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"',
+        ),
+        (
+            "save_state_snapshot_array",
+            'nhms-state save --manifest-index "$NHMS_MANIFEST_INDEX" --task-id "${SLURM_ARRAY_TASK_ID:-0}"',
         ),
         (
             "compute_frequency_array",
@@ -646,6 +651,20 @@ def test_parse_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
     monkeypatch.setattr(output_cli.OutputParser, "from_env", staticmethod(lambda: FakeParser()))
 
     _invoke_main(output_cli.main, ["shud-output", "--manifest-index", str(_manifest_index(tmp_path)), "--task-id", "0"])
+
+    assert captured["run_id"] == "run_001"
+
+
+def test_state_save_array_cli_accepts_manifest_index(monkeypatch, tmp_path):
+    captured: dict[str, str] = {}
+
+    def fake_save_state_for_run(run_id: str) -> dict[str, object]:
+        captured["run_id"] = run_id
+        return {"run_id": run_id, "status": "saved"}
+
+    monkeypatch.setattr(state_cli, "save_state_for_run", fake_save_state_for_run)
+
+    _invoke_main(state_cli.main, ["save", "--manifest-index", str(_manifest_index(tmp_path)), "--task-id", "0"])
 
     assert captured["run_id"] == "run_001"
 

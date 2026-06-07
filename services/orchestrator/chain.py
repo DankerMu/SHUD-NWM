@@ -193,6 +193,14 @@ M3_STAGES: tuple[StageDefinition, ...] = (
         is_array=True,
     ),
     StageDefinition(
+        "state_save_qc",
+        "save_state_snapshot_array",
+        "save_state_snapshot_array.sbatch",
+        "complete",
+        "failed_publish",
+        is_array=True,
+    ),
+    StageDefinition(
         "frequency",
         "compute_frequency_array",
         "compute_frequency_array.sbatch",
@@ -2784,7 +2792,7 @@ class ForecastOrchestrator:
     ) -> None:
         _record_array_task_outcomes(context, stage=stage.stage, aggregation=aggregation)
         if aggregation.status == "succeeded":
-            if context.had_partial and stage.stage in {"parse", "frequency"}:
+            if context.had_partial and stage.stage in {"parse", "state_save_qc", "frequency"}:
                 context.last_partial_status = "parsed_partial"
             return
         if aggregation.status == "failed":
@@ -2797,14 +2805,14 @@ class ForecastOrchestrator:
     def _success_cycle_status(self, stage: StageDefinition, context: CycleOrchestrationContext) -> str:
         if not context.had_partial:
             return stage.success_cycle_status
-        if stage.stage in {"parse", "frequency", "publish"}:
+        if stage.stage in {"parse", "state_save_qc", "frequency", "publish"}:
             return "parsed_partial"
         if stage.stage in {"forcing", "forecast"}:
             return "forcing_ready_partial"
         return context.last_partial_status or stage.success_cycle_status
 
     def _partial_cycle_status(self, stage: StageDefinition) -> str:
-        if stage.stage in {"parse", "frequency"}:
+        if stage.stage in {"parse", "state_save_qc", "frequency"}:
             return "parsed_partial"
         return "forcing_ready_partial"
 
@@ -5973,8 +5981,9 @@ class PsycopgOrchestratorRepository:
                 WHEN 'forcing' THEN 3
                 WHEN 'forecast' THEN 4
                 WHEN 'parse' THEN 5
-                WHEN 'frequency' THEN 6
-                WHEN 'publish' THEN 7
+                WHEN 'state_save_qc' THEN 6
+                WHEN 'frequency' THEN 7
+                WHEN 'publish' THEN 8
                 WHEN 'download_gfs' THEN 1
                 WHEN 'convert_canonical' THEN 2
                 WHEN 'produce_forcing' THEN 3

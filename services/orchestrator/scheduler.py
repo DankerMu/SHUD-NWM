@@ -119,7 +119,7 @@ MODEL_RUN_EVIDENCE_SCHEMA_VERSION = "nhms.production_scheduler.model_run_evidenc
 SCHEDULER_EVIDENCE_CONTRACT_ID = "runtime-evidence-and-operations.scheduler-evidence.v1"
 SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE = "m20-production-multibasin-continuous-automation"
 SCHEDULER_EVIDENCE_GITHUB_ISSUE = 196
-SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "frequency"}
+SLURM_ARRAY_STAGE_NAMES = {"forcing", "forecast", "parse", "state_save_qc", "frequency"}
 SAFE_SLURM_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 SAFE_SLURM_ENV_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:=,@+\-]*$")
 SHELL_META_RE = re.compile(r"[;|&$`<>\n\r]")
@@ -191,17 +191,29 @@ TERMINAL_PIPELINE_STATUSES = {
     "permanently_failed",
 }
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
-DOWNSTREAM_RESTART_STAGES = ("parse", "frequency", "publish")
+DOWNSTREAM_RESTART_STAGES = ("parse", "state_save_qc", "frequency", "publish")
 DOWNSTREAM_STAGE_ALIASES = {
     "parse": "parse",
     "parse_output": "parse",
+    "state_save_qc": "state_save_qc",
+    "save_state_snapshot": "state_save_qc",
+    "save_state_snapshot_array": "state_save_qc",
     "frequency": "frequency",
     "compute_frequency": "frequency",
     "publish": "publish",
     "publish_tiles": "publish",
 }
 NATIVE_SHUD_STAGE_ALIASES = {"forecast", "run_shud_forecast", "forecast_run", "analysis_run"}
-PIPELINE_TERMINAL_SUCCESS_STAGES = {"parse", "frequency", "publish", "parse_output", "publish_tiles"}
+PIPELINE_TERMINAL_SUCCESS_STAGES = {
+    "parse",
+    "state_save_qc",
+    "frequency",
+    "publish",
+    "parse_output",
+    "save_state_snapshot",
+    "save_state_snapshot_array",
+    "publish_tiles",
+}
 TRANSIENT_RETRY_REASON_CODES = {
     "SLURM_TIMEOUT",
     "SLURM_JOB_TIMEOUT",

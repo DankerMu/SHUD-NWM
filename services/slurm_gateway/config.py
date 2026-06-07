@@ -18,6 +18,7 @@ DEFAULT_JOB_TYPE_TEMPLATES = {
     "produce_forcing_array": "produce_forcing_array.sbatch",
     "run_shud_forecast_array": "run_shud_forecast_array.sbatch",
     "parse_output_array": "parse_output_array.sbatch",
+    "save_state_snapshot_array": "save_state_snapshot_array.sbatch",
     "compute_frequency_array": "compute_frequency_array.sbatch",
     "publish_tiles": "publish_tiles.sbatch",
     "analysis_download_source_cycle": "analysis_download_source_cycle.sbatch",

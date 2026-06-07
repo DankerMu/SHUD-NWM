@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
+from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from packages.common.object_store import LocalObjectStore
 from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateManagerError
 
@@ -107,6 +108,19 @@ def save_state_for_run(
     }
 
 
+def resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int | None) -> str:
+    if manifest_index is not None:
+        resolved_task_id = resolve_task_id(task_id)
+        entry = load_manifest_entry(manifest_index, resolved_task_id)
+        return str(entry["run_id"])
+    if not run_id:
+        raise ManifestValidationError(
+            "Explicit state save requires --run-id.",
+            {"missing_fields": ["run_id"]},
+        )
+    return run_id
+
+
 def _find_ic_file(run: StateRunContext, workspace_root: Path, object_store: LocalObjectStore) -> Path:
     # Prefer the native SHUD end-of-segment restart artifact ``*.cfg.ic.update`` (the
     # interim T_{N+1} state written by the restart cadence); fall back to ``*.cfg.ic``.
@@ -181,10 +195,17 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
         pass
 
     @cli.command("save")
-    @click.option("--run-id", required=True)
-    def save(run_id: str) -> None:
+    @click.option("--run-id")
+    @click.option("--manifest-index")
+    @click.option("--task-id", type=int, default=None)
+    def save(run_id: str | None, manifest_index: str | None, task_id: int | None) -> None:
         try:
-            click.echo(json.dumps(save_state_for_run(run_id), sort_keys=True))
+            click.echo(
+                json.dumps(save_state_for_run(resolve_run_id(run_id, manifest_index, task_id)), sort_keys=True)
+            )
+        except ManifestValidationError as error:
+            click.echo(f"{error.error_code}: {error.message}", err=True)
+            raise SystemExit(1) from error
         except StateManagerError as error:
             click.echo(str(error), err=True)
             raise SystemExit(1) from error
@@ -197,12 +218,18 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nhms-state")
     subparsers = parser.add_subparsers(dest="command", required=True)
     save_parser = subparsers.add_parser("save")
-    save_parser.add_argument("--run-id", required=True)
+    save_parser.add_argument("--run-id")
+    save_parser.add_argument("--manifest-index")
+    save_parser.add_argument("--task-id", type=int, default=None)
     args = parser.parse_args(argv)
 
     if args.command == "save":
         try:
-            print(json.dumps(save_state_for_run(args.run_id), sort_keys=True))
+            resolved_run_id = resolve_run_id(args.run_id, args.manifest_index, args.task_id)
+            print(json.dumps(save_state_for_run(resolved_run_id), sort_keys=True))
+        except ManifestValidationError as error:
+            print(f"{error.error_code}: {error.message}", file=sys.stderr)
+            return 1
         except StateManagerError as error:
             print(str(error), file=sys.stderr)
             return 1

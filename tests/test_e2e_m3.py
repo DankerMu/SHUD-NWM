@@ -35,7 +35,7 @@ def test_e2e_m3_complete_cycle_monitoring_api(tmp_path: Path, monkeypatch: Any) 
 
         assert result.status == "complete"
         assert [submission["stage"] for submission in slurm.submissions] == [stage.stage for stage in M3_STAGES]
-        assert [stage.status for stage in result.stages] == ["succeeded"] * 7
+        assert [stage.status for stage in result.stages] == ["succeeded"] * len(M3_STAGES)
 
         with _client(store) as client:
             stages_response = client.get(
@@ -54,7 +54,7 @@ def test_e2e_m3_complete_cycle_monitoring_api(tmp_path: Path, monkeypatch: Any) 
 
         assert jobs_response.status_code == 200
         jobs = jobs_response.json()["data"]["items"]
-        assert jobs_response.json()["data"]["total"] == 7
+        assert jobs_response.json()["data"]["total"] == len(M3_STAGES)
         assert {job["status"] for job in jobs} == {"succeeded"}
         assert {job["run_type"] for job in jobs} == {"forecast"}
         assert {job["scenario"] for job in jobs} == {"forecast_gfs_deterministic"}

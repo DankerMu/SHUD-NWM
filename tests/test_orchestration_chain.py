@@ -773,7 +773,7 @@ class FakeRetryService:
         return job
 
 
-def test_m3_cycle_orchestration_submits_all_seven_stages_lazily(tmp_path: Path) -> None:
+def test_m3_cycle_orchestration_submits_all_stages_lazily(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
     orchestrator = _orchestrator(tmp_path, repository, client)
@@ -782,9 +782,24 @@ def test_m3_cycle_orchestration_submits_all_seven_stages_lazily(tmp_path: Path) 
 
     assert result.status == "complete"
     assert [submission["stage"] for submission in client.submissions] == [stage.stage for stage in M3_STAGES]
-    assert [stage.status for stage in result.stages] == ["succeeded"] * 7
+    assert [stage.status for stage in result.stages] == ["succeeded"] * len(M3_STAGES)
     assert repository.cycle_statuses[-1] == "complete"
     assert {job["status"] for job in repository.jobs.values()} == {"succeeded"}
+
+
+def test_m3_forecast_saves_state_before_frequency() -> None:
+    stages = [stage.stage for stage in M3_STAGES]
+
+    assert stages == [
+        "download",
+        "convert",
+        "forcing",
+        "forecast",
+        "parse",
+        "state_save_qc",
+        "frequency",
+        "publish",
+    ]
 
 
 def test_non_array_stage_submissions_carry_slurm_template_and_env_contract(tmp_path: Path) -> None:
@@ -926,7 +941,7 @@ def test_array_pipeline_jobs_are_persisted_as_cycle_level_rows(tmp_path: Path) -
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
     assert result.status == "complete"
-    for stage in ("forcing", "forecast", "parse", "frequency"):
+    for stage in ("forcing", "forecast", "parse", "state_save_qc", "frequency"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100"
         assert job["model_id"] is None
@@ -949,7 +964,7 @@ def test_single_candidate_downstream_restart_jobs_are_candidate_scoped(tmp_path:
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
 
     assert result.status == "complete"
-    for stage in ("parse", "frequency", "publish"):
+    for stage in ("parse", "state_save_qc", "frequency", "publish"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_parse_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100_parse"
         assert job["model_id"] == "model_0"
@@ -980,8 +995,13 @@ def test_candidate_scoped_parse_restarts_do_not_reuse_sibling_stage_jobs(tmp_pat
     first_result = orchestrator.orchestrate_cycle("gfs", "2026050100", [restart_basin(0)])
 
     assert first_result.status == "complete"
-    assert [submission["stage"] for submission in client.submissions] == ["parse", "frequency", "publish"]
-    for stage in ("parse", "frequency", "publish"):
+    assert [submission["stage"] for submission in client.submissions] == [
+        "parse",
+        "state_save_qc",
+        "frequency",
+        "publish",
+    ]
+    for stage in ("parse", "state_save_qc", "frequency", "publish"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_parse_model_0_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100_parse_model_0"
         assert job["model_id"] == "model_0"
@@ -1010,15 +1030,17 @@ def test_candidate_scoped_parse_restarts_do_not_reuse_sibling_stage_jobs(tmp_pat
     assert second_result.status == "complete"
     assert [submission["stage"] for submission in client.submissions[first_submission_count:]] == [
         "parse",
+        "state_save_qc",
         "frequency",
         "publish",
     ]
     assert [stage.pipeline_job_id for stage in second_result.stages] == [
         "job_cycle_gfs_2026050100_parse_model_1_parse",
+        "job_cycle_gfs_2026050100_parse_model_1_state_save_qc",
         "job_cycle_gfs_2026050100_parse_model_1_frequency",
         "job_cycle_gfs_2026050100_parse_model_1_publish",
     ]
-    for stage in ("parse", "frequency", "publish"):
+    for stage in ("parse", "state_save_qc", "frequency", "publish"):
         job = repository.jobs[f"job_cycle_gfs_2026050100_parse_model_1_{stage}"]
         assert job["run_id"] == "cycle_gfs_2026050100_parse_model_1"
         assert job["model_id"] == "model_1"
@@ -1838,7 +1860,7 @@ def test_failed_stage_auto_retries_before_downstream_stages(tmp_path: Path) -> N
 
     assert result.status == "complete"
     assert [submission["stage"] for submission in client.submissions[:3]] == ["download", "download", "convert"]
-    assert [stage.status for stage in result.stages] == ["succeeded"] * 7
+    assert [stage.status for stage in result.stages] == ["succeeded"] * len(M3_STAGES)
     assert retry_service.handled_job_ids == ["job_cycle_gfs_2026050100_download"]
 
 
@@ -2104,7 +2126,12 @@ def test_restart_stage_parse_skips_durable_upstream_stages_without_existing_upst
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
 
     assert result.status == "complete"
-    assert [submission["stage"] for submission in client.submissions] == ["parse", "frequency", "publish"]
+    assert [submission["stage"] for submission in client.submissions] == [
+        "parse",
+        "state_save_qc",
+        "frequency",
+        "publish",
+    ]
     assert "job_cycle_gfs_2026050100_download" not in repository.jobs
     assert "job_cycle_gfs_2026050100_forecast" not in repository.jobs
 
@@ -2201,7 +2228,12 @@ def test_crash_recovery_resumes_after_last_completed_stage(tmp_path: Path) -> No
     result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
 
     assert result.status == "complete"
-    assert [submission["stage"] for submission in client.submissions] == ["parse", "frequency", "publish"]
+    assert [submission["stage"] for submission in client.submissions] == [
+        "parse",
+        "state_save_qc",
+        "frequency",
+        "publish",
+    ]
 
 
 def test_resume_array_status_override_publishes_log_before_advertising_uri(

@@ -61,6 +61,7 @@ def test_pipeline_stages_endpoint() -> None:
             "forcing",
             "forecast",
             "parse",
+            "state_save_qc",
             "frequency",
             "publish",
         ]
@@ -417,10 +418,12 @@ def test_qhh_like_pipeline_stages_expose_formal_job_evidence_for_all_canonical_s
             "forcing",
             "forecast",
             "parse",
+            "state_save_qc",
             "frequency",
             "publish",
         ]
         assert [stage["display_status"] for stage in stages] == [
+            "succeeded",
             "succeeded",
             "succeeded",
             "succeeded",
@@ -3148,7 +3151,9 @@ def _seed_monitoring_jobs(store: PipelineStore, *, cycle_id: str) -> None:
 
 def _seed_qhh_canonical_stage_jobs(store: PipelineStore, *, cycle_id: str) -> None:
     base_time = _cycle_time()
-    for index, stage in enumerate(("download", "convert", "forcing", "forecast", "parse", "frequency", "publish")):
+    for index, stage in enumerate(
+        ("download", "convert", "forcing", "forecast", "parse", "state_save_qc", "frequency", "publish")
+    ):
         status = "partially_failed" if stage == "frequency" else "succeeded"
         retry_count = 2 if stage == "frequency" else 0
         job = _create_job(
