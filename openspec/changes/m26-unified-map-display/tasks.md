@@ -14,11 +14,11 @@
 
 ## 2. 总览↔详情就地化 + 数据 store 改造（inplace-overview-basin-detail）【最高风险，先做 store 单测】
 
-- [ ] 2.1 `lib/m11/queryState.ts`：`M11QueryState` 新增 `basinId: string | null`，纳入 `parseM11QueryState`/`serializeM11QueryState`/默认值/identifier 白名单校验。
-- [ ] 2.2 `stores/overviewData.ts`：`loadBasinDetail` 的 basinId 入口由路由 param 改为 query；snapshot 匹配函数按 query 内 basinId 判定；store 内部取数键与 honest 契约不变。**先补 store 单测覆盖 basinId-from-query**（护栏），再改页面。
-- [ ] 2.3 `pages/OverviewPage.tsx` 改造为 `DisplayMapPage`：按 `state.basinId` 双模式（null=总览 / 非 null=详情同图）；选 basin（点 `m11-basin-fill`/可见性树"进入分析"）→ `handleQueryChange({ basinId })`+`fitTo` bbox；"返回总览"→ `handleQueryChange({ basinId: null, segmentId: null })`。
-- [ ] 2.4 将 `BasinDetailPage` 的详情面板（`SegmentDiscoveryPanel`/`SelectedSegmentPanel`/趋势/对比/RP 三态）抽到 `components/m11/BasinDetailPanels.tsx` 并入单页；删除 `pages/BasinDetailPage.tsx` 与其路由。
-- [ ] 2.5 测试：`overviewData` 测试更新（basinId from query）；`AppRoutes.test.tsx` 加 basinId 切换驱动 `loadBasinDetail`+`m11FitBoundsCalls` 命中、河段列表出现、`basinId=null` 回总览；`M11Shell.test.tsx` 基本不动。
+- [x] 2.1 `lib/m11/queryState.ts`：`M11QueryState` 新增 `basinId: string | null`，纳入 `parseM11QueryState`/`serializeM11QueryState`/默认值/identifier 白名单校验。
+- [x] 2.2 `stores/overviewData.ts`：`loadBasinDetail` 的 basinId 入口由路由 param 改为 query；snapshot 匹配函数按 query 内 basinId 判定；store 内部取数键与 honest 契约不变。**先补 store 单测覆盖 basinId-from-query**（护栏），再改页面。
+- [x] 2.3 `pages/OverviewPage.tsx` 改造为 `DisplayMapPage`：按 `state.basinId` 双模式（null=总览 / 非 null=详情同图）；选 basin（点 `m11-basin-fill`/可见性树"进入分析"）→ `handleQueryChange({ basinId })`+`fitTo` bbox；"返回总览"→ `handleQueryChange({ basinId: null, segmentId: null })`。
+- [x] 2.4 将 `BasinDetailPage` 的详情面板（`SegmentDiscoveryPanel`/`SelectedSegmentPanel`/趋势/对比/RP 三态）抽到 `components/m11/BasinDetailPanels.tsx` 并入单页；删除 `pages/BasinDetailPage.tsx` 与其路由。
+- [x] 2.5 测试：`overviewData` 测试更新（basinId from query）；`AppRoutes.test.tsx` 加 basinId 切换驱动 `loadBasinDetail`+`m11FitBoundsCalls` 命中、河段列表出现、`basinId=null` 回总览；`M11Shell.test.tsx` 基本不动。
 
 ## 3. 气象代站 clustered-GeoJSON 图层（met-station-cluster-layer）
 

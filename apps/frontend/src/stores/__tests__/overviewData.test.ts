@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
-import { clearOverviewDataCache, useOverviewDataStore } from '@/stores/overviewData'
+import { basinSnapshotMatchesQuery, clearOverviewDataCache, useOverviewDataStore } from '@/stores/overviewData'
 import type { M11QueryState } from '@/lib/m11/queryState'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
 import { filterBasinSegmentRows, m11BasinRiverCollectionBudget, normalizeLayerStates } from '@/lib/m11/overviewDataContracts'
@@ -1017,6 +1017,57 @@ describe('useOverviewDataStore', () => {
       valid_time: '2026-05-18T06:00:00Z',
       variable: 'q_down',
     })
+  })
+
+  // M26-2 store 护栏：basinId 经 query 入参（D2），且不污染既有取数键（R1 回归）。
+  function mockHeiheBasinDetail() {
+    const heiheBasin = { ...basin, basin_id: 'basins_heihe', basin_name: 'Heihe Basin' }
+    const heiheVersion = { ...basinVersion, basin_version_id: 'heihe_v1', basin_id: 'basins_heihe' }
+    const heiheModel = { ...model, model_id: 'heihe_shud', basin_id: 'basins_heihe', basin_version_id: 'heihe_v1' }
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      if (path === '/api/v1/basins') return success([heiheBasin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([heiheVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [], total: 0, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [heiheModel], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return success({ ...featureCollection, features: [], total: 0, feature_total: 0, limit: 0 }) as never
+      if (path === '/api/v1/flood-alerts/ranking') return success({ ...ranking, items: [], total: 0 }) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+  }
+
+  it('loads basin detail using basinId from query and matches only that basin', async () => {
+    mockHeiheBasinDetail()
+    const heiheQuery: M11QueryState = { ...defaultM11QueryState, source: 'gfs', basinId: 'basins_heihe', basinVersionId: null, segmentId: null }
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('basins_heihe', heiheQuery)
+
+    expect(snapshot.requestScope.kind).toBe('basin-detail')
+    expect(snapshot.requestScope.basinId).toBe('basins_heihe')
+    expect(snapshot.detail.basinId).toBe('basins_heihe')
+    // 匹配函数按 query 内 basinId 判定，命中当前查询
+    expect(basinSnapshotMatchesQuery(snapshot, 'basins_heihe', heiheQuery)).toBe(true)
+    // 不串到其他流域
+    expect(basinSnapshotMatchesQuery(snapshot, 'basins_qhh', { ...heiheQuery, basinId: 'basins_qhh' })).toBe(false)
+  })
+
+  it('keeps basinId out of the request scope keys so it does not churn existing caches (R1)', async () => {
+    mockHeiheBasinDetail()
+    const baseQuery: M11QueryState = { ...defaultM11QueryState, source: 'gfs', basinId: null, basinVersionId: null, segmentId: null }
+    const withBasinId: M11QueryState = { ...baseQuery, basinId: 'basins_heihe' }
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('basins_heihe', baseQuery)
+
+    // 加 basinId 字段前后，经匹配函数的可观察行为一致：basinId 不进序列化键，零缓存 churn。
+    expect(basinSnapshotMatchesQuery(snapshot, 'basins_heihe', baseQuery)).toBe(
+      basinSnapshotMatchesQuery(snapshot, 'basins_heihe', withBasinId),
+    )
+    expect(basinSnapshotMatchesQuery(snapshot, 'basins_heihe', withBasinId)).toBe(true)
+    // dataKey 本身不含 basinId 痕迹
+    expect(snapshot.requestScope.dataKey).not.toContain('basins_heihe')
+    expect(snapshot.requestScope.queryKey).not.toContain('basins_heihe')
   })
 
   it('does not retain basin snapshot row geometry beyond the aggregate river budget', async () => {

@@ -2858,7 +2858,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basemap=satellite&basinVersionId=bv-sibling&segmentId=seg-sibling',
+      '/?source=gfs&validTime=2026-05-18T06:00:00Z&basemap=satellite&basinVersionId=bv-sibling&segmentId=seg-sibling',
     )
 
     render(<LegacyPagesHarness />)
@@ -2868,11 +2868,6 @@ describe('App route state', () => {
 
     await user.dblClick(screen.getByTestId('mock-m11-maplibre-map'))
     expect(await screen.findByTestId('m11-basin-popup')).toHaveTextContent('Demo Basin')
-    expect(screen.getByRole('link', { name: /进入分析/ })).toHaveAttribute(
-      'href',
-      '/basins/basin-demo?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basemap=satellite&basinVersionId=bv-001',
-    )
-    expect(screen.getByRole('link', { name: /进入分析/ }).getAttribute('href')).not.toContain('segmentId=seg-sibling')
     expect(screen.getByRole('link', { name: /查看详情/ })).toHaveAttribute(
       'href',
       '/monitoring?basinId=basin-demo&basinVersionId=bv-001',
@@ -2886,6 +2881,16 @@ describe('App route state', () => {
       '/flood-alerts?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z',
     )
     expect(screen.getByTestId('m11-basin-popup')).toHaveTextContent('模型河段数')
+
+    // 进入分析现为就地按钮：点击写 basinId（切详情模式），不携带异版本 segmentId，pathname 仍为 /
+    await user.click(screen.getByRole('button', { name: /进入分析/ }))
+    await waitFor(() =>
+      expect(window.location.search).toBe(
+        '?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basemap=satellite&basinVersionId=bv-001&basinId=basin-demo',
+      ),
+    )
+    expect(window.location.search).not.toContain('segmentId=seg-sibling')
+    expect(window.location.pathname).toBe('/')
   })
 
   it('resolves best summary links to the concrete overview source identity', async () => {
@@ -3015,32 +3020,32 @@ describe('App route state', () => {
     expect(screen.queryByRole('link', { name: /进入流域分析|等待可用流域/ })).not.toBeInTheDocument()
   })
 
-  it('encodes overview drill-down basin ids as one path segment and preserves query serialization', async () => {
-    const reservedBasinId = 'basin/demo?branch#run%25'
+  it('drills into a basin by writing basinId into the single-page query without leaving /', async () => {
+    const validBasinId = 'basins_qhh'
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasin(
         m11Layers,
         overviewFloodScopeKey,
         overviewFloodValid06ScopeKey,
-        reservedBasinId,
+        validBasinId,
       ),
       loading: false,
     })
-    window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
+    window.history.pushState({}, '', '/?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
 
     render(<LegacyPagesHarness />)
 
     await userEvent.setup().click(await screen.findByText('Demo Basin'))
-    const link = await screen.findByRole('link', { name: '进入流域分析' })
-    const href = link.getAttribute('href') ?? ''
-    const url = new URL(href, window.location.origin)
+    // 进入流域分析是就地按钮：写 query basinId、切详情模式，pathname 恒为 /，basinId 作单一 query 参数序列化
+    await userEvent.setup().click(await screen.findByRole('button', { name: '进入流域分析' }))
 
-    expect(url.pathname).toBe(`/basins/${encodeURIComponent(reservedBasinId)}`)
-    expect(url.pathname.split('/')).toHaveLength(3)
-    expect(url.search).toBe(
-      '?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001',
+    await waitFor(() =>
+      expect(window.location.search).toBe(
+        '?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&basinId=basins_qhh',
+      ),
     )
-    expect(url.hash).toBe('')
+    expect(window.location.pathname).toBe('/')
+    expect(new URLSearchParams(window.location.search).getAll('basinId')).toEqual(['basins_qhh'])
   })
 
   it('does not render static basin labels when overview basin inventory is empty', async () => {
@@ -3559,7 +3564,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&source=best&cycle=2026-05-18T00:00:00.123456Z&validTime=2026-05-18T14:00:00.250001%2B08:00&warningLevel=orange&q=main',
+      '/?cycle=2026-05-18T00%3A00%3A00.123456Z&validTime=2026-05-18T14%3A00%3A00.250001%2B08%3A00&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009&warningLevel=orange&q=main',
     )
     const replaceState = vi.spyOn(window.history, 'replaceState')
 
@@ -3571,12 +3576,12 @@ describe('App route state', () => {
     expect(screen.getAllByText('orange').length).toBeGreaterThan(0)
     await waitFor(() =>
       expect(window.location.search).toBe(
-        '?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=orange&q=main',
+        '?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009&warningLevel=orange&q=main',
       ),
     )
     const normalizedRouteReplacements = replaceState.mock.calls.filter(([, , url]) =>
       String(url).endsWith(
-        '/basins/basin-demo?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=orange&q=main',
+        '/?cycle=2026-05-18T00%3A00%3A00.123Z&validTime=2026-05-18T06%3A00%3A00.250Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009&warningLevel=orange&q=main',
       ),
     )
     expect(normalizedRouteReplacements).toHaveLength(1)
@@ -3619,7 +3624,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=flood-return-period&basemap=satellite&warningLevel=orange&q=main&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+      '/?source=ifs&cycle=2026-05-18T00%3A00%3A00Z&validTime=2026-05-18T06%3A00%3A00Z&layer=flood-return-period&basemap=satellite&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009&warningLevel=orange&q=main',
     )
     const replaceState = vi.spyOn(window.history, 'replaceState')
 
@@ -3652,7 +3657,7 @@ describe('App route state', () => {
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-segment-highlight-hook', 'selected-layer')
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'selected-layer')
     expect(screen.getAllByTestId('mock-m11-map-layer').map((layer) => layer.getAttribute('data-layer-id'))).toContain('m11-selected-segment-line')
-    const normalizedReplacements = replaceState.mock.calls.filter(([, , url]) => String(url).includes('/basins/basin-demo?'))
+    const normalizedReplacements = replaceState.mock.calls.filter(([, , url]) => String(url).includes('basinId=basin-demo'))
     expect(normalizedReplacements).toHaveLength(1)
     replaceState.mockRestore()
   })
@@ -3736,7 +3741,7 @@ describe('App route state', () => {
       basinLoading: false,
       basinError: null,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
+    window.history.pushState({}, '', '/?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
 
     render(<LegacyPagesHarness />)
 
@@ -3812,7 +3817,7 @@ describe('App route state', () => {
       basinError: null,
       loadBasinDetail,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
+    window.history.pushState({}, '', '/?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
 
     render(<LegacyPagesHarness />)
 
@@ -3899,7 +3904,7 @@ describe('App route state', () => {
       basinError: null,
       loadBasinDetail,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-old&segmentId=seg-009')
+    window.history.pushState({}, '', '/?basinVersionId=bv-001&riverNetworkVersionId=rn-old&basinId=basin-demo&segmentId=seg-009')
 
     render(<LegacyPagesHarness />)
 
@@ -3941,7 +3946,7 @@ describe('App route state', () => {
       },
       basinLoading: false,
     })
-    window.history.pushState({}, '', `/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=${warningLevel}`)
+    window.history.pushState({}, '', `/?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009&warningLevel=${warningLevel}`)
 
     render(<LegacyPagesHarness />)
 
@@ -3960,7 +3965,7 @@ describe('App route state', () => {
       basinError: null,
       loadBasinDetail,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
+    window.history.pushState({}, '', '/?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
 
     render(<LegacyPagesHarness />)
 
@@ -3986,7 +3991,7 @@ describe('App route state', () => {
       basinLoading: false,
       basinError: null,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
+    window.history.pushState({}, '', '/?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
 
     render(<LegacyPagesHarness />)
 
@@ -4055,7 +4060,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=best&cycle=2026-05-18T00:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
+      '/?cycle=2026-05-18T00%3A00%3A00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009',
     )
 
     render(<LegacyPagesHarness />)
@@ -4102,7 +4107,7 @@ describe('App route state', () => {
       basinLoading: false,
       basinError: null,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
+    window.history.pushState({}, '', '/?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
 
     render(<LegacyPagesHarness />)
 
@@ -4785,7 +4790,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-16T00:00:00Z',
+      '/?source=gfs&validTime=2026-05-16T00%3A00%3A00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009',
     )
 
     render(<LegacyPagesHarness />)
@@ -4810,7 +4815,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
+      '/?source=gfs&validTime=2026-05-18T06%3A00%3A00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009',
     )
 
     render(<LegacyPagesHarness />)
@@ -4832,7 +4837,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-18T00:00:00Z',
+      '/?source=gfs&validTime=2026-05-18T00%3A00%3A00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009',
     )
 
     render(<LegacyPagesHarness />)
@@ -4853,7 +4858,7 @@ describe('App route state', () => {
     window.history.pushState(
       {},
       '',
-      '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
+      '/?source=gfs&validTime=2026-05-18T06%3A00%3A00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009',
     )
 
     render(<LegacyPagesHarness />)
@@ -4878,7 +4883,7 @@ describe('App route state', () => {
       },
       basinLoading: false,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
+    window.history.pushState({}, '', '/?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
 
     render(<LegacyPagesHarness />)
 
@@ -4902,7 +4907,7 @@ describe('App route state', () => {
       },
       basinLoading: false,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001')
+    window.history.pushState({}, '', '/?basinVersionId=bv-001&basinId=basin-demo')
 
     render(<LegacyPagesHarness />)
 
@@ -4933,7 +4938,7 @@ describe('App route state', () => {
       basinLoading: false,
       basinError: null,
     })
-    window.history.pushState({}, '', '/basins/not-a-real-basin')
+    window.history.pushState({}, '', '/?basinId=not-a-real-basin')
 
     render(<LegacyPagesHarness />)
 
@@ -4943,9 +4948,14 @@ describe('App route state', () => {
     expect(screen.getByText('未找到流域')).toBeInTheDocument()
     expect(screen.getByText('Basin was not found.')).toBeInTheDocument()
     expect(within(unavailableNotice).getByText('not-a-real-basin')).toBeInTheDocument()
-    expect(within(unavailableNotice).getByRole('link', { name: '返回全国总览' })).toHaveAttribute('href', '/overview')
     expect(screen.queryByText('选中河段')).not.toBeInTheDocument()
     expect(screen.queryByText('预警状态')).not.toBeInTheDocument()
+
+    // 返回全国总览现为就地按钮：清空 basinId 回总览模式，pathname 仍为 /
+    await userEvent.setup().click(within(unavailableNotice).getByRole('button', { name: '返回全国总览' }))
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+    expect(window.location.search).not.toContain('basinId=')
   })
 
   it('renders an unavailable state for invalid basin segment deep links', async () => {
@@ -5017,7 +5027,7 @@ describe('App route state', () => {
       basinLoading: false,
       basinError: null,
     })
-    window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=missing-seg')
+    window.history.pushState({}, '', '/?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=missing-seg')
 
     render(<LegacyPagesHarness />)
 
@@ -5027,6 +5037,96 @@ describe('App route state', () => {
     expect(screen.queryByText('已恢复 missing-seg')).not.toBeInTheDocument()
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-id', '')
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'idle')
+  })
+
+  // M26-2 spec scenarios: 总览↔详情按 query basinId 就地切换，pathname 恒为 /。
+  it('selects a basin in-place: writes basinId, enters detail mode, fits basin bbox, keeps pathname /', async () => {
+    const user = userEvent.setup()
+    const baseSnapshot = basinSnapshot(
+      'basin-demo',
+      m11Layers,
+      'source=gfs&basinVersionId=bv-001',
+      'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001',
+    )
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasins(
+        m11Layers,
+        'source=gfs',
+        'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z',
+      ),
+      // selectedSegment.riverNetworkVersionId 置空，避免 rn 解析 effect 重写 URL 导致快照不再匹配
+      basinDetail: {
+        ...baseSnapshot,
+        selectedSegment: baseSnapshot.selectedSegment
+          ? { ...baseSnapshot.selectedSegment, riverNetworkVersionId: null }
+          : null,
+      },
+      loading: false,
+      basinLoading: false,
+    })
+    // 携带已校正 validTime，避免 valid-time 校正 effect 重写 URL 清空本地选中态
+    window.history.pushState({}, '', '/?source=gfs&validTime=2026-05-18T06:00:00Z')
+
+    render(<LegacyPagesHarness />)
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    // 点 m11-basin-fill（地图双击 mock 派发 basin-fill）→ popup → 进入分析（spec：点 basin 或树进入分析皆可）
+    await user.dblClick(screen.getByTestId('mock-m11-maplibre-map'))
+    await user.click(await screen.findByRole('button', { name: /进入分析/ }))
+
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get('basinId')).toBe('basin-demo'))
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(await screen.findByText('Main Stem 009')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+    await waitFor(() =>
+      expect(m11FitBoundsCalls).toContainEqual([[[101, 31], [104, 34]], { padding: 36, duration: 450 }]),
+    )
+  })
+
+  it('returns to the national overview in-place when basinId is cleared, keeping pathname /', async () => {
+    const user = userEvent.setup()
+    useOverviewDataStore.setState({
+      overview: overviewSnapshotWithBasin(m11Layers, 'source=gfs', 'source=gfs', 'basin-demo'),
+      basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs', 'source=gfs'),
+      loading: false,
+      basinLoading: false,
+    })
+    window.history.pushState({}, '', '/?source=gfs&basinId=basin-demo')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '返回全国总览' }))
+
+    expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
+    expect(window.location.search).not.toContain('basinId=')
+    expect(window.location.search).not.toContain('segmentId=')
+  })
+
+  it('opens a shared detail deep link directly and restores the prior basinId on back navigation', async () => {
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basins_qhh', m11Layers, 'source=gfs', 'source=gfs'),
+      basinLoading: false,
+    })
+    // 直接访问 QHH 详情深链（可分享）
+    window.history.pushState({}, '', '/?source=gfs&basinId=basins_qhh')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    expect(new URLSearchParams(window.location.search).get('basinId')).toBe('basins_qhh')
+    expect(window.location.pathname).toBe('/')
+
+    // 浏览器后退到上一 basinId 状态（basin-demo）：popstate 驱动单页重渲染，pathname 仍为 /
+    act(() => {
+      window.history.replaceState({}, '', '/?source=gfs&basinId=basin-demo')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get('basinId')).toBe('basin-demo'))
+    expect(window.location.pathname).toBe('/')
+    expect(screen.getByRole('heading', { name: '流域分析' })).toBeInTheDocument()
   })
 
   it('normalizes invalid overview query values without repeated URL updates', async () => {

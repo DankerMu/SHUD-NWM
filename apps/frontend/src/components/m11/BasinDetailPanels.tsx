@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { Activity, GitBranch, ListFilter, Search, Split, TrendingUp } from 'lucide-react'
 
 import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
@@ -13,23 +13,16 @@ import {
   type SelectedSegmentDetail,
   type TrendPoint,
 } from '@/lib/m11/overviewDataContracts'
-import { M11Layout, StateReadout } from '@/pages/m11/M11Shell'
+import { StateReadout } from '@/pages/m11/M11Shell'
 import {
   defaultM11QueryState,
   m11QueryHref,
   type M11QueryPatch,
+  type M11QueryState,
   type M11QueryWarningLevel,
-  needsM11QueryReplacement,
-  parseM11QueryState,
-  serializeM11QueryState,
 } from '@/lib/m11/queryState'
 import { cn } from '@/lib/cn'
-import {
-  LayerGroupControls,
-  LayerLegendPanel,
-  SourceScenarioControls,
-  resolveM11ValidTimeCorrection,
-} from '@/pages/m11/M11Controls'
+import { LayerGroupControls, LayerLegendPanel, SourceScenarioControls, resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { basinSnapshotMatchesQuery, basinSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
 
 const BASIN_NOT_FOUND_REASON = 'Basin was not found.'
@@ -48,11 +41,20 @@ const warningFilterOptions: Array<{ value: M11QueryWarningLevel | ''; label: str
   { value: 'red', label: '红色' },
 ]
 
-export function BasinDetailPage() {
-  const { basinId = 'unknown' } = useParams()
-  const location = useLocation()
-  const navigate = useNavigate()
-  const state = useMemo(() => parseM11QueryState(location.search), [location.search])
+/**
+ * 流域详情就地化（M26-2）：把原 BasinDetailPage 的取数 + 详情面板抽到此 hook，
+ * 由单页（OverviewPage 详情模式）按 query 内 basinId 调用，返回组装好的 M11Layout props。
+ * basinId 入参来自 query（非路由 param），其余取数/honest 契约与原 BasinDetailPage 一致。
+ */
+export function useBasinDetailMode({
+  basinId,
+  state,
+  onQueryChange,
+}: {
+  basinId: string
+  state: M11QueryState
+  onQueryChange: (patch: M11QueryPatch) => void
+}) {
   const dataLoadState = useMemo(
     () => ({
       source: state.source,
@@ -62,18 +64,17 @@ export function BasinDetailPage() {
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
       riverNetworkVersionId: state.riverNetworkVersionId,
+      basinId: state.basinId,
       segmentId: state.segmentId,
       warningLevel: null,
       q: null,
     }),
-    [state.basinVersionId, state.cycle, state.layer, state.riverNetworkVersionId, state.segmentId, state.source, state.validTime],
+    [state.basinId, state.basinVersionId, state.cycle, state.layer, state.riverNetworkVersionId, state.segmentId, state.source, state.validTime],
   )
-  const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
   const basinData = useOverviewDataStore((store) => store.basinDetail)
   const loading = useOverviewDataStore((store) => store.basinLoading)
   const error = useOverviewDataStore((store) => store.basinError)
   const loadBasinDetail = useOverviewDataStore((store) => store.loadBasinDetail)
-  const needsQueryReplacement = needsM11QueryReplacement(location.search)
   const basinMatchesQuery = basinSnapshotMatchesQuery(basinData, basinId, state)
   const basinMetadataMatchesQuery = basinSnapshotMetadataMatchesQuery(basinData, basinId, state)
   const currentBasinData = basinMatchesQuery ? basinData : null
@@ -90,37 +91,23 @@ export function BasinDetailPage() {
       : null
   }, [currentBasinData?.selectedSegment?.trendPoints])
 
-  const handleQueryChange = useCallback(
-    (patch: M11QueryPatch) => {
-      const nextSearch = serializeM11QueryState({ ...state, ...patch })
-      navigate({ pathname: location.pathname, search: nextSearch ? `?${nextSearch}` : '' })
-    },
-    [location.pathname, navigate, state],
-  )
-
   useEffect(() => {
-    if (!needsQueryReplacement) return
-    navigate({ pathname: location.pathname, search: normalizedSearch ? `?${normalizedSearch}` : '' }, { replace: true })
-  }, [location.pathname, navigate, needsQueryReplacement, normalizedSearch])
-
-  useEffect(() => {
-    if (needsQueryReplacement) return
     void loadBasinDetail(basinId, dataLoadState).catch(() => undefined)
-  }, [basinId, dataLoadState, loadBasinDetail, needsQueryReplacement])
+  }, [basinId, dataLoadState, loadBasinDetail])
 
   useEffect(() => {
-    if (needsQueryReplacement || loading || !basinMetadataMatchesQuery) return
+    if (loading || !basinMetadataMatchesQuery) return
     const correctedValidTime = resolveM11ValidTimeCorrection(state, metadataLayers, derivedTimeline)
     if (correctedValidTime === undefined) return
-    handleQueryChange({ validTime: correctedValidTime })
-  }, [basinMetadataMatchesQuery, derivedTimeline, handleQueryChange, loading, metadataLayers, needsQueryReplacement, state])
+    onQueryChange({ validTime: correctedValidTime })
+  }, [basinMetadataMatchesQuery, derivedTimeline, onQueryChange, loading, metadataLayers, state])
 
   useEffect(() => {
-    if (needsQueryReplacement || loading || !currentBasinData?.selectedSegment?.riverNetworkVersionId) return
+    if (loading || !currentBasinData?.selectedSegment?.riverNetworkVersionId) return
     const resolvedRiverNetworkVersionId = currentBasinData.selectedSegment.riverNetworkVersionId
     if (state.riverNetworkVersionId === resolvedRiverNetworkVersionId) return
-    handleQueryChange({ riverNetworkVersionId: resolvedRiverNetworkVersionId })
-  }, [currentBasinData?.selectedSegment?.riverNetworkVersionId, handleQueryChange, loading, needsQueryReplacement, state.riverNetworkVersionId])
+    onQueryChange({ riverNetworkVersionId: resolvedRiverNetworkVersionId })
+  }, [currentBasinData?.selectedSegment?.riverNetworkVersionId, onQueryChange, loading, state.riverNetworkVersionId])
 
   const detail = currentBasinData?.detail
   const filteredSegments = useMemo(
@@ -156,98 +143,107 @@ export function BasinDetailPage() {
       ) {
         return
       }
-      handleQueryChange({
+      onQueryChange({
         basinVersionId: nextBasinVersionId ?? state.basinVersionId,
         riverNetworkVersionId: nextRiverNetworkVersionId ?? state.riverNetworkVersionId,
         segmentId: nextSegmentId,
       })
     },
-    [handleQueryChange, state.basinVersionId, state.riverNetworkVersionId, state.segmentId],
+    [onQueryChange, state.basinVersionId, state.riverNetworkVersionId, state.segmentId],
   )
 
-  return (
-    <M11Layout
-      title="流域分析"
-      subtitle={`当前流域 ${basinDisplayName}`}
-      state={state}
-      layers={layers}
-      sourceSelection={sourceSelection}
-      derivedTimeline={derivedTimeline}
-      fitTo={mapFitTo}
-      basins={basinMapContext}
-      visibleBasinIds={[basinId]}
-      basinSegments={currentBasinData?.segments ?? []}
-      selectedSegmentId={selectedSegmentId}
-      selectedSegmentGeometry={selectedSegment?.geometry ?? null}
-      onMapOverlayHover={handleMapOverlayHover}
-      onMapOverlayClick={handleMapOverlayClick}
-      onQueryChange={handleQueryChange}
-      mapLabel="流域钻取地图"
-      mapTitle={`${basinDisplayName} 流域钻取`}
-      mapMeta={detail?.bbox ? '地图已按流域 bbox 定位，河段选择会同步到地图高亮状态。' : '当前流域缺少 bbox，地图使用中国范围兜底视域，河段列表不受影响。'}
-      left={
-        <>
-          <SourceScenarioControls state={state} sourceSelection={sourceSelection} onQueryChange={handleQueryChange} />
-          <StateReadout state={state} basinId={basinId} />
-          {detail && !basinNotFoundReason ? <BasinIdentityCard detail={detail} /> : null}
-          {detail && !basinNotFoundReason && !detail.bbox ? <MissingBboxNotice /> : null}
-          {detail && !basinNotFoundReason ? <MapContextNotice detail={detail} /> : null}
-          <SegmentDiscoveryPanel
-            basinName={basinDisplayName}
-            basinVersionId={detail?.selectedBasinVersionId ?? state.basinVersionId}
-            rows={filteredSegments}
-            selectedSegmentId={selectedSegmentId}
-            query={state.q}
-            warningLevel={state.warningLevel}
-            segmentCount={detail?.segmentCount ?? null}
-            invalidSegmentId={invalidSegmentRequested ? state.segmentId : null}
-            disabled={Boolean(basinNotFoundReason)}
-            onQueryChange={handleQueryChange}
-          />
-          <LayerGroupControls state={state} layers={layers} onQueryChange={handleQueryChange} />
-        </>
-      }
-      right={
-        <>
-          {basinNotFoundReason ? (
-            <BasinUnavailableNotice basinId={basinId} reason={basinNotFoundReason} />
-          ) : (
-            <>
-              <SelectedSegmentPanel
-                segment={selectedSegment}
-                requestedSegmentId={state.segmentId}
-                invalidSegmentRequested={invalidSegmentRequested}
-                routeState={state}
-              />
-              <SelectedSegmentTrendPanel segment={selectedSegment} />
-              <div className="rounded-md border border-neutral-300 p-3">
-                <div className="text-base font-semibold text-neutral-900">预警状态</div>
-                <p className="mt-2 font-mono text-sm text-neutral-700">{state.warningLevel ?? 'all'}</p>
-              </div>
-              {detail ? <BasinRunMetadata detail={detail} /> : null}
-            </>
-          )}
-          <LayerLegendPanel state={state} layers={layers} />
-          {loading || error ? (
-            <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
-              {loading ? '流域数据加载中' : error}
+  const backToOverview = useCallback(() => onQueryChange({ basinId: null, segmentId: null }), [onQueryChange])
+
+  return {
+    title: '流域分析',
+    subtitle: `当前流域 ${basinDisplayName}`,
+    mapLabel: '流域钻取地图',
+    mapTitle: `${basinDisplayName} 流域钻取`,
+    mapMeta: detail?.bbox
+      ? '地图已按流域 bbox 定位，河段选择会同步到地图高亮状态。'
+      : '当前流域缺少 bbox，地图使用中国范围兜底视域，河段列表不受影响。',
+    layers,
+    sourceSelection,
+    derivedTimeline,
+    fitTo: mapFitTo,
+    basins: basinMapContext,
+    visibleBasinIds: [basinId],
+    basinSegments: currentBasinData?.segments ?? [],
+    selectedSegmentId,
+    selectedSegmentGeometry: selectedSegment?.geometry ?? null,
+    onMapOverlayHover: handleMapOverlayHover,
+    onMapOverlayClick: handleMapOverlayClick,
+    left: (
+      <>
+        <SourceScenarioControls state={state} sourceSelection={sourceSelection} onQueryChange={onQueryChange} />
+        <StateReadout state={state} basinId={basinId} />
+        {detail && !basinNotFoundReason ? <BasinIdentityCard detail={detail} /> : null}
+        {detail && !basinNotFoundReason && !detail.bbox ? <MissingBboxNotice /> : null}
+        {detail && !basinNotFoundReason ? <MapContextNotice detail={detail} /> : null}
+        <SegmentDiscoveryPanel
+          basinName={basinDisplayName}
+          basinVersionId={detail?.selectedBasinVersionId ?? state.basinVersionId}
+          rows={filteredSegments}
+          selectedSegmentId={selectedSegmentId}
+          query={state.q}
+          warningLevel={state.warningLevel}
+          segmentCount={detail?.segmentCount ?? null}
+          invalidSegmentId={invalidSegmentRequested ? state.segmentId : null}
+          disabled={Boolean(basinNotFoundReason)}
+          onQueryChange={onQueryChange}
+        />
+        <LayerGroupControls state={state} layers={layers} onQueryChange={onQueryChange} />
+      </>
+    ),
+    right: (
+      <>
+        {basinNotFoundReason ? (
+          <BasinUnavailableNotice basinId={basinId} reason={basinNotFoundReason} onBackToOverview={backToOverview} />
+        ) : (
+          <>
+            <SelectedSegmentPanel
+              segment={selectedSegment}
+              requestedSegmentId={state.segmentId}
+              invalidSegmentRequested={invalidSegmentRequested}
+              routeState={state}
+            />
+            <SelectedSegmentTrendPanel segment={selectedSegment} />
+            <div className="rounded-md border border-neutral-300 p-3">
+              <div className="text-base font-semibold text-neutral-900">预警状态</div>
+              <p className="mt-2 font-mono text-sm text-neutral-700">{state.warningLevel ?? 'all'}</p>
             </div>
-          ) : null}
-          {!basinNotFoundReason ? (
-            <Link className="block rounded border border-primary-600 px-3 py-2 text-sm font-medium text-primary-600" to="/overview">
-              返回全国总览
-            </Link>
-          ) : null}
-          <Link className="block rounded border border-primary-600 px-3 py-2 text-sm font-medium text-primary-600" to="/forecast">
-            返回水文预报
-          </Link>
-        </>
-      }
-    />
-  )
+            {detail ? <BasinRunMetadata detail={detail} /> : null}
+          </>
+        )}
+        <LayerLegendPanel state={state} layers={layers} />
+        {loading || error ? (
+          <div className="rounded-md border border-neutral-300 bg-neutral-50 p-3 text-xs text-neutral-700">
+            {loading ? '流域数据加载中' : error}
+          </div>
+        ) : null}
+        {!basinNotFoundReason ? (
+          <button
+            type="button"
+            className="block w-full rounded border border-primary-600 px-3 py-2 text-left text-sm font-medium text-primary-600 hover:bg-primary-50"
+            onClick={backToOverview}
+          >
+            返回全国总览
+          </button>
+        ) : null}
+      </>
+    ),
+  }
 }
 
-function BasinUnavailableNotice({ basinId, reason }: { basinId: string; reason: string }) {
+function BasinUnavailableNotice({
+  basinId,
+  reason,
+  onBackToOverview,
+}: {
+  basinId: string
+  reason: string
+  onBackToOverview: () => void
+}) {
   const title = reason === 'Basin was not found.' ? '未找到流域' : '流域暂不可用'
 
   return (
@@ -257,9 +253,13 @@ function BasinUnavailableNotice({ basinId, reason }: { basinId: string; reason: 
       <p className="mt-1 text-xs">
         请求的流域 ID：<code className="font-mono">{basinId}</code>
       </p>
-      <Link className="mt-3 block rounded border border-primary-600 bg-white px-3 py-2 text-sm font-medium text-primary-600" to="/overview">
+      <button
+        type="button"
+        className="mt-3 block w-full rounded border border-primary-600 bg-white px-3 py-2 text-left text-sm font-medium text-primary-600"
+        onClick={onBackToOverview}
+      >
         返回全国总览
-      </Link>
+      </button>
     </section>
   )
 }
@@ -517,7 +517,7 @@ function SelectedSegmentPanel({
   segment: SelectedSegmentDetail | null | undefined
   requestedSegmentId: string | null
   invalidSegmentRequested: boolean
-  routeState: ReturnType<typeof parseM11QueryState>
+  routeState: M11QueryState
 }) {
   const [comparisonVisible, setComparisonVisible] = useState(false)
 
@@ -642,7 +642,7 @@ function SelectedSegmentPanel({
   )
 }
 
-function segmentDetailHref(segment: SelectedSegmentDetail, routeState: ReturnType<typeof parseM11QueryState>) {
+function segmentDetailHref(segment: SelectedSegmentDetail, routeState: M11QueryState) {
   const resolvedSource =
     routeState.source === 'best' && (segment.sourceSelection.resolvedSource === 'GFS' || segment.sourceSelection.resolvedSource === 'IFS')
       ? (segment.sourceSelection.resolvedSource.toLowerCase() as 'gfs' | 'ifs')
@@ -655,6 +655,7 @@ function segmentDetailHref(segment: SelectedSegmentDetail, routeState: ReturnTyp
     basemap: defaultM11QueryState.basemap,
     basinVersionId: segment.basinVersionId,
     riverNetworkVersionId: segment.riverNetworkVersionId,
+    basinId: null,
     segmentId: segment.riverSegmentId,
     warningLevel: null,
     q: null,
