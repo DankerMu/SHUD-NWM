@@ -132,6 +132,9 @@ def test_forecast_manifest_keeps_product_horizon_and_enables_state_checkpoints(t
     assert manifest["end_time"] == "2026-05-08T00:00:00Z"
     assert manifest["runtime"]["state_checkpoint_hours"] == [6, 12]
     assert manifest["runtime"]["update_ic_step_minutes"] == 360
+    manifest_path = tmp_path / "workspace" / "runs" / context.run_id / "input" / "manifest.json"
+    written = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert written["end_time"] == "2026-05-08T00:00:00Z"
 
 
 def test_forecast_marks_soft_stale_state_as_degraded(tmp_path: Path) -> None:

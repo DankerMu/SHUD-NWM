@@ -400,8 +400,9 @@ class SHUDRuntime:
             )
             update_ic_step = _update_ic_step_minutes(manifest)
             if update_ic_step is not None:
-                # Restart cadence so SHUD writes its interim state exactly at the
-                # segment end (T_{N+1}) rather than the default daily boundary.
+                # Restart cadence inside the same SHUD long run. Forecast
+                # checkpoint states are copied opportunistically from
+                # cfg.ic.update; they are not produced by extra short runs.
                 replacements["Update_IC_STEP"] = str(update_ic_step)
         else:
             content = "\n".join(line for line in content.splitlines() if ".cfg.ic" not in line)
@@ -1918,8 +1919,10 @@ def _output_interval_minutes(manifest: dict[str, Any], default_interval_minutes:
 def _update_ic_step_minutes(manifest: dict[str, Any]) -> int | None:
     """Restart cadence (minutes) for SHUD ``Update_IC_STEP``, or None when unset.
 
-    Set on analysis/nowcast segments so SHUD writes its restart state exactly at the
-    segment end (T_{N+1}); absent on plain forecast runs (M24 §2 Lane 2).
+    For forecast business runs this is a state-output cadence within the full
+    product horizon, not a request to split the forecast into shorter SHUD runs.
+    The runtime watches the long run and preserves selected ``cfg.ic.update``
+    snapshots such as T+6/T+12 for later warm starts.
     """
     runtime = manifest.get("runtime") or {}
     value = runtime.get("update_ic_step_minutes") or runtime.get("Update_IC_STEP")
