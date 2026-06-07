@@ -4,6 +4,14 @@
 
 ## 最新（2026-06-07）
 
+**M25 多流域前端生产化交付**（`openspec/changes/m25-multibasin-frontend-production/`，9 子 issue：#310–#317 已合并，#318 本 PR 收尾）——node-27 `display_readonly` 前端去 QHH 硬编码、按数据驱动：
+
+1. **后端动态发现 + 去硬编码**：`list_basins` 增 `has_display_product`（EXISTS run-status 集合过滤，复用 `QHH_LATEST_READY_RUN_STATUSES` 单一口径，**无 basin_id 白名单**）（#310）；latest-product 去 `QHH_BASIN_ID` 写死、`basin_id` 参数化（缺省 `basins_qhh` 向后兼容 + 旧 `/mvp/qhh/latest-product` 路径保留）（#311）；河段/站点列表 `search`+分页+`variable`/`stream_order` 字段可用性降级契约（#313）。
+2. **return-period 诚实展示**：`availability.return_period_status`（ready/unavailable）作**独立 supplemental 字段**，不进 blocking reasons（有 q_down 无洪频基线的产品不掉 ready/404）（#312/#316）；无真实产品时仅静态图例 + "暂未发布正式产品"，不渲染假数据。
+3. **前端生产化**：流域选择器数据驱动（无前端白名单，新流域自动出现）+ 切流域以 `basin_id` 重拉、strict identity 一致（#314）；河段/站点列表走后端 search/分页（#315）；`/ops`+`/monitoring` 入口按 `display_readonly` 降级（保留 `/meteorology` 门控）（#317）。
+4. **可扩展性验证 + 文档收尾**（#318）：真 DB 集成测试断言「全新注册 basin 仅靠数据即在发现接口出现，零代码改动」（`tests/test_real_basin_discovery_integration.py`），前端 `BasinSelector.test.tsx` 数据驱动断言新流域自动渲染。
+5. **边界**：以上为**功能交付**；node-27 实质上线仍是 **C1–C4 live receipt**（部署/只读 DB denied-write/cross-plane identity/浏览器 e2e），见 `docs/runbooks/node-27-bringup-checklist.md`，属后续。
+
 **node-27 开发地基就位**（master 直推 `661da44`）——22 业务化稳定后转入 27（`display_readonly`）前端生产化开发，先把流程/文档/CI 铺稳：
 
 1. **m25 change**（`openspec/changes/m25-multibasin-frontend-production/`，多流域前端生产化）已 spec 化并过 codex 三路审核——**P0 修正**：洪水重现期可用性从"进 blocking reasons"改为 `availability.return_period_status` **独立 supplemental 字段**（否则有 q_down 无洪频基线的产品会整体掉 ready/404）；已拆 GitHub issue（并行起点 #310/#311/#313/#317）。

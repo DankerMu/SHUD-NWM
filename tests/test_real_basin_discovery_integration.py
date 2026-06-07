@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
+import packages.common.model_registry as model_registry_module
 from packages.common.model_registry import PsycopgModelRegistryStore
 from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
 
@@ -18,6 +20,10 @@ pytestmark = pytest.mark.integration
 _PREFIX = "itbd"
 _BASIN_READY = f"{_PREFIX}_basin_ready"
 _BASIN_PENDING = f"{_PREFIX}_basin_pending"
+# A brand-new basin id that appears NOWHERE in the discovery source code: it must
+# still surface purely from data (registration + a display-ready run). This is the
+# "zero-code-change extensibility" id used by the dedicated test below.
+_BASIN_BRANDNEW = f"{_PREFIX}_basin_brandnew_2099"
 _RUN_START = datetime(2026, 5, 14, 0, tzinfo=UTC)
 _RUN_END = datetime(2026, 5, 14, 1, tzinfo=UTC)
 
@@ -119,6 +125,43 @@ def test_list_basins_has_display_product_reflects_real_run_status(integration_da
         # Backward-compatible default lists every registered basin.
         all_basins = {row["basin_id"] for row in store.list_basins(limit=100, offset=0)}
         assert {_BASIN_READY, _BASIN_PENDING} <= all_basins
+    finally:
+        with psycopg_connection(integration_database_url) as connection:
+            _clear(connection)
+
+
+def test_brandnew_basin_surfaces_without_any_code_change(integration_database_url: str) -> None:
+    """§8.1 zero-code-change extensibility (multibasin-product-discovery Scenario 3).
+
+    A basin id that exists NOWHERE in the discovery source code surfaces in the
+    has_display_product discovery endpoint purely from data (registration + one
+    display-ready run). The assertion below is the explicit extensibility oracle:
+    the new id is provably absent from any source-level basin constant/whitelist,
+    yet still returned by the discovery query.
+    """
+    # The discovery module must not hardcode this basin id anywhere (no whitelist).
+    discovery_source = inspect.getsource(model_registry_module)
+    assert _BASIN_BRANDNEW not in discovery_source
+    # Defense-in-depth: discovery filters on a run-status set, not a basin enum.
+    assert _BASIN_BRANDNEW not in model_registry_module.QHH_LATEST_READY_RUN_STATUSES
+
+    apply_migrations_from_zero(integration_database_url)
+    with psycopg_connection(integration_database_url) as connection:
+        _clear(connection)
+        _seed_basin(
+            connection,
+            basin_id=_BASIN_BRANDNEW,
+            basin_name="ZZ Brand New Basin 2099",
+            run_status="published",
+        )
+
+    store = PsycopgModelRegistryStore(integration_database_url)
+    try:
+        display_only = {
+            row["basin_id"] for row in store.list_basins(limit=100, offset=0, has_display_product=True)
+        }
+        # Surfaced by data alone — no frontend/backend code change required.
+        assert _BASIN_BRANDNEW in display_only
     finally:
         with psycopg_connection(integration_database_url) as connection:
             _clear(connection)
