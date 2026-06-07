@@ -48,6 +48,8 @@ from services.orchestrator.reservation import (
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
 from services.orchestrator.time_consistency import check_three_way_time_consistency
 from services.slurm_gateway.config import SlurmGatewaySettings
+from services.tile_publisher import PublishError, TilePublisher
+from services.tile_publisher.publisher import failure_payload
 from workers.canonical_converter.converter import (
     evaluate_canonical_readiness,
     expected_converter_version,
@@ -1613,6 +1615,8 @@ class ForecastOrchestrator:
         pipeline_job_id: str | None = None,
     ) -> tuple[StageRunResult, ArrayAggregation | None]:
         pipeline_job_id = pipeline_job_id or _pipeline_job_id(context.run_id, stage.stage)
+        if stage.stage == "publish" and _published_artifact_root_configured():
+            return self._run_local_publish_stage(stage, context, pipeline_job_id=pipeline_job_id), None
         if stage.is_array and not context.active_basins:
             self.repository.update_forecast_cycle_status(
                 source_id=context.source_id,
@@ -1831,6 +1835,174 @@ class ForecastOrchestrator:
             ),
             aggregation,
         )
+
+    def _run_local_publish_stage(
+        self,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        *,
+        pipeline_job_id: str,
+    ) -> StageRunResult:
+        """Publish display artifacts on the control node.
+
+        Compute nodes can write the shared object-store, but the display mount
+        under ``NHMS_PUBLISHED_ARTIFACT_ROOT`` is node-22-local. Keep all heavy
+        SHUD work on Slurm, then mirror publish artifacts from object-store to
+        the display root here where the mount is writable.
+        """
+
+        now = _utcnow()
+        log_publication = self._display_log_publication_for_stage(
+            source_id=context.source_id,
+            cycle_time=context.cycle_time,
+            run_id=context.run_id,
+            job_id=pipeline_job_id,
+            stage=stage.stage,
+        )
+        self.repository.upsert_pipeline_job(
+            {
+                "job_id": pipeline_job_id,
+                "run_id": context.run_id,
+                "cycle_id": context.cycle_id,
+                "job_type": stage.job_type,
+                "slurm_job_id": "local",
+                "array_task_id": None,
+                "model_id": _cycle_pipeline_job_model_id(context),
+                "status": "running",
+                "stage": stage.stage,
+                "idempotency_key": _cycle_stage_idempotency_key(context, stage, pipeline_job_id=pipeline_job_id),
+                "submitted_at": now,
+                "started_at": now,
+                "finished_at": None,
+                "exit_code": None,
+                "error_code": None,
+                "error_message": None,
+                "log_uri": None,
+            }
+        )
+        self.repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=pipeline_job_id,
+            event_type="submission",
+            status_from=None,
+            status_to="running",
+            message=f"{stage.stage} running locally on the control node.",
+            details=_safe_pipeline_event_details(
+                {"stage": stage.stage, "job_type": stage.job_type, "execution": "control_node"}
+            ),
+        )
+
+        try:
+            publisher = TilePublisher(
+                workspace_root=self.config.workspace_root,
+                object_store_root=self.config.object_store_root,
+                object_store_prefix=self.config.object_store_prefix,
+                database_url=os.getenv("DATABASE_URL", ""),
+                published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
+                published_artifact_uri_prefix=os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://"),
+            )
+            payload = publisher.publish_cycle(context.cycle_id).to_dict()
+            status = "succeeded"
+            exit_code = 0
+            error_code = None
+            error_message = None
+        except PublishError as error:
+            payload = failure_payload(context.cycle_id, error)
+            status = "failed"
+            exit_code = 1
+            error_code = error.error_code
+            error_message = error.message
+        except (OSError, RuntimeError, ValueError) as error:
+            safe_message = str(redact_payload(str(error)))
+            payload = {
+                "cycle_id": context.cycle_id,
+                "status": "failed_publish",
+                "error_code": "PUBLISH_TILES_FAILED",
+                "error_message": safe_message,
+                "layers": [],
+            }
+            status = "failed"
+            exit_code = 1
+            error_code = "PUBLISH_TILES_FAILED"
+            error_message = safe_message
+
+        log_uri = self._write_local_stage_log(log_publication.candidate_uri, payload)
+        finished_at = _utcnow()
+        previous_status, _record = self.repository.update_pipeline_job_status(
+            pipeline_job_id,
+            status,
+            finished_at=finished_at,
+            exit_code=exit_code,
+            error_code=error_code,
+            error_message=error_message,
+            log_uri=log_uri,
+        )
+        terminal = {
+            "job_id": "local",
+            "status": status,
+            "exit_code": exit_code,
+            "error_code": error_code,
+            "error_message": error_message,
+            "log_uri": log_uri,
+            "started_at": _format_time(now),
+            "finished_at": _format_time(finished_at),
+            "accounting": {"execution": "control_node"},
+        }
+        self.repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=pipeline_job_id,
+            event_type="status_change",
+            status_from=previous_status or "running",
+            status_to=status,
+            message=f"{stage.stage} completed locally with status {status}.",
+            details=_safe_pipeline_event_details(
+                {
+                    "stage": stage.stage,
+                    "job_type": stage.job_type,
+                    "execution": "control_node",
+                    "log_uri": log_uri,
+                    "result": payload,
+                }
+            ),
+        )
+        self._after_cycle_stage_terminal(stage, context, status, terminal, None)
+        return StageRunResult(
+            stage=stage.stage,
+            job_type=stage.job_type,
+            pipeline_job_id=pipeline_job_id,
+            slurm_job_id="local",
+            status=status,
+            exit_code=exit_code,
+            error_code=error_code,
+            error_message=error_message,
+            log_uri=log_uri,
+            accounting={"execution": "control_node"},
+            task_results=(),
+            finished_at=finished_at,
+        )
+
+    def _write_local_stage_log(self, log_uri: str, payload: Mapping[str, Any]) -> str:
+        content = json.dumps(redact_payload(dict(payload)), sort_keys=True).encode("utf-8")
+        published_path = self._published_log_path(log_uri)
+        if published_path is None:
+            self.object_store.write_bytes_atomic(log_uri, content)
+            return log_uri
+        published_root = _absolute_configured_path(Path(os.environ["NHMS_PUBLISHED_ARTIFACT_ROOT"]))
+        try:
+            ensure_directory_no_follow(published_root)
+            atomic_write_bytes_no_follow(
+                published_path,
+                content,
+                containment_root=published_root,
+                temp_suffix="part",
+            )
+        except (OSError, SafeFilesystemError) as exc:
+            raise OrchestratorError(
+                "PUBLISHED_LOG_WRITE_FAILED",
+                "Failed to publish local stage logs.",
+                {"log_uri": log_uri},
+            ) from exc
+        return log_uri
 
     def _resume_cycle_stage(
         self,

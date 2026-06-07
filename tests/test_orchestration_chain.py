@@ -4717,6 +4717,55 @@ def test_publish_stage_failure_maps_to_failed_publish_cycle_status(tmp_path: Pat
     assert repository.cycle_statuses[-1] == "failed_publish"
 
 
+def test_publish_stage_runs_on_control_node_when_published_root_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published_root = tmp_path / "published"
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(published_root))
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://")
+
+    calls: list[dict[str, Any]] = []
+
+    class _PublishedResult:
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "cycle_id": "gfs_2026050100",
+                "status": "published",
+                "layers": [{"layer_id": "q-down:gfs_2026050100"}],
+                "artifacts": [],
+                "lineage": {"cycle_id": "gfs_2026050100"},
+            }
+
+    class _ControlNodePublisher:
+        def __init__(self, **kwargs: Any) -> None:
+            calls.append({"init": dict(kwargs)})
+
+        def publish_cycle(self, cycle_id: str) -> _PublishedResult:
+            calls.append({"cycle_id": cycle_id})
+            return _PublishedResult()
+
+    monkeypatch.setattr("services.orchestrator.chain.TilePublisher", _ControlNodePublisher)
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(2))
+
+    assert result.status == "complete"
+    assert "publish" not in [submission["stage"] for submission in client.submissions]
+    assert calls[-1] == {"cycle_id": "gfs_2026050100"}
+    publish_job = repository.jobs["job_cycle_gfs_2026050100_publish"]
+    assert publish_job["slurm_job_id"] == "local"
+    assert publish_job["status"] == "succeeded"
+    assert publish_job["log_uri"].startswith("published://logs/gfs/2026050100/")
+    published_log = published_root / publish_job["log_uri"].removeprefix("published://")
+    payload = json.loads(published_log.read_text(encoding="utf-8"))
+    assert payload["status"] == "published"
+    assert payload["layers"] == [{"layer_id": "q-down:gfs_2026050100"}]
+
+
 def test_trigger_ready_forecasts_rejects_stale_canonical_lineage_before_submission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
