@@ -451,7 +451,8 @@ describe('M11 visual foundation shell', () => {
     expect(shell.className).toContain('min-[1200px]:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]')
     expect(shell).toHaveAttribute('data-left-panel', 'expanded')
     expect(shell).toHaveAttribute('data-right-panel', 'expanded')
-    expect(m11VisualTokens.navHeight).toBe('56px')
+    // 去导航后预留高度归 0，shell 随之占满全视口（M26-1 单页外壳）
+    expect(m11VisualTokens.navHeight).toBe('0px')
     expect(m11VisualTokens.warningLevels.major).toBe('#FF8A65')
     expect(screen.getByLabelText('M11 左侧面板')).toBeInTheDocument()
     expect(screen.getByLabelText('M11 右侧面板')).toBeInTheDocument()

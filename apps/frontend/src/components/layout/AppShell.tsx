@@ -1,6 +1,5 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 
-import { NavBar } from '@/components/layout/NavBar'
 import {
   Select,
   SelectContent,
@@ -18,6 +17,7 @@ import {
 } from '@/components/ui/toast'
 import { cn } from '@/lib/cn'
 import { isRoleOverrideEnabled, type AuthRole, useAuthStore } from '@/stores/auth'
+import { useMonitoringStore } from '@/stores/monitoring'
 import { useToast } from '@/hooks/useToast'
 
 const roleOptions: Array<{ value: AuthRole; label: string }> = [
@@ -37,32 +37,37 @@ export function AppShell({ children }: AppShellProps) {
   const setRole = useAuthStore((state) => state.setRole)
   const { toasts, dismiss } = useToast()
 
+  // runtime config 全局唯一加载点（去 NavBar 后迁到此处）：
+  // 加载到既有 store，display_readonly 检测的唯一来源，不新造 fetch。
+  const runtimeConfig = useMonitoringStore((state) => state.runtimeConfig)
+  const runtimeConfigError = useMonitoringStore((state) => state.runtimeConfigError)
+  const fetchRuntimeConfig = useMonitoringStore((state) => state.fetchRuntimeConfig)
+
+  useEffect(() => {
+    if (runtimeConfig || runtimeConfigError) return
+    void fetchRuntimeConfig()
+  }, [fetchRuntimeConfig, runtimeConfig, runtimeConfigError])
+
   return (
     <ToastProvider>
-      <div className="min-h-screen bg-background text-foreground">
-        <header className="sticky top-0 z-20 border-b border-primary-800 bg-primary-900 text-white shadow-sm">
-          <div className="flex h-14 items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
-            <div className="flex items-center gap-6">
-              <div className="text-base font-semibold text-white">NHMS</div>
-              <NavBar />
-            </div>
-            {isRoleOverrideEnabled ? (
-              <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
-                <SelectTrigger className="w-36 border-white/30 bg-white/10 text-white" aria-label="Role">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent align="end">
-                  {roleOptions.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : null}
+      <div className="relative h-screen w-screen overflow-hidden bg-background text-foreground">
+        {isRoleOverrideEnabled ? (
+          <div className="absolute right-4 top-4 z-30">
+            <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
+              <SelectTrigger className="w-36" aria-label="Role">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {roleOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-        </header>
-        <main className="w-full max-w-[100vw] overflow-x-hidden px-4 py-4 sm:px-6 lg:px-8">{children}</main>
+        ) : null}
+        <main className="h-full w-full overflow-hidden">{children}</main>
       </div>
       {toasts.map((toast) => (
         <Toast

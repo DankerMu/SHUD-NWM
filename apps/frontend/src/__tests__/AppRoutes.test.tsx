@@ -3,7 +3,10 @@ import userEvent from '@testing-library/user-event'
 import { forwardRef, useEffect, useImperativeHandle, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import App from '@/App'
+import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom'
+
+import App, { LegacyRedirect } from '@/App'
+import { LegacyPagesHarness } from '@/__tests__/legacyPagesHarness'
 import { client } from '@/api/client'
 import { contextHandoff } from '@/pages/OverviewPage'
 import { ReadyHydroMetContent } from '@/pages/hydroMet/HydroMetPage'
@@ -1235,17 +1238,16 @@ describe('App route state', () => {
   it('routes / to the national overview shell and marks navigation active', async () => {
     window.history.pushState({}, '', '/')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     expect(screen.getByLabelText('全国总览地图')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /全国总览/ })).toHaveClass('border-accent')
   })
 
   it('routes /overview with normalized query state', async () => {
     window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&basemap=terrain')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     expect(screen.getByText('source')).toBeInTheDocument()
@@ -1257,10 +1259,9 @@ describe('App route state', () => {
   it('routes /meteorology grid tab with public navigation', async () => {
     window.history.pushState({}, '', '/meteorology?tab=grid&source=GFS&variable=PRCP')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '气象数据产品' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /气象数据/ })).toHaveClass('border-accent')
     const tablist = screen.getByRole('tablist', { name: '气象产品标签' })
     expect(within(tablist).getByRole('tab', { selected: true, name: /空间栅格/ })).toBeInTheDocument()
     expect(screen.getByTestId('grid-unavailable')).toHaveTextContent('实时栅格瓦片服务尚未接入')
@@ -1269,10 +1270,9 @@ describe('App route state', () => {
   it('routes /meteorology stations tab with station inventory state', async () => {
     window.history.pushState({}, '', '/meteorology?tab=stations&basin=yangtze&stationId=HMT-Y2-0237')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '气象数据产品' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /气象数据/ })).toHaveClass('border-accent')
     const tablist = screen.getByRole('tablist', { name: '气象产品标签' })
     expect(within(tablist).getByRole('tab', { selected: true, name: /气象代站/ })).toBeInTheDocument()
     expect(screen.getByLabelText('流域', { selector: 'select' })).toHaveValue('yangtze')
@@ -1284,10 +1284,9 @@ describe('App route state', () => {
     mockHydroMetRouteClient()
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '水文气象展示' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /水文气象/ })).toHaveClass('border-accent')
     expect(await screen.findByTestId('hydro-met-product-panel')).toHaveTextContent('qhh_gfs_2026052100_smoke')
     expect(screen.getByTestId('hydro-met-product-panel')).toHaveTextContent('forc_gfs_2026052100_basins_qhh_shud')
     expect(screen.getByTestId('hydro-met-station-list')).toHaveTextContent('qhh_forc_001')
@@ -1351,7 +1350,7 @@ describe('App route state', () => {
       '/hydro-met?source=GFS&cycle_time=2026-05-21T00:00:00Z&run_id=qhh_gfs_2026052100_smoke&model_id=basins_qhh_shud',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-product-panel')).toHaveTextContent('qhh_gfs_2026052100_smoke')
     expect(vi.mocked(client.GET)).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
@@ -1370,7 +1369,7 @@ describe('App route state', () => {
     vi.mocked(client.GET).mockResolvedValue({ data: success(hydroMetLatestProduct()), error: undefined } as never)
     window.history.pushState({}, '', '/hydro-met?source=GFS&run_id=qhh_gfs_2026052100_smoke')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-strict-handoff-invalid')).toHaveTextContent('严格 handoff 参数不完整')
     expect(vi.mocked(client.GET).mock.calls.some(([path]) => path === '/api/v1/mvp/qhh/latest-product')).toBe(false)
@@ -1383,7 +1382,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-loading')).toHaveTextContent('正在加载 latest-product')
   })
@@ -1392,7 +1391,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationResponse: hydroMetRuntimeStationPage })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const stationList = await screen.findByTestId('hydro-met-station-list')
     expect(stationList).toHaveTextContent('qhh_forc_runtime_001')
@@ -1423,7 +1422,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-selected-river')).toHaveTextContent('seg-001')
     await waitFor(() => expect(forecastResolvers.has('seg-001')).toBe(true))
@@ -1453,7 +1452,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient()
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     // stream_order control is offered because the loaded segments carry the field.
     expect(await screen.findByTestId('hydro-met-river-stream-order-filter')).toBeInTheDocument()
@@ -1600,7 +1599,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=IFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-river-forecast-loaded')).toHaveTextContent('IFS / forecast_ifs_deterministic')
     expect(screen.getByTestId('hydro-met-river-horizon')).toHaveTextContent('144h')
@@ -1626,7 +1625,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationResponse: hydroMetInteractiveStationPage })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-station-list')).toHaveTextContent('qhh_forc_no_coord')
     expect(screen.getByTestId('hydro-met-station-marker-count')).toHaveTextContent('markers 2')
@@ -1660,7 +1659,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent('qhh_forc_001')
     await user.click(screen.getByRole('button', { name: '选择站点 qhh_forc_002' }))
@@ -1774,7 +1773,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-variable-PRCP-chart')).toHaveTextContent('mm')
     expect(screen.getByTestId('hydro-met-station-series-loaded')).toHaveTextContent('forc_gfs_2026052100_basins_qhh_shud')
@@ -1801,7 +1800,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-variable-PRCP-invalid')).toHaveTextContent('metadata 缺失或格式无效')
     expect(screen.getByTestId('hydro-met-variable-TEMP-invalid')).toHaveTextContent('metadata 缺失或格式无效')
@@ -1817,7 +1816,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const warning = await screen.findByTestId('hydro-met-station-series-identity-warning')
     expect(warning).toHaveTextContent('series[0] 不是对象')
@@ -1836,7 +1835,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-variable-PRCP-invalid')).toHaveTextContent('unit 格式无效')
     expect(screen.getByTestId('hydro-met-variable-TEMP-invalid')).toHaveTextContent('truncated 格式无效')
@@ -1873,7 +1872,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-variable-PRCP-chart')).toBeInTheDocument()
     expect(screen.getByTestId('hydro-met-variable-PRCP-qc')).toHaveTextContent('flag capped')
@@ -1901,7 +1900,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const warning = await screen.findByTestId('hydro-met-station-series-identity-warning')
     expect(warning).toHaveTextContent('station_id=')
@@ -1924,7 +1923,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const warning = await screen.findByTestId('hydro-met-station-series-identity-warning')
     expect(warning).toHaveTextContent('PRCP.source_id=')
@@ -1957,7 +1956,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-variable-PRCP-capped')).toHaveTextContent(`capped ${HYDRO_MET_STATION_SERIES_LIMIT}/${oversizedPoints.length}`)
     expect(screen.getByTestId('hydro-met-variable-PRCP-metadata')).toHaveTextContent(`rendered ${HYDRO_MET_STATION_SERIES_LIMIT}`)
@@ -1990,7 +1989,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const capped = await screen.findByTestId('hydro-met-variable-PRCP-capped')
     expect(capped).toHaveTextContent(`capped ${HYDRO_MET_STATION_SERIES_LIMIT}/${oversizedPoints.length}`)
@@ -2028,7 +2027,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const invalid = await screen.findByTestId('hydro-met-variable-PRCP-invalid')
     expect(invalid).toHaveTextContent('第 1 个点value 不是有限数值')
@@ -2073,7 +2072,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-variable-PRCP-invalid')).toHaveTextContent('valid_time=2026-02-30T00:00:00Z')
     expect(screen.getByTestId('hydro-met-variable-TEMP-invalid')).toHaveTextContent('value 不是有限数值')
@@ -2087,7 +2086,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesError: 'station not found for forcing version' })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-station-series-error')).toHaveTextContent('station not found')
 
@@ -2102,7 +2101,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('station_id=qhh_forc_999')
     expect(screen.getByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('wrong-forcing')
@@ -2122,7 +2121,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient({ stationSeriesResponse: response })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('PRCP 在 station-series 响应中重复 2 次')
     expect(screen.getByTestId('hydro-met-station-series-identity-warning')).toHaveTextContent('TEMP.source_id=IFS')
@@ -2151,7 +2150,7 @@ describe('App route state', () => {
       setup()
       window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-      render(<App />)
+      render(<LegacyPagesHarness />)
 
       const error = await screen.findByTestId('hydro-met-station-series-error')
       expect(error).toHaveTextContent('station-series')
@@ -2179,7 +2178,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent('qhh_forc_001')
     await waitFor(() => expect(seriesResolvers.has('qhh_forc_001')).toBe(true))
@@ -2215,7 +2214,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-quality-notes')).toHaveTextContent('QHH_SOURCE_WARNING')
     expect(screen.getByTestId('hydro-met-quality-notes')).toHaveTextContent('ERR_QHH')
@@ -2239,7 +2238,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-latest-unavailable')).toHaveTextContent('NO_READY_PRODUCT')
     expect(screen.getByTestId('hydro-met-latest-unavailable')).toHaveTextContent('ERR_QHH')
@@ -2265,7 +2264,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const unavailable = await screen.findByTestId('hydro-met-latest-unavailable')
     const items = within(unavailable).getAllByRole('listitem')
@@ -2304,7 +2303,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const notes = await screen.findByTestId('hydro-met-quality-notes')
     const visibleNotes = within(notes).getAllByText(/质量备注已截断|:/)
@@ -2330,7 +2329,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=ifs&cycle=2026-05-21T08:00:00%2B08:00')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '水文气象展示' })).toBeInTheDocument()
     await waitFor(() => expect(window.location.search).toBe('?source=IFS&cycle=2026-05-21T00%3A00%3A00.000Z'))
@@ -2344,7 +2343,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient()
     window.history.pushState({}, '', '/hydro-met?source=ERA5&cycle=2026-02-30T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-query-validation')).toHaveTextContent('source=ERA5')
     expect(screen.getByTestId('hydro-met-query-validation')).toHaveTextContent('cycle=2026-02-30T00:00:00Z')
@@ -2369,7 +2368,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-latest-unavailable')).toHaveTextContent('NO_READY_PRODUCT')
     expect(
@@ -2389,7 +2388,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-latest-incomplete')).toHaveTextContent('river_network_version_id 缺失')
     expect(screen.getByTestId('hydro-met-latest-incomplete')).toHaveTextContent('segment_count 不可展示')
@@ -2408,7 +2407,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-station-partial-failure')).toHaveTextContent('station inventory timeout')
     expect(screen.getByTestId('hydro-met-river-partial-failure')).toHaveTextContent('river segment timeout')
@@ -2423,7 +2422,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-station-no-results')).toHaveTextContent('没有匹配的真实站点')
     expect(screen.getByTestId('hydro-met-empty-rivers')).toHaveTextContent('河段列表为空')
@@ -2504,7 +2503,7 @@ describe('App route state', () => {
       scenario.setup()
       window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-      render(<App />)
+      render(<LegacyPagesHarness />)
 
       expect(await screen.findByTestId(scenario.testId)).toHaveTextContent(scenario.text)
       expect(findHydroMetRiverChartOption()).toBeUndefined()
@@ -2582,7 +2581,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const horizon = await screen.findByTestId('hydro-met-river-horizon')
     expect(horizon).toHaveTextContent(`capped ${HYDRO_MET_RIVER_FORECAST_LIMIT}/${oversizedPoints.length}`)
@@ -2593,7 +2592,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient()
     window.history.pushState({}, '', '/hydro-met?source=GFS')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-river-forecast-loaded')).toHaveTextContent('river discharge')
     const hydroMetText = screen.getByTestId('hydro-met-page').textContent ?? ''
@@ -2605,7 +2604,7 @@ describe('App route state', () => {
     mockHydroMetRouteClient()
     window.history.pushState({}, '', '/hydro-met?source=GFS&cycle=2026-05-20T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByTestId('hydro-met-cycle-unavailable')).toHaveTextContent('避免混用产品')
     expect(
@@ -2623,7 +2622,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=best&validTime=2026-05-17T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
@@ -2656,7 +2655,7 @@ describe('App route state', () => {
       '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() =>
@@ -2688,7 +2687,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=gfs')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(loadOverview).toHaveBeenCalled())
@@ -2713,7 +2712,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-16T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(loadOverview).toHaveBeenCalledWith(expect.objectContaining({ layer: 'flood-return-period' })))
@@ -2734,7 +2733,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
@@ -2752,7 +2751,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T00%3A00%3A00.000Z'))
@@ -2775,7 +2774,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 36, duration: 450 }]]))
@@ -2804,7 +2803,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-visible-basin-ids', 'basin-demo'))
@@ -2831,7 +2830,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=gfs&validTime=2026-05-18T06:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     expect(screen.queryByTestId('m11-basin-popup')).not.toBeInTheDocument()
@@ -2862,7 +2861,7 @@ describe('App route state', () => {
       '/overview?source=gfs&validTime=2026-05-18T06:00:00Z&basemap=satellite&basinVersionId=bv-sibling&segmentId=seg-sibling',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     expect(screen.queryByTestId('m11-basin-popup')).not.toBeInTheDocument()
@@ -2956,7 +2955,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=best')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /产品监控摘要/ })).toHaveAttribute(
@@ -2997,7 +2996,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=compare&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /产品监控摘要/ })).toHaveAttribute('href', '/monitoring')
@@ -3008,7 +3007,7 @@ describe('App route state', () => {
   it('does not emit fabricated basin or basin-version IDs when overview data is unavailable', async () => {
     window.history.pushState({}, '', '/overview')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     const disabledTarget = screen.getByText('等待可见流域选择')
@@ -3029,7 +3028,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview?source=gfs&layer=flood-return-period&validTime=2026-05-18T06:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     await userEvent.setup().click(await screen.findByText('Demo Basin'))
     const link = await screen.findByRole('link', { name: '进入流域分析' })
@@ -3103,7 +3102,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     expect(screen.getByText('暂无可用流域数据')).toBeInTheDocument()
@@ -3172,7 +3171,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/overview')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     expect(screen.getByText('0')).toBeInTheDocument()
@@ -3188,7 +3187,7 @@ describe('App route state', () => {
   it('routes /forecast to the preserved hydrologic forecast workflow', async () => {
     window.history.pushState({}, '', '/forecast')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect((await screen.findAllByLabelText('河网地图')).length).toBeGreaterThan(0)
     expect(screen.getByText('请在地图上选择河段查看预报')).toBeInTheDocument()
@@ -3196,7 +3195,6 @@ describe('App route state', () => {
       'href',
       '/basins/basin-demo?basinVersionId=bv-001',
     )
-    expect(screen.getByRole('link', { name: /水文预报/ })).toHaveClass('border-accent')
   })
 
   it('clears stale forecast segment context when basin handoff changes basin version', async () => {
@@ -3206,7 +3204,7 @@ describe('App route state', () => {
       '/forecast?segmentId=seg-009&basinVersionId=bv-route&riverNetworkVersionId=rn-route&source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange&q=main',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByText('mock forecast panel')).toBeInTheDocument()
     expect(await screen.findByRole('link', { name: '进入流域分析' })).toHaveAttribute(
@@ -3232,7 +3230,7 @@ describe('App route state', () => {
       '/forecast?segmentId=seg-009&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&warningLevel=orange',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByText('mock forecast panel')).toBeInTheDocument()
     expect(screen.getByText('seg-009')).toBeInTheDocument()
@@ -3293,7 +3291,7 @@ describe('App route state', () => {
     }) as never)
     window.history.pushState({}, '', '/forecast')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     await userEvent.setup().click(await screen.findByRole('button', { name: '河网地图' }))
     await waitFor(() => expect(screen.getByRole('link', { name: '查看河段详情' })).toBeInTheDocument())
@@ -3336,7 +3334,7 @@ describe('App route state', () => {
     }) as never)
     window.history.pushState({}, '', '/forecast')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     await userEvent.setup().click(await screen.findByRole('button', { name: '河网地图' }))
     await waitFor(() =>
@@ -3361,7 +3359,7 @@ describe('App route state', () => {
       '/forecast?source=best&segmentId=seg-009&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&cycle=2026-05-18T00:00:00Z',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByText('mock forecast panel')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '查看河段详情' })).toHaveAttribute(
@@ -3423,7 +3421,7 @@ describe('App route state', () => {
       `/forecast?segmentId=seg-009&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&source=${source}&cycle=2026-05-18T00:00:00Z`,
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     await waitFor(() =>
       expect(useForecastStore.getState()).toMatchObject({
@@ -3525,7 +3523,7 @@ describe('App route state', () => {
       '/forecast?segmentId=seg-009&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&source=ifs&cycle=2026-05-18T00:00:00Z',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     await waitFor(() => expect(forecastCalls).toHaveLength(1))
     window.history.pushState(
@@ -3565,7 +3563,7 @@ describe('App route state', () => {
     )
     const replaceState = vi.spyOn(window.history, 'replaceState')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getAllByText('basin-demo').length).toBeGreaterThan(0)
@@ -3625,7 +3623,7 @@ describe('App route state', () => {
     )
     const replaceState = vi.spyOn(window.history, 'replaceState')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     await waitFor(() =>
@@ -3740,7 +3738,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getByText('数据源与情景')).toBeInTheDocument()
@@ -3816,7 +3814,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getByText('North Branch 001')).toBeInTheDocument()
@@ -3903,7 +3901,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-old&segmentId=seg-009')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
@@ -3945,7 +3943,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', `/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=${warningLevel}`)
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getByLabelText('预警筛选')).toHaveValue(warningLevel)
@@ -3964,7 +3962,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     await waitFor(() => expect(loadBasinDetail).toHaveBeenCalled())
@@ -3990,7 +3988,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: '查看河段详情' })).toHaveAttribute(
@@ -4060,7 +4058,7 @@ describe('App route state', () => {
       '/basins/basin-demo?source=best&cycle=2026-05-18T00:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     const href = screen.getByRole('link', { name: '查看河段详情' }).getAttribute('href')
@@ -4073,7 +4071,7 @@ describe('App route state', () => {
   it('renders invalid segment-id state for unsafe path segment ids without segment or forecast calls', async () => {
     window.history.pushState({}, '', '/segments/bad%2Fid?basinVersionId=bv-001&riverNetworkVersionId=rn-v1')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '无效 segmentId' })).toBeInTheDocument()
     expect(vi.mocked(client.GET)).not.toHaveBeenCalled()
@@ -4082,7 +4080,7 @@ describe('App route state', () => {
   it('renders invalid segment-id state for overlong path segment ids without segment or forecast calls', async () => {
     window.history.pushState({}, '', `/segments/${'x'.repeat(97)}?basinVersionId=bv-001&riverNetworkVersionId=rn-v1`)
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '无效 segmentId' })).toBeInTheDocument()
     expect(vi.mocked(client.GET)).not.toHaveBeenCalled()
@@ -4091,7 +4089,7 @@ describe('App route state', () => {
   it('rejects path and query segment identity mismatch before scoped fetches', async () => {
     window.history.pushState({}, '', '/segments/path-seg?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=query-seg')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: 'segmentId 路径与查询不匹配' })).toBeInTheDocument()
     expect(vi.mocked(client.GET)).not.toHaveBeenCalled()
@@ -4106,7 +4104,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '对比预报' }))
@@ -4171,7 +4169,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByLabelText('洪水阈值')).toHaveTextContent('Q100'))
@@ -4223,7 +4221,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '未找到河段 seg-009' })).toBeInTheDocument()
     expect(screen.getByText(/河段详情响应与请求河段不匹配/)).toBeInTheDocument()
@@ -4288,7 +4286,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-17T00:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
     expect(screen.getByText('当前预报响应与路由身份不匹配，已隐藏曲线。')).toBeInTheDocument()
@@ -4340,7 +4338,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
     const refresh = screen.getByRole('button', { name: '刷新' })
@@ -4422,7 +4420,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('预报曲线响应与请求河段不匹配'))
@@ -4454,7 +4452,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByLabelText('洪水阈值')).toHaveTextContent('Q100'))
@@ -4487,7 +4485,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText(/预报序列超出客户端渲染预算/).length).toBeGreaterThanOrEqual(3))
@@ -4521,7 +4519,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('frequency-curve')).toHaveTextContent('当前峰值'))
@@ -4543,7 +4541,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    const { unmount } = render(<App />)
+    const { unmount } = render(<LegacyPagesHarness />)
     expect(await screen.findByLabelText('位置缩略图')).toHaveTextContent('位置缩略图不可用')
     unmount()
 
@@ -4561,7 +4559,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
     expect(await screen.findByLabelText('位置缩略图')).toHaveTextContent('河段几何超出缩略图预算')
   })
 
@@ -4603,7 +4601,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const panel = await screen.findByLabelText('站点与强迫数据')
     await waitFor(() => expect(panel).toHaveTextContent('S001'))
@@ -4642,7 +4640,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const panel = await screen.findByLabelText('站点与强迫数据')
     await waitFor(() => expect(panel).toHaveTextContent('站点强迫序列超出客户端渲染预算'))
@@ -4664,7 +4662,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const panel = await screen.findByLabelText('站点与强迫数据')
     await waitFor(() => expect(panel).toHaveTextContent('CLDAS unavailable in this environment'))
@@ -4683,7 +4681,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const panel = await screen.findByLabelText('站点与强迫数据')
     await waitFor(() => expect(panel).toHaveTextContent('站点与强迫数据暂不可用'))
@@ -4697,7 +4695,7 @@ describe('App route state', () => {
   it('does not request forecast series when segment detail lacks river network identity', async () => {
     window.history.pushState({}, '', '/segments/seg-009?basinVersionId=bv-001')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '缺少 riverNetworkVersionId' })).toBeInTheDocument()
     expect(vi.mocked(client.GET).mock.calls.some(([path]) => String(path).endsWith('/forecast-series'))).toBe(false)
@@ -4712,7 +4710,7 @@ describe('App route state', () => {
     }) as never)
     window.history.pushState({}, '', '/segments/missing?basinVersionId=bv-001&riverNetworkVersionId=rn-v1')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '未找到河段 missing' })).toBeInTheDocument()
     const forecastCalls = vi.mocked(client.GET).mock.calls.filter(([path]) => String(path).endsWith('/forecast-series'))
@@ -4765,7 +4763,7 @@ describe('App route state', () => {
       '/segments/seg-009?source=gfs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-17T00:00:00Z&basinVersionId=bv-001&riverNetworkVersionId=rn-v1',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: 'seg-009' })).toBeInTheDocument()
     await waitFor(() => expect(new URLSearchParams(window.location.search).get('validTime')).toBe('2026-05-18T00:00:00.000Z'))
@@ -4790,7 +4788,7 @@ describe('App route state', () => {
       '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-16T00:00:00Z',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ source: 'gfs' })))
@@ -4815,7 +4813,7 @@ describe('App route state', () => {
       '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
@@ -4837,7 +4835,7 @@ describe('App route state', () => {
       '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-18T00:00:00Z',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T00%3A00%3A00.000Z'))
@@ -4858,7 +4856,7 @@ describe('App route state', () => {
       '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&validTime=2026-05-18T06:00:00Z',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[101, 31], [104, 34]], { padding: 36, duration: 450 }]]))
@@ -4882,7 +4880,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/basin-demo?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getByLabelText('缺少流域 bbox')).toHaveTextContent('73,18,135,54')
@@ -4906,7 +4904,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getByText('该流域暂无已发布的预报数据')).toBeInTheDocument()
@@ -4937,7 +4935,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/not-a-real-basin')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     const unavailableNotice = screen.getByLabelText('流域不可用')
@@ -5021,7 +5019,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/basins/basin-demo?basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=missing-seg')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
     expect(screen.getAllByText('未找到河段 missing-seg').length).toBeGreaterThan(0)
@@ -5039,7 +5037,7 @@ describe('App route state', () => {
     )
     const replaceState = vi.spyOn(window.history, 'replaceState')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '全国总览' })).toBeInTheDocument()
     await waitFor(() => expect(window.location.search).toBe(''))
@@ -5103,7 +5101,7 @@ describe('App route state', () => {
       '/flood-alerts?source=gfs&cycle=2026-05-12T00:00:00Z&validTime=2026-05-12T03:00:00Z&warningLevel=major',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '预警统计' })).toBeInTheDocument()
@@ -5111,7 +5109,6 @@ describe('App route state', () => {
     expect(screen.getByRole('heading', { name: '预报时刻' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '风险排名' })).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /Flood Segment 1/ })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /洪水预警/ })).toHaveClass('border-accent')
     expect(fetchLatestFrequencyDoneRun).toHaveBeenCalledWith({
       source: 'gfs',
       cycleTime: '2026-05-12T00:00:00.000Z',
@@ -5202,7 +5199,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/flood-alerts')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     expect(await screen.findByRole('row', { name: /Focused Flood Segment/ })).toBeInTheDocument()
@@ -5313,7 +5310,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/flood-alerts')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     expect(await screen.findByRole('row', { name: /No Centroid Segment/ })).toBeInTheDocument()
@@ -5424,7 +5421,7 @@ describe('App route state', () => {
       '/flood-alerts',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     await user.click(screen.getByRole('row', { name: /Flood Segment 1/ }))
@@ -5565,7 +5562,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/flood-alerts')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     await user.click(screen.getByRole('row', { name: /Flood Segment 1/ }))
@@ -5685,7 +5682,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/flood-alerts')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     await user.click(screen.getByRole('row', { name: /Flood Segment 1/ }))
@@ -5773,7 +5770,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/flood-alerts')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     await user.click(screen.getByRole('row', { name: /Scoped Flood Segment/ }))
@@ -5880,7 +5877,7 @@ describe('App route state', () => {
       '/flood-alerts?source=gfs&cycle=2026-05-12T00:00:00Z&validTime=2026-05-12T03:00:00Z',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     expect(fetchLatestFrequencyDoneRun).toHaveBeenCalledWith({
@@ -5922,7 +5919,7 @@ describe('App route state', () => {
     useFloodAlertStore.setState({ fetchLatestFrequencyDoneRun })
     window.history.pushState({}, '', `/flood-alerts?warningLevel=${warningLevel}`)
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     expect(useFloodAlertStore.getState().selectedAlertLevel).toBe(expectedLevel)
@@ -5933,8 +5930,7 @@ describe('App route state', () => {
     })
   })
 
-  it('clears selected flood warning level when the route omits warningLevel', async () => {
-    const user = userEvent.setup()
+  it('hydrates selected flood warning level from the route warningLevel param', async () => {
     const fetchLatestFrequencyDoneRun = vi.fn().mockResolvedValue(undefined)
     useFloodAlertStore.setState({
       selectedRunId: 'run-flood-1',
@@ -5965,14 +5961,10 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/flood-alerts?warningLevel=major')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     await waitFor(() => expect(useFloodAlertStore.getState().selectedAlertLevel).toBe('high_risk'))
-    await user.click(screen.getByRole('link', { name: /洪水预警/ }))
-    await waitFor(() => expect(window.location.pathname).toBe('/flood-alerts'))
-    await waitFor(() => expect(window.location.search).toBe(''))
-    await waitFor(() => expect(useFloodAlertStore.getState().selectedAlertLevel).toBeNull())
   })
 
   it('hydrates flood-alert requests from a resolved concrete IFS summary handoff', async () => {
@@ -5984,7 +5976,7 @@ describe('App route state', () => {
       '/flood-alerts?source=ifs&cycle=2026-05-18T00:00:00.000Z&validTime=2026-05-18T06:00:00.000Z',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '洪水预警' })).toBeInTheDocument()
     expect(fetchLatestFrequencyDoneRun).toHaveBeenCalledWith({
@@ -6085,7 +6077,7 @@ describe('App route state', () => {
     )
 
     const user = userEvent.setup()
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     const oldRow = await screen.findByRole('row', { name: /Old Segment/ })
     await user.click(oldRow)
@@ -6156,7 +6148,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/monitoring?source=ifs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
     await waitFor(() =>
@@ -6171,7 +6163,6 @@ describe('App route state', () => {
     expect(screen.getByRole('heading', { name: '作业列表' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '趋势' })).toBeInTheDocument()
     expect(within(screen.getByRole('row', { name: /run-failed/ })).getByText('model-b')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /产品监控/ })).toHaveClass('border-accent')
   })
 
   it('keeps legacy /monitoring operational errors out of StageList unavailable text', async () => {
@@ -6187,7 +6178,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/monitoring')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
     expect(screen.getAllByText(/monitoring fixture API error/)).toHaveLength(1)
@@ -6258,7 +6249,7 @@ describe('App route state', () => {
       })
       window.history.pushState({}, '', '/ops?source=ifs&cycle=2026-05-18T00:00:00Z')
 
-      render(<App />)
+      render(<LegacyPagesHarness />)
 
       expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
       await waitFor(() =>
@@ -6268,8 +6259,6 @@ describe('App route state', () => {
         }),
       )
       expect(screen.queryByText('权限不足')).not.toBeInTheDocument()
-      expect(screen.getByRole('link', { name: /内部诊断/ })).toHaveClass('border-accent')
-      expect(screen.getByRole('link', { name: /产品监控/ })).toHaveAttribute('href', '/monitoring')
       expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
       expect(screen.getByTestId('ops-manual-recovery-guidance')).not.toHaveTextContent(/display_readonly|27/)
       const failedRow = screen.getByRole('row', { name: /job-ops.*run-ops.*forecast.*model-ops.*failed.*2001.*2m.*2.*available/ })
@@ -6350,7 +6339,7 @@ describe('App route state', () => {
       })
       window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
 
-      render(<App />)
+      render(<LegacyPagesHarness />)
 
       expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
       expect(screen.getAllByText(/display_readonly/).some((node) =>
@@ -6473,7 +6462,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() => expect(useMonitoringStore.getState().runtimeConfig).toMatchObject({
@@ -6555,7 +6544,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.queryByRole('row', { name: /stage-only-job/ })).not.toBeInTheDocument()
@@ -6623,7 +6612,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/monitoring?source=ifs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
     expect(within(screen.getByRole('row', { name: /run-monitoring-running/ })).getByRole('button', { name: /取消/ })).toBeVisible()
@@ -6665,7 +6654,7 @@ describe('App route state', () => {
       })
       window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
 
-      render(<App />)
+      render(<LegacyPagesHarness />)
 
       expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
       const row = await screen.findByRole('row', { name: new RegExp(`run-ops-${status}`) })
@@ -6713,7 +6702,7 @@ describe('App route state', () => {
       vi.mocked(client.POST).mockResolvedValue({ data: success({ status: 'submitted' }), error: undefined } as never)
       window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
 
-      render(<App />)
+      render(<LegacyPagesHarness />)
 
       expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
       await user.click(await screen.findByRole('button', { name: /重试/ }))
@@ -6760,7 +6749,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('alert')).toHaveTextContent('权限不足')
     expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
@@ -6787,7 +6776,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/ops')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.getByText(/当前 source\/cycle 的流水线阶段不可用：ops fixture API error/)).toBeInTheDocument()
@@ -6828,7 +6817,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/ops/?source=gfs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /重试/ })).toBeVisible()
@@ -6861,7 +6850,7 @@ describe('App route state', () => {
       })
       window.history.pushState({}, '', url)
 
-      render(<App />)
+      render(<LegacyPagesHarness />)
 
       expect(await screen.findByRole('heading', { name: url.startsWith('/ops') ? '内部诊断' : '监控工作台' })).toBeInTheDocument()
       await waitFor(() =>
@@ -6941,7 +6930,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', `/monitoring?source=${unsupportedSource}&cycle=2026-05-18T00:00:00Z`)
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
     expect(screen.queryByText(new RegExp(`source=${unsupportedSource} 不支持`))).not.toBeInTheDocument()
@@ -7026,7 +7015,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/monitoring?source=gfs&cycle=bad-cycle')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
     expect(screen.queryByText(/cycle=bad-cycle 不是有效 RFC3339 时间/)).not.toBeInTheDocument()
@@ -7099,7 +7088,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', `/ops?source=${unsupportedSource}&cycle=2026-05-18T00:00:00Z`)
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect((await screen.findAllByText(new RegExp(`source=${unsupportedSource} 不支持`))).length).toBeGreaterThan(0)
@@ -7157,7 +7146,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', url)
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect((await screen.findAllByText(errorPattern)).length).toBeGreaterThan(0)
@@ -7182,7 +7171,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/monitoring?source=gfs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '监控工作台' })).toBeInTheDocument()
     await waitFor(() => expect(fetchJobs).toHaveBeenCalled())
@@ -7321,7 +7310,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', `/ops?source=${urlSource}&cycle=2026-05-18T00:00:00Z`)
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(screen.queryByRole('row', { name: /old-cycle-run/ })).not.toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
@@ -7452,7 +7441,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/ops?source=ifs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.queryByText('stale-running')).not.toBeInTheDocument()
@@ -7568,7 +7557,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/ops?source=ifs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() =>
@@ -7612,7 +7601,7 @@ describe('App route state', () => {
       '/ops?source=gfs&cycle_time=2026-05-18T00:00:00Z&run_id=run-strict&model_id=model-strict',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() =>
@@ -7706,7 +7695,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/ops?source=gfs&cycle_time=2026-05-18T00:00:00Z&run_id=run-strict')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect((await screen.findAllByText(/严格 identity 参数不完整/)).length).toBeGreaterThan(0)
@@ -7746,7 +7735,7 @@ describe('App route state', () => {
       '/ops?source=gfs&cycle_time=2026-05-18T00:00:00Z&run_id=run-strict&model_id=model-strict',
     )
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() =>
@@ -7829,7 +7818,7 @@ describe('App route state', () => {
       }),
     })
     window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
-    render(<App />)
+    render(<LegacyPagesHarness />)
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     await waitFor(() => expect(useMonitoringStore.getState().fetchAll).toHaveBeenCalled())
     contexts.length = 0
@@ -7990,7 +7979,7 @@ describe('App route state', () => {
     vi.mocked(client.POST).mockReturnValueOnce(retryRequest.promise as never)
     window.history.pushState({}, '', '/ops?source=gfs&cycle=2026-05-18T00:00:00Z')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /stale-retry-run/ })).toBeInTheDocument()
@@ -8045,7 +8034,7 @@ describe('App route state', () => {
     useAuthStore.setState({ role: 'analyst' })
     window.history.pushState({}, '', '/ops')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('alert')).toHaveTextContent('权限不足')
     expect(screen.queryByRole('heading', { name: '内部诊断' })).not.toBeInTheDocument()
@@ -8062,10 +8051,9 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /模型资产/ })).toHaveClass('border-accent')
     await waitFor(() => expect(screen.getAllByText('qhh-basin-v1').length).toBeGreaterThan(0))
     expect(screen.getAllByText('https://assets.example.test/pkg').length).toBeGreaterThan(0)
     expect(screen.getByText('s3://nhms/private/package')).toBeInTheDocument()
@@ -8139,7 +8127,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
     const lifecycleCard = screen.getByRole('heading', { name: '生命周期操作' }).closest('div')?.parentElement
@@ -8241,7 +8229,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', `/system/model-assets?modelId=${outgoing.model_id}`)
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
     const lifecycleCard = screen.getByRole('heading', { name: '生命周期操作' }).closest('div')?.parentElement
@@ -8284,7 +8272,7 @@ describe('App route state', () => {
     } as never)
     window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
     const lifecycleCard = screen.getByRole('heading', { name: '生命周期操作' }).closest('div')?.parentElement
@@ -8342,7 +8330,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/system/model-assets?modelId=model-b')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText('模型资产详情与当前选择不匹配').length).toBeGreaterThan(0))
@@ -8401,7 +8389,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText('受限来源').length).toBeGreaterThanOrEqual(3))
@@ -8448,7 +8436,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText('受限来源').length).toBeGreaterThanOrEqual(3))
@@ -8489,7 +8477,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
     expect(await screen.findByText('空间几何超出预览预算')).toBeInTheDocument()
@@ -8513,7 +8501,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     await waitFor(() => expect(screen.getAllByText('模型资产列表加载失败').length).toBeGreaterThan(0))
     await waitFor(() => expect(useModelAssetsStore.getState().selectedModel).toBeNull())
@@ -8536,7 +8524,7 @@ describe('App route state', () => {
     })
     window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
 
-    render(<App />)
+    render(<LegacyPagesHarness />)
 
     expect(await screen.findByRole('heading', { name: '模型资产管理' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText('模型资产详情加载失败').length).toBeGreaterThan(0))
@@ -8547,17 +8535,193 @@ describe('App route state', () => {
   })
 
   it.each(['viewer', 'operator'] as const)(
-    'denies /system/model-assets for %s, hides navigation, and does not fetch detail',
+    'denies /system/model-assets for %s and does not fetch detail',
     async (role) => {
       useAuthStore.setState({ role })
       window.history.pushState({}, '', '/system/model-assets?modelId=basins_qhh_shud')
 
-      render(<App />)
+      render(<LegacyPagesHarness />)
 
       expect(await screen.findByText('权限不足')).toBeInTheDocument()
-      expect(screen.queryByRole('link', { name: /模型资产/ })).not.toBeInTheDocument()
       await waitFor(() => expect(vi.mocked(client.GET).mock.calls.length).toBe(0))
       expect(vi.mocked(client.GET).mock.calls.some(([path]) => path === '/api/v1/models/{model_id}')).toBe(false)
     },
   )
+})
+
+// 精确 query 契约：用 LegacyRedirect + 被动探针落点（不经 OverviewPage 归一化），
+// 隔离 #337 的重定向责任（OverviewPage 自身的 query 归一化属 #338/#339 范畴）。
+function RedirectLandingProbe() {
+  const location = useLocation()
+  return (
+    <div data-testid="redirect-landing" data-pathname={location.pathname} data-search={location.search} />
+  )
+}
+
+function RedirectMatrixHarness() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<RedirectLandingProbe />} />
+        <Route path="/overview" element={<LegacyRedirect />} />
+        <Route path="/hydro-met" element={<LegacyRedirect />} />
+        <Route path="/forecast" element={<LegacyRedirect />} />
+        <Route path="/meteorology" element={<LegacyRedirect extraParams={{ layer: 'met-stations' }} />} />
+        <Route
+          path="/flood-alerts"
+          element={<LegacyRedirect extraParams={{ layer: 'flood-return-period' }} />}
+        />
+        <Route
+          path="/basins/:basinId"
+          element={<LegacyRedirect param={{ name: 'basinId', queryKey: 'basinId' }} />}
+        />
+        <Route
+          path="/segments/:segmentId"
+          element={<LegacyRedirect param={{ name: 'segmentId', queryKey: 'segmentId' }} />}
+        />
+      </Routes>
+    </BrowserRouter>
+  )
+}
+
+describe('legacy route redirect query contract', () => {
+  async function landingParams() {
+    const probe = await screen.findByTestId('redirect-landing')
+    return {
+      pathname: probe.getAttribute('data-pathname'),
+      params: new URLSearchParams(probe.getAttribute('data-search') ?? ''),
+    }
+  }
+
+  it.each(['/overview', '/hydro-met', '/forecast'])('redirects %s to bare /', async (path) => {
+    window.history.pushState({}, '', path)
+
+    render(<RedirectMatrixHarness />)
+
+    const { pathname, params } = await landingParams()
+    expect(pathname).toBe('/')
+    expect(params.toString()).toBe('')
+  })
+
+  it('redirects /meteorology with layer=met-stations', async () => {
+    window.history.pushState({}, '', '/meteorology')
+
+    render(<RedirectMatrixHarness />)
+
+    const { pathname, params } = await landingParams()
+    expect(pathname).toBe('/')
+    expect(params.get('layer')).toBe('met-stations')
+  })
+
+  it('redirects /flood-alerts with layer=flood-return-period', async () => {
+    window.history.pushState({}, '', '/flood-alerts')
+
+    render(<RedirectMatrixHarness />)
+
+    const { params } = await landingParams()
+    expect(params.get('layer')).toBe('flood-return-period')
+  })
+
+  it('redirects /basins/:basinId with basinId query', async () => {
+    window.history.pushState({}, '', '/basins/basins_qhh')
+
+    render(<RedirectMatrixHarness />)
+
+    const { params } = await landingParams()
+    expect(params.get('basinId')).toBe('basins_qhh')
+  })
+
+  it('redirects /segments/:segmentId with segmentId query', async () => {
+    window.history.pushState({}, '', '/segments/seg_001')
+
+    render(<RedirectMatrixHarness />)
+
+    const { params } = await landingParams()
+    expect(params.get('segmentId')).toBe('seg_001')
+  })
+
+  it('preserves original deep-link search and appends the semantic layer param', async () => {
+    window.history.pushState({}, '', '/meteorology?source=IFS&time=2026-06-05T18:00:00Z')
+
+    render(<RedirectMatrixHarness />)
+
+    const { params } = await landingParams()
+    expect(params.get('source')).toBe('IFS')
+    expect(params.get('time')).toBe('2026-06-05T18:00:00Z')
+    expect(params.get('layer')).toBe('met-stations')
+  })
+
+  it('keeps the original search value when a semantic key collides', async () => {
+    window.history.pushState({}, '', '/meteorology?layer=foo')
+
+    render(<RedirectMatrixHarness />)
+
+    const { params } = await landingParams()
+    // 同名键冲突时取原始 search 的值，语义参数不覆盖用户既有状态
+    expect(params.getAll('layer')).toEqual(['foo'])
+  })
+
+  it('lands a segment deep-link without basin context as /?segmentId=...', async () => {
+    window.history.pushState({}, '', '/segments/seg_x')
+
+    render(<RedirectMatrixHarness />)
+
+    const { pathname, params } = await landingParams()
+    expect(pathname).toBe('/')
+    expect(params.get('segmentId')).toBe('seg_x')
+    expect(params.has('basinId')).toBe(false)
+  })
+})
+
+describe('legacy routes converge on the single map shell (full App)', () => {
+  async function expectSingleMapShell() {
+    expect(await screen.findByTestId('m11-shell')).toBeInTheDocument()
+    // 去导航后单页无顶部导航（NavBar 的 aria-label="Main navigation" 已移除）
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+  }
+
+  it.each(['/overview', '/hydro-met', '/forecast'])(
+    'redirects %s to / via replace and renders the single map shell',
+    async (path) => {
+      window.history.pushState({}, '', path)
+
+      render(<App />)
+
+      await expectSingleMapShell()
+      expect(window.location.pathname).toBe('/')
+    },
+  )
+
+  it('does not pollute the back stack (replace, not push)', async () => {
+    window.history.pushState({}, '', '/start-anchor')
+    const lengthBefore = window.history.length
+    window.history.pushState({}, '', '/overview')
+
+    render(<App />)
+
+    await expectSingleMapShell()
+    expect(window.location.pathname).toBe('/')
+    // replace 跳转不应新增历史项（相对 push /overview 之后）
+    expect(window.history.length).toBe(lengthBefore + 1)
+  })
+
+  it('keeps /ops reachable (not redirected) for operator role', async () => {
+    useAuthStore.setState({ role: 'operator' })
+    window.history.pushState({}, '', '/ops')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '内部诊断' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/ops')
+  })
+
+  it('keeps /monitoring RBAC-denied for a role without ops access', async () => {
+    useAuthStore.setState({ role: 'viewer' })
+    window.history.pushState({}, '', '/monitoring')
+
+    render(<App />)
+
+    expect(await screen.findByText('权限不足')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/monitoring')
+  })
 })
