@@ -428,17 +428,17 @@ def list_river_segments(
     river_network_version_id: str | None = None,
     search: str | None = Query(
         default=None,
-        description="Case-insensitive substring match over river_segment_id and name.",
+        description="Case-insensitive substring match over river_segment_id and name (backend-applied).",
     ),
     stream_order_min: int | None = Query(
         default=None,
         ge=0,
-        description="Lower bound (inclusive) on stream order (river_segment.segment_order).",
+        description="Inclusive lower bound on stream order (river_segment.segment_order).",
     ),
     stream_order_max: int | None = Query(
         default=None,
         ge=0,
-        description="Upper bound (inclusive) on stream order (river_segment.segment_order).",
+        description="Inclusive upper bound on stream order (river_segment.segment_order).",
     ),
     limit: int = Query(default=500, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),

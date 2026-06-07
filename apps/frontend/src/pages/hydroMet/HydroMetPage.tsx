@@ -361,6 +361,18 @@ function parseStreamOrderInput(value: string): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
+function hydroMetInventoryProductKey(product: QhhLatestProduct) {
+  return [
+    product.model_id,
+    product.basin_version_id,
+    product.river_network_version_id,
+    product.forcing_version_id,
+    product.source_id,
+    product.cycle_time,
+    product.run_id,
+  ].join('|')
+}
+
 function useStationInventory(
   product: QhhLatestProduct,
   initialPage: HydroMetStationPage | null,
@@ -374,10 +386,13 @@ function useStationInventory(
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const debouncedSearch = useDebouncedValue(search, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
+  const productKey = hydroMetInventoryProductKey(product)
+  const defaultServedKey = `${productKey}|||0`
   // The bootstrap already served the default query (no search/variables, offset 0) for this
   // product identity, so we mark it as served to avoid a duplicate request on mount. Any other
   // query (search / variables / page) is fetched. This is robust to effect double-invocation.
-  const servedKeyRef = useRef(`${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|||0`)
+  const servedKeyRef = useRef(defaultServedKey)
+  const pendingResetProductKeyRef = useRef<string | null>(null)
 
   // Reset to the bootstrap page whenever the product identity changes.
   useEffect(() => {
@@ -387,8 +402,9 @@ function useStationInventory(
     setPage(initialPage)
     setStations(initialStations)
     setError(null)
-    servedKeyRef.current = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|||0`
-  }, [product.forcing_version_id, product.source_id, product.cycle_time, initialPage, initialStations])
+    pendingResetProductKeyRef.current = productKey
+    servedKeyRef.current = defaultServedKey
+  }, [productKey, defaultServedKey, initialPage, initialStations])
 
   // Reset paging inline on filter change so a single effect issues exactly one request, instead of
   // a separate reset effect firing a stale-offset request that gets immediately cancelled.
@@ -403,7 +419,12 @@ function useStationInventory(
   }, [filterChanged, offset])
 
   useEffect(() => {
-    const queryKey = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|${debouncedSearch}|${selectedVariables.join(',')}|${effectiveOffset}`
+    const resetFiltersReady = debouncedSearch === '' && selectedVariables.length === 0 && effectiveOffset === 0
+    if (pendingResetProductKeyRef.current === productKey) {
+      if (!resetFiltersReady) return
+      pendingResetProductKeyRef.current = null
+    }
+    const queryKey = `${productKey}|${debouncedSearch}|${selectedVariables.join(',')}|${effectiveOffset}`
     if (queryKey === servedKeyRef.current) return
     servedKeyRef.current = queryKey
     let cancelled = false
@@ -430,7 +451,7 @@ function useStationInventory(
     return () => {
       cancelled = true
     }
-  }, [product, debouncedSearch, selectedVariables, effectiveOffset])
+  }, [product, productKey, debouncedSearch, selectedVariables, effectiveOffset])
 
   const filterAvailability = useMemo(() => hydroMetStationFilterAvailability(page), [page])
 
@@ -477,7 +498,10 @@ function useRiverSegmentInventory(
   const debouncedSearch = useDebouncedValue(search, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
   const debouncedMin = useDebouncedValue(streamOrderMin, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
   const debouncedMax = useDebouncedValue(streamOrderMax, HYDRO_MET_LIST_SEARCH_DEBOUNCE_MS)
-  const servedKeyRef = useRef(`${product.forcing_version_id}|${product.source_id}|${product.cycle_time}||||0`)
+  const productKey = hydroMetInventoryProductKey(product)
+  const defaultServedKey = `${productKey}||||0`
+  const servedKeyRef = useRef(defaultServedKey)
+  const pendingResetProductKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     setSearch('')
@@ -488,8 +512,9 @@ function useRiverSegmentInventory(
     setRiverSegments(initialFeatures)
     setError(null)
     setStreamOrderSeen(hydroMetStreamOrderAvailable(initialFeatures))
-    servedKeyRef.current = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}||||0`
-  }, [product.forcing_version_id, product.source_id, product.cycle_time, initialCollection, initialFeatures])
+    pendingResetProductKeyRef.current = productKey
+    servedKeyRef.current = defaultServedKey
+  }, [productKey, defaultServedKey, initialCollection, initialFeatures])
 
   // Filter signature drives paging reset. We compute the effective offset inline (resetting to 0
   // when the filter changed) so a single effect issues exactly one request — instead of one effect
@@ -505,9 +530,17 @@ function useRiverSegmentInventory(
   }, [filterChanged, offset])
 
   useEffect(() => {
+    const resetFiltersReady = debouncedSearch === '' && debouncedMin === '' && debouncedMax === '' && effectiveOffset === 0
+    if (pendingResetProductKeyRef.current === productKey) {
+      if (!resetFiltersReady) return
+      pendingResetProductKeyRef.current = null
+    }
     const minValue = parseStreamOrderInput(debouncedMin)
     const maxValue = parseStreamOrderInput(debouncedMax)
-    const queryKey = `${product.forcing_version_id}|${product.source_id}|${product.cycle_time}|${debouncedSearch}|${minValue ?? ''}|${maxValue ?? ''}|${effectiveOffset}`
+    const streamOrderAvailable = streamOrderSeen || hydroMetStreamOrderAvailable(riverSegments)
+    const requestMinValue = streamOrderAvailable ? minValue : undefined
+    const requestMaxValue = streamOrderAvailable ? maxValue : undefined
+    const queryKey = `${productKey}|${debouncedSearch}|${requestMinValue ?? ''}|${requestMaxValue ?? ''}|${effectiveOffset}`
     if (queryKey === servedKeyRef.current) return
     servedKeyRef.current = queryKey
     let cancelled = false
@@ -515,8 +548,8 @@ function useRiverSegmentInventory(
     setError(null)
     void fetchHydroMetRiverSegments(product, {
       search: debouncedSearch,
-      streamOrderMin: minValue,
-      streamOrderMax: maxValue,
+      streamOrderMin: requestMinValue,
+      streamOrderMax: requestMaxValue,
       limit: HYDRO_MET_RIVER_SEGMENT_LIMIT,
       offset: effectiveOffset,
     }).then(
@@ -536,7 +569,7 @@ function useRiverSegmentInventory(
     return () => {
       cancelled = true
     }
-  }, [product, debouncedSearch, debouncedMin, debouncedMax, effectiveOffset])
+  }, [product, productKey, debouncedSearch, debouncedMin, debouncedMax, effectiveOffset, streamOrderSeen, riverSegments])
 
   // stream_order filter stays available once seen for this product identity (sticky), so filtering
   // down to an empty result never unmounts the control and locks the user out of clearing it.

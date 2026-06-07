@@ -1475,6 +1475,101 @@ describe('App route state', () => {
     expect(screen.getByTestId('hydro-met-river-segment-list')).toHaveTextContent('seg-002')
   })
 
+  it('does not carry stale inventory filters or duplicate default requests across product switches (F-1)', async () => {
+    const user = userEvent.setup()
+    mockHydroMetRouteClient()
+    const baseProduct = hydroMetLatestProduct()
+    const baseResult = {
+      status: 'ready' as const,
+      source: 'GFS' as const,
+      cycle: null,
+      product: baseProduct,
+      stations: hydroMetInteractiveStationPage.items,
+      riverSegments: hydroMetRiverSegments.features,
+      stationPage: hydroMetInteractiveStationPage,
+      riverSegmentCollection: hydroMetRiverSegments,
+      latestReasons: [],
+      stationError: null,
+      riverError: null,
+    }
+    const { rerender } = render(<ReadyHydroMetContent result={baseResult} product={baseProduct} />)
+
+    await user.type(await screen.findByLabelText('搜索气象站点'), 'North')
+    await waitFor(() => {
+      expect(vi.mocked(client.GET).mock.calls.some(([path, options]) => (
+        path === '/api/v1/met/stations'
+        && (options as { params?: { query?: { search?: string } } })?.params?.query?.search === 'North'
+      ))).toBe(true)
+    })
+
+    await user.type(await screen.findByTestId('hydro-met-river-stream-order-min'), '3')
+    await user.type(screen.getByTestId('hydro-met-river-stream-order-max'), '4')
+    await waitFor(() => {
+      expect(vi.mocked(client.GET).mock.calls.some(([path, options]) => {
+        const query = (options as { params?: { query?: { stream_order_min?: number; stream_order_max?: number } } })?.params?.query
+        return path === '/api/v1/basin-versions/{basin_version_id}/river-segments'
+          && query?.stream_order_min === 3
+          && query?.stream_order_max === 4
+      })).toBe(true)
+    })
+
+    const stationInventoryCallCount = vi.mocked(client.GET).mock.calls.filter(([path]) => path === '/api/v1/met/stations').length
+    const riverInventoryCallCount = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => path === '/api/v1/basin-versions/{basin_version_id}/river-segments')
+      .length
+    const nextProduct = hydroMetLatestProduct({
+      model_id: 'basins_qhh_shud_next',
+      basin_version_id: 'basins_qhh_vnext',
+      river_network_version_id: 'basins_qhh_rivnet_next',
+      forcing_version_id: 'forc_gfs_2026052106_basins_qhh_shud_next',
+      cycle_time: '2026-05-21T06:00:00Z',
+      run_id: 'qhh_gfs_2026052106_smoke_next',
+    })
+    const noStreamOrderCollection = {
+      ...hydroMetRiverSegments,
+      features: hydroMetRiverSegments.features.map((feature) => {
+        const properties = { ...feature.properties }
+        delete properties.stream_order
+        return {
+          ...feature,
+          properties: {
+            ...properties,
+            basin_version_id: 'basins_qhh_vnext',
+            river_network_version_id: 'basins_qhh_rivnet_next',
+          },
+        }
+      }),
+    }
+
+    rerender(
+      <ReadyHydroMetContent
+        result={{
+          ...baseResult,
+          product: nextProduct,
+          stations: hydroMetStationPage.items,
+          stationPage: hydroMetStationPage,
+          riverSegments: noStreamOrderCollection.features,
+          riverSegmentCollection: noStreamOrderCollection,
+        }}
+        product={nextProduct}
+      />,
+    )
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350))
+    })
+
+    const stationInventoryCallsAfterSwitch = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => path === '/api/v1/met/stations')
+      .slice(stationInventoryCallCount)
+    const riverInventoryCallsAfterSwitch = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => path === '/api/v1/basin-versions/{basin_version_id}/river-segments')
+      .slice(riverInventoryCallCount)
+
+    expect(stationInventoryCallsAfterSwitch).toEqual([])
+    expect(riverInventoryCallsAfterSwitch).toEqual([])
+  })
+
   it('uses matching IFS source/scenario and labels shorter actual river horizon without padded q_down values', async () => {
     mockHydroMetRouteClient({
       product: {

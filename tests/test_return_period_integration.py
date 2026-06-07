@@ -4,8 +4,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from psycopg2.extras import Json, execute_values
 
 from packages.common.forecast_store import (
+    MVP_STATION_VARIABLES,
     PsycopgForecastStore,
     _qhh_latest_candidate_response,
 )
@@ -26,7 +28,7 @@ _BASIN_PEAK = f"{_PREFIX}_basin_peak"
 _BASIN_NONPEAK = f"{_PREFIX}_basin_nonpeak"
 _SOURCE = "GFS"
 _RUN_START = datetime(2026, 5, 14, 0, tzinfo=UTC)
-_RUN_END = datetime(2026, 5, 14, 7, tzinfo=UTC)
+_RUN_END = datetime(2026, 5, 14, 1, tzinfo=UTC)
 _CYCLE_TIME = datetime(2026, 5, 14, 0, tzinfo=UTC)
 _VALID_TIME = datetime(2026, 5, 14, 1, tzinfo=UTC)
 
@@ -42,7 +44,19 @@ def _seed_run(connection: Any, *, basin_id: str, with_peak_return_period: bool, 
     model_id = f"{suffix}_model"
     run_id = f"{suffix}_run"
     river_segment_id = f"{suffix}_seg"
+    forcing_version_id = f"{suffix}_forcing"
+    station_id = f"{suffix}_station"
     with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO met.data_source (
+                source_id, source_name, source_type, status, native_format, adapter_name, config_json
+            )
+            VALUES (%s, 'GFS Integration', 'forecast', 'mock', 'netcdf', 'gfs', %s)
+            ON CONFLICT (source_id) DO NOTHING
+            """,
+            (_SOURCE, Json({"return_period_integration": True})),
+        )
         cursor.execute(
             "INSERT INTO core.basin (basin_id, basin_name, basin_group, description) VALUES (%s, %s, %s, %s)",
             (basin_id, f"ZZ {basin_id}", "return-period", "return period integration"),
@@ -102,16 +116,115 @@ def _seed_run(connection: Any, *, basin_id: str, with_peak_return_period: bool, 
         )
         cursor.execute(
             """
-            INSERT INTO hydro.hydro_run (
-                run_id, run_type, scenario_id, model_id, basin_version_id,
-                source_id, cycle_time, start_time, end_time, status, run_manifest_uri
+            INSERT INTO met.met_station (
+                station_id, basin_version_id, station_name, geom, elevation_m,
+                station_role, active_flag, properties_json
             )
             VALUES (
-                %s, 'forecast', 'forecast_gfs_deterministic', %s, %s,
+                %s, %s, 'Return period station',
+                ST_SetSRID(ST_Point(110.15, 30.15), 4490),
+                3200, 'forcing', true, %s
+            )
+            """,
+            (station_id, basin_version_id, Json({"return_period_integration": True})),
+        )
+        execute_values(
+            cursor,
+            """
+            INSERT INTO met.interp_weight (
+                source_id, grid_id, model_id, station_id, variable, grid_cell_id, weight, method
+            )
+            VALUES %s
+            """,
+            [
+                (_SOURCE, f"{suffix}_grid", model_id, station_id, variable, f"{suffix}_{variable}_cell", 1.0, "nearest")
+                for variable in MVP_STATION_VARIABLES
+            ],
+        )
+        cursor.execute(
+            """
+            INSERT INTO met.forcing_version (
+                forcing_version_id, model_id, source_id, cycle_time, start_time, end_time,
+                station_count, forcing_package_uri, checksum, lineage_json
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, 1, 'integration://forcing/package', 'forcing-sha', %s)
+            """,
+            (forcing_version_id, model_id, _SOURCE, _CYCLE_TIME, _RUN_START, _RUN_END, Json({"integration": True})),
+        )
+        execute_values(
+            cursor,
+            """
+            INSERT INTO met.forcing_station_timeseries (
+                forcing_version_id, basin_version_id, station_id, valid_time, source_id, variable,
+                value, unit, native_resolution, quality_flag
+            )
+            VALUES %s
+            """,
+            [
+                (
+                    forcing_version_id,
+                    basin_version_id,
+                    station_id,
+                    valid_time,
+                    _SOURCE,
+                    variable,
+                    index + 1,
+                    "mm" if variable == "PRCP" else "unit",
+                    "1h",
+                    "ok",
+                )
+                for index, variable in enumerate(MVP_STATION_VARIABLES)
+                for valid_time in (_RUN_START, _VALID_TIME)
+            ],
+        )
+        cursor.execute(
+            """
+            INSERT INTO hydro.hydro_run (
+                run_id, run_type, scenario_id, model_id, basin_version_id,
+                forcing_version_id, source_id, cycle_time, start_time, end_time, status, run_manifest_uri
+            )
+            VALUES (
+                %s, 'forecast', 'forecast_gfs_deterministic', %s, %s, %s,
                 %s, %s, %s, %s, 'frequency_done', 'integration://manifest.json'
             )
             """,
-            (run_id, model_id, basin_version_id, _SOURCE, _CYCLE_TIME, _RUN_START, _RUN_END),
+            (run_id, model_id, basin_version_id, forcing_version_id, _SOURCE, _CYCLE_TIME, _RUN_START, _RUN_END),
+        )
+        execute_values(
+            cursor,
+            """
+            INSERT INTO hydro.river_timeseries (
+                run_id, basin_version_id, river_network_version_id, river_segment_id,
+                valid_time, lead_time_hours, variable, value, unit, quality_flag
+            )
+            VALUES %s
+            """,
+            [
+                (
+                    run_id,
+                    basin_version_id,
+                    river_network_version_id,
+                    river_segment_id,
+                    _RUN_START,
+                    0,
+                    "q_down",
+                    10.0,
+                    "m3/s",
+                    "ok",
+                ),
+                (
+                    run_id,
+                    basin_version_id,
+                    river_network_version_id,
+                    river_segment_id,
+                    _VALID_TIME,
+                    1,
+                    "q_down",
+                    12.0,
+                    "m3/s",
+                    "ok",
+                ),
+            ],
         )
         if with_rows:
             cursor.execute(
@@ -140,12 +253,18 @@ def _seed_run(connection: Any, *, basin_id: str, with_peak_return_period: bool, 
                     with_peak_return_period,
                 ),
             )
+    return run_id
 
 
 def _clear(connection: Any) -> None:
     with connection.cursor() as cursor:
         cursor.execute("DELETE FROM flood.return_period_result WHERE run_id LIKE %s", (f"{_PREFIX}%",))
+        cursor.execute("DELETE FROM hydro.river_timeseries WHERE run_id LIKE %s", (f"{_PREFIX}%",))
         cursor.execute("DELETE FROM hydro.hydro_run WHERE run_id LIKE %s", (f"{_PREFIX}%",))
+        cursor.execute("DELETE FROM met.forcing_station_timeseries WHERE forcing_version_id LIKE %s", (f"{_PREFIX}%",))
+        cursor.execute("DELETE FROM met.forcing_version WHERE forcing_version_id LIKE %s", (f"{_PREFIX}%",))
+        cursor.execute("DELETE FROM met.interp_weight WHERE model_id LIKE %s", (f"{_PREFIX}%",))
+        cursor.execute("DELETE FROM met.met_station WHERE station_id LIKE %s", (f"{_PREFIX}%",))
         cursor.execute("DELETE FROM core.model_instance WHERE model_id LIKE %s", (f"{_PREFIX}%",))
         cursor.execute("DELETE FROM core.mesh_version WHERE mesh_version_id LIKE %s", (f"{_PREFIX}%",))
         cursor.execute("DELETE FROM core.river_segment WHERE river_segment_id LIKE %s", (f"{_PREFIX}%",))
@@ -180,6 +299,9 @@ def test_return_period_status_ready_when_non_null_peak_rows_exist(integration_da
     try:
         response = _candidate_response(store, basin_id=_BASIN_PEAK)
         availability = response["product"]["availability"]
+        assert response["ready"] is True
+        assert response["product"]["status"] == "ready"
+        assert availability["ready"] is True
         assert availability["return_period_status"] == "ready"
         assert availability["return_period_reasons"] == []
     finally:
@@ -199,11 +321,15 @@ def test_return_period_status_unavailable_does_not_block_ready(integration_datab
     try:
         response = _candidate_response(store, basin_id=_BASIN_NONPEAK)
         availability = response["product"]["availability"]
+        assert response["ready"] is True
+        assert response["product"]["status"] == "ready"
+        assert availability["ready"] is True
         assert availability["return_period_status"] == "unavailable"
 
         # Red line: the return-period code must NOT be in the blocking set, so it
         # can never demote the product to unavailable on its own.
         blocking_codes = {reason["code"] for reason in availability["unavailable_reasons"]}
+        assert blocking_codes == set()
         assert _RETURN_PERIOD_REASON_CODE not in blocking_codes
     finally:
         with psycopg_connection(integration_database_url) as connection:
