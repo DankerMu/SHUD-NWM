@@ -73,6 +73,16 @@ paths:
             maximum: 500
             default: 200
         - $ref: "#/components/parameters/Offset"
+        - name: has_display_product
+          in: query
+          required: false
+          description: >-
+            When true, only basins that have at least one run in a display-ready
+            status (parsed/frequency_done/published) are returned. When omitted or
+            false, all registered basins are returned (default behaviour).
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
           description: Basin list

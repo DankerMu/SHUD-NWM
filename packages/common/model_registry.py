@@ -17,6 +17,7 @@ from apps.api.auth import (
     require_policy_evidence,
     trusted_internal_policy_decision,
 )
+from packages.common.forecast_store import QHH_LATEST_READY_RUN_STATUSES
 
 
 class ModelRegistryError(RuntimeError):
@@ -248,16 +249,37 @@ class PsycopgModelRegistryStore:
                 geom_wkt=geom_wkt,
             )
 
-    def list_basins(self, *, limit: int, offset: int) -> list[dict[str, Any]]:
+    def list_basins(
+        self, *, limit: int, offset: int, has_display_product: bool = False
+    ) -> list[dict[str, Any]]:
+        # When has_display_product is true, restrict to basins that have at least
+        # one run in a display-ready status. The ready status set reuses the same
+        # single source of truth as latest-product (QHH_LATEST_READY_RUN_STATUSES)
+        # so discovery and availability never diverge.
+        display_filter = ""
+        parameters: tuple[Any, ...] = (limit, offset)
+        if has_display_product:
+            display_filter = """
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM core.basin_version bv
+                    JOIN hydro.hydro_run hr
+                        ON hr.basin_version_id = bv.basin_version_id
+                    WHERE bv.basin_id = core.basin.basin_id
+                      AND hr.status::text = ANY(%s)
+                )
+                """
+            parameters = (list(QHH_LATEST_READY_RUN_STATUSES), limit, offset)
         with self._transaction() as cursor:
             cursor.execute(
-                """
+                f"""
                 SELECT basin_id, basin_name, basin_group, description, created_at
                 FROM core.basin
+                {display_filter}
                 ORDER BY basin_name, basin_id
                 LIMIT %s OFFSET %s
                 """,
-                (limit, offset),
+                parameters,
             )
             return [dict(row) for row in cursor.fetchall()]
 

@@ -1922,6 +1922,8 @@ export interface operations {
             query?: {
                 limit?: number;
                 offset?: components["parameters"]["Offset"];
+                /** @description When true, only basins that have at least one run in a display-ready status (parsed/frequency_done/published) are returned. When omitted or false, all registered basins are returned (default behaviour). */
+                has_display_product?: boolean;
             };
             header?: never;
             path?: never;
