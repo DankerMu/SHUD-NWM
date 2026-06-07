@@ -4013,6 +4013,10 @@ def _candidate_state_decision(
 
     hydro_status = _state_status(decision_state, "hydro_status", "hydro_run_status")
     pipeline_status = _state_status(decision_state, "pipeline_status", "job_status", "status")
+    if pipeline_status in ACTIVE_PIPELINE_STATUSES and _state_has_only_unsubmitted_auto_retry_placeholders(
+        decision_state,
+    ):
+        pipeline_status = None
     if hydro_status in ACTIVE_HYDRO_STATUSES or pipeline_status in ACTIVE_PIPELINE_STATUSES:
         return CandidateStateDecision(
             "skip",
@@ -4111,7 +4115,9 @@ def _candidate_state_decision(
             cancelled,
         )
 
-    if pipeline_status in FAILED_PIPELINE_STATUSES or hydro_status == "failed":
+    if pipeline_status in FAILED_PIPELINE_STATUSES or hydro_status == "failed" or _state_has_failure_signal(
+        decision_state,
+    ):
         return CandidateStateDecision(
             "retry",
             "retry_failed_candidate",
@@ -4119,6 +4125,32 @@ def _candidate_state_decision(
         )
 
     return None
+
+
+def _state_has_only_unsubmitted_auto_retry_placeholders(state: Mapping[str, Any]) -> bool:
+    jobs = _state_jobs(state)
+    active_jobs = [
+        job
+        for job in jobs
+        if str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+        in ACTIVE_PIPELINE_STATUSES
+    ]
+    return bool(active_jobs) and all(_job_is_unsubmitted_auto_retry_placeholder(job) for job in active_jobs)
+
+
+def _job_is_unsubmitted_auto_retry_placeholder(job: Mapping[str, Any]) -> bool:
+    status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+    if status not in {"pending", "submission_failed"}:
+        return False
+    if job.get("manual_retry_marker") is True:
+        return False
+    if job.get("slurm_job_id") not in (None, "") or job.get("array_task_id") not in (None, ""):
+        return False
+    retry_count = _coerce_int(job.get("retry_count"), default=0)
+    if retry_count <= 0:
+        return False
+    job_id = str(job.get("job_id") or "")
+    return "_retry_" in job_id
 
 
 def _call_candidate_state_provider(
@@ -4176,13 +4208,15 @@ def _candidate_state_is_candidate_scoped_retry(decision: CandidateStateDecision 
     identity = evidence.get("identity")
     if not isinstance(identity, Mapping):
         identity = evidence.get("candidate_identity")
-    restart_stage = evidence.get("restart_stage")
+    restart_stage = _canonical_downstream_stage(
+        str(evidence.get("restart_stage") or evidence.get("restart_from_stage") or "")
+    )
     task_identity = evidence.get("task_identity")
     return bool(
         isinstance(identity, Mapping)
         and identity.get("candidate_id")
         and identity.get("run_id")
-        and (restart_stage not in (None, "") or (isinstance(task_identity, Mapping) and bool(task_identity)))
+        and (restart_stage is not None or (isinstance(task_identity, Mapping) and bool(task_identity)))
     )
 
 
@@ -5224,7 +5258,10 @@ def _latest_manual_retry_marker(state: Mapping[str, Any]) -> dict[str, Any] | No
 def _latest_manual_retry_blocker(state: Mapping[str, Any]) -> dict[str, Any] | None:
     blockers: list[dict[str, Any]] = []
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
-    if _manual_retry_blocking_pipeline_status(pipeline_status):
+    if (
+        _manual_retry_blocking_pipeline_status(pipeline_status)
+        and not _state_has_only_unsubmitted_auto_retry_placeholders(state)
+    ):
         blockers.append(
             _manual_retry_blocker_record(
                 state,
@@ -5250,6 +5287,8 @@ def _latest_manual_retry_blocker(state: Mapping[str, Any]) -> dict[str, Any] | N
     for order, job in enumerate(_state_jobs(state)):
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if not _manual_retry_blocking_pipeline_status(status):
+            continue
+        if _job_is_unsubmitted_auto_retry_placeholder(job):
             continue
         blockers.append(
             _manual_retry_blocker_record(
@@ -5754,9 +5793,10 @@ def _candidate_restart_stage(candidate: SchedulerCandidate) -> str | None:
     state_evidence = candidate.state_evidence
     if not isinstance(state_evidence, Mapping):
         return None
-    return _canonical_downstream_stage(
-        str(state_evidence.get("restart_stage") or state_evidence.get("restart_from_stage") or "")
-    )
+    stage = str(state_evidence.get("restart_stage") or state_evidence.get("restart_from_stage") or "")
+    if stage in NATIVE_SHUD_STAGE_ALIASES:
+        return "forecast"
+    return _canonical_downstream_stage(stage)
 
 
 def _candidate_restart_cohort_key(restart_stage: str | None) -> tuple[int, str]:
@@ -6033,11 +6073,17 @@ def _retry_failure_evidence(
     base_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
     failure = _failure_policy_payload(state)
+    failed_stage = _failed_stage(state)
+    restart_stage = (
+        "forecast" if failed_stage in NATIVE_SHUD_STAGE_ALIASES else _canonical_downstream_stage(failed_stage)
+    )
     return {
         **base_evidence,
         "decision": "retry_failed",
         "reason": "retry_failed_candidate",
-        "stage": _failed_stage(state),
+        "stage": failed_stage,
+        "restart_stage": restart_stage,
+        "restart_from_stage": restart_stage,
         "task_identity": _state_task_identity(state),
         "failure": failure,
         "retry_policy": {
@@ -6093,6 +6139,13 @@ def _state_has_failure_signal(state: Mapping[str, Any]) -> bool:
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
     hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
     if pipeline_status in FAILED_PIPELINE_STATUSES or hydro_status in {"failed", "permanently_failed"}:
+        return True
+    if (
+        pipeline_status in ACTIVE_PIPELINE_STATUSES
+        and _state_has_only_unsubmitted_auto_retry_placeholders(state)
+        and _failed_stage(state) is not None
+        and _state_error_code(state) not in (None, "")
+    ):
         return True
     if pipeline_status is not None:
         return False
