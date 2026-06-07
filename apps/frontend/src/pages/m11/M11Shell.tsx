@@ -12,6 +12,7 @@ import type {
   M11MapCameraFit,
   M11MapCameraFlyTo,
   M11MapOverlayInteraction,
+  M11MapPopupSlot,
   M11StationFeatureCollection,
 } from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
@@ -32,6 +33,7 @@ interface M11LayoutProps {
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
+  popup?: M11MapPopupSlot | null
   sourceSelection?: SourceScenarioSelectionState | null
   derivedTimeline?: M11TimelineDerivedTimes | null
   fitTo?: M11MapCameraFit | null
@@ -58,6 +60,7 @@ export function M11Layout({
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   stationFeatureCollection = null,
+  popup = null,
   sourceSelection = null,
   derivedTimeline = null,
   fitTo = null,
@@ -109,6 +112,7 @@ export function M11Layout({
           selectedSegmentId={selectedSegmentId}
           selectedSegmentGeometry={selectedSegmentGeometry}
           stationFeatureCollection={stationFeatureCollection}
+          popup={popup}
           onQueryChange={onQueryChange}
           fitTo={fitTo}
           flyTo={flyTo}

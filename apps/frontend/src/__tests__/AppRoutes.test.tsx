@@ -126,6 +126,7 @@ vi.mock('react-map-gl/maplibre', () => ({
             event.preventDefault()
             onClick?.({
               target: { getCanvas: () => ({ style: {} }) },
+              lngLat: { lng: 100.5, lat: 30.5 },
               features: [
                 {
                   layer: { id: 'm11-basin-river-line' },
@@ -134,6 +135,7 @@ vi.mock('react-map-gl/maplibre', () => ({
                     segment_id: 'seg-001',
                     basin_version_id: 'bv-001',
                     river_network_version_id: 'rn-v1',
+                    segment_name: 'North Branch 001',
                   },
                 },
               ],
@@ -151,6 +153,21 @@ vi.mock('react-map-gl/maplibre', () => ({
               ],
             })
           }
+          onContextMenu={(event) => {
+            // 模拟点击单个代站点要素（met-stations-point），feature 带 station_id + 点几何坐标。
+            event.preventDefault()
+            onClick?.({
+              target: { getCanvas: () => ({ style: {} }) },
+              lngLat: { lng: 104.1, lat: 31.2 },
+              features: [
+                {
+                  layer: { id: 'met-stations-point' },
+                  properties: { station_id: 'qhh_forc_001', station_name: 'QHH forcing 001' },
+                  geometry: { type: 'Point', coordinates: [104.1, 31.2] },
+                },
+              ],
+            })
+          }}
         >
           {children}
         </div>
@@ -171,6 +188,12 @@ vi.mock('react-map-gl/maplibre', () => ({
   Layer: (props: Record<string, unknown>) => <div data-testid="mock-m11-map-layer" data-layer-id={String(props.id ?? '')} />,
   NavigationControl: () => <div />,
   ScaleControl: () => <div />,
+  Popup: ({ children, longitude, latitude }: { children: ReactNode; longitude?: number; latitude?: number }) => (
+    <div data-testid="mock-m11-map-popup" data-longitude={String(longitude ?? '')} data-latitude={String(latitude ?? '')}>
+      {children}
+    </div>
+  ),
+  Marker: ({ children }: { children?: ReactNode }) => <div data-testid="mock-m11-map-marker">{children}</div>,
 }))
 
 type MockForecastPanelProps = {
@@ -3843,6 +3866,50 @@ describe('App route state', () => {
     fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
     expect(new URLSearchParams(window.location.search).get('segmentId')).toBe('seg-001')
     await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
+  })
+
+  it('opens the river forecast popup when a river segment map feature is clicked (M26-4)', async () => {
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs&basinVersionId=bv-001', 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'),
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    mockHydroMetRouteClient()
+    window.history.pushState({}, '', '/?source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
+
+    render(<LegacyPagesHarness />)
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+
+    fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
+
+    expect(await screen.findByTestId('m11-river-popup')).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument()
+  })
+
+  it('opens the station forcing popup when a met-station map feature is clicked (M26-4)', async () => {
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs&layer=met-stations&basinVersionId=bv-001', 'source=gfs&layer=met-stations&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'),
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+    mockHydroMetRouteClient()
+    window.history.pushState({}, '', '/?source=gfs&layer=met-stations&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009')
+
+    render(<LegacyPagesHarness />)
+    expect(await screen.findByRole('heading', { name: '流域分析' })).toBeInTheDocument()
+    // 等代站图层取数完成、点图层进入 interactive（showStationLayer 为真）后再点击。
+    await waitFor(() =>
+      expect(screen.getByTestId('mock-m11-maplibre-map').getAttribute('data-interactive-layer-ids') ?? '').toContain('met-stations-point'),
+    )
+
+    fireEvent.contextMenu(screen.getByTestId('mock-m11-maplibre-map'))
+
+    expect(await screen.findByTestId('m11-station-popup')).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-river-popup')).not.toBeInTheDocument()
   })
 
   it('replaces stale URL river network identity from clicked basin map features', async () => {

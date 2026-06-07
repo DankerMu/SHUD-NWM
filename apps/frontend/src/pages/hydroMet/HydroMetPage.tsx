@@ -27,18 +27,24 @@ import {
   type HydroMetRiverForecastValidation,
 } from '@/lib/hydroMet/riverForecast'
 import {
+  HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT,
   HYDRO_MET_STATION_SERIES_LIMIT,
   HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
   HYDRO_MET_STATION_SERIES_UI_STRING_LIMIT,
   HYDRO_MET_STATION_VARIABLES,
+  capHydroMetStationSeriesMessages,
   formatHydroMetStationSeriesMessage,
   formatHydroMetStationSeriesContractValue,
   formatHydroMetStationSeriesUiString,
-  isHydroMetStationSeriesUiStringCapped,
+  hydroMetStationSeriesItems,
+  isHydroMetStationSeriesVariable,
   loadHydroMetStationSeries,
+  mapUniqueHydroMetStationSeries,
   stationSeriesRequestKey,
+  validateHydroMetStationSeriesForChart,
   validateHydroMetStationSeriesIdentity,
-  type HydroMetStationSeries,
+  type ChartableStationSeriesPoint,
+  type HydroMetStationSeriesRecord,
   type HydroMetStationSeriesResponse,
   type HydroMetStationSeriesVariable,
 } from '@/lib/hydroMet/stationSeries'
@@ -58,7 +64,7 @@ import {
   type QhhLatestProduct,
 } from '@/pages/hydroMet/bootstrap'
 import { BasinSelector } from '@/pages/hydroMet/BasinSelector'
-import { ProductStatusBar, ReturnPeriodSection } from '@/pages/hydroMet/ReturnPeriodSection'
+import { ProductStatusBar, ReturnPeriodSection } from '@/components/m11/ReturnPeriodSection'
 
 type LoadState =
   | { kind: 'loading' }
@@ -78,42 +84,6 @@ type RiverForecastLoadState =
   | { kind: 'loaded'; requestKey: string; response: HydroMetRiverForecastPayload }
   | { kind: 'error'; requestKey: string; message: string }
 
-type ChartableStationSeriesPoint = {
-  timestamp: number
-  value: number
-  qualityFlag: string | null
-}
-
-type HydroMetStationSeriesRecord = Record<string, unknown> & {
-  variable: HydroMetStationSeriesVariable
-}
-
-type StationSeriesValidation =
-  | {
-      ok: true
-      metadata: HydroMetStationSeries['metadata']
-      unit: string | null
-      sourceId: string | null
-      cycleTime: string | null
-      seriesTruncated: boolean
-      reportedPointCount: number
-      inspectedPointCount: number
-      renderedPoints: ChartableStationSeriesPoint[]
-      capped: boolean
-      inspectionCapped: boolean
-      nonOkFlags: string[]
-      nonOkFlagsCapped: boolean
-      qualitySummary: string
-    }
-  | { ok: false; messages: string[] }
-
-const HYDRO_MET_STATION_SERIES_POINT_SENTINEL = 16
-const HYDRO_MET_STATION_SERIES_POINT_INSPECTION_LIMIT = HYDRO_MET_STATION_SERIES_LIMIT + HYDRO_MET_STATION_SERIES_POINT_SENTINEL
-const HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT = 6
-const HYDRO_MET_STATION_SERIES_QC_FLAG_LIMIT = 6
-const HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT = 32
-const HYDRO_MET_STATION_SERIES_UNIT_LIMIT = 32
-const HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT = HYDRO_MET_STATION_VARIABLES.length * 2
 const HYDRO_MET_PAGE_MESSAGE_LIST_LIMIT = 6
 
 type BoundedHydroMetMessage = {
@@ -1307,29 +1277,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function isHydroMetStationSeriesVariable(value: unknown): value is HydroMetStationSeriesVariable {
-  return typeof value === 'string' && (HYDRO_MET_STATION_VARIABLES as readonly string[]).includes(value)
-}
-
-function isHydroMetStationSeriesRecord(value: unknown): value is HydroMetStationSeriesRecord {
-  return isRecord(value) && isHydroMetStationSeriesVariable(value.variable)
-}
-
-function hydroMetStationSeriesItems(response: unknown) {
-  if (!isRecord(response)) return []
-  const series = response.series
-  return Array.isArray(series) ? series : []
-}
-
-function mapUniqueHydroMetStationSeries(seriesList: unknown[]) {
-  const seriesByVariable = new Map<HydroMetStationSeriesVariable, HydroMetStationSeriesRecord>()
-  seriesList.slice(0, HYDRO_MET_STATION_SERIES_ITEM_INSPECTION_LIMIT).forEach((series) => {
-    if (!isHydroMetStationSeriesRecord(series)) return
-    if (!seriesByVariable.has(series.variable)) seriesByVariable.set(series.variable, series)
-  })
-  return seriesByVariable
-}
-
 function validateHydroMetStationSeriesContract(
   response: HydroMetStationSeriesResponse,
   product: QhhLatestProduct,
@@ -1402,233 +1349,6 @@ function validateHydroMetStationSeriesContract(
   })
 
   return capHydroMetStationSeriesMessages(messages)
-}
-
-function validateHydroMetStationSeriesForChart(series: HydroMetStationSeriesRecord): StationSeriesValidation {
-  const messages: string[] = []
-  const metadataValue = series.metadata
-  const pointsValue = series.points
-  const unitValue = series.unit
-  const truncatedValue = series.truncated
-
-  let unit: string | null = null
-  if (unitValue === undefined || unitValue === null) {
-    unit = null
-  } else if (typeof unitValue === 'string') {
-    if (isHydroMetStationSeriesUiStringCapped(unitValue, { limit: HYDRO_MET_STATION_SERIES_UNIT_LIMIT, fallback: '' })) {
-      messages.push(`变量 ${series.variable} unit 过长，停止绘图`)
-    } else {
-      unit = formatHydroMetStationSeriesUiString(unitValue, { limit: HYDRO_MET_STATION_SERIES_UNIT_LIMIT, fallback: '' }) || null
-    }
-  } else {
-    messages.push(`变量 ${series.variable} unit 格式无效`)
-  }
-
-  let seriesTruncated = false
-  if (truncatedValue === undefined || truncatedValue === null) {
-    seriesTruncated = false
-  } else if (typeof truncatedValue === 'boolean') {
-    seriesTruncated = truncatedValue
-  } else {
-    messages.push(`变量 ${series.variable} truncated 格式无效`)
-  }
-
-  if (!isRecord(metadataValue)) {
-    messages.push(`变量 ${series.variable} metadata 缺失或格式无效`)
-  }
-  if (!Array.isArray(pointsValue)) {
-    messages.push(`变量 ${series.variable} points 缺失或格式无效`)
-  }
-  if (messages.length > 0) return { ok: false, messages: capHydroMetStationSeriesMessages(messages) }
-
-  messages.push(...validateStationSeriesMetadata(metadataValue, series.variable))
-  if (messages.length > 0) return { ok: false, messages: capHydroMetStationSeriesMessages(messages) }
-
-  const metadata = metadataValue as unknown as HydroMetStationSeries['metadata']
-  const reportedPointCount = Math.max(metadata.returned_points, pointsValue.length)
-  const inspectedPointCount = Math.min(pointsValue.length, HYDRO_MET_STATION_SERIES_POINT_INSPECTION_LIMIT)
-  const inspectionCapped = pointsValue.length > inspectedPointCount
-
-  const renderedPoints: ChartableStationSeriesPoint[] = []
-  const invalidPointMessages: string[] = []
-  let invalidPointCount = 0
-  const qualityFlagCounts = new Map<string, number>()
-
-  for (let index = 0; index < inspectedPointCount; index += 1) {
-    const point = pointsValue[index]
-    const parsed = parseChartableStationSeriesPoint(point)
-    if (typeof parsed === 'string') {
-      invalidPointCount += 1
-      if (invalidPointMessages.length < HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT) {
-        invalidPointMessages.push(`变量 ${series.variable} 第 ${index + 1} 个点${parsed}`)
-      }
-    } else {
-      if (renderedPoints.length < HYDRO_MET_STATION_SERIES_LIMIT) renderedPoints.push(parsed)
-      const flag = parsed.qualityFlag ?? 'missing'
-      qualityFlagCounts.set(flag, (qualityFlagCounts.get(flag) ?? 0) + 1)
-    }
-  }
-
-  if (invalidPointCount > 0) {
-    messages.push(...capInvalidPointMessages(series.variable, invalidPointMessages, invalidPointCount, inspectedPointCount, reportedPointCount, inspectionCapped))
-  }
-  if (messages.length > 0) return { ok: false, messages: capHydroMetStationSeriesMessages(messages) }
-
-  const { nonOkFlags, nonOkFlagsCapped, qualitySummary } = qualityFlagSummary(qualityFlagCounts, inspectedPointCount, reportedPointCount, inspectionCapped)
-  return {
-    ok: true,
-    metadata,
-    unit,
-    sourceId: typeof series.source_id === 'string' ? formatHydroMetStationSeriesUiString(series.source_id) : null,
-    cycleTime: typeof series.cycle_time === 'string' ? normalizeHydroMetCycle(series.cycle_time) : null,
-    seriesTruncated,
-    reportedPointCount,
-    inspectedPointCount,
-    renderedPoints,
-    capped: reportedPointCount > HYDRO_MET_STATION_SERIES_LIMIT,
-    inspectionCapped,
-    nonOkFlags,
-    nonOkFlagsCapped,
-    qualitySummary,
-  }
-}
-
-function validateStationSeriesMetadata(metadata: Record<string, unknown>, variable: HydroMetStationSeriesVariable) {
-  const messages: string[] = []
-  const limit = metadata.limit
-  const returnedPoints = metadata.returned_points
-  const truncated = metadata.truncated
-
-  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
-    messages.push(`变量 ${variable} metadata.limit 缺失或格式无效`)
-  }
-  if (typeof returnedPoints !== 'number' || !Number.isInteger(returnedPoints) || returnedPoints < 0) {
-    messages.push(`变量 ${variable} metadata.returned_points 缺失或格式无效`)
-  }
-  if (typeof truncated !== 'boolean') {
-    messages.push(`变量 ${variable} metadata.truncated 缺失或格式无效`)
-  }
-
-  const metadataTimeFields = ['requested_from', 'requested_to', 'returned_from', 'returned_to'] as const
-  metadataTimeFields.forEach((field) => {
-    if (!(field in metadata)) {
-      messages.push(`变量 ${variable} metadata.${field} 缺失`)
-      return
-    }
-    const value = metadata[field]
-    if (value !== null && (typeof value !== 'string' || !normalizeHydroMetCycle(value))) {
-      messages.push(`变量 ${variable} metadata.${field} 不是有效 RFC3339 时间`)
-    }
-  })
-
-  return messages
-}
-
-function capHydroMetStationSeriesMessages(messages: string[]) {
-  const safeMessages = messages.map((message) => (
-    formatHydroMetStationSeriesUiString(message, {
-      limit: HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
-      fallback: 'station-series contract 问题已截断',
-    })
-  ))
-  if (safeMessages.length <= HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT) return safeMessages
-  return [
-    ...safeMessages.slice(0, HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT),
-    `另有 ${safeMessages.length - HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT} 条 station-series contract 问题已截断`,
-  ]
-}
-
-function capInvalidPointMessages(
-  variable: HydroMetStationSeriesVariable,
-  messages: string[],
-  invalidPointCount: number,
-  inspectedPointCount: number,
-  reportedPointCount: number,
-  inspectionCapped: boolean,
-) {
-  const reservedSummarySlots = (invalidPointCount > messages.length ? 1 : 0) + (inspectionCapped ? 1 : 0)
-  const detailLimit = Math.max(1, HYDRO_MET_STATION_SERIES_MESSAGE_LIMIT - reservedSummarySlots)
-  const cappedMessages = messages.slice(0, detailLimit)
-  const hiddenByMessageCap = Math.max(0, invalidPointCount - cappedMessages.length)
-  if (hiddenByMessageCap > 0) {
-    cappedMessages.push(`变量 ${variable} 另有 ${hiddenByMessageCap} 个已检查点无效，错误详情已截断`)
-  }
-  if (inspectionCapped) {
-    cappedMessages.push(`变量 ${variable} capped 仅检查前 ${inspectedPointCount}/${reportedPointCount} 个点，响应过大，已停止继续校验`)
-  }
-  return cappedMessages
-}
-
-function parseChartableStationSeriesPoint(point: unknown): ChartableStationSeriesPoint | string {
-  if (!isRecord(point)) return '不是对象'
-
-  const validTimeValue = point.valid_time
-  if (typeof validTimeValue !== 'string') return '缺少有效 valid_time'
-  const validTime = normalizeHydroMetCycle(validTimeValue)
-  if (!validTime) return `valid_time=${formatHydroMetStationSeriesContractValue(validTimeValue)} 不是有效 RFC3339 时间`
-
-  const value = point.value
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 'value 不是有限数值'
-
-  const qualityFlagValue = point.quality_flag
-  if (qualityFlagValue !== undefined && qualityFlagValue !== null && typeof qualityFlagValue !== 'string') {
-    return 'quality_flag 格式无效'
-  }
-
-  return {
-    timestamp: Date.parse(validTime),
-    value,
-    qualityFlag: qualityFlagValue
-      ? formatHydroMetStationSeriesUiString(qualityFlagValue, {
-          limit: HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT,
-          fallback: 'missing',
-          oversizeReplacement: 'flag capped',
-        })
-      : null,
-  }
-}
-
-function qualityFlagLabel(value: string) {
-  return formatHydroMetStationSeriesUiString(value, {
-    limit: HYDRO_MET_STATION_SERIES_QC_LABEL_LIMIT,
-    fallback: 'missing',
-    oversizeReplacement: 'flag capped',
-  })
-}
-
-function qualityFlagSummary(
-  counts: Map<string, number>,
-  inspectedPointCount: number,
-  reportedPointCount: number,
-  inspectionCapped: boolean,
-) {
-  const entries = Array.from(counts.entries()).sort(([left], [right]) => left.localeCompare(right))
-  const nonOkFlagEntries = entries.filter(([flag]) => flag !== 'missing' && flag.trim() !== '' && flag.toLowerCase() !== 'ok')
-  const nonOkFlags = nonOkFlagEntries.slice(0, HYDRO_MET_STATION_SERIES_QC_FLAG_LIMIT).map(([flag]) => qualityFlagLabel(flag))
-  const nonOkFlagsCapped = nonOkFlagEntries.length > nonOkFlags.length
-
-  if (counts.size === 0) {
-    return {
-      nonOkFlags,
-      nonOkFlagsCapped,
-      qualitySummary: inspectionCapped
-        ? `none; inspected ${inspectedPointCount}/${reportedPointCount}, capped`
-        : 'none',
-    }
-  }
-
-  const visibleEntries = entries.slice(0, HYDRO_MET_STATION_SERIES_QC_FLAG_LIMIT)
-  const summary = visibleEntries.map(([flag, count]) => `${qualityFlagLabel(flag || 'empty')}:${count}`).join(', ')
-  const hidden = entries.length - visibleEntries.length
-  const suffixes: string[] = []
-  if (hidden > 0) suffixes.push(`+${hidden} flags capped`)
-  if (inspectionCapped) suffixes.push(`inspected ${inspectedPointCount}/${reportedPointCount}, capped`)
-
-  return {
-    nonOkFlags,
-    nonOkFlagsCapped,
-    qualitySummary: [summary, ...suffixes].join('; '),
-  }
 }
 
 function StationSeriesCharts({

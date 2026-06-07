@@ -29,11 +29,11 @@
 
 ## 4. 两类地图 popup（map-feature-popups）
 
-- [ ] 4.1 `ReturnPeriodSection.tsx` 从 `pages/hydroMet/` 迁到 `components/m11/`（保留导出名）；`ReturnPeriodSection.test.tsx` 更新 import 路径。
-- [ ] 4.2 新建 `components/map/M11RiverForecastPopup.tsx`：点河段→按 `river_segment_id` 调 `loadHydroMetRiverForecast`+`validateHydroMetRiverForecastForChart`→`ForecastChart`(q_down)+`ReturnPeriodSection`(三态)；`ok:false` 显原因空态不画曲线。
-- [ ] 4.3 新建 `components/map/M11StationForcingPopup.tsx`：点代站→按 `station_id` 调 `loadHydroMetStationSeries`+`validateHydroMetStationSeriesIdentity`→六要素 echarts；身份不符空态。popup 经纬度定位 + source 用 `resolvedSource`，best 未解析显空态。
-- [ ] 4.4 单页挂载两类 popup（`M11Layout` children 模式）；点击经 `onOverlayClick` 分发要素到对应 popup。
-- [ ] 4.5 测试：新增 popup 单测（正常曲线 / `ok:false` 不画曲线 / 身份不符空态 / productReady 门控 / best 未解析空态）；`AppRoutes.test.tsx` 集成点河段/代站触发 popup；`react-map-gl/maplibre` mock 补 `Popup`/`Marker`/`getSource`(cluster) 导出 + 注入 `met-stations-point`/河段 feature 的 onClick 分支。
+- [x] 4.1 `ReturnPeriodSection.tsx` 从 `pages/hydroMet/` 迁到 `components/m11/`（保留导出名）；`ReturnPeriodSection.test.tsx` 更新 import 路径。
+- [x] 4.2 新建 `components/map/M11RiverForecastPopup.tsx`：点河段→按 `river_segment_id` 调 `loadHydroMetRiverForecast`+`validateHydroMetRiverForecastForChart`→`ForecastChart`(q_down)+`ReturnPeriodSection`(三态)；`ok:false` 显原因空态不画曲线。
+- [x] 4.3 新建 `components/map/M11StationForcingPopup.tsx`：点代站→按 `station_id` 调 `loadHydroMetStationSeries`+`validateHydroMetStationSeriesIdentity`→六要素 echarts；身份不符空态。popup 经纬度定位 + source 用 `resolvedSource`，best 未解析显空态。
+- [x] 4.4 单页挂载两类 popup（`M11Layout` children 模式）；点击经 `onOverlayClick` 分发要素到对应 popup。
+- [x] 4.5 测试：新增 popup 单测（正常曲线 / `ok:false` 不画曲线 / 身份不符空态 / productReady 门控 / best 未解析空态）；`AppRoutes.test.tsx` 集成点河段/代站触发 popup；`react-map-gl/maplibre` mock 补 `Popup`/`Marker`/`getSource`(cluster) 导出 + 注入 `met-stations-point`/河段 feature 的 onClick 分支。
 
 ## 5. 删玩具页 + 清理（legacy-display-page-retirement）
 
