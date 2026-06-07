@@ -1078,7 +1078,8 @@ class PsycopgForecastStore:
                         h.end_time,
                         fv.end_time,
                         h.cycle_time + (%s * INTERVAL '1 hour')
-                    ) AS display_end_time
+                    ) AS display_end_time,
+                    {_flood_product_quality_select("fpq")}
                 FROM hydro.hydro_run h
                 JOIN core.basin_version bv
                   ON bv.basin_version_id = h.basin_version_id
@@ -1088,6 +1089,7 @@ class PsycopgForecastStore:
                   ON rnv.river_network_version_id = mi.river_network_version_id
                 LEFT JOIN met.forcing_version fv
                   ON fv.forcing_version_id = h.forcing_version_id
+                {_flood_product_quality_join("fpq")}
                 WHERE bv.basin_id = %s
                   AND h.run_type = 'forecast'
                   AND h.status IN ('parsed', 'frequency_done', 'published')
@@ -1620,7 +1622,8 @@ class PsycopgForecastStore:
                 NULL AS river_valid_time_start,
                 NULL AS river_valid_time_end,
                 NULL AS min_lead_time_hours,
-                NULL AS max_lead_time_hours
+                NULL AS max_lead_time_hours,
+                {_flood_product_quality_select("fpq")}
             FROM hydro.hydro_run h
             JOIN core.basin_version bv
               ON bv.basin_version_id = h.basin_version_id
@@ -1630,6 +1633,7 @@ class PsycopgForecastStore:
               ON rnv.river_network_version_id = mi.river_network_version_id
             LEFT JOIN met.forcing_version fv
               ON fv.forcing_version_id = h.forcing_version_id
+            {_flood_product_quality_join("fpq")}
             WHERE bv.basin_id = %s
               AND h.run_type = 'forecast'
               AND h.status NOT IN ('parsed', 'frequency_done', 'published')
@@ -2377,6 +2381,29 @@ def _qhh_latest_no_candidates_reason(
     return reason
 
 
+def _qhh_latest_return_period_status(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Supplemental return-period availability.
+
+    Uses the same non-null peak-row caliber as best-available / ``/runs``
+    (``flood_return_period_rows > 0``). This MUST stay out of the blocking
+    ``unavailable_reasons`` set and MUST NOT affect the product ``ready``
+    decision: a run with q_down output but no flood baseline still returns.
+    """
+    return_period_rows = int(row.get("flood_return_period_rows") or 0)
+    if return_period_rows > 0:
+        return {"return_period_status": "ready", "return_period_reasons": []}
+    return {
+        "return_period_status": "unavailable",
+        "return_period_reasons": [
+            {
+                "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+                "message": "No non-null peak return-period rows are available for this run.",
+                "run_id": str(row.get("run_id") or "") or None,
+            }
+        ],
+    }
+
+
 def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QHH_BASIN_ID) -> dict[str, Any]:
     reasons = _qhh_latest_unavailable_reasons(row)
     source_id = _display_source_id(str(row.get("source_id") or ""))
@@ -2432,6 +2459,9 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QH
             "unavailable_reasons": reasons,
             "quality_flags": quality_flags,
             "quality_notes": quality_notes,
+            # Supplemental return-period availability: independent of `ready` and
+            # NOT part of the blocking `unavailable_reasons` set (M25 #312).
+            **_qhh_latest_return_period_status(row),
         },
         "quality": {
             "station_sample_count": _non_negative_int(row.get("station_sample_count")),
