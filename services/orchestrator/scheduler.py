@@ -5902,6 +5902,8 @@ def _missing_raw_manifest_repair_evidence(
     manifest_uri = _forecast_cycle_manifest_uri(candidate, state)
     if manifest_uri in (None, ""):
         return None
+    if not _is_raw_manifest_object_uri(str(manifest_uri)):
+        return None
     if not _has_successful_download_stage(state):
         return None
     if not _object_manifest_is_missing(candidate, str(manifest_uri)):
@@ -5955,6 +5957,8 @@ def _repaired_raw_manifest_downstream_retry_evidence(
         return None
     manifest_uri = _forecast_cycle_manifest_uri(candidate, state)
     if manifest_uri in (None, ""):
+        return None
+    if not _is_raw_manifest_object_uri(str(manifest_uri)):
         return None
     if _object_manifest_is_missing(candidate, str(manifest_uri)):
         return None
@@ -6017,6 +6021,15 @@ def _forecast_cycle_manifest_uri(candidate: SchedulerCandidate, state: Mapping[s
     if value not in (None, ""):
         return str(value)
     return f"raw/{candidate.source_id}/{format_cycle_time(candidate.cycle_time_utc)}/manifest.json"
+
+
+def _is_raw_manifest_object_uri(manifest_uri: str) -> bool:
+    value = manifest_uri.strip()
+    if value.startswith("s3://"):
+        parsed = urlparse(value)
+        path = parsed.path.lstrip("/")
+        return path.startswith("raw/") and path.endswith("/manifest.json")
+    return value.startswith("raw/") and value.endswith("/manifest.json")
 
 
 def _has_successful_download_stage(state: Mapping[str, Any]) -> bool:

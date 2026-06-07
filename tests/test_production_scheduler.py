@@ -661,6 +661,11 @@ def test_unsubmitted_auto_retry_placeholder_does_not_block_scheduler_retry(tmp_p
             "error_code": "NODE_FAILURE",
             "retry_count": 1,
             "retry_limit": 3,
+            "forecast_cycle": {
+                "cycle_id": "gfs_2026052106",
+                "status": "failed_run",
+                "manifest_uri": "published://tiles/hydro/gfs_2026052106/q-down/manifest.json",
+            },
             "pipeline_jobs": [
                 {
                     "job_id": "job_cycle_gfs_2026052106_forecast",
