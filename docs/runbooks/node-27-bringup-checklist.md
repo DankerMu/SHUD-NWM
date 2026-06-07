@@ -18,6 +18,13 @@
     但其作为上线 receipt 仍以 node-27 cross-plane live（C3）为准。
 - **CI**：纯前端/docs 子 PR 按路径 scope 跳过后端 pytest；迭代标 **draft**（定向快速通道）、合并前转 **ready**（全量门）。约定见 `CLAUDE.md`「CI 范围与门控」。
 
+### M26 统一地图展示（2026-06-07，EPIC #336 已关闭）
+
+- **27 展示端形态已变**：展示前端从 ~10 条路由 + 顶部导航收敛为**一张全屏地图**（无 `NavBar`），旧展示路由（`/hydro-met`/`/overview`/`/forecast`/`/meteorology`/`/flood-alerts`/`/basins/:id`/`/segments/:id`）全 `replace` 重定向到 `/` + 语义参数；`/ops`/`/monitoring`/`/system/model-assets` 经 RBAC 仍可达。2496 行玩具页 `HydroMetPage` 已删，honest-display 库迁入 popup 复用。change 详见 `openspec/changes/m26-unified-map-display/`，全链路与边界见 `progress.md`「最新」M26 块。
+- **M26 已在 node-27 实机产 live receipt**（`worklogs/node27-live-receipt.md`，`execution_mode=live_proof`，dev-phase 本地 uvicorn 起 `apps.api.main:app`，非 `docker compose up`，符合 C1 deploy gate）：①重定向矩阵 7/7、②全屏无导航、③QHH↔Heihe 同页 zoom（pathname 恒 `/`）、⑥overlay 未注册如实显示「Layer is not registered」=**live-PASS**；平面身份 `service_role=display_readonly`/`control_mutations_enabled=false`/`slurm_routes_enabled=false` live 确认。
+- **与本清单 C 关系**：M26 receipt 是 **C4 浏览器 e2e** 在新单页地图形态下的**部分闭合**（单页 shell 的重定向/全屏/诚实 overlay live 已证），**不替代** C1（生产 docker 部署）/ C2（只读 DB denied-write 矩阵）/ C3（cross-plane identity GFS+IFS 双源）—— 这三项仍须独立产 live receipt。④⑤ 代站/河段 popup 的 live 点击截图因 `/api/v1/basins` 无 bbox（无法自动 framing）+ CLI 难命中 WebGL 要素而延后，绘制不变量已由本地单测全覆盖、数据 live 就绪，归 **#343**（并入 overlay 424/409 + basin bbox 暴露）。
+- **解耦平行 backend issue**：**#342**（station-MVT 点图层端点，全国万级代站，node-22 oracle）、**#343**（`display_readonly` live PostGIS MVT 排查，决定全国态 overlay 能否点亮）——均 OPEN，是全国级展示与 ④⑤ live 点击的前置。
+
 ## 拓扑回顾
 
 | 节点 | 角色 | 能力 |
@@ -80,6 +87,8 @@ published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm
 - [ ] GFS + IFS 双源都过 strict latest/series/ops/logs/browser 才算 cross-plane `PASS`；单源为 `PARTIAL`。
 
 ### C4. 浏览器 e2e（tasks 6.8 + §10.4）
+
+> M26（EPIC #336）已对**新单页全屏地图**形态产 live browser receipt（重定向矩阵 / 全屏无导航 / QHH↔Heihe 同页 zoom / overlay 诚实未注册态 = live-PASS，见上「M26」节）；下列 `/hydro-met`/`/ops` 项的判定**改以单页地图 + `/ops` 为准**（`/hydro-met` 已重定向到 `/`），④⑤ popup live 点击仍待 #343 闭合。
 
 - [ ] 真实浏览器对 27 backend 跑 `/hydro-met`（strict bootstrap）+ `/ops`（display 模式控件隐藏/禁用、无任何 retry·cancel·Slurm POST、queue-depth unavailable 态、诊断复制、人工 22 恢复指引）。
 - [ ] 证明 27 只展示 22 产生的 retry/cancel 结果，自身从不创建控制面 receipt。

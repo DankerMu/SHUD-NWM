@@ -4,6 +4,17 @@
 
 ## 最新（2026-06-07）
 
+**M26 统一地图展示交付**（`openspec/changes/m26-unified-map-display/`，EPIC **#336 已关闭**，子 issue #337–#341 全合并，tasks 7 节全勾）——node-27 `display_readonly` 展示端从 ~10 条路由 + 顶部导航的碎片化（含 2496 行 M21 玩具页 `HydroMetPage`）收敛为**字面一张全屏地图 = 整个展示端**：
+
+1. **去导航 + 路由收敛**（#337）：`AppShell` 删 `NavBar`，全屏布局（`--m11-nav-height`→0）；`/overview`/`/forecast`/`/hydro-met`/`/meteorology`/`/flood-alerts`/`/basins/:id`/`/segments/:id` 全 `replace` 重定向到 `/`，**保留原始 search + 附加语义参数**（`layer=`/`basinId=`/`segmentId=`，同名键以原始 search 为准）；`/ops`/`/monitoring`/`/system/model-assets` 经 RBAC 保留可达。
+2. **总览↔详情就地化**（#338）：M11 query 新增 `basinId`，`overviewData` store 的 basinId **改从 query 读**（不再依赖路由 param），单页按 `basinId` 双模式（null=全国总览 / 非 null=流域详情同图 zoom-in），删 `BasinDetailPage` 路由 + 文件。
+3. **气象代站 clustered-GeoJSON 图层**（#339）：新 `stationLayerData` store + `M11StationClusterPrimitive`，按选中流域 latest-product 严格身份取 `/met/stations`；**超 500 站流域（Heihe 1709）分页拉取至 client cap，诚实暴露 `total/loaded/truncated`**；全国无 basinId 显"选择流域"honest 空态；为 station-MVT 预留 source 抽象。
+4. **两类地图 popup**（#340）：点河段→`q_down` 曲线 + 重现期三态；点代站→六要素 forcing 曲线；maplibre `Popup` 内嵌 echarts，复用 honest-display 校验（不画假曲线、`ok:false` 空态、strict identity）。
+5. **删玩具页**（#341）：删 `HydroMetPage`（2496 行）+ 专属测试，迁移 honest-display 库（`bootstrap/stationSeries/riverForecast/ReturnPeriodSection`）供 popup 复用，river 诚实展示覆盖迁移。
+6. **node-27 live receipt**（`worklogs/node27-live-receipt.md`，`execution_mode=live_proof`）：①重定向矩阵 7/7 ②全屏无导航 ③QHH↔Heihe 同页 zoom（pathname 恒 `/`）⑥overlay 未注册如实显示「Layer is not registered」=**live-PASS**（均为本地 vitest 无法验、仅 live 可证之项）；④⑤ popup 绘制不变量本地单测全覆盖 + 数据 live 就绪，**live 点击延后**（`/api/v1/basins` 无 bbox 无法自动 framing + CLI 难命中 WebGL 要素，归 #343）。
+7. **解耦平行 issue（不在本变更）**：**#342** 后端 station-MVT 点图层端点（全国万级代站，仿 river-network `ST_AsMVT`，node-22 oracle）；**#343** `display_readonly` live PostGIS MVT 排查（river-network 瓦片 424 / hydro 409，决定全国态 overlay 能否点亮，并入 basin bbox 暴露缺口）。
+8. **边界**：当前 2 流域规模（QHH 386 站/1633 河段、Heihe 1709 站/2352 河段）用 M11 既有 GeoJSON 河网渲染；全国级（数万代站/百万河段）依赖 #342/#343 解耦任务；④⑤ live 点击截图待 overlay 注册 + bbox 暴露后补。
+
 **M25 多流域前端生产化交付**（`openspec/changes/m25-multibasin-frontend-production/`，9 子 issue：#310–#317 已合并，#318 本 PR 收尾）——node-27 `display_readonly` 前端去 QHH 硬编码、按数据驱动：
 
 1. **后端动态发现 + 去硬编码**：`list_basins` 增 `has_display_product`（EXISTS run-status 集合过滤，复用 `QHH_LATEST_READY_RUN_STATUSES` 单一口径，**无 basin_id 白名单**）（#310）；latest-product 去 `QHH_BASIN_ID` 写死、`basin_id` 参数化（缺省 `basins_qhh` 向后兼容 + 旧 `/mvp/qhh/latest-product` 路径保留）（#311）；河段/站点列表 `search`+分页+`variable`/`stream_order` 字段可用性降级契约（#313）。
