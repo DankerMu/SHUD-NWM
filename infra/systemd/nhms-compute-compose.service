@@ -25,6 +25,7 @@
 #       ExecStart=/usr/bin/docker compose --env-file env/compute.env -f compose.compute.yml run --rm scheduler-once uv run nhms-pipeline plan-production --continuous --interval-seconds ${NHMS_SCHEDULER_INTERVAL_SECONDS} --max-passes ${NHMS_SCHEDULER_MAX_PASSES} --max-cycles-per-source ${NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE} --source gfs --model-id basins_qhh_shud --basin-id basins_qhh --plan
 #     nhms-compute-scheduler.timer:
 #       OnBootSec=2min
+#       OnActiveSec=30s
 #       OnUnitActiveSec=5min
 #       Persistent=false
 #       Unit=nhms-compute-scheduler.service

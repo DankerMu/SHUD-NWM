@@ -5,7 +5,6 @@ import io
 import json
 import os
 import re
-import shutil
 import stat as stat_module
 import subprocess
 import sys
@@ -1750,7 +1749,7 @@ class _StateCheckpointTracker:
     def _capture(self, hour: int, valid_time: datetime) -> None:
         _ensure_directory(self.checkpoint_dir, containment_root=self.output_dir)
         target = self.checkpoint_dir / f"{self.project_name}.f{hour:03d}.cfg.ic.update"
-        shutil.copyfile(self.source_path, target)
+        _copy_staged_file_no_follow(self.source_path, target, root=self.output_dir)
         self.captured[hour] = {
             "lead_hours": hour,
             "valid_time": _format_time(valid_time),
