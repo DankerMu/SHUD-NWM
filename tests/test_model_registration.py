@@ -126,6 +126,9 @@ class FakeModelRegistryStore:
         *,
         basin_version_id: str,
         river_network_version_id: str | None,
+        search: str | None = None,
+        stream_order_min: int | None = None,
+        stream_order_max: int | None = None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
@@ -394,6 +397,9 @@ class NullGeometryModelRegistryStore(FakeModelRegistryStore):
         *,
         basin_version_id: str,
         river_network_version_id: str | None,
+        search: str | None = None,
+        stream_order_min: int | None = None,
+        stream_order_max: int | None = None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
@@ -490,6 +496,9 @@ class OversizedPropertiesModelRegistryStore(FakeModelRegistryStore):
         *,
         basin_version_id: str,
         river_network_version_id: str | None,
+        search: str | None = None,
+        stream_order_min: int | None = None,
+        stream_order_max: int | None = None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
@@ -549,6 +558,9 @@ class BasinsRiverSegmentStore(FakeModelRegistryStore):
         *,
         basin_version_id: str,
         river_network_version_id: str | None,
+        search: str | None = None,
+        stream_order_min: int | None = None,
+        stream_order_max: int | None = None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:

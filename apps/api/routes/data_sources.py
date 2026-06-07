@@ -68,6 +68,22 @@ def list_met_stations(
     request: Request,
     basin_version_id: str | None = None,
     model_id: str | None = None,
+    search: str | None = Query(
+        default=None,
+        description="Case-insensitive substring match over station_id and station name.",
+    ),
+    variables: str | list[str] | None = Query(
+        default=None,
+        description=(
+            "Variable coverage filter. Repeat or comma-separate values "
+            "(PRCP, TEMP, RH, wind, Rn, Press). Only applied when model_id is set; "
+            "otherwise reported as unavailable."
+        ),
+    ),
+    qc_status: str | None = Query(
+        default=None,
+        description="QC status filter (advisory; reported unavailable when QC fields are not in inventory).",
+    ),
     limit: int = Query(default=DEFAULT_LIMIT, ge=1),
     offset: int = Query(default=0, ge=0),
     store: PsycopgForecastStore = Depends(get_data_source_store),
@@ -78,6 +94,9 @@ def list_met_stations(
             store.list_met_stations(
                 basin_version_id=basin_version_id,
                 model_id=model_id,
+                search=search,
+                variables=variables,
+                qc_status=qc_status,
                 limit=min(limit, MAX_LIMIT),
                 offset=offset,
             ),

@@ -104,6 +104,16 @@ def default_database_url() -> str:
     return database_url
 
 
+def _escape_like(value: str) -> str:
+    """Escape LIKE/ILIKE wildcards so user search input matches literally.
+
+    The backslash is the ESCAPE character; %/_ are the only LIKE metacharacters.
+    Values remain bound as parameters, so this only prevents the search term from
+    silently widening the pattern (e.g. a literal '%').
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def build_versioned_id(prefix: str, version_label: str | None, explicit_id: str | None = None) -> str:
     """Build a conservative ID from a prefix and version label when an explicit ID is absent."""
     if explicit_id:
@@ -395,6 +405,9 @@ class PsycopgModelRegistryStore:
         *,
         basin_version_id: str,
         river_network_version_id: str | None = None,
+        search: str | None = None,
+        stream_order_min: int | None = None,
+        stream_order_max: int | None = None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
@@ -403,6 +416,29 @@ class PsycopgModelRegistryStore:
         if river_network_version_id is not None:
             filters.append("rnv.river_network_version_id = %s")
             params.append(river_network_version_id)
+
+        # search: parameterised ILIKE over the segment identifier and the human
+        # readable name stored in properties_json. Escapes %/_ so caller input is
+        # treated literally and never widens the LIKE pattern (no injection face).
+        normalized_search = search.strip() if search is not None else ""
+        if normalized_search:
+            like_pattern = f"%{_escape_like(normalized_search)}%"
+            filters.append(
+                "(rs.river_segment_id ILIKE %s ESCAPE '\\' "
+                "OR COALESCE(rs.properties_json->>'name', '') ILIKE %s ESCAPE '\\' "
+                "OR COALESCE(rs.properties_json->>'segment_name', '') ILIKE %s ESCAPE '\\')"
+            )
+            params.extend([like_pattern, like_pattern, like_pattern])
+
+        # stream_order filter lands on core.river_segment.segment_order. The column
+        # is nullable, so rows without a populated order are excluded from a filtered
+        # subset (the correct "filter by stream order" semantic) rather than erroring.
+        if stream_order_min is not None:
+            filters.append("rs.segment_order >= %s")
+            params.append(stream_order_min)
+        if stream_order_max is not None:
+            filters.append("rs.segment_order <= %s")
+            params.append(stream_order_max)
 
         where_clause = " AND ".join(filters)
         with self._transaction() as cursor:
