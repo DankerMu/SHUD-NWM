@@ -14,15 +14,25 @@ TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "integration: tests that require explicitly configured external services")
+    config.addinivalue_line("markers", "e2e: end-to-end pipeline tests; opt-in via NHMS_RUN_E2E=1 (node-22)")
+    config.addinivalue_line("markers", "grib: real GRIB2 decode tests; opt-in via NHMS_RUN_GRIB=1 (node-22)")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     del config
     skip_reason = _integration_skip_reason()
     skip_integration = pytest.mark.skip(reason=skip_reason or "integration tests are explicitly enabled")
+    e2e_skip_reason = _opt_in_skip_reason("e2e", "NHMS_RUN_E2E")
+    grib_skip_reason = _opt_in_skip_reason("grib", "NHMS_RUN_GRIB")
+    skip_e2e = pytest.mark.skip(reason=e2e_skip_reason or "e2e tests are explicitly enabled")
+    skip_grib = pytest.mark.skip(reason=grib_skip_reason or "grib tests are explicitly enabled")
     for item in items:
         if "integration" in item.keywords and skip_reason:
             item.add_marker(skip_integration)
+        if "e2e" in item.keywords and e2e_skip_reason:
+            item.add_marker(skip_e2e)
+        if "grib" in item.keywords and grib_skip_reason:
+            item.add_marker(skip_grib)
 
 
 @pytest.fixture(scope="session")
@@ -64,6 +74,16 @@ def _integration_skip_reason() -> str | None:
             "NHMS_ALLOW_DATABASE_URL_INTEGRATION=1 is also set for compatibility"
         )
     return None
+
+
+def _opt_in_skip_reason(marker: str, env_var: str) -> str | None:
+    if _env_flag(env_var):
+        return None
+    return (
+        f"{marker} tests require explicit opt-in with {env_var}=1; "
+        f"run on node-22 (outside production windows) via "
+        f'`NHMS_RUN_E2E=1 NHMS_RUN_GRIB=1 uv run pytest -m "e2e or grib"`'
+    )
 
 
 def _env_flag(name: str) -> bool:

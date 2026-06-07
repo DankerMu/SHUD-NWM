@@ -19,6 +19,7 @@ from workers.data_adapters.ifs_adapter import IFSAdapter, IFSAdapterConfig
 from workers.forcing_producer import ForcingProducer, ForcingProducerConfig
 
 
+@pytest.mark.grib
 def test_ifs_adapter_canonical_forcing_run_parse_e2e(tmp_path: Path) -> None:
     repository = E2ERepository()
     object_root = tmp_path / "object-store"
@@ -71,6 +72,7 @@ def test_ifs_adapter_canonical_forcing_run_parse_e2e(tmp_path: Path) -> None:
     assert [row.variable for row in repository.river_timeseries if row.run_id == run_id] == ["q_down"]
 
 
+@pytest.mark.grib
 def test_ifs_06z_144h_manifest_context_and_forcing_limit(tmp_path: Path) -> None:
     repository = E2ERepository()
     object_root = tmp_path / "object-store"

@@ -17,6 +17,7 @@
 | 验证类型 | oracle 节点 |
 |---|---|
 | 后端单测/集成、真实 DB pytest、Slurm/SHUD 行为 | **node-22** |
+| `e2e`/`grib` marker 测试（已从纯 CI 排除，`NHMS_RUN_E2E=1 NHMS_RUN_GRIB=1`，见 `docs/runbooks/ci-test-routing.md`） | **node-22** |
 | display_readonly 部署 receipt、只读 DB denied-write、cross-plane identity live、`/hydro-met`+`/ops` 浏览器 e2e | **node-27** |
 | ruff、openspec validate、前端 tsc / pnpm test / check:api-types | 本地 |
 

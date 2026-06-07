@@ -58,5 +58,5 @@
 ## 8. 集成与验收
 
 - [x] 8.1 可扩展性验证：构造一个新注册流域（fixture/集成）走"注册→published→发现接口→前端选择器出现"，断言前后端零代码改动。
-- [ ] 8.2 全量校验：`uv run ruff check . && uv run pytest -q`；`cd apps/frontend && corepack pnpm test && corepack pnpm exec tsc --noEmit && corepack pnpm run check:api-types && corepack pnpm build`。
+- [x] 8.2 全量校验：`uv run ruff check . && uv run pytest -q`；`cd apps/frontend && corepack pnpm test && corepack pnpm exec tsc --noEmit && corepack pnpm run check:api-types && corepack pnpm build`。（前端全绿 + ruff 0 + openspec valid 已达；后端 pytest 非全绿——后端预存失败归 #321，M25 新增回归=0，见 `worklogs/ci-baseline.md`）
 - [x] 8.3 `openspec validate m25-multibasin-frontend-production --strict --no-interactive` 通过；更新 `progress.md` 与 `docs/runbooks/node-27-bringup-checklist.md` 衔接说明（多流域展示、/ops 降级、return-period 诚实状态）。

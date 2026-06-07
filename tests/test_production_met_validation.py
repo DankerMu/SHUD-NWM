@@ -42,6 +42,7 @@ def test_output_units_keyset_equals_required_forcing_variables() -> None:
         assert isinstance(unit, str) and unit.strip(), variable
 
 
+@pytest.mark.grib
 def test_validate_met_default_lane_writes_required_evidence_and_redacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -260,6 +261,7 @@ def test_validate_met_bounds_block_before_unbounded_work(
     assert not (tmp_path / "artifacts" / "bounded" / "met" / "local-object-store").exists()
 
 
+@pytest.mark.grib
 def test_validate_met_manifest_bound_counts_actual_deterministic_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -305,6 +307,7 @@ def test_validate_met_rejects_primary_evidence_root_under_existing_symlink(
     assert not (target_root / suffix).exists()
 
 
+@pytest.mark.grib
 def test_validate_met_same_run_requires_force_and_force_replaces_bundle(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -390,6 +393,7 @@ def test_validate_met_force_refuses_object_bundle_parent_symlink_swap_without_ex
     assert sentinel.read_text(encoding="utf-8") == "external must remain\n"
 
 
+@pytest.mark.grib
 def test_validate_met_disabled_sources_record_skipped_without_success(tmp_path: Path) -> None:
     summary = validate_met(
         ProductionMetConfig.from_env(evidence_root=tmp_path / "artifacts", run_id="gfsonly", sources="GFS")
@@ -490,6 +494,7 @@ def test_validate_met_disabled_fallback_policy_blocks_without_fixture(
     assert gfs["file_count"] == 0
 
 
+@pytest.mark.grib
 def test_validate_met_cached_only_policy_uses_cached_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NHMS_PRODUCTION_MET_CACHED_FALLBACK_POLICY", "cached_only")
 
@@ -525,6 +530,7 @@ def test_validate_met_raw_manifest_uses_redacted_configured_endpoint(
     assert "token=secret" not in evidence_text
 
 
+@pytest.mark.grib
 def test_argparse_validate_met_fallback(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = slurm_validation._argparse_main(
         ["validate-met", "--evidence-root", str(tmp_path / "artifacts"), "--run-id", "argparse"]

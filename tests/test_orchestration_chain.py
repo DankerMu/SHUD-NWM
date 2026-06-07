@@ -5643,13 +5643,18 @@ def test_template_export_lines_injects_grib_env_when_set(monkeypatch):
     assert lines.index(f"export PATH={quoted}/bin:$PATH") > 0
 
 
-def test_template_export_lines_omits_grib_env_when_unset(monkeypatch):
+def test_template_export_lines_omits_grib_env_when_unset(monkeypatch, tmp_path: Path):
     from services.orchestrator.chain import _template_export_lines
 
     monkeypatch.delenv("NHMS_GRIB_ENV_ROOT", raising=False)
+    # Environment-independent: point the runtime venv-bin at an existing tmp dir
+    # via the explicit override, so the assertion holds with or without cwd/.venv.
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_PYTHON_VENV_BIN", str(venv_bin))
     lines = _template_export_lines({"workspace_dir": "/work"})
 
-    expected_venv = shlex.quote(str((Path.cwd() / ".venv" / "bin").resolve()))
+    expected_venv = shlex.quote(str(venv_bin.resolve()))
     assert f"export PATH={expected_venv}:$PATH" in lines
     assert not any(line.startswith("export LD_LIBRARY_PATH=") for line in lines)
 
