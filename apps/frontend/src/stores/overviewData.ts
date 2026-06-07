@@ -199,11 +199,13 @@ function cacheKey(path: string, params?: unknown) {
 }
 
 function requestScopeQueryKey(query: M11QueryState) {
-  return serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap, validTime: null })
+  // basinId 由 requestScope.basinId 单独匹配，故从序列化键中剔除：
+  // 加 basinId 字段后键的输出与改动前字节完全一致，零缓存 churn（R1 缓解）。
+  return serializeM11QueryState({ ...query, basinId: null, basemap: defaultM11QueryState.basemap, validTime: null })
 }
 
 function requestScopeDataKey(query: M11QueryState) {
-  return serializeM11QueryState({ ...query, basemap: defaultM11QueryState.basemap })
+  return serializeM11QueryState({ ...query, basinId: null, basemap: defaultM11QueryState.basemap })
 }
 
 function basinRequestIdentityQuery(query: M11QueryState): M11QueryState {

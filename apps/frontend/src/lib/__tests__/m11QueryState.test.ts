@@ -12,7 +12,7 @@ import {
 describe('M11 query state helpers', () => {
   it('round-trips supported values', () => {
     const state = parseM11QueryState(
-      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=warning-level&basemap=satellite&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009&warningLevel=red&q=%E5%B9%B2%E6%B5%81',
+      'source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=warning-level&basemap=satellite&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basins_qhh&segmentId=seg-009&warningLevel=red&q=%E5%B9%B2%E6%B5%81',
     )
 
     expect(state).toEqual({
@@ -23,6 +23,7 @@ describe('M11 query state helpers', () => {
       basemap: 'satellite',
       basinVersionId: 'bv-001',
       riverNetworkVersionId: 'rn-v1',
+      basinId: 'basins_qhh',
       segmentId: 'seg-009',
       warningLevel: 'red',
       q: '干流',
@@ -38,6 +39,19 @@ describe('M11 query state helpers', () => {
     expect(serializeM11QueryState(state)).toBe('')
     expect(needsM11QueryReplacement('?source=unknown&basemap=bad&warningLevel=invalid')).toBe(true)
     expect(needsM11QueryReplacement('')).toBe(false)
+  })
+
+  it('rejects reserved-character basinId and keeps a valid basinId single-valued (#338 boundary)', () => {
+    // basinId 进 query 后由 normalizeM11Identifier 白名单把关：含 / ? # % 的 id 被拒、不写入 URL，
+    // 杜绝伪造/越权流域上下文；合法 basinId 经 parse→serialize 单值往返。
+    const rejected = parseM11QueryState('basinId=basin%2Fdemo%3Fbranch%23run%2525')
+    expect(rejected.basinId).toBeNull()
+    expect(serializeM11QueryState(rejected)).not.toContain('basinId=')
+
+    const accepted = parseM11QueryState('basinId=basins_qhh&basinId=basins_heihe')
+    expect(accepted.basinId).toBe('basins_qhh')
+    const serialized = serializeM11QueryState(accepted)
+    expect(new URLSearchParams(serialized).getAll('basinId')).toEqual(['basins_qhh'])
   })
 
   it('omits empty or unsupported values on serialization', () => {

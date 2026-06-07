@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { AlertTriangle, ArrowRight, ExternalLink, Layers, Rows3 } from 'lucide-react'
 
 import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
 import type { M11Bbox, OverviewBasin, SourceScenarioSelectionState } from '@/lib/m11/overviewDataContracts'
-import { BasinLink, M11Layout, StateReadout } from '@/pages/m11/M11Shell'
+import { M11Layout, StateReadout } from '@/pages/m11/M11Shell'
+import { useBasinDetailMode } from '@/components/m11/BasinDetailPanels'
 import {
   defaultM11QueryState,
-  m11QueryHref,
   type M11QueryPatch,
+  type M11QueryState,
   needsM11QueryReplacement,
   parseM11QueryState,
   serializeM11QueryState,
@@ -19,10 +20,56 @@ import { overviewSnapshotMatchesQuery, overviewSnapshotMetadataMatchesQuery, use
 
 const NONE_VISIBLE_SENTINEL = '__none__'
 
+/**
+ * 单页地图（M26-2）：按 query 内 basinId 双模式渲染——
+ * basinId 为空 → 全国总览模式；非空 → 流域详情模式（就地 zoom-in）。
+ * pathname 恒为 `/`，模式切换不触发整页路由跳转。
+ * 子模式拆为独立组件，借组件 mount/unmount 隔离两套 hooks/effects。
+ */
 export function OverviewPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const state = useMemo(() => parseM11QueryState(location.search), [location.search])
+  const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
+  const needsQueryReplacement = needsM11QueryReplacement(location.search)
+
+  const handleQueryChange = useCallback(
+    (patch: M11QueryPatch) => {
+      const nextSearch = serializeM11QueryState({ ...state, ...patch })
+      navigate({ pathname: location.pathname, search: nextSearch ? `?${nextSearch}` : '' })
+    },
+    [location.pathname, navigate, state],
+  )
+
+  useEffect(() => {
+    if (!needsQueryReplacement) return
+    navigate({ pathname: location.pathname, search: normalizedSearch ? `?${normalizedSearch}` : '' }, { replace: true })
+  }, [location.pathname, navigate, needsQueryReplacement, normalizedSearch])
+
+  if (needsQueryReplacement) return null
+
+  return state.basinId ? (
+    <BasinDetailMode basinId={state.basinId} state={state} onQueryChange={handleQueryChange} />
+  ) : (
+    <OverviewMode state={state} onQueryChange={handleQueryChange} />
+  )
+}
+
+function BasinDetailMode({
+  basinId,
+  state,
+  onQueryChange,
+}: {
+  basinId: string
+  state: M11QueryState
+  onQueryChange: (patch: M11QueryPatch) => void
+}) {
+  const layoutProps = useBasinDetailMode({ basinId, state, onQueryChange })
+  return <M11Layout state={state} onQueryChange={onQueryChange} {...layoutProps} />
+}
+
+function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryChange: (patch: M11QueryPatch) => void }) {
+  const handleQueryChange = onQueryChange
   const dataLoadState = useMemo(
     () => ({
       source: state.source,
@@ -48,12 +95,10 @@ export function OverviewPage() {
       state.warningLevel,
     ],
   )
-  const normalizedSearch = useMemo(() => serializeM11QueryState(state), [state])
   const overview = useOverviewDataStore((store) => store.overview)
   const loading = useOverviewDataStore((store) => store.loading)
   const error = useOverviewDataStore((store) => store.error)
   const loadOverview = useOverviewDataStore((store) => store.loadOverview)
-  const needsQueryReplacement = needsM11QueryReplacement(location.search)
   const overviewMatchesQuery = overviewSnapshotMatchesQuery(overview, state)
   const overviewMetadataMatchesQuery = overviewSnapshotMetadataMatchesQuery(overview, state)
   const currentOverview = overviewMatchesQuery ? overview : null
@@ -63,30 +108,16 @@ export function OverviewPage() {
   const [selectedBasinId, setSelectedBasinId] = useState<string | null>(null)
   const [popupBasinId, setPopupBasinId] = useState<string | null>(null)
 
-  const handleQueryChange = useCallback(
-    (patch: M11QueryPatch) => {
-      const nextSearch = serializeM11QueryState({ ...state, ...patch })
-      navigate({ pathname: location.pathname, search: nextSearch ? `?${nextSearch}` : '' })
-    },
-    [location.pathname, navigate, state],
-  )
-
   useEffect(() => {
-    if (!needsQueryReplacement) return
-    navigate({ pathname: location.pathname, search: normalizedSearch ? `?${normalizedSearch}` : '' }, { replace: true })
-  }, [location.pathname, navigate, needsQueryReplacement, normalizedSearch])
-
-  useEffect(() => {
-    if (needsQueryReplacement) return
     void loadOverview(dataLoadState).catch(() => undefined)
-  }, [dataLoadState, loadOverview, needsQueryReplacement])
+  }, [dataLoadState, loadOverview])
 
   useEffect(() => {
-    if (needsQueryReplacement || loading || !overviewMetadataMatchesQuery || metadataLayers.length === 0) return
+    if (loading || !overviewMetadataMatchesQuery || metadataLayers.length === 0) return
     const correctedValidTime = resolveM11ValidTimeCorrection(state, metadataLayers)
     if (correctedValidTime === undefined) return
     handleQueryChange({ validTime: correctedValidTime })
-  }, [handleQueryChange, loading, metadataLayers, needsQueryReplacement, overviewMetadataMatchesQuery, state])
+  }, [handleQueryChange, loading, metadataLayers, overviewMetadataMatchesQuery, state])
 
   const basins = currentOverview?.basins ?? []
   const summary = currentOverview?.summary
@@ -130,6 +161,11 @@ export function OverviewPage() {
     },
     [visibleBasinSet],
   )
+  // 进入流域分析：写 basinId（就地切详情模式），并由详情模式 fitTo 该 basin bbox。
+  const handleEnterAnalysis = useCallback(
+    (basin: OverviewBasin) => handleQueryChange(basinAnalysisPatch(basin, state)),
+    [handleQueryChange, state],
+  )
   useEffect(() => {
     if (basins.length === 0) {
       setVisibleBasinIds((current) => (current.size === 0 ? current : new Set()))
@@ -159,7 +195,6 @@ export function OverviewPage() {
             ? currentOverview.aggregationDecision.evidence
             : '流域清单暂不可用')
       : null
-  const selectedBasinLinkTarget = selectedBasin ? basinAnalysisHref(selectedBasin, state) : '/overview'
   const monitoringHandoff = contextHandoff('/monitoring', state, sourceSelection)
   const floodAlertsHandoff = contextHandoff('/flood-alerts', state, sourceSelection)
   const partialErrors = summary?.partialErrors ?? []
@@ -201,9 +236,12 @@ export function OverviewPage() {
               {unavailableBasinCount} 个流域缺少已发布版本或边界，地图不会绘制对应边界。
             </ScopedNotice>
           ) : null}
-          <BasinLink to={selectedBasinLinkTarget} disabled={!selectedBasin}>
+          <EnterAnalysisButton
+            disabled={!selectedBasin}
+            onClick={() => selectedBasin && handleEnterAnalysis(selectedBasin)}
+          >
             {selectedBasin ? '进入流域分析' : '等待可见流域选择'}
-          </BasinLink>
+          </EnterAnalysisButton>
         </>
       }
       right={
@@ -241,8 +279,40 @@ export function OverviewPage() {
         </>
       }
     >
-      {popupBasin ? <BasinPopup basin={popupBasin} state={state} /> : null}
+      {popupBasin ? <BasinPopup basin={popupBasin} onEnterAnalysis={() => handleEnterAnalysis(popupBasin)} /> : null}
     </M11Layout>
+  )
+}
+
+function EnterAnalysisButton({
+  disabled,
+  onClick,
+  children,
+}: {
+  disabled: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  if (disabled) {
+    return (
+      <span
+        aria-disabled="true"
+        className="flex h-9 cursor-not-allowed items-center justify-between rounded border border-neutral-300 px-3 text-sm font-medium text-neutral-500"
+      >
+        {children}
+        <ArrowRight className="h-4 w-4" aria-hidden="true" />
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex h-9 w-full items-center justify-between rounded border border-primary-600 px-3 text-sm font-medium text-primary-600 transition-colors hover:bg-primary-50"
+    >
+      {children}
+      <ArrowRight className="h-4 w-4" aria-hidden="true" />
+    </button>
   )
 }
 
@@ -386,7 +456,7 @@ function BasinVisibilityTree({
   )
 }
 
-function BasinPopup({ basin, state }: { basin: OverviewBasin; state: ReturnType<typeof parseM11QueryState> }) {
+function BasinPopup({ basin, onEnterAnalysis }: { basin: OverviewBasin; onEnterAnalysis: () => void }) {
   const disabled = Boolean(basin.unavailableReason || !basin.selectedBasinVersionId)
   return (
     <aside
@@ -431,13 +501,14 @@ function BasinPopup({ basin, state }: { basin: OverviewBasin; state: ReturnType<
             进入分析
           </button>
         ) : (
-          <Link
-            to={basinAnalysisHref(basin, state)}
+          <button
+            type="button"
+            onClick={onEnterAnalysis}
             className="inline-flex h-9 items-center gap-1 rounded bg-primary-600 px-3 text-sm font-medium text-white hover:bg-primary-700"
           >
             进入分析
             <ArrowRight className="h-4 w-4" aria-hidden="true" />
-          </Link>
+          </button>
         )}
       </div>
     </aside>
@@ -490,18 +561,21 @@ function unionBasinBbox(basins: OverviewBasin[]) {
   }, null)
 }
 
-function basinAnalysisHref(basin: OverviewBasin, state: ReturnType<typeof parseM11QueryState>) {
+// 进入流域分析的 query patch：写 basinId（就地切详情模式），并携带 basinVersionId/segmentId
+// 上下文（与改造前 /basins/:id 深链的 carry-over 语义一致，仅落点从路由 param 变为 query basinId）。
+function basinAnalysisPatch(basin: OverviewBasin, state: M11QueryState): M11QueryPatch {
   const selectedVersionIds = new Set(basin.basinVersions.map((version) => version.basinVersionId))
   const basinVersionId =
     state.basinVersionId && selectedVersionIds.has(state.basinVersionId)
       ? state.basinVersionId
       : basin.selectedBasinVersionId
-  const segmentId = basinVersionId && basinVersionId === state.basinVersionId ? state.segmentId : null
-  return m11QueryHref(`/basins/${encodeURIComponent(basin.basinId)}`, state, {
+  const carriesContext = Boolean(basinVersionId && basinVersionId === state.basinVersionId)
+  return {
+    basinId: basin.basinId,
     basinVersionId,
-    riverNetworkVersionId: basinVersionId && basinVersionId === state.basinVersionId ? state.riverNetworkVersionId : null,
-    segmentId,
-  })
+    riverNetworkVersionId: carriesContext ? state.riverNetworkVersionId : null,
+    segmentId: carriesContext ? state.segmentId : null,
+  }
 }
 
 export function contextHandoff(

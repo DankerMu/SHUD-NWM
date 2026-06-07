@@ -18,9 +18,6 @@ const ForecastPage = lazy(() =>
 const OverviewPage = lazy(() =>
   import('@/pages/OverviewPage').then((module) => ({ default: module.OverviewPage })),
 )
-const BasinDetailPage = lazy(() =>
-  import('@/pages/BasinDetailPage').then((module) => ({ default: module.BasinDetailPage })),
-)
 const FloodAlertPage = lazy(() =>
   import('@/pages/FloodAlertPage').then((module) => ({ default: module.FloodAlertPage })),
 )
@@ -48,7 +45,6 @@ export function LegacyPagesHarness() {
           <Routes>
             <Route path="/" element={<OverviewPage />} />
             <Route path="/overview" element={<OverviewPage />} />
-            <Route path="/basins/:basinId" element={<BasinDetailPage />} />
             <Route path="/hydro-met" element={<HydroMetPage />} />
             <Route path="/meteorology" element={<MeteorologyPage />} />
             <Route path="/forecast" element={<ForecastPage />} />
