@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Map, {
   Layer,
   NavigationControl,
+  Popup,
   ScaleControl,
   Source,
   type MapLayerMouseEvent,
   type MapRef,
   type MapStyle,
 } from 'react-map-gl/maplibre'
+import type { ReactNode } from 'react'
 import type { LayerProps } from 'react-map-gl/maplibre'
 import type { FilterSpecification } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
@@ -68,6 +70,17 @@ export interface M11MapCameraFlyTo {
   zoom?: number
 }
 
+/**
+ * 地图 popup slot（M26-4）：popup 内容（河段 / 代站组件）与经纬度锚点由页面经 props 传入，
+ * react-map-gl `<Popup>` 必须在 `<Map>` 内渲染，故由本组件挂载、页面只给数据。
+ */
+export interface M11MapPopupSlot {
+  longitude: number
+  latitude: number
+  content: ReactNode
+  onClose?: () => void
+}
+
 export { m11BasinRiverCollectionBudget } from '@/lib/m11/overviewDataContracts'
 
 interface M11MapLibreSurfaceProps {
@@ -79,6 +92,7 @@ interface M11MapLibreSurfaceProps {
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
+  popup?: M11MapPopupSlot | null
   className?: string
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
@@ -181,6 +195,7 @@ export function M11MapLibreSurface({
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   stationFeatureCollection = null,
+  popup = null,
   className,
   fitTo,
   flyTo,
@@ -279,6 +294,17 @@ export function M11MapLibreSurface({
         event.target.getCanvas().style.cursor = 'pointer'
         return
       }
+      // 代站点 / cluster hover：cursor=pointer（#339 遗留 minor），但不触发 overlay hover 高亮。
+      if (showStationLayer) {
+        const stationFeature =
+          findEventFeature(event, MET_STATION_POINT_LAYER_ID) ?? findEventFeature(event, MET_STATION_CLUSTER_LAYER_ID)
+        if (stationFeature) {
+          setHoveredRiverSegmentId(null)
+          onOverlayHover?.(null)
+          event.target.getCanvas().style.cursor = 'pointer'
+          return
+        }
+      }
       const overlayFeature = renderableOverlay ? findEventFeature(event, renderableOverlay.layer.id) : null
       if (!renderableOverlay || !overlayFeature) {
         setHoveredRiverSegmentId(null)
@@ -289,7 +315,7 @@ export function M11MapLibreSurface({
       onOverlayHover?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
       event.target.getCanvas().style.cursor = 'pointer'
     },
-    [onOverlayHover, renderableOverlay],
+    [onOverlayHover, renderableOverlay, showStationLayer],
   )
 
   const handleMouseLeave = useCallback(
@@ -387,6 +413,18 @@ export function M11MapLibreSurface({
         ) : null}
         {showStationLayer && stationFeatureCollection ? (
           <M11StationClusterPrimitive collection={stationFeatureCollection} />
+        ) : null}
+        {popup ? (
+          <Popup
+            longitude={popup.longitude}
+            latitude={popup.latitude}
+            anchor="bottom"
+            closeOnClick={false}
+            onClose={popup.onClose}
+            maxWidth="none"
+          >
+            {popup.content}
+          </Popup>
         ) : null}
       </Map>
 

@@ -19,6 +19,7 @@ import {
   type M11MapCameraFit,
   type M11MapCameraFlyTo,
   type M11MapOverlayInteraction,
+  type M11MapPopupSlot,
   type M11StationFeatureCollection,
 } from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
@@ -54,6 +55,7 @@ interface M11MapSurfaceProps extends SharedControlProps {
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
+  popup?: M11MapPopupSlot | null
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
@@ -112,6 +114,7 @@ export function M11MapSurface({
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   stationFeatureCollection = null,
+  popup = null,
   onQueryChange,
   fitTo,
   flyTo,
@@ -129,6 +132,7 @@ export function M11MapSurface({
         selectedSegmentId={selectedSegmentId}
         selectedSegmentGeometry={selectedSegmentGeometry}
         stationFeatureCollection={stationFeatureCollection}
+        popup={popup}
         fitTo={fitTo}
         flyTo={flyTo}
         onOverlayHover={onOverlayHover}

@@ -2,7 +2,10 @@ import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'r
 import { Link } from 'react-router-dom'
 import { Activity, GitBranch, ListFilter, Search, Split, TrendingUp } from 'lucide-react'
 
-import type { M11MapOverlayInteraction } from '@/components/map/M11MapLibreSurface'
+import type { M11MapOverlayInteraction, M11MapPopupSlot } from '@/components/map/M11MapLibreSurface'
+import { M11RiverForecastPopup, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPopup'
+import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
+import { useHydroMetProduct } from '@/pages/m11/useHydroMetProduct'
 import {
   filterBasinSegmentRows,
   type BasinDetail,
@@ -128,15 +131,46 @@ export function useBasinDetailMode({
     basinNotFoundReason,
     detail,
   ])
+  // 两类 popup（M26-4）互斥状态：river 与 station 各持选中要素 + 经纬度锚点，开一个关另一个。
+  const [riverPopup, setRiverPopup] = useState<{ segment: M11RiverPopupSegment; lngLat: [number, number] } | null>(null)
+  const [stationPopup, setStationPopup] = useState<{ station: M11StationPopupStation; lngLat: [number, number] } | null>(null)
   const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
   const handleMapOverlayClick = useCallback(
     (interaction: M11MapOverlayInteraction) => {
+      if (interaction.layerId === 'met-stations') {
+        // 点代站：开代站 popup（关河段 popup）；锚点用 station 坐标。
+        const stationId = mapFeatureStringProperty(interaction.feature, 'station_id')
+        if (!stationId) return
+        const lngLat = popupAnchorFromInteraction(interaction)
+        if (!lngLat) return
+        setRiverPopup(null)
+        setStationPopup({
+          station: { station_id: stationId, station_name: mapFeatureStringProperty(interaction.feature, 'station_name') },
+          lngLat,
+        })
+        return
+      }
       if (interaction.layerId !== 'basin-river-segments') return
       const nextSegmentId =
         mapFeatureStringProperty(interaction.feature, 'river_segment_id') ?? mapFeatureStringProperty(interaction.feature, 'segment_id')
       if (!nextSegmentId) return
       const nextRiverNetworkVersionId = mapFeatureStringProperty(interaction.feature, 'river_network_version_id')
       const nextBasinVersionId = mapFeatureStringProperty(interaction.feature, 'basin_version_id')
+      // 点河段：开河段 popup（关代站 popup）；锚点用点击 event lngLat。
+      const lngLat = popupAnchorFromInteraction(interaction)
+      if (lngLat) {
+        setStationPopup(null)
+        setRiverPopup({
+          segment: {
+            river_segment_id: nextSegmentId,
+            segment_id: mapFeatureStringProperty(interaction.feature, 'segment_id') ?? nextSegmentId,
+            river_network_version_id: nextRiverNetworkVersionId ?? state.riverNetworkVersionId ?? '',
+            basin_version_id: nextBasinVersionId ?? state.basinVersionId ?? '',
+            name: mapFeatureStringProperty(interaction.feature, 'segment_name'),
+          },
+          lngLat,
+        })
+      }
       if (
         nextSegmentId === state.segmentId &&
         (nextRiverNetworkVersionId ?? state.riverNetworkVersionId) === state.riverNetworkVersionId &&
@@ -163,6 +197,66 @@ export function useBasinDetailMode({
     cycle: state.cycle,
   })
 
+  // 共享 product 解析（M26-4）：两类 popup 共用同一份选中流域 + 已解析具体源的 latest-product；
+  // best/compare 未解析时 product=null + honest 原因，杜绝拿未解析源直接打曲线接口。
+  const popupProduct = useHydroMetProduct({
+    basinId,
+    resolvedSource: sourceSelection?.resolvedSource ?? null,
+    cycle: state.cycle,
+  })
+
+  // 切流域时清掉残留 popup（避免跨流域误展示）。
+  useEffect(() => {
+    setRiverPopup(null)
+    setStationPopup(null)
+  }, [basinId])
+
+  // 已解析具体源在 GFS↔IFS 间真正切换时清 popup；transient null（数据重载中）不清，
+  // 否则一次选段导致 snapshot 暂不匹配会误关刚开的 popup。
+  const concretePopupSource =
+    sourceSelection?.resolvedSource === 'GFS' || sourceSelection?.resolvedSource === 'IFS'
+      ? sourceSelection.resolvedSource
+      : null
+  const lastConcretePopupSourceRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (concretePopupSource === null) return
+    if (lastConcretePopupSourceRef.current && lastConcretePopupSourceRef.current !== concretePopupSource) {
+      setRiverPopup(null)
+      setStationPopup(null)
+    }
+    lastConcretePopupSourceRef.current = concretePopupSource
+  }, [concretePopupSource])
+
+  const popup: M11MapPopupSlot | null = riverPopup
+    ? {
+        longitude: riverPopup.lngLat[0],
+        latitude: riverPopup.lngLat[1],
+        onClose: () => setRiverPopup(null),
+        content: (
+          <M11RiverForecastPopup
+            product={popupProduct.product}
+            segment={riverPopup.segment}
+            productReason={popupProduct.reason}
+            onClose={() => setRiverPopup(null)}
+          />
+        ),
+      }
+    : stationPopup
+      ? {
+          longitude: stationPopup.lngLat[0],
+          latitude: stationPopup.lngLat[1],
+          onClose: () => setStationPopup(null),
+          content: (
+            <M11StationForcingPopup
+              product={popupProduct.product}
+              station={stationPopup.station}
+              productReason={popupProduct.reason}
+              onClose={() => setStationPopup(null)}
+            />
+          ),
+        }
+      : null
+
   return {
     title: '流域分析',
     subtitle: `当前流域 ${basinDisplayName}`,
@@ -181,6 +275,7 @@ export function useBasinDetailMode({
     selectedSegmentId,
     selectedSegmentGeometry: selectedSegment?.geometry ?? null,
     stationFeatureCollection: stationLayer.featureCollection,
+    popup,
     onMapOverlayHover: handleMapOverlayHover,
     onMapOverlayClick: handleMapOverlayClick,
     left: (
@@ -864,6 +959,20 @@ function lineageLabel(status: SelectedSegmentDetail['lineageStatus'], reason: st
 function mapFeatureStringProperty(feature: M11MapOverlayInteraction['feature'], key: string) {
   const value = feature?.properties?.[key]
   return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+// popup 经纬度锚点：station 优先用 feature 点几何坐标，否则回退点击 event lngLat（river 用之）。
+function popupAnchorFromInteraction(interaction: M11MapOverlayInteraction): [number, number] | null {
+  const geometry = interaction.feature?.geometry
+  if (geometry && geometry.type === 'Point' && Array.isArray(geometry.coordinates)) {
+    const [lon, lat] = geometry.coordinates as number[]
+    if (Number.isFinite(lon) && Number.isFinite(lat)) return [lon, lat]
+  }
+  const lngLat = (interaction.event as { lngLat?: { lng?: number; lat?: number } }).lngLat
+  if (lngLat && Number.isFinite(lngLat.lng) && Number.isFinite(lngLat.lat)) {
+    return [lngLat.lng as number, lngLat.lat as number]
+  }
+  return null
 }
 
 function warningLabel(level: M11WarningLevel | string) {

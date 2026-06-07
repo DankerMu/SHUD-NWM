@@ -217,6 +217,12 @@ vi.mock('react-map-gl/maplibre', () => ({
   },
   NavigationControl: () => <div data-testid="mock-navigation-control" />,
   ScaleControl: () => <div data-testid="mock-scale-control" />,
+  Popup: ({ children, longitude, latitude }: { children: ReactNode; longitude?: number; latitude?: number }) => (
+    <div data-testid="mock-map-popup" data-longitude={String(longitude ?? '')} data-latitude={String(latitude ?? '')}>
+      {children}
+    </div>
+  ),
+  Marker: ({ children }: { children?: ReactNode }) => <div data-testid="mock-map-marker">{children}</div>,
 }))
 
 const state: M11QueryState = {

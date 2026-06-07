@@ -8,7 +8,7 @@ import {
   RETURN_PERIOD_LEGEND,
   ReturnPeriodLegend,
   ReturnPeriodSection,
-} from '@/pages/hydroMet/ReturnPeriodSection'
+} from '@/components/m11/ReturnPeriodSection'
 
 vi.mock('@/api/client', () => ({
   client: {
