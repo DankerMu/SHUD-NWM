@@ -8,9 +8,56 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same PR/branch — stop stacked re-runs when you push repeatedly.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Path scoping: each job below runs only when its area changed, so a frontend-only or docs-only PR
+  # never pays the ~16-min backend pytest, and a backend PR never pays the frontend build. master is
+  # unprotected (no required status checks), so a skipped job does not deadlock merge.
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      docs: ${{ steps.filter.outputs.docs }}
+      openapi: ${{ steps.filter.outputs.openapi }}
+      schemas: ${{ steps.filter.outputs.schemas }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - '**/*.py'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'tests/**'
+              - 'packages/**'
+              - 'apps/api/**'
+              - 'services/**'
+              - 'workers/**'
+              - 'schemas/**'
+              - 'db/**'
+            frontend:
+              - 'apps/frontend/**'
+              - 'openapi/**'
+            docs:
+              - 'docs/**'
+            openapi:
+              - 'openapi/**'
+            schemas:
+              - 'schemas/**'
+
   markdown-lint:
     name: Markdown Lint
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -21,6 +68,8 @@ jobs:
 
   openapi-validate:
     name: OpenAPI Validate
+    needs: changes
+    if: needs.changes.outputs.openapi == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -35,6 +84,8 @@ jobs:
 
   json-schema-validate:
     name: JSON Schema Validate
+    needs: changes
+    if: needs.changes.outputs.schemas == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -69,8 +120,15 @@ jobs:
             fi
           done
 
+  # Merge-gate backend suites: full pytest + real-DB integration. Run on push-to-master and on
+  # ready (non-draft) PRs. Skipped while a PR is a DRAFT — keep iterating fast, mark the PR
+  # ready-for-review to trigger the full gate before merge. node-22's real DB stays the iteration oracle.
   real-db-integration:
     name: SQL Migration Dry Run
+    needs: changes
+    if: >-
+      needs.changes.outputs.backend == 'true' &&
+      (github.event_name == 'push' || github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -104,6 +162,10 @@ jobs:
 
   unit-test:
     name: Unit Tests
+    needs: changes
+    if: >-
+      needs.changes.outputs.backend == 'true' &&
+      (github.event_name == 'push' || github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -121,8 +183,47 @@ jobs:
       - name: Run tests with coverage
         run: pytest tests/ -v --tb=short --co -q 2>/dev/null; pytest tests/ -v --tb=short
 
+  # Fast lane for DRAFT PRs: run only the test files this PR changed (full suite is the ready/merge
+  # gate above). Fail-safe: if you forget to draft, the full gate runs instead — you never get LESS
+  # coverage by accident, only more.
+  unit-test-fast:
+    name: Unit Tests (targeted, draft)
+    needs: changes
+    if: >-
+      needs.changes.outputs.backend == 'true' &&
+      github.event_name == 'pull_request' && github.event.pull_request.draft == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Prepare scratch evidence root
+        run: |
+          sudo mkdir -p /scratch/frd_muziyao
+          sudo chown "$USER:$(id -gn)" /scratch/frd_muziyao
+          chmod u+rwx /scratch/frd_muziyao
+      - name: Targeted tests (changed test files; full suite runs at the ready/merge gate)
+        run: |
+          git fetch --no-tags origin "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+          mapfile -t T < <(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- 'tests/**/*.py')
+          if [ "${#T[@]}" -gt 0 ]; then
+            echo "Targeted test files:"; printf '  %s\n' "${T[@]}"
+            pytest -q "${T[@]}"
+          else
+            echo "No changed test files — running collect-only smoke (import/syntax across suite)"
+            pytest tests/ -q --collect-only >/dev/null
+          fi
+
   frontend-build:
     name: Frontend Build
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -138,8 +239,13 @@ jobs:
       - name: Check frontend bundle size
         run: cd apps/frontend && pnpm check:bundle
 
+  # PAUSED (2026-06-07): M15-specific Playwright visual-evidence gate is legacy to the M15 milestone and
+  # not part of node-27 / m25 frontend production. Re-enable (drop `&& false`) once m25 redefines the
+  # frontend e2e gate. Kept in-file so the re-enable is a one-line change, not a rewrite.
   frontend-m15-visual:
     name: Frontend M15 Visual Evidence
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' && false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

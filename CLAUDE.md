@@ -2,27 +2,46 @@
 
 ## 双端开发流程
 
-本项目采用 **本地开发 + 远端测试** 模式：
+本项目采用 **本地开发 + 远端测试** 模式；远端含两个角色节点（实为三端协作）：
 
-- **本地 (macOS)**: 代码编辑、commit、push
-- **远端 (210.77.77.22:32099, user=frd_muziyao)**: 测试运行、数据库、Slurm、Docker 完整环境
-- **仓库路径**: 远端 `/scratch/frd_muziyao/NWM`，本地 `/Users/danker/Desktop/Hydro-SHUD/NWM`
-- **同步方式**: GitHub (`DankerMu/SHUD-NWM`) 做中转，双端 push/pull
+- **本地 (macOS)**: 代码编辑、commit、push、ruff、openspec validate、前端 tsc/pnpm test
+  - 仓库路径: `/Users/danker/Desktop/Hydro-SHUD/NWM`
+- **node-22 (210.77.77.22:32099, user=frd_muziyao)**: `compute_control` —— 调度/DB/Slurm/Docker/SHUD 完整环境，**后端代码 + 真实 DB pytest 的测试 oracle**
+  - 仓库路径: `/scratch/frd_muziyao/NWM`
+- **node-27 (210.77.77.27:32099, user=nwm)**: `display_readonly` —— 只读 DB 副本 + published 产物，**display API / 前端生产化 / 只读边界 live 验证 oracle**
+  - 仓库路径: `/home/nwm/NWM`
+- **同步方式**: GitHub (`DankerMu/SHUD-NWM`) 做中转，三端 push/pull
+
+### 验证 oracle 路由（改了什么 → 在哪验）
+
+| 验证类型 | oracle 节点 |
+|---|---|
+| 后端单测/集成、真实 DB pytest、Slurm/SHUD 行为 | **node-22** |
+| display_readonly 部署 receipt、只读 DB denied-write、cross-plane identity live、`/hydro-met`+`/ops` 浏览器 e2e | **node-27** |
+| ruff、openspec validate、前端 tsc / pnpm test / check:api-types | 本地 |
+
+涉及 display/前端生产化与只读边界的改动，**必须在 node-27 实机产出 live receipt**（见 `docs/runbooks/node-27-bringup-checklist.md` C1–C4），不得用 node-22 或本地 ruff 冒充 PASS。
 
 ### 标准开发循环
 
 ```
 本地改代码 → commit → git push
-→ 远端 ssh: cd /scratch/frd_muziyao/NWM && git pull
-→ 远端跑验证命令（见下方 issue 验证节）
+→ node-22 ssh: cd /scratch/frd_muziyao/NWM && git pull --ff-only → 跑后端验证命令
+→ (display/前端) node-27 ssh: cd /home/nwm/NWM && git pull --ff-only → 产 live receipt
 → 失败则本地修复 → 重复
 ```
 
 ### 远端 SSH 连接
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
+ssh -p 32099 frd_muziyao@210.77.77.22   # node-22 compute_control
+ssh -p 32099 nwm@210.77.77.27           # node-27 display_readonly
 ```
+
+### 远端同步纪律（ff-only，绝不吞 stash）
+
+- 两端工作树共享、可能有未提交内容；pull 前先 `git status --porcelain` 把关，用 `git pull --ff-only`，**绝不自动 `git stash pop`**（吞掉冲突会静默丢工作）。
+- node-27 历史落后较多时，ff 合并可能因 **untracked 同名文件**中止（master 新跟踪的文件本地有同名 untracked）。处置：先确认内容与 master 一致（`diff` 为 0 / 备份到 `~/NWM-presync-backup-<date>/`），再清理冲突 untracked 后 ff；**绝不动** gitignored 数据/证据目录（`artifacts/`、`.nhms-*`、`data/Basins/` 等），有价值的本地证据先 `git stash push -- <file>` 保全。
 
 ### 环境隔离原则
 
@@ -79,16 +98,37 @@ openspec validate <change-name> --strict --no-interactive
 
 ### CI 成本纪律（避免重复跑 / 单一终态推送）
 
-`.github/workflows/ci.yml` 触发于每次 push（`pull_request:` 全事件），每推一次都重跑全量
-7 个 job（含慢速 Unit Tests）。因此：
+`.github/workflows/ci.yml` 触发于 push master + 所有 PR 事件。**2026-06-07 起改为按路径 scope +
+draft 快速通道**（见下"CI 范围与门控"），不再每推全跑 7 个 job。提交纪律仍然适用：
 
 - **文档/规格更新必须并入触发合并门 CI 的最后一次 push** —— worklog、`openspec/**`、
   `*.md` 等随活儿一起 commit，或在最后一次代码推送之前推完。
 - **不得在等 CI 绿期间再补 docs-only 的尾随 commit**（如"补个 worklog"）——那会重置
-  合并门、白跑一遍全量 CI。
+  合并门、白跑 CI。
 - 一个 PR 的"最后一推"应已是完整终态；该推之后只等 CI 与 merge，不再追加任何 commit。
 - 注：openspec/ **不可** gitignore——它是规格源 + `openspec validate` 对象 + 双端同步内容，
   忽略它会破坏 spec-driven 工作流（治错了病）。成本问题用上面的提交纪律解决。
+
+### CI 范围与门控（路径 scope + draft 快速通道）
+
+CI 是**人工合并门**（master 无 branch protection / required checks），不是机器强制；下面是
+"哪个改动触发哪个 job"的约定：
+
+- **按路径 scope**：`changes` job（`dorny/paths-filter`）先判改动区，下游 job 仅在相关路径变化时跑。
+  纯前端 / 纯 docs PR **不跑** 16min 后端 pytest；纯后端 PR 不跑前端构建。
+  - 后端门（`unit-test` 全量 pytest、`real-db-integration` 起 TimescaleDB）：`**/*.py`、`pyproject.toml`、
+    `tests/**`、`packages/**`、`apps/api/**`、`services/**`、`workers/**`、`schemas/**`、`db/**`。
+  - 前端门（`frontend-build`）：`apps/frontend/**`、`openapi/**`。
+  - lint 门：`markdown-lint`←`docs/**`、`openapi-validate`←`openapi/**`、`json-schema-validate`←`schemas/**`。
+- **draft = 快速定向通道，ready = 全量合并门**：
+  - PR 标为 **draft** 时，后端只跑 `unit-test-fast`（仅本 PR 改动到的 test 文件 + collect-only 冒烟），
+    迭代快；真实快速反馈仍以 **node-22 真实 DB** 为准（CI 不是迭代 oracle）。
+  - PR 标为 **ready-for-review**（或 push 到 master）时，跑全量 `unit-test` + `real-db-integration` 作为
+    合并门。**合并前务必把 PR 转 ready** 以触发全量。
+  - **Fail-safe**：忘记标 draft → 默认走全量门，只会多跑、绝不漏测。
+- **`concurrency: cancel-in-progress`**：同一 PR 连推多次，自动取消被取代的旧 run。
+- **`frontend-m15-visual` 已暂停**（`if: … && false`）：它是 M15 里程碑的 Playwright 视觉证据门（遗留），
+  与 node-27 / m25 前端生产化无关；待 m25 重定义前端 e2e 门后，删掉 `&& false` 一行即可重启。
 
 ## 技术栈速查
 
