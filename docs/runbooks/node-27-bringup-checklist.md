@@ -8,6 +8,14 @@
 
 - **验证 oracle 路由**：后端代码/DB pytest 在 **node-22**；display API / 前端生产化 / 只读边界（本清单 C1–C4）在 **node-27**——node-22 的 pytest **不**闭合 C1–C4。详见 `CLAUDE.md`「验证 oracle 路由」+ `dual-end-issue-workflow` skill。
 - **27 前端生产化的功能性开发走 m25 change**：`openspec/changes/m25-multibasin-frontend-production/`（多流域选择器、latest-product 去硬编码/basin_id、洪水重现期独立 `return_period_status`、/ops·/monitoring display 降级）；并行起点 issue #310/#311/#313/#317。本清单聚焦"上线 live receipt"，m25 聚焦"功能交付"，二者互补。
+- **m25 功能已交付（2026-06-07，#310–#317 已合并，#318 收尾）**：多流域展示（数据驱动选择器 +
+  `basin_id` 参数化 + `has_display_product` 动态发现，**无硬编码白名单**）、`/ops`+`/monitoring` 按
+  `display_readonly` display 降级（`/meteorology` 门控保留）、return-period 诚实
+  `availability.return_period_status`（独立 supplemental，不进 blocking）均已落地并过本地/CI 校验。
+  - **不改变本清单 C1–C4 的判定标准**：C1–C4 live receipt 仍须在 node-27 实机产出，是上线的实质；
+    m25 交付的是"功能在代码层就绪"，不等于"已在 27 实机验证上线"。
+  - 可扩展性（新流域零代码改动出现）已有真 DB 集成断言（`tests/test_real_basin_discovery_integration.py`），
+    但其作为上线 receipt 仍以 node-27 cross-plane live（C3）为准。
 - **CI**：纯前端/docs 子 PR 按路径 scope 跳过后端 pytest；迭代标 **draft**（定向快速通道）、合并前转 **ready**（全量门）。约定见 `CLAUDE.md`「CI 范围与门控」。
 
 ## 拓扑回顾
