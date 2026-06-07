@@ -39,7 +39,7 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
             extension_names = {
                 row["extname"] for row in connection.execute(text("SELECT extname FROM pg_extension")).mappings()
             }
-            assert {"postgis", "timescaledb", "pgcrypto"} <= extension_names
+            assert {"postgis", "timescaledb", "pgcrypto", "pg_trgm"} <= extension_names
 
             schemas = {
                 row["schema_name"]
@@ -134,6 +134,13 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "river_segment_network_order_idx",
                 "river_network_version_basin_lookup_idx",
                 "hydro_run_ops_strict_identity_candidates_idx",
+                "river_segment_id_trgm_idx",
+                "river_segment_name_trgm_idx",
+                "river_segment_segment_name_trgm_idx",
+                "met_station_id_trgm_idx",
+                "met_station_name_trgm_idx",
+                "hydro_run_display_product_basin_status_idx",
+                "return_period_result_run_quality_idx",
             } <= indexes
 
             constraints = {

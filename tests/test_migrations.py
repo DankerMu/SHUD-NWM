@@ -33,6 +33,8 @@ EXPECTED_MIGRATIONS = [
     "000027_cycle_status_canonical_incomplete.sql",
     "000028_state_lineage.sql",
     "000029_pipeline_reservation.sql",
+    "000030_qhh_latest_display_parsed_status_index.sql",
+    "000031_search_discovery_return_period_performance.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -440,6 +442,8 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
 
 def test_qhh_latest_display_product_migration_matches_candidate_and_window_queries() -> None:
     migration = dict(_migration_sql())["000024_qhh_latest_display_product_indexes.sql"]
+    parsed_status_migration = dict(_migration_sql())["000030_qhh_latest_display_parsed_status_index.sql"]
+    performance_migration = dict(_migration_sql())["000031_search_discovery_return_period_performance.sql"]
     store_source = (
         Path(__file__).resolve().parents[1] / "packages" / "common" / "forecast_store.py"
     ).read_text(encoding="utf-8")
@@ -450,6 +454,9 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     ]
     index_evidence_source = store_source[
         store_source.index("def _qhh_latest_query_indexes") : store_source.index("def _non_negative_int")
+    ]
+    flood_quality_join_source = store_source[
+        store_source.index("def _flood_product_quality_join") : store_source.index("def _flood_product_quality_select")
     ]
 
     assert _index_columns_by_name(migration, "hydro_run_qhh_latest_candidate_idx") == (
@@ -462,6 +469,22 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "hydro_run_ops_strict_identity_candidates_idx" not in migration
     assert "WHERE cycle_time IS NOT NULL" in migration
     assert "AND status IN ('frequency_done', 'published')" in migration
+    assert _index_columns_by_name(parsed_status_migration, "hydro_run_qhh_latest_candidate_parsed_idx") == (
+        "LOWER(source_id)",
+        "run_type",
+        "basin_version_id",
+        "cycle_time DESC",
+        "run_id DESC",
+    )
+    assert "WHERE cycle_time IS NOT NULL" in parsed_status_migration
+    assert (
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_qhh_latest_candidate_parsed_idx"
+        in parsed_status_migration
+    )
+    assert "AND status IN ('parsed', 'frequency_done', 'published')" in parsed_status_migration
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS hydro_run_display_product_basin_status_idx" in performance_migration
+    assert "ON hydro.hydro_run (basin_version_id, status)" in performance_migration
+    assert "WHERE status IN ('parsed', 'frequency_done', 'published')" in performance_migration
     assert _index_columns_by_name(migration, "basin_version_qhh_latest_lookup_idx") == (
         "basin_id",
         "basin_version_id",
@@ -491,6 +514,7 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     for index_name in (
         "hydro_run_qhh_latest_candidate_idx",
         "basin_version_qhh_latest_lookup_idx",
+        "return_period_result_run_quality_idx",
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
         "river_timeseries_qhh_latest_window_idx",
@@ -499,9 +523,12 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
 
     assert "LOWER(h.source_id) = LOWER(%s)" in query_source
     assert "h.run_type = 'forecast'" in query_source
-    assert "h.status IN ('frequency_done', 'published')" in query_source
-    assert "h.status NOT IN ('frequency_done', 'published')" in query_source
+    assert "h.status IN ('parsed', 'frequency_done', 'published')" in query_source
+    assert "h.status NOT IN ('parsed', 'frequency_done', 'published')" in query_source
     assert "h.cycle_time IS NOT NULL" in query_source
+    assert "LEFT JOIN LATERAL" in flood_quality_join_source
+    assert "WHERE fpr.run_id = h.run_id" in flood_quality_join_source
+    assert "GROUP BY run_id" not in flood_quality_join_source
     assert "QHH_LATEST_SEARCH_LIMIT" in query_source
     assert "QHH_LATEST_CONTEXT_LIMIT" in query_source
     assert "QHH_LATEST_EXPECTED_HORIZON_HOURS" in query_source
@@ -552,6 +579,27 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "fst.valid_time <= cr.display_end_time" in query_source
     assert "rt.valid_time >= cr.display_start_time" in query_source
     assert "rt.valid_time <= cr.display_end_time" in query_source
+
+
+def test_search_discovery_performance_migration_adds_trgm_and_quality_indexes() -> None:
+    migration = dict(_migration_sql())["000031_search_discovery_return_period_performance.sql"]
+
+    assert "CREATE EXTENSION IF NOT EXISTS pg_trgm" in migration
+    for index_name in (
+        "river_segment_id_trgm_idx",
+        "river_segment_name_trgm_idx",
+        "river_segment_segment_name_trgm_idx",
+        "met_station_id_trgm_idx",
+        "met_station_name_trgm_idx",
+        "hydro_run_display_product_basin_status_idx",
+    ):
+        assert f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {index_name}" in migration
+    assert "CREATE INDEX IF NOT EXISTS return_period_result_run_quality_idx" in migration
+    assert migration.count("USING GIN") == 5
+    assert "gin_trgm_ops" in migration
+    assert "WHERE active_flag = true" in migration
+    assert "ON hydro.hydro_run (basin_version_id, status)" in migration
+    assert "ON flood.return_period_result (run_id, max_over_window, return_period, warning_level)" in migration
 
 
 def test_ops_strict_identity_index_migration_is_forward_upgrade_safe() -> None:
@@ -677,7 +725,7 @@ def _index_columns(migration: str, schema: str, table: str) -> tuple[str, ...]:
 
 def _index_columns_by_name(migration: str, index_name: str) -> tuple[str, ...]:
     match = re.search(
-        rf"CREATE INDEX IF NOT EXISTS {index_name}\s+ON\s+",
+        rf"CREATE INDEX(?: CONCURRENTLY)? IF NOT EXISTS {index_name}\s+ON\s+",
         migration,
     )
     assert match is not None

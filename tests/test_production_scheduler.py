@@ -298,7 +298,7 @@ def test_canonical_incomplete_readiness_blocks_forcing_candidate_submission(tmp_
     assert adapter.download_calls == 0
 
 
-def test_non_ok_canonical_readiness_blocks_forcing_candidate_submission(tmp_path: Path) -> None:
+def test_warn_canonical_readiness_allows_candidate_selection_with_quality_evidence(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
     source_object = {"source": "gfs", "manifest_object_key": "raw/gfs/2026052106/manifest.json"}
@@ -342,14 +342,16 @@ def test_non_ok_canonical_readiness_blocks_forcing_candidate_submission(tmp_path
 
     result = scheduler.run_once()
 
-    assert result.evidence["candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["candidate_count"] == 1
     assert result.evidence["counts"]["submitted_count"] == 0
-    blocked = result.evidence["blocked_candidates"][0]
-    assert blocked["reason"] == "missing_canonical_leads"
-    canonical = blocked["state_evidence"]["canonical_readiness"]
-    assert canonical["status"] == "canonical_incomplete"
-    assert canonical["rejected_quality_flags"] == {"warn": 1}
-    assert canonical["missing_leads"][0]["missing_variables"] == ["shortwave_down"]
+    assert len(result.evidence["candidates"]) == 1
+    assert result.evidence["candidates"][0]["status"] == "selected"
+    canonical = result.evidence["candidates"][0]["state_evidence"]["canonical_readiness"]
+    assert canonical["status"] == "canonical_ready"
+    assert canonical["ready"] is True
+    assert canonical["rejected_quality_flags"] == {}
+    assert canonical["present_variables"] == sorted(GFS_REQUIRED_STANDARD_VARIABLES)
     assert adapter.download_calls == 0
 
 

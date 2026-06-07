@@ -284,7 +284,7 @@ class PsycopgModelRegistryStore:
                     JOIN hydro.hydro_run hr
                         ON hr.basin_version_id = bv.basin_version_id
                     WHERE bv.basin_id = core.basin.basin_id
-                      AND hr.status::text = ANY(%s)
+                      AND hr.status = ANY(%s::hydro.run_status[])
                       AND hr.run_type = 'forecast'
                       AND hr.cycle_time IS NOT NULL
                 )

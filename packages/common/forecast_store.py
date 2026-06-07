@@ -3124,6 +3124,12 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "columns": ["basin_id", "basin_version_id"],
         },
         {
+            "table": "flood.return_period_result",
+            "index": "return_period_result_run_quality_idx",
+            "status": "covered_by_lateral_run_quality_index",
+            "columns": ["run_id", "max_over_window", "return_period", "warning_level"],
+        },
+        {
             "table": "hydro.river_timeseries",
             "index": "river_timeseries_qhh_latest_window_idx",
             "status": "covered_by_latest_product_window_index",
@@ -3372,37 +3378,37 @@ def _flood_product_quality_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _flood_product_quality_join(alias: str) -> str:
     return f"""
-                LEFT JOIN (
-                    SELECT run_id,
+                LEFT JOIN LATERAL (
+                    SELECT
                            CASE
-                               WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) > 0
+                               WHEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END) > 0
                                THEN true
                                WHEN COUNT(*) > 0
                                THEN false
                                ELSE NULL
                            END AS quality_max_over_window,
                            CASE
-                               WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) > 0
-                               THEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END)
+                               WHEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END) > 0
+                               THEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END)
                                ELSE COUNT(*)
                            END AS result_rows,
                            SUM(CASE
-                               WHEN max_over_window = true AND return_period IS NOT NULL THEN 1
+                               WHEN fpr.max_over_window = true AND fpr.return_period IS NOT NULL THEN 1
                                ELSE 0
                            END) AS return_period_rows,
                            CASE
-                               WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) > 0
+                               WHEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END) > 0
                                THEN SUM(
                                    CASE
-                                       WHEN max_over_window = true AND warning_level IS NOT NULL THEN 1
+                                       WHEN fpr.max_over_window = true AND fpr.warning_level IS NOT NULL THEN 1
                                        ELSE 0
                                    END
                                )
-                               ELSE SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END)
+                               ELSE SUM(CASE WHEN fpr.warning_level IS NOT NULL THEN 1 ELSE 0 END)
                            END AS warning_rows
-                    FROM flood.return_period_result
-                    GROUP BY run_id
-                ) {alias} ON {alias}.run_id = h.run_id
+                    FROM flood.return_period_result fpr
+                    WHERE fpr.run_id = h.run_id
+                ) {alias} ON true
     """
 
 

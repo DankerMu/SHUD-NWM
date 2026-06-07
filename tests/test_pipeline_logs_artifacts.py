@@ -13,7 +13,12 @@ from packages.common.object_store import LocalObjectStore
 from services.artifacts import ArtifactReader, ArtifactReaderConfig
 from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig
 from tests.test_monitoring_api import _create_job, _cycle_time, _insert_cycle, _store
-from tests.test_orchestration_chain import FakeCycleRepository, FakeCycleSlurmClient, _basins
+from tests.test_orchestration_chain import (
+    FakeCycleRepository,
+    FakeCycleSlurmClient,
+    _basins,
+    _successful_control_node_publisher,
+)
 from workers.data_adapters.base import cycle_id_for
 
 
@@ -430,6 +435,7 @@ def test_compute_pipeline_emits_published_log_uri_and_writes_published_log(
 ) -> None:
     published_root = tmp_path / "published"
     monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(published_root))
+    monkeypatch.setattr("services.orchestrator.chain.TilePublisher", _successful_control_node_publisher())
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
     orchestrator = ForecastOrchestrator(
@@ -456,14 +462,18 @@ def test_compute_pipeline_emits_published_log_uri_and_writes_published_log(
         )
         assert stage.log_uri == expected
         assert repository.jobs[stage.pipeline_job_id]["log_uri"] == expected
-        assert (
+        log_content = (
             published_root
             / "logs"
             / "gfs"
             / "2026050100"
             / "cycle_gfs_2026050100"
             / f"{stage.pipeline_job_id}.out"
-        ).read_text(encoding="utf-8") == "ok"
+        ).read_text(encoding="utf-8")
+        if stage.stage == "publish":
+            assert json.loads(log_content)["status"] == "published"
+        else:
+            assert log_content == "ok"
 
 
 def test_compute_pipeline_keeps_legacy_object_store_uri_without_publish_root(
