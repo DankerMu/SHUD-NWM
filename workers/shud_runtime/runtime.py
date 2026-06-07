@@ -1714,7 +1714,10 @@ class _StateCheckpointTracker:
         self.source_path = output_dir / f"{self.project_name}.cfg.ic.update"
         self.checkpoint_dir = output_dir / "state_checkpoints"
         self.targets = {
-            int(hour): self.start_time + timedelta(hours=int(hour))
+            int(hour): {
+                "valid_time": self.start_time + timedelta(hours=int(hour)),
+                "relative_minute": float(int(hour) * 60),
+            }
             for hour in _state_checkpoint_hours(manifest)
         }
         self.captured: dict[int, dict[str, Any]] = {}
@@ -1725,10 +1728,15 @@ class _StateCheckpointTracker:
         header_minute = _read_cfg_ic_header_minute(self.source_path)
         if header_minute is None:
             return
-        for hour, valid_time in self.targets.items():
+        for hour, target in self.targets.items():
             if hour in self.captured:
                 continue
-            if round(header_minute) != round(valid_time.timestamp() / 60.0):
+            valid_time = target["valid_time"]
+            if not _header_minute_matches_checkpoint(
+                header_minute,
+                valid_time=valid_time,
+                relative_minute=target["relative_minute"],
+            ):
                 continue
             self._capture(hour, valid_time)
 
@@ -1794,11 +1802,25 @@ def _state_checkpoint_poll_seconds(manifest: dict[str, Any]) -> float:
     runtime = manifest.get("runtime") or {}
     value = runtime.get("state_checkpoint_poll_seconds")
     if value in (None, ""):
-        return 5.0
+        return 0.1
     try:
         return max(float(value), 0.1)
     except (TypeError, ValueError):
-        return 5.0
+        return 0.1
+
+
+def _header_minute_matches_checkpoint(
+    header_minute: float,
+    *,
+    valid_time: datetime,
+    relative_minute: float,
+) -> bool:
+    rounded_header = round(header_minute)
+    # SHUD writes forecast .cfg.ic.update headers as minutes since run start.
+    if rounded_header == round(relative_minute):
+        return True
+    # Saved/warm-state fixtures and materialized canonical ICs may use epoch minutes.
+    return rounded_header == round(_ensure_utc(valid_time).timestamp() / 60.0)
 
 
 def _shud_forcing_station(manifest: dict[str, Any]) -> dict[str, Any]:
