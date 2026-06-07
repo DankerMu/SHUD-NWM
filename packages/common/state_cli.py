@@ -12,6 +12,7 @@ from typing import Any, Sequence
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from packages.common.object_store import LocalObjectStore
 from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager, StateManagerError
+from packages.common.state_qc import cfg_ic_header_minute_index
 from workers.data_adapters.base import cycle_id_for
 
 
@@ -128,11 +129,12 @@ def save_state_for_run(
     # interim state is valid at the next cycle's init time (M24 §2 Lane 2).
     saved = []
     for checkpoint in checkpoints:
+        ic_file_path = _normalized_checkpoint_ic_file(checkpoint)
         result = state_manager.save_state_snapshot(
             model_id=run.model_id,
             run_id=run.run_id,
             valid_time=checkpoint.valid_time,
-            ic_file_path=checkpoint.ic_file,
+            ic_file_path=ic_file_path,
             source_id=run.source_id,
             cycle_id=_state_cycle_id(run),
             lead_hours=checkpoint.lead_hours,
@@ -168,6 +170,31 @@ def save_state_for_run(
         "valid_time": first["valid_time"],
         "checkpoints": saved,
     }
+
+
+def _normalized_checkpoint_ic_file(checkpoint: StateCheckpoint) -> Path:
+    """Return an IC file whose header minute-time is absolute at valid_time."""
+
+    content = checkpoint.ic_file.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    if not lines:
+        return checkpoint.ic_file
+    header = lines[0].split()
+    minute_index = cfg_ic_header_minute_index(header)
+    if minute_index is None:
+        return checkpoint.ic_file
+    expected_minute = _ensure_utc(checkpoint.valid_time).timestamp() / 60.0
+    try:
+        observed_minute = float(header[minute_index])
+    except ValueError:
+        return checkpoint.ic_file
+    if round(observed_minute) == round(expected_minute):
+        return checkpoint.ic_file
+    normalized = checkpoint.ic_file.with_name(f".{checkpoint.ic_file.name}.normalized")
+    header[minute_index] = f"{expected_minute:.6f}"
+    lines[0] = "\t".join(header)
+    normalized.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return normalized
 
 
 def resolve_run_id(run_id: str | None, manifest_index: str | None, task_id: int | None) -> str:

@@ -283,6 +283,7 @@ def test_saved_state_finds_restart_from_object_store_output_directory_uri(tmp_pa
 def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: Path) -> None:
     from packages.common.state_cli import StateRunContext, save_state_for_run
     from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager
+    from workers.shud_runtime.runtime import _read_cfg_ic_header_minute
 
     object_root = tmp_path / "object-store"
     workspace = tmp_path / "workspace"
@@ -381,6 +382,10 @@ def test_saved_state_persists_long_run_checkpoints_at_each_valid_time(tmp_path: 
     ]
     assert [item["lead_hours"] for item in result["checkpoints"]] == [6, 12]
     assert result["state_uri"].endswith("state.cfg.ic")
+    saved_t6 = object_root / "states" / "GFS" / "demo_model" / "2026050106" / "state.cfg.ic"
+    saved_t12 = object_root / "states" / "GFS" / "demo_model" / "2026050112" / "state.cfg.ic"
+    assert round(_read_cfg_ic_header_minute(saved_t6)) == round(_minute_time("2026-05-01T06:00:00Z"))
+    assert round(_read_cfg_ic_header_minute(saved_t12)) == round(_minute_time("2026-05-01T12:00:00Z"))
 
 
 # ---------------------------------------------------------------------------
