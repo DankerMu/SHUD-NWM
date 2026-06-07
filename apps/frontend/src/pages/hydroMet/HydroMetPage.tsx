@@ -52,6 +52,7 @@ import {
   type QhhLatestProduct,
 } from '@/pages/hydroMet/bootstrap'
 import { BasinSelector } from '@/pages/hydroMet/BasinSelector'
+import { ProductStatusBar, ReturnPeriodSection } from '@/pages/hydroMet/ReturnPeriodSection'
 
 type LoadState =
   | { kind: 'loading' }
@@ -400,7 +401,9 @@ export function ReadyHydroMetContent({ result, product }: { result: HydroMetBoot
   return (
     <div className="grid gap-3 min-[1180px]:grid-cols-[minmax(19rem,0.76fr)_minmax(0,1.04fr)_minmax(23rem,1fr)]">
       <aside className="space-y-3">
+        <ProductStatusBar product={product} />
         <ProductPanel product={product} />
+        <ReturnPeriodSection product={product} />
         {result.stationError ? <StatusPanel tone="warning" title="站点 inventory 部分失败" messages={[result.stationError]} testId="hydro-met-station-partial-failure" /> : null}
         {result.riverError ? <StatusPanel tone="warning" title="河段流量候选部分失败" messages={[result.riverError]} testId="hydro-met-river-partial-failure" /> : null}
       </aside>
