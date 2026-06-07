@@ -364,10 +364,14 @@ def list_basins(
     request: Request,
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    has_display_product: bool = Query(default=False),
     store: PsycopgModelRegistryStore = Depends(get_model_registry_store),
 ) -> dict[str, Any]:
     try:
-        return _ok(request, store.list_basins(limit=limit, offset=offset))
+        return _ok(
+            request,
+            store.list_basins(limit=limit, offset=offset, has_display_product=has_display_product),
+        )
     except (ModelRegistryError, ModelPackageValidationError) as error:
         raise _handle_registry_error(error) from error
     except Exception as error:
