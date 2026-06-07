@@ -42,6 +42,22 @@ export interface M11MapOverlayInteraction {
   feature?: NonNullable<MapLayerMouseEvent['features']>[number]
 }
 
+// 代站 clustered-GeoJSON 图层的固定 source/layer id。以 layerId/source 抽象集中于此，
+// 未来切换到后端 station-MVT 点图层瓦片端点时，只需替换 <Source> 实现而无需改交互/分发逻辑。
+const MET_STATION_SOURCE_ID = 'm11-met-stations-source'
+const MET_STATION_CLUSTER_LAYER_ID = 'clusters'
+const MET_STATION_CLUSTER_COUNT_LAYER_ID = 'cluster-count'
+const MET_STATION_POINT_LAYER_ID = 'met-stations-point'
+
+export interface M11StationFeatureCollection {
+  type: 'FeatureCollection'
+  features: Array<{
+    type: 'Feature'
+    geometry: { type: 'Point'; coordinates: [number, number] }
+    properties: { station_id: string; station_name: string | null }
+  }>
+}
+
 export interface M11MapCameraFit {
   bounds: [[number, number], [number, number]]
   padding?: number
@@ -62,6 +78,7 @@ interface M11MapLibreSurfaceProps {
   basinSegments?: BasinSegmentRow[]
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
+  stationFeatureCollection?: M11StationFeatureCollection | null
   className?: string
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
@@ -163,6 +180,7 @@ export function M11MapLibreSurface({
   basinSegments = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
+  stationFeatureCollection = null,
   className,
   fitTo,
   flyTo,
@@ -210,10 +228,13 @@ export function M11MapLibreSurface({
       m11SelectedLayerUnavailableReason(state, layers, overlay, overlayData, basinRiverFeatureCollection.features.length > 0),
     [basinRiverFeatureCollection.features.length, layers, overlay, overlayData, overlayUnavailableReason, state],
   )
+  // 代站图层仅在选中该图层模式且有非空 features 时渲染/注册（关闭图层不注册 source/layer）。
+  const showStationLayer = state.layer === 'met-stations' && (stationFeatureCollection?.features.length ?? 0) > 0
   const interactiveLayerIds = [
     ...(basinRiverFeatureCollection.features.length > 0 ? ['m11-basin-river-line'] : []),
     ...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []),
     ...(renderableOverlay ? [renderableOverlay.layer.id] : []),
+    ...(showStationLayer ? [MET_STATION_POINT_LAYER_ID, MET_STATION_CLUSTER_LAYER_ID] : []),
   ]
 
   useEffect(() => {
@@ -292,12 +313,26 @@ export function M11MapLibreSurface({
         onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
         return
       }
+      if (showStationLayer) {
+        // 点 cluster：用 source 运行时 API 取展开 zoom 后 flyTo（测试以 stub 验证调用）。
+        const clusterFeature = findEventFeature(event, MET_STATION_CLUSTER_LAYER_ID)
+        if (clusterFeature) {
+          expandStationCluster(mapRef.current, clusterFeature)
+          return
+        }
+        // 点单个代站：经 onOverlayClick 以 met-stations 分发，feature 带 station_id（为 #340 popup 预留）。
+        const stationFeature = findEventFeature(event, MET_STATION_POINT_LAYER_ID)
+        if (stationFeature) {
+          onOverlayClick?.({ layerId: 'met-stations', event, feature: stationFeature })
+          return
+        }
+      }
       const overlayFeature = renderableOverlay ? findEventFeature(event, renderableOverlay.layer.id) : null
       if (renderableOverlay && overlayFeature) {
         onOverlayClick?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
       }
     },
-    [onOverlayClick, renderableOverlay],
+    [onOverlayClick, renderableOverlay, showStationLayer],
   )
 
   const handleMapError = useCallback((event: { error?: { message?: string } }) => {
@@ -323,6 +358,7 @@ export function M11MapLibreSurface({
       data-hovered-segment-id={hoveredRiverSegmentId ?? ''}
       data-overlay-source-type={renderableOverlay?.source.type ?? ''}
       data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
+      data-met-station-feature-count={showStationLayer ? stationFeatureCollection?.features.length ?? 0 : 0}
     >
       <Map
         ref={mapRef}
@@ -348,6 +384,9 @@ export function M11MapLibreSurface({
         {renderableOverlay ? <M11OverlayPrimitive overlay={renderableOverlay} data={overlayData} /> : null}
         {selectedSegmentFeatureCollection.features.length > 0 ? (
           <M11SelectedSegmentPrimitive collection={selectedSegmentFeatureCollection} />
+        ) : null}
+        {showStationLayer && stationFeatureCollection ? (
+          <M11StationClusterPrimitive collection={stationFeatureCollection} />
         ) : null}
       </Map>
 
@@ -790,6 +829,84 @@ function M11SelectedSegmentPrimitive({ collection }: { collection: SelectedSegme
   )
 }
 
+/**
+ * 代站 clustered-GeoJSON primitive：以 layerId/source 抽象组织（id 集中常量），未来切换到后端
+ * station-MVT 点图层瓦片端点时仅替换 <Source> 实现即可，无需重写交互/popup 分发。
+ */
+function M11StationClusterPrimitive({ collection }: { collection: M11StationFeatureCollection }) {
+  return (
+    <Source
+      id={MET_STATION_SOURCE_ID}
+      type="geojson"
+      data={collection}
+      cluster
+      clusterRadius={50}
+      clusterMaxZoom={14}
+      promoteId="station_id"
+    >
+      <Layer
+        id={MET_STATION_CLUSTER_LAYER_ID}
+        type="circle"
+        source={MET_STATION_SOURCE_ID}
+        filter={['has', 'point_count']}
+        paint={{
+          'circle-color': ['step', ['get', 'point_count'], '#90CAF9', 25, '#42A5F5', 100, '#1E88E5'],
+          'circle-radius': ['step', ['get', 'point_count'], 14, 25, 18, 100, 24],
+          'circle-opacity': 0.85,
+          'circle-stroke-color': '#FFFFFF',
+          'circle-stroke-width': 1.5,
+        }}
+      />
+      <Layer
+        id={MET_STATION_CLUSTER_COUNT_LAYER_ID}
+        type="symbol"
+        source={MET_STATION_SOURCE_ID}
+        filter={['has', 'point_count']}
+        layout={{
+          'text-field': ['get', 'point_count_abbreviated'],
+          'text-size': 12,
+          'text-allow-overlap': true,
+        }}
+        paint={{ 'text-color': '#0A1929' }}
+      />
+      <Layer
+        id={MET_STATION_POINT_LAYER_ID}
+        type="circle"
+        source={MET_STATION_SOURCE_ID}
+        filter={['!', ['has', 'point_count']]}
+        paint={{
+          'circle-color': '#F97316',
+          'circle-radius': 6,
+          'circle-opacity': 0.92,
+          'circle-stroke-color': '#FFFFFF',
+          'circle-stroke-width': 1.5,
+        }}
+      />
+    </Source>
+  )
+}
+
+type StationClusterSource = {
+  getClusterExpansionZoom?: (clusterId: number, callback: (error: unknown, zoom: number) => void) => void
+}
+
+function expandStationCluster(
+  mapRef: MapRef | null,
+  feature: NonNullable<MapLayerMouseEvent['features']>[number],
+) {
+  const map = mapRef?.getMap?.()
+  if (!map) return
+  const source = (map.getSource(MET_STATION_SOURCE_ID) as StationClusterSource | undefined) ?? undefined
+  const clusterId = feature.properties?.cluster_id ?? feature.id
+  const geometry = feature.geometry
+  if (!source?.getClusterExpansionZoom || typeof clusterId !== 'number' || geometry?.type !== 'Point') return
+  const [lon, lat] = geometry.coordinates as [number, number]
+  source.getClusterExpansionZoom(clusterId, (error, zoom) => {
+    if (error) return
+    map.flyTo({ center: [lon, lat], zoom, duration: 450 })
+  })
+}
+
 export function buildSelectedSegmentFeatureCollection(
   selectedSegmentId: string | null | undefined,
   geometry: components['schemas']['GeoJsonLineString'] | null | undefined,
@@ -957,6 +1074,8 @@ function m11SelectedLayerUnavailableReason(
   hasBasinRiverNetwork = false,
 ) {
   if (overlay && (overlay.source.type === 'vector' || overlayData)) return null
+  // 代站为独立 clustered-GeoJSON 图层，不走 MVT overlay 注册路径；其空态/truncation 由页面层诚实标注。
+  if (state.layer === 'met-stations') return null
   if (hasBasinRiverNetwork && (state.layer === 'discharge' || state.layer === 'flood-return-period' || state.layer === 'warning-level')) {
     return null
   }

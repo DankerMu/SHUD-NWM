@@ -321,6 +321,7 @@ const layerLabels: Record<M11Layer, string> = {
   'water-level': 'Water level',
   'flood-return-period': 'Flood return period',
   'warning-level': 'Warning level',
+  'met-stations': 'Meteorological stations',
 }
 
 export function createSourceScenarioSelection(

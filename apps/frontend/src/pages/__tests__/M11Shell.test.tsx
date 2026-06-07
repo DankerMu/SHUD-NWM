@@ -30,13 +30,18 @@ import {
   m11FallbackLegends,
   resolveM11ValidTimeCorrection,
 } from '@/pages/m11/M11Controls'
+import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { OverviewPage } from '@/pages/OverviewPage'
 import { useOverviewDataStore } from '@/stores/overviewData'
+import { useStationLayerDataStore } from '@/stores/stationLayerData'
 
 const mapSources: Array<Record<string, unknown>> = []
 const mapLayers: Array<Record<string, unknown>> = []
 const fitBoundsCalls: Array<unknown[]> = []
 const flyToCalls: Array<unknown> = []
+const clusterExpansionCalls: Array<unknown> = []
+// 代站 cluster 展开 stub：模拟 source.getClusterExpansionZoom(clusterId, cb) 异步回调。
+const clusterExpansionZoom = { value: 9 as number, error: null as unknown }
 
 vi.mock('react-map-gl/maplibre', () => ({
   default: forwardRef(
@@ -76,9 +81,30 @@ vi.mock('react-map-gl/maplibre', () => ({
         },
       }
       const basinFeature = { layer: { id: 'm11-basin-fill' }, properties: { basin_id: 'yangtze' } }
-      useImperativeHandle(ref, () => ({
+      const clusterFeature = {
+        layer: { id: 'clusters' },
+        id: 7,
+        properties: { cluster: true, cluster_id: 7, point_count: 12 },
+        geometry: { type: 'Point', coordinates: [101.5, 30.5] },
+      }
+      const stationPointFeature = {
+        layer: { id: 'met-stations-point' },
+        properties: { station_id: 'HMT-Y2-0237', station_name: 'Station 0237' },
+        geometry: { type: 'Point', coordinates: [100.4, 30.4] },
+      }
+      const map = {
         fitBounds: (...args: unknown[]) => fitBoundsCalls.push(args),
         flyTo: (args: unknown) => flyToCalls.push(args),
+        getSource: (id: string) => ({
+          getClusterExpansionZoom: (clusterId: number, callback: (error: unknown, zoom: number) => void) => {
+            clusterExpansionCalls.push({ id, clusterId })
+            callback(clusterExpansionZoom.error, clusterExpansionZoom.value)
+          },
+        }),
+      }
+      useImperativeHandle(ref, () => ({
+        ...map,
+        getMap: () => map,
       }))
       return (
         <div
@@ -161,6 +187,20 @@ vi.mock('react-map-gl/maplibre', () => ({
             })
           }}
           onFocus={() => onError?.({ error: { message: 'mock source failed' } })}
+          onDrag={() =>
+            onClick?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [clusterFeature],
+              point: { x: 5, y: 5 },
+            })
+          }
+          onDrop={() =>
+            onClick?.({
+              target: { getCanvas: () => ({ style: canvasStyle }) },
+              features: [stationPointFeature],
+              point: { x: 6, y: 6 },
+            })
+          }
         >
           {children}
         </div>
@@ -415,6 +455,9 @@ describe('M11 visual foundation shell', () => {
     mapLayers.length = 0
     fitBoundsCalls.length = 0
     flyToCalls.length = 0
+    clusterExpansionCalls.length = 0
+    clusterExpansionZoom.value = 9
+    clusterExpansionZoom.error = null
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(async () => geoJsonResponse({ type: 'FeatureCollection', features: [] })),
@@ -423,6 +466,11 @@ describe('M11 visual foundation shell', () => {
       ...useOverviewDataStore.getInitialState(),
       loadOverview: vi.fn().mockResolvedValue(undefined),
       loadBasinDetail: vi.fn().mockResolvedValue(undefined),
+    })
+    useStationLayerDataStore.setState({
+      ...useStationLayerDataStore.getInitialState(),
+      loadStationLayer: vi.fn().mockResolvedValue(undefined),
+      clear: vi.fn(),
     })
   })
 
@@ -1351,5 +1399,180 @@ describe('M11 visual foundation shell', () => {
     expect(onQueryChange).toHaveBeenCalledWith({ validTime: '2026-05-18T06:00:00.000Z' })
     unmount()
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  describe('met-station cluster layer (M26-3)', () => {
+    const stationFeatureCollection = {
+      type: 'FeatureCollection' as const,
+      features: [
+        {
+          type: 'Feature' as const,
+          geometry: { type: 'Point' as const, coordinates: [100.4, 30.4] as [number, number] },
+          properties: { station_id: 'HMT-Y2-0237', station_name: 'Station 0237' },
+        },
+        {
+          type: 'Feature' as const,
+          geometry: { type: 'Point' as const, coordinates: [101.6, 30.6] as [number, number] },
+          properties: { station_id: 'HMT-Y2-0238', station_name: 'Station 0238' },
+        },
+      ],
+    }
+    const metState = { ...state, layer: 'met-stations' as const }
+
+    it('registers a clustered-GeoJSON source with three layers and interactive ids when the met-station layer is on', () => {
+      render(<M11MapSurface state={metState} layers={layers} stationFeatureCollection={stationFeatureCollection} />)
+
+      const source = mapSources.find((entry) => entry.id === 'm11-met-stations-source')
+      expect(source).toMatchObject({ id: 'm11-met-stations-source', type: 'geojson', cluster: true, promoteId: 'station_id' })
+      const layerIds = mapLayers.map((layer) => layer.id)
+      expect(layerIds).toEqual(expect.arrayContaining(['clusters', 'cluster-count', 'met-stations-point']))
+      expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-met-station-feature-count', '2')
+      expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute(
+        'data-interactive-layer-ids',
+        'met-stations-point,clusters',
+      )
+    })
+
+    it('does not register the met-station source/layers when the layer is off', () => {
+      render(<M11MapSurface state={state} layers={layers} stationFeatureCollection={stationFeatureCollection} />)
+
+      expect(mapSources.find((entry) => entry.id === 'm11-met-stations-source')).toBeUndefined()
+      expect(mapLayers.map((layer) => layer.id)).not.toEqual(expect.arrayContaining(['clusters', 'met-stations-point']))
+      expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-met-station-feature-count', '0')
+    })
+
+    it('does not register the met-station source when the collection is empty', () => {
+      render(
+        <M11MapSurface
+          state={metState}
+          layers={layers}
+          stationFeatureCollection={{ type: 'FeatureCollection', features: [] }}
+        />,
+      )
+
+      expect(mapSources.find((entry) => entry.id === 'm11-met-stations-source')).toBeUndefined()
+      expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', '')
+    })
+
+    it('expands the cluster via getClusterExpansionZoom and flies to it on cluster click', () => {
+      render(<M11MapSurface state={metState} layers={layers} stationFeatureCollection={stationFeatureCollection} />)
+
+      fireEvent.drag(screen.getByTestId('mock-maplibre-map'))
+      expect(clusterExpansionCalls).toEqual([{ id: 'm11-met-stations-source', clusterId: 7 }])
+      expect(flyToCalls).toEqual([{ center: [101.5, 30.5], zoom: 9, duration: 450 }])
+    })
+
+    it('dispatches met-station point clicks with station_id for downstream popups', () => {
+      const onOverlayClick = vi.fn()
+      render(
+        <M11MapSurface
+          state={metState}
+          layers={layers}
+          stationFeatureCollection={stationFeatureCollection}
+          onOverlayClick={onOverlayClick}
+        />,
+      )
+
+      fireEvent.drop(screen.getByTestId('mock-maplibre-map'))
+      expect(onOverlayClick).toHaveBeenCalledWith(
+        expect.objectContaining({
+          layerId: 'met-stations',
+          feature: expect.objectContaining({ properties: expect.objectContaining({ station_id: 'HMT-Y2-0237' }) }),
+        }),
+      )
+      expect(flyToCalls).toHaveLength(0)
+    })
+
+    it('exposes a switchable met-station layer entry in the meteorology group', async () => {
+      const onQueryChange = vi.fn()
+      const user = userEvent.setup()
+
+      render(<LayerGroupControls state={state} layers={layers} onQueryChange={onQueryChange} />)
+
+      await user.click(screen.getByRole('button', { name: /气象代站/ }))
+      expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-stations' })
+    })
+
+    it('shows a honest empty state on the national overview and never fetches without a basin', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+      window.history.pushState({}, '', '/overview?layer=met-stations')
+
+      render(
+        <BrowserRouter>
+          <OverviewPage />
+        </BrowserRouter>,
+      )
+
+      expect(screen.getByTestId('m11-met-station-status')).toHaveTextContent('请选择流域以加载气象代站')
+      expect(loadStationLayer).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('useMetStationLayer honest states (M26-3)', () => {
+    function Harness(props: Parameters<typeof useMetStationLayer>[0]) {
+      const model = useMetStationLayer(props)
+      return (
+        <div
+          data-testid="harness"
+          data-status={model.statusNote ?? ''}
+          data-feature-count={model.featureCollection?.features.length ?? -1}
+          data-truncated={String(model.truncated)}
+        />
+      )
+    }
+
+    it('does not fetch while the source is unresolved (best not yet GFS/IFS)', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+
+      render(<Harness active basinId="heihe" resolvedSource="Unknown" cycle={null} />)
+
+      expect(loadStationLayer).not.toHaveBeenCalled()
+      expect(screen.getByTestId('harness').getAttribute('data-status')).toContain('Best Available')
+    })
+
+    it('fetches with the basin identity once the source resolves to GFS/IFS', () => {
+      const loadStationLayer = vi.fn().mockResolvedValue(undefined)
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer,
+        clear: vi.fn(),
+      })
+
+      render(<Harness active basinId="heihe" resolvedSource="GFS" cycle={null} />)
+
+      expect(loadStationLayer).toHaveBeenCalledWith({ basinId: 'heihe', resolvedSource: 'GFS', cycle: null })
+    })
+
+    it('annotates truncation when an oversized basin is capped', () => {
+      useStationLayerDataStore.setState({
+        ...useStationLayerDataStore.getInitialState(),
+        loadStationLayer: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn(),
+        data: {
+          stations: [],
+          total: 12000,
+          loaded: 5000,
+          truncated: true,
+        },
+        requestKey: 'heihe::GFS::latest',
+      })
+
+      render(<Harness active basinId="heihe" resolvedSource="GFS" cycle={null} />)
+
+      const harness = screen.getByTestId('harness')
+      expect(harness).toHaveAttribute('data-truncated', 'true')
+      expect(harness.getAttribute('data-status')).toContain('5000/12000')
+      expect(harness.getAttribute('data-status')).toContain('截断')
+    })
   })
 })
