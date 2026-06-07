@@ -219,7 +219,7 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-xl font-semibold text-foreground">{canonicalRoute === '/ops' ? '运维工作台' : '监控工作台'}</h1>
+        <h1 className="text-xl font-semibold text-foreground">{canonicalRoute === '/ops' ? '内部诊断' : '监控工作台'}</h1>
         <p className="mt-1 text-sm text-muted">
           {visibleCycle?.source ?? visibleSource} · {formatDate(visibleCycle?.cycle_time ?? visibleCycleTime)}
         </p>
