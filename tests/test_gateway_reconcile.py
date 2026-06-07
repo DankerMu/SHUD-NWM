@@ -237,6 +237,27 @@ def test_reconcile_unknown_to_accounting_is_unverified_not_resubmitted() -> None
     assert store.get_job("job_unknown").status == RECONCILE_UNVERIFIED_STATUS
 
 
+def test_pipeline_store_success_status_clears_previous_unverified_error() -> None:
+    store = _store()
+    _make_inflight_job(
+        store,
+        job_id="job_recovered",
+        slurm_job_id="3004",
+        status="running",
+    )
+    store.update_job_status(
+        "job_recovered",
+        RECONCILE_UNVERIFIED_STATUS,
+        error_code="SLURM_RECONCILE_UNVERIFIED",
+        error_message="sacct could not verify the candidate identity.",
+    )
+    store.update_job_status("job_recovered", "succeeded", exit_code=0)
+    recovered = store.get_job("job_recovered")
+    assert recovered.status == "succeeded"
+    assert recovered.error_code is None
+    assert recovered.error_message is None
+
+
 def test_reconcile_no_duplicate_resubmit_for_running_or_terminal() -> None:
     store = _store()
     _make_inflight_job(store, job_id="job_running", slurm_job_id="4001")

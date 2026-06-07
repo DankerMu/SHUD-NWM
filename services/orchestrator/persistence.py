@@ -183,6 +183,10 @@ class PipelineStore:
             job.finished_at = finished_at
         if exit_code is not None:
             job.exit_code = exit_code
+        if status in {"succeeded", "complete", "published"} and error_code is None:
+            job.error_code = None
+        if status in {"succeeded", "complete", "published"} and error_message is None:
+            job.error_message = None
         if error_code is not None:
             job.error_code = error_code
         if error_message is not None:

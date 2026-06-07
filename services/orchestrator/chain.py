@@ -5801,8 +5801,14 @@ class PsycopgOrchestratorRepository:
                 started_at = COALESCE(%s, started_at),
                 finished_at = COALESCE(%s, finished_at),
                 exit_code = COALESCE(%s, exit_code),
-                error_code = COALESCE(%s, error_code),
-                error_message = COALESCE(%s, error_message),
+                error_code = CASE
+                    WHEN %s IN ('succeeded', 'complete', 'published') AND %s IS NULL THEN NULL
+                    ELSE COALESCE(%s, error_code)
+                END,
+                error_message = CASE
+                    WHEN %s IN ('succeeded', 'complete', 'published') AND %s IS NULL THEN NULL
+                    ELSE COALESCE(%s, error_message)
+                END,
                 log_uri = COALESCE(%s, log_uri),
                 updated_at = now()
             WHERE job_id = %s
@@ -5813,7 +5819,21 @@ class PsycopgOrchestratorRepository:
               )
             RETURNING *
             """,
-            (status, started_at, finished_at, exit_code, error_code, error_message, log_uri, job_id, status),
+            (
+                status,
+                started_at,
+                finished_at,
+                exit_code,
+                status,
+                error_code,
+                error_code,
+                status,
+                error_message,
+                error_message,
+                log_uri,
+                job_id,
+                status,
+            ),
         )
         if record is None:
             record = self._fetch_one(
