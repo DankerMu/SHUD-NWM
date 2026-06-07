@@ -51,6 +51,7 @@ import {
   type HydroMetStation,
   type QhhLatestProduct,
 } from '@/pages/hydroMet/bootstrap'
+import { BasinSelector } from '@/pages/hydroMet/BasinSelector'
 
 type LoadState =
   | { kind: 'loading' }
@@ -138,7 +139,12 @@ export function HydroMetPage() {
       }
     }
     setLoadState({ kind: 'loading' })
-    void loadHydroMetBootstrap({ source: state.source, cycle: state.cycle, strictIdentity: state.strictIdentity }).then(
+    void loadHydroMetBootstrap({
+      source: state.source,
+      cycle: state.cycle,
+      basinId: state.basin,
+      strictIdentity: state.strictIdentity,
+    }).then(
       (result) => {
         if (!cancelled) setLoadState({ kind: 'loaded', result })
       },
@@ -149,7 +155,7 @@ export function HydroMetPage() {
     return () => {
       cancelled = true
     }
-  }, [state.cycle, state.source, state.strictIdentity, state.strictIdentityError])
+  }, [state.basin, state.cycle, state.source, state.strictIdentity, state.strictIdentityError])
 
   const updateState = (patch: HydroMetQueryPatch) => {
     const next = mergeHydroMetQueryState(state, patch)
@@ -164,8 +170,13 @@ export function HydroMetPage() {
           <h1 className="text-xl font-semibold text-primary-900">水文气象展示</h1>
           <p className="text-sm text-neutral-700">QHH latest-product bootstrap · 河段流量 q_down 与气象 forcing inventory</p>
         </div>
-        <div className="flex rounded-md border border-neutral-300 bg-white p-1" role="tablist" aria-label="水文气象数据源">
-          {hydroMetSources.map((source) => (
+        <div className="flex flex-wrap items-center gap-3">
+          <BasinSelector
+            selectedBasinId={state.basin}
+            onSelect={(basinId) => updateState({ basin: basinId, cycle: null })}
+          />
+          <div className="flex rounded-md border border-neutral-300 bg-white p-1" role="tablist" aria-label="水文气象数据源">
+            {hydroMetSources.map((source) => (
             <button
               key={source}
               type="button"
@@ -181,6 +192,7 @@ export function HydroMetPage() {
               {source}
             </button>
           ))}
+          </div>
         </div>
       </div>
 

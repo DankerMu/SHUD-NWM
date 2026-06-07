@@ -16,6 +16,7 @@ import {
   type QhhLatestProduct,
 } from '@/pages/hydroMet/bootstrap'
 import {
+  mergeHydroMetQueryState,
   needsHydroMetQueryReplacement,
   parseHydroMetQueryState,
   serializeHydroMetQueryState,
@@ -248,6 +249,25 @@ describe('hydro-met query state', () => {
     expect(state.strictIdentityError).toContain('缺少 cycle_time, model_id')
     expect(needsHydroMetQueryReplacement('?source=GFS&run_id=qhh_gfs_2026052100_smoke')).toBe(false)
   })
+
+  it('parses, serializes, and merges the selected basin without a whitelist (#314)', () => {
+    const state = parseHydroMetQueryState('source=GFS&basin=basins_heihe')
+    expect(state.basin).toBe('basins_heihe')
+    expect(serializeHydroMetQueryState(state)).toBe('source=GFS&basin=basins_heihe')
+
+    const switched = mergeHydroMetQueryState(state, { basin: 'basins_qhh', cycle: null })
+    expect(switched.basin).toBe('basins_qhh')
+    expect(switched.cycle).toBeNull()
+
+    const cleared = mergeHydroMetQueryState(state, { basin: null })
+    expect(cleared.basin).toBeNull()
+    expect(serializeHydroMetQueryState(cleared)).toBe('source=GFS')
+  })
+
+  it('treats basin as null when absent, preserving backend-default selection (#314)', () => {
+    const state = parseHydroMetQueryState('source=GFS')
+    expect(state.basin).toBeNull()
+  })
 })
 
 describe('loadHydroMetBootstrap', () => {
@@ -321,6 +341,101 @@ describe('loadHydroMetBootstrap', () => {
         model_id: 'basins_qhh_shud',
       },
     })
+  })
+
+  it('threads basinId into latest-product query and derives downstream from the returned product (#314)', async () => {
+    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+    vi.mocked(client.GET).mockImplementation(async (path: string, options?: { params?: { query?: Record<string, unknown> } }) => {
+      calls.push({ path, query: options?.params?.query })
+      if (path === '/api/v1/mvp/qhh/latest-product') {
+        return {
+          data: success(
+            latestProduct({
+              basin_id: 'basins_heihe',
+              model_id: 'basins_heihe_shud',
+              basin_version_id: 'basins_heihe_vbasins',
+              river_network_version_id: 'basins_heihe_rivnet_vbasins',
+            }),
+          ),
+          error: undefined,
+        } as never
+      }
+      if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const result = await loadHydroMetBootstrap({ source: 'GFS', cycle: null, basinId: 'basins_heihe' })
+
+    expect(result.status).toBe('ready')
+    expect(calls[0]).toEqual({
+      path: '/api/v1/mvp/qhh/latest-product',
+      query: { source: 'GFS', basin_id: 'basins_heihe' },
+    })
+    // Downstream params are derived from the returned product's identity, not hand-input.
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations', {
+      params: { query: { model_id: 'basins_heihe_shud', limit: HYDRO_MET_STATION_LIMIT, offset: 0 } },
+    })
+    expect(client.GET).toHaveBeenCalledWith('/api/v1/basin-versions/{basin_version_id}/river-segments', {
+      params: {
+        path: { basin_version_id: 'basins_heihe_vbasins' },
+        query: {
+          river_network_version_id: 'basins_heihe_rivnet_vbasins',
+          limit: HYDRO_MET_RIVER_SEGMENT_LIMIT,
+          offset: 0,
+        },
+      },
+    })
+  })
+
+  it('combines basinId with strict identity in the latest-product query (#314)', async () => {
+    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+    vi.mocked(client.GET).mockImplementation(async (path: string, options?: { params?: { query?: Record<string, unknown> } }) => {
+      calls.push({ path, query: options?.params?.query })
+      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
+      if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    await loadHydroMetBootstrap({
+      source: 'GFS',
+      cycle: '2026-05-21T00:00:00.000Z',
+      basinId: 'basins_qhh',
+      strictIdentity: {
+        source: 'GFS',
+        cycleTime: '2026-05-21T00:00:00.000Z',
+        runId: 'qhh_gfs_2026052100_smoke',
+        modelId: 'basins_qhh_shud',
+      },
+    })
+
+    expect(calls[0]).toEqual({
+      path: '/api/v1/mvp/qhh/latest-product',
+      query: {
+        source: 'GFS',
+        cycle_time: '2026-05-21T00:00:00.000Z',
+        run_id: 'qhh_gfs_2026052100_smoke',
+        model_id: 'basins_qhh_shud',
+        basin_id: 'basins_qhh',
+      },
+    })
+  })
+
+  it('omits basin_id when no basin is selected, preserving backend-default behaviour (#314)', async () => {
+    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+    vi.mocked(client.GET).mockImplementation(async (path: string, options?: { params?: { query?: Record<string, unknown> } }) => {
+      calls.push({ path, query: options?.params?.query })
+      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
+      if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') return { data: success(riverSegments), error: undefined } as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    await loadHydroMetBootstrap({ source: 'GFS', cycle: null, basinId: null })
+
+    expect(calls[0]).toEqual({ path: '/api/v1/mvp/qhh/latest-product', query: { source: 'GFS' } })
+    expect(JSON.stringify(calls[0])).not.toContain('basin_id')
   })
 
   it('blocks downstream bootstrap when strict latest-product identity mismatches', async () => {

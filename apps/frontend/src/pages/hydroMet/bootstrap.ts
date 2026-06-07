@@ -23,6 +23,7 @@ export type HydroMetBootstrapStatus =
 export interface HydroMetBootstrapRequest {
   source: HydroMetSource
   cycle: string | null
+  basinId?: string | null
   strictIdentity?: HydroMetStrictIdentity | null
   stationLimit?: number
   riverSegmentLimit?: number
@@ -43,14 +44,16 @@ export interface HydroMetBootstrapResult {
 }
 
 async function getLatestProduct(request: HydroMetBootstrapRequest) {
+  const basinId = request.basinId?.trim() ? { basin_id: request.basinId.trim() } : {}
   const query = request.strictIdentity
     ? {
       source: request.strictIdentity.source,
       cycle_time: request.strictIdentity.cycleTime,
       run_id: request.strictIdentity.runId,
       model_id: request.strictIdentity.modelId,
+      ...basinId,
     }
-    : { source: request.source }
+    : { source: request.source, ...basinId }
   const { data, error } = await client.GET('/api/v1/mvp/qhh/latest-product', {
     params: { query },
   })
