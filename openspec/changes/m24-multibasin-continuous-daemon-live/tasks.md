@@ -80,14 +80,13 @@ Verification: `uv run pytest -q tests/test_real_slurm_gateway.py tests/test_prod
 > jobs/stages, not conflated). §1.6 production routing via `HttpSlurmGatewayClient`; full
 > diagnostic-script retirement is tracked in §5/#293.
 
-## 2. Cross-cycle warm-start closure (analysis-segment + cohort wiring)
+## 2. Cross-cycle warm-start closure (long-run checkpoints + cohort wiring)
 
-- [x] 2.1 Implement path (b): a short analysis/nowcast segment `[T_N, T_{N+1}]` with
-  `end_time == T_{N+1}`, setting `Update_IC_STEP` to a cadence that lands on `T_{N+1}` (default
-  1440min misses 6h/12h cycles), and using a causal no-future-leak `[T_N,T_{N+1}]` forcing policy
-  (cycle N `0..Δ` lead or best-available nowcast; ERA5 only in delayed-reanalysis mode), so
-  `state_save_qc` persists the `T_{N+1}` end state as the next cycle's IC. (Path (a) restart-cadence
-  only if timestamped non-overwriting restart artifacts are added later.)
+- [x] 2.1 Preserve T+6/T+12 successor-init states from the same full-horizon forecast long run:
+  set `Update_IC_STEP` to the checkpoint cadence, copy matching overwritten `*.cfg.ic.update`
+  content into timestamped `state_checkpoints/` entries while SHUD continues running, and keep
+  `forecast_horizon_hours`/`end_time` at the product horizon. Explicit short reruns are manual
+  historical repair only, not the unattended business scheduler path.
 - [x] 2.2 Normalize the run state artifact (`*.cfg.ic`/`*.cfg.ic.update`) to canonical
   `state.cfg.ic`, recording the original SHUD filename and target `valid_time`; on consume,
   materialize/rename the canonical state to `<project_name>.cfg.ic` that SHUD reads.
@@ -110,22 +109,25 @@ Verification: `uv run pytest -q tests/test_real_slurm_gateway.py tests/test_prod
 Evidence Floor: the named tests PASS; lineage-reject code + QC + three-way time covered.
 
 > Closure (issue #289), 2026-06-04 — deterministic CLOSED; live two-cycle receipt BLOCKED.
-> Implemented: analysis-segment `Update_IC_STEP` lands restart on `T_{N+1}` (6h/12h/24h →
-> 360/720/1440); IC normalize `*.cfg.ic.update`→canonical `state.cfg.ic` (records original filename
+> Implemented: forecast long-run checkpoint cadence preserves T+6/T+12 restart states without
+> shortening the product run (`forecast_horizon_hours` stays at the product horizon);
+> IC normalize captured `*.cfg.ic.update`→canonical `state.cfg.ic` (records original filename
 > + valid_time) and consume materialize→`<project>.cfg.ic` with `init_mode=3`; three-way time
 > consistency wired into the runtime consume path (warm-continuity enforced, degraded reuse 2-way),
 > lake-aware header-minute parsing shared across runtime + QC; cohort selection feeds one
 > `init_state_uri`/checksum/lineage into all three manifest surfaces; `StateSnapshot` lineage +
 > migration 000028 + stable rejection codes (`state_lineage.py`); state-variable QC
 > (`state_qc.py`, bounded 64MiB read, missing-column/lake-mismatch fail); canonical quality enum;
-> `create_qhh_shud_manifest.py` labelled diagnostic-only. **node-22: 267 passed** (HEAD 7b97aae;
+> `create_qhh_shud_manifest.py` labelled diagnostic-only. Short checkpoint reruns are limited to
+> manual repair for already completed historical cycles. **node-22: 267 passed** (HEAD 7b97aae;
 > all named tests + e2e + migrations + runtime IC header). **Honest boundaries**: forcing causality
-> emits a `delayed_reanalysis`+latency marker (true causal cycle-N-lead/nowcast is future work,
-> not over-claimed as `causal`); water-balance delta implemented but skipped pending first-step
+> emits a `delayed_reanalysis`+latency marker for analysis workflows outside the production
+> forecast scheduler; water-balance delta implemented but skipped pending first-step
 > diagnostics; production save-time row-count QC runs with counts=None and the selection-time QC
 > hook is trust-through (documented). **Live two-cycle receipt** `artifacts/m24/m24-warmstart-7b97aae/
-> warm_start.json` (status=BLOCKED): needs the generic scheduler real-SHUD analysis→save→consume
-> chain on node-22 (m20 0/33 never live) — consumed by and tracked under §4/#292.
+> warm_start.json` (status=BLOCKED): needs the generic scheduler real-SHUD forecast long-run
+> checkpoint→save→consume chain on node-22 (m20 0/33 never live) — consumed by and tracked under
+> §4/#292.
 Verification: `uv run pytest -q tests/test_warm_start.py tests/test_orchestration_chain.py tests/test_e2e.py` + `uv run ruff check .` + node-22 two-cycle warm-start receipt (cycle 2 `ic_file_uri`==cycle 1 snapshot, quality recorded) or BLOCKED.
 
 ## 3A. Concurrent submit-and-return with durable reservation

@@ -13,12 +13,15 @@ Code facts established by review (cited so issues do not re-discover them):
   `orchestrate_cycle` (scheduler.py:1349); the `FileSchedulerLease` is held until `run_once` ends.
 - Submission is **only** via `HttpSlurmGatewayClient` (chain.py:635); no direct-`sbatch` fallback
   in the production path. Direct `sbatch` is the QHH diagnostic runner / gateway backend only.
-- `state_save_qc` is in **ANALYSIS_STAGES** (chain.py:198), **not** forecast `M3_STAGES` (which
-  ends at `publish`, chain.py:130–182). Forecast runs do not currently save a successor state.
+- Forecast runs emit selected successor checkpoint states from the same full-horizon SHUD run:
+  the runtime sets `Update_IC_STEP` for restart cadence and copies timestamped T+6/T+12 snapshots
+  from the overwritten `*.cfg.ic.update` while the long run continues.
 - `nhms-state save` keys the snapshot `valid_time` at `hydro_run.end_time` (state_cli.py:87) and
   looks for `*.cfg.ic` (state_cli.py:104). Forecast `end_time = cycle_time + horizon` (chain.py:3696).
 - SHUD writes interim restart state only to a single overwritten `*.cfg.ic.update`
-  (shud.cpp:88/108, MD_update.cpp:226, IO.cpp:178); the end-of-run state is what survives.
+  (shud.cpp:88/108, MD_update.cpp:226, IO.cpp:178); production therefore must copy required
+  checkpoint states during the full forecast run instead of waiting until only the final overwrite
+  survives.
 - `_candidate_basin_manifest` does not emit a top-level `init_state_uri` (scheduler.py:5219); the
   cycle-stage manifest only reads `basin.get("init_state_uri")` (chain.py:2424).
 - `StateSnapshot` carries only `model_id/run_id/valid_time/state_uri/checksum/usable_flag`;
@@ -32,41 +35,37 @@ Code facts established by review (cited so issues do not re-discover them):
 
 ## Key decisions
 
-### D1 — Warm-start mechanism: short analysis/nowcast segment is the default (HIGH; 3-reviewer consensus)
+### D1 — Warm-start mechanism: full forecast long run with opportunistic checkpoints
 
 Operator intent: cycle N+1 (init `T_{N+1}`) initializes from cycle N's SHUD state **at `T_{N+1}`**.
 
-Path (a) "SHUD restart cadence" is **rejected as default**: SHUD's `PrintInit` writes only one
-overwritten `*.cfg.ic.update`, so a 7-day forecast cannot reliably yield a savable `T_{N+1}` mid-
-state, and `state_save` does not even collect `*.cfg.ic.update`. (a) is allowed only if a future
-change adds timestamped, non-overwriting restart IC artifacts + a `state_save` that selects by
-target valid_time + header-time validation.
+The production default is **one full forecast long run** for the product horizon. T+6/T+12 states are
+checkpoint side effects from that same SHUD process: runtime sets `Update_IC_STEP` to the checkpoint
+cadence, watches the overwritten `*.cfg.ic.update`, copies matching header-time snapshots to
+`state_checkpoints/`, and `state_save_qc` persists those checkpoints with their actual
+`valid_time`. The checkpoint cadence is **not** a request to split the forecast horizon.
 
-Path (b) — **short analysis/nowcast segment `[T_N, T_{N+1}]`** — is the default. The **time
-semantics** are supported today (`AnalysisRunContext.end_time` can be set to `T_{N+1}` chain.py:3955,
-`nhms-state save` keys the snapshot at `end_time`, `state_save_qc` is in ANALYSIS_STAGES), but path
-(b) is **not yet end-to-end functional**: m24 must add the four implementation pieces below before
-it persists a usable `T_{N+1}` IC. The forecast for products still runs the full horizon; the
-analysis segment exists only to produce the IC for the next cycle. Cost: one short extra SHUD run
-per cycle.
+Short `[T_N,T_{N+1}]` reruns are allowed only as explicit manual repair for already completed
+historical cycles that did not preserve checkpoint states. They are not part of the unattended
+business scheduler because they waste compute and can create a different product lineage from the
+published full-horizon forecast.
 
-Required implementation pieces (do not claim "supported today"):
+Required implementation pieces:
 1. **Final-state normalization (HIGH)**: native SHUD writes the end state to an overwriting
-   `*.cfg.ic.update` (IO.cpp:178), but `nhms-state save` only finds `*.cfg.ic` (state_cli.py:104).
-   m24 must normalize the run artifact to a canonical `state.cfg.ic` (recording original filename +
+   `*.cfg.ic.update` (IO.cpp:178). `nhms-state save` must prefer the captured
+   `state_checkpoints/<project>.f006/f012.cfg.ic.update` manifest entries when present and
+   normalize each selected checkpoint to canonical `state.cfg.ic` (recording original filename +
    target `valid_time`) before save.
 2. **`Update_IC_STEP` cadence (HIGH)**: `PrintInit` only writes when `t_long % Update_IC_STEP == 0`
    (MD_update.cpp:226), default 1440 min (Model_Control.hpp:111); a 6h/12h cycle end will not hit
-   the daily modulo, and runtime does not set it today (runtime.py:389). The analysis segment must
-   set `Update_IC_STEP` to a cadence that lands on `T_{N+1}`.
+   the daily modulo. Forecast runtime sets `Update_IC_STEP` to the smallest requested checkpoint
+   cadence while keeping `end_time == cycle_time + forecast_horizon_hours`.
 3. **Consume-side filename (HIGH)**: the canonical object is `state.cfg.ic`, but SHUD reads
    `<project_name>.cfg.ic` (IO.cpp:76) and runtime clears packaged `*.cfg.ic` (runtime.py:770). The
    consuming run must materialize/rename the canonical state to `<project_name>.cfg.ic`.
-4. **Causal forcing policy (HIGH)**: the analysis pipeline fixes `ANALYSIS_SOURCE_ID=ERA5`
-   (chain.py:57), downloads a whole UTC day, and ERA5 truncates the cycle to 00Z
-   (era5_adapter.py:1019) — wrong for a real-time 6h cycle. path(b) must define a causal,
-   no-future-leak `[T_N, T_{N+1}]` forcing policy (e.g. cycle N's `0..Δ` forecast lead or
-   best-available nowcast); ERA5 is allowed only in delayed reanalysis mode.
+4. **Long-run checkpoint capture (HIGH)**: the runtime must copy the matching T+6/T+12
+   `*.cfg.ic.update` content while SHUD is still running, because the native file is overwritten by
+   later restart writes.
 
 Time-consistency acceptance (HIGH): the snapshot `valid_time`, the `.cfg.ic` header minute-time
 (note `_shift_cfg_ic_time` rewrites it to run start, runtime.py:1386/1434), and the consuming run's
@@ -147,7 +146,8 @@ warm-start quality. Baseline lands at `artifacts/m24/<run_id>/baseline.json` wit
 ## Risks
 
 - `.cfg.ic` valid_time vs next-cycle init-time vs header-time three-way alignment (D1) is the top
-  scientific risk; the extra analysis segment per cycle is the cost of correctness.
+  scientific risk; the production mitigation is checkpoint capture during the full forecast long
+  run, not an extra scheduled short SHUD segment.
 - Concurrent submit-and-return (D4) interacts with lock/lease and stale-job reconcile; must be
   proven on node-22 `/scratch`/NFS with durable reservations, not only local `fcntl` unit tests.
 - Multi-basin array proof must assert identity through retry/reindex (`original_task_id`) to rule

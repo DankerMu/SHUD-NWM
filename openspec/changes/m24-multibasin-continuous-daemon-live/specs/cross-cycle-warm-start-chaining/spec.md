@@ -1,17 +1,16 @@
 ## ADDED Requirements
 
 ### Requirement: Warm-start IC is produced at the next cycle's init time
-A production cycle SHALL produce, via a short analysis/nowcast segment `[T_N, T_{N+1}]` whose
-`hydro_run.end_time == T_{N+1}`, a SHUD initial-condition snapshot valid at the next cycle's init
-time, closing the gap that a forecast run only saves state at its forecast-window `end_time`.
-(SHUD's single overwritten `*.cfg.ic.update` cannot reliably yield an interim `T_{N+1}` state, so
-the restart-cadence path is not used unless timestamped non-overwriting restart artifacts are added.)
+A production forecast cycle SHALL run SHUD for the full product horizon and preserve selected
+T+6/T+12 checkpoint states from the same long run, so successor cycles can initialize from a SHUD
+initial-condition snapshot valid at their init time. `Update_IC_STEP` is a checkpoint write cadence,
+not a shortened forecast horizon or a request for extra short production runs.
 
 #### Scenario: Saved snapshot is keyed at the next cycle init time
-- **WHEN** the analysis segment for successor cycle N+1 completes with `end_time == T_{N+1}`
+- **WHEN** the forecast long run for cycle N writes a checkpoint whose header time equals `T_{N+1}`
 - **THEN** the saved snapshot has `valid_time == T_{N+1}` and is normalized to a canonical
   `state.cfg.ic` recording the original SHUD filename
-- **AND** it is not keyed at any forecast-window `end_time`.
+- **AND** the forecast run still has `end_time == T_N + forecast_horizon_hours`.
 
 #### Scenario: Three-way time consistency
 - **WHEN** cycle N+1 consumes the saved state
@@ -19,27 +18,31 @@ the restart-cadence path is not used unless timestamped non-overwriting restart 
   `start_time`/`cycle_time` all equal `T_{N+1}`
 - **AND** a mismatch among the three is a recorded blocker, not a silent restart at the wrong time.
 
-### Requirement: Analysis-segment production mechanics are functional, not assumed
-The analysis segment SHALL be made end-to-end functional (the time semantics alone are not enough):
-final-state normalization, restart cadence, consume-side filename, and causal forcing must all hold.
+### Requirement: Forecast checkpoint mechanics are functional, not assumed
+The forecast long-run checkpoint path SHALL be made end-to-end functional: checkpoint capture,
+normalization, consume-side filename, and header-time validation must all hold.
 
 #### Scenario: Restart cadence lands on the next cycle init time
-- **WHEN** the analysis segment runs `[T_N, T_{N+1}]`
-- **THEN** `Update_IC_STEP` is set to a cadence that writes a restart state exactly at `T_{N+1}`
+- **WHEN** the forecast long run starts at `T_N`
+- **THEN** `Update_IC_STEP` is set to a cadence that writes restart states at configured successor
+  init offsets such as T+6 and T+12
   (the default 1440-minute cadence is not assumed; short 6h/12h cycles must still land)
-- **AND** the saved state is the state at `T_{N+1}`, not an earlier modulo boundary.
+- **AND** the saved state is the state at the target successor init time, not an earlier modulo
+  boundary.
+- **AND** the runtime manifest and SHUD config retain the full forecast horizon.
 
 #### Scenario: Final-state normalization and consume-side filename
-- **WHEN** native SHUD writes its end state to `*.cfg.ic.update`
+- **WHEN** native SHUD writes a checkpoint state to `*.cfg.ic.update`
 - **THEN** it is normalized to the canonical `state.cfg.ic` object before save, and the consuming
   run materializes/renames it to `<project_name>.cfg.ic` that SHUD actually reads
 - **AND** the original SHUD filename and target `valid_time` are recorded.
 
-#### Scenario: Causal forcing for the analysis segment
-- **WHEN** the daemon runs in real time and builds the `[T_N, T_{N+1}]` analysis forcing
-- **THEN** it uses a causal, no-future-leak source (e.g. cycle N's `0..Δ` forecast lead or
-  best-available nowcast), not whole-day ERA5 truncated to 00Z
-- **AND** ERA5 is used only in an explicit delayed-reanalysis mode with recorded latency.
+#### Scenario: Checkpoint capture does not create extra production SHUD runs
+- **WHEN** the daemon runs in unattended production mode
+- **THEN** T+6/T+12 state preservation is performed by the running forecast process and
+  `state_save_qc`, not by scheduling separate short checkpoint forecast runs
+- **AND** explicit short reruns are allowed only as manual repair for already completed historical
+  cycles that missed checkpoint capture.
 
 ### Requirement: Next cycle consumes the prior cycle's saved state
 A production forecast cycle SHALL initialize SHUD from the snapshot valid at its init time when one

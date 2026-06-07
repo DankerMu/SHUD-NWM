@@ -232,6 +232,35 @@ def test_runtime_executes_mock_shud_and_updates_statuses(tmp_path: Path) -> None
     assert ".cfg.ic" not in cfg
 
 
+def test_forecast_checkpoint_cadence_does_not_shorten_shud_long_run(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["end_time"] = "2026-05-08T00:00:00Z"
+    manifest["forecast_horizon_hours"] = 168
+    manifest["runtime"]["state_checkpoint_hours"] = [6, 12]
+    manifest["runtime"]["update_ic_step_minutes"] = 360
+
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    runtime.prepare_workspace(manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(
+        manifest,
+        input_dir,
+        output_dir,
+    )
+
+    cfg = cfg_path.read_text(encoding="utf-8")
+    assert "START\t0.0" in cfg
+    assert "END\t7.0" in cfg
+    assert "Update_IC_STEP\t360" in cfg
+    assert "START_TIME\t2026-05-01T00:00:00Z" in cfg
+    assert "END_TIME\t2026-05-08T00:00:00Z" in cfg
+
+
 def test_state_checkpoint_tracker_captures_t6_t12_from_long_run_update(tmp_path: Path) -> None:
     manifest = _manifest()
     manifest["end_time"] = "2026-05-08T00:00:00Z"
