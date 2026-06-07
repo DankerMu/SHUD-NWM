@@ -770,7 +770,7 @@ class SHUDRuntime:
         so a wrong-time restart is a recorded blocker, not silent (M24 §2 Lane 2).
         """
 
-        model_input_dir = _model_input_dir(manifest, input_dir, self.config.command_style)
+        model_input_dir = _materialized_model_input_dir(manifest, input_dir, self.config.command_style)
         target = model_input_dir / f"{_project_name(manifest)}.cfg.ic"
         if staged_path.resolve() != target.resolve():
             content = _read_staged_bytes(staged_path, root=input_dir)
@@ -1442,6 +1442,13 @@ def _is_shud_project_mode(manifest: dict[str, Any], command_style: str) -> bool:
 def _model_input_dir(manifest: dict[str, Any], input_dir: Path, command_style: str) -> Path:
     if _is_shud_project_mode(manifest, command_style):
         return input_dir / _project_name(manifest)
+    return input_dir
+
+
+def _materialized_model_input_dir(manifest: dict[str, Any], input_dir: Path, command_style: str) -> Path:
+    project_name = _project_name(manifest)
+    if _is_shud_project_mode(manifest, command_style) and input_dir.name != project_name:
+        return input_dir / project_name
     return input_dir
 
 

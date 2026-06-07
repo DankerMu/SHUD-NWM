@@ -232,6 +232,34 @@ def test_runtime_executes_mock_shud_and_updates_statuses(tmp_path: Path) -> None
     assert ".cfg.ic" not in cfg
 
 
+def test_shud_project_warm_start_ic_materializes_in_project_input_dir(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    ic_content = b"2 1 29626560.000000\n1 0.1\n2 0.2\n1 0.0\n"
+    state_path = object_root / "states" / "gfs" / "basins_basin_a_shud" / "2026050100" / "state.cfg.ic"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_bytes(ic_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["initial_state"] = {
+        "state_id": "state_gfs_basins_basin_a_shud_2026050100",
+        "ic_file_uri": "s3://nhms/states/gfs/basins_basin_a_shud/2026050100/state.cfg.ic",
+        "checksum": sha256_bytes(ic_content),
+        "valid_time": "2026-05-01T00:00:00Z",
+        "quality": "fresh",
+    }
+    manifest["runtime"]["init_mode"] = 3
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+
+    runtime.prepare_workspace(manifest, input_dir)
+
+    assert (input_dir / "alias-a" / "alias-a.cfg.ic").is_file()
+    assert not (input_dir / "alias-a" / "alias-a" / "alias-a.cfg.ic").exists()
+    assert not (input_dir / "alias-a" / "state.cfg.ic").exists()
+
+
 def test_forecast_checkpoint_cadence_does_not_shorten_shud_long_run(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
