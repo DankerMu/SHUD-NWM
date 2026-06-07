@@ -22,7 +22,7 @@
 | # | 阻塞 | 影响 | 解除方 |
 |---|---|---|---|
 | B1 | **`infra/env/display.env` 缺失**（node-side，不同步） | C1/C2/C3 全部依赖它（角色 env + 只读 DSN + published root） | orchestrator 从 display.example 派生填值（node-27 本地） |
-| B2 | **只读 DB 账号未确认**（`NHMS_DISPLAY_READONLY_DATABASE_URL` 未设） | C2 denied-write receipt 的前置；无真实 RO 账号 → C2 必须报 `BLOCKED`（禁止 mock 冒充 PASS） | **外部依赖**：需 node-22/DBA 在只读副本上建 `nhms_display_ro`（或确认已有），提供 DSN |
+| B2 | **只读 DB 账号未确认**（`NHMS_DISPLAY_READONLY_DATABASE_URL` 未设） | C2 denied-write receipt 的前置；无真实 RO 账号 → C2 必须报 `BLOCKED`（禁止 mock 冒充 PASS） | **orchestrator 在 node-22 建 `nhms_display_ro`**（用户 2026-06-07 指派："你去 node-22 建个账号"）；**暂不执行**，待用户点头即跑（SQL 见 §6） |
 | B3 | `NHMS_PUBLISHED_ARTIFACT_ROOT` 未设 | C1/C3 published 只读探测 | B1 内填 `=/home/ghdc/nwm/published` 即可（数据已在） |
 
 ## 3. 有序行动计划（C1→C4）
@@ -54,5 +54,32 @@
 - **生产部署 `docker compose up -d`**：human-gated（与 merge 同治理），dev-phase 不触发。
 - **上线判定**：B 全绿 + C1–C4 全产 live receipt（C3 双源 PASS）→ 可声明上线。
 
-## 5. 进度
-- 2026-06-07：建分支 `node27-live-bringup`；node-27 ff-only 同步到 `5a83123`；实测状态 + 计划落本 worklog。下一步待定（C4 e2e 场景可 repo-side 先行；C1 需先派生 display.env）。
+## 6. B2 只读账号创建 SQL（就绪，待执行 — 暂不跑）
+
+> 由 orchestrator 在 **node-22**（compute_control，DB 主库）执行。production DB 状态变更，**待用户点头**。
+> 纪律：node-22 **不 git pull**（NFS stale handle 杀生产）；`psql` 不在 PATH → 走 `uv run python` + psycopg2；
+> `set -a; source infra/env/compute.host.env; set +a` 取 DSN；任何 DSN echo 前 `sed -E 's#://[^@]*@#://REDACTED@#'` 脱敏。
+> 前置探测（只读，安全）：`current_user` 是否有 `CREATEROLE`/superuser；`nhms_display_ro` 是否已存在；目标 DB/schema 清单。
+
+只读角色设计（最小权限、纯 SELECT、无写无 DDL）：
+
+```sql
+-- 1) 角色（强随机密码，建时生成，不写入仓库）
+CREATE ROLE nhms_display_ro LOGIN PASSWORD '<generated-strong-random>';
+-- 2) 连接 + schema 使用权
+GRANT CONNECT ON DATABASE <db> TO nhms_display_ro;
+GRANT USAGE ON SCHEMA core, hydro, met, flood, ops TO nhms_display_ro;
+-- 3) 现有表只读
+GRANT SELECT ON ALL TABLES IN SCHEMA core, hydro, met, flood, ops TO nhms_display_ro;
+-- 4) 未来表自动只读（default privileges 须按各 schema owner 角色分别设）
+ALTER DEFAULT PRIVILEGES IN SCHEMA core, hydro, met, flood, ops GRANT SELECT ON TABLES TO nhms_display_ro;
+-- 5) 显式不授予：INSERT/UPDATE/DELETE/TRUNCATE/CREATE/USAGE-on-sequence-nextval 等（默认即无）
+```
+
+验证（建后自检，C2 会正式产矩阵）：以 `nhms_display_ro` 连接 → `SELECT` 通过；`INSERT/UPDATE/CREATE TABLE` 全 `permission denied`。
+产出 DSN（脱敏存档 + 真实凭据交付用户填 display.env）：`postgresql://nhms_display_ro:REDACTED@210.77.77.22:<port>/<db>`。
+> 实际 schema 清单以前置探测为准（上面是按 specs 拓扑的预估）；owner 分歧时 default privileges 分角色补。
+
+## 7. 进度
+- 2026-06-07：建分支 `node27-live-bringup`；node-27 ff-only 同步到 `5a83123`；实测状态 + C1–C4 计划落本 worklog。
+- 2026-06-07：用户决策 — B2 由 orchestrator 在 node-22 建 `nhms_display_ro`；**当前仅梳理，暂不执行**（账号 SQL 见 §6，待点头）。其余 C1–C4 亦暂不执行。
