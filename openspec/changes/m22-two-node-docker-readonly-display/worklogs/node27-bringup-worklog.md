@@ -17,13 +17,15 @@
 | **published copyback（C3 前置）** | ✅ **双源真实数据已回灌** `/home/ghdc/nwm/published`：472 文件，`logs/gfs`+`logs/IFS` 多周期，`tiles/hydro` 含 GFS+IFS `q-down`（2026-06-01~03） | `find` 472 files |
 | 历史证据 | ℹ️ `artifacts/` 有 dev-server / mvp-e2e / production-like-e2e / production-closure 历史 | — |
 
-## 2. 阻塞 / 缺失（上线前必须解决）
+## 2. 阻塞 / 缺失 — **2026-06-07 全部解除** ✅
 
-| # | 阻塞 | 影响 | 解除方 |
-|---|---|---|---|
-| B1 | **`infra/env/display.env` 缺失**（node-side，不同步） | C1/C2/C3 全部依赖它（角色 env + 只读 DSN + published root） | orchestrator 从 display.example 派生填值（node-27 本地） |
-| B2 | **只读 DB 账号未确认**（`NHMS_DISPLAY_READONLY_DATABASE_URL` 未设） | C2 denied-write receipt 的前置；无真实 RO 账号 → C2 必须报 `BLOCKED`（禁止 mock 冒充 PASS） | **orchestrator 在 node-22 建 `nhms_display_ro`**（用户 2026-06-07 指派："你去 node-22 建个账号"）；**暂不执行**，待用户点头即跑（SQL 见 §6） |
-| B3 | `NHMS_PUBLISHED_ARTIFACT_ROOT` 未设 | C1/C3 published 只读探测 | B1 内填 `=/home/ghdc/nwm/published` 即可（数据已在） |
+| # | 阻塞 | 解除结果 |
+|---|---|---|
+| B1 | `infra/env/display.env` 缺失 | ✅ 已在 node-27 派生 `infra/env/display.env`（0600，不入 git）：`NHMS_SERVICE_ROLE=display_readonly`、RO DSN、`NHMS_PUBLISHED_ARTIFACT_ROOT=/home/ghdc/nwm/published` |
+| B2 | 只读 DB 账号 | ✅ 已在 node-22 主库建 `nhms_display_ro`（superuser nhms 执行）：6 应用 schema + `_timescaledb_internal` 只读；自检 SELECT 通过（hydro_run/river_timeseries hypertable 2944万）、CREATE/INSERT permission denied。**node-27 经公网 `210.77.77.22:55433` 连**（内网 10.0.2.100 不可达；node-27 在 10.0.1.27 子网） |
+| B3 | published root 未设 | ✅ display.env 填 `/home/ghdc/nwm/published`（472 文件双源数据已在） |
+
+> **拓扑订正**：node-27 是**共享节点**（另跑 geoserver/docmost/GHDC Django api 栈/nginx/rabbitmq），其宿主 `:5433` postgres 非 node-22 物理副本（拒 RO 角色认证）。NHMS display 实际连 **node-22 公网 DB `210.77.77.22:55433`**，以 `nhms_display_ro` 只读账号。真正的本地只读副本属后续（C2 denied-write 矩阵可在此账号上跑）。
 
 ## 3. 有序行动计划（C1→C4）
 
@@ -80,6 +82,28 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA core, hydro, met, flood, ops GRANT SELECT ON 
 产出 DSN（脱敏存档 + 真实凭据交付用户填 display.env）：`postgresql://nhms_display_ro:REDACTED@210.77.77.22:<port>/<db>`。
 > 实际 schema 清单以前置探测为准（上面是按 specs 拓扑的预估）；owner 分歧时 default privileges 分角色补。
 
-## 7. 进度
-- 2026-06-07：建分支 `node27-live-bringup`；node-27 ff-only 同步到 `5a83123`；实测状态 + C1–C4 计划落本 worklog。
-- 2026-06-07：用户决策 — B2 由 orchestrator 在 node-22 建 `nhms_display_ro`；**当前仅梳理，暂不执行**（账号 SQL 见 §6，待点头）。其余 C1–C4 亦暂不执行。
+## 7. 执行结果（2026-06-07 live bring-up）
+
+receipt：node-27 `artifacts/production-closure/node27-bringup-receipt.json`（`execution_mode: live_proof`，未入 git）。
+
+| 项 | 结果 |
+|---|---|
+| **B1/B2/B3** | ✅ 全部解除（见 §2） |
+| **C1 部署 receipt** | ✅ 静态校验 `validate_two_node_docker_runtime.py static` = **PASS**；dev 本地起 `uvicorn apps.api.main:app`（node-27 `127.0.0.1:8000`，`.venv` 直跑）；`/health`=200、`/api/v1/runtime/config`=`{service_role:display_readonly, control_mutations_enabled:false, slurm_routes_enabled:false, queue_depth_mode:display_readonly_unavailable}`、`/api/v1/slurm/health`=**404**、`/api/v1/pipeline/queue-depth`=**404**、retry POST=**405**（控制面禁用） |
+| **C3 cross-plane（双源）** | ✅ **GFS+IFS 双源 PASS**：latest-product GFS=`fcst_gfs_2026060518_basins_qhh_shud`(ready,386站/1633段)、IFS=`fcst_ifs_2026060518_basins_qhh_shud`(ready)；`/basins?has_display_product=true`=`[basins_heihe, basins_qhh]`（多流域发现）。链路：22 产→node-22 DB→node-27 display API→浏览器，真实数据无 historical 冒充 |
+| **浏览器（agent-browser，本地隧道 127.0.0.1:8899→node-27:8000）** | ✅ `/hydro-met` 完整渲染：QHH latest-product、386 forcing 站点全变量真实曲线（quality_flag ok）、5371 河段、q_down 168点、honest-display 红线"不绘制假曲线"在。截图 `/tmp/n27-hydromet.png` |
+| **C2 只读 denied-write** | 🟡 账号级已证（§2 自检 CREATE/INSERT denied）；完整 permission-denied 矩阵（各表 INSERT/UPDATE/DDL/TRUNCATE/sequence）+ 脱敏 evidence 待补 |
+| **C4 浏览器 e2e** | 🟡 `/ops` 在 production auth 下匿名访问被路由守卫挡（"权限不足"）→ display-mode 受控场景需认证会话；`e2e/monitoring.spec.ts` display_readonly 场景（repo-side）待补 |
+
+### 隧道说明
+未发现用户预设的 node-27 隧道（本地仅 18080=sub2api）。本次 orchestrator 自建 `ssh -L 8899:127.0.0.1:8000 nwm@node-27` 跑浏览器校验（会话级，后台任务保活）。如需常驻访问，可按 CLAUDE.md `local:8080→node-27:8080` 另建并把服务绑对应端口。
+
+## 8. 剩余（上线前）
+- **C2**：完整只读 denied-write 矩阵 + 脱敏 evidence（在 `nhms_display_ro` 上跑 `readonly_db_validation` 入口）。
+- **C4**：认证会话下 `/ops` display-mode 受控 e2e（控件隐藏/禁用、无 retry·cancel·Slurm POST、queue unavailable、诊断复制）+ 补 `e2e/monitoring.spec.ts` display_readonly 场景（repo-side，本分支可做）。
+- **真正本地只读副本**（可选硬化）：当前 display 直连 node-22 公网 DB；若要 node-27 独立只读副本，需 DBA 配流复制后把 DSN 切到本地副本。
+- **生产部署**：`docker compose -f infra/compose.display.yml up -d`（human-gated）。
+
+## 9. 进度
+- 2026-06-07：建分支；node-27 ff-only 同步 `5a83123`；梳理 C1–C4。
+- 2026-06-07：用户授权执行 → B2 建 `nhms_display_ro`（node-22）；B1 派生 display.env；C1 静态校验 PASS + 起服务 + 角色/slurm 边界证实；C3 GFS+IFS 双源 latest-product 实证；agent-browser 经隧道渲染 `/hydro-met` 通过；receipt 落 node-27 artifacts；临时凭据三端清理；密码仅存 display.env(0600)。
