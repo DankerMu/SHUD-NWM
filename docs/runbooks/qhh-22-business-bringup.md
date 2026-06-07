@@ -205,6 +205,18 @@ psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 de
 
 作业里每个 stage 以结构化 JSON（含 `error_code`/`status`）落到 `.out`，便于定位失败 stage。
 
+**实时生产监控快照**（`nhms-monitor`，通用编排器，49883ea）——一次性扫 DB + Slurm 生成结构化健康快照，适合 cron/守护轮询：
+
+```bash
+set -a; . infra/env/compute.host.env; set +a     # 提供 DATABASE_URL
+uv run nhms-monitor                               # 打印 JSON 到 stdout，并写快照文件
+# 输出：$NHMS_MONITORING_OUTPUT_DIR（默认 $WORKSPACE_ROOT/monitoring）/
+#   monitoring_status.json  (schema nhms.live_monitoring.v1：cycle/slurm/scheduler 三段 + status=ok|warning)
+#   monitoring_alerts.json  (触发的告警列表)
+```
+
+阈值（env 可调）：`NHMS_MONITORING_MAX_STALE_MINUTES=20`（cycle 停滞）、`NHMS_MONITORING_MAX_FAILED_CYCLES=0`、`NHMS_MONITORING_MAX_ACTIVE_SLURM_JOBS=32`、`NHMS_MONITORING_LOOKBACK_HOURS=168`。任一告警 → `status=warning`；Slurm CLI 不可用单列 `slurm_monitor_unavailable`。
+
 ---
 
 ## 6. 首跑已处置的问题清单（按出现顺序）
@@ -245,7 +257,7 @@ psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 de
 7. 🔀 **转连续 = m24**（不再沿用本诊断脚本转连续）：正式守护走通用 scheduler/chain daemon，由 **m24** 落地。三道硬坎(均为 m24 任务)：
    - ① Slurm HTTP gateway 在 node-22 部署(#288，通用 chain 只走 gateway、从未 live)；
    - ② 跨周期暖启动 path(b) 短 analysis 段(#289，现状每周期从固定打包标定态起跑、无水文记忆)；
-   - ③ 并发 submit-and-return + durable reservation(#290)。**代码已完成并合并**：锁内 sbatch 前写持久预留行
+   - ③ 并发 submit-and-return + durable reservation(#290)，**有序生产调度器重试已 operationalize**（b9b8446：可复用 auto-retry job + `AUTO_RETRY_JOB_CONFLICT` 守卫；新 env `NHMS_SCHEDULER_LOCK_BACKEND=postgres`、`NHMS_SCHEDULER_CYCLE_LAG_HOURS=6`）。**代码已完成并合并**：锁内 sbatch 前写持久预留行
      (`pipeline_job.status='reserved'` + `idempotency_key`)、提交后原子 bind `slurm_job_id`(`WHERE slurm_job_id IS NULL`)、
      reclaim 原子接管死预留(`status IN ('submission_failed','reservation_lost')`)；双提交防护跨重叠 pass
      (partial unique index) + 提交崩溃窗口(crash-after-sbatch-before-bind)经 reconcile-by-comment 恢复
@@ -254,7 +266,8 @@ psql "$DATABASE_URL" -c "select run_id,status from hydro.hydro_run order by 1 de
      reservation_lost；reconcile 会话 commit 失败后 rollback 避免毒化后续 pass。**部署前置见 §2.3**（000029 必须先 apply）。
      **尚未 live**——overlapping-submit 实况 receipt 待 daemon live = #292，依赖 #287(验 m23 #255 鲜活摄取)。
      out-of-scope LOW 收尾 → #300。
-8. ⏳ **生产硬化**（并入 m24/后续）：独立生产 PostgreSQL（替换 e2e 容器）、固化 `compute.host.env`、`QHH_FORCE_UPSTREAM` 透传 sbatch（§6 #16，亦由 m24 改走 chain 自动重转消解）、source-trust/docker 预检、监控告警、诊断脚本退役护栏(#293)。
+7b. ✅ **多源下载韧性**（PR #308，b4a2e85/eeb4d5c）：GFS 换 NODD 多镜像链（`GFS_SOURCE_BACKENDS=s3,gcs,azure,ftpprd,nomads`，共享 `.idx`+HTTP-Range+本地 cdo-clip，NOMADS grib-filter 末位回退）；IFS 云镜像优先（`IFS_OPEN_DATA_FALLBACK_SOURCES` 默认 `aws,azure,google,ecmwf`，ECMWF 直连 500 连接上限末位）。NOMADS 403=动态封禁 → 持久断路器（`OBJECT_STORE_ROOT/state/source_circuit/`，cooldown 内停重试）；云镜像 503/429/SlowDown 归类 `RateLimitedError` → 切源 + per-source cooldown（`IFS_SOURCE_COOLDOWN_SECONDS=1800`）；f000 缺累积场镜像 404 回落 NOMADS、重复 APCP idx fail-loud。**从根上消解 §3B 缺陷③ 单源静默丢 cycle。**
+8. ⏳ **生产硬化**（并入 m24/后续）：独立生产 PostgreSQL（替换 e2e 容器）、固化 `compute.host.env`、`QHH_FORCE_UPSTREAM` 透传 sbatch（§6 #16，亦由 m24 改走 chain 自动重转消解）、source-trust/docker 预检、监控告警（`nhms-monitor` 已落地，见 §5；接 cron/守护）、诊断脚本退役护栏(#293)。
 9. ⏳ **洪频曲线对齐**：将来建 ERA5 hindcast 洪频曲线（hourly）后，5min 预报侧 return-period 窗口需按 12 行/小时折算（`flood_frequency/frequency.py` ROWS 窗口假设 hourly）。
 
 > 注:本节 1–4 是诊断路径下已实测的科学链路结果(GFS+IFS 至 frequency_done),证明 worker 链正确;5–9 的"正式业务化"在 m24 通用 daemon 上重做并 live 验证,不再以本脚本声称 production。

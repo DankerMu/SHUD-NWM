@@ -203,6 +203,16 @@ qhh 脚本 dry-run 输出每轮 JSON summary，核心字段为 `status`、
 | `QHH_SLURM_WAIT_TIMEOUT_SECONDS` | `43200` | Slurm 等待总上限 |
 | `QHH_SLURM_ACCOUNTING_TIMEOUT_SECONDS` | `300` | 作业离开 `squeue` 后等待 `sacct` 出账的上限 |
 
+多源下载源变量（适配器级，PR #308；两 lane 通用，控制下载镜像链与限流退避）：
+
+| 变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `GFS_SOURCE_BACKENDS` | `s3,gcs,azure,ftpprd,nomads` | GFS NODD 多镜像顺序；前四者共享 `.idx`+HTTP-Range+cdo-clip，NOMADS grib-filter 为末位回退 |
+| `IFS_OPEN_DATA_FALLBACK_SOURCES` | `aws,azure,google,ecmwf` | IFS 云镜像优先顺序；ECMWF 直连有 500 连接上限，强制末位回退 |
+| `IFS_SOURCE_COOLDOWN_SECONDS` | `1800` | 镜像被限流（503/429/SlowDown）后跳过该源的冷却时长 |
+
+退避语义：NOMADS 403=动态封禁 → 持久断路器写 `OBJECT_STORE_ROOT/state/source_circuit/gfs_<source>.json`，cooldown 内停重试（`discover_cycles` 403 `retryable=False`）；云镜像 503/429/SlowDown 归类 `RateLimitedError` → 切下一源 + per-source cooldown；f000 缺累积/平均场（APCP/DSWRF）镜像返回 404 → 回落 NOMADS（不静默丢变量）。
+
 本地 PostgreSQL helper 默认只允许 loopback 监听，适合单机调试：
 
 ```bash
