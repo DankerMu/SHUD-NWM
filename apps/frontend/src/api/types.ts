@@ -2405,6 +2405,8 @@ export interface operations {
             query: {
                 /** @description MVP forecast source. Accepted case-insensitively and normalized to GFS or IFS. */
                 source: "GFS" | "IFS";
+                /** @description Target basin id for the latest display product. Defaults to basins_qhh when omitted, preserving backward compatibility for /api/v1/mvp/qhh/latest-product and M22 cross-plane callers. */
+                basin_id?: string;
                 /** @description Strict QHH run identity. If supplied, source, cycle_time, and model_id must also be supplied; the API will not fall back to source-only latest selection. */
                 run_id?: string;
                 /** @description Strict QHH cycle time. If supplied, source, run_id, and model_id must also be supplied; the API will not fall back to source-only latest selection. */

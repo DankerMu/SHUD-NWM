@@ -553,6 +553,16 @@ def _patch_qhh_latest_product_openapi(schema: dict) -> None:
             "description": "MVP forecast source. Accepted case-insensitively and normalized to GFS or IFS.",
         },
         {
+            "name": "basin_id",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string", "minLength": 1},
+            "description": (
+                "Target basin id for the latest display product. Defaults to basins_qhh when omitted, "
+                "preserving backward compatibility for /api/v1/mvp/qhh/latest-product and M22 cross-plane callers."
+            ),
+        },
+        {
             "name": "run_id",
             "in": "query",
             "required": False,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
@@ -350,12 +351,19 @@ class FakeForecastStore:
         self,
         source: str,
         *,
+        basin_id: str = "basins_qhh",
         run_id: str | None = None,
         cycle_time: datetime | str | None = None,
         model_id: str | None = None,
     ) -> dict[str, Any]:
         self.latest_qhh_calls.append(
-            {"source": source, "run_id": run_id, "cycle_time": cycle_time, "model_id": model_id}
+            {
+                "source": source,
+                "basin_id": basin_id,
+                "run_id": run_id,
+                "cycle_time": cycle_time,
+                "model_id": model_id,
+            }
         )
         if str(source).strip().upper() not in {"GFS", "IFS"}:
             reflected_source = str(source)
@@ -1639,6 +1647,136 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
     }
 
 
+# --- M25 #311: latest-product basin_id parameterization (no hardcoded basins_qhh) ---
+
+
+def test_latest_qhh_display_product_selects_heihe_basin_and_filters_sql_by_requested_basin() -> None:
+    # Scenario: 按流域取得对应产品 — heihe basin returns heihe identity, not qhh.
+    store = SqlCaptureForecastStore(
+        [
+            [
+                _qhh_candidate_row(
+                    basin_id="basins_heihe",
+                    run_id="heihe_gfs_2026050700",
+                )
+            ]
+        ]
+    )
+
+    response = store.latest_qhh_display_product("gfs", basin_id="basins_heihe")
+
+    assert response["basin_id"] == "basins_heihe"
+    assert response["run_id"] == "heihe_gfs_2026050700"
+    assert response["status"] == "ready"
+    # SQL candidate query MUST filter by the requested basin (param index 1), not basins_qhh.
+    _, parameters = store.cursor.executions[0]
+    assert parameters[1] == "basins_heihe"
+
+
+def test_latest_qhh_display_product_default_basin_is_qhh_backward_compatible() -> None:
+    # Scenario: 缺省默认 QHH 向后兼容 — omitting basin_id behaves exactly as before.
+    store = SqlCaptureForecastStore(
+        [[_qhh_candidate_row(cycle_time=_dt("2026-05-07T00:00:00Z"), source_id="gfs")]]
+    )
+
+    response = store.latest_qhh_display_product("gfs")
+
+    assert response["basin_id"] == "basins_qhh"
+    assert response["run_id"] == "qhh_gfs_2026050700"
+    assert response["status"] == "ready"
+    _, parameters = store.cursor.executions[0]
+    assert parameters[1] == "basins_qhh"
+
+
+def test_latest_qhh_display_product_m22_cross_plane_strict_call_without_basin_id_unchanged() -> None:
+    # Scenario: M22 cross-plane 旧调用不破 — full strict identity, no basin_id => QHH identity + availability.
+    cycle_time = _dt("2026-05-07T00:00:00Z")
+    store = SqlCaptureForecastStore(
+        [
+            [
+                _qhh_candidate_row(
+                    run_id="qhh_gfs_2026050700",
+                    cycle_time=cycle_time,
+                    model_id="basins_qhh_shud",
+                )
+            ]
+        ]
+    )
+
+    response = store.latest_qhh_display_product(
+        "gfs",
+        run_id="qhh_gfs_2026050700",
+        cycle_time="2026-05-07T00:00:00Z",
+        model_id="basins_qhh_shud",
+    )
+
+    assert response["basin_id"] == "basins_qhh"
+    assert response["run_id"] == "qhh_gfs_2026050700"
+    assert response["model_id"] == "basins_qhh_shud"
+    assert response["availability"]["ready"] is True
+    _, parameters = store.cursor.executions[0]
+    # Default basin param stays basins_qhh; strict identity predicates remain AND-combined.
+    assert parameters[1] == "basins_qhh"
+
+
+def test_latest_qhh_display_product_target_basin_no_run_returns_honest_unavailable() -> None:
+    # Scenario: 目标流域无产品返回诚实 unavailable — basin_id reflects request, no cross-basin product.
+    store = SqlCaptureForecastStore([[], []])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS", basin_id="basins_heihe")
+
+    assert error.value.status_code == 404
+    assert error.value.code == "QHH_LATEST_PRODUCT_UNAVAILABLE"
+    details = error.value.details
+    assert details["basin_id"] == "basins_heihe"
+    assert details["unavailable_reasons"][0]["basin_id"] == "basins_heihe"
+    assert details["candidates"] == []
+    # Both candidate + context queries filter by the requested basin.
+    for _, parameters in store.cursor.executions:
+        assert parameters[1] == "basins_heihe"
+
+
+def test_latest_qhh_display_product_unavailable_response_not_hardcoded_qhh() -> None:
+    # Requirement: 移除 QHH 流域硬编码 — unavailable response never substitutes basins_qhh.
+    store = SqlCaptureForecastStore([[], []])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS", basin_id="basins_heihe")
+
+    details = error.value.details
+    assert "basins_qhh" not in json.dumps(details)
+
+
+def test_latest_qhh_display_product_basin_and_strict_identity_combined_no_historical_fallback() -> None:
+    # Scenario: basin 与 strict identity 联合精确匹配 — identity absent in basin => unavailable, no fallback.
+    store = SqlCaptureForecastStore([[], []])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product(
+            "GFS",
+            basin_id="basins_heihe",
+            run_id="heihe_gfs_2026050700",
+            cycle_time="2026-05-07T00:00:00Z",
+            model_id="basins_heihe_shud",
+        )
+
+    assert error.value.status_code == 404
+    details = error.value.details
+    assert details["basin_id"] == "basins_heihe"
+    assert details["strict_identity"] is True
+    assert details["candidates"] == []
+    assert details["unavailable_reasons"][0]["code"] == "STRICT_IDENTITY_NOT_FOUND"
+    # Same SQL WHERE constrains basin_id (param 1) AND strict identity predicates together.
+    ready_statement, ready_parameters = store.cursor.executions[0]
+    assert ready_parameters[1] == "basins_heihe"
+    assert "AND h.run_id = %s" in ready_statement
+    assert "AND h.cycle_time = %s" in ready_statement
+    assert "AND h.model_id = %s" in ready_statement
+    # Strict candidate window is capped to 1 — no historical latest fallback.
+    assert ready_parameters[6] == 1
+
+
 def test_latest_qhh_display_product_accepts_parsed_qdown_display_candidate() -> None:
     store = SqlCaptureForecastStore([[_qhh_candidate_row(status="parsed")]])
 
@@ -2653,7 +2791,7 @@ async def test_qhh_latest_product_success_envelope_accepts_source_case_and_needs
     assert data["status"] == "ready"
     assert data["shorter_horizon"] is True
     assert fake_store.latest_qhh_calls == [
-        {"source": "ifs", "run_id": None, "cycle_time": None, "model_id": None}
+        {"source": "ifs", "basin_id": "basins_qhh", "run_id": None, "cycle_time": None, "model_id": None}
     ]
 
 
@@ -2672,6 +2810,23 @@ async def test_qhh_latest_product_strict_identity_forwards_all_filters(fake_stor
     assert call["run_id"] == "qhh_gfs_2026050700"
     assert call["cycle_time"] == "2026-05-07T00:00:00Z"
     assert call["model_id"] == "basins_qhh_shud"
+
+
+@pytest.mark.asyncio
+async def test_qhh_latest_product_forwards_basin_id_when_supplied(fake_store: FakeForecastStore) -> None:
+    response = await _get("/api/v1/mvp/qhh/latest-product?source=gfs&basin_id=basins_heihe")
+
+    assert response.status_code == 200
+    assert fake_store.latest_qhh_calls[-1]["basin_id"] == "basins_heihe"
+    assert fake_store.latest_qhh_calls[-1]["source"] == "gfs"
+
+
+@pytest.mark.asyncio
+async def test_qhh_latest_product_defaults_basin_id_to_qhh_when_omitted(fake_store: FakeForecastStore) -> None:
+    response = await _get("/api/v1/mvp/qhh/latest-product?source=gfs")
+
+    assert response.status_code == 200
+    assert fake_store.latest_qhh_calls[-1]["basin_id"] == "basins_qhh"
 
 
 @pytest.mark.asyncio
@@ -3283,6 +3438,7 @@ def _qhh_candidate_row(
     run_id: str = "qhh_gfs_2026050700",
     run_type: str = "forecast",
     scenario_id: str = "forecast_gfs_deterministic",
+    basin_id: str = "basins_qhh",
     model_id: str | None = "basins_qhh_shud",
     basin_version_id: str | None = "basins_qhh_vbasins",
     forcing_version_id: str | None = "forc_qhh_gfs_2026050700_basins_qhh_shud",
@@ -3363,7 +3519,7 @@ def _qhh_candidate_row(
         "run_updated_at": schedule_cycle_time,
         "river_network_version_id": river_network_version_id,
         "model_basin_version_id": model_basin_version_id,
-        "basin_id": "basins_qhh",
+        "basin_id": basin_id,
         "river_network_basin_version_id": river_network_basin_version_id,
         "expected_segment_count": expected_segment_count,
         "fv_forcing_version_id": forcing_version_id,
