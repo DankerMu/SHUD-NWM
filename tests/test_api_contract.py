@@ -1236,6 +1236,8 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
         "unavailable_reasons",
         "quality_flags",
         "quality_notes",
+        "return_period_status",
+        "return_period_reasons",
     ]
     assert schemas["QhhLatestQuality"]["properties"]["station_variable_coverage"]["items"]["$ref"] == (
         "#/components/schemas/QhhLatestStationVariableCoverage"

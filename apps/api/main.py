@@ -1518,7 +1518,14 @@ def _qhh_latest_query_index_schema() -> dict:
 def _qhh_latest_availability_schema() -> dict:
     return {
         "type": "object",
-        "required": ["ready", "unavailable_reasons", "quality_flags", "quality_notes"],
+        "required": [
+            "ready",
+            "unavailable_reasons",
+            "quality_flags",
+            "quality_notes",
+            "return_period_status",
+            "return_period_reasons",
+        ],
         "properties": {
             "ready": {"type": "boolean"},
             "unavailable_reasons": {
@@ -1529,6 +1536,26 @@ def _qhh_latest_availability_schema() -> dict:
             "quality_notes": {
                 "type": "array",
                 "items": {"$ref": "#/components/schemas/QhhLatestQualityNote"},
+            },
+            "return_period_status": {
+                "type": "string",
+                "enum": ["ready", "unavailable"],
+                "description": (
+                    "Supplemental flood return-period availability for this run, derived from the "
+                    "same non-null peak-row caliber as best-available / runs "
+                    "(flood_return_period_rows > 0). Independent of `ready`: a run with streamflow "
+                    "output but no return-period baseline still returns with "
+                    "`return_period_status = unavailable`. Never part of the blocking "
+                    "`unavailable_reasons` set."
+                ),
+            },
+            "return_period_reasons": {
+                "type": "array",
+                "description": (
+                    "Populated only when `return_period_status = unavailable`; carries the reason "
+                    "code RETURN_PERIOD_RESULT_UNAVAILABLE. Supplemental, not blocking."
+                ),
+                "items": {"$ref": "#/components/schemas/QhhLatestUnavailableReason"},
             },
         },
     }

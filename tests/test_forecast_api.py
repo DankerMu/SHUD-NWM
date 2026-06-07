@@ -19,8 +19,10 @@ from packages.common.forecast_store import (
     QHH_LATEST_SEARCH_LIMIT,
     ForecastStoreError,
     PsycopgForecastStore,
+    _flood_product_quality_from_row,
     _forecast_response_from_rows,
     _PsycopgTransaction,
+    _qhh_latest_candidate_response,
     _spliced_response_from_rows,
     analysis_window_for_issue_time,
 )
@@ -1636,6 +1638,8 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
         "unavailable_reasons": [],
         "quality_flags": [],
         "quality_notes": [],
+        "return_period_status": "ready",
+        "return_period_reasons": [],
     }
     assert response["quality"]["required_station_variables"] == ["PRCP", "TEMP", "RH", "wind", "Rn", "Press"]
     assert {item["index"] for item in response["quality"]["query_indexes"]} == {
@@ -1645,6 +1649,103 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
     }
+
+
+# --- M25 #312: latest-product return-period independent supplemental availability ---
+
+
+def test_latest_qhh_return_period_ready_when_non_null_peak_rows_present() -> None:
+    # Scenario: 有重现期产品时标为 ready — flood_return_period_rows > 0.
+    store = SqlCaptureForecastStore([[_qhh_candidate_row(flood_return_period_rows=1633)]])
+
+    response = store.latest_qhh_display_product("gfs")
+
+    assert response["availability"]["return_period_status"] == "ready"
+    assert response["availability"]["return_period_reasons"] == []
+
+
+def test_latest_qhh_return_period_unavailable_does_not_block_ready_product() -> None:
+    # 关键回归：有 q_down 流量但 flood.return_period_result 无非空 peak 行 →
+    # 产品仍 ready 正常返回（不掉 ready、不 404），return_period_status=unavailable + reason。
+    store = SqlCaptureForecastStore([[_qhh_candidate_row(flood_return_period_rows=0)]])
+
+    response = store.latest_qhh_display_product("gfs")
+
+    # Product still ready and returned (no 404).
+    assert response["status"] == "ready"
+    assert response["availability"]["ready"] is True
+    assert response["quality"]["river_sample_count"] == 10000  # q_down output present
+    # Supplemental field flags the missing baseline.
+    assert response["availability"]["return_period_status"] == "unavailable"
+    reasons = response["availability"]["return_period_reasons"]
+    assert [reason["code"] for reason in reasons] == ["RETURN_PERIOD_RESULT_UNAVAILABLE"]
+    # And it MUST NOT leak into the blocking unavailable_reasons set.
+    blocking_codes = {reason["code"] for reason in response["availability"]["unavailable_reasons"]}
+    assert "RETURN_PERIOD_RESULT_UNAVAILABLE" not in blocking_codes
+    assert response["availability"]["unavailable_reasons"] == []
+
+
+def test_latest_qhh_return_period_unavailable_for_non_peak_only_rows() -> None:
+    # Scenario: 仅有非 peak/timestep 行（flood_return_period_rows == 0）→ unavailable（口径反例）。
+    # result_rows>0 (timestep rows exist) but no non-null peak return-period rows.
+    store = SqlCaptureForecastStore(
+        [[_qhh_candidate_row(flood_return_period_rows=0, flood_result_rows=240)]]
+    )
+
+    response = store.latest_qhh_display_product("gfs")
+
+    assert response["availability"]["return_period_status"] == "unavailable"
+    assert response["status"] == "ready"  # caliber reversal does not block product
+
+
+def test_latest_qhh_return_period_caliber_matches_best_available() -> None:
+    # Scenario: 跨接口口径一致 — 同一 run 在 best-available 判 unavailable，
+    # latest-product 的 return_period_status 也为 unavailable（同一非空 peak 口径）。
+    row = _qhh_candidate_row(flood_return_period_rows=0, flood_result_rows=240)
+    best_available_quality = _flood_product_quality_from_row(row)
+    best_available_unavailable = "return_period_result" in best_available_quality["unavailable_products"]
+
+    store = SqlCaptureForecastStore([[dict(row)]])
+    response = store.latest_qhh_display_product("gfs")
+    latest_unavailable = response["availability"]["return_period_status"] == "unavailable"
+
+    assert best_available_unavailable is True
+    assert latest_unavailable is best_available_unavailable
+
+    # And the positive direction: non-null peak rows => both ready.
+    ready_row = _qhh_candidate_row(flood_return_period_rows=1633)
+    ready_quality = _flood_product_quality_from_row(ready_row)
+    ready_store = SqlCaptureForecastStore([[dict(ready_row)]])
+    ready_response = ready_store.latest_qhh_display_product("gfs")
+    assert "return_period_result" not in ready_quality["unavailable_products"]
+    assert ready_response["availability"]["return_period_status"] == "ready"
+
+
+def test_latest_qhh_unavailable_context_response_schema_carries_return_period_field() -> None:
+    # Schema consistency: 无候选/失败 run 走 unavailable-context 时，候选评估的 availability
+    # 结构仍始终含 return_period_status（与 ready 分支同一 schema）。
+    context_row = _qhh_candidate_row(status="failed", flood_return_period_rows=0)
+
+    evaluation = _qhh_latest_candidate_response(context_row, basin_id="basins_qhh")
+
+    assert evaluation["ready"] is False  # failed run is blocking-unavailable
+    availability = evaluation["product"]["availability"]
+    assert "return_period_status" in availability
+    assert availability["return_period_status"] == "unavailable"
+    # Supplemental field never bleeds into the blocking reasons.
+    blocking_codes = {reason["code"] for reason in availability["unavailable_reasons"]}
+    assert "RETURN_PERIOD_RESULT_UNAVAILABLE" not in blocking_codes
+
+
+def test_latest_qhh_no_candidate_full_404_still_raises() -> None:
+    # 无任何候选时 latest-product 整体 404（既有契约不变）。
+    store = SqlCaptureForecastStore([[], []])
+
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("gfs")
+
+    assert error.value.status_code == 404
+    assert error.value.code == "QHH_LATEST_PRODUCT_UNAVAILABLE"
 
 
 # --- M25 #311: latest-product basin_id parameterization (no hardcoded basins_qhh) ---
@@ -3474,6 +3575,10 @@ def _qhh_candidate_row(
     river_valid_time_start: datetime | None = _dt("2026-05-07T00:00:00Z"),
     river_valid_time_end: datetime | None = _dt("2026-05-14T00:00:00Z"),
     max_lead_time_hours: int | None = 168,
+    flood_return_period_rows: int = 1633,
+    flood_result_rows: int | None = None,
+    flood_warning_rows: int | None = None,
+    flood_quality_max_over_window: bool | None = True,
 ) -> dict[str, Any]:
     default_cycle_time = _dt("2026-05-07T00:00:00Z")
     schedule_cycle_time = cycle_time or default_cycle_time
@@ -3555,6 +3660,15 @@ def _qhh_candidate_row(
         "river_valid_time_end": river_valid_time_end,
         "min_lead_time_hours": 0,
         "max_lead_time_hours": max_lead_time_hours,
+        # Flood product-quality columns surfaced via cr.* (same caliber as best-available).
+        "flood_return_period_rows": flood_return_period_rows,
+        "flood_result_rows": (
+            flood_result_rows if flood_result_rows is not None else flood_return_period_rows
+        ),
+        "flood_warning_rows": (
+            flood_warning_rows if flood_warning_rows is not None else flood_return_period_rows
+        ),
+        "flood_quality_max_over_window": flood_quality_max_over_window,
     }
 
 

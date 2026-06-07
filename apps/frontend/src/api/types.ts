@@ -1093,6 +1093,13 @@ export interface components {
             unavailable_reasons: components["schemas"]["QhhLatestUnavailableReason"][];
             quality_flags: string[];
             quality_notes: components["schemas"]["QhhLatestQualityNote"][];
+            /**
+             * @description Supplemental flood return-period availability for this run, derived from the same non-null peak-row caliber as best-available / runs (flood_return_period_rows > 0). Independent of `ready`: a run with streamflow output but no return-period baseline still returns with `return_period_status = unavailable`. Never part of the blocking `unavailable_reasons` set.
+             * @enum {string}
+             */
+            return_period_status: "ready" | "unavailable";
+            /** @description Populated only when `return_period_status = unavailable`; carries the reason code RETURN_PERIOD_RESULT_UNAVAILABLE. Supplemental, not blocking. */
+            return_period_reasons: components["schemas"]["QhhLatestUnavailableReason"][];
         };
         QhhLatestQuality: {
             station_sample_count: number;
