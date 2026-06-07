@@ -1933,7 +1933,7 @@ export interface operations {
             query?: {
                 limit?: number;
                 offset?: components["parameters"]["Offset"];
-                /** @description When true, only basins that have at least one run in a display-ready status (parsed/frequency_done/published) are returned. When omitted or false, all registered basins are returned (default behaviour). */
+                /** @description When true, only basins that have at least one display-ready forecast run with non-null cycle_time are returned, aligned with the latest-product candidate caliber; the forcing/product source is not constrained. When omitted or false, all registered basins are returned (default behaviour). */
                 has_display_product?: boolean;
             };
             header?: never;

@@ -191,4 +191,26 @@ describe('ProductStatusBar (#316)', () => {
     expect(screen.getByTestId('hydro-met-status-forcing')).not.toHaveAttribute('data-tone', 'ready')
     expect(screen.getByTestId('hydro-met-status-q_down')).not.toHaveAttribute('data-tone', 'ready')
   })
+
+  it('does not mark return_period ready when overall availability.ready is false (M-25 round 2)', () => {
+    const unavailableProduct = product({
+      availability: {
+        ...product().availability,
+        ready: false,
+        unavailable_reasons: [],
+        return_period_status: 'ready',
+        return_period_reasons: [],
+      },
+    })
+
+    render(
+      <>
+        <ProductStatusBar product={unavailableProduct} />
+        <ReturnPeriodSection product={unavailableProduct} />
+      </>,
+    )
+
+    expect(screen.getByTestId('hydro-met-status-return_period')).toHaveAttribute('data-tone', 'unavailable')
+    expect(screen.getByTestId('hydro-met-return-period-unavailable')).toBeInTheDocument()
+  })
 })

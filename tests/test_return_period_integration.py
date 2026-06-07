@@ -26,6 +26,7 @@ pytestmark = pytest.mark.integration
 _PREFIX = "itrp"
 _BASIN_PEAK = f"{_PREFIX}_basin_peak"
 _BASIN_NONPEAK = f"{_PREFIX}_basin_nonpeak"
+_BASIN_NONPEAK_NONNULL = f"{_PREFIX}_basin_nonpeak_nonnull"
 _SOURCE = "GFS"
 _RUN_START = datetime(2026, 5, 14, 0, tzinfo=UTC)
 _RUN_END = datetime(2026, 5, 14, 1, tzinfo=UTC)
@@ -36,7 +37,14 @@ _VALID_TIME = datetime(2026, 5, 14, 1, tzinfo=UTC)
 _RETURN_PERIOD_REASON_CODE = "RETURN_PERIOD_RESULT_UNAVAILABLE"
 
 
-def _seed_run(connection: Any, *, basin_id: str, with_peak_return_period: bool, with_rows: bool = True) -> str:
+def _seed_run(
+    connection: Any,
+    *,
+    basin_id: str,
+    with_peak_return_period: bool,
+    with_rows: bool = True,
+    nonpeak_return_period: int | None = None,
+) -> str:
     suffix = basin_id
     basin_version_id = f"{suffix}_v1"
     river_network_version_id = f"{suffix}_rnv"
@@ -246,7 +254,7 @@ def _seed_run(connection: Any, *, basin_id: str, with_peak_return_period: bool, 
                     # Peak: max_over_window=true with a non-null return_period.
                     # Non-peak: max_over_window=false (no peak row), so the join's
                     # non-null peak-row count is 0.
-                    2 if with_peak_return_period else None,
+                    2 if with_peak_return_period else nonpeak_return_period,
                     "elevated" if with_peak_return_period else None,
                     _SOURCE,
                     _CYCLE_TIME,
@@ -328,6 +336,39 @@ def test_return_period_status_unavailable_does_not_block_ready(integration_datab
 
         # Red line: the return-period code must NOT be in the blocking set, so it
         # can never demote the product to unavailable on its own.
+        blocking_codes = {reason["code"] for reason in availability["unavailable_reasons"]}
+        assert blocking_codes == set()
+        assert _RETURN_PERIOD_REASON_CODE not in blocking_codes
+    finally:
+        with psycopg_connection(integration_database_url) as connection:
+            _clear(connection)
+
+
+def test_return_period_status_ignores_non_peak_non_null_rows(integration_database_url: str) -> None:
+    apply_migrations_from_zero(integration_database_url)
+    with psycopg_connection(integration_database_url) as connection:
+        _clear(connection)
+        # Caliber guard: non-peak timestep rows with return_period values are
+        # not product rows and must not make the supplemental status ready.
+        _seed_run(
+            connection,
+            basin_id=_BASIN_NONPEAK_NONNULL,
+            with_peak_return_period=False,
+            nonpeak_return_period=2,
+        )
+
+    store = PsycopgForecastStore(integration_database_url)
+    try:
+        response = _candidate_response(store, basin_id=_BASIN_NONPEAK_NONNULL)
+        availability = response["product"]["availability"]
+        assert response["ready"] is True
+        assert response["product"]["status"] == "ready"
+        assert availability["ready"] is True
+        assert availability["return_period_status"] == "unavailable"
+
+        return_period_codes = {reason["code"] for reason in availability["return_period_reasons"]}
+        assert _RETURN_PERIOD_REASON_CODE in return_period_codes
+
         blocking_codes = {reason["code"] for reason in availability["unavailable_reasons"]}
         assert blocking_codes == set()
         assert _RETURN_PERIOD_REASON_CODE not in blocking_codes

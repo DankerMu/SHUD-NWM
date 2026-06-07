@@ -30,7 +30,7 @@ function readReturnPeriodStatus(product: QhhLatestProduct): ReturnPeriodStatus {
 
 export function ReturnPeriodSection({ product }: { product: QhhLatestProduct }) {
   const status = readReturnPeriodStatus(product)
-  const unavailable = status !== 'ready'
+  const unavailable = !productReady(product) || status !== 'ready'
 
   return (
     <section className="rounded-md border border-neutral-300 bg-white p-4" data-testid="hydro-met-return-period-section">
@@ -154,6 +154,9 @@ function qDownTone(product: QhhLatestProduct): ProductStatusEntry {
 function returnPeriodTone(product: QhhLatestProduct): ProductStatusEntry {
   // return_period_status 独立于产品 ready；只有 ready/unavailable 两态（无 degraded）。
   const status = readReturnPeriodStatus(product)
+  if (!productReady(product)) {
+    return { key: 'return_period', label: '洪水重现期', tone: 'unavailable', detail: '产品整体不可用' }
+  }
   if (status === 'ready') {
     return { key: 'return_period', label: '洪水重现期', tone: 'ready', detail: '已有重现期基线' }
   }
