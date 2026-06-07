@@ -187,12 +187,19 @@ def _store(
         session.close()
 
 
-def _publisher(tmp_path: Any, *, database_url: str | None = None) -> TilePublisher:
+def _publisher(
+    tmp_path: Any,
+    *,
+    database_url: str | None = None,
+    published_artifact_root: Any | None = None,
+) -> TilePublisher:
     return TilePublisher(
         workspace_root=tmp_path / "workspace",
         object_store_root=tmp_path / "object-store",
         object_store_prefix="",
         database_url=database_url,
+        published_artifact_root=published_artifact_root,
+        published_artifact_uri_prefix="published://",
     )
 
 
@@ -329,6 +336,28 @@ def test_publish_qdown_success_publishes_one_layer_per_run(tmp_path: Any) -> Non
     assert publisher.object_store.exists(
         f"tiles/hydro/{CYCLE_ID}/q-down/run-a/rivnet-1/manifest.json"
     )
+
+
+def test_publish_qdown_mirrors_artifacts_to_published_root(tmp_path: Any) -> None:
+    published_root = tmp_path / "published"
+    publisher = _publisher(tmp_path, published_artifact_root=published_root)
+    with _store(create_flood=False) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    manifest_key = f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json"
+    run_manifest_key = f"tiles/hydro/{CYCLE_ID}/q-down/run-a/rivnet-1/manifest.json"
+    log_key = f"tiles/hydro/{CYCLE_ID}/q-down/run-a/rivnet-1/publish.log.json"
+
+    assert publisher.object_store.exists(manifest_key)
+    assert (published_root / manifest_key).is_file()
+    assert (published_root / run_manifest_key).is_file()
+    assert (published_root / log_key).is_file()
+
+    artifact_uris = {artifact["uri"] for artifact in result.artifacts}
+    assert f"published://{run_manifest_key}" in artifact_uris
+    assert f"published://{log_key}" in artifact_uris
 
 
 def test_publish_qdown_identity_carries_all_nine_fields(tmp_path: Any) -> None:

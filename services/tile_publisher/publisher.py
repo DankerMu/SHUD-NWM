@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload
+from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -59,10 +60,21 @@ class TilePublisher:
         object_store_root: Path | str,
         object_store_prefix: str = "",
         database_url: str | None = None,
+        published_artifact_root: Path | str | None = None,
+        published_artifact_uri_prefix: str | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.object_store = LocalObjectStore(object_store_root, object_store_prefix=object_store_prefix)
         self.database_url = (database_url or "").strip()
+        self.published_artifact_root = (
+            Path(published_artifact_root).expanduser().resolve()
+            if published_artifact_root is not None and str(published_artifact_root).strip()
+            else None
+        )
+        self.published_artifact_uri_prefix = (
+            (published_artifact_uri_prefix or os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://")).strip()
+            or "published://"
+        )
 
     @classmethod
     def from_env(cls) -> TilePublisher:
@@ -77,6 +89,8 @@ class TilePublisher:
             object_store_root=object_store_root,
             object_store_prefix=os.getenv("OBJECT_STORE_PREFIX", ""),
             database_url=os.getenv("DATABASE_URL", ""),
+            published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
+            published_artifact_uri_prefix=os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://"),
         )
 
     def publish_cycle(self, cycle_id: str) -> PublishResult:
@@ -968,7 +982,30 @@ class TilePublisher:
     def _write_qdown_artifact(self, key: str, payload: dict[str, Any]) -> str:
         content = json.dumps(payload, sort_keys=True).encode("utf-8")
         self.object_store.write_bytes_atomic(key, content)
+        if self.published_artifact_root is not None:
+            published_key = self.object_store.normalize_key(key)
+            self._write_published_artifact(published_key, content)
+            return f"{_prefix_with_separator(self.published_artifact_uri_prefix)}{published_key}"
         return self.object_store.uri_for_key(key)
+
+    def _write_published_artifact(self, key: str, content: bytes) -> None:
+        if self.published_artifact_root is None:
+            return
+        target = self.published_artifact_root / key
+        try:
+            ensure_directory_no_follow(self.published_artifact_root)
+            atomic_write_bytes_no_follow(
+                target,
+                content,
+                containment_root=self.published_artifact_root,
+                temp_suffix="part",
+            )
+        except (OSError, SafeFilesystemError) as error:
+            raise PublishError(
+                "PUBLISHED_ARTIFACT_WRITE_FAILED",
+                "Failed to write q_down artifact to the published artifact root.",
+                {"artifact_key": key},
+            ) from error
 
 
 def _safe_key_segment(value: Any) -> str:
@@ -995,6 +1032,10 @@ def _qdown_isoformat(value: Any) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def _prefix_with_separator(prefix: str) -> str:
+    return prefix if prefix.endswith("/") else f"{prefix}/"
 
 
 def _qdown_cycle_quality_summary(runs: list[dict[str, Any]]) -> dict[str, Any]:
