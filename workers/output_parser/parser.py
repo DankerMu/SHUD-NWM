@@ -476,6 +476,23 @@ class PsycopgOutputParserRepository:
     def upsert_river_timeseries(self, rows: tuple[RiverTimeseriesRow, ...], *, batch_size: int) -> None:
         if not rows:
             return
+        replacement_keys = sorted(
+            {(row.run_id, row.river_network_version_id, row.variable) for row in rows}
+        )
+        if self._connection is None:
+            with self.transaction() as repository:
+                repository.upsert_river_timeseries(rows, batch_size=batch_size)
+            return
+        for run_id, river_network_version_id, variable in replacement_keys:
+            self._fetch_all(
+                """
+                DELETE FROM hydro.river_timeseries
+                WHERE run_id = %s
+                  AND river_network_version_id = %s
+                  AND variable = %s
+                """,
+                (run_id, river_network_version_id, variable),
+            )
         value_rows = [
             (
                 row.run_id,
@@ -804,7 +821,7 @@ def _rivqdown_data_lines(lines: list[str], start_time: datetime) -> list[str]:
 
 def _rivqdown_time_basis(lines: list[str], start_time: datetime, *, context: HydroRunContext) -> str:
     joined = "\n".join(lines[:10]).lower()
-    if "time_min" in joined or "unix minute" in joined or "unix_min" in joined:
+    if "unix minute" in joined or "unix_min" in joined:
         return "absolute_unix_minutes"
     data_lines = _rivqdown_data_lines(lines, start_time)
     if data_lines:

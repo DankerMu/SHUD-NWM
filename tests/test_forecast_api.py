@@ -1639,6 +1639,16 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
     }
 
 
+def test_latest_qhh_display_product_accepts_parsed_qdown_display_candidate() -> None:
+    store = SqlCaptureForecastStore([[_qhh_candidate_row(status="parsed")]])
+
+    response = store.latest_qhh_display_product("GFS")
+
+    assert response["status"] == "ready"
+    assert response["run_status"] == "parsed"
+    assert response["availability"]["ready"] is True
+
+
 def test_latest_qhh_display_product_selects_newest_ready_candidate_after_newer_unusable() -> None:
     newer_unusable = _qhh_candidate_row(
         run_id="qhh_gfs_2026050800",
@@ -1910,61 +1920,26 @@ def test_latest_qhh_display_product_bounds_blank_strict_identity_detail_before_s
     assert store.cursor.executions == []
 
 
-def test_latest_qhh_display_product_selects_ready_candidate_after_more_than_25_newer_unusable() -> None:
-    unusable_candidates = [
-        _qhh_candidate_row(
-            run_id=f"qhh_gfs_202606{index + 1:02d}00",
-            cycle_time=_dt("2026-06-01T00:00:00Z") - timedelta(hours=index),
-            segment_count=0,
-            river_sample_count=0,
-            river_valid_time_start=None,
-            river_valid_time_end=None,
-        )
-        for index in range(26)
-    ]
-    older_ready = _qhh_candidate_row(
-        run_id="qhh_gfs_2026050700",
-        cycle_time=_dt("2026-05-07T00:00:00Z"),
-    )
-    store = SqlCaptureForecastStore([[*unusable_candidates, older_ready]])
-
-    response = store.latest_qhh_display_product("GFS")
-
-    assert response["run_id"] == "qhh_gfs_2026050700"
-    assert response["status"] == "ready"
-    assert response["quality"]["candidate_limit"] == QHH_LATEST_SEARCH_LIMIT
-    assert response["quality"]["search_limit"] == QHH_LATEST_SEARCH_LIMIT
-    assert response["quality"]["context_limit"] == QHH_LATEST_CONTEXT_LIMIT
-
-
-def test_latest_qhh_display_product_searches_past_100_terminal_incomplete_candidates() -> None:
-    assert QHH_LATEST_SEARCH_LIMIT > 100
-    incomplete_candidates = [
-        _qhh_candidate_row(
-            run_id=f"qhh_gfs_202606{index + 1:03d}00",
-            cycle_time=_dt("2026-06-01T00:00:00Z") - timedelta(hours=index),
-            status="frequency_done" if index % 2 == 0 else "published",
-            segment_count=0,
-            river_sample_count=0,
-            river_valid_time_start=None,
-            river_valid_time_end=None,
-        )
-        for index in range(100)
-    ]
-    older_ready = _qhh_candidate_row(
-        run_id="qhh_gfs_older_ready_2026050700",
-        cycle_time=_dt("2026-05-07T00:00:00Z"),
+def test_latest_qhh_display_product_default_search_is_latest_candidate_only() -> None:
+    latest_incomplete = _qhh_candidate_row(
+        run_id="qhh_gfs_2026060100",
+        cycle_time=_dt("2026-06-01T00:00:00Z"),
         status="published",
+        segment_count=0,
+        river_sample_count=0,
+        river_valid_time_start=None,
+        river_valid_time_end=None,
     )
-    store = SqlCaptureForecastStore([[*incomplete_candidates, older_ready]])
+    store = SqlCaptureForecastStore([[latest_incomplete]])
 
-    response = store.latest_qhh_display_product("GFS")
+    with pytest.raises(ForecastStoreError) as error:
+        store.latest_qhh_display_product("GFS")
 
     _statement, parameters = store.cursor.executions[0]
     assert parameters[3] == QHH_LATEST_SEARCH_LIMIT
-    assert response["run_id"] == "qhh_gfs_older_ready_2026050700"
-    assert response["cycle_time"] == "2026-05-07T00:00:00Z"
-    assert response["status"] == "ready"
+    assert error.value.details["candidate_count"] == 1
+    assert error.value.details["reported_candidate_count"] == 1
+    assert error.value.details["candidates"][0]["run_id"] == "qhh_gfs_2026060100"
 
 
 def test_latest_qhh_display_product_normalizes_ifs_and_discloses_shorter_horizon() -> None:
@@ -2078,7 +2053,7 @@ def test_latest_qhh_display_product_bounds_reflected_unsupported_source() -> Non
     assert store.cursor.executions == []
 
 
-@pytest.mark.parametrize("status", ["failed", "cancelled", "pending", "created", "running", "parsed"])
+@pytest.mark.parametrize("status", ["failed", "cancelled", "pending", "created", "running"])
 def test_latest_qhh_display_product_rejects_failed_cancelled_pending_and_incomplete_runs(status: str) -> None:
     store = SqlCaptureForecastStore([[_qhh_candidate_row(status=status)]])
 
@@ -2450,7 +2425,7 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     candidate_cte = statement[statement.index("WITH candidate_runs") : statement.index("station_sample_rows AS")]
     assert "bv.basin_id = %s" in candidate_cte
     assert "LOWER(h.source_id) = LOWER(%s)" in candidate_cte
-    assert "h.status IN ('frequency_done', 'published')" in candidate_cte
+    assert "h.status IN ('parsed', 'frequency_done', 'published')" in candidate_cte
     assert "h.run_type = 'forecast'" in candidate_cte
     assert "h.cycle_time IS NOT NULL" in candidate_cte
     assert "ORDER BY h.cycle_time DESC, h.run_id DESC" in candidate_cte
@@ -2541,10 +2516,10 @@ def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_r
 
     ready_statement, ready_parameters = store.cursor.executions[0]
     context_statement, context_parameters = store.cursor.executions[1]
-    assert "h.status IN ('frequency_done', 'published')" in ready_statement
+    assert "h.status IN ('parsed', 'frequency_done', 'published')" in ready_statement
     assert "FROM met.forcing_station_timeseries" in ready_statement
     assert "FROM hydro.river_timeseries" in ready_statement
-    assert "h.status NOT IN ('frequency_done', 'published')" in context_statement
+    assert "h.status NOT IN ('parsed', 'frequency_done', 'published')" in context_statement
     assert "FROM met.forcing_station_timeseries" not in context_statement
     assert "FROM hydro.river_timeseries" not in context_statement
     assert ready_parameters == (

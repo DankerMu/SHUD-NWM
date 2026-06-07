@@ -81,6 +81,38 @@ def test_negative_state_value_fails(tmp_path: Path) -> None:
     assert "negative" in (result.reason or "")
 
 
+def test_native_shud_update_header_and_negative_zero_pass(tmp_path: Path) -> None:
+    path = tmp_path / "native.cfg.ic.update"
+    path.write_text(
+        "2\t1\t27000000.000000\n"
+        "Index\tCanopy\tSnow\tSurface\tUnsat\tGW\n"
+        "1\t0.000000\t0.000000\t-0.000001\t0.000000\t0.000000\n"
+        "2\t0.000000\t0.000000\t0.000000\t0.000000\t-0.000001\n"
+        "Index\tRiver_Stage\n"
+        "1\t0.000000\n",
+        encoding="utf-8",
+    )
+
+    result = run_state_variable_qc(path, expected_mesh_count=2, expected_river_count=1)
+
+    assert result.passed is True
+    assert result.reason is None
+
+
+def test_negative_beyond_roundoff_tolerance_fails(tmp_path: Path) -> None:
+    ic = _write_ic(
+        tmp_path / "neg_tolerance.cfg.ic",
+        mesh=1,
+        river=1,
+        mesh_rows=[[1.0, 0.1, -0.02, 0.1, 0.1, 0.1]],
+    )
+
+    result = run_state_variable_qc(ic, expected_mesh_count=1, expected_river_count=1)
+
+    assert result.passed is False
+    assert "negative" in (result.reason or "")
+
+
 def test_out_of_range_value_fails(tmp_path: Path) -> None:
     ic = _write_ic(
         tmp_path / "huge.cfg.ic",

@@ -211,6 +211,66 @@ def test_saved_state_valid_time_equals_next_cycle_init(tmp_path: Path) -> None:
     assert result["state_uri"].endswith("state.cfg.ic")
 
 
+def test_saved_state_finds_restart_from_object_store_output_directory_uri(tmp_path: Path) -> None:
+    from packages.common.state_cli import StateRunContext, save_state_for_run
+    from packages.common.state_manager import PsycopgStateSnapshotRepository, StateManager
+
+    t_next = "2026-05-02T00:00:00Z"
+    object_root = tmp_path / "object-store"
+    workspace = tmp_path / "workspace"
+    run_id = "fcst_gfs_2026050100_demo_model"
+    output_dir = object_root / "runs" / run_id / "output"
+    output_dir.mkdir(parents=True)
+    ic_update = output_dir / "demo.cfg.ic.update"
+    ic_update.write_text(f"2 1 {_minute_time(t_next):.6f}\n1 0.1\n2 0.2\n1 0.0\n", encoding="utf-8")
+
+    captured: dict[str, Any] = {}
+
+    class _Repo(PsycopgStateSnapshotRepository):
+        def __init__(self) -> None:  # noqa: D401 - test double
+            pass
+
+        def get_state_snapshot_by_model_time(self, *, model_id: str, valid_time: datetime) -> StateSnapshot | None:
+            return None
+
+        def upsert_state_snapshot(self, snapshot: StateSnapshot) -> StateSnapshot:
+            captured["snapshot"] = snapshot
+            return snapshot
+
+        def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
+            return captured.get("snapshot")
+
+        def insert_qc_result(self, record: Any) -> dict[str, Any]:
+            captured.setdefault("qc_records", []).append(record)
+            return {}
+
+        def set_usable_flag(self, *, state_id: str, usable_flag: bool) -> StateSnapshot | None:
+            captured["usable_flag"] = usable_flag
+            return captured.get("snapshot")
+
+    class _RunRepo:
+        def load_run_context(self, _run_id: str) -> StateRunContext:
+            return StateRunContext(
+                run_id=run_id,
+                model_id="demo_model",
+                end_time=_dt(t_next),
+                output_uri=f"s3://nhms/runs/{run_id}/output/",
+            )
+
+    manager = StateManager(repository=_Repo(), object_store=LocalObjectStore(object_root, "s3://nhms"))
+
+    result = save_state_for_run(
+        run_id,
+        manager=manager,
+        repository=_RunRepo(),
+        workspace_root=workspace,
+    )
+
+    assert captured["snapshot"].valid_time == _dt(t_next)
+    assert captured["snapshot"].original_shud_filename == "demo.cfg.ic.update"
+    assert result["state_uri"].endswith("state.cfg.ic")
+
+
 # ---------------------------------------------------------------------------
 # IC materialization on the consume side: state.cfg.ic -> <project>.cfg.ic
 # ---------------------------------------------------------------------------

@@ -59,6 +59,11 @@ _LAKE_STATE_COLUMNS = ("lake_stage",)
 # real SHUD depths are << 1000 m.
 _MAX_STATE_VALUE_M = 1.0e6
 
+# Native SHUD restart writers can emit small negative depths/stages from numeric
+# residuals. Treat sub-centimetre negatives as numeric zero for QC; larger
+# negatives remain fatal because they are no longer harmless roundoff.
+_NEGATIVE_ZERO_TOLERANCE = 1.0e-2
+
 
 @dataclass(frozen=True)
 class StateQCResult:
@@ -166,10 +171,16 @@ def _parse_ic_file(path: Path) -> tuple[list[list[float]], list[list[float]], li
         raise ValueError(f"unreadable IC header: {lines[0]!r}")
     mesh_count, river_count, lake_count = counts
 
+    sectioned_rows = _parse_sectioned_rows(lines[1:], counts)
+    if sectioned_rows is not None:
+        return sectioned_rows
+
     data_rows: list[list[float]] = []
     for line in lines[1:]:
         row = _numeric_row(line)
         if row is None:
+            if not data_rows and _looks_like_column_header(line):
+                continue
             raise ValueError(f"non-numeric IC data row: {line!r}")
         data_rows.append(row)
 
@@ -194,6 +205,49 @@ def _parse_ic_file(path: Path) -> tuple[list[list[float]], list[list[float]], li
                 f"{len(data_rows)} rows (< {total_expected} = mesh+river+lake)"
             )
         lake_rows = data_rows[mesh_count + river_count : total_expected]
+    return mesh_rows, river_rows, lake_rows
+
+
+def _parse_sectioned_rows(
+    data_lines: Sequence[str],
+    counts: tuple[int, int, int],
+) -> tuple[list[list[float]], list[list[float]], list[list[float]]] | None:
+    """Parse native SHUD ``*.cfg.ic.update`` files with per-section column headers."""
+
+    if not any(_looks_like_column_header(line) for line in data_lines):
+        return None
+
+    mesh_count, river_count, lake_count = counts
+    mesh_rows: list[list[float]] = []
+    river_rows: list[list[float]] = []
+    lake_rows: list[list[float]] = []
+    section: str | None = None
+
+    for line in data_lines:
+        if _looks_like_column_header(line):
+            section = _section_from_column_header(line, river_rows=river_rows, river_count=river_count)
+            continue
+
+        row = _numeric_row(line)
+        if row is None:
+            raise ValueError(f"non-numeric IC data row: {line!r}")
+
+        # Native SHUD restart files can include numeric section metadata between
+        # state blocks. Only rows inside a recognised section and before that
+        # section's declared count are state rows.
+        if section == "mesh":
+            if len(mesh_rows) < mesh_count:
+                mesh_rows.append(row)
+            continue
+        if section == "river":
+            if len(river_rows) < river_count:
+                river_rows.append(row)
+            continue
+        if section == "lake":
+            if len(lake_rows) < lake_count:
+                lake_rows.append(row)
+            continue
+
     return mesh_rows, river_rows, lake_rows
 
 
@@ -285,6 +339,25 @@ def _numeric_row(line: str) -> list[float] | None:
     return row or None
 
 
+def _looks_like_column_header(line: str) -> bool:
+    tokens = [token.strip().lower() for token in line.split()]
+    if not tokens:
+        return False
+    return tokens[0] in {"index", "id"} and any(
+        token in {"canopy", "snow", "surface", "unsat", "gw", "stage", "river_stage", "lake_stage", "lakestage"}
+        for token in tokens[1:]
+    )
+
+
+def _section_from_column_header(line: str, *, river_rows: list[list[float]], river_count: int) -> str:
+    tokens = {token.strip().lower() for token in line.split()}
+    if {"canopy", "snow", "surface", "unsat", "gw"} & tokens:
+        return "mesh"
+    if "stage" in tokens or "river_stage" in tokens or "lake_stage" in tokens or "lakestage" in tokens:
+        return "river" if len(river_rows) < river_count else "lake"
+    return "mesh"
+
+
 def _check_row_counts(row_counts: Mapping[str, Any]) -> str | None:
     for kind in ("mesh", "river", "lake"):
         expected = row_counts.get(f"expected_{kind}")
@@ -326,7 +399,7 @@ def _check_block_range(
                 return f"{kind} row {index} column {col_index} is not finite ({value})"
             # State columns (everything after the id) must be non-negative & bounded.
             if col_index >= 1:
-                if value < 0.0:
+                if value < -_NEGATIVE_ZERO_TOLERANCE:
                     block_report["violations"] += 1
                     name = columns[col_index - 1] if col_index - 1 < len(columns) else f"col{col_index}"
                     return f"{kind} row {index} {name} is negative ({value})"

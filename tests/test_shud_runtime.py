@@ -333,6 +333,36 @@ def test_runtime_staging_accepts_manifest_carried_forcing_checksums(tmp_path: Pa
     assert (input_dir / "alias-a" / "forcing.csv").exists()
 
 
+def test_runtime_staging_keeps_standard_shud_forcing_time_axis_relative_to_cfg_start(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(object_root)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    output_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "output"
+    input_dir.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+
+    runtime.prepare_workspace(manifest, input_dir)
+    cfg_path = runtime.generate_cfg_para(manifest, input_dir, output_dir)
+
+    cfg_values = dict(
+        line.split(maxsplit=1)
+        for line in cfg_path.read_text(encoding="utf-8").splitlines()
+        if line.split(maxsplit=1)[0] in {"START", "END"}
+    )
+    forcing_rows = (input_dir / "alias-a" / "forcing.csv").read_text(encoding="utf-8").splitlines()
+    first_time_day = float(forcing_rows[2].split()[0])
+    last_time_day = float(forcing_rows[-1].split()[0])
+
+    assert float(cfg_values["START"]) == pytest.approx(0.0)
+    assert float(cfg_values["END"]) == pytest.approx(3.0)
+    assert first_time_day == pytest.approx(0.0)
+    assert first_time_day <= last_time_day < float(cfg_values["END"])
+
+
 _MMDAY_UNITS = {
     "PRCP": "mm/day",
     "TEMP": "degC",

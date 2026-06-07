@@ -1433,6 +1433,8 @@ def _shud_start_day(manifest: dict[str, Any]) -> float:
     runtime = manifest.get("runtime") or {}
     if runtime.get("shud_start_day") is not None:
         return float(runtime["shud_start_day"])
+    if _is_shud_project_mode(manifest, str(runtime.get("command_style") or "")):
+        return 0.0
     return _shud_start_minute(manifest) / 1440.0
 
 

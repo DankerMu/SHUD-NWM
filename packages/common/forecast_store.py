@@ -11,12 +11,12 @@ MVP_STATION_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 DEFAULT_STATION_SERIES_LIMIT = 500
 MAX_STATION_SERIES_LIMIT = 10000
 QHH_BASIN_ID = "basins_qhh"
-QHH_LATEST_SEARCH_LIMIT = 500
+QHH_LATEST_SEARCH_LIMIT = 1
 QHH_LATEST_CANDIDATE_LIMIT = QHH_LATEST_SEARCH_LIMIT
 QHH_LATEST_CONTEXT_LIMIT = 10
 QHH_LATEST_EXPECTED_HORIZON_HOURS = 168
 QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
-QHH_LATEST_READY_RUN_STATUSES = ("frequency_done", "published")
+QHH_LATEST_READY_RUN_STATUSES = ("parsed", "frequency_done", "published")
 QHH_LATEST_REFLECTED_VALUE_LIMIT = 64
 QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id")
 
@@ -1041,7 +1041,19 @@ class PsycopgForecastStore:
                     mi.basin_version_id AS model_basin_version_id,
                     bv.basin_id,
                     rnv.basin_version_id AS river_network_basin_version_id,
-                    rnv.segment_count AS expected_segment_count,
+                    COALESCE(
+                        CASE WHEN mi.resource_profile->>'output_segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->>'output_segment_count')::integer END,
+                        CASE WHEN mi.resource_profile->>'shud_output_segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->>'shud_output_segment_count')::integer END,
+                        CASE WHEN mi.resource_profile->>'shud_output_river_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->>'shud_output_river_count')::integer END,
+                        CASE WHEN mi.resource_profile->'output_river'->>'output_segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->'output_river'->>'output_segment_count')::integer END,
+                        CASE WHEN mi.resource_profile->'output_river'->>'segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->'output_river'->>'segment_count')::integer END,
+                        rnv.segment_count
+                    ) AS expected_segment_count,
                     fv.forcing_version_id AS fv_forcing_version_id,
                     fv.model_id AS forcing_model_id,
                     fv.source_id AS forcing_source_id,
@@ -1068,7 +1080,7 @@ class PsycopgForecastStore:
                   ON fv.forcing_version_id = h.forcing_version_id
                 WHERE bv.basin_id = %s
                   AND h.run_type = 'forecast'
-                  AND h.status IN ('frequency_done', 'published')
+                  AND h.status IN ('parsed', 'frequency_done', 'published')
                   AND LOWER(h.source_id) = LOWER(%s)
                   {identity_sql}
                   AND h.cycle_time IS NOT NULL
@@ -1553,7 +1565,19 @@ class PsycopgForecastStore:
                 mi.basin_version_id AS model_basin_version_id,
                 bv.basin_id,
                 rnv.basin_version_id AS river_network_basin_version_id,
-                rnv.segment_count AS expected_segment_count,
+                COALESCE(
+                    CASE WHEN mi.resource_profile->>'output_segment_count' ~ '^[0-9]+$'
+                        THEN (mi.resource_profile->>'output_segment_count')::integer END,
+                    CASE WHEN mi.resource_profile->>'shud_output_segment_count' ~ '^[0-9]+$'
+                        THEN (mi.resource_profile->>'shud_output_segment_count')::integer END,
+                    CASE WHEN mi.resource_profile->>'shud_output_river_count' ~ '^[0-9]+$'
+                        THEN (mi.resource_profile->>'shud_output_river_count')::integer END,
+                    CASE WHEN mi.resource_profile->'output_river'->>'output_segment_count' ~ '^[0-9]+$'
+                        THEN (mi.resource_profile->'output_river'->>'output_segment_count')::integer END,
+                    CASE WHEN mi.resource_profile->'output_river'->>'segment_count' ~ '^[0-9]+$'
+                        THEN (mi.resource_profile->'output_river'->>'segment_count')::integer END,
+                    rnv.segment_count
+                ) AS expected_segment_count,
                 fv.forcing_version_id AS fv_forcing_version_id,
                 fv.model_id AS forcing_model_id,
                 fv.source_id AS forcing_source_id,
@@ -1597,7 +1621,7 @@ class PsycopgForecastStore:
               ON fv.forcing_version_id = h.forcing_version_id
             WHERE bv.basin_id = %s
               AND h.run_type = 'forecast'
-              AND h.status NOT IN ('frequency_done', 'published')
+              AND h.status NOT IN ('parsed', 'frequency_done', 'published')
               AND LOWER(h.source_id) = LOWER(%s)
               {identity_sql}
               AND h.cycle_time IS NOT NULL
@@ -2959,7 +2983,7 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "index": "hydro_run_qhh_latest_candidate_idx",
             "status": "covered_by_latest_product_candidate_index",
             "columns": ["LOWER(source_id)", "run_type", "basin_version_id", "cycle_time DESC", "run_id DESC"],
-            "predicate": "cycle_time IS NOT NULL AND status IN ('frequency_done', 'published')",
+            "predicate": "cycle_time IS NOT NULL AND status IN ('parsed', 'frequency_done', 'published')",
         },
         {
             "table": "core.basin_version",

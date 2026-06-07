@@ -77,13 +77,14 @@ def save_state_for_run(
     workspace = Path(workspace_root or os.getenv("WORKSPACE_ROOT", ".")).expanduser().resolve()
     object_root = Path(os.getenv("OBJECT_STORE_ROOT", str(workspace))).expanduser().resolve()
     object_prefix = os.getenv("OBJECT_STORE_PREFIX", "")
+    state_object_store = LocalObjectStore(object_root, object_prefix)
     state_manager = manager or StateManager(
         repository=PsycopgStateSnapshotRepository.from_env(),
-        object_store=LocalObjectStore(object_root, object_prefix),
+        object_store=state_object_store,
     )
     run_repository = repository or StateRunRepository.from_env()
     run = run_repository.load_run_context(run_id)
-    ic_file = _find_ic_file(run, workspace, LocalObjectStore(object_root, object_prefix))
+    ic_file = _find_ic_file(run, workspace, state_manager.object_store)
     # The native SHUD end-of-segment restart artifact is ``*.cfg.ic.update``; the
     # canonical object key is ``state.cfg.ic`` (state_manager._state_object_key). Record
     # the original SHUD filename and key the snapshot at end_time == T_{N+1} so the saved
@@ -123,7 +124,7 @@ def _find_ic_file(run: StateRunContext, workspace_root: Path, object_store: Loca
         _collect(workspace_output)
 
     if run.output_uri:
-        output_path = object_store.resolve_path(run.output_uri)
+        output_path = _resolve_run_output_path(run, object_store)
         if output_path.is_file():
             if output_path.name.endswith(".cfg.ic.update"):
                 update_candidates.append(output_path)
@@ -137,6 +138,39 @@ def _find_ic_file(run: StateRunContext, workspace_root: Path, object_store: Loca
     if ic_candidates:
         return ic_candidates[0]
     raise StateManagerError(f"No .cfg.ic / .cfg.ic.update state file found for run {run.run_id}.")
+
+
+def _resolve_run_output_path(run: StateRunContext, object_store: LocalObjectStore) -> Path:
+    """Resolve ``hydro_run.output_uri`` for either a run output directory or file."""
+
+    if not run.output_uri:
+        raise StateManagerError(f"hydro_run {run.run_id} has no output_uri.")
+    try:
+        key = object_store.normalize_key(run.output_uri)
+    except ValueError as error:
+        raise StateManagerError(f"Invalid output_uri for run {run.run_id}: {error}") from error
+
+    parts = Path(key).parts
+    expected_prefix = ("runs", run.run_id, "output")
+    if parts[: len(expected_prefix)] != expected_prefix:
+        raise StateManagerError(
+            f"output_uri for run {run.run_id} must be under runs/{run.run_id}/output/: {run.output_uri}"
+        )
+
+    if len(parts) > len(expected_prefix):
+        try:
+            return object_store.resolve_path(run.output_uri)
+        except ValueError as error:
+            raise StateManagerError(f"Invalid output object for run {run.run_id}: {error}") from error
+
+    output_path = object_store.root.joinpath(*parts)
+    try:
+        output_path.relative_to(object_store.root)
+    except ValueError as error:
+        raise StateManagerError(
+            f"output_uri escapes object store root for run {run.run_id}: {run.output_uri}"
+        ) from error
+    return output_path
 
 
 def _click_main(argv: Sequence[str] | None = None) -> int:

@@ -36,6 +36,15 @@ class FakeOutputRepository:
 
     def upsert_river_timeseries(self, rows: tuple[RiverTimeseriesRow, ...], *, batch_size: int) -> None:
         assert batch_size > 0
+        replacement_keys = {
+            (row.run_id, row.river_network_version_id, row.variable)
+            for row in rows
+        }
+        self.rows = {
+            key: row
+            for key, row in self.rows.items()
+            if (key[0], key[1], key[3]) not in replacement_keys
+        }
         for row in rows:
             key = (row.run_id, row.river_network_version_id, row.river_segment_id, row.variable, row.valid_time)
             self.rows[key] = row
@@ -84,6 +93,21 @@ def test_parse_dat_relative_minutes_from_run_start(tmp_path: Path) -> None:
     store.write_bytes_atomic(
         "runs/run_001/output/demo.rivqdown",
         "0 86400 172800\n60 43200 0\n".encode("utf-8"),
+    )
+
+    parser.parse_run("run_001")
+
+    first_time = _dt("2026-05-01T00:00:00Z")
+    second_time = _dt("2026-05-01T01:00:00Z")
+    assert repository.rows[("run_001", "rivnet_v1", "seg_a", "q_down", first_time)].lead_time_hours == 0
+    assert repository.rows[("run_001", "rivnet_v1", "seg_a", "q_down", second_time)].lead_time_hours == 1
+
+
+def test_parse_qhh_time_min_header_is_relative_to_run_start(tmp_path: Path) -> None:
+    store, parser, repository = _build_parser(tmp_path)
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown.csv",
+        "0 2 20260501\nTime_min X1 X2\n0 86400 172800\n60 43200 0\n".encode("utf-8"),
     )
 
     parser.parse_run("run_001")
@@ -189,6 +213,23 @@ def test_reparse_upserts_existing_timeseries_rows(tmp_path: Path) -> None:
     assert len(repository.rows) == 1
     assert next(iter(repository.rows.values())).value == pytest.approx(2.0)
     assert repository.statuses == ["parsed", "parsed"]
+
+
+def test_reparse_replaces_stale_timeseries_window(tmp_path: Path) -> None:
+    store, parser, repository = _build_parser(
+        tmp_path,
+        segments=(RiverSegmentOrder("seg_a", "rivnet_v1", 1),),
+    )
+    key = "runs/run_001/output/demo.rivqdown"
+    store.write_bytes_atomic(key, "time,seg_a\n2026-05-01T00:00:00Z,86400\n".encode("utf-8"))
+    parser.parse_run("run_001")
+
+    store.write_bytes_atomic(key, "time,seg_a\n2026-05-01T01:00:00Z,172800\n".encode("utf-8"))
+    parser.parse_run("run_001")
+
+    assert len(repository.rows) == 1
+    assert _row_key("seg_a", "2026-05-01T00:00:00Z") not in repository.rows
+    assert repository.rows[_row_key("seg_a", "2026-05-01T01:00:00Z")].value == pytest.approx(2.0)
 
 
 def test_s3_output_uri_must_match_configured_bucket_and_prefix(tmp_path: Path) -> None:
