@@ -89,6 +89,15 @@ GFS_IDX_FIELD_LEVEL: dict[str, tuple[str, str]] = {
     "apcp": ("APCP", "surface"),
     "dswrf": ("DSWRF", "surface"),
 }
+GFS_GRIB_SHORT_NAME: dict[str, str] = {
+    "tmp2m": "2t",
+    "rh2m": "2r",
+    "u10m": "10u",
+    "v10m": "10v",
+    "pressfc": "sp",
+    "apcp": "tp",
+    "dswrf": "sdswrf",
+}
 # apcp/dswrf are accumulated/averaged fields that are undefined at the f000 analysis
 # time; the cloud .idx omits them there, matching NOMADS which has no f000 APCP/DSWRF.
 # Keep f000 in the manifest for instantaneous fields. The forcing producer maps
@@ -582,18 +591,27 @@ class GFSAdapter(DataSourceAdapter):
 
         effective_hours = self._effective_forecast_hours(hours)
         for forecast_hour in effective_hours:
-            for variable in self._variables_for_forecast_hour(forecast_hour):
-                filename = self.raw_filename(parsed_cycle_time, forecast_hour, variable)
-                local_key = f"raw/{self.config.source_id}/{compact_cycle}/{filename}"
+            bundle_variables = self._variables_for_forecast_hour(forecast_hour)
+            bundle_filename = self.raw_bundle_filename(parsed_cycle_time, forecast_hour)
+            local_key = f"raw/{self.config.source_id}/{compact_cycle}/{bundle_filename}"
+            for variable in bundle_variables:
                 entries.append(
                     ManifestEntry(
-                        remote_url=self.remote_url(parsed_cycle_time, forecast_hour, variable),
+                        remote_url=self.remote_bundle_url(parsed_cycle_time, forecast_hour, bundle_variables),
                         local_key=local_key,
                         variable=variable,
                         forecast_hour=forecast_hour,
                         metadata={
                             "cycle_time": parsed_cycle_time.isoformat(),
                             "valid_time": valid_time_for(parsed_cycle_time, forecast_hour).isoformat(),
+                            "bundle": {
+                                "layout": "per_forecast_hour",
+                                "variables": list(bundle_variables),
+                                "physical_file_count": len(effective_hours),
+                            },
+                            "grib_short_name": GFS_GRIB_SHORT_NAME.get(variable, variable),
+                            "cfgrib_filter_by_keys": {"shortName": GFS_GRIB_SHORT_NAME.get(variable, variable)},
+                            "logical_remote_url": self.remote_url(parsed_cycle_time, forecast_hour, variable),
                         },
                     )
                 )
@@ -607,6 +625,8 @@ class GFSAdapter(DataSourceAdapter):
             "source_policy": self.source_policy_identity(effective_hours),
             "source_object_identity": self.source_object_identity(parsed_cycle_time, effective_hours),
             "variable_count": len(self.config.variables),
+            "physical_file_layout": "per_forecast_hour_bundle",
+            "physical_file_count": len(effective_hours),
             "total_file_count": len(entries),
         }
         manifest_key = f"raw/{self.config.source_id}/{compact_cycle}/manifest.json"
@@ -659,6 +679,8 @@ class GFSAdapter(DataSourceAdapter):
 
         for entry in manifest.entries:
             try:
+                if entry.local_key in already_done_by_key:
+                    continue
                 already_done = self._already_done_result(
                     entry,
                     trusted_source_object_identity=trusted_source_object_identity,
@@ -715,18 +737,20 @@ class GFSAdapter(DataSourceAdapter):
         self._update_cycle(cycle_time=cycle_time, status="downloading", error_code="", error_message="")
 
         results: list[DownloadFileResult] = []
+        completed_by_key: dict[str, DownloadFileResult] = dict(already_done_by_key)
         retry_count = 0
         total_bytes_written = 0
 
         for entry in manifest.entries:
             try:
-                if entry.local_key in already_done_by_key:
-                    results.append(already_done_by_key[entry.local_key])
+                if entry.local_key in completed_by_key:
+                    results.append(completed_by_key[entry.local_key])
                     continue
 
                 result, retries = self._download_entry(entry)
                 retry_count += retries
                 total_bytes_written += result.bytes_written
+                completed_by_key[entry.local_key] = result
                 results.append(result)
                 self._persist_manifest_metadata(manifest)
             except GFSAdapterError as error:
@@ -785,7 +809,11 @@ class GFSAdapter(DataSourceAdapter):
 
     def verify_manifest(self, manifest: DownloadManifest) -> VerificationResult:
         failures: list[VerificationFailure] = []
+        verified_keys: set[str] = set()
         for entry in manifest.entries:
+            if entry.local_key in verified_keys:
+                continue
+            verified_keys.add(entry.local_key)
             try:
                 if not self.object_store.exists(entry.local_key):
                     failures.append(
@@ -996,34 +1024,34 @@ class GFSAdapter(DataSourceAdapter):
 
     # ------------------------------------------------------------------ cloud mirror
     def _download_cloud_mirror(self, entry: ManifestEntry, backend: str) -> tuple[DownloadedPayload, int]:
-        """Subset one variable from a cloud mirror via .idx Range GET + local cdo clip.
+        """Subset one forecast-hour bundle from a cloud mirror via .idx Range GET + local cdo clip.
 
         The mirror serves the full global GRIB and a wgrib2 .idx. We GET the .idx,
-        locate the variable's byte range, Range-GET only those bytes, then clip to the
-        configured bbox with cdo (mandatory: a missing/failed cdo fails loud).
+        locate the requested variables' byte ranges, Range-GET only those bytes,
+        concatenate them into a small GRIB bundle, then clip to the configured bbox
+        with cdo (mandatory: a missing/failed cdo fails loud).
         """
         cycle_time = self._entry_cycle_time(entry)
-        if entry.forecast_hour == 0 and entry.variable in GFS_F000_UNAVAILABLE_VARIABLES:
-            # apcp/dswrf are undefined at the f000 analysis time; the cloud .idx omits
-            # them, exactly as NOMADS has no f000 APCP/DSWRF. Surface as 404 so the
-            # chain falls through to NOMADS rather than silently dropping the variable.
-            raise IdxRecordNotFoundError(
-                f"{entry.variable} is not defined at f000 on mirror {backend} for {entry.local_key}",
-                attempts=1,
-            )
+        variables = self._bundle_variables_for_entry(entry)
         grib_url = self._mirror_grib_url(backend, cycle_time, entry.forecast_hour)
         idx_url = f"{grib_url}.idx"
         idx_text = self._http_get_text(idx_url)
         records = _parse_gfs_idx(idx_text)
-        selection = _select_idx_record(
-            records,
-            entry.variable,
-            entry.forecast_hour,
-            expected_interval_hours=self._expected_interval_hours(entry.forecast_hour),
-        )
-        if selection.accumulation_type is not None:
-            entry.metadata.setdefault("idx_selector", {}).update(selection.as_metadata())
-        raw_bytes = self._http_get_range(grib_url, selection.byte_range[0], selection.byte_range[1])
+        raw_chunks: list[bytes] = []
+        selectors: dict[str, Any] = {}
+        for variable in variables:
+            selection = _select_idx_record(
+                records,
+                variable,
+                entry.forecast_hour,
+                expected_interval_hours=self._expected_interval_hours(entry.forecast_hour),
+            )
+            selectors[variable] = selection.as_metadata()
+            raw_chunks.append(self._http_get_range(grib_url, selection.byte_range[0], selection.byte_range[1]))
+        entry.metadata.setdefault("idx_selectors", {}).update(selectors)
+        if len(variables) == 1:
+            entry.metadata["idx_selector"] = selectors[variables[0]]
+        raw_bytes = b"".join(raw_chunks)
         clipped = self._clip_grib_to_bbox(raw_bytes, grib_url)
         if len(clipped) > self.config.max_file_size_bytes:
             raise FileTooLargeError(
@@ -1031,6 +1059,22 @@ class GFSAdapter(DataSourceAdapter):
             )
         checksum = hashlib.sha256(clipped).hexdigest()
         return DownloadedPayload(content=clipped, checksum=checksum, bytes_written=len(clipped)), 0
+
+    def _bundle_variables_for_entry(self, entry: ManifestEntry) -> tuple[str, ...]:
+        bundle = entry.metadata.get("bundle") if entry.metadata else None
+        raw_variables = bundle.get("variables") if isinstance(bundle, Mapping) else None
+        if isinstance(raw_variables, list):
+            variables = tuple(str(variable) for variable in raw_variables)
+        else:
+            variables = (entry.variable,)
+        if entry.forecast_hour == 0:
+            variables = tuple(variable for variable in variables if variable not in GFS_F000_UNAVAILABLE_VARIABLES)
+        if not variables:
+            raise IdxRecordNotFoundError(
+                f"No GFS variables are defined for f{entry.forecast_hour:03d} in {entry.local_key}",
+                attempts=1,
+            )
+        return variables
 
     def _mirror_grib_url(self, backend: str, cycle_time: datetime, forecast_hour: int) -> str:
         base = self.config.mirror_base_url(backend).rstrip("/")
@@ -1581,6 +1625,7 @@ class GFSAdapter(DataSourceAdapter):
             "requested_forecast_hours": requested_hours,
             "forecast_hours": hours,
             "variables": list(self.config.variables),
+            "grib_short_names": self._grib_short_names_identity(),
             "variable_availability": {
                 "f000_unavailable_variables": sorted(GFS_F000_UNAVAILABLE_VARIABLES),
                 "f000_keeps_available_instantaneous_variables": True,
@@ -1617,6 +1662,7 @@ class GFSAdapter(DataSourceAdapter):
             "last_forecast_hour": max(hours) if hours else None,
             "forecast_hour_count": len(hours),
             "variable_count": len(self.config.variables),
+            "grib_short_names": self._grib_short_names_identity(),
             "manifest_object_key": f"raw/{self.config.source_id}/{format_cycle_time(parsed_cycle_time)}/manifest.json",
             "manifest_digest": _stable_digest(
                 {
@@ -1644,16 +1690,22 @@ class GFSAdapter(DataSourceAdapter):
         compact_cycle = format_cycle_time(cycle_time)
         entries: list[dict[str, Any]] = []
         for forecast_hour in forecast_hours:
-            for variable in self._variables_for_forecast_hour(forecast_hour):
-                filename = self.raw_filename(cycle_time, forecast_hour, variable)
-                local_key = f"raw/{self.config.source_id}/{compact_cycle}/{filename}"
+            bundle_variables = self._variables_for_forecast_hour(forecast_hour)
+            local_key = (
+                f"raw/{self.config.source_id}/{compact_cycle}/"
+                f"{self.raw_bundle_filename(cycle_time, forecast_hour)}"
+            )
+            for variable in bundle_variables:
                 entries.append(
                     {
                         "local_key": local_key,
-                        "remote_identity": self._safe_text(self.remote_url(cycle_time, forecast_hour, variable)),
+                        "remote_identity": self._safe_text(
+                            self.remote_bundle_url(cycle_time, forecast_hour, bundle_variables)
+                        ),
                         "variable": variable,
                         "forecast_hour": forecast_hour,
                         "selector_policy": self._entry_selector_policy(variable, forecast_hour),
+                        "bundle_variables": list(bundle_variables),
                         "expected_checksum": None,
                         "expected_size_bytes": None,
                         "observed_raw_object": self._raw_object_observation(local_key),
@@ -1801,18 +1853,37 @@ class GFSAdapter(DataSourceAdapter):
         parsed_cycle_time = parse_cycle_time(cycle_time)
         return f"gfs.t{parsed_cycle_time:%H}z.pgrb2.0p25.f{forecast_hour:03d}.{variable}.grib2"
 
-    def remote_url(self, cycle_time: str | datetime, forecast_hour: int, variable: str) -> str:
+    def _grib_short_names_identity(self) -> dict[str, str]:
+        return {variable: GFS_GRIB_SHORT_NAME.get(variable, variable) for variable in self.config.variables}
+
+    def raw_bundle_filename(self, cycle_time: str | datetime, forecast_hour: int) -> str:
         parsed_cycle_time = parse_cycle_time(cycle_time)
-        if variable not in NOMADS_QUERY_PARAMS:
-            raise ValueError(f"Unsupported GFS variable: {variable}")
+        return f"gfs.t{parsed_cycle_time:%H}z.pgrb2.0p25.f{forecast_hour:03d}.bundle.grib2"
+
+    def remote_url(self, cycle_time: str | datetime, forecast_hour: int, variable: str) -> str:
+        return self.remote_bundle_url(cycle_time, forecast_hour, (variable,))
+
+    def remote_bundle_url(
+        self,
+        cycle_time: str | datetime,
+        forecast_hour: int,
+        variables: tuple[str, ...],
+    ) -> str:
+        parsed_cycle_time = parse_cycle_time(cycle_time)
+        for variable in variables:
+            if variable not in NOMADS_QUERY_PARAMS:
+                raise ValueError(f"Unsupported GFS variable: {variable}")
 
         file_name = f"gfs.t{parsed_cycle_time:%H}z.pgrb2.0p25.f{forecast_hour:03d}"
         directory = f"/gfs.{parsed_cycle_time:%Y%m%d}/{parsed_cycle_time:%H}/atmos"
         bbox = self.config.bbox
+        variable_params: dict[str, str] = {}
+        for variable in variables:
+            variable_params.update(NOMADS_QUERY_PARAMS[variable])
         query = {
             "dir": directory,
             "file": file_name,
-            **NOMADS_QUERY_PARAMS[variable],
+            **variable_params,
             "subregion": "on",
             "leftlon": f"{bbox.west:g}",
             "rightlon": f"{bbox.east:g}",

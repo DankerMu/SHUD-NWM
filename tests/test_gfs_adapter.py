@@ -6,11 +6,11 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
-from packages.common.test_netcdf4 import encode_test_netcdf4
 
 base = importlib.import_module("workers.data_adapters.base")
 cli_module = importlib.import_module("workers.data_adapters.cli")
@@ -22,6 +22,7 @@ ManifestEntry = base.ManifestEntry
 parse_cycle_time = base.parse_cycle_time
 CanonicalConverter = converter_module.CanonicalConverter
 CanonicalConverterConfig = converter_module.CanonicalConverterConfig
+RawRecord = converter_module.RawRecord
 FileUnavailableError = gfs_module.FileUnavailableError
 FileTooLargeError = gfs_module.FileTooLargeError
 GFSAdapter = gfs_module.GFSAdapter
@@ -141,6 +142,10 @@ def one_entry_manifest(tmp_path: Path, expected_checksum: str | None = None) -> 
     return adapter, DownloadManifest(source_id="gfs", cycle_time=cycle_time, entries=(entry,))
 
 
+def _query_items(url: str) -> frozenset[tuple[str, tuple[str, ...]]]:
+    return frozenset((key, tuple(values)) for key, values in parse_qs(urlparse(url).query).items())
+
+
 def test_cycle_discovery_upserts_four_available_cycles(tmp_path: Path) -> None:
     repository = FakeMetRepository()
     adapter = build_adapter(tmp_path, repository=repository, availability_checker=lambda _url: True)
@@ -194,6 +199,9 @@ def test_manifest_keeps_f000_instantaneous_fields_and_omits_f000_interval_fields
 
     assert len(manifest.entries) == 56 * 7 + 5
     assert manifest.metadata["total_file_count"] == 397
+    assert manifest.metadata["physical_file_layout"] == "per_forecast_hour_bundle"
+    assert manifest.metadata["physical_file_count"] == 57
+    assert len({entry.local_key for entry in manifest.entries}) == 57
     assert manifest.metadata["variable_count"] == 7
     assert manifest.metadata["requested_forecast_hours"][0] == 0
     assert manifest.metadata["forecast_hours"][0] == 0
@@ -207,8 +215,57 @@ def test_manifest_keeps_f000_instantaneous_fields_and_omits_f000_interval_fields
         "u10m",
         "v10m",
     ]
+    assert {entry.local_key for entry in manifest.entries if entry.forecast_hour == 0} == {
+        "raw/gfs/2026050700/gfs.t00z.pgrb2.0p25.f000.bundle.grib2"
+    }
+    assert all(entry.metadata["bundle"]["layout"] == "per_forecast_hour" for entry in manifest.entries)
+    assert all("cfgrib_filter_by_keys" in entry.metadata for entry in manifest.entries)
     assert manifest.manifest_uri == "raw/gfs/2026050700/manifest.json"
     assert adapter.object_store.exists("raw/gfs/2026050700/manifest.json")
+
+
+def test_manifest_uses_one_physical_gfs_bundle_per_forecast_hour(tmp_path: Path) -> None:
+    adapter = build_adapter(tmp_path)
+
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[3])
+
+    assert len(manifest.entries) == 7
+    assert {entry.local_key for entry in manifest.entries} == {
+        "raw/gfs/2026050700/gfs.t00z.pgrb2.0p25.f003.bundle.grib2"
+    }
+    expected_url = adapter.remote_bundle_url("2026050700", 3, tuple(adapter.config.variables))
+    assert {
+        (urlparse(entry.remote_url).scheme, urlparse(entry.remote_url).netloc, urlparse(entry.remote_url).path)
+        for entry in manifest.entries
+    } == {(urlparse(expected_url).scheme, urlparse(expected_url).netloc, urlparse(expected_url).path)}
+    assert {_query_items(entry.remote_url) for entry in manifest.entries} == {_query_items(expected_url)}
+    assert all(entry.metadata["bundle"]["variables"] == list(adapter.config.variables) for entry in manifest.entries)
+    assert all(
+        entry.metadata["logical_remote_url"] == adapter.remote_url("2026050700", 3, entry.variable)
+        for entry in manifest.entries
+    )
+
+
+def test_download_plan_downloads_gfs_bundle_once_for_logical_entries(tmp_path: Path) -> None:
+    content = b"GRIB bundled GFS payload 7777"
+    calls: list[str] = []
+
+    def downloader(url: str) -> bytes:
+        calls.append(url)
+        return content
+
+    adapter = build_adapter(tmp_path, downloader=downloader)
+    manifest = adapter.build_manifest("2026050700", forecast_hours=[3])
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "raw_complete"
+    assert len(result.files) == 7
+    assert {file.local_key for file in result.files} == {
+        "raw/gfs/2026050700/gfs.t00z.pgrb2.0p25.f003.bundle.grib2"
+    }
+    assert calls == [manifest.entries[0].remote_url]
+    assert adapter.object_store.read_bytes(manifest.entries[0].local_key) == content
 
 
 def test_manifest_keeps_f000_when_configured_variables_are_available(tmp_path: Path) -> None:
@@ -250,6 +307,7 @@ def test_forecast_hours_can_be_limited_from_environment(tmp_path: Path, monkeypa
     manifest = adapter.build_manifest("2026050700")
 
     assert len(manifest.entries) == 8 * 7
+    assert len({entry.local_key for entry in manifest.entries}) == 8
     assert manifest.metadata["first_forecast_hour"] == 3
     assert manifest.metadata["last_forecast_hour"] == 24
     assert repository.data_sources["gfs"]["config_json"]["forecast_hours"]["start"] == 3
@@ -719,11 +777,7 @@ def test_downloaded_manifest_identity_feeds_gfs_canonical_readiness_and_blocks_s
     pre_download_identity = manifest.metadata["source_object_identity"]
     assert pre_download_identity["raw_entry_samples"][0]["observed_raw_object"]["status"] == "missing"
 
-    payloads = {
-        entry.remote_url: encode_test_netcdf4(entry.variable, entry.forecast_hour, cycle_time=manifest.cycle_time)
-        for entry in manifest.entries
-    }
-    adapter.downloader = lambda url: payloads[url]
+    adapter.downloader = lambda url: f"GRIB GFS bundle fixture {url}".encode("utf-8")
 
     download = adapter.download_plan(manifest)
 
@@ -742,6 +796,34 @@ def test_downloaded_manifest_identity_feeds_gfs_canonical_readiness_and_blocks_s
         repository=repository,
         object_store=LocalObjectStore(tmp_path),
     )
+
+    def read_record(entry: dict[str, Any]) -> Any:
+        variable = str(entry["variable"])
+        forecast_hour = int(entry["forecast_hour"])
+        values_by_variable = {
+            "tmp2m": 285.0 + forecast_hour,
+            "rh2m": 50.0,
+            "u10m": 3.0,
+            "v10m": 4.0,
+            "pressfc": 101325.0,
+            "apcp": float(forecast_hour),
+            "dswrf": 100.0,
+        }
+        metadata = dict(entry.get("metadata") or {})
+        if variable == "apcp":
+            metadata.setdefault("idx_selector", {"accumulation_type": "cumulative_since_cycle", "step_range": "0-3"})
+        return RawRecord(
+            source_file=converter.object_store.uri_for_key(str(entry["local_key"])),
+            native_variable=variable,
+            forecast_hour=forecast_hour,
+            values=(values_by_variable[variable],),
+            longitudes=(0.0,),
+            latitudes=(0.0,),
+            shape=(1,),
+            metadata=metadata,
+        )
+
+    converter._read_record = read_record  # type: ignore[method-assign]
     conversion = converter.convert_manifest(manifest.as_dict())
     readiness = converter.canonical_readiness(
         cycle_time=manifest.cycle_time,
@@ -764,7 +846,7 @@ def test_downloaded_manifest_identity_feeds_gfs_canonical_readiness_and_blocks_s
     changed_entry = manifest.entries[0]
     adapter.object_store.write_bytes_atomic(
         changed_entry.local_key,
-        encode_test_netcdf4(changed_entry.variable, changed_entry.forecast_hour, values=[999.0]),
+        b"GRIB GFS changed bundle fixture",
     )
     changed_identity = adapter.source_object_identity(manifest.cycle_time, effective_forecast_hours)
     stale_readiness = converter.canonical_readiness(

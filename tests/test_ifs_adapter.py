@@ -238,8 +238,13 @@ def test_build_manifest_uses_cycle_specific_lead_policy_and_custom_hours(tmp_pat
 
     assert len(manifest_00.entries) == 53 * 8
     assert manifest_00.metadata["max_lead_hours"] == 168
-    assert manifest_00.entries[0].local_key == "raw/IFS/2026050100/ifs.t00z.f000.2t.grib2"
-    assert manifest_00.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f168.str.grib2"
+    assert manifest_00.metadata["physical_file_layout"] == "per_forecast_hour_bundle"
+    assert manifest_00.metadata["physical_file_count"] == 53
+    assert len({entry.local_key for entry in manifest_00.entries}) == 53
+    assert manifest_00.entries[0].local_key == "raw/IFS/2026050100/ifs.t00z.f000.bundle.grib2"
+    assert manifest_00.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f168.bundle.grib2"
+    assert all(entry.metadata["bundle"]["layout"] == "per_forecast_hour" for entry in manifest_00.entries)
+    assert all("cfgrib_filter_by_keys" in entry.metadata for entry in manifest_00.entries)
     assert sorted({entry.forecast_hour for entry in manifest_00.entries if entry.forecast_hour > 144}) == [
         150,
         156,
@@ -249,10 +254,49 @@ def test_build_manifest_uses_cycle_specific_lead_policy_and_custom_hours(tmp_pat
     assert adapter.object_store.exists("raw/IFS/2026050100/manifest.json")
 
     assert len(manifest_06.entries) == 49 * 8
+    assert len({entry.local_key for entry in manifest_06.entries}) == 49
     assert manifest_06.metadata["max_lead_hours"] == 144
 
     assert len(custom.entries) == 3 * 8
+    assert len({entry.local_key for entry in custom.entries}) == 3
     assert sorted({entry.forecast_hour for entry in custom.entries}) == [0, 3, 6]
+
+
+def test_manifest_uses_one_physical_ifs_bundle_per_forecast_hour(tmp_path: Path) -> None:
+    adapter = build_adapter(tmp_path)
+
+    manifest = adapter.build_manifest("2026050100", forecast_hours=[0])
+
+    assert len(manifest.entries) == 8
+    assert {entry.local_key for entry in manifest.entries} == {"raw/IFS/2026050100/ifs.t00z.f000.bundle.grib2"}
+    assert {entry.remote_url for entry in manifest.entries} == {
+        adapter.remote_bundle_url("2026050100", 0, tuple(adapter.config.variables))
+    }
+    assert all(entry.metadata["bundle"]["variables"] == list(adapter.config.variables) for entry in manifest.entries)
+    assert all(
+        entry.metadata["logical_remote_url"] == adapter.remote_url("2026050100", 0, entry.variable)
+        for entry in manifest.entries
+    )
+
+
+def test_download_plan_downloads_ifs_bundle_once_for_logical_entries(tmp_path: Path) -> None:
+    content = b"GRIB bundled IFS payload 7777"
+    calls: list[str] = []
+
+    def downloader(url: str) -> bytes:
+        calls.append(url)
+        return content
+
+    adapter = build_adapter(tmp_path, downloader=downloader)
+    manifest = adapter.build_manifest("2026050100", forecast_hours=[0])
+
+    result = adapter.download_plan(manifest)
+
+    assert result.status == "raw_complete"
+    assert len(result.files) == 8
+    assert {file.local_key for file in result.files} == {"raw/IFS/2026050100/ifs.t00z.f000.bundle.grib2"}
+    assert calls == [manifest.entries[0].remote_url]
+    assert adapter.object_store.read_bytes(manifest.entries[0].local_key) == content
 
 
 def test_build_manifest_honors_env_forecast_end_hour_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,7 +307,7 @@ def test_build_manifest_honors_env_forecast_end_hour_override(tmp_path: Path, mo
 
     assert len(manifest.entries) == 49 * 8
     assert manifest.metadata["max_lead_hours"] == 144
-    assert manifest.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f144.str.grib2"
+    assert manifest.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f144.bundle.grib2"
 
 
 def test_segmented_forecast_end_hour_override_must_be_native_hour(
@@ -289,8 +333,8 @@ def test_build_manifest_honors_env_forecast_start_hour_override(
     manifest = adapter.build_manifest("2026050100")
 
     assert len(manifest.entries) == 48 * 8
-    assert manifest.entries[0].local_key == "raw/IFS/2026050100/ifs.t00z.f003.2t.grib2"
-    assert manifest.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f144.str.grib2"
+    assert manifest.entries[0].local_key == "raw/IFS/2026050100/ifs.t00z.f003.bundle.grib2"
+    assert manifest.entries[-1].local_key == "raw/IFS/2026050100/ifs.t00z.f144.bundle.grib2"
 
 
 @pytest.mark.parametrize(
@@ -410,7 +454,8 @@ def test_raw_complete_trusted_existing_object_reuses_already_done(tmp_path: Path
         downloads += 1
         return b"GRIB IFS should not download"
 
-    adapter, manifest = one_entry_manifest(tmp_path)
+    adapter = build_adapter(tmp_path)
+    manifest = adapter.build_manifest("2026050100", forecast_hours=[0])
     adapter.downloader = downloader
     adapter.object_store.write_bytes_atomic(manifest.entries[0].local_key, content)
     manifest.metadata["source_policy"] = adapter.source_policy_identity(manifest.cycle_time, [0])
@@ -896,6 +941,40 @@ def test_real_download_path_caps_multiurl_retries_for_outer_mirror_switch(
     assert calls[0]["retry_after"] == 0
 
 
+def test_real_download_path_passes_slash_separated_bundle_params_to_ecmwf_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests_seen: list[dict[str, Any]] = []
+    adapter = build_adapter(tmp_path)
+
+    class FakeClient:
+        use_sas_token = False
+        verify = True
+        session = object()
+        preserve_request_order = False
+
+        def _get_urls(self, request: dict[str, Any], *, target: str, use_index: bool) -> Any:
+            requests_seen.append(dict(request))
+            assert use_index is True
+            return SimpleNamespace(urls=["https://example.test/file.grib2"], target=target)
+
+    def fake_download(_urls: Any, target: str, **_kwargs: Any) -> int:
+        Path(target).write_bytes(b"GRIB bundled params payload")
+        return 27
+
+    monkeypatch.setattr("multiurl.download", fake_download)
+    adapter._client_for_source = lambda _source: FakeClient()  # type: ignore[method-assign]
+
+    payload = adapter._download_url(
+        "ecmwf-opendata://aws/ifs/2026050100/ifs.t00z.f000.2t,2d,10u,10v,tp,sp,ssr,str.grib2",
+        clip=False,
+    )
+
+    assert payload.content == b"GRIB bundled params payload"
+    assert requests_seen[0]["param"] == "2t/2d/10u/10v/tp/sp/ssr/str"
+
+
 def test_all_cloud_mirrors_rate_limited_falls_back_to_ecmwf(tmp_path: Path) -> None:
     calls: list[str] = []
 
@@ -984,7 +1063,7 @@ def test_rate_limited_source_is_skipped_until_cooldown_expires(tmp_path: Path) -
 
     first = adapter.download_plan(_single_entry_manifest(adapter))
     assert first.status == "raw_complete"
-    assert calls[0].endswith("ifs.t00z.f000.2t.grib2")
+    assert calls[0].endswith("ifs.t00z.f000.2t,2d,10u,10v,tp,sp,ssr,str.grib2")
     assert "://aws/" in calls[0]
 
     # Second pass while still inside cooldown: aws must be skipped entirely.

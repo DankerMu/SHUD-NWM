@@ -44,6 +44,16 @@ from .region import GeoBBox, china_buffered_bbox_from_env
 LOGGER = logging.getLogger(__name__)
 
 IFS_VARIABLES: tuple[str, ...] = ("2t", "2d", "10u", "10v", "tp", "sp", "ssr", "str")
+IFS_GRIB_SHORT_NAME: dict[str, str] = {
+    "2t": "2t",
+    "2d": "2d",
+    "10u": "10u",
+    "10v": "10v",
+    "tp": "tp",
+    "sp": "sp",
+    "ssr": "ssr",
+    "str": "str",
+}
 # Cloud mirrors are the same data published four ways; they carry no 500-concurrent
 # cap and are the production primary. The ECMWF Open-Data Portal direct connection is
 # kept strictly as the last-resort fallback (sources() pins it to the tail).
@@ -457,12 +467,15 @@ class IFSAdapter(DataSourceAdapter):
         entries: list[ManifestEntry] = []
 
         for forecast_hour in hours:
-            for variable in self.config.variables:
-                filename = self.raw_filename(parsed_cycle_time, forecast_hour, variable)
-                local_key = f"raw/{self.config.source_id}/{compact_cycle}/{filename}"
+            bundle_variables = tuple(self.config.variables)
+            local_key = (
+                f"raw/{self.config.source_id}/{compact_cycle}/"
+                f"{self.raw_bundle_filename(parsed_cycle_time, forecast_hour)}"
+            )
+            for variable in bundle_variables:
                 entries.append(
                     ManifestEntry(
-                        remote_url=self.remote_url(parsed_cycle_time, forecast_hour, variable),
+                        remote_url=self.remote_bundle_url(parsed_cycle_time, forecast_hour, bundle_variables),
                         local_key=local_key,
                         variable=variable,
                         forecast_hour=forecast_hour,
@@ -473,6 +486,14 @@ class IFSAdapter(DataSourceAdapter):
                             "model": "ifs",
                             "type": "fc",
                             "levtype": "sfc",
+                            "bundle": {
+                                "layout": "per_forecast_hour",
+                                "variables": list(bundle_variables),
+                                "physical_file_count": len(hours),
+                            },
+                            "grib_short_name": IFS_GRIB_SHORT_NAME.get(variable, variable),
+                            "cfgrib_filter_by_keys": {"shortName": IFS_GRIB_SHORT_NAME.get(variable, variable)},
+                            "logical_remote_url": self.remote_url(parsed_cycle_time, forecast_hour, variable),
                         },
                     )
                 )
@@ -486,6 +507,8 @@ class IFSAdapter(DataSourceAdapter):
             "source_policy": self.source_policy_identity(parsed_cycle_time, hours),
             "source_object_identity": self.source_object_identity(parsed_cycle_time, hours),
             "variable_count": len(self.config.variables),
+            "physical_file_layout": "per_forecast_hour_bundle",
+            "physical_file_count": len(hours),
             "total_file_count": len(entries),
             "preferred_source": self.config.preferred_source,
             "fallback_sources": list(self.config.fallback_sources),
@@ -540,6 +563,8 @@ class IFSAdapter(DataSourceAdapter):
 
         for entry in manifest.entries:
             try:
+                if entry.local_key in already_done_by_key:
+                    continue
                 already_done = self._already_done_result(
                     entry,
                     trusted_source_object_identity=trusted_source_object_identity,
@@ -596,18 +621,20 @@ class IFSAdapter(DataSourceAdapter):
         self._update_cycle(cycle_time=cycle_time, status="downloading", error_code="", error_message="")
 
         results: list[DownloadFileResult] = []
+        completed_by_key: dict[str, DownloadFileResult] = dict(already_done_by_key)
         retry_count = 0
         total_bytes_written = 0
 
         for entry in manifest.entries:
             try:
-                if entry.local_key in already_done_by_key:
-                    results.append(already_done_by_key[entry.local_key])
+                if entry.local_key in completed_by_key:
+                    results.append(completed_by_key[entry.local_key])
                     continue
 
                 result, retries = self._download_entry(entry)
                 retry_count += retries
                 total_bytes_written += result.bytes_written
+                completed_by_key[entry.local_key] = result
                 results.append(result)
             except IFSAdapterError as error:
                 retry_count += error.attempts
@@ -665,7 +692,11 @@ class IFSAdapter(DataSourceAdapter):
 
     def verify_manifest(self, manifest: DownloadManifest) -> VerificationResult:
         failures: list[VerificationFailure] = []
+        verified_keys: set[str] = set()
         for entry in manifest.entries:
+            if entry.local_key in verified_keys:
+                continue
+            verified_keys.add(entry.local_key)
             try:
                 if not self.object_store.exists(entry.local_key):
                     failures.append(
@@ -1275,6 +1306,7 @@ class IFSAdapter(DataSourceAdapter):
             ),
             "forecast_hours": hours,
             "variables": list(self.config.variables),
+            "grib_short_names": self._grib_short_names_identity(),
             "preferred_source": self.config.preferred_source,
             "fallback_sources": list(self.config.fallback_sources),
             "max_retries": self.config.max_retries,
@@ -1303,6 +1335,7 @@ class IFSAdapter(DataSourceAdapter):
             "last_forecast_hour": max(hours) if hours else None,
             "forecast_hour_count": len(hours),
             "variable_count": len(self.config.variables),
+            "grib_short_names": self._grib_short_names_identity(),
             "manifest_object_key": f"raw/{self.config.source_id}/{format_cycle_time(parsed_cycle_time)}/manifest.json",
             "manifest_digest": _stable_digest(
                 {
@@ -1330,13 +1363,16 @@ class IFSAdapter(DataSourceAdapter):
         compact_cycle = format_cycle_time(cycle_time)
         entries: list[dict[str, Any]] = []
         for forecast_hour in forecast_hours:
-            for variable in self.config.variables:
-                filename = self.raw_filename(cycle_time, forecast_hour, variable)
+            bundle_variables = tuple(self.config.variables)
+            local_key = (
+                f"raw/{self.config.source_id}/{compact_cycle}/"
+                f"{self.raw_bundle_filename(cycle_time, forecast_hour)}"
+            )
+            for variable in bundle_variables:
                 remote_identities = [
-                    self._safe_text(self.remote_url(cycle_time, forecast_hour, variable, source=source))
+                    self._safe_text(self.remote_bundle_url(cycle_time, forecast_hour, bundle_variables, source=source))
                     for source in self.config.sources()
                 ]
-                local_key = f"raw/{self.config.source_id}/{compact_cycle}/{filename}"
                 entries.append(
                     {
                         "local_key": local_key,
@@ -1344,6 +1380,7 @@ class IFSAdapter(DataSourceAdapter):
                         "remote_identity_fallbacks": remote_identities,
                         "variable": variable,
                         "forecast_hour": forecast_hour,
+                        "bundle_variables": list(bundle_variables),
                         "expected_checksum": None,
                         "expected_size_bytes": None,
                         "observed_raw_object": self._raw_object_observation(local_key),
@@ -1477,6 +1514,13 @@ class IFSAdapter(DataSourceAdapter):
         parsed_cycle_time = parse_cycle_time(cycle_time)
         return f"ifs.t{parsed_cycle_time:%H}z.f{forecast_hour:03d}.{variable}.grib2"
 
+    def _grib_short_names_identity(self) -> dict[str, str]:
+        return {variable: IFS_GRIB_SHORT_NAME.get(variable, variable) for variable in self.config.variables}
+
+    def raw_bundle_filename(self, cycle_time: str | datetime, forecast_hour: int) -> str:
+        parsed_cycle_time = parse_cycle_time(cycle_time)
+        return f"ifs.t{parsed_cycle_time:%H}z.f{forecast_hour:03d}.bundle.grib2"
+
     def remote_url(
         self,
         cycle_time: str | datetime,
@@ -1485,13 +1529,25 @@ class IFSAdapter(DataSourceAdapter):
         *,
         source: str | None = None,
     ) -> str:
+        return self.remote_bundle_url(cycle_time, forecast_hour, (variable,), source=source)
+
+    def remote_bundle_url(
+        self,
+        cycle_time: str | datetime,
+        forecast_hour: int,
+        variables: tuple[str, ...],
+        *,
+        source: str | None = None,
+    ) -> str:
         parsed_cycle_time = parse_cycle_time(cycle_time)
-        if variable not in self.config.variables:
-            raise ValueError(f"Unsupported IFS variable: {variable}")
+        for variable in variables:
+            if variable not in self.config.variables:
+                raise ValueError(f"Unsupported IFS variable: {variable}")
         selected_source = source or self.config.preferred_source
+        param = ",".join(variables)
         return (
             f"ecmwf-opendata://{selected_source}/ifs/{parsed_cycle_time:%Y%m%d%H}/"
-            f"ifs.t{parsed_cycle_time:%H}z.f{forecast_hour:03d}.{variable}.grib2"
+            f"ifs.t{parsed_cycle_time:%H}z.f{forecast_hour:03d}.{param}.grib2"
         )
 
 
@@ -1555,13 +1611,14 @@ def _parse_ifs_url(remote_url: str) -> dict[str, Any]:
     compact_cycle = path_parts[1]
     filename = path_parts[2]
     variable = filename.rsplit(".", maxsplit=2)[-2]
+    request_variable = variable.replace(",", "/")
     forecast_hour = int(filename.split(".f", maxsplit=1)[1].split(".", maxsplit=1)[0])
     return {
         "source": parsed.netloc,
         "date": compact_cycle[:8],
         "time": int(compact_cycle[8:10]),
         "step": forecast_hour,
-        "variable": variable,
+        "variable": request_variable,
     }
 
 

@@ -1378,8 +1378,10 @@ class CanonicalConverter:
         file_path = self.object_store.resolve_path(local_key)
         cfgrib_error: Exception | None = None
         try:
+            expected_native_variable = str(entry["variable"])
+            backend_kwargs = _cfgrib_backend_kwargs(entry, expected_native_variable)
             try:
-                dataset = xr.open_dataset(file_path, engine="cfgrib")
+                dataset = xr.open_dataset(file_path, engine="cfgrib", backend_kwargs=backend_kwargs)
             except Exception as _cfgrib_err:
                 cfgrib_error = _cfgrib_err
                 LOGGER.warning(
@@ -1388,7 +1390,6 @@ class CanonicalConverter:
                     _cfgrib_err,
                 )
                 dataset = xr.open_dataset(file_path, engine="netcdf4")
-            expected_native_variable = str(entry["variable"])
             data_variable = self._select_data_variable(dataset, expected_native_variable, local_key)
             data_array = dataset[data_variable]
             values = tuple(float(value) for value in data_array.values.ravel().tolist())
@@ -2825,3 +2826,25 @@ def _manifest_entries(manifest: Any) -> list[dict[str, Any]]:
                 }
             )
     return normalized
+
+
+def _cfgrib_backend_kwargs(entry: Mapping[str, Any], expected_native_variable: str) -> dict[str, Any]:
+    metadata = _mapping_value(entry.get("metadata"))
+    explicit = metadata.get("cfgrib_filter_by_keys")
+    if isinstance(explicit, Mapping):
+        return {"filter_by_keys": dict(explicit), "indexpath": ""}
+
+    bundle = metadata.get("bundle")
+    if isinstance(bundle, Mapping) and bundle.get("layout") == "per_forecast_hour":
+        short_name = metadata.get("grib_short_name") or _first_cfgrib_alias(expected_native_variable)
+        if short_name:
+            return {"filter_by_keys": {"shortName": short_name}, "indexpath": ""}
+
+    return {"indexpath": ""}
+
+
+def _first_cfgrib_alias(native_variable: str) -> str | None:
+    aliases = CFGRIB_VARIABLE_ALIASES.get(native_variable)
+    if aliases:
+        return aliases[0]
+    return native_variable or None

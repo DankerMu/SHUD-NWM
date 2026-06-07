@@ -816,7 +816,7 @@ def test_negative_apcp_delta_marks_product_warn(tmp_path: Path) -> None:
     assert conversion_params["anomalies"][0]["min_delta"] == -2.0
 
 
-def test_non_ok_required_product_marks_cycle_incomplete_not_ready(tmp_path: Path) -> None:
+def test_warn_required_product_keeps_cycle_ready_but_records_quality_flag(tmp_path: Path) -> None:
     repository = FakeCanonicalRepository()
     store, manifest = build_raw_manifest(tmp_path)
     cycle_time = parse_cycle_time("2026050700")
@@ -831,12 +831,10 @@ def test_non_ok_required_product_marks_cycle_incomplete_not_ready(tmp_path: Path
 
     result = converter.convert_manifest(manifest)
 
-    assert result.status == "canonical_incomplete"
+    assert result.status == "canonical_ready"
     cycle = repository.cycles[("gfs", cycle_time)]
-    assert cycle["status"] == "canonical_incomplete"
-    assert cycle["error_code"] == "CANONICAL_INCOMPLETE"
-    assert "missing_canonical_leads" in cycle["error_message"]
-    assert "rejected_quality_flags" in cycle["error_message"]
+    assert cycle["status"] == "canonical_ready"
+    assert cycle["error_code"] == ""
     assert repository.products["gfs_2026050700_prcp_rate_or_amount_f003"]["quality_flag"] == "warn"
 
 
@@ -955,6 +953,70 @@ def test_cfgrib_variable_mismatch_does_not_fallback_to_first_data_var(tmp_path: 
 
     with pytest.raises(CanonicalConversionError, match="cfgrib variable mismatch"):
         converter._select_cfgrib_data_variable(FakeDataset(), "u10m", "raw/gfs/file.grib2")
+
+
+def test_bundle_entries_open_cfgrib_with_entry_specific_filter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeValues:
+        shape = (1,)
+
+        def ravel(self) -> FakeValues:
+            return self
+
+        def tolist(self) -> list[float]:
+            return [280.0]
+
+    class FakeDataArray:
+        attrs = {"GRIB_shortName": "t2m"}
+        values = FakeValues()
+
+    class FakeDataset:
+        data_vars = {"t2m": FakeDataArray()}
+        coords: dict[str, Any] = {}
+
+        def __getitem__(self, key: str) -> FakeDataArray:
+            return self.data_vars[key]
+
+        def close(self) -> None:
+            return None
+
+    calls: list[dict[str, Any]] = []
+
+    class FakeXarray:
+        @staticmethod
+        def open_dataset(*args: Any, **kwargs: Any) -> FakeDataset:
+            calls.append({"args": args, "kwargs": kwargs})
+            return FakeDataset()
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "xarray":
+            return FakeXarray
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    converter = build_converter(tmp_path)
+    local_key = "raw/gfs/2026050700/gfs.t00z.pgrb2.0p25.f003.bundle.grib2"
+    converter.object_store.write_bytes_atomic(local_key, b"GRIB bundle placeholder")
+
+    record = converter._read_record_with_xarray(
+        {
+            "local_key": local_key,
+            "variable": "tmp2m",
+            "forecast_hour": 3,
+            "metadata": {
+                "bundle": {"layout": "per_forecast_hour", "variables": ["tmp2m", "rh2m"]},
+                "cfgrib_filter_by_keys": {"shortName": "t2m"},
+            },
+        }
+    )
+
+    assert record.native_variable == "tmp2m"
+    assert calls[0]["kwargs"]["engine"] == "cfgrib"
+    assert calls[0]["kwargs"]["backend_kwargs"] == {"filter_by_keys": {"shortName": "t2m"}, "indexpath": ""}
 
 
 def test_netcdf4_missing_raises_without_json_fallback(
