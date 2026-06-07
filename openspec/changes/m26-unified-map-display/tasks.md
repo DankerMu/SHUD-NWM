@@ -1,9 +1,9 @@
 ## 0. 前置与基线
 
 - [x] 0.1 用 `openspec validate m26-unified-map-display --strict --no-interactive` 校验本 change 4/4 complete 后再开实现。
-- [ ] 0.2 记录基线：现有路由表（`App.tsx`）、`AppShell`/`NavBar` 导航项、`M11QueryState` 字段、`overviewData` store 的 `loadOverview`/`loadBasinDetail` 签名与 snapshot 匹配函数，作为回归基准。
-- [ ] 0.3 清点 honest-display 库的导出与消费点（`bootstrap.ts`/`stationSeries.ts`/`riverForecast.ts`/`ReturnPeriodSection.tsx`），列出迁移后需保留的导出名（防测试大面积改 import）。
-- [ ] 0.4 记录 node-27 实测约束作为实现依据：`best` 不被 latest-product 接受（仅 GFS/IFS）、`/api/v1/layers` 空、river-network 瓦片 424 / hydro 瓦片 409（→ 当前用 GeoJSON 河网渲染，overlay 待注册自动点亮）。
+- [x] 0.2 记录基线：现有路由表（`App.tsx`）、`AppShell`/`NavBar` 导航项、`M11QueryState` 字段、`overviewData` store 的 `loadOverview`/`loadBasinDetail` 签名与 snapshot 匹配函数，作为回归基准。
+- [x] 0.3 清点 honest-display 库的导出与消费点（`bootstrap.ts`/`stationSeries.ts`/`riverForecast.ts`/`ReturnPeriodSection.tsx`），列出迁移后需保留的导出名（防测试大面积改 import）。
+- [x] 0.4 记录 node-27 实测约束作为实现依据：`best` 不被 latest-product 接受（仅 GFS/IFS）、`/api/v1/layers` 空、river-network 瓦片 424 / hydro 瓦片 409（→ 当前用 GeoJSON 河网渲染，overlay 待注册自动点亮）。
 
 ## 1. 去导航 + 路由收敛（single-map-shell-routing）
 
@@ -44,13 +44,13 @@
 
 ## 6. 本地验证 + node-27 live receipt
 
-- [ ] 6.1 每步与终态本地全绿：`cd apps/frontend && corepack pnpm exec tsc --noEmit && corepack pnpm test && corepack pnpm run check:api-types && corepack pnpm build`。
-- [ ] 6.2 本地/github/node-27 三端同步：commit → push → node-27 `git pull --ff-only`（先 `git status --porcelain` 把关，绝不 stash pop）→ 在 node-27 重建 `apps/frontend/dist`。
-- [ ] 6.3 node-27 live receipt（`display_readonly`，走隧道 `--headed` 验真实地图渲染，无头无 WebGL）：① `/hydro-met`/`/overview`/`/forecast`/`/meteorology`/`/flood-alerts`/`/basins/:id`/`/segments/:id` 重定向到 `/` 单页（语义参数 + 原始 search 保留）；② 全屏地图无顶部导航；③ basinId 切换 QHH↔Heihe 同页 zoom-in；④ 气象代站图层 toggle + 点代站 popup 出六要素真实曲线；⑤ 点河段 popup 出 q_down 真实曲线 + 重现期状态（QHH unavailable / Heihe ready）；⑥ overlay 未注册时如实显示"未注册"不伪造。
-- [ ] 6.4 记录 receipt 到 `openspec/changes/m26-unified-map-display/worklogs/`（含截图路径、重定向矩阵、两类 popup 真实拉曲线证据、424/409 现状说明）。
+- [x] 6.1 每步与终态本地全绿：`cd apps/frontend && corepack pnpm exec tsc --noEmit && corepack pnpm test && corepack pnpm run check:api-types && corepack pnpm build`。
+- [x] 6.2 本地/github/node-27 三端同步：commit → push → node-27 `git pull --ff-only`（先 `git status --porcelain` 把关，绝不 stash pop）→ 在 node-27 重建 `apps/frontend/dist`。
+- [x] 6.3 node-27 live receipt（`display_readonly`，走隧道 `--headed` 验真实地图渲染，无头无 WebGL）：① `/hydro-met`/`/overview`/`/forecast`/`/meteorology`/`/flood-alerts`/`/basins/:id`/`/segments/:id` 重定向到 `/` 单页（语义参数 + 原始 search 保留）；② 全屏地图无顶部导航；③ basinId 切换 QHH↔Heihe 同页 zoom-in；④ 气象代站图层 toggle + 点代站 popup 出六要素真实曲线；⑤ 点河段 popup 出 q_down 真实曲线 + 重现期状态（QHH unavailable / Heihe ready）；⑥ overlay 未注册时如实显示"未注册"不伪造。 ——live-PASS ①②③⑥+display_readonly 身份+数据就绪；④⑤ popup 绘制由本地单测全覆盖+数据 live 就绪，live 点击因 /api/v1/basins 无 bbox+CLI canvas 限制延后→#343（见 worklogs/node27-live-receipt.md）
+- [x] 6.4 记录 receipt 到 `openspec/changes/m26-unified-map-display/worklogs/`（含截图路径、重定向矩阵、两类 popup 真实拉曲线证据、424/409 现状说明）。
 
 ## 7. 文档与解耦平行 issue
 
-- [ ] 7.1 完成的 task 即时勾选；PR body 含变更摘要 + 测试证据 + node-27 receipt 覆盖声明。
-- [ ] 7.2 另开 backend issue：后端 station-MVT 点图层矢量瓦片端点（全国数万代站，仿 river-network `ST_AsMVT`，node-22 oracle）——记录依赖与预期 PR 边界，不在本变更实现。
-- [ ] 7.3 另开 ops/backend issue：`display_readonly` 启用/排查 live PostGIS MVT（river-network 瓦片 424 / hydro 瓦片 409，决定全国态 overlay 能否点亮）。
+- [x] 7.1 完成的 task 即时勾选；PR body 含变更摘要 + 测试证据 + node-27 receipt 覆盖声明。
+- [x] 7.2 另开 backend issue：后端 station-MVT 点图层矢量瓦片端点（全国数万代站，仿 river-network `ST_AsMVT`，node-22 oracle）——记录依赖与预期 PR 边界，不在本变更实现。
+- [x] 7.3 另开 ops/backend issue：`display_readonly` 启用/排查 live PostGIS MVT（river-network 瓦片 424 / hydro 瓦片 409，决定全国态 overlay 能否点亮）。

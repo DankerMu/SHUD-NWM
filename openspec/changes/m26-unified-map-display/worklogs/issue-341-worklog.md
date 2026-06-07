@@ -54,4 +54,4 @@
 - [ ] Phase 3 commit + PR
 - [x] Phase 4-6 review（3 路并行，1 轮 clean）
 - [x] Phase 7 独立复核（编排者复跑删除/悬挂/testid/字面量校验 + 直读 riverForecast.test 确认忠实 + R-B 逐行 lib 语义交叉核对）
-- [ ] Phase 8 merge
+- [x] Phase 8 merge（PR #348 merge 2f79baf，用户授权不等 CI；#341 已关闭，tasks.md §5 已勾）
