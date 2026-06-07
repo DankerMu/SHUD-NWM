@@ -28,6 +28,7 @@ TRANSIENT_ERROR_CODES: set[str] = {
     "SOURCE_CYCLE_UNAVAILABLE",
     "SOURCE_UNAVAILABLE",
     "ADAPTER_UNAVAILABLE",
+    "WARM_START_CHECKPOINT_RETRY",
 }
 NON_TRANSIENT_ERROR_CODES: set[str] = {
     "INVALID_MANIFEST",
@@ -101,6 +102,8 @@ def failure_classifier(error_code: str | None) -> str:
         return "transient_slurm_runtime"
     if code in {"SHUD_FAILED", "FAILED_RUN", "RUNTIME_FAILED"}:
         return "shud_runtime_failure"
+    if code == "WARM_START_CHECKPOINT_RETRY":
+        return "warm_start_checkpoint_repair"
     if code in {"INVALID_MANIFEST", "MANIFEST_SCHEMA_INVALID", "MALFORMED_INPUT"}:
         return "malformed_input"
     if code in {"POLICY_BLOCKED", "PERMISSION_DENIED", "TEMPLATE_NOT_ALLOWED"}:
