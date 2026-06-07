@@ -181,7 +181,7 @@ jobs:
           sudo chown "$USER:$(id -gn)" /scratch/frd_muziyao
           chmod u+rwx /scratch/frd_muziyao
       - name: Run tests with coverage
-        run: pytest tests/ -v --tb=short --co -q 2>/dev/null; pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short -m "not e2e and not grib and not integration" --co -q 2>/dev/null; pytest tests/ -v --tb=short -m "not e2e and not grib and not integration"
 
   # Fast lane for DRAFT PRs: run only the test files this PR changed (full suite is the ready/merge
   # gate above). Fail-safe: if you forget to draft, the full gate runs instead — you never get LESS

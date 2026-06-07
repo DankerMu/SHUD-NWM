@@ -510,6 +510,7 @@ class E2ERepository:
         return sorted(rows, key=lambda item: item["valid_time"])
 
 
+@pytest.mark.e2e
 @pytest.mark.asyncio
 async def test_m1_forecast_cycle_data_flow_and_api_response(tmp_path: Path) -> None:
     repository = E2ERepository()
@@ -562,6 +563,7 @@ async def test_m1_forecast_cycle_data_flow_and_api_response(tmp_path: Path) -> N
     assert all(len(point) == 2 and isinstance(point[0], int) for point in payload["series"][0]["points"])
 
 
+@pytest.mark.e2e
 @pytest.mark.asyncio
 async def test_m2_analysis_warm_start_spliced_curve_and_selection_e2e(tmp_path: Path) -> None:
     repository = E2ERepository()

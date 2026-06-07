@@ -1549,7 +1549,15 @@ def test_render_template_rejects_secret_direct_job_type_before_template_lookup(
     assert "supersecret" not in details
 
 
-def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_rejected(tmp_path: Path) -> None:
+def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Environment-independent: pin the runtime venv-bin to an existing tmp dir via
+    # the explicit override, so the PATH assertion holds with or without cwd/.venv.
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_PYTHON_VENV_BIN", str(venv_bin))
     gateway = _production_gateway(tmp_path)
     manifest = {
         **_production_manifest(tmp_path, "download_source_cycle"),
@@ -1558,7 +1566,7 @@ def test_safe_slurm_env_reaches_rendered_non_array_template_and_secret_is_reject
 
     rendered = gateway.render_template("download_source_cycle", manifest)
 
-    assert f"export PATH={shlex.quote(str((Path.cwd() / '.venv' / 'bin').resolve()))}:$PATH" in rendered
+    assert f"export PATH={shlex.quote(str(venv_bin.resolve()))}:$PATH" in rendered
     assert "export NHMS_PROFILE=prod/gfs_00" in rendered
     assert "export NHMS_RUN_LABEL=prod_gfs_00" in rendered
     with pytest.raises(ManifestValidationError):
