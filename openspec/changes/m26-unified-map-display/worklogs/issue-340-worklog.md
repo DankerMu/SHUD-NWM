@@ -60,4 +60,4 @@
 - [x] Phase 6 fix round-1（抽金标准校验到 lib/hydroMet/stationSeries.ts，HydroMetPage+popup 同源复用）
 - [x] Phase 4-6 round-2 comprehensive review（3 路 None，clean）
 - [x] Phase 7 独立复核（编排者直读 round-2 evidence：字节等价 + echarts 缺失硬断言 + 673 无回归）
-- [ ] Phase 8 merge（用户授权，不等 CI）
+- [x] Phase 8 merge（PR #347 squash-merge 8b7befc，用户授权不等 CI；#340 已关闭，tasks.md §4 已勾）
