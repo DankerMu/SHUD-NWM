@@ -1,5 +1,5 @@
 export const m11VisualTokens = {
-  navHeight: '56px',
+  navHeight: '0px',
   leftPanelWidth: '280px',
   rightPanelWidth: '340px',
   rightPanelMinWidth: '320px',

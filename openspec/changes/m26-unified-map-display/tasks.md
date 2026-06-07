@@ -1,16 +1,16 @@
 ## 0. 前置与基线
 
-- [ ] 0.1 用 `openspec validate m26-unified-map-display --strict --no-interactive` 校验本 change 4/4 complete 后再开实现。
+- [x] 0.1 用 `openspec validate m26-unified-map-display --strict --no-interactive` 校验本 change 4/4 complete 后再开实现。
 - [ ] 0.2 记录基线：现有路由表（`App.tsx`）、`AppShell`/`NavBar` 导航项、`M11QueryState` 字段、`overviewData` store 的 `loadOverview`/`loadBasinDetail` 签名与 snapshot 匹配函数，作为回归基准。
 - [ ] 0.3 清点 honest-display 库的导出与消费点（`bootstrap.ts`/`stationSeries.ts`/`riverForecast.ts`/`ReturnPeriodSection.tsx`），列出迁移后需保留的导出名（防测试大面积改 import）。
 - [ ] 0.4 记录 node-27 实测约束作为实现依据：`best` 不被 latest-product 接受（仅 GFS/IFS）、`/api/v1/layers` 空、river-network 瓦片 424 / hydro 瓦片 409（→ 当前用 GeoJSON 河网渲染，overlay 待注册自动点亮）。
 
 ## 1. 去导航 + 路由收敛（single-map-shell-routing）
 
-- [ ] 1.1 `components/layout/AppShell.tsx` 删除 `<NavBar/>` 及 import；保留 `ToastProvider`/`<main>`/role override；可在角落保留 operator+ 可见的低调"运维"直链。
-- [ ] 1.2 `lib/m11/visualTokens.ts` 的 `--m11-nav-height` 去 nav 后归 0；`pages/m11/M11Shell.tsx`（`M11Layout`）高度改为全视口，验证三栏不塌陷/留白。
-- [ ] 1.3 `App.tsx`：`/`→`DisplayMapPage`；`/overview`/`/forecast`/`/hydro-met`→`<Navigate replace>` 到 `/`；`/meteorology`→附加 `layer=met-stations`；`/flood-alerts`→附加 `layer=flood-return-period`；`/basins/:basinId`→附加 `basinId=:basinId`；`/segments/:segmentId`→附加 `segmentId=:segmentId`；`/ops`/`/monitoring`/`/system/model-assets` 不动。重定向 MUST 保留原始 search（读 param+search 合成），同名键以原始 search 为准；`/segments/:segmentId` 缺 basin 上下文时落 `/?segmentId=…` 由单页 honest 空态处理。
-- [ ] 1.4 测试：`AppRoutes.test.tsx` 增/改各旧路由（含 `/segments/:segmentId`）重定向落点断言 + 深链原始 search 保留断言 + `/` 渲染单页 + `/ops` 等仍受 RBAC（不被重定向）。
+- [x] 1.1 `components/layout/AppShell.tsx` 删除 `<NavBar/>` 及 import；保留 `ToastProvider`/`<main>`/role override；可在角落保留 operator+ 可见的低调"运维"直链。
+- [x] 1.2 `lib/m11/visualTokens.ts` 的 `--m11-nav-height` 去 nav 后归 0；`pages/m11/M11Shell.tsx`（`M11Layout`）高度改为全视口，验证三栏不塌陷/留白。
+- [x] 1.3 `App.tsx`：`/`→`DisplayMapPage`；`/overview`/`/forecast`/`/hydro-met`→`<Navigate replace>` 到 `/`；`/meteorology`→附加 `layer=met-stations`；`/flood-alerts`→附加 `layer=flood-return-period`；`/basins/:basinId`→附加 `basinId=:basinId`；`/segments/:segmentId`→附加 `segmentId=:segmentId`；`/ops`/`/monitoring`/`/system/model-assets` 不动。重定向 MUST 保留原始 search（读 param+search 合成），同名键以原始 search 为准；`/segments/:segmentId` 缺 basin 上下文时落 `/?segmentId=…` 由单页 honest 空态处理。
+- [x] 1.4 测试：`AppRoutes.test.tsx` 增/改各旧路由（含 `/segments/:segmentId`）重定向落点断言 + 深链原始 search 保留断言 + `/` 渲染单页 + `/ops` 等仍受 RBAC（不被重定向）。
 
 ## 2. 总览↔详情就地化 + 数据 store 改造（inplace-overview-basin-detail）【最高风险，先做 store 单测】
 
