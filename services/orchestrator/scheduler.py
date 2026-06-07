@@ -31,6 +31,7 @@ from packages.common.slurm_env import (
     secret_manifest_value_reason,
 )
 from packages.common.source_identity import normalize_source_id
+from packages.common.state_manager import StateManager
 from services.orchestrator.chain import (
     ForecastOrchestrator,
     OrchestratorConfig,
@@ -2031,7 +2032,7 @@ class ProductionScheduler:
         return ForecastOrchestrator(
             config=config,
             repository=_orchestrator_repository_from_env(),
-            state_manager=None,
+            state_manager=StateManager.from_env(),
             retry_service=_retry_service_from_env(),
         )
 

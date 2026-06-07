@@ -4504,6 +4504,7 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     monkeypatch.setenv("FORECAST_SOURCE_ID", "IFS")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
     monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
+    monkeypatch.setattr(scheduler_module.StateManager, "from_env", staticmethod(lambda: "state-manager-from-env"))
     monkeypatch.setattr(scheduler_module, "ForecastOrchestrator", DefaultPathOrchestrator)
     config = _config(
         roots["workspace_root"],
@@ -4533,7 +4534,7 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     assert result.evidence["slurm_preflight"]["status"] == "ready"
     assert len(constructed) == 1
     assert constructed[0]["repository"] == "repository-from-env"
-    assert constructed[0]["state_manager"] is None
+    assert constructed[0]["state_manager"] == "state-manager-from-env"
     assert constructed[0]["config"].source_id == "gfs"
     assert constructed[0]["config"].workspace_root == roots["workspace_root"].resolve()
     assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
