@@ -266,7 +266,9 @@ uv run nhms-monitor                               # 打印 JSON 到 stdout，并
      reservation_lost；reconcile 会话 commit 失败后 rollback 避免毒化后续 pass。**部署前置见 §2.3**（000029 必须先 apply）。
      **尚未 live**——overlapping-submit 实况 receipt 待 daemon live = #292，依赖 #287(验 m23 #255 鲜活摄取)。
      out-of-scope LOW 收尾 → #300。
-7b. ✅ **多源下载韧性**（PR #308，b4a2e85/eeb4d5c）：GFS 换 NODD 多镜像链（`GFS_SOURCE_BACKENDS=s3,gcs,azure,ftpprd,nomads`，共享 `.idx`+HTTP-Range+本地 cdo-clip，NOMADS grib-filter 末位回退）；IFS 云镜像优先（`IFS_OPEN_DATA_FALLBACK_SOURCES` 默认 `aws,azure,google,ecmwf`，ECMWF 直连 500 连接上限末位）。NOMADS 403=动态封禁 → 持久断路器（`OBJECT_STORE_ROOT/state/source_circuit/`，cooldown 内停重试）；云镜像 503/429/SlowDown 归类 `RateLimitedError` → 切源 + per-source cooldown（`IFS_SOURCE_COOLDOWN_SECONDS=1800`）；f000 缺累积场镜像 404 回落 NOMADS、重复 APCP idx fail-loud。**从根上消解 §3B 缺陷③ 单源静默丢 cycle。**
+7b. ✅ **多源下载韧性**（PR #308，b4a2e85/eeb4d5c）：GFS 换 NODD 多镜像链（`GFS_SOURCE_BACKENDS=s3,gcs,azure,ftpprd,nomads`，共享 `.idx`+HTTP-Range+本地 cdo-clip，NOMADS grib-filter 末位回退）；
+IFS 云镜像优先（`IFS_OPEN_DATA_FALLBACK_SOURCES` 默认 `aws,azure,google,ecmwf`，ECMWF 直连 500 连接上限末位）。NOMADS 403=动态封禁 → 持久断路器（`OBJECT_STORE_ROOT/state/source_circuit/`，cooldown 内停重试）；
+云镜像 503/429/SlowDown 归类 `RateLimitedError` → 切源 + per-source cooldown（`IFS_SOURCE_COOLDOWN_SECONDS=1800`）；f000 缺累积场镜像 404 回落 NOMADS、重复 APCP idx fail-loud。**从根上消解 §3B 缺陷③ 单源静默丢 cycle。**
 8. ⏳ **生产硬化**（并入 m24/后续）：独立生产 PostgreSQL（替换 e2e 容器）、固化 `compute.host.env`、`QHH_FORCE_UPSTREAM` 透传 sbatch（§6 #16，亦由 m24 改走 chain 自动重转消解）、source-trust/docker 预检、监控告警（`nhms-monitor` 已落地，见 §5；接 cron/守护）、诊断脚本退役护栏(#293)。
 9. ⏳ **洪频曲线对齐**：将来建 ERA5 hindcast 洪频曲线（hourly）后，5min 预报侧 return-period 窗口需按 12 行/小时折算（`flood_frequency/frequency.py` ROWS 窗口假设 hourly）。
 
