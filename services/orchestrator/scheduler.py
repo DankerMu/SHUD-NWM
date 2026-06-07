@@ -112,6 +112,7 @@ STATE_CANDIDATE_SCOPED_PROOF_FIELDS = (
     "hydro_run_id",
     "published_manifest_id",
 )
+STATE_STRONG_CANDIDATE_SCOPED_PROOF_FIELDS = STATE_CANDIDATE_SCOPED_PROOF_FIELDS
 LOCK_OWNER = "production_scheduler"
 LOCK_SCHEMA_VERSION = 1
 SCHEDULER_EVIDENCE_SCHEMA_VERSION = "nhms.production_scheduler.pass_evidence.v1"
@@ -4589,8 +4590,9 @@ def _candidate_state_identity_validation(
         payload = record["payload"]
         if not isinstance(payload, Mapping):
             continue
+        scoped_to_other_candidate = _state_row_is_scoped_to_other_candidate(expected, payload)
         authoritative = record["authoritative"] is True
-        if authoritative or _state_row_has_m23_comparison_evidence(payload):
+        if not scoped_to_other_candidate and (authoritative or _state_row_has_m23_comparison_evidence(payload)):
             validation_payload = _legacy_compatible_state_row(expected, payload)
             try:
                 fields = validate_compatible_production_identity(expected, validation_payload)
@@ -4691,11 +4693,37 @@ def _state_values_have_authoritative_candidate_proof(
 ) -> bool:
     if not row_values:
         return False
+    if _state_values_are_scoped_to_other_candidate(row_values, expected_values):
+        return False
     if _state_values_have_complete_m23_identity(row_values, expected_values):
         return True
     if _state_values_have_candidate_scoped_m23_proof(row_values, expected_values):
         return True
     return _legacy_values_prove_same_candidate(row_values, expected_values)
+
+
+def _state_row_is_scoped_to_other_candidate(expected: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    expected_values = _legacy_identity_values(expected)
+    if _state_values_are_scoped_to_other_candidate(_legacy_identity_values(row), expected_values):
+        return True
+    return any(
+        _state_values_are_scoped_to_other_candidate(_legacy_identity_values(nested), expected_values)
+        for nested in _nested_state_identity_payloads(row)
+    )
+
+
+def _state_values_are_scoped_to_other_candidate(
+    row_values: Mapping[str, str],
+    expected_values: Mapping[str, str],
+) -> bool:
+    for identity_field in STATE_CANDIDATE_SCOPED_PROOF_FIELDS:
+        value = row_values.get(identity_field)
+        expected = expected_values.get(identity_field)
+        if identity_field == "run_id" and _stage_cycle_run_matches_candidate(value, expected_values):
+            continue
+        if value not in (None, "") and expected not in (None, "") and value != expected:
+            return True
+    return False
 
 
 def _state_values_have_complete_m23_identity(

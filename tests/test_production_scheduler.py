@@ -2012,6 +2012,61 @@ def test_nested_task_proof_does_not_authorize_parent_event_manual_retry(
     assert orchestrator.calls
 
 
+def test_sibling_array_task_result_does_not_block_current_candidate(
+    tmp_path: Path,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    identity = _production_identity_fixture()
+    sibling_identity = {
+        **identity,
+        "run_id": "fcst_gfs_2026052106_model_b",
+        "model_id": "model_b",
+        "basin_id": "basin_b",
+        "forcing_version_id": "forc_gfs_2026052106_model_b",
+        "hydro_run_id": "fcst_gfs_2026052106_model_b",
+        "published_manifest_id": "manifest_fcst_gfs_2026052106_model_b",
+    }
+    state = {
+        "pipeline_events": [
+            {
+                "event_id": 103,
+                "event_type": "status_change",
+                "status_to": "succeeded",
+                "details": {
+                    "stage": "forcing",
+                    "task_results": [
+                        {**sibling_identity, "task_id": 0, "status": "succeeded"},
+                        {**identity, "task_id": 1, "status": "succeeded"},
+                    ],
+                },
+            }
+        ],
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+    validation = scheduler_module._candidate_state_identity_validation(candidate, state)
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    assert decision is None
+    assert validation["status"] == "compatible"
+    assert "pipeline_events[0].details.task_results[0]" in validation["legacy_non_authoritative"]
+    assert "pipeline_events[0].details.task_results[1]" not in validation["legacy_non_authoritative"]
+    assert "pipeline_events[0].details.task_results[0]" not in validation["compared"]
+    assert validation["compared"]["pipeline_events[0].details.task_results[1]"]["run_id"] == candidate.run_id
+    assert orchestrator.calls
+
+
 def test_nested_failed_task_identity_remains_available_when_failure_state_is_candidate_scoped() -> None:
     candidate = _scheduler_candidate_fixture()
     state = {
