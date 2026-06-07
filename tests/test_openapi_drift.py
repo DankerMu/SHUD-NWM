@@ -197,7 +197,7 @@ def test_qhh_latest_product_runtime_openapi_matches_static_parameters_and_schema
 
     static_parameters = _operation_parameters_by_name(static_operation, static_spec)
     runtime_parameters = _operation_parameters_by_name(runtime_operation, fastapi_spec)
-    assert set(static_parameters) == {"source", "run_id", "cycle_time", "model_id"}
+    assert set(static_parameters) == {"source", "basin_id", "run_id", "cycle_time", "model_id"}
     assert runtime_parameters == static_parameters
 
     static_response = static_operation["responses"]["200"]["content"]["application/json"]["schema"]
@@ -207,6 +207,8 @@ def test_qhh_latest_product_runtime_openapi_matches_static_parameters_and_schema
     assert runtime_operation["responses"]["5XX"] == static_operation["responses"]["5XX"]
     assert static_response["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/QhhLatestProduct"
     assert static_parameters["source"]["schema"] == {"type": "string", "enum": ["GFS", "IFS"]}
+    assert static_parameters["basin_id"]["schema"] == {"type": "string", "minLength": 1}
+    assert static_parameters["basin_id"]["required"] is False
     assert static_parameters["run_id"]["schema"] == {"type": "string", "minLength": 1}
     assert static_parameters["cycle_time"]["schema"] == {"type": "string", "format": "date-time"}
     assert static_parameters["model_id"]["schema"] == {"type": "string", "minLength": 1}

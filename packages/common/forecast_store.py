@@ -959,6 +959,7 @@ class PsycopgForecastStore:
         self,
         source: str,
         *,
+        basin_id: str = QHH_BASIN_ID,
         run_id: str | None = None,
         cycle_time: datetime | str | None = None,
         model_id: str | None = None,
@@ -971,15 +972,21 @@ class PsycopgForecastStore:
             model_id=model_id,
         )
         with self._transaction() as cursor:
-            rows = self._fetch_latest_qhh_display_candidates(cursor, source_id=source_id, identity=identity)
+            rows = self._fetch_latest_qhh_display_candidates(
+                cursor,
+                basin_id=basin_id,
+                source_id=source_id,
+                identity=identity,
+            )
             if not rows:
                 rows = self._fetch_latest_qhh_display_unavailable_context(
                     cursor,
+                    basin_id=basin_id,
                     source_id=source_id,
                     identity=identity,
                 )
 
-        evaluations = [_qhh_latest_candidate_response(row) for row in rows]
+        evaluations = [_qhh_latest_candidate_response(row, basin_id=basin_id) for row in rows]
         for evaluation in evaluations:
             if evaluation["ready"]:
                 return evaluation["product"]
@@ -987,10 +994,12 @@ class PsycopgForecastStore:
         context_evaluations = evaluations[:QHH_LATEST_CONTEXT_LIMIT]
         reasons = _qhh_latest_context_reasons(context_evaluations)
         if not reasons:
-            reasons.append(_qhh_latest_no_candidates_reason(source_id=source_id, identity=identity))
+            reasons.append(
+                _qhh_latest_no_candidates_reason(basin_id=basin_id, source_id=source_id, identity=identity)
+            )
         details: dict[str, Any] = {
             "source_id": source_id,
-            "basin_id": QHH_BASIN_ID,
+            "basin_id": basin_id,
             "status": "unavailable",
             "candidate_limit": QHH_LATEST_CANDIDATE_LIMIT,
             "search_limit": QHH_LATEST_SEARCH_LIMIT,
@@ -1014,6 +1023,7 @@ class PsycopgForecastStore:
         self,
         cursor: Any,
         *,
+        basin_id: str,
         source_id: str,
         identity: "_QhhLatestStrictIdentity | None" = None,
     ) -> list[dict[str, Any]]:
@@ -1526,7 +1536,7 @@ class PsycopgForecastStore:
             """,
             (
                 QHH_LATEST_EXPECTED_HORIZON_HOURS,
-                QHH_BASIN_ID,
+                basin_id,
                 source_id,
                 *identity_params,
                 candidate_limit,
@@ -1539,6 +1549,7 @@ class PsycopgForecastStore:
         self,
         cursor: Any,
         *,
+        basin_id: str,
         source_id: str,
         identity: "_QhhLatestStrictIdentity | None" = None,
     ) -> list[dict[str, Any]]:
@@ -1630,7 +1641,7 @@ class PsycopgForecastStore:
             """,
             (
                 QHH_LATEST_EXPECTED_HORIZON_HOURS,
-                QHH_BASIN_ID,
+                basin_id,
                 source_id,
                 *identity_params,
                 context_limit,
@@ -2349,6 +2360,7 @@ def _qhh_latest_requested_identity_details(identity: _QhhLatestStrictIdentity) -
 
 def _qhh_latest_no_candidates_reason(
     *,
+    basin_id: str,
     source_id: str,
     identity: _QhhLatestStrictIdentity | None,
 ) -> dict[str, Any]:
@@ -2356,7 +2368,7 @@ def _qhh_latest_no_candidates_reason(
         "code": "NO_CANDIDATES",
         "message": f"No QHH display-product candidates were found for source {source_id}.",
         "source_id": source_id,
-        "basin_id": QHH_BASIN_ID,
+        "basin_id": basin_id,
     }
     if identity is not None:
         reason["code"] = "STRICT_IDENTITY_NOT_FOUND"
@@ -2365,7 +2377,7 @@ def _qhh_latest_no_candidates_reason(
     return reason
 
 
-def _qhh_latest_candidate_response(row: Mapping[str, Any]) -> dict[str, Any]:
+def _qhh_latest_candidate_response(row: Mapping[str, Any], *, basin_id: str = QHH_BASIN_ID) -> dict[str, Any]:
     reasons = _qhh_latest_unavailable_reasons(row)
     source_id = _display_source_id(str(row.get("source_id") or ""))
     cycle_time = _datetime_value(row.get("cycle_time"))
@@ -2392,7 +2404,7 @@ def _qhh_latest_candidate_response(row: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     product = {
-        "basin_id": str(row.get("basin_id") or QHH_BASIN_ID),
+        "basin_id": str(row.get("basin_id") or basin_id),
         "model_id": str(row.get("model_id") or ""),
         "basin_version_id": str(row.get("basin_version_id") or ""),
         "river_network_version_id": str(row.get("river_network_version_id") or ""),

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from apps.api.errors import ApiError
 from packages.common.forecast_store import (
+    QHH_BASIN_ID,
     QHH_LATEST_REFLECTED_VALUE_LIMIT,
     ForecastStoreError,
     PsycopgForecastStore,
@@ -118,6 +119,13 @@ def get_qhh_latest_product(
         default=None,
         description="MVP forecast source. Accepted values: GFS or IFS.",
     ),
+    basin_id: str | None = Query(
+        default=None,
+        description=(
+            "Target basin id for the latest display product. Defaults to "
+            f"{QHH_BASIN_ID} for backward compatibility when omitted."
+        ),
+    ),
     run_id: str | None = Query(
         default=None,
         description="Strict QHH run identity. Requires source, cycle_time, and model_id when supplied.",
@@ -144,6 +152,7 @@ def get_qhh_latest_product(
             request,
             store.latest_qhh_display_product(
                 str(source),
+                basin_id=basin_id or QHH_BASIN_ID,
                 run_id=run_id,
                 cycle_time=cycle_time,
                 model_id=model_id,
