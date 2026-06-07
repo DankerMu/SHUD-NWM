@@ -1,19 +1,23 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
 import { HYDRO_MET_STATION_VARIABLES } from '@/lib/hydroMet/stationSeries'
-import type { QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import { loadHydroMetBootstrap, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
 
 vi.mock('@/api/client', () => ({
   client: { GET: vi.fn() },
 }))
 
+vi.mock('@/pages/hydroMet/bootstrap', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/pages/hydroMet/bootstrap')>()
+  return { ...actual, loadHydroMetBootstrap: vi.fn() }
+})
+
 vi.mock('echarts-for-react/lib/core', () => ({
-  default: ({ option }: { option: unknown }) => (
-    <pre data-testid="mock-station-echarts">{JSON.stringify(option)}</pre>
-  ),
+  default: ({ option }: { option: unknown }) => <pre data-testid="mock-station-echarts">{JSON.stringify(option)}</pre>,
 }))
 vi.mock('@/components/charts/echartsCore', () => ({ echarts: {} }))
 
@@ -68,6 +72,22 @@ function product(overrides: Partial<QhhLatestProduct> = {}): QhhLatestProduct {
   } as QhhLatestProduct
 }
 
+function bootstrapReady(p: QhhLatestProduct) {
+  return {
+    status: 'ready' as const,
+    source: p.source_id as 'GFS' | 'IFS',
+    cycle: null,
+    product: p,
+    stations: [],
+    riverSegments: [],
+    stationPage: null,
+    riverSegmentCollection: null,
+    latestReasons: [],
+    stationError: null,
+    riverError: null,
+  }
+}
+
 const station: M11StationPopupStation = { station_id: 'qhh_forc_001', station_name: 'QHH forcing 001' }
 
 function metadata() {
@@ -114,6 +134,7 @@ function mockSeries(body: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(loadHydroMetBootstrap).mockResolvedValue(bootstrapReady(product()))
 })
 
 afterEach(() => {
@@ -121,10 +142,12 @@ afterEach(() => {
 })
 
 describe('M11StationForcingPopup', () => {
-  it('renders six forcing variable charts when identity matches', async () => {
+  it('renders six forcing variable charts in a glass popup when identity matches', async () => {
     mockSeries(seriesResponse())
-    render(<M11StationForcingPopup product={product()} station={station} />)
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
+    expect(screen.getByTestId('m11-station-popup')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
     for (const variable of HYDRO_MET_STATION_VARIABLES) {
       expect(screen.getByTestId(`m11-station-variable-${variable}-chart`)).toBeInTheDocument()
@@ -132,23 +155,56 @@ describe('M11StationForcingPopup', () => {
     expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length)
   })
 
+  it('changes the displayed curve set when a variable is toggled off', async () => {
+    const user = userEvent.setup()
+    mockSeries(seriesResponse())
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+
+    await screen.findByTestId('m11-station-popup-loaded')
+    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length)
+
+    // 关掉 PRCP → 只显其余五个变量曲线
+    await user.click(screen.getByTestId('m11-station-variable-toggle-PRCP'))
+    expect(screen.queryByTestId('m11-station-variable-PRCP-chart')).not.toBeInTheDocument()
+    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length - 1)
+
+    // 重新开启 PRCP → 恢复全部
+    await user.click(screen.getByTestId('m11-station-variable-toggle-PRCP'))
+    expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()
+    expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length)
+  })
+
+  it('refetches with the new source when the user switches GFS to IFS', async () => {
+    const user = userEvent.setup()
+    mockSeries(seriesResponse())
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
+
+    await screen.findByTestId('m11-station-popup-loaded')
+    expect(loadHydroMetBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
+
+    vi.mocked(loadHydroMetBootstrap).mockResolvedValue(bootstrapReady(product({ source_id: 'IFS' })))
+    await user.click(screen.getByTestId('m11-popup-source-IFS'))
+    await waitFor(() =>
+      expect(loadHydroMetBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' })),
+    )
+  })
+
   it('shows identity-mismatch empty state and draws no curve when station_id mismatches', async () => {
     mockSeries(seriesResponse({ station_id: 'OTHER' }))
-    render(<M11StationForcingPopup product={product()} station={station} />)
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(await screen.findByTestId('m11-station-popup-identity-mismatch')).toBeInTheDocument()
     expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
   })
 
-  it('shows honest empty state and does not call the API when product=null (best unresolved)', () => {
-    render(<M11StationForcingPopup product={null} station={station} productReason="等待 Best Available 解析" />)
+  it('shows honest empty state and never resolves a product when basinId=null', () => {
+    render(<M11StationForcingPopup basinId={null} initialSource={null} station={station} />)
 
-    expect(screen.getByTestId('m11-station-popup-no-product')).toHaveTextContent('等待 Best Available 解析')
+    expect(screen.getByTestId('m11-station-popup-no-product')).toHaveTextContent('请选择流域')
     expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
-    expect(vi.mocked(client.GET)).not.toHaveBeenCalled()
+    expect(vi.mocked(loadHydroMetBootstrap)).not.toHaveBeenCalled()
   })
 
-  // critical-1：任一无效点（malformed/NaN）→ 该变量 ok:false → 空态，绝不渲染 echarts（与金标准同口径）。
   it('rejects the variable (no echarts) when any point is malformed/NaN', async () => {
     const body = seriesResponse()
     const series = (body.series as Record<string, unknown>[])[0]
@@ -157,22 +213,20 @@ describe('M11StationForcingPopup', () => {
       { valid_time: '2026-05-21T12:00:00Z', value: Number.NaN, quality_flag: 'ok' },
     ]
     mockSeries(body)
-    render(<M11StationForcingPopup product={product()} station={station} />)
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-PRCP-invalid')).toBeInTheDocument()
     expect(screen.queryByTestId('m11-station-variable-PRCP-chart')).not.toBeInTheDocument()
-    // PRCP 拒绝，其余五个变量正常 → 恰好 5 个 echarts，PRCP 不画。
     expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length - 1)
   })
 
-  // major：缺 unit（unit=null）→ 缺 unit 门控空态，无 echarts。
   it('gates on missing unit (no echarts) when unit is null', async () => {
     const body = seriesResponse()
     const series = (body.series as Record<string, unknown>[])[0]
     series.unit = null
     mockSeries(body)
-    render(<M11StationForcingPopup product={product()} station={station} />)
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-PRCP-missing-unit')).toBeInTheDocument()
@@ -180,13 +234,12 @@ describe('M11StationForcingPopup', () => {
     expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length - 1)
   })
 
-  // critical-2：坏 metadata（returned_points 非法 + 时间字段非法）→ ok:false → 空态，无 echarts。
   it('rejects the variable (no echarts) when metadata is malformed', async () => {
     const body = seriesResponse()
     const series = (body.series as Record<string, unknown>[])[0]
     series.metadata = { ...metadata(), returned_points: -1, returned_from: 'not-a-time' }
     mockSeries(body)
-    render(<M11StationForcingPopup product={product()} station={station} />)
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-PRCP-invalid')).toBeInTheDocument()
@@ -194,14 +247,13 @@ describe('M11StationForcingPopup', () => {
     expect(screen.getAllByTestId('mock-station-echarts')).toHaveLength(HYDRO_MET_STATION_VARIABLES.length - 1)
   })
 
-  // minor：truncated/capped → echarts 渲染 + 显式披露截断标记（与金标准披露口径一致）。
   it('renders echarts and discloses truncation/cap when series is truncated', async () => {
     const body = seriesResponse()
     const series = (body.series as Record<string, unknown>[])[0]
     series.truncated = true
     series.metadata = { ...metadata(), returned_points: 1000, truncated: true }
     mockSeries(body)
-    render(<M11StationForcingPopup product={product()} station={station} />)
+    render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     expect(await screen.findByTestId('m11-station-popup-loaded')).toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-PRCP-chart')).toBeInTheDocument()

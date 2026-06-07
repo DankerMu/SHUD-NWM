@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
-import { CloudRain, Loader2, X } from 'lucide-react'
+import { CloudRain } from 'lucide-react'
 
 import { echarts } from '@/components/charts/echartsCore'
+import {
+  M11PopupEmpty,
+  M11PopupHeader,
+  M11PopupLoading,
+  M11PopupShell,
+  M11PopupSourceControls,
+} from '@/components/map/M11PopupChrome'
+import { useHydroMetPopupProduct } from '@/components/map/useHydroMetPopupProduct'
+import { cn } from '@/lib/cn'
 import {
   HYDRO_MET_STATION_SERIES_LIMIT,
   HYDRO_MET_STATION_VARIABLES,
@@ -18,6 +27,7 @@ import {
   type HydroMetStationSeriesResponse,
   type HydroMetStationSeriesVariable,
 } from '@/lib/hydroMet/stationSeries'
+import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import type { QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
 
 /** 选中代站（来自地图 feature.properties + 坐标）的必要字段。 */
@@ -32,7 +42,6 @@ type StationSeriesLoadState =
   | { kind: 'loaded'; requestKey: string; response: HydroMetStationSeriesResponse }
   | { kind: 'error'; requestKey: string; message: string }
 
-// 从 QhhLatestProduct 构造 station-series product identity（照搬 HydroMetPage 的派生口径）。
 function stationSeriesProductIdentity(product: QhhLatestProduct): HydroMetStationSeriesProductIdentity {
   return {
     forcing_version_id: product.forcing_version_id,
@@ -45,31 +54,47 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-// 复用金标准 mapUniqueHydroMetStationSeries：仅保留 MVP 变量、去重、保 record 类型。
 function seriesByVariable(response: HydroMetStationSeriesResponse) {
   const list = isRecord(response) && Array.isArray(response.series) ? response.series : []
   return mapUniqueHydroMetStationSeries(list)
 }
 
 /**
- * 代站六要素 forcing 曲线 popup（M26-4）。逻辑照搬 HydroMetPage station 段：
- * loadHydroMetStationSeries → validateHydroMetStationSeriesIdentity → 逐变量
- * validateHydroMetStationSeriesForChart（同源金标准）→ 渲染六要素 echarts。
- * honest 红线：身份不符 / 任一无效点 / 缺 unit / 坏 metadata → 空态，绝不渲染 echarts。
- * product=null（best 未解析 / 无 basin）→ honest 空态。
+ * 代站六要素 forcing 曲线 popup（M26 全屏单页）。玻璃质感 + 弹窗内 source/起报/变量选择。
+ * 变量选择：PRCP/TEMP/RH/wind/Rn/Press 多选切换（默认全显），改选只显所选变量曲线。
+ * source 切换 → 以新源重取 latest-product + station-series。
+ * honest 红线：身份不符 / 任一无效点 / 缺 unit / 坏 metadata → 空态，绝不渲染 echarts；product=null → honest 空态。
  */
 export function M11StationForcingPopup({
-  product,
+  basinId,
+  initialSource,
   station,
-  productReason,
   onClose,
 }: {
-  product: QhhLatestProduct | null
+  basinId: string | null
+  initialSource: HydroMetSource | null
   station: M11StationPopupStation
-  productReason?: string | null
   onClose?: () => void
 }) {
+  const popupProduct = useHydroMetPopupProduct({ basinId, initialSource })
+  const { product } = popupProduct
   const [state, setState] = useState<StationSeriesLoadState>({ kind: 'idle' })
+  const [selectedVariables, setSelectedVariables] = useState<Set<HydroMetStationSeriesVariable>>(
+    () => new Set(HYDRO_MET_STATION_VARIABLES),
+  )
+
+  const toggleVariable = (variable: HydroMetStationSeriesVariable) => {
+    setSelectedVariables((current) => {
+      const next = new Set(current)
+      if (next.has(variable)) {
+        // 至少保留一个变量，避免全空态歧义。
+        if (next.size > 1) next.delete(variable)
+      } else {
+        next.add(variable)
+      }
+      return next
+    })
+  }
 
   useEffect(() => {
     if (!product) {
@@ -80,17 +105,17 @@ export function M11StationForcingPopup({
     const requestKey = stationSeriesRequestKey(identity, station.station_id)
     let cancelled = false
     setState({ kind: 'loading', requestKey })
-    void loadHydroMetStationSeries({ product: identity, station: { station_id: station.station_id }, limit: HYDRO_MET_STATION_SERIES_LIMIT }).then(
+    void loadHydroMetStationSeries({
+      product: identity,
+      station: { station_id: station.station_id },
+      limit: HYDRO_MET_STATION_SERIES_LIMIT,
+    }).then(
       (response) => {
         if (!cancelled) setState({ kind: 'loaded', requestKey, response })
       },
       (error) => {
         if (!cancelled) {
-          setState({
-            kind: 'error',
-            requestKey,
-            message: formatHydroMetStationSeriesMessage(error, 'station-series 不可用'),
-          })
+          setState({ kind: 'error', requestKey, message: formatHydroMetStationSeriesMessage(error, 'station-series 不可用') })
         }
       },
     )
@@ -100,22 +125,73 @@ export function M11StationForcingPopup({
   }, [product, station.station_id])
 
   return (
-    <div className="w-[min(26rem,80vw)]" data-testid="m11-station-popup">
-      <PopupHeader
+    <M11PopupShell testId="m11-station-popup">
+      <M11PopupHeader
+        icon={CloudRain}
         title={`${station.station_id}${station.station_name ? ` · ${station.station_name}` : ''}`}
         subtitle="气象代站六要素 forcing"
         onClose={onClose}
       />
+      <M11PopupSourceControls
+        source={popupProduct.source}
+        onSourceChange={popupProduct.setSource}
+        issueTimes={popupProduct.issueTimes}
+        issueTime={popupProduct.issueTime}
+      />
+      <StationVariableSelector selected={selectedVariables} onToggle={toggleVariable} />
 
       {!product ? (
-        <EmptyState testId="m11-station-popup-no-product">{productReason ?? '等待 Best Available 解析'}</EmptyState>
+        <M11PopupEmpty testId="m11-station-popup-no-product">{popupProduct.reason ?? '等待 Best Available 解析'}</M11PopupEmpty>
       ) : state.kind === 'loading' ? (
-        <LoadingState testId="m11-station-popup-loading">正在加载 {station.station_id} 的 station-series...</LoadingState>
+        <M11PopupLoading testId="m11-station-popup-loading">正在加载 {station.station_id} 的 station-series...</M11PopupLoading>
       ) : state.kind === 'error' ? (
-        <EmptyState testId="m11-station-popup-error">{state.message}</EmptyState>
+        <M11PopupEmpty testId="m11-station-popup-error">{state.message}</M11PopupEmpty>
       ) : state.kind === 'loaded' ? (
-        <StationForcingBody product={product} stationId={station.station_id} response={state.response} />
+        <StationForcingBody
+          product={product}
+          stationId={station.station_id}
+          response={state.response}
+          selectedVariables={selectedVariables}
+        />
       ) : null}
+    </M11PopupShell>
+  )
+}
+
+function StationVariableSelector({
+  selected,
+  onToggle,
+}: {
+  selected: Set<HydroMetStationSeriesVariable>
+  onToggle: (variable: HydroMetStationSeriesVariable) => void
+}) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1.5 border-b border-white/40 px-4 py-2"
+      role="group"
+      aria-label="代站变量选择"
+      data-testid="m11-station-variable-selector"
+    >
+      {HYDRO_MET_STATION_VARIABLES.map((variable) => {
+        const active = selected.has(variable)
+        return (
+          <button
+            key={variable}
+            type="button"
+            className={cn(
+              'cursor-pointer rounded border px-2 py-0.5 text-xs font-medium transition-colors',
+              active
+                ? 'border-primary-600 bg-primary-600/15 text-primary-700'
+                : 'border-white/50 bg-white/40 text-neutral-600 hover:bg-white/60',
+            )}
+            aria-pressed={active}
+            data-testid={`m11-station-variable-toggle-${variable}`}
+            onClick={() => onToggle(variable)}
+          >
+            {variable}
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -124,34 +200,35 @@ function StationForcingBody({
   product,
   stationId,
   response,
+  selectedVariables,
 }: {
   product: QhhLatestProduct
   stationId: string
   response: HydroMetStationSeriesResponse
+  selectedVariables: Set<HydroMetStationSeriesVariable>
 }) {
   const identity = stationSeriesProductIdentity(product)
   const identityMessages = validateHydroMetStationSeriesIdentity(response, identity, stationId)
   const byVariable = useMemo(() => seriesByVariable(response), [response])
 
   if (identityMessages.length > 0) {
-    // honest 红线：身份不符 → 空态，绝不绘制曲线。
     return (
       <div className="px-4 py-3" data-testid="m11-station-popup-identity-mismatch">
-        <EmptyState testId="m11-station-popup-identity-reasons">
+        <M11PopupEmpty testId="m11-station-popup-identity-reasons">
           <div className="font-semibold">station-series identity 不一致</div>
           <ul className="mt-1 space-y-1">
             {identityMessages.map((message, index) => (
               <li key={`${index}-${message}`}>{message}</li>
             ))}
           </ul>
-        </EmptyState>
+        </M11PopupEmpty>
       </div>
     )
   }
 
   return (
     <div className="max-h-[60vh] space-y-3 overflow-auto px-4 py-3" data-testid="m11-station-popup-loaded">
-      {HYDRO_MET_STATION_VARIABLES.map((variable) => (
+      {HYDRO_MET_STATION_VARIABLES.filter((variable) => selectedVariables.has(variable)).map((variable) => (
         <StationVariableChart key={variable} variable={variable} series={byVariable.get(variable)} />
       ))}
     </div>
@@ -173,7 +250,6 @@ function StationVariableChart({
     )
   }
 
-  // honest 红线：调金标准校验器；任一无效点 / 坏 metadata / 坏 unit → ok:false → 空态，绝不画曲线。
   const validation = validateHydroMetStationSeriesForChart(series)
   if (!validation.ok) {
     return (
@@ -183,7 +259,6 @@ function StationVariableChart({
     )
   }
 
-  // 缺 unit 门控（与金标准一致）：缺少 unit 元数据 → 停止绘图。
   if (!validation.unit) {
     return (
       <VariableEmpty variable={variable} testId={`m11-station-variable-${variable}-missing-unit`}>
@@ -203,7 +278,7 @@ function StationVariableChart({
   const truncated = validation.seriesTruncated || validation.metadata.truncated
 
   return (
-    <div className="rounded-md border border-neutral-300 p-2" data-testid={`m11-station-variable-${variable}-chart`}>
+    <div className="rounded-md border border-white/50 bg-white/40 p-2" data-testid={`m11-station-variable-${variable}-chart`}>
       <div className="flex flex-wrap items-start justify-between gap-1">
         <div className="text-xs font-semibold text-neutral-900">
           {variable} · {validation.unit}
@@ -280,56 +355,9 @@ function VariableEmpty({
   children: React.ReactNode
 }) {
   return (
-    <div className="rounded-md border border-dashed border-neutral-300 bg-neutral-50 p-2 text-xs text-neutral-700" data-testid={testId}>
+    <div className="rounded-md border border-dashed border-white/50 bg-white/40 p-2 text-xs text-neutral-700" data-testid={testId}>
       <div className="font-semibold text-neutral-900">{variable}</div>
       <div className="mt-1">{children}</div>
-    </div>
-  )
-}
-
-function PopupHeader({ title, subtitle, onClose }: { title: string; subtitle: string; onClose?: () => void }) {
-  return (
-    <div className="flex items-start justify-between gap-2 border-b border-neutral-300 px-4 py-3">
-      <div className="min-w-0">
-        <div className="flex items-center gap-2 text-sm font-semibold text-neutral-900">
-          <CloudRain className="h-4 w-4 shrink-0 text-primary-600" aria-hidden="true" />
-          <span className="truncate" title={title}>
-            {title}
-          </span>
-        </div>
-        <div className="mt-0.5 text-xs text-neutral-700">{subtitle}</div>
-      </div>
-      {onClose ? (
-        <button
-          type="button"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-neutral-100"
-          aria-label="关闭弹窗"
-          onClick={onClose}
-        >
-          <X className="h-4 w-4" aria-hidden="true" />
-        </button>
-      ) : null}
-    </div>
-  )
-}
-
-function LoadingState({ children, testId }: { children: React.ReactNode; testId: string }) {
-  return (
-    <div
-      className="m-4 flex items-center gap-2 rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700"
-      role="status"
-      data-testid={testId}
-    >
-      <Loader2 className="h-4 w-4 animate-spin text-primary-600" aria-hidden="true" />
-      {children}
-    </div>
-  )
-}
-
-function EmptyState({ children, testId }: { children: React.ReactNode; testId: string }) {
-  return (
-    <div className="m-4 rounded border border-warning/40 bg-warning/10 p-3 text-sm text-neutral-900" role="status" data-testid={testId}>
-      {children}
     </div>
   )
 }

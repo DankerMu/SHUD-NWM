@@ -1,0 +1,111 @@
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { BrowserRouter } from 'react-router-dom'
+import { describe, expect, it, vi } from 'vitest'
+
+import {
+  M11BackToOverviewButton,
+  M11FloatingLayerSwitcher,
+  M11FloatingLegend,
+  M11OpsLink,
+  resolveM11FloatingLegend,
+} from '@/components/map/M11FloatingControls'
+import type { LayerState } from '@/lib/m11/overviewDataContracts'
+
+const dischargeLayer: LayerState = {
+  layerId: 'discharge',
+  displayName: 'River discharge',
+  group: 'hydrology',
+  available: true,
+  metadata: null,
+  validTimes: [],
+  currentValidTime: null,
+  validTimeSource: 'none',
+  disabledReason: null,
+  freshness: {
+    updatedAt: null,
+    cycleTime: null,
+    validTime: null,
+    runId: null,
+    source: 'GFS',
+    isStale: false,
+    staleAfterHours: 6,
+    unavailableReason: null,
+    basinVersionId: null,
+    riverNetworkVersionId: null,
+  },
+  legend: [
+    { label: '<500 m3/s', color: '#90CAF9', max: 500 },
+    { label: '>5000 m3/s', color: '#0D47A1', min: 5000 },
+  ],
+}
+
+describe('M11FloatingLayerSwitcher', () => {
+  it('offers discharge/met-raster/met-stations and dispatches layer changes', async () => {
+    const onQueryChange = vi.fn()
+    const user = userEvent.setup()
+    render(<M11FloatingLayerSwitcher layer="discharge" onQueryChange={onQueryChange} />)
+
+    expect(screen.getByRole('button', { name: /流量/, pressed: true })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /气象栅格/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /气象代站/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /气象栅格/ }))
+    expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-raster' })
+    await user.click(screen.getByRole('button', { name: /气象代站/ }))
+    expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-stations' })
+  })
+})
+
+describe('M11FloatingLegend', () => {
+  it('renders legend entries for the active discharge layer', () => {
+    render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} />)
+    expect(screen.getByText('径流量图例')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-floating-legend-entries')).toBeInTheDocument()
+    expect(screen.getByText('<500 m3/s')).toBeInTheDocument()
+  })
+
+  it('falls back to the contract legend when the layer carries no legend', () => {
+    expect(resolveM11FloatingLegend('warning-level', []).length).toBeGreaterThan(0)
+    render(<M11FloatingLegend layer="warning-level" layers={[]} />)
+    expect(screen.getByText('预警等级图例')).toBeInTheDocument()
+  })
+
+  it('shows an honest not-registered note for met-raster (no fabricated color ramp)', () => {
+    render(<M11FloatingLegend layer="met-raster" layers={[]} />)
+    expect(screen.getByText('气象栅格图例')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-floating-legend-empty')).toHaveTextContent('未注册')
+    expect(screen.queryByTestId('m11-floating-legend-entries')).not.toBeInTheDocument()
+  })
+
+  it('shows an honest note for met-stations (point cluster, no color ramp)', () => {
+    render(<M11FloatingLegend layer="met-stations" layers={[]} />)
+    expect(screen.getByTestId('m11-floating-legend-empty')).toHaveTextContent('点位聚合')
+  })
+})
+
+describe('M11OpsLink + M11BackToOverviewButton', () => {
+  it('hides the ops link for non-operator roles', () => {
+    const { rerender } = render(
+      <BrowserRouter>
+        <M11OpsLink visible={false} />
+      </BrowserRouter>,
+    )
+    expect(screen.queryByTestId('m11-ops-link')).not.toBeInTheDocument()
+
+    rerender(
+      <BrowserRouter>
+        <M11OpsLink visible />
+      </BrowserRouter>,
+    )
+    expect(screen.getByTestId('m11-ops-link')).toHaveAttribute('href', '/ops')
+  })
+
+  it('invokes the back-to-overview handler', async () => {
+    const onClick = vi.fn()
+    const user = userEvent.setup()
+    render(<M11BackToOverviewButton onClick={onClick} />)
+    await user.click(screen.getByTestId('m11-back-to-overview'))
+    expect(onClick).toHaveBeenCalledTimes(1)
+  })
+})

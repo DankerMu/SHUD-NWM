@@ -1,8 +1,16 @@
 import { useEffect, useState } from 'react'
-import { Loader2, Waves, X } from 'lucide-react'
+import { Waves } from 'lucide-react'
 
 import { ForecastChart } from '@/components/charts/ForecastChart'
 import { ReturnPeriodSection } from '@/components/m11/ReturnPeriodSection'
+import {
+  M11PopupEmpty,
+  M11PopupHeader,
+  M11PopupLoading,
+  M11PopupShell,
+  M11PopupSourceControls,
+} from '@/components/map/M11PopupChrome'
+import { useHydroMetPopupProduct } from '@/components/map/useHydroMetPopupProduct'
 import {
   formatHydroMetRiverForecastMessage,
   formatHydroMetRiverForecastUiString,
@@ -32,7 +40,6 @@ type RiverForecastLoadState =
   | { kind: 'loaded'; requestKey: string; response: HydroMetRiverForecastPayload }
   | { kind: 'error'; requestKey: string; message: string }
 
-// 从 QhhLatestProduct 构造 river forecast product identity（照搬 HydroMetPage 的派生口径）。
 function riverForecastProductIdentity(product: QhhLatestProduct): HydroMetRiverForecastProductIdentity {
   return {
     basin_version_id: product.basin_version_id,
@@ -62,24 +69,26 @@ function riverForecastSegmentIdentity(segment: M11RiverPopupSegment): HydroMetRi
 }
 
 /**
- * 河段 q_down 预报曲线 popup（M26-4）。逻辑照搬 HydroMetPage river 段：
- * 构造 product/segment identity → loadHydroMetRiverForecast → validateHydroMetRiverForecastForChart；
- * ok:true 渲染 ForecastChart(q_down) + ReturnPeriodSection 三态；ok:false 显示原因，不画曲线。
- * product=null（best 未解析 / 无 basin）→ honest 空态。
+ * 河段 q_down 预报曲线 popup（M26 全屏单页）。玻璃质感 + 弹窗内 source/起报选择。
+ * 弹窗自持 source（默认随地图解析源），改 source → 以新源重取 latest-product 再取曲线。
+ * 预报变量仅 q_down（产品唯一预报变量），如实保留单项标注。
+ * honest 红线：身份/契约校验失败（ok:false）→ 显示原因，绝不绘制曲线；product=null → honest 空态。
  */
 export function M11RiverForecastPopup({
-  product,
+  basinId,
+  initialSource,
   segment,
-  productReason,
   onClose,
 }: {
-  product: QhhLatestProduct | null
+  basinId: string | null
+  /** 地图解析到的具体源（best/compare 未解析时为 null → 弹窗回退 GFS）。 */
+  initialSource: HydroMetSource | null
   segment: M11RiverPopupSegment
-  /** product=null 时的 honest 原因（"等待 Best Available 解析" / "请选择流域"）。 */
-  productReason?: string | null
   onClose?: () => void
 }) {
   const segmentIdentity = riverForecastSegmentIdentity(segment)
+  const popupProduct = useHydroMetPopupProduct({ basinId, initialSource })
+  const { product } = popupProduct
   const [state, setState] = useState<RiverForecastLoadState>({ kind: 'idle' })
 
   useEffect(() => {
@@ -108,31 +117,35 @@ export function M11RiverForecastPopup({
     return () => {
       cancelled = true
     }
-    // segmentIdentity 由 segment 派生，依赖其稳定字段即可。
   }, [product, segmentIdentity.river_segment_id, segmentIdentity.basin_version_id, segmentIdentity.river_network_version_id])
 
   return (
-    <div className="w-[min(26rem,80vw)]" data-testid="m11-river-popup">
-      <PopupHeader
+    <M11PopupShell testId="m11-river-popup">
+      <M11PopupHeader
+        icon={Waves}
         title={`${segmentIdentity.river_segment_id} · ${segmentIdentity.name}`}
         subtitle="河段 q_down 流量预报"
         onClose={onClose}
       />
+      <M11PopupSourceControls
+        source={popupProduct.source}
+        onSourceChange={popupProduct.setSource}
+        issueTimes={popupProduct.issueTimes}
+        issueTime={popupProduct.issueTime}
+      />
 
       {!product ? (
-        <EmptyState testId="m11-river-popup-no-product">
-          {productReason ?? '等待 Best Available 解析'}
-        </EmptyState>
+        <M11PopupEmpty testId="m11-river-popup-no-product">{popupProduct.reason ?? '等待 Best Available 解析'}</M11PopupEmpty>
       ) : state.kind === 'loading' ? (
-        <LoadingState testId="m11-river-popup-loading">
+        <M11PopupLoading testId="m11-river-popup-loading">
           正在加载 {segmentIdentity.river_segment_id} 的 q_down forecast-series...
-        </LoadingState>
+        </M11PopupLoading>
       ) : state.kind === 'error' ? (
-        <EmptyState testId="m11-river-popup-error">{state.message}</EmptyState>
+        <M11PopupEmpty testId="m11-river-popup-error">{state.message}</M11PopupEmpty>
       ) : state.kind === 'loaded' ? (
         <RiverForecastBody product={product} segment={segmentIdentity} response={state.response} />
       ) : null}
-    </div>
+    </M11PopupShell>
   )
 }
 
@@ -149,16 +162,15 @@ function RiverForecastBody({
   const validation = validateHydroMetRiverForecastForChart(response, identity, segment)
 
   if (!validation.ok) {
-    // honest 红线：身份/契约校验失败 → 显示原因空态，绝不绘制 q_down 曲线。
     return (
       <div className="space-y-3 px-4 py-3" data-testid="m11-river-popup-invalid">
-        <EmptyState testId="m11-river-popup-invalid-reasons">
+        <M11PopupEmpty testId="m11-river-popup-invalid-reasons">
           <ul className="space-y-1">
             {validation.messages.map((message, index) => (
               <li key={`${index}-${message}`}>{message}</li>
             ))}
           </ul>
-        </EmptyState>
+        </M11PopupEmpty>
         <ReturnPeriodSection product={product} />
       </div>
     )
@@ -189,11 +201,14 @@ function RiverForecastBody({
 
   return (
     <div className="space-y-3 px-4 py-3" data-testid="m11-river-popup-loaded">
+      <div className="text-xs font-medium text-neutral-700" data-testid="m11-river-popup-variable">
+        预报变量：q_down（产品唯一预报变量）
+      </div>
       <div
         className={
           validation.horizonShorter
             ? 'rounded border border-warning/40 bg-warning/10 p-2 text-xs text-neutral-900'
-            : 'rounded border border-primary-100 bg-primary-50 p-2 text-xs text-neutral-900'
+            : 'rounded border border-primary-100 bg-primary-50/70 p-2 text-xs text-neutral-900'
         }
         data-testid="m11-river-popup-horizon"
       >
@@ -202,65 +217,6 @@ function RiverForecastBody({
       </div>
       <ForecastChart data={forecastData} segmentName={segment.name} />
       <ReturnPeriodSection product={product} />
-    </div>
-  )
-}
-
-function PopupHeader({
-  title,
-  subtitle,
-  onClose,
-}: {
-  title: string
-  subtitle: string
-  onClose?: () => void
-}) {
-  return (
-    <div className="flex items-start justify-between gap-2 border-b border-neutral-300 px-4 py-3">
-      <div className="min-w-0">
-        <div className="flex items-center gap-2 text-sm font-semibold text-neutral-900">
-          <Waves className="h-4 w-4 shrink-0 text-primary-600" aria-hidden="true" />
-          <span className="truncate" title={title}>
-            {title}
-          </span>
-        </div>
-        <div className="mt-0.5 text-xs text-neutral-700">{subtitle}</div>
-      </div>
-      {onClose ? (
-        <button
-          type="button"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-neutral-100"
-          aria-label="关闭弹窗"
-          onClick={onClose}
-        >
-          <X className="h-4 w-4" aria-hidden="true" />
-        </button>
-      ) : null}
-    </div>
-  )
-}
-
-function LoadingState({ children, testId }: { children: React.ReactNode; testId: string }) {
-  return (
-    <div
-      className="m-4 flex items-center gap-2 rounded border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700"
-      role="status"
-      data-testid={testId}
-    >
-      <Loader2 className="h-4 w-4 animate-spin text-primary-600" aria-hidden="true" />
-      {children}
-    </div>
-  )
-}
-
-function EmptyState({ children, testId }: { children: React.ReactNode; testId: string }) {
-  return (
-    <div
-      className="m-4 rounded border border-warning/40 bg-warning/10 p-3 text-sm text-neutral-900"
-      role="status"
-      data-testid={testId}
-    >
-      {children}
     </div>
   )
 }

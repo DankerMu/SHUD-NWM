@@ -485,8 +485,8 @@ describe('M11 visual foundation shell', () => {
     vi.unstubAllGlobals()
   })
 
-  it('exposes mapped layout tokens for nav, panels, timeline, and warning colors', () => {
-    window.history.pushState({}, '', '/overview?warningLevel=major')
+  it('renders a fullscreen map with floating switcher/legend and no legacy side panels or timeline (M26)', () => {
+    window.history.pushState({}, '', '/?warningLevel=major')
 
     render(
       <BrowserRouter>
@@ -494,31 +494,24 @@ describe('M11 visual foundation shell', () => {
       </BrowserRouter>,
     )
 
-    const shell = screen.getByTestId('m11-shell')
-    expect(shell).toHaveStyle({
-      '--m11-left-panel-width': '280px',
-      '--m11-right-panel-width': '340px',
-      '--m11-timeline-height': '64px',
-    })
-    expect(shell).toHaveAttribute('data-layout', 'map-first-compact')
-    expect(shell.className).toContain('h-[calc(100vh-var(--m11-nav-height)-32px)]')
-    expect(shell.className).toContain('min-[1200px]:grid-rows-[minmax(0,1fr)_var(--m11-timeline-height)]')
-    expect(shell).toHaveAttribute('data-left-panel', 'expanded')
-    expect(shell).toHaveAttribute('data-right-panel', 'expanded')
-    // 去导航后预留高度归 0，shell 随之占满全视口（M26-1 单页外壳）
+    // M26 全屏单页：地图铺满视口 + 浮层；不再有三栏 shell / 侧栏 / timeline
+    expect(screen.getByTestId('m11-fullscreen-map')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-floating-layer-switcher')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-floating-legend')).toBeInTheDocument()
     expect(m11VisualTokens.navHeight).toBe('0px')
-    expect(m11VisualTokens.warningLevels.major).toBe('#FF8A65')
-    expect(screen.getByLabelText('M11 左侧面板')).toBeInTheDocument()
-    expect(screen.getByLabelText('M11 右侧面板')).toBeInTheDocument()
-    expect(screen.getByLabelText('M11 时间轴')).toBeInTheDocument()
-    expect(screen.getByTestId('m11-timeline')).toHaveAttribute('data-first-viewport-visible', 'true')
-    expect(screen.getByTestId('m11-timeline-region')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '折叠左侧面板' })).toHaveAttribute('aria-expanded', 'true')
-    expect(screen.getByRole('button', { name: '折叠右侧面板' })).toHaveAttribute('aria-expanded', 'true')
+
+    // 断言旧边栏控件 / timeline 不在 DOM
+    expect(screen.queryByTestId('m11-shell')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('M11 左侧面板')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('M11 右侧面板')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('m11-timeline')).not.toBeInTheDocument()
+    expect(screen.queryByRole('slider', { name: '有效时间滑块' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('M11 数据源控制')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('全国流域树')).not.toBeInTheDocument()
   })
 
-  it('collapses side panels while keeping the timeline mounted for 1280 compact layout', async () => {
-    window.history.pushState({}, '', '/overview')
+  it('defaults the floating switcher to the discharge layer and switches layers on click (M26)', async () => {
+    window.history.pushState({}, '', '/')
 
     render(
       <BrowserRouter>
@@ -527,17 +520,16 @@ describe('M11 visual foundation shell', () => {
     )
 
     const user = userEvent.setup()
-    const shell = screen.getByTestId('m11-shell')
+    // 默认流量（discharge）选中
+    expect(screen.getByRole('button', { name: /流量/, pressed: true })).toBeInTheDocument()
+    // 三项可点：流量 / 气象栅格 / 气象代站
+    expect(screen.getByRole('button', { name: /气象栅格/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /气象代站/ })).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '折叠左侧面板' }))
-    expect(shell).toHaveAttribute('data-left-panel', 'collapsed')
-    expect(screen.getByRole('button', { name: '展开左侧面板' })).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.getByTestId('m11-timeline')).toHaveAttribute('data-first-viewport-visible', 'true')
-
-    await user.click(screen.getByRole('button', { name: '折叠右侧面板' }))
-    expect(shell).toHaveAttribute('data-right-panel', 'collapsed')
-    expect(screen.getByRole('button', { name: '展开右侧面板' })).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.getByLabelText('M11 时间轴')).toBeInTheDocument()
+    // 选气象栅格 → honest 未注册占位，不画假图层
+    await user.click(screen.getByRole('button', { name: /气象栅格/ }))
+    await waitFor(() => expect(screen.getByTestId('m11-met-raster-notice')).toBeInTheDocument())
+    expect(screen.getByTestId('m11-floating-legend-empty')).toHaveTextContent('未注册')
   })
 
   it('keeps default discharge unregistered without basin river geometry while preserving controls and unavailable map status', async () => {
@@ -1506,7 +1498,7 @@ describe('M11 visual foundation shell', () => {
         loadStationLayer,
         clear: vi.fn(),
       })
-      window.history.pushState({}, '', '/overview?layer=met-stations')
+      window.history.pushState({}, '', '/?layer=met-stations')
 
       render(
         <BrowserRouter>

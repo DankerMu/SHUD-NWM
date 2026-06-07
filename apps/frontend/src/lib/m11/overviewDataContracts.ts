@@ -322,6 +322,7 @@ const layerLabels: Record<M11Layer, string> = {
   'flood-return-period': 'Flood return period',
   'warning-level': 'Warning level',
   'met-stations': 'Meteorological stations',
+  'met-raster': 'Meteorological grid',
 }
 
 export function createSourceScenarioSelection(

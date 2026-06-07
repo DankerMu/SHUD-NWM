@@ -99,6 +99,7 @@ const fallbackLegends: Record<M11Layer, LayerState['legend']> = {
   'flood-return-period': getM11LayerLegend('flood-return-period'),
   'warning-level': getM11LayerLegend('warning-level'),
   'met-stations': [],
+  'met-raster': [],
 }
 
 const meteorologyLayers: Array<{ value: M11Layer; label: string; description: string }> = [
