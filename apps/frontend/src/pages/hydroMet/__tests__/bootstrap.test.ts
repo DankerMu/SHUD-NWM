@@ -292,7 +292,7 @@ describe('loadHydroMetBootstrap', () => {
       params: { query: { source: 'GFS' } },
     })
     expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations', {
-      params: { query: { model_id: 'basins_qhh_shud', limit: HYDRO_MET_STATION_LIMIT, offset: 0 } },
+      params: { query: { model_id: 'basins_qhh_shud', basin_version_id: 'basins_qhh_vbasins', limit: HYDRO_MET_STATION_LIMIT, offset: 0 } },
     })
     expect(client.GET).toHaveBeenCalledWith('/api/v1/basin-versions/{basin_version_id}/river-segments', {
       params: {
@@ -374,7 +374,7 @@ describe('loadHydroMetBootstrap', () => {
     })
     // Downstream params are derived from the returned product's identity, not hand-input.
     expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations', {
-      params: { query: { model_id: 'basins_heihe_shud', limit: HYDRO_MET_STATION_LIMIT, offset: 0 } },
+      params: { query: { model_id: 'basins_heihe_shud', basin_version_id: 'basins_heihe_vbasins', limit: HYDRO_MET_STATION_LIMIT, offset: 0 } },
     })
     expect(client.GET).toHaveBeenCalledWith('/api/v1/basin-versions/{basin_version_id}/river-segments', {
       params: {
