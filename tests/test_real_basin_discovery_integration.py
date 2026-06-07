@@ -24,11 +24,25 @@ _BASIN_PENDING = f"{_PREFIX}_basin_pending"
 # still surface purely from data (registration + a display-ready run). This is the
 # "zero-code-change extensibility" id used by the dedicated test below.
 _BASIN_BRANDNEW = f"{_PREFIX}_basin_brandnew_2099"
+# A basin whose only ready run is run_type='analysis' (not forecast): it must NOT
+# surface, because discovery is aligned with the latest-product candidate query
+# (forecast-only). Same for a forecast run with a NULL cycle_time.
+_BASIN_ANALYSIS = f"{_PREFIX}_basin_analysis"
+_BASIN_NO_CYCLE = f"{_PREFIX}_basin_no_cycle"
 _RUN_START = datetime(2026, 5, 14, 0, tzinfo=UTC)
 _RUN_END = datetime(2026, 5, 14, 1, tzinfo=UTC)
+_CYCLE_TIME = datetime(2026, 5, 14, 0, tzinfo=UTC)
 
 
-def _seed_basin(connection: Any, *, basin_id: str, basin_name: str, run_status: str) -> None:
+def _seed_basin(
+    connection: Any,
+    *,
+    basin_id: str,
+    basin_name: str,
+    run_status: str,
+    run_type: str = "forecast",
+    cycle_time: datetime | None = _CYCLE_TIME,
+) -> None:
     suffix = basin_id
     basin_version_id = f"{suffix}_v1"
     river_network_version_id = f"{suffix}_rnv"
@@ -84,11 +98,11 @@ def _seed_basin(connection: Any, *, basin_id: str, basin_name: str, run_status: 
             """
             INSERT INTO hydro.hydro_run (
                 run_id, run_type, scenario_id, model_id, basin_version_id,
-                start_time, end_time, status, run_manifest_uri
+                cycle_time, start_time, end_time, status, run_manifest_uri
             )
-            VALUES (%s, 'forecast', 'forecast_gfs_deterministic', %s, %s, %s, %s, %s, 'integration://manifest.json')
+            VALUES (%s, %s, 'forecast_gfs_deterministic', %s, %s, %s, %s, %s, %s, 'integration://manifest.json')
             """,
-            (run_id, model_id, basin_version_id, _RUN_START, _RUN_END, run_status),
+            (run_id, run_type, model_id, basin_version_id, cycle_time, _RUN_START, _RUN_END, run_status),
         )
 
 
@@ -130,20 +144,70 @@ def test_list_basins_has_display_product_reflects_real_run_status(integration_da
             _clear(connection)
 
 
+def test_list_basins_has_display_product_excludes_non_forecast_and_null_cycle(
+    integration_database_url: str,
+) -> None:
+    """M-1 alignment oracle: discovery matches the latest-product candidate query
+    on run_type and cycle_time.
+
+    A basin whose only display-ready run is run_type='analysis', and a basin whose
+    only display-ready run is a forecast with NULL cycle_time, must both be absent
+    from has_display_product discovery — even though their run_status is otherwise
+    display-ready. This is the real-SQL oracle for the EXISTS clause's
+    `run_type = 'forecast' AND cycle_time IS NOT NULL` predicates.
+    """
+    apply_migrations_from_zero(integration_database_url)
+    with psycopg_connection(integration_database_url) as connection:
+        _clear(connection)
+        # Ready status but run_type='analysis' => not a latest-product candidate.
+        _seed_basin(
+            connection,
+            basin_id=_BASIN_ANALYSIS,
+            basin_name="ZZ Discovery Analysis",
+            run_status="frequency_done",
+            run_type="analysis",
+        )
+        # Ready forecast but cycle_time IS NULL => not a latest-product candidate.
+        _seed_basin(
+            connection,
+            basin_id=_BASIN_NO_CYCLE,
+            basin_name="ZZ Discovery No Cycle",
+            run_status="frequency_done",
+            run_type="forecast",
+            cycle_time=None,
+        )
+
+    store = PsycopgModelRegistryStore(integration_database_url)
+    try:
+        display_only = {row["basin_id"] for row in store.list_basins(limit=100, offset=0, has_display_product=True)}
+        assert _BASIN_ANALYSIS not in display_only
+        assert _BASIN_NO_CYCLE not in display_only
+
+        # Both are still registered basins, so the default listing includes them.
+        all_basins = {row["basin_id"] for row in store.list_basins(limit=100, offset=0)}
+        assert {_BASIN_ANALYSIS, _BASIN_NO_CYCLE} <= all_basins
+    finally:
+        with psycopg_connection(integration_database_url) as connection:
+            _clear(connection)
+
+
 def test_brandnew_basin_surfaces_without_any_code_change(integration_database_url: str) -> None:
     """§8.1 zero-code-change extensibility (multibasin-product-discovery Scenario 3).
 
-    A basin id that exists NOWHERE in the discovery source code surfaces in the
-    has_display_product discovery endpoint purely from data (registration + one
-    display-ready run). The assertion below is the explicit extensibility oracle:
-    the new id is provably absent from any source-level basin constant/whitelist,
-    yet still returned by the discovery query.
+    A basin id that is not referenced in the discovery module source still surfaces
+    in has_display_product discovery purely from data (registration + one
+    display-ready forecast run). The source-text check below is only weak evidence
+    (absence of a literal); the live-DB assertion at the end of this test is the
+    real oracle that discovery is data-driven, not whitelist-driven.
     """
-    # The discovery module must not hardcode this basin id anywhere (no whitelist).
+    # Weak evidence: this brand-new id is not a literal in the discovery module.
     discovery_source = inspect.getsource(model_registry_module)
     assert _BASIN_BRANDNEW not in discovery_source
-    # Defense-in-depth: discovery filters on a run-status set, not a basin enum.
+    # Discovery filters on a run-status set, not a basin enum.
     assert _BASIN_BRANDNEW not in model_registry_module.QHH_LATEST_READY_RUN_STATUSES
+    # A known production basin id is likewise NOT a literal in the discovery module:
+    # discovery cannot be relying on a hardcoded basin whitelist for it either.
+    assert "basins_qhh" not in discovery_source
 
     apply_migrations_from_zero(integration_database_url)
     with psycopg_connection(integration_database_url) as connection:

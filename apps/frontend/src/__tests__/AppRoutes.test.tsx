@@ -855,8 +855,14 @@ function applyMockRiverServerFilter(
       const label = `${props.river_segment_id ?? props.segment_id ?? ''} ${props.name ?? ''}`.toLowerCase()
       if (!label.includes(search)) return false
     }
-    if (Number.isFinite(query?.stream_order_min) && (props.stream_order ?? -Infinity) < (query?.stream_order_min as number)) return false
-    if (Number.isFinite(query?.stream_order_max) && (props.stream_order ?? Infinity) > (query?.stream_order_max as number)) return false
+    // Backend SQL semantics: NULL stream_order compares as false, so a row with NULL
+    // stream_order is excluded whenever either bound is set. Mirror that here instead of
+    // treating NULL as ±Infinity (which would falsely pass it through).
+    const hasMin = Number.isFinite(query?.stream_order_min)
+    const hasMax = Number.isFinite(query?.stream_order_max)
+    if ((hasMin || hasMax) && !Number.isFinite(props.stream_order)) return false
+    if (hasMin && (props.stream_order as number) < (query?.stream_order_min as number)) return false
+    if (hasMax && (props.stream_order as number) > (query?.stream_order_max as number)) return false
     return true
   })
   return { ...collection, features, total: features.length, feature_total: features.length }
@@ -1442,6 +1448,128 @@ describe('App route state', () => {
     expect(forecastCalls.map(([, options]) => (options as { params?: { path?: { segment_id?: string } } })?.params?.path?.segment_id)).toEqual(['seg-001', 'seg-002'])
   })
 
+  it('keeps the stream_order filter (with a clear control) mounted after filtering to empty, and clears to recover (F-1)', async () => {
+    const user = userEvent.setup()
+    mockHydroMetRouteClient()
+    window.history.pushState({}, '', '/hydro-met?source=GFS')
+
+    render(<App />)
+
+    // stream_order control is offered because the loaded segments carry the field.
+    expect(await screen.findByTestId('hydro-met-river-stream-order-filter')).toBeInTheDocument()
+    expect(await screen.findByTestId('hydro-met-river-segment-list')).toHaveTextContent('seg-001')
+
+    // Filter the list down to empty (no segment has stream_order >= 9).
+    await user.type(screen.getByTestId('hydro-met-river-stream-order-min'), '9')
+    await waitFor(() => expect(screen.getByTestId('hydro-met-empty-rivers')).toBeInTheDocument())
+
+    // The control must stay mounted (sticky availability) so the user is not locked out, and a
+    // clear-filter control is available. The unavailable banner must NOT appear / mislabel.
+    expect(screen.getByTestId('hydro-met-river-stream-order-filter')).toBeInTheDocument()
+    expect(screen.queryByTestId('hydro-met-river-stream-order-unavailable')).not.toBeInTheDocument()
+    const clearButton = screen.getByTestId('hydro-met-river-stream-order-clear')
+
+    // Clearing the filter recovers the full list.
+    await user.click(clearButton)
+    await waitFor(() => expect(screen.getByTestId('hydro-met-river-segment-list')).toHaveTextContent('seg-001'))
+    expect(screen.getByTestId('hydro-met-river-segment-list')).toHaveTextContent('seg-002')
+  })
+
+  it('does not carry stale inventory filters or duplicate default requests across product switches (F-1)', async () => {
+    const user = userEvent.setup()
+    mockHydroMetRouteClient()
+    const baseProduct = hydroMetLatestProduct()
+    const baseResult = {
+      status: 'ready' as const,
+      source: 'GFS' as const,
+      cycle: null,
+      product: baseProduct,
+      stations: hydroMetInteractiveStationPage.items,
+      riverSegments: hydroMetRiverSegments.features,
+      stationPage: hydroMetInteractiveStationPage,
+      riverSegmentCollection: hydroMetRiverSegments,
+      latestReasons: [],
+      stationError: null,
+      riverError: null,
+    }
+    const { rerender } = render(<ReadyHydroMetContent result={baseResult} product={baseProduct} />)
+
+    await user.type(await screen.findByLabelText('搜索气象站点'), 'North')
+    await waitFor(() => {
+      expect(vi.mocked(client.GET).mock.calls.some(([path, options]) => (
+        path === '/api/v1/met/stations'
+        && (options as { params?: { query?: { search?: string } } })?.params?.query?.search === 'North'
+      ))).toBe(true)
+    })
+
+    await user.type(await screen.findByTestId('hydro-met-river-stream-order-min'), '3')
+    await user.type(screen.getByTestId('hydro-met-river-stream-order-max'), '4')
+    await waitFor(() => {
+      expect(vi.mocked(client.GET).mock.calls.some(([path, options]) => {
+        const query = (options as { params?: { query?: { stream_order_min?: number; stream_order_max?: number } } })?.params?.query
+        return path === '/api/v1/basin-versions/{basin_version_id}/river-segments'
+          && query?.stream_order_min === 3
+          && query?.stream_order_max === 4
+      })).toBe(true)
+    })
+
+    const stationInventoryCallCount = vi.mocked(client.GET).mock.calls.filter(([path]) => path === '/api/v1/met/stations').length
+    const riverInventoryCallCount = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => path === '/api/v1/basin-versions/{basin_version_id}/river-segments')
+      .length
+    const nextProduct = hydroMetLatestProduct({
+      model_id: 'basins_qhh_shud_next',
+      basin_version_id: 'basins_qhh_vnext',
+      river_network_version_id: 'basins_qhh_rivnet_next',
+      forcing_version_id: 'forc_gfs_2026052106_basins_qhh_shud_next',
+      cycle_time: '2026-05-21T06:00:00Z',
+      run_id: 'qhh_gfs_2026052106_smoke_next',
+    })
+    const noStreamOrderCollection = {
+      ...hydroMetRiverSegments,
+      features: hydroMetRiverSegments.features.map((feature) => {
+        const properties = { ...feature.properties }
+        delete properties.stream_order
+        return {
+          ...feature,
+          properties: {
+            ...properties,
+            basin_version_id: 'basins_qhh_vnext',
+            river_network_version_id: 'basins_qhh_rivnet_next',
+          },
+        }
+      }),
+    }
+
+    rerender(
+      <ReadyHydroMetContent
+        result={{
+          ...baseResult,
+          product: nextProduct,
+          stations: hydroMetStationPage.items,
+          stationPage: hydroMetStationPage,
+          riverSegments: noStreamOrderCollection.features,
+          riverSegmentCollection: noStreamOrderCollection,
+        }}
+        product={nextProduct}
+      />,
+    )
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350))
+    })
+
+    const stationInventoryCallsAfterSwitch = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => path === '/api/v1/met/stations')
+      .slice(stationInventoryCallCount)
+    const riverInventoryCallsAfterSwitch = vi.mocked(client.GET).mock.calls
+      .filter(([path]) => path === '/api/v1/basin-versions/{basin_version_id}/river-segments')
+      .slice(riverInventoryCallCount)
+
+    expect(stationInventoryCallsAfterSwitch).toEqual([])
+    expect(riverInventoryCallsAfterSwitch).toEqual([])
+  })
+
   it('uses matching IFS source/scenario and labels shorter actual river horizon without padded q_down values', async () => {
     mockHydroMetRouteClient({
       product: {
@@ -1554,7 +1682,7 @@ describe('App route state', () => {
     expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent('qhh_forc_001')
   })
 
-  it('renders selected-station-absent state without requesting station-series or drawing charts', async () => {
+  it('auto-reselects the current page head when the selected station is absent after a page replace (F-2)', async () => {
     const user = userEvent.setup()
     vi.mocked(client.GET).mockImplementation(async (path: string, requestOptions?: unknown) => {
       if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series') {
@@ -1586,6 +1714,9 @@ describe('App route state', () => {
     await user.click(screen.getByRole('button', { name: '选择站点 qhh_forc_002' }))
     expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent('qhh_forc_002')
 
+    // Backend pagination replaces the page wholesale; the previously-selected station (002) is no
+    // longer present. The selection must auto-fall back to the new page head instead of locking the
+    // panel on a stale "selected station not in inventory" warning.
     const nextStationPage = {
       ...hydroMetInteractiveStationPage,
       items: hydroMetInteractiveStationPage.items.filter((station) => station.station_id !== 'qhh_forc_002'),
@@ -1602,15 +1733,16 @@ describe('App route state', () => {
       />,
     )
 
-    const unavailable = await screen.findByTestId('hydro-met-station-series-unavailable')
-    expect(unavailable).toHaveTextContent('选中站点不在 inventory 中')
-    expect(unavailable).toHaveTextContent('已停止 station-series 请求')
-    expect(screen.queryByTestId('hydro-met-station-series-panel')).not.toBeInTheDocument()
-    expect(findHydroMetChartOption('PRCP')).toBeUndefined()
+    // Auto-reselected to the new current-page head (qhh_forc_001), no absent warning, charts redraw.
+    expect(await screen.findByTestId('hydro-met-selected-station')).toHaveTextContent(nextStationPage.items[0].station_id)
+    expect(screen.queryByTestId('hydro-met-station-series-unavailable')).not.toBeInTheDocument()
+    expect(screen.getByTestId('hydro-met-station-series-panel')).toBeInTheDocument()
     const stationSeriesStationIds = vi.mocked(client.GET).mock.calls
       .filter(([path]) => path === '/api/v1/met/stations/{station_id}/series')
       .map(([, options]) => (options as { params?: { path?: { station_id?: string } } })?.params?.path?.station_id)
-    expect(stationSeriesStationIds).toEqual(['qhh_forc_001', 'qhh_forc_002'])
+    // Never requested series for an absent (stale) station; landed back on the page head.
+    expect(stationSeriesStationIds).not.toContain('qhh_forc_002_stale_absent')
+    expect(stationSeriesStationIds[stationSeriesStationIds.length - 1]).toBe(nextStationPage.items[0].station_id)
   })
 
   it('renders six station forcing charts with metadata, QC, truncation, missing variable, and missing unit states', async () => {
@@ -2379,7 +2511,7 @@ describe('App route state', () => {
     }
   })
 
-  it('shows selected river unavailable after candidates change and does not request the absent segment again', async () => {
+  it('auto-reselects the current river page head when the selected segment is absent after a page replace (F-2)', async () => {
     const user = userEvent.setup()
     vi.mocked(client.GET).mockImplementation(async (path: string, requestOptions?: unknown) => {
       if (path === '/api/v1/met/stations/{station_id}/series') {
@@ -2428,13 +2560,16 @@ describe('App route state', () => {
       />,
     )
 
-    const unavailable = await screen.findByTestId('hydro-met-river-forecast-unavailable')
-    expect(unavailable).toHaveTextContent('选中河段不在候选列表中')
-    expect(unavailable).toHaveTextContent('已停止 forecast-series 请求')
+    // After the page replace removes the selected seg-002, selection auto-falls back to the new
+    // page head (seg-001) rather than locking on a stale "segment not in candidates" warning.
+    const newHead = nextRiverCollection.features[0].properties.river_segment_id
+    expect(await screen.findByTestId('hydro-met-selected-river')).toHaveTextContent(newHead)
+    expect(screen.queryByTestId('hydro-met-river-forecast-unavailable')).not.toBeInTheDocument()
     const forecastSegmentIds = vi.mocked(client.GET).mock.calls
       .filter(([path]) => String(path).endsWith('/forecast-series'))
       .map(([, options]) => (options as { params?: { path?: { segment_id?: string } } })?.params?.path?.segment_id)
-    expect(forecastSegmentIds).toEqual(['seg-001', 'seg-002'])
+    // Never re-requested the absent seg-002 after removal; ended back on the page head.
+    expect(forecastSegmentIds[forecastSegmentIds.length - 1]).toBe(newHead)
   })
 
   it('bounds oversized river q_down responses before ECharts options', async () => {

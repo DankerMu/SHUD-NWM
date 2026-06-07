@@ -207,7 +207,11 @@ def test_qhh_latest_product_runtime_openapi_matches_static_parameters_and_schema
     assert runtime_operation["responses"]["5XX"] == static_operation["responses"]["5XX"]
     assert static_response["allOf"][1]["properties"]["data"]["$ref"] == "#/components/schemas/QhhLatestProduct"
     assert static_parameters["source"]["schema"] == {"type": "string", "enum": ["GFS", "IFS"]}
-    assert static_parameters["basin_id"]["schema"] == {"type": "string", "minLength": 1}
+    # basin_id intentionally has no minLength: an empty string is treated as
+    # omitted and falls back to basins_qhh (B-1 backward-compat), so the contract
+    # must not advertise minLength: 1.
+    assert static_parameters["basin_id"]["schema"] == {"type": "string"}
+    assert "minLength" not in static_parameters["basin_id"]["schema"]
     assert static_parameters["basin_id"]["required"] is False
     assert static_parameters["run_id"]["schema"] == {"type": "string", "minLength": 1}
     assert static_parameters["cycle_time"]["schema"] == {"type": "string", "format": "date-time"}
@@ -856,6 +860,71 @@ def test_basins_runtime_openapi_matches_static_parameters_and_schema() -> None:
     assert runtime_flag["schema"]["default"] is False
     assert static_flag.get("required", False) is False
     assert runtime_flag.get("required", False) is False
+
+
+def _normalize_runtime_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Strip FastAPI-only decorations so a runtime query-param schema can be
+    compared against the hand-authored static contract.
+
+    FastAPI wraps optional params as ``anyOf: [<schema>, {type: null}]`` and adds
+    a ``title``; the static spec uses the bare schema. This collapses the null
+    branch and drops the title without losing type/constraint information.
+    """
+    cleaned = {key: value for key, value in schema.items() if key not in {"title", "description"}}
+    branches = cleaned.get("anyOf")
+    if isinstance(branches, list):
+        non_null = [branch for branch in branches if branch.get("type") != "null"]
+        if len(non_null) == 1:
+            merged = dict(non_null[0])
+            for key, value in cleaned.items():
+                if key != "anyOf" and key not in merged:
+                    merged[key] = value
+            cleaned = merged
+    return cleaned
+
+
+def test_met_stations_runtime_openapi_matches_static_parameters_and_schema() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/met/stations"
+    static_parameters = _operation_parameters_by_name(static_spec["paths"][path]["get"], static_spec)
+    runtime_parameters = _operation_parameters_by_name(fastapi_spec["paths"][path]["get"], fastapi_spec)
+
+    assert set(static_parameters) == set(runtime_parameters)
+    assert "variables" in static_parameters
+
+    for name in ("search", "variables", "qc_status"):
+        static_schema = static_parameters[name]["schema"]
+        runtime_schema = _normalize_runtime_schema(runtime_parameters[name]["schema"])
+        assert runtime_schema == static_schema, name
+
+    # The repeated-param contract must survive: list-typed array binding.
+    assert static_parameters["variables"]["schema"] == {
+        "oneOf": [
+            {"type": "string"},
+            {"type": "array", "items": {"type": "string"}},
+        ]
+    }
+
+
+def test_river_segments_runtime_openapi_matches_static_parameters_and_schema() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/basin-versions/{basin_version_id}/river-segments"
+    static_parameters = _operation_parameters_by_name(static_spec["paths"][path]["get"], static_spec)
+    runtime_parameters = _operation_parameters_by_name(fastapi_spec["paths"][path]["get"], fastapi_spec)
+
+    assert set(static_parameters) == set(runtime_parameters)
+
+    for name in ("search", "stream_order_min", "stream_order_max"):
+        static_schema = static_parameters[name]["schema"]
+        runtime_schema = _normalize_runtime_schema(runtime_parameters[name]["schema"])
+        assert runtime_schema == static_schema, name
+
+    for name in ("stream_order_min", "stream_order_max"):
+        assert static_parameters[name]["schema"] == {"type": "integer", "minimum": 0}
 
 
 def _openapi_routes() -> set[RouteKey]:

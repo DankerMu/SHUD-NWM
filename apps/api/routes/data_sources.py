@@ -70,19 +70,22 @@ def list_met_stations(
     model_id: str | None = None,
     search: str | None = Query(
         default=None,
-        description="Case-insensitive substring match over station_id and station name.",
+        description="Case-insensitive substring match over station_id and station name (backend-applied).",
     ),
-    variables: str | list[str] | None = Query(
+    variables: list[str] | None = Query(
         default=None,
         description=(
             "Variable coverage filter. Repeat or comma-separate values "
-            "(PRCP, TEMP, RH, wind, Rn, Press). Only applied when model_id is set; "
-            "otherwise reported as unavailable."
+            "(PRCP, TEMP, RH, wind, Rn, Press). Applied only when model_id is set; "
+            "otherwise reported unavailable in the response filters block."
         ),
     ),
     qc_status: str | None = Query(
         default=None,
-        description="QC status filter (advisory; reported unavailable when QC fields are not in inventory).",
+        description=(
+            "QC status filter (advisory). Reported unavailable in the response "
+            "filters block because QC fields are not present on the station inventory."
+        ),
     ),
     limit: int = Query(default=DEFAULT_LIMIT, ge=1),
     offset: int = Query(default=0, ge=0),

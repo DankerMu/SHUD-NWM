@@ -21,6 +21,7 @@ from packages.common.forecast_store import (
     QHH_LATEST_REFLECTED_VALUE_LIMIT,
     QHH_LATEST_SEARCH_LIMIT,
     ForecastStoreError,
+    _station_variable_filter_tokens,
 )
 from services.orchestrator.production_contract import (
     PRODUCTION_STAGE_TAXONOMY,
@@ -594,6 +595,43 @@ def test_met_stations_contract_uses_success_envelope() -> None:
     assert data["items"] == [{"station_id": "station_1", "basin_version_id": "basin_v1", "active_flag": True}]
 
 
+def test_met_stations_repeated_variables_query_binds_all_values() -> None:
+    class _RecordingMetStationStore:
+        """Captures the variables argument delivered to list_met_stations."""
+
+        def __init__(self) -> None:
+            self.variables_calls: list[Any] = []
+
+        def list_met_stations(self, **kwargs: Any) -> dict[str, Any]:
+            self.variables_calls.append(kwargs.get("variables"))
+            # Exercise the real coverage-token parser to confirm both variables bind.
+            tokens = _station_variable_filter_tokens(kwargs.get("variables"))
+            return {
+                "items": [],
+                "total_count": 0,
+                "limit": kwargs["limit"],
+                "offset": kwargs["offset"],
+                "filters": {"variables": tokens},
+            }
+
+    store = _RecordingMetStationStore()
+    app.dependency_overrides[get_data_source_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/met/stations",
+                params=[("variables", "PRCP"), ("variables", "TEMP")],
+            )
+    finally:
+        app.dependency_overrides.pop(get_data_source_store, None)
+
+    assert response.status_code == 200
+    # Repeated query params must arrive as a list, not collapse to the first value.
+    assert store.variables_calls == [["PRCP", "TEMP"]]
+    data = _assert_success_envelope(response.json())
+    assert data["filters"]["variables"] == ["PRCP", "TEMP"]
+
+
 def test_met_station_series_contract_uses_success_envelope_and_store_payload() -> None:
     store = _DataSourceStore()
     app.dependency_overrides[get_data_source_store] = lambda: store
@@ -813,6 +851,32 @@ def test_basin_version_list_redacts_source_uri_and_checksum() -> None:
     assert "checksum-secret" not in rendered
 
 
+def test_basins_has_display_product_flag_reaches_store() -> None:
+    class _RecordingBasinStore:
+        """Captures the has_display_product flag actually delivered to the store."""
+
+        def __init__(self) -> None:
+            self.has_display_product_calls: list[bool] = []
+
+        def list_basins(self, *, limit: int, offset: int, has_display_product: bool = False) -> list[dict[str, Any]]:
+            self.has_display_product_calls.append(has_display_product)
+            return []
+
+    store = _RecordingBasinStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            filtered = client.get("/api/v1/basins", params={"has_display_product": "true"})
+            default = client.get("/api/v1/basins")
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert filtered.status_code == 200
+    assert default.status_code == 200
+    # First request opted in, second relied on the default.
+    assert store.has_display_product_calls == [True, False]
+
+
 def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
     store = _ModelRegistryStore()
     app.dependency_overrides[get_model_registry_store] = lambda: store
@@ -931,6 +995,26 @@ def test_river_segment_geojson_budget_error_contract() -> None:
     ]
     assert collection_responses["413"]["$ref"] == "#/components/responses/Error"
     assert detail_responses["413"]["$ref"] == "#/components/responses/Error"
+
+
+def test_river_segments_reversed_stream_order_range_rejected() -> None:
+    store = _ModelRegistryStore()
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/basin-versions/basin_v1/river-segments",
+                params={"stream_order_min": 5, "stream_order_max": 2},
+            )
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert body["error"]["details"]["stream_order_min"] == 5
+    assert body["error"]["details"]["stream_order_max"] == 2
 
 
 def test_forecast_series_contract_accepts_include_analysis_query() -> None:

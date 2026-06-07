@@ -3392,16 +3392,10 @@ def _flood_product_quality_join(alias: str) -> str:
                                THEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END)
                                ELSE COUNT(*)
                            END AS result_rows,
-                           CASE
-                               WHEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END) > 0
-                               THEN SUM(
-                                   CASE
-                                       WHEN fpr.max_over_window = true AND fpr.return_period IS NOT NULL THEN 1
-                                       ELSE 0
-                                   END
-                               )
-                               ELSE SUM(CASE WHEN fpr.return_period IS NOT NULL THEN 1 ELSE 0 END)
-                           END AS return_period_rows,
+                           SUM(CASE
+                               WHEN fpr.max_over_window = true AND fpr.return_period IS NOT NULL THEN 1
+                               ELSE 0
+                           END) AS return_period_rows,
                            CASE
                                WHEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END) > 0
                                THEN SUM(
