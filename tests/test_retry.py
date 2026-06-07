@@ -326,6 +326,36 @@ def test_manual_retry_submits_to_slurm_when_gateway_available() -> None:
         assert events[-1].details["slurm_job_id"] == "slurm_retry_1"
 
 
+def test_manual_retry_download_source_cycle_submits_source_and_cycle_time() -> None:
+    with _store() as store:
+        _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+        )
+        job = store.get_job("job_cycle_ifs_2026053106_download")
+        assert job is not None
+        job.cycle_id = "ifs_2026053106"
+        job.job_type = "download_source_cycle"
+        store.session.add(job)
+        store.session.commit()
+        gateway = _RecordingGateway(job_id="slurm_retry_ifs")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert retry.status == "submitted"
+        submission = gateway.submissions[0]
+        assert submission.run_id == "cycle_ifs_2026053106"
+        assert submission.job_type == "download_source_cycle"
+        assert submission.manifest["cycle_id"] == "ifs_2026053106"
+        assert submission.manifest["source_id"] == "ifs"
+        assert submission.manifest["cycle_time"] == "2026053106"
+        assert submission.manifest["pipeline_job_id"] == retry.job_id
+
+
 def test_manual_retry_submission_failure_marks_submission_failed() -> None:
     with _store() as store:
         _create_job(store, run_id="run_1", error_code="NODE_FAILURE")

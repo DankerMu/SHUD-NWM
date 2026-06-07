@@ -498,22 +498,14 @@ class RetryService:
 
     def _submit_retry_job(self, retry_job: _RetrySubmissionJob, gateway: RetrySubmitter) -> dict[str, Any]:
         model_id = retry_job.model_id or _model_id_from_run_id(retry_job.run_id) or "unknown"
+        manifest = _retry_submission_manifest(retry_job, model_id=model_id)
         submitted = gateway.submit_job(
             SubmitJobRequest(
                 run_id=retry_job.run_id,
                 model_id=model_id,
                 job_type=retry_job.job_type,
-                manifest={
-                    "run_id": retry_job.run_id,
-                    "model_id": model_id,
-                    "cycle_id": retry_job.cycle_id,
-                    "job_type": retry_job.job_type,
-                "stage": retry_job.stage,
-                "pipeline_job_id": retry_job.job_id,
-                "retry_count": retry_job.retry_count,
-                "manual_retry_marker": True,
-            },
-        )
+                manifest=manifest,
+            )
         )
         return _coerce_gateway_payload(submitted)
 
@@ -741,6 +733,34 @@ def _model_id_from_run_id(run_id: str | None) -> str | None:
     if match is None:
         return None
     return match.group(1)
+
+
+def _retry_submission_manifest(retry_job: _RetrySubmissionJob, *, model_id: str) -> dict[str, Any]:
+    manifest: dict[str, Any] = {
+        "run_id": retry_job.run_id,
+        "model_id": model_id,
+        "cycle_id": retry_job.cycle_id,
+        "job_type": retry_job.job_type,
+        "stage": retry_job.stage,
+        "pipeline_job_id": retry_job.job_id,
+        "retry_count": retry_job.retry_count,
+        "manual_retry_marker": True,
+    }
+    cycle_identity = _source_cycle_identity(retry_job.cycle_id)
+    if retry_job.job_type == "download_source_cycle" and cycle_identity is not None:
+        source_id, cycle_time = cycle_identity
+        manifest["source_id"] = source_id
+        manifest["cycle_time"] = cycle_time
+    return manifest
+
+
+def _source_cycle_identity(cycle_id: str | None) -> tuple[str, str] | None:
+    if not cycle_id:
+        return None
+    match = re.fullmatch(r"(?P<source>[A-Za-z0-9]+)_(?P<cycle>[0-9]{10})", cycle_id)
+    if match is None:
+        return None
+    return match.group("source"), match.group("cycle")
 
 
 def _coerce_gateway_payload(value: Any) -> dict[str, Any]:
