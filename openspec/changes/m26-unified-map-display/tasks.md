@@ -37,10 +37,10 @@
 
 ## 5. 删玩具页 + 清理（legacy-display-page-retirement）
 
-- [ ] 5.1 删除 `pages/hydroMet/HydroMetPage.tsx` 与 `pages/hydroMet/__tests__/ListProduction.test.tsx`；移除对 `ReadyHydroMetContent` 的全部 import。
-- [ ] 5.2 删除/精简 `pages/hydroMet/BasinSelector.tsx`（如不再复用）；确认 `bootstrap.ts`/`stationSeries.ts`/`riverForecast.ts` 保留且被 popup 复用。
-- [ ] 5.3 `NavBar.tsx` 删除或精简为未用（如运维直链复用则保留精简版）；`MeteorologyPage`/`SegmentDetailPage` 暂保留（仅其展示路由重定向，文件不在删除范围）。
-- [ ] 5.4 全仓 grep 确认无悬挂 import / 死路由 / 残留 testid 引用；`pnpm build` 无未用导出告警阻断。
+- [x] 5.1 删除 `pages/hydroMet/HydroMetPage.tsx` 与 `pages/hydroMet/__tests__/ListProduction.test.tsx`；移除对 `ReadyHydroMetContent` 的全部 import。
+- [x] 5.2 删除/精简 `pages/hydroMet/BasinSelector.tsx`（如不再复用）；确认 `bootstrap.ts`/`stationSeries.ts`/`riverForecast.ts` 保留且被 popup 复用。
+- [x] 5.3 `NavBar.tsx` 删除或精简为未用（如运维直链复用则保留精简版）；`MeteorologyPage`/`SegmentDetailPage` 暂保留（仅其展示路由重定向，文件不在删除范围）。
+- [x] 5.4 全仓 grep 确认无悬挂 import / 死路由 / 残留 testid 引用；`pnpm build` 无未用导出告警阻断。
 
 ## 6. 本地验证 + node-27 live receipt
 

@@ -24,9 +24,6 @@ const FloodAlertPage = lazy(() =>
 const MeteorologyPage = lazy(() =>
   import('@/pages/meteorology/MeteorologyPage').then((module) => ({ default: module.MeteorologyPage })),
 )
-const HydroMetPage = lazy(() =>
-  import('@/pages/hydroMet/HydroMetPage').then((module) => ({ default: module.HydroMetPage })),
-)
 const SegmentDetailPage = lazy(() =>
   import('@/pages/SegmentDetailPage').then((module) => ({ default: module.SegmentDetailPage })),
 )
@@ -45,7 +42,6 @@ export function LegacyPagesHarness() {
           <Routes>
             <Route path="/" element={<OverviewPage />} />
             <Route path="/overview" element={<OverviewPage />} />
-            <Route path="/hydro-met" element={<HydroMetPage />} />
             <Route path="/meteorology" element={<MeteorologyPage />} />
             <Route path="/forecast" element={<ForecastPage />} />
             <Route path="/flood-alerts" element={<FloodAlertPage />} />
