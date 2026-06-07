@@ -833,6 +833,29 @@ def test_basin_limit_parameters_match_fastapi_runtime_contract() -> None:
         assert fastapi_limit["schema"]["maximum"] == expected_schema["maximum"]
 
 
+def test_basins_runtime_openapi_matches_static_parameters_and_schema() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    fastapi_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/basins"
+    static_operation = static_spec["paths"][path]["get"]
+    runtime_operation = fastapi_spec["paths"][path]["get"]
+
+    static_parameters = _operation_parameters_by_name(static_operation, static_spec)
+    runtime_parameters = _operation_parameters_by_name(runtime_operation, fastapi_spec)
+    assert set(static_parameters) == {"limit", "offset", "has_display_product"}
+    assert set(runtime_parameters) == set(static_parameters)
+
+    static_flag = static_parameters["has_display_product"]
+    runtime_flag = runtime_parameters["has_display_product"]
+    assert static_flag["schema"]["type"] == "boolean"
+    assert static_flag["schema"]["default"] is False
+    assert runtime_flag["schema"]["type"] == "boolean"
+    assert runtime_flag["schema"]["default"] is False
+    assert static_flag.get("required", False) is False
+    assert runtime_flag.get("required", False) is False
+
+
 def _openapi_routes() -> set[RouteKey]:
     spec = _openapi_spec()
     routes: set[RouteKey] = set()

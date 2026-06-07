@@ -2011,7 +2011,10 @@ class _ModelRegistryStore:
 
         raise MissingResourceError(f"model_id not found: {model_id}")
 
-    def list_basins(self, *, limit: int, offset: int) -> list[dict[str, Any]]:
+    def list_basins(
+        self, *, limit: int, offset: int, has_display_product: bool = False
+    ) -> list[dict[str, Any]]:
+        del has_display_product
         return [
             {
                 "basin_id": "basins_basin_a",
