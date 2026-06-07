@@ -3031,10 +3031,14 @@ class ProductionScheduler:
                         }
                     )
                     continue
-                if self.active_repository is not None and self.active_repository.has_active_pipeline(
-                    source_id=discovery.source_id,
-                    cycle_time=discovery.cycle_time,
-                    model_id=model.model_id,
+                if (
+                    self.active_repository is not None
+                    and self.active_repository.has_active_pipeline(
+                        source_id=discovery.source_id,
+                        cycle_time=discovery.cycle_time,
+                        model_id=model.model_id,
+                    )
+                    and not _candidate_state_is_candidate_scoped_retry(state_decision)
                 ):
                     skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                     continue

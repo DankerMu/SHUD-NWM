@@ -716,6 +716,67 @@ def test_unsubmitted_auto_retry_placeholder_does_not_block_scheduler_retry(tmp_p
     assert submitted_basin["restart_stage"] == "forecast"
 
 
+def test_candidate_scoped_retry_bypasses_active_pipeline_guard(tmp_path: Path) -> None:
+    class ActiveCandidateStateRepository(FakeCandidateStateRepository):
+        def has_active_pipeline(self, *, source_id: str, cycle_time: datetime, model_id: str) -> bool:
+            del source_id, cycle_time, model_id
+            return True
+
+    active_repository = ActiveCandidateStateRepository(
+        {
+            "pipeline_status": "pending",
+            "failed_stage": "forecast",
+            "error_code": "NODE_FAILURE",
+            "retry_count": 1,
+            "retry_limit": 3,
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_forecast",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "job_type": "run_shud_forecast_array",
+                    "status": "failed",
+                    "stage": "forecast",
+                    "retry_count": 0,
+                    "error_code": "NODE_FAILURE",
+                    "updated_at": "2026-05-21T06:20:00Z",
+                },
+                {
+                    "job_id": "job_cycle_gfs_2026052106_forecast_retry_1",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "job_type": "run_shud_forecast_array",
+                    "status": "pending",
+                    "stage": "forecast",
+                    "retry_count": 1,
+                    "slurm_job_id": None,
+                    "array_task_id": None,
+                    "manual_retry_marker": False,
+                    "candidate_id": None,
+                    "idempotency_key": None,
+                    "updated_at": "2026-05-21T06:21:00Z",
+                },
+            ],
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    submitted_basin = orchestrator.calls[0]["basins"][0]
+    assert submitted_basin["state_evidence"]["decision"] == "retry_failed"
+    assert submitted_basin["restart_stage"] == "forecast"
+
+
 def test_fresh_cycle_basin_manifest_carries_identity_contract_fields(tmp_path: Path) -> None:
     cycle_time = _dt("2026-05-21T06:00:00Z")
     policy = {"source": "gfs", "forecast_hours": [0, 3]}
