@@ -101,7 +101,6 @@ Representative active paths:
 
 Allowed mutations:
 
-- No business/control-plane mutations.
 - Serve readonly responses, frontend/static assets, MVT/display data, health,
   runtime config, and fail-closed error responses.
 - Read the readonly database role and readonly published artifacts.
@@ -121,6 +120,16 @@ Forbidden capabilities:
   these fail closed with display-specific error codes.
 - Writing business state, scheduler state, Slurm state, workspace roots, or
   published artifact roots.
+
+Current residual / follow-up boundary:
+
+- `display_readonly` currently still registers some non-Slurm mutation-shaped
+  routes, including model registry and hindcast endpoints, that are protected by
+  auth checks and the readonly DB/deployment posture rather than by the #360
+  runtime role guard. Governance-1/Governance-4 follow-up work must decide
+  whether to gate or split display mutation routes, or add display-wide
+  fail-closed mutation tests. #360 only claims the display Slurm-route,
+  compute-env, retry/cancel, and queue-depth boundaries above.
 
 Verification oracle:
 

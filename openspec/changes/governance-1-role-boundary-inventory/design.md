@@ -48,7 +48,11 @@ Change surface:
 Must preserve:
 
 - `compute_control` and `dev_monolith` continue to expose Slurm routes through the full API.
-- `display_readonly` continues to expose readonly business/display routes but not `/api/v1/slurm/*`.
+- `display_readonly` continues to expose the existing non-Slurm business/display
+  route inventory but not `/api/v1/slurm/*`. Some non-Slurm mutation-shaped
+  model registry and hindcast routes remain a documented residual protected by
+  auth checks and readonly DB/deployment posture rather than by the #360 runtime
+  role guard.
 - `display_readonly` continues to fail closed for retry/cancel (`409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`) and queue-depth (`503 CONTROL_PLANE_QUEUE_UNAVAILABLE`).
 - The standalone Slurm gateway app continues to expose only `/api/v1/slurm` and `/api/v1/slurm/*` plus explicit framework docs/openapi surfaces, not forecast/model/pipeline/static/frontend routes or sibling prefixes such as `/api/v1/slurmish`.
 - Existing QHH diagnostic scripts remain diagnostic-only and are not wired into production orchestrator code.
@@ -106,6 +110,8 @@ Surfaces:
 Regression rows:
 
 - `display_readonly` app with normal display env -> starts with readonly business routes and no `/api/v1/slurm/*`.
+- `display_readonly` non-Slurm mutation-shaped route residual -> documented as
+  follow-up Governance-1/Governance-4 scope, not claimed as removed by #360.
 - `display_readonly` app with Slurm/compute-only env -> startup/static validation fails before serving unsafe control-plane capability.
 - `display_readonly` retry/cancel requests -> `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`, covered by `tests/test_retry_cancel_consistency.py`.
 - `display_readonly` queue-depth request -> `503 CONTROL_PLANE_QUEUE_UNAVAILABLE`, covered by `tests/test_monitoring_api.py`.
@@ -130,6 +136,9 @@ Static and focused runtime tests should assert:
 - `display_readonly` blocks `SLURM_GATEWAY_URL`, `SLURM_GATEWAY_BACKEND`, `WORKSPACE_ROOT`, `SHUD_EXECUTABLE`, Docker/socket/control mutations, and compute-only path env.
 - retry/cancel return `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED` under display (`tests/test_retry_cancel_consistency.py` is the compatibility evidence).
 - queue depth returns `503 CONTROL_PLANE_QUEUE_UNAVAILABLE` under display (`tests/test_monitoring_api.py` is the compatibility evidence).
+- current display non-Slurm mutation-shaped routes are explicitly called out as
+  residual follow-up scope; #360 does not edit runtime route registration for
+  model registry or hindcast routes.
 - `services/slurm_gateway/app.py` exposes Slurm gateway routes only, uses slash-delimited `/api/v1/slurm` matching, and does not include forecast/model/pipeline/static/frontend routes or mounts.
 - recursive production Python sources under `services/orchestrator` do not reference `scripts/run_qhh_*` diagnostic tokens.
 - `packages/common`, `services/orchestrator`, `workers/**`, and documented shared-contract Python files such as `services/slurm_gateway/models.py` do not import `apps.api` / `apps.api.*` except through a documented temporary allowlist while the shared-policy extraction issue is open.

@@ -16,7 +16,10 @@ The repository SHALL document active paths under one of four categories: `comput
 
 ### Requirement: display_readonly cannot gain control-plane capability
 
-The `display_readonly` role SHALL remain a readonly display plane. It MUST NOT register Slurm routes, configure compute-only env, enable control mutations, or perform retry/cancel/queue-depth control actions.
+The `display_readonly` role SHALL remain a display plane with fail-closed
+control-plane guardrails in the #360 scope. It MUST NOT register Slurm routes,
+configure compute-only env, enable control mutations, or perform
+retry/cancel/queue-depth control actions.
 
 #### Scenario: display service starts with Slurm gateway env
 
@@ -37,6 +40,21 @@ The `display_readonly` role SHALL remain a readonly display plane. It MUST NOT r
 
 - **WHEN** queue depth is requested under `display_readonly`
 - **THEN** the response is `503 CONTROL_PLANE_QUEUE_UNAVAILABLE`
+
+### Requirement: display non-Slurm mutation residual is explicit
+
+#360 SHALL NOT claim full display mutation route removal while
+`display_readonly` still registers non-Slurm mutation-shaped routes. The
+Governance-1 inventory MUST document that current model registry and hindcast
+mutation-shaped routes are protected by auth checks and readonly DB/deployment
+posture rather than by the #360 runtime role guard.
+
+#### Scenario: maintainer reviews display mutation scope
+
+- **WHEN** a maintainer reviews the Governance-1 role-boundary inventory
+- **THEN** they can see that display non-Slurm mutation-shaped routes are
+  residual follow-up scope for gating, route splitting, or display-wide
+  fail-closed mutation tests
 
 ### Requirement: standalone Slurm gateway remains bounded
 

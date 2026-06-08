@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
 from pathlib import Path
+
+from fastapi.routing import APIRoute
+from starlette.routing import Mount
 
 from apps.api import runtime_mode
 from scripts import validate_two_node_docker_runtime as docker_runtime
@@ -81,6 +85,14 @@ GATEWAY_FORBIDDEN_ROUTE_MARKERS = (
 )
 
 
+@dataclass(frozen=True)
+class GatewayRouteInventoryEntry:
+    path: str
+    route_type: str
+    is_api_route: bool
+    is_mount: bool
+
+
 def test_display_env_blockers_align_with_compute_only_static_inventory() -> None:
     """Runtime and two-node static guards must reject the same display control-plane env keys."""
 
@@ -111,11 +123,12 @@ def test_display_env_blockers_align_with_compute_only_static_inventory() -> None
 
 def test_standalone_slurm_gateway_exposes_only_gateway_routes() -> None:
     app = create_gateway_app(SlurmGatewaySettings(backend="mock"))
-    paths = _route_paths(app)
+    inventory = _route_inventory(app)
+    paths = {entry.path for entry in inventory}
 
     assert "/api/v1/slurm/health" in paths
     assert any(_is_slurm_gateway_route_path(path) for path in paths)
-    forbidden_paths = _forbidden_gateway_route_paths(paths)
+    forbidden_paths = _forbidden_gateway_route_paths(inventory)
     assert not forbidden_paths
     for forbidden_prefix in GATEWAY_FORBIDDEN_ROUTE_PREFIXES:
         assert not any(_is_route_namespace_path(path, forbidden_prefix) for path in paths), forbidden_prefix
@@ -134,10 +147,25 @@ def test_gateway_route_scope_rejects_sibling_prefixes_and_mounts() -> None:
 
     app = create_gateway_app(SlurmGatewaySettings(backend="mock"))
     app.mount("/static", _NoopAsgiApp(), name="frontend")
-    paths = _route_paths(app)
+    inventory = _route_inventory(app)
+    paths = {entry.path for entry in inventory}
 
     assert "/static" in paths
-    assert "/static" in _forbidden_gateway_route_paths(paths)
+    assert "/static" in _forbidden_gateway_route_paths(inventory)
+
+
+def test_gateway_route_scope_rejects_same_namespace_mounts() -> None:
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock"))
+    app.mount("/api/v1/slurm/extra", _NoopAsgiApp(), name="same-namespace")
+    inventory = _route_inventory(app)
+
+    forbidden_mounts = [
+        entry
+        for entry in _forbidden_gateway_route_entries(inventory)
+        if entry.path == "/api/v1/slurm/extra"
+    ]
+    assert forbidden_mounts
+    assert all(entry.is_mount for entry in forbidden_mounts)
 
 
 def test_production_orchestrator_excludes_qhh_diagnostic_tokens() -> None:
@@ -176,6 +204,15 @@ def test_production_orchestrator_source_scan_is_recursive(tmp_path: Path) -> Non
 
 def test_shared_worker_orchestrator_api_imports_match_temporary_361_allowlist() -> None:
     assert _observed_apps_api_imports() == TEMPORARY_361_API_AUTH_ALLOWLIST
+
+
+def test_api_import_scan_includes_documented_shared_contract_files() -> None:
+    relative_sources = {
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _python_sources(API_IMPORT_SCAN_ROOTS, API_IMPORT_SCAN_FILES)
+    }
+
+    assert "services/slurm_gateway/models.py" in relative_sources
 
 
 def test_apps_api_import_normalization_covers_parent_and_wildcard_forms() -> None:
@@ -224,6 +261,17 @@ from apps import api
     assert observed - TEMPORARY_361_API_AUTH_ALLOWLIST == observed
 
 
+def test_shared_contract_file_apps_api_import_fixture_fails_exact_allowlist() -> None:
+    source = """
+from apps.api import auth
+"""
+    relative_path = "services/slurm_gateway/models.py"
+    observed = _observed_apps_api_imports_for_tree(ast.parse(source), relative_path)
+
+    assert observed == frozenset({(relative_path, "apps.api.auth")})
+    assert observed - TEMPORARY_361_API_AUTH_ALLOWLIST == observed
+
+
 def test_role_boundary_document_mentions_required_inventory_and_allowlist() -> None:
     text = ROLE_BOUNDARY_DOC.read_text(encoding="utf-8")
 
@@ -268,14 +316,28 @@ def test_role_boundary_document_mentions_required_inventory_and_allowlist() -> N
         assert text.count(section) >= 4, section
 
 
-def _route_paths(app: object) -> set[str]:
-    paths: set[str] = set()
+def _route_inventory(app: object) -> set[GatewayRouteInventoryEntry]:
+    entries: set[GatewayRouteInventoryEntry] = set()
     for route in getattr(app, "routes", []):
+        route_type = type(route).__name__
+        is_api_route = isinstance(route, APIRoute)
+        is_mount = isinstance(route, Mount)
         for attribute in ("path", "path_format"):
             path = getattr(route, attribute, None)
             if isinstance(path, str) and path:
-                paths.add(path)
-    return paths
+                entries.add(
+                    GatewayRouteInventoryEntry(
+                        path=path,
+                        route_type=route_type,
+                        is_api_route=is_api_route,
+                        is_mount=is_mount,
+                    )
+                )
+    return entries
+
+
+def _route_paths(app: object) -> set[str]:
+    return {entry.path for entry in _route_inventory(app)}
 
 
 def _is_slurm_gateway_route_path(path: str) -> bool:
@@ -294,8 +356,27 @@ def _is_route_namespace_path(path: str, namespace: str) -> bool:
     return path == namespace or path.startswith(f"{namespace}/")
 
 
-def _forbidden_gateway_route_paths(paths: set[str]) -> list[str]:
-    return sorted(path for path in paths if not _is_allowed_gateway_route_path(path))
+def _is_allowed_gateway_route_entry(entry: GatewayRouteInventoryEntry) -> bool:
+    if entry.is_mount:
+        return False
+    if entry.path in GATEWAY_FRAMEWORK_ROUTE_PATHS:
+        return True
+    return entry.is_api_route and (
+        entry.path == "/health" or _is_slurm_gateway_route_path(entry.path)
+    )
+
+
+def _forbidden_gateway_route_entries(
+    entries: set[GatewayRouteInventoryEntry],
+) -> list[GatewayRouteInventoryEntry]:
+    return sorted(
+        (entry for entry in entries if not _is_allowed_gateway_route_entry(entry)),
+        key=lambda entry: (entry.path, entry.route_type),
+    )
+
+
+def _forbidden_gateway_route_paths(entries: set[GatewayRouteInventoryEntry]) -> list[str]:
+    return sorted({entry.path for entry in _forbidden_gateway_route_entries(entries)})
 
 
 class _NoopAsgiApp:
