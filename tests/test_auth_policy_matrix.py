@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from apps.api.auth import ACTION_MATRIX, ROLE_VOCABULARY, AuthContext, evaluate_policy, redact_audit_payload
+from packages.common.auth_policy import (
+    ACTION_MATRIX,
+    ROLE_VOCABULARY,
+    AuthContext,
+    evaluate_policy,
+    redact_audit_payload,
+)
 
 
 @pytest.mark.parametrize("role", ROLE_VOCABULARY)

@@ -95,3 +95,61 @@ dependencies kept in `apps/api`.
 
 - **WHEN** #360 lands before #361
 - **THEN** the static guard documents the exact temporary allowlist and does not require helper moves or call-site rewrites in the #360 PR
+
+### Requirement: Shared policy helpers are API-independent after #361
+
+The repository SHALL keep shared policy/evidence helpers API-independent after
+#361.
+
+Shared policy/evidence helpers used by common packages, orchestrator code, and
+workers SHALL live in a shared package that does not import `apps.api` or
+FastAPI request/error types. `apps/api/auth.py` SHALL keep API-only request
+handling and error translation while reusing the shared policy primitives.
+
+#### Scenario: shared helper imports are inspected after extraction
+
+- **WHEN** static boundary tests scan `packages/common`,
+  `services/orchestrator`, `workers/**`, documented shared-contract Python
+  files, and `services/production_closure/ops_validation.py` after #361
+- **THEN** no production import from `apps.api` or `apps.api.*` is present in
+  those scanned roots
+- **AND** the temporary #361 allowlist is absent
+
+#### Scenario: API auth wraps shared policy primitives
+
+- **WHEN** an API route calls `require_action`
+- **THEN** request auth is translated into the shared policy decision contract
+  and API-specific `ApiError` responses remain owned by `apps/api/auth.py`
+
+#### Scenario: CLI policy evidence remains deterministic
+
+- **WHEN** CLI code builds policy evidence from explicit actor/role flags or
+  `NHMS_CLI_AUTH_ACTOR_ID` / `NHMS_CLI_AUTH_ROLES`
+- **THEN** the returned decision fields match the pre-extraction shared policy
+  contract
+
+#### Scenario: live auth mode blocks CLI dev-test evidence
+
+- **WHEN** `NHMS_AUTH_MODE` or `AUTH_BACKEND` requests production/live auth
+- **THEN** CLI dev-test policy evidence returns `release_blocked` and expects no
+  mutation
+
+#### Scenario: mismatched policy evidence is rejected
+
+- **WHEN** shared code calls `require_policy_evidence` with a decision for a
+  different action, target type, or target id
+- **THEN** the result is a deny decision preserving actor/role metadata and
+  setting `no_mutation_expected=true`
+
+#### Scenario: audit redaction remains stable
+
+- **WHEN** policy audit records contain URI, path, credential, checksum, or
+  lineage-like shapes
+- **THEN** redaction output matches the pre-extraction policy redaction contract
+
+#### Scenario: production closure uses shared policy simulation
+
+- **WHEN** production-closure ops validation builds simulated auth decisions and
+  policy audit evidence
+- **THEN** it imports shared policy primitives from the shared package and keeps
+  readiness metadata, simulated decisions, and redacted proof payloads stable

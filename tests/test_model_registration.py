@@ -10,9 +10,9 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from starlette.types import Message, Scope
 
-from apps.api.auth import AuthContext, evaluate_policy
 from apps.api.main import app
 from apps.api.routes.models import get_model_registry_store
+from packages.common.auth_policy import AuthContext, evaluate_policy
 from packages.common.model_registry import (
     RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
     RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,

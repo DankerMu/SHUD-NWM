@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
-from apps.api.auth import (
+from packages.common.auth_policy import (
     ACTION_MATRIX,
     ROLE_VOCABULARY,
     AuthContext,

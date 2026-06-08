@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from typing import Sequence
 
-from apps.api.auth import PolicyDecision, cli_policy_decision_from_evidence
+from packages.common.auth_policy import PolicyDecision, cli_policy_decision_from_evidence
 
 from .basins_discovery import BasinsDiscoveryError, discover_basins_inventory, resolve_basins_root, write_inventory
 from .basins_package import BasinsPackageError, publish_basins_package, write_basins_migration_report

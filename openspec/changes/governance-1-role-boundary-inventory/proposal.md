@@ -9,6 +9,7 @@ accidental cross-plane leakage.
 - Add static tests that enforce the most important boundaries: no Slurm routes on display, no compute-only env in display config, no business or frontend/static routes in the standalone Slurm gateway, and no production orchestrator reference to QHH diagnostic scripts.
 - Identify and plan the layer-inversion cleanup where shared packages, orchestrator code, or workers import `apps.api.auth`.
 - Add an implementation issue for shared auth/policy extraction so the layer inversion is not left as a permanent known finding.
+- Extract shared auth/policy evidence helpers from `apps.api.auth` into a shared package so common/orchestrator/worker code no longer depends upward on the API layer.
 
 ## Capabilities
 
@@ -27,3 +28,4 @@ accidental cross-plane leakage.
 - Static tests: `tests/test_role_boundary_static.py`, plus references to existing runtime/two-node/gateway tests as evidence. #360 does not edit runtime implementation; it may tighten sibling static tests when they share the same boundary predicate.
 - Runtime/config reference points: `apps/api/runtime_mode.py`, `apps/api/main.py`, `apps/api/routes/pipeline.py`, `services/slurm_gateway/app.py`, `infra/env/*.example`, `infra/compose.*.yml`.
 - Refactor planning: `packages/common/model_registry.py`, `services/orchestrator/retry.py`, `workers/flood_frequency/*`, `workers/model_registry/*`, `workers/shud_runtime/runtime.py`.
+- Shared auth/policy extraction: `apps/api/auth.py`, a new shared package module such as `packages/common/auth_policy.py`, the eight current production non-API import sites, and focused policy/model-registry/retry/flood-frequency/production-closure/CLI tests.

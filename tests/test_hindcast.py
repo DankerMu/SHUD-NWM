@@ -16,11 +16,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from apps.api.auth import trusted_internal_policy_decision
 from apps.api.main import app
 from apps.api.routes import forecast as forecast_routes
 from apps.api.routes import hindcast as hindcast_routes
 from apps.api.routes import pipeline as pipeline_routes
+from packages.common.auth_policy import trusted_internal_policy_decision
 from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
 from services.orchestrator.retry import RetryConfig, RetryService
 from workers.flood_frequency import cli as flood_cli

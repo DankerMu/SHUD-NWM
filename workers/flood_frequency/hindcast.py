@@ -14,7 +14,7 @@ from sqlalchemy import bindparam, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.safe_fs import (
     SafeFilesystemError,
     ensure_directory_no_follow,

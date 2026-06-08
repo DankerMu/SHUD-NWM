@@ -39,17 +39,9 @@ API_IMPORT_SCAN_ROOTS = (
     REPO_ROOT / "services/orchestrator",
     REPO_ROOT / "workers",
 )
-API_IMPORT_SCAN_FILES = (REPO_ROOT / "services/slurm_gateway/models.py",)
-TEMPORARY_361_API_AUTH_ALLOWLIST = frozenset(
-    {
-        ("packages/common/model_registry.py", "apps.api.auth"),
-        ("services/orchestrator/retry.py", "apps.api.auth"),
-        ("workers/flood_frequency/cli.py", "apps.api.auth"),
-        ("workers/flood_frequency/frequency.py", "apps.api.auth"),
-        ("workers/flood_frequency/hindcast.py", "apps.api.auth"),
-        ("workers/model_registry/basins_registry_import.py", "apps.api.auth"),
-        ("workers/model_registry/cli.py", "apps.api.auth"),
-    }
+API_IMPORT_SCAN_FILES = (
+    REPO_ROOT / "services/slurm_gateway/models.py",
+    REPO_ROOT / "services/production_closure/ops_validation.py",
 )
 
 GATEWAY_FRAMEWORK_ROUTE_PATHS = frozenset(
@@ -202,8 +194,8 @@ def test_production_orchestrator_source_scan_is_recursive(tmp_path: Path) -> Non
     assert sources == {"scheduler.py", "submission/driver.py"}
 
 
-def test_shared_worker_orchestrator_api_imports_match_temporary_361_allowlist() -> None:
-    assert _observed_apps_api_imports() == TEMPORARY_361_API_AUTH_ALLOWLIST
+def test_shared_worker_orchestrator_api_imports_are_hard_gated_after_361() -> None:
+    assert _observed_apps_api_imports() == frozenset()
 
 
 def test_api_import_scan_includes_documented_shared_contract_files() -> None:
@@ -213,6 +205,7 @@ def test_api_import_scan_includes_documented_shared_contract_files() -> None:
     }
 
     assert "services/slurm_gateway/models.py" in relative_sources
+    assert "services/production_closure/ops_validation.py" in relative_sources
 
 
 def test_apps_api_import_normalization_covers_parent_and_wildcard_forms() -> None:
@@ -243,7 +236,7 @@ from apps.api.auth import *
     )
 
 
-def test_non_allowlisted_apps_api_import_fixture_fails_exact_allowlist() -> None:
+def test_apps_api_import_fixture_fails_hard_gate() -> None:
     source = """
 import apps.api
 from apps.api import auth as api_auth
@@ -258,10 +251,10 @@ from apps import api
             (relative_path, "apps.api.auth"),
         }
     )
-    assert observed - TEMPORARY_361_API_AUTH_ALLOWLIST == observed
+    assert observed
 
 
-def test_shared_contract_file_apps_api_import_fixture_fails_exact_allowlist() -> None:
+def test_shared_contract_file_apps_api_import_fixture_fails_hard_gate() -> None:
     source = """
 from apps.api import auth
 """
@@ -269,10 +262,10 @@ from apps.api import auth
     observed = _observed_apps_api_imports_for_tree(ast.parse(source), relative_path)
 
     assert observed == frozenset({(relative_path, "apps.api.auth")})
-    assert observed - TEMPORARY_361_API_AUTH_ALLOWLIST == observed
+    assert observed
 
 
-def test_role_boundary_document_mentions_required_inventory_and_allowlist() -> None:
+def test_role_boundary_document_mentions_required_inventory_and_hard_gate() -> None:
     text = ROLE_BOUNDARY_DOC.read_text(encoding="utf-8")
 
     required_terms = {
@@ -282,11 +275,12 @@ def test_role_boundary_document_mentions_required_inventory_and_allowlist() -> N
         "shared_contract",
         "node-22",
         "node-27",
-        "apps.api.auth",
         "#361",
-        "not permanent",
+        "hard gate",
+        "packages/common/auth_policy.py",
         "packages/common",
         "services/orchestrator",
+        "services/production_closure/ops_validation.py",
         "services/slurm_gateway/models.py",
         "workers/",
         "apps/api/main.py",
@@ -301,9 +295,19 @@ def test_role_boundary_document_mentions_required_inventory_and_allowlist() -> N
     missing_terms = sorted(term for term in required_terms if term not in text)
     assert not missing_terms
 
-    for path, module in TEMPORARY_361_API_AUTH_ALLOWLIST:
-        assert path in text
-        assert module in text
+    retired_temporary_terms = {
+        "Temporary #361 Allowlist",
+        "not permanent",
+        "`packages/common/model_registry.py` | `apps.api.auth`",
+        "`services/orchestrator/retry.py` | `apps.api.auth`",
+        "`workers/flood_frequency/cli.py` | `apps.api.auth`",
+        "`workers/flood_frequency/frequency.py` | `apps.api.auth`",
+        "`workers/flood_frequency/hindcast.py` | `apps.api.auth`",
+        "`workers/model_registry/basins_registry_import.py` | `apps.api.auth`",
+        "`workers/model_registry/cli.py` | `apps.api.auth`",
+    }
+    present_retired_terms = sorted(term for term in retired_temporary_terms if term in text)
+    assert not present_retired_terms
 
     required_section_titles = (
         "Representative active paths",

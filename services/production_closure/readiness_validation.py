@@ -757,7 +757,7 @@ def _deterministic_items(config: ProductionReadinessConfig) -> list[dict[str, An
             artifact_refs=["readiness_items.json"],
             residual_risk="Policy simulation does not prove target-environment IdP behavior.",
             removal_criteria="Provide accepted live backend auth proof covering allowed and denied protected actions.",
-            dependencies=["apps.api.auth.ACTION_MATRIX"],
+            dependencies=["packages.common.auth_policy.ACTION_MATRIX"],
         ),
         _item(
             item_id="deterministic-alert-dry-run",

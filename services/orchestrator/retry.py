@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from sqlalchemy import inspect, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.redaction import redact_payload
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.slurm_gateway.config import SlurmGatewaySettings
