@@ -34,3 +34,60 @@
 - [x] 3.2 Inventory all imports from `apps.api.auth` outside `apps/api` and classify each as shared helper vs API-only dependency.
 - [x] 3.3 Add the shared auth/policy extraction issue as a dependency for any future hard-gate that fails `apps.api` / `apps.api.*` imports outside the API layer.
 - [x] 3.4 Do not perform shared auth/policy extraction in #360: no helper moves, no call-site rewrites, no behavior change. #360 may only document and test the temporary #361 allowlist.
+
+## 4. #361 shared policy/evidence extraction
+
+- [x] 4.1 Add a shared auth-policy module under `packages/common` for
+  API-independent policy primitives:
+  - `AuthRole`, `ActionDecision`, `ExecutionMode`, `ROLE_VOCABULARY`,
+    `ACTION_MATRIX`
+  - `AuthContext`, `PolicyDecision`
+  - `evaluate_policy`, `trusted_internal_policy_decision`,
+    `require_policy_evidence`, `cli_policy_decision_from_evidence`
+  - `simulated_decisions_for_action`
+  - `audit_record`, `redact_audit_payload`
+- [x] 4.2 Keep API-only request behavior in `apps/api/auth.py`:
+  - FastAPI `Request` parsing and request-state recording
+  - `require_action`, `evaluate_request_action`, `auth_context_from_request`
+  - API `ApiError` mapping for auth required, RBAC forbidden, release blocked,
+    and policy config errors
+  - live/dev request-header auth helpers
+- [x] 4.3 Update all eight current production non-API import sites to import shared
+  helpers from the new shared module instead of `apps.api.auth`:
+  - `packages/common/model_registry.py`
+  - `services/orchestrator/retry.py`
+  - `services/production_closure/ops_validation.py`
+  - `workers/flood_frequency/cli.py`
+  - `workers/flood_frequency/frequency.py`
+  - `workers/flood_frequency/hindcast.py`
+  - `workers/model_registry/basins_registry_import.py`
+  - `workers/model_registry/cli.py`
+- [x] 4.4 Update tests that exercise shared policy primitives to import from the
+  shared module when they are not testing API-specific request/error behavior.
+- [x] 4.5 Remove the temporary #361 allowlist from
+  `tests/test_role_boundary_static.py`; the scanned shared/orchestrator/worker
+  roots, documented shared-contract Python files, and
+  `services/production_closure/ops_validation.py` must have zero `apps.api` /
+  `apps.api.*` imports. API smoke-probe imports in
+  `services/production_closure/readonly_db_validation.py` are outside #361.
+- [x] 4.6 Update `docs/governance/ROLE_BOUNDARY.md` so the shared-contract
+  section records the hard gate after #361 rather than a temporary allowlist.
+- [x] 4.7 Update production-closure dependency metadata or evidence strings that
+  name `apps.api.auth.ACTION_MATRIX` so they point at the shared policy module
+  after extraction.
+
+## 5. #361 verification
+
+- [x] 5.1 Verify policy matrix and redaction behavior:
+  `uv run pytest -q tests/test_auth_policy_matrix.py`.
+- [x] 5.2 Verify model-registry policy behavior:
+  `uv run pytest -q tests/test_model_registration.py tests/test_basins_registry_import.py`.
+- [x] 5.3 Verify retry and flood-frequency policy behavior:
+  `uv run pytest -q tests/test_retry_cancel_consistency.py tests/test_flood_frequency.py tests/test_hindcast.py`.
+- [x] 5.4 Verify role-boundary import gate:
+  `uv run pytest -q tests/test_role_boundary_static.py`.
+- [x] 5.5 Verify production-closure policy evidence path:
+  `uv run pytest -q tests/test_production_ops_validation.py`.
+- [x] 5.6 Run repository style and spec checks:
+  `openspec validate governance-1-role-boundary-inventory --strict --no-interactive`
+  and `uv run ruff check .`.

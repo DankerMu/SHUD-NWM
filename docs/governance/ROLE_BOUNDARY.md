@@ -3,7 +3,8 @@
 This inventory is the repository source of truth for the current NHMS role
 boundary. The governing invariant is: runtime role determines allowed
 control-plane capability, and shared contracts must not depend upward on
-API-layer helpers except through the temporary #361 allowlist below.
+API-layer helpers. #361 extracted shared auth policy helpers into
+`packages/common/auth_policy.py`, so this boundary is now a hard gate.
 
 `ServiceRole` in `apps/api/runtime_mode.py` is the runtime role source for
 application startup. `shared_contract` is a governance category, not a
@@ -62,8 +63,7 @@ Forbidden capabilities:
   `scripts/create_qhh_shud_manifest.py`) as production orchestrator entrypoints.
 - Adding new upward imports from `packages/common`, `services/orchestrator`,
   `workers/**`, or documented shared-contract Python files such as
-  `services/slurm_gateway/models.py` into `apps.api` / `apps.api.*` outside the
-  temporary #361 allowlist.
+  `services/slurm_gateway/models.py` into `apps.api` / `apps.api.*`.
 - Depending on display-only environment to gain control mutations.
 
 Verification oracle:
@@ -224,8 +224,7 @@ Forbidden capabilities:
 
 - Depending upward on `apps.api.*` from shared packages, workers, or
   orchestrator code, or from documented shared-contract Python files such as
-  `services/slurm_gateway/models.py`, except for the exact temporary #361
-  allowlist below.
+  `services/slurm_gateway/models.py`.
 - Hiding role-specific control-plane actions inside common helpers.
 - Changing `openapi/nhms.v1.yaml` or generated frontend API types as part of
   #360.
@@ -235,7 +234,8 @@ Verification oracle:
 
 - AST import scan over `packages/common`, `services/orchestrator`, `workers/**`,
   and documented shared-contract Python files such as
-  `services/slurm_gateway/models.py`.
+  `services/slurm_gateway/models.py`, plus the production-closure auth-policy
+  evidence surface `services/production_closure/ops_validation.py`.
 - OpenAPI drift, migration, schema, and static route tests.
 - Review of generated/public artifacts before contract changes land.
 
@@ -247,24 +247,22 @@ Current guard tests:
 - `tests/test_api_contract.py`
 - `tests/test_slurm_route_contract.py`
 
-## Temporary #361 Allowlist
+## #361 Hard Gate
 
-The following upward imports into `apps.api.auth` are allowed only while #361
-extracts shared auth/policy evidence helpers into a shared package. This is
-temporary and not permanent. #360 must not move helpers or rewrite call sites;
-it only documents and guards the current allowlist. New `apps.api.*` imports
-outside `apps/api` must fail static review.
-Equivalent parent-package spellings such as `import apps.api`,
+`#361` moved the API-independent auth policy contract to
+`packages/common/auth_policy.py`. Shared packages, orchestrator modules,
+workers, documented shared-contract Python files, and
+`services/production_closure/ops_validation.py` must have zero imports from
+`apps.api` or `apps.api.*`.
+
+The static gate normalizes parent-package spellings such as `import apps.api`,
 `from apps.api import auth`, `from apps import api`, and wildcard imports that
-resolve to `apps.api` are normalized before comparison and must also match the
-exact allowlist.
+resolve to `apps.api`. Any such import in the scanned shared/orchestrator/worker
+surfaces fails `tests/test_role_boundary_static.py`.
 
-| Path | Temporary module |
-| --- | --- |
-| `packages/common/model_registry.py` | `apps.api.auth` |
-| `services/orchestrator/retry.py` | `apps.api.auth` |
-| `workers/flood_frequency/cli.py` | `apps.api.auth` |
-| `workers/flood_frequency/frequency.py` | `apps.api.auth` |
-| `workers/flood_frequency/hindcast.py` | `apps.api.auth` |
-| `workers/model_registry/basins_registry_import.py` | `apps.api.auth` |
-| `workers/model_registry/cli.py` | `apps.api.auth` |
+API request handling remains in `apps/api/auth.py`: FastAPI `Request` parsing,
+request-state audit recording, `require_action`, `evaluate_request_action`,
+`auth_context_from_request`, and API error mapping stay API-owned. API route
+smoke-probe imports in `services/production_closure/readonly_db_validation.py`
+are outside #361 because they validate display/API route behavior rather than
+shared auth-policy evidence helpers.

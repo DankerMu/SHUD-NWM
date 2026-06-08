@@ -10,7 +10,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-from apps.api.auth import (
+from packages.common.auth_policy import (
     PolicyDecision,
     audit_record,
     redact_audit_payload,

@@ -10,9 +10,9 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from starlette.types import Message, Scope
 
-from apps.api.auth import AuthContext, evaluate_policy
 from apps.api.main import app
 from apps.api.routes.models import get_model_registry_store
+from packages.common.auth_policy import AuthContext, evaluate_policy
 from packages.common.model_registry import (
     RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
     RIVER_SEGMENT_COLLECTION_PAGE_MAX_COORDINATES,
@@ -874,6 +874,37 @@ async def test_pre_body_dynamic_denial_preserves_request_id_and_canonical_active
     )
     assert fake_store.write_calls == []
     assert fake_store.models["active_model"]["active_flag"] is expected_active
+
+
+@pytest.mark.asyncio
+async def test_pre_body_active_toggle_denial_redacts_secret_shaped_model_id(
+    fake_store: FakeModelRegistryStore,
+) -> None:
+    request_id = "req-dynamic-pre-body-redacted-target"
+    secret_model_id = "a" * 64
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            f"/api/v1/models/{secret_model_id}/active",
+            headers={"X-Request-ID": request_id, "X-User-Role": "viewer"},
+            json={"active": True},
+        )
+
+    assert response.status_code == 403
+    _assert_pre_body_policy_error(
+        response,
+        request_id=request_id,
+        code="RBAC_FORBIDDEN",
+        action_id="models.activate",
+        decision="deny",
+        target={"type": "model_instance", "id": "[redacted]"},
+    )
+    assert fake_store.write_calls == []
+    assert fake_store.preflight_calls == []
+    assert fake_store.lifecycle_calls == []
+    assert fake_store.activation_audit_rows == []
+    assert fake_store.models["active_model"]["active_flag"] is True
+    assert fake_store.models["inactive_model"]["active_flag"] is False
 
 
 @pytest.mark.asyncio

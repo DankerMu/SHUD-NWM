@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from apps.api.auth import (
+from packages.common.auth_policy import (
     PolicyDecision,
     require_policy_evidence,
     trusted_internal_policy_decision,

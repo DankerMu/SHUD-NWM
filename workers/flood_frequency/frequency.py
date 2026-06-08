@@ -12,7 +12,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from apps.api.auth import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
+from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 
 RETURN_PERIODS: tuple[int, ...] = (2, 5, 10, 20, 50, 100)
 QUANTILE_KEYS: tuple[str, ...] = tuple(f"Q{return_period}" for return_period in RETURN_PERIODS)

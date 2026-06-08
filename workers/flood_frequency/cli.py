@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from apps.api.auth import PolicyDecision, cli_policy_decision_from_evidence, require_policy_evidence
+from packages.common.auth_policy import PolicyDecision, cli_policy_decision_from_evidence, require_policy_evidence
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.frequency import FrequencyFitError, fit_curves

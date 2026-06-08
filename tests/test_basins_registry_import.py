@@ -11,7 +11,7 @@ import pytest
 from pyproj import Transformer
 
 import workers.model_registry.basins_geometry as basins_geometry
-from apps.api.auth import cli_policy_decision_from_evidence
+from packages.common.auth_policy import cli_policy_decision_from_evidence
 from packages.common.model_registry import PsycopgModelRegistryStore
 from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
 from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory

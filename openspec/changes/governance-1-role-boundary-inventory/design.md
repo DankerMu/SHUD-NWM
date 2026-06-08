@@ -154,3 +154,172 @@ Static and focused runtime tests should assert:
 - `uv run pytest -q tests/test_runtime_mode.py tests/test_two_node_docker_runtime.py`
 - `uv run pytest -q tests/test_qhh_scripts_static.py tests/test_role_boundary_static.py`
 - `uv run ruff check .`
+
+## #361 OpenSpec Fixture
+
+Fixture level: broad-expanded
+
+Repair intensity: high
+
+Project profile: NHMS
+
+Change surface:
+
+- New or updated shared policy/evidence module, expected under `packages/common`.
+- `apps/api/auth.py` keeps request/API-specific authorization entrypoints and
+  errors, but imports shared policy/evidence primitives from the shared module.
+- Eight current production upward import sites move away from `apps.api.auth`:
+  - `packages/common/model_registry.py`
+  - `services/orchestrator/retry.py`
+  - `services/production_closure/ops_validation.py`
+  - `workers/flood_frequency/cli.py`
+  - `workers/flood_frequency/frequency.py`
+  - `workers/flood_frequency/hindcast.py`
+  - `workers/model_registry/basins_registry_import.py`
+  - `workers/model_registry/cli.py`
+- Static guard in `tests/test_role_boundary_static.py` changes from temporary
+  #361 allowlist to a hard no-`apps.api` import check for shared/orchestrator/
+  worker/documented shared-contract Python surfaces and the production-closure
+  auth-policy evidence surface `services/production_closure/ops_validation.py`.
+
+Shared helpers to extract:
+
+- `AuthRole`, `ActionDecision`, `ExecutionMode`, `ROLE_VOCABULARY`, and
+  `ACTION_MATRIX`.
+- `AuthContext` and `PolicyDecision`.
+- Policy evaluation and evidence helpers used outside API request handling:
+  `evaluate_policy`, `trusted_internal_policy_decision`,
+  `require_policy_evidence`, `cli_policy_decision_from_evidence`,
+  `simulated_decisions_for_action`, `audit_record`, and
+  `redact_audit_payload`.
+- Redaction/private-shape helpers needed by `redact_audit_payload`.
+
+API-only code that must remain in `apps/api/auth.py`:
+
+- FastAPI `Request` handling, `require_action`, `evaluate_request_action`,
+  `auth_context_from_request`, `_record_decision`, `ApiError` construction, and
+  live/dev request-header auth helpers.
+
+Must preserve:
+
+- API routes keep the same `PolicyDecision` shape, policy error codes, audit
+  details, redaction behavior, and request-auth behavior.
+- CLI/dev-test policy evidence keeps the same env behavior for
+  `NHMS_CLI_AUTH_ACTOR_ID`, `NHMS_CLI_AUTH_ROLES`, `NHMS_AUTH_MODE`, and
+  `AUTH_BACKEND`.
+- Trusted internal policy decisions keep current default actor/role semantics.
+- `require_policy_evidence` continues to deny missing, mismatched action, or
+  mismatched target evidence without mutating.
+- Existing model registry, retry, flood-frequency, hindcast, and registry CLI
+  tests continue to pass with shared imports.
+- Production-closure ops validation keeps the same policy simulation, audit
+  evidence, dependency summary, and redaction behavior with shared imports.
+- API-layer imports outside `apps/api` are removed; tests may import API auth
+  for API-specific behavior, but production shared/orchestrator/worker code may
+  not.
+
+Must add/change:
+
+- Shared policy/evidence helpers live in a shared package and have focused tests.
+- `apps/api/auth.py` imports the shared helpers rather than duplicating policy
+  matrices or dataclasses.
+- Existing external imports update to the shared module.
+- `tests/test_role_boundary_static.py` fails on any `apps.api` or `apps.api.*`
+  import in `packages/common`, `services/orchestrator`, `workers/**`,
+  documented shared-contract Python files, or
+  `services/production_closure/ops_validation.py`; the temporary #361 allowlist
+  is removed.
+- API smoke-probe imports in
+  `services/production_closure/readonly_db_validation.py` are explicitly
+  outside #361 because they test display/API route behavior rather than shared
+  auth-policy evidence helpers.
+- `docs/governance/ROLE_BOUNDARY.md` removes temporary allowlist wording and
+  records #361 as closed/hard-gated.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - API routes and CLI policy evidence
+  share the same policy primitives.
+- Config / project setup: selected - CLI evidence depends on auth-related env.
+- File IO / path safety / overwrite: not selected - no new file IO or write
+  paths are added.
+- Schema / columns / units / field names: not selected - no DB schema or OpenAPI
+  shape changes are intended.
+- Auth / permissions / secrets: selected - this change moves policy/RBAC
+  primitives and redaction behavior.
+- Concurrency / shared state / ordering: not selected - helpers are pure policy
+  evaluation and payload redaction.
+- Resource limits / large input / discovery: selected - redaction must remain
+  recursive and bounded by existing behavior; no broad scans beyond static tests.
+- Legacy compatibility / examples: selected - existing CLI/dev-test evidence and
+  trusted internal call sites must remain compatible.
+- Error handling / rollback / partial outputs: selected - deny/release-blocked
+  decisions and `ApiError` mapping must not drift.
+- Release / packaging / dependency compatibility: selected - new shared module
+  must import without API/FastAPI dependencies in worker/CLI contexts.
+- Documentation / migration notes: selected - `ROLE_BOUNDARY.md` and OpenSpec
+  must reflect that the temporary allowlist has been retired.
+
+Invariant Matrix
+
+Governing invariant: shared policy/evidence primitives are API-independent and
+the API layer is the only code allowed to translate request auth into API
+errors.
+
+Source-of-truth identity/contract: canonical action matrix, role vocabulary,
+`PolicyDecision` fields, audit record keys, redaction rules, and static import
+scan roots.
+
+Surfaces:
+
+- Producers: shared auth-policy module and `apps/api/auth.py`.
+- Validators/preflight: `tests/test_role_boundary_static.py`,
+  `tests/test_auth_policy_matrix.py`, model registry/retry/flood-frequency/CLI
+  policy tests.
+- Storage/cache/query: none - this change does not alter database writes, but
+  model registry and flood-frequency tests must prove existing policy checks are
+  preserved before writes.
+- Public routes/entrypoints: API route dependencies in `apps/api/routes/**`,
+  model-registry CLI, flood-frequency CLI, retry/orchestrator service,
+  production-closure ops validation CLI/evidence path.
+- Frontend/downstream consumers: unchanged; no OpenAPI/generated type changes.
+- Failure paths/rollback/stale state: missing/mismatched policy evidence,
+  unauthorized roles, live-auth release-blocked CLI env, and audit redaction.
+- Evidence/audit/readiness: static import scan, policy matrix tests, focused
+  domain tests, and docs update retiring the temporary allowlist.
+
+Regression rows:
+
+- API request path -> `require_action` still evaluates request auth and returns
+  or raises the same policy decisions and API errors.
+- Shared/worker/CLI path with trusted internal policy -> same allow/deny decision
+  fields and audit record keys as before extraction.
+- Production-closure policy simulation -> same simulated decisions, audit record
+  keys, readiness metadata, and redacted proof payloads as before extraction.
+- CLI evidence with missing actor/roles, production/live auth mode, or unknown
+  roles -> same deny/release-blocked behavior as before extraction.
+- `require_policy_evidence` with mismatched action/target -> stable deny
+  decision and no mutation.
+- Redaction payloads containing URI/path/log/checksum/credential shapes -> same
+  redacted output.
+- Static import scan over shared/orchestrator/worker roots plus documented
+  shared-contract Python files and `services/production_closure/ops_validation.py`
+  -> zero `apps.api` / `apps.api.*` imports after #361.
+- Production-closure readonly DB route smoke probes -> may continue importing
+  API app/routes until a separate production-closure route-probe refactor,
+  because they are not shared auth-policy helpers.
+- API-only modules under `apps/api` -> may still import request/auth wrappers
+  from `apps.api.auth` and should not import worker/shared code upward.
+
+Boundary-surface checklist:
+
+- Shared helper roots: new shared auth-policy module, `packages/common`,
+  `services/orchestrator`, `workers/**`, `services/slurm_gateway/models.py`,
+  and `services/production_closure/ops_validation.py`.
+- Public entrypoints: API routes, CLI modules, worker functions, retry service.
+- Read surfaces: policy evidence payloads, auth env, audit details.
+- Write/delete/overwrite surfaces: existing model registry/flood-frequency/retry
+  writes guarded by policy decisions; no new write paths.
+- Producer/consumer evidence boundaries: API request decisions and CLI/trusted
+  internal decisions consume the same `PolicyDecision` contract.
+- Unchanged downstream consumers: frontend/OpenAPI/migrations remain unchanged.

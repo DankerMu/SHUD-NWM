@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from apps.api.auth import AuthContext, evaluate_policy
+from packages.common.auth_policy import AuthContext, evaluate_policy
 from workers.flood_frequency import cli as flood_cli
 from workers.flood_frequency import frequency
 from workers.flood_frequency.frequency import (
