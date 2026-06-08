@@ -60,8 +60,10 @@ Forbidden capabilities:
 - Running the full business API with `NHMS_SERVICE_ROLE=slurm_gateway`.
 - Treating QHH diagnostic scripts (`scripts/run_qhh_*` or
   `scripts/create_qhh_shud_manifest.py`) as production orchestrator entrypoints.
-- Adding new upward imports from `packages/common`, `services/orchestrator`, or
-  `workers/**` into `apps.api.*` outside the temporary #361 allowlist.
+- Adding new upward imports from `packages/common`, `services/orchestrator`,
+  `workers/**`, or documented shared-contract Python files such as
+  `services/slurm_gateway/models.py` into `apps.api` / `apps.api.*` outside the
+  temporary #361 allowlist.
 - Depending on display-only environment to gain control mutations.
 
 Verification oracle:
@@ -70,7 +72,8 @@ Verification oracle:
 - Full API route inventory in `apps/api/main.py`.
 - Compute env and compose identity in `infra/env/compute.example` and
   `infra/compose.compute.yml`.
-- Diagnostic-token scans of `services/orchestrator/*.py`.
+- Recursive diagnostic-token scans of production Python sources under
+  `services/orchestrator/**/*.py`.
 
 Current guard tests:
 
@@ -163,6 +166,9 @@ Forbidden capabilities:
 
 - Serving forecast, model, pipeline, data-source, static, or frontend business
   routes.
+- Serving sibling prefixes such as `/api/v1/slurmish` or
+  `/api/v1/slurm-admin`; the standalone namespace is slash-delimited as
+  `/api/v1/slurm` and `/api/v1/slurm/*`.
 - Starting the full API as `NHMS_SERVICE_ROLE=slurm_gateway`.
 - Mutating NHMS business database state or published artifact state directly.
 - Becoming a general-purpose compute-control API.
@@ -170,7 +176,8 @@ Forbidden capabilities:
 Verification oracle:
 
 - Standalone route inventory from
-  `services.slurm_gateway.app:create_gateway_app()`.
+  `services.slurm_gateway.app:create_gateway_app()`, including non-APIRoute
+  framework, mount, static, or frontend routes.
 - Gateway settings in `services/slurm_gateway/config.py`.
 - Full API fail-fast behavior for `ServiceRole.SLURM_GATEWAY`.
 
@@ -207,7 +214,9 @@ Allowed mutations:
 Forbidden capabilities:
 
 - Depending upward on `apps.api.*` from shared packages, workers, or
-  orchestrator code, except for the exact temporary #361 allowlist below.
+  orchestrator code, or from documented shared-contract Python files such as
+  `services/slurm_gateway/models.py`, except for the exact temporary #361
+  allowlist below.
 - Hiding role-specific control-plane actions inside common helpers.
 - Changing `openapi/nhms.v1.yaml` or generated frontend API types as part of
   #360.
@@ -215,8 +224,9 @@ Forbidden capabilities:
 
 Verification oracle:
 
-- AST import scan over `packages/common`, `services/orchestrator`, and
-  `workers/**`.
+- AST import scan over `packages/common`, `services/orchestrator`, `workers/**`,
+  and documented shared-contract Python files such as
+  `services/slurm_gateway/models.py`.
 - OpenAPI drift, migration, schema, and static route tests.
 - Review of generated/public artifacts before contract changes land.
 
@@ -235,6 +245,10 @@ extracts shared auth/policy evidence helpers into a shared package. This is
 temporary and not permanent. #360 must not move helpers or rewrite call sites;
 it only documents and guards the current allowlist. New `apps.api.*` imports
 outside `apps/api` must fail static review.
+Equivalent parent-package spellings such as `import apps.api`,
+`from apps.api import auth`, `from apps import api`, and wildcard imports that
+resolve to `apps.api` are normalized before comparison and must also match the
+exact allowlist.
 
 | Path | Temporary module |
 | --- | --- |
