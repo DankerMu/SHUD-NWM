@@ -365,7 +365,12 @@ def list_layer_valid_times(
         validate_identifier(run_id, "run_id")
         run = _require_frequency_ready(session, run_id)
     else:
-        run = latest_ready_run(session)
+        # 洪频/预警 valid-times 维持 latest_ready_run（要求洪频完整，无则空、不抛错）；
+        # discharge/water-level/river-network 用 frequency-ready 选择器，使无洪频流域也能发现有效时间。
+        if layer_id in {"flood-return-period", "warning-level"}:
+            run = latest_ready_run(session)
+        else:
+            run = latest_frequency_ready_run(session)
         if run is None:
             return _ok(request, _empty_valid_times().model_dump())
         run_id = str(run["run_id"]) if run else None

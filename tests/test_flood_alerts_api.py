@@ -3343,6 +3343,8 @@ def test_layer_catalog_unscoped_frequency_ready_without_flood_product_still_expo
         try:
             with TestClient(app) as client:
                 response = client.get("/api/v1/layers")
+                discharge_valid_times = client.get("/api/v1/layers/discharge/valid-times")
+                flood_valid_times = client.get("/api/v1/layers/flood-return-period/valid-times")
         finally:
             app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
 
@@ -3356,6 +3358,11 @@ def test_layer_catalog_unscoped_frequency_ready_without_flood_product_still_expo
     # 洪频/预警层仍在目录但被标注 unavailable（return_period_result 缺）
     flood = by_id["flood-return-period"]
     assert "return_period_result" in flood["metadata"]["unavailable_products"]
+    # valid-times 端点同样解耦：discharge 有有效时间（地图叠加层可渲染），洪频则空（不抛错）
+    assert discharge_valid_times.status_code == 200
+    assert len(discharge_valid_times.json()["data"]["valid_times"]) > 0
+    assert flood_valid_times.status_code == 200
+    assert flood_valid_times.json()["data"]["valid_times"] == []
 
 
 def test_layer_catalog_explicit_missing_run_source_identity_returns_stable_error_without_discovery(
