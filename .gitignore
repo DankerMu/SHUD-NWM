@@ -73,6 +73,7 @@ AutoSHUD/
 
 # Claude Code local config
 .claude/
+.agents/skills/repo-entropy-audit/
 
 # Design artifacts (tracked separately)
 设计图/

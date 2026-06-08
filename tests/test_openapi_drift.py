@@ -64,6 +64,9 @@ INTERNAL_ROUTE_REASONS: dict[RouteKey, str] = {
     ("GET", "/api/v1/met/best-available"): (
         "issue-123 internal compatibility route until data-source public contract is promoted"
     ),
+    ("GET", "/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf"): (
+        "issue-350 runtime national overview MVT route; public static OpenAPI promotion remains out of scope"
+    ),
     ("GET", "/api/v1/state-snapshots"): "issue-123 internal state snapshot surface",
     ("GET", "/api/v1/state-snapshots/{state_id}"): "issue-123 internal state snapshot surface",
     ("POST", "/api/v1/basins"): "issue-123 write-side registry API remains internal",
