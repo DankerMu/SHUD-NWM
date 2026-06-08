@@ -384,7 +384,7 @@ def postgis_tile_sql(layer: str) -> str:
         #   z<=4 -> 2000m, z=5 -> 1000m, z=6 -> 500m, z>=7 -> 0 (no extra simplify).
         source_cte = """
             SELECT feature_id, segment_id, river_segment_id, river_network_version_id,
-                   basin_version_id, value, unit, quality_flag, run_id, variable,
+                   basin_version_id, basin_id, value, unit, quality_flag, run_id, variable,
                    valid_time,
                    CASE
                        WHEN :z >= 7 THEN geom
@@ -406,6 +406,7 @@ def postgis_tile_sql(layer: str) -> str:
                        ts.river_segment_id,
                        ts.river_network_version_id,
                        ts.basin_version_id,
+                       bv.basin_id,
                        ts.value, ts.unit,
                        ts.quality_flag,
                        ts.run_id, ts.variable,
@@ -431,6 +432,8 @@ def postgis_tile_sql(layer: str) -> str:
                 JOIN core.river_segment rs
                   ON rs.river_segment_id = ts.river_segment_id
                  AND rs.river_network_version_id = ts.river_network_version_id
+                LEFT JOIN core.basin_version bv
+                  ON bv.basin_version_id = ts.basin_version_id
                 WHERE ts.variable = :variable
                   AND ts.valid_time = :valid_time
             ) ranked
@@ -613,7 +616,25 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
             "basin_version_id",
             "mvt_geom",
         )
-    if layer in {"hydro", "hydro-national"}:
+    if layer == "hydro-national":
+        # National overview tile self-describes basin_id (LEFT JOIN core.basin_version),
+        # so the click→popup curve resolves the basin without an N+1 versions fetch.
+        return (
+            "feature_id",
+            "segment_id",
+            "river_segment_id",
+            "river_network_version_id",
+            "basin_version_id",
+            "basin_id",
+            "value",
+            "unit",
+            "quality_flag",
+            "run_id",
+            "variable",
+            "valid_time",
+            "mvt_geom",
+        )
+    if layer == "hydro":
         return (
             "feature_id",
             "segment_id",
@@ -657,6 +678,22 @@ _NATIONAL_DISCHARGE_METADATA = {
     # ST_SimplifyPreserveTopology 容差，使 z3 起也能落入预算（z3 实测 ~55KB）。
     # min_zoom=3 对齐前端初始全国视图 zoom=3.35，使默认（未放大）也能看到主干河道。
     "min_zoom": 3,
+    # 全国瓦片自带 basin_id（LEFT JOIN core.basin_version），点击河段即可直接定位流域取曲线，
+    # 不必为每个流域发 versions 请求（N+1）。单 run discharge 瓦片不带，故只在此 override。
+    "properties": [
+        "feature_id",
+        "segment_id",
+        "river_segment_id",
+        "basin_version_id",
+        "basin_id",
+        "river_network_version_id",
+        "value",
+        "unit",
+        "quality_flag",
+        "run_id",
+        "variable",
+        "valid_time",
+    ],
 }
 
 

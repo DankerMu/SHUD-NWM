@@ -279,7 +279,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
             name: mapFeatureStringProperty(interaction.feature, 'segment_name'),
           },
           lngLat,
-          basinId: basinVersionToBasinId[basinVersionId] ?? null,
+          // national 瓦片自带 basin_id（feature 自描述）→ 直接取，不依赖 N+1 versions 映射；
+          // 单 run 瓦片无此属性时回退 version→basin 映射，保证两条路都能取到曲线。
+          basinId: mapFeatureStringProperty(interaction.feature, 'basin_id') ?? basinVersionToBasinId[basinVersionId] ?? null,
         })
         return
       }

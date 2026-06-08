@@ -3326,6 +3326,9 @@ def test_unscoped_discharge_catalog_uses_national_template_and_union_valid_times
     # front-end initial national view (zoom 3.35) so trunk rivers show without zooming in.
     # Guards against regressing the hardcoded min_zoom=0 in layer_metadata().
     assert metadata["min_zoom"] == 3
+    # National tile self-describes basin_id so the click→popup curve resolves the basin
+    # without an N+1 versions fetch (single-run discharge tiles don't carry it).
+    assert "basin_id" in metadata["properties"]
     valid_times = metadata["valid_times"]
     assert _iso(rnv1_time) in valid_times
     assert _iso(rnv2_time) in valid_times
@@ -3407,6 +3410,26 @@ def test_single_run_hydro_tile_sql_has_no_zoom_trunk_filter() -> None:
     assert "PERCENT_RANK" not in source_cte
     assert "value_percent_rank" not in source_cte
     assert ":z <= 4 THEN 0.90" not in source_cte
+
+
+def test_hydro_national_tile_sql_self_describes_basin_id() -> None:
+    # National click→popup must resolve a basin without an N+1 versions fetch: the tile
+    # LEFT JOINs core.basin_version and emits basin_id as a public MVT property.
+    sql = re.sub(r"\s+", " ", flood_alert_routes.postgis_tile_sql("hydro-national"))
+    source_cte = sql[sql.index("source_rows AS") : sql.index("bounded_rows AS")]
+    assert "LEFT JOIN core.basin_version bv ON bv.basin_version_id = ts.basin_version_id" in source_cte
+    assert "bv.basin_id" in source_cte
+    # basin_id rides through the public projection (ST_AsMVT tile_rows).
+    tile_rows = sql[sql.index("SELECT ST_AsMVT(tile_rows") :]
+    assert "basin_id" in tile_rows
+
+
+def test_single_run_hydro_tile_sql_has_no_basin_id_column() -> None:
+    # Zero-regression: single-run "hydro" tile does not self-describe basin_id (basin is
+    # known from the run context), so it must not gain the national-only column.
+    sql = re.sub(r"\s+", " ", flood_alert_routes.postgis_tile_sql("hydro"))
+    assert "bv.basin_id" not in sql
+    assert "core.basin_version" not in sql
 
 
 @pytest.mark.parametrize(
