@@ -20,6 +20,11 @@ const THRESHOLD_COLORS: Record<(typeof THRESHOLD_KEYS)[number], string> = {
 interface ForecastChartProps {
   data: ForecastData | null
   segmentName?: string
+  /**
+   * compact：去掉内部标题/图例、收紧网格、压低高度。
+   * 用于弹窗等已在外层 header 给出河段/起报/资料来源的场景，避免信息重复、更现代。
+   */
+  variant?: 'full' | 'compact'
 }
 
 function timestampValue(time: string | number) {
@@ -152,7 +157,7 @@ function tooltipFormatter(params: TooltipParam | TooltipParam[], unit?: string) 
   return lines.join('\n')
 }
 
-export function ForecastChart({ data, segmentName }: ForecastChartProps) {
+export function ForecastChart({ data, segmentName, variant = 'full' }: ForecastChartProps) {
   if (data?.pointBudgetStatus?.overBudget) {
     return (
       <div className="grid min-h-72 place-items-center rounded-md border border-amber-300 bg-amber-50 p-4 text-center text-sm text-amber-950" role="status">
@@ -161,10 +166,11 @@ export function ForecastChart({ data, segmentName }: ForecastChartProps) {
     )
   }
 
-  return <ForecastChartInner data={data} segmentName={segmentName} />
+  return <ForecastChartInner data={data} segmentName={segmentName} variant={variant} />
 }
 
-function ForecastChartInner({ data, segmentName }: ForecastChartProps) {
+function ForecastChartInner({ data, segmentName, variant = 'full' }: ForecastChartProps) {
+  const compact = variant === 'compact'
   const normalizedSeries = useMemo(
     () => {
       let retainedPointCount = 0
@@ -204,17 +210,19 @@ function ForecastChartInner({ data, segmentName }: ForecastChartProps) {
 
     return {
       color: normalizedSeries.map((series) => series.color),
-      title: {
-        text: `${segmentName ?? data?.segmentId ?? '河段'} 预报曲线`,
-        subtext: `起报时间 ${data?.cycleAttribution || data?.issueTime || 'latest'}${
-          data?.sourceAttribution ? `\n资料来源 ${data.sourceAttribution}` : ''
-        }`,
-        left: 0,
-        textStyle: { fontSize: 15, fontWeight: 650, color: '#1f2937' },
-        subtextStyle: { color: '#64748b', lineHeight: 18 },
-      },
-      legend: { top: 48, left: 0, itemWidth: 18, itemHeight: 8, textStyle: { color: '#64748b' } },
-      grid: { left: 52, right: 18, top: 98, bottom: 52 },
+      title: compact
+        ? undefined
+        : {
+          text: `${segmentName ?? data?.segmentId ?? '河段'} 预报曲线`,
+          subtext: `起报时间 ${data?.cycleAttribution || data?.issueTime || 'latest'}${
+            data?.sourceAttribution ? `\n资料来源 ${data.sourceAttribution}` : ''
+          }`,
+          left: 0,
+          textStyle: { fontSize: 15, fontWeight: 650, color: '#1f2937' },
+          subtextStyle: { color: '#64748b', lineHeight: 18 },
+        },
+      legend: compact ? undefined : { top: 48, left: 0, itemWidth: 18, itemHeight: 8, textStyle: { color: '#64748b' } },
+      grid: compact ? { left: 48, right: 16, top: 16, bottom: 28 } : { left: 52, right: 18, top: 98, bottom: 52 },
       tooltip: {
         trigger: 'axis',
         renderMode: 'richText',
@@ -253,7 +261,7 @@ function ForecastChartInner({ data, segmentName }: ForecastChartProps) {
         ]),
       })),
     }
-  }, [data, normalizedSeries, segmentName])
+  }, [data, normalizedSeries, segmentName, compact])
 
   if (!data || normalizedSeries.length === 0) {
     return (
@@ -269,7 +277,7 @@ function ForecastChartInner({ data, segmentName }: ForecastChartProps) {
       option={option}
       notMerge
       lazyUpdate
-      style={{ height: 360, minHeight: 320, width: '100%' }}
+      style={compact ? { height: 248, minHeight: 220, width: '100%' } : { height: 360, minHeight: 320, width: '100%' }}
     />
   )
 }

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Waves } from 'lucide-react'
 
 import { ForecastChart } from '@/components/charts/ForecastChart'
-import { ReturnPeriodSection } from '@/components/m11/ReturnPeriodSection'
+import { cn } from '@/lib/cn'
 import {
   M11PopupEmpty,
   M11PopupHeader,
@@ -163,7 +163,7 @@ function RiverForecastBody({
 
   if (!validation.ok) {
     return (
-      <div className="space-y-3 px-4 py-3" data-testid="m11-river-popup-invalid">
+      <div className="px-4 py-3" data-testid="m11-river-popup-invalid">
         <M11PopupEmpty testId="m11-river-popup-invalid-reasons">
           <ul className="space-y-1">
             {validation.messages.map((message, index) => (
@@ -171,7 +171,6 @@ function RiverForecastBody({
             ))}
           </ul>
         </M11PopupEmpty>
-        <ReturnPeriodSection product={product} />
       </div>
     )
   }
@@ -199,24 +198,28 @@ function RiverForecastBody({
     ],
   }
 
+  const leadHours = validation.series.availableLeadHours
+  const horizonText = leadHours != null ? `预见期 ${leadHours}h` : '预见期'
+
   return (
-    <div className="space-y-3 px-4 py-3" data-testid="m11-river-popup-loaded">
-      <div className="text-xs font-medium text-neutral-700" data-testid="m11-river-popup-variable">
-        预报变量：q_down（产品唯一预报变量）
+    <div className="space-y-2 px-4 pb-4 pt-2.5" data-testid="m11-river-popup-loaded">
+      <div className="flex items-center justify-between gap-2">
+        <span
+          className="inline-flex items-center rounded-full bg-primary-50 px-2 py-0.5 text-[11px] font-medium tracking-wide text-primary-700"
+          data-testid="m11-river-popup-variable"
+        >
+          流量 · q_down
+        </span>
+        <span
+          className={cn('text-[11px] tabular-nums', validation.horizonShorter ? 'font-medium text-warning' : 'text-neutral-500')}
+          title={validation.horizonLabel}
+          data-testid="m11-river-popup-horizon"
+        >
+          {validation.horizonShorter ? `${horizonText}（短于预期）` : horizonText}
+          {validation.capped ? ` · ${validation.renderedPoints.length}/${validation.pointCount}` : ''}
+        </span>
       </div>
-      <div
-        className={
-          validation.horizonShorter
-            ? 'rounded border border-warning/40 bg-warning/10 p-2 text-xs text-neutral-900'
-            : 'rounded border border-primary-100 bg-primary-50/70 p-2 text-xs text-neutral-900'
-        }
-        data-testid="m11-river-popup-horizon"
-      >
-        {validation.horizonLabel}
-        {validation.capped ? `; capped ${validation.renderedPoints.length}/${validation.pointCount}` : ''}
-      </div>
-      <ForecastChart data={forecastData} segmentName={segment.name} />
-      <ReturnPeriodSection product={product} />
+      <ForecastChart data={forecastData} segmentName={segment.name} variant="compact" />
     </div>
   )
 }

@@ -4,16 +4,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
 import { M11RiverForecastPopup, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPopup'
-import { loadHydroMetBootstrap, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
 
 vi.mock('@/api/client', () => ({
   client: { GET: vi.fn() },
 }))
 
-// 弹窗内 source/起报通过 loadHydroMetBootstrap 取 latest-product；mock 它隔离曲线/honest 逻辑。
+// 弹窗只取 latest-product（不拉 stations/river-segments）；mock 它隔离曲线/honest 逻辑。
 vi.mock('@/pages/hydroMet/bootstrap', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/pages/hydroMet/bootstrap')>()
-  return { ...actual, loadHydroMetBootstrap: vi.fn() }
+  return { ...actual, fetchHydroMetLatestProduct: vi.fn() }
 })
 
 vi.mock('echarts-for-react/lib/core', () => ({
@@ -72,22 +72,6 @@ function product(overrides: Partial<QhhLatestProduct> = {}): QhhLatestProduct {
   } as QhhLatestProduct
 }
 
-function bootstrapReady(p: QhhLatestProduct) {
-  return {
-    status: 'ready' as const,
-    source: p.source_id as 'GFS' | 'IFS',
-    cycle: null,
-    product: p,
-    stations: [],
-    riverSegments: [],
-    stationPage: null,
-    riverSegmentCollection: null,
-    latestReasons: [],
-    stationError: null,
-    riverError: null,
-  }
-}
-
 const segment: M11RiverPopupSegment = {
   river_segment_id: 'seg-009',
   segment_id: 'seg-009',
@@ -120,7 +104,7 @@ const validForecast = {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  vi.mocked(loadHydroMetBootstrap).mockResolvedValue(bootstrapReady(product()))
+  vi.mocked(fetchHydroMetLatestProduct).mockResolvedValue(product())
 })
 
 afterEach(() => {
@@ -144,6 +128,22 @@ describe('M11RiverForecastPopup', () => {
     expect(screen.getByTestId('m11-river-popup-variable')).toHaveTextContent('q_down')
   })
 
+  it('does NOT render a return-period section in the discharge popup', async () => {
+    mockForecast(validForecast)
+    render(<M11RiverForecastPopup basinId="basins_qhh" initialSource="GFS" segment={segment} />)
+
+    await screen.findByTestId('m11-river-popup-loaded')
+    expect(screen.queryByTestId('hydro-met-return-period-section')).not.toBeInTheDocument()
+  })
+
+  it('only resolves latest-product (no stations/river-segments bootstrap) for speed', async () => {
+    mockForecast(validForecast)
+    render(<M11RiverForecastPopup basinId="basins_qhh" initialSource="GFS" segment={segment} />)
+
+    await screen.findByTestId('m11-river-popup-loaded')
+    expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
+  })
+
   it('lists the real cycle (single item) in the issue-time selector', async () => {
     mockForecast(validForecast)
     render(<M11RiverForecastPopup basinId="basins_qhh" initialSource="GFS" segment={segment} />)
@@ -160,14 +160,12 @@ describe('M11RiverForecastPopup', () => {
     render(<M11RiverForecastPopup basinId="basins_qhh" initialSource="GFS" segment={segment} />)
 
     await screen.findByTestId('m11-river-popup-loaded')
-    expect(loadHydroMetBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
+    expect(fetchHydroMetLatestProduct).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
 
-    vi.mocked(loadHydroMetBootstrap).mockResolvedValue(
-      bootstrapReady(product({ source_id: 'IFS', cycle_time: '2026-05-21T12:00:00Z' })),
-    )
+    vi.mocked(fetchHydroMetLatestProduct).mockResolvedValue(product({ source_id: 'IFS', cycle_time: '2026-05-21T12:00:00Z' }))
     await user.click(screen.getByTestId('m11-popup-source-IFS'))
     await waitFor(() =>
-      expect(loadHydroMetBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' })),
+      expect(fetchHydroMetLatestProduct).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' })),
     )
   })
 
@@ -179,50 +177,12 @@ describe('M11RiverForecastPopup', () => {
     expect(screen.queryByTestId('mock-forecast-echarts')).not.toBeInTheDocument()
   })
 
-  it('gates return-period via productReady: shows unavailable when product not ready', async () => {
-    mockForecast(validForecast)
-    const notReady = product({
-      availability: {
-        ready: false,
-        unavailable_reasons: [],
-        quality_flags: [],
-        quality_notes: [],
-        return_period_status: 'ready',
-        return_period_reasons: [],
-      },
-    })
-    vi.mocked(loadHydroMetBootstrap).mockResolvedValue(bootstrapReady(notReady))
-    render(<M11RiverForecastPopup basinId="basins_qhh" initialSource="GFS" segment={segment} />)
-
-    await waitFor(() => expect(screen.getByTestId('hydro-met-return-period-section')).toBeInTheDocument())
-    expect(screen.getByTestId('hydro-met-return-period-unavailable')).toBeInTheDocument()
-  })
-
-  it('renders return-period three-state (ready) when product ready + status ready', async () => {
-    mockForecast(validForecast)
-    const ready = product({
-      availability: {
-        ready: true,
-        unavailable_reasons: [],
-        quality_flags: [],
-        quality_notes: [],
-        return_period_status: 'ready',
-        return_period_reasons: [],
-      },
-    })
-    vi.mocked(loadHydroMetBootstrap).mockResolvedValue(bootstrapReady(ready))
-    render(<M11RiverForecastPopup basinId="basins_qhh" initialSource="GFS" segment={segment} />)
-
-    expect(await screen.findByTestId('hydro-met-return-period-section')).toBeInTheDocument()
-    expect(screen.queryByTestId('hydro-met-return-period-unavailable')).not.toBeInTheDocument()
-  })
-
   it('shows honest empty state and never resolves a product when basinId=null', () => {
     render(<M11RiverForecastPopup basinId={null} initialSource={null} segment={segment} />)
 
     expect(screen.getByTestId('m11-river-popup-no-product')).toHaveTextContent('请选择流域')
     expect(screen.queryByTestId('mock-forecast-echarts')).not.toBeInTheDocument()
-    expect(vi.mocked(loadHydroMetBootstrap)).not.toHaveBeenCalled()
+    expect(vi.mocked(fetchHydroMetLatestProduct)).not.toHaveBeenCalled()
     // 起报选择器诚实空态（无解析产品 → 无起报时间）
     expect(screen.getByTestId('m11-popup-issue-time-empty')).toBeInTheDocument()
   })

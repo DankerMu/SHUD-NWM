@@ -63,6 +63,16 @@ async function getLatestProduct(request: HydroMetBootstrapRequest) {
   return product
 }
 
+/**
+ * 仅解析 latest-product，不附带 stations / river-segments 候选。
+ * 河段流量弹窗只需要产品身份（cycle/horizon）来取 forecast-series，
+ * 用 loadHydroMetBootstrap 会白白多发 2 个整页才用得到的请求 → 弹窗变慢。
+ * 失败抛错（与 getLatestProduct 一致）。
+ */
+export async function fetchHydroMetLatestProduct(request: HydroMetBootstrapRequest): Promise<QhhLatestProduct> {
+  return getLatestProduct(request)
+}
+
 export interface HydroMetStationQuery {
   search?: string
   variables?: string[]

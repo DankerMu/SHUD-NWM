@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { client } from '@/api/client'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
 import { HYDRO_MET_STATION_VARIABLES } from '@/lib/hydroMet/stationSeries'
-import { loadHydroMetBootstrap, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
 
 vi.mock('@/api/client', () => ({
   client: { GET: vi.fn() },
@@ -13,7 +13,7 @@ vi.mock('@/api/client', () => ({
 
 vi.mock('@/pages/hydroMet/bootstrap', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/pages/hydroMet/bootstrap')>()
-  return { ...actual, loadHydroMetBootstrap: vi.fn() }
+  return { ...actual, fetchHydroMetLatestProduct: vi.fn() }
 })
 
 vi.mock('echarts-for-react/lib/core', () => ({
@@ -72,21 +72,6 @@ function product(overrides: Partial<QhhLatestProduct> = {}): QhhLatestProduct {
   } as QhhLatestProduct
 }
 
-function bootstrapReady(p: QhhLatestProduct) {
-  return {
-    status: 'ready' as const,
-    source: p.source_id as 'GFS' | 'IFS',
-    cycle: null,
-    product: p,
-    stations: [],
-    riverSegments: [],
-    stationPage: null,
-    riverSegmentCollection: null,
-    latestReasons: [],
-    stationError: null,
-    riverError: null,
-  }
-}
 
 const station: M11StationPopupStation = { station_id: 'qhh_forc_001', station_name: 'QHH forcing 001' }
 
@@ -134,7 +119,7 @@ function mockSeries(body: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  vi.mocked(loadHydroMetBootstrap).mockResolvedValue(bootstrapReady(product()))
+  vi.mocked(fetchHydroMetLatestProduct).mockResolvedValue(product())
 })
 
 afterEach(() => {
@@ -180,12 +165,12 @@ describe('M11StationForcingPopup', () => {
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
 
     await screen.findByTestId('m11-station-popup-loaded')
-    expect(loadHydroMetBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
+    expect(fetchHydroMetLatestProduct).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
 
-    vi.mocked(loadHydroMetBootstrap).mockResolvedValue(bootstrapReady(product({ source_id: 'IFS' })))
+    vi.mocked(fetchHydroMetLatestProduct).mockResolvedValue(product({ source_id: 'IFS' }))
     await user.click(screen.getByTestId('m11-popup-source-IFS'))
     await waitFor(() =>
-      expect(loadHydroMetBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' })),
+      expect(fetchHydroMetLatestProduct).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' })),
     )
   })
 
@@ -202,7 +187,7 @@ describe('M11StationForcingPopup', () => {
 
     expect(screen.getByTestId('m11-station-popup-no-product')).toHaveTextContent('请选择流域')
     expect(screen.queryByTestId('mock-station-echarts')).not.toBeInTheDocument()
-    expect(vi.mocked(loadHydroMetBootstrap)).not.toHaveBeenCalled()
+    expect(vi.mocked(fetchHydroMetLatestProduct)).not.toHaveBeenCalled()
   })
 
   it('rejects the variable (no echarts) when any point is malformed/NaN', async () => {

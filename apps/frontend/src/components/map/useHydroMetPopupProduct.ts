@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { getApiErrorMessage } from '@/api/response'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
-import { loadHydroMetBootstrap, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
+import { fetchHydroMetLatestProduct, type QhhLatestProduct } from '@/pages/hydroMet/bootstrap'
 
 export const M11_POPUP_SOURCES: HydroMetSource[] = ['GFS', 'IFS']
 
@@ -62,16 +62,11 @@ export function useHydroMetPopupProduct({
     let cancelled = false
     setLoading(true)
     setError(null)
-    void loadHydroMetBootstrap({ source, cycle: null, basinId })
-      .then((bootstrap) => {
+    void fetchHydroMetLatestProduct({ source, cycle: null, basinId })
+      .then((resolved) => {
         if (cancelled) return
-        if (bootstrap.status === 'ready' && bootstrap.product) {
-          setProduct(bootstrap.product)
-          setError(null)
-        } else {
-          setProduct(null)
-          setError(bootstrap.latestReasons[0] ?? `latest-product 未就绪（${bootstrap.status}）`)
-        }
+        setProduct(resolved)
+        setError(null)
         setLoading(false)
       })
       .catch((caught) => {
