@@ -13,11 +13,11 @@ dev:
 	@echo "  FastAPI (Swagger UI):             localhost:$(or $(API_PORT),8000)/docs"
 	@echo ""
 	@echo "Starting FastAPI in reload mode..."
-	API_PORT=$(or $(API_PORT),8000) python -m uvicorn apps.api.main:app --host 0.0.0.0 --port $(or $(API_PORT),8000) --reload
+	API_PORT=$(or $(API_PORT),8000) uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port $(or $(API_PORT),8000) --reload
 
 migrate:
 	@echo "Running database migrations..."
-	python -m packages.common.migrate
+	uv run python -m packages.common.migrate
 	@echo "Migration complete."
 
 reset-db:
@@ -30,17 +30,17 @@ reset-db:
 
 seed-demo:
 	@echo "Seeding demo data..."
-	python -m db.seeds.seed_demo
+	uv run python -m db.seeds.seed_demo
 	@echo "Seed complete."
 
 seed-m1-model:
 	@echo "Seeding M1 model registry assets..."
-	python -m db.seeds.seed_m1_model
+	uv run python -m db.seeds.seed_m1_model
 	@echo "M1 model seed complete."
 
 test:
-	python -m pytest tests/ -v
+	uv run pytest tests/ -v
 
 lint:
-	ruff check .
+	uv run ruff check .
 	@echo "Lint passed."

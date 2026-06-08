@@ -31,3 +31,7 @@ Developer entrypoints for backend Python work MUST use `uv run` so local, CI, an
 #### Scenario: Makefile app and migration targets use uv
 - **WHEN** a developer runs `make dev`, `make migrate`, `make seed-demo`, or `make seed-m1-model`
 - **THEN** Python modules are invoked through `uv run python -m ...`
+
+#### Scenario: Makefile reset-db preserves uv-backed child targets
+- **WHEN** a developer inspects or runs `make reset-db`
+- **THEN** the target preserves the existing database drop/create sequence and invokes `$(MAKE) migrate` and `$(MAKE) seed-demo`, so migration and seed Python modules run through the uv-backed child targets

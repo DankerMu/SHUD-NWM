@@ -13,7 +13,9 @@
 ## 2. Toolchain command discipline (#359)
 
 - [ ] 2.1 Update `Makefile` targets `dev`, `migrate`, `seed-demo`, `seed-m1-model`, `test`, and `lint` to use `uv run` while preserving target names and behavior.
-- [ ] 2.2 Verify or inspect the rendered commands for `make dev`, `make migrate`, `make seed-demo`, `make seed-m1-model`, `make test`, and `make lint`; document any target not executed because it would start long-running services.
+- [ ] 2.2 Verify or inspect the rendered commands for `make dev`, `make migrate`, `make seed-demo`, `make seed-m1-model`, `make test`, `make lint`, and `make reset-db`; document any target not executed because it would start long-running services or destructive local database operations.
+- [ ] 2.3 Confirm `reset-db` still calls `$(MAKE) migrate` and `$(MAKE) seed-demo`, so its Python work reaches the updated `uv run` child targets without changing drop/create DB semantics.
+- [ ] 2.4 Confirm #359 does not edit `openapi/nhms.v1.yaml` or `apps/frontend/src/api/types.ts`.
 
 ## 3. Gate evidence (#353 epic)
 
