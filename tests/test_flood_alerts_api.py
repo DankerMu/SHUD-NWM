@@ -3239,6 +3239,137 @@ def test_layer_valid_times_endpoint_scopes_to_explicit_run_id_latest_window() ->
     assert unscoped_data["valid_times"][0] != scoped_data["valid_times"][0]
 
 
+def _seed_second_basin_national_run(session: Session) -> tuple[datetime, datetime]:
+    """Add a second river-network (rnv_v2) frequency_done run with its own q_down series.
+
+    The default seed already gives rnv_v1 a frequency_done run (RUN_ID) with q_down at
+    VALID_TIME_1. This adds a model_instance for rnv_v2 plus a frequency_done run with
+    q_down at a distinct time so the national union spans two networks.
+    """
+    rnv2_run_id = "fcst_gfs_2026050300_rnv_v2"
+    rnv2_valid_time = VALID_TIME_2 + timedelta(hours=3)
+    # Make RUN_ID the latest frequency-ready run for rnv_v1 so the national selector
+    # picks the run that actually carries q_down for that network.
+    session.execute(
+        text("UPDATE hydro.hydro_run SET cycle_time = :cycle_time WHERE run_id = :run_id"),
+        {"cycle_time": datetime(2026, 5, 4, tzinfo=UTC), "run_id": RUN_ID},
+    )
+    session.execute(
+        text(
+            """
+            INSERT INTO core.model_instance (model_id, basin_version_id, river_network_version_id)
+            VALUES ('model_2', 'basin_v2', 'rnv_v2')
+            """
+        )
+    )
+    session.execute(
+        text(
+            """
+            INSERT INTO hydro.hydro_run (
+                run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                start_time, end_time, status, run_manifest_uri, updated_at
+            )
+            VALUES (
+                :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_2', 'basin_v2',
+                'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest', :updated_at
+            )
+            """
+        ),
+        {
+            "run_id": rnv2_run_id,
+            "cycle_time": datetime(2026, 5, 3, tzinfo=UTC),
+            "start_time": datetime(2026, 5, 3, tzinfo=UTC),
+            "end_time": datetime(2026, 5, 10, tzinfo=UTC),
+            "updated_at": datetime(2026, 5, 3, 1, tzinfo=UTC),
+        },
+    )
+    session.execute(
+        text(
+            """
+            INSERT INTO hydro.river_timeseries (
+                run_id, basin_version_id, river_network_version_id, river_segment_id,
+                valid_time, variable, value, unit
+            )
+            VALUES (
+                :run_id, 'basin_v2', 'rnv_v2', 'seg_004',
+                :valid_time, 'q_down', 305.0, 'm3/s'
+            )
+            """
+        ),
+        {"run_id": rnv2_run_id, "valid_time": rnv2_valid_time},
+    )
+    session.commit()
+    return VALID_TIME_1, rnv2_valid_time
+
+
+def test_unscoped_discharge_catalog_uses_national_template_and_union_valid_times() -> None:
+    with _store() as session:
+        rnv1_time, rnv2_time = _seed_second_basin_national_run(session)
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get("/api/v1/layers")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    discharge = next(layer for layer in response.json()["data"] if layer["layer_id"] == "discharge")
+    metadata = discharge["metadata"]
+    assert metadata["tile_url_template"] == "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    assert "{run_id}" not in metadata["tile_url_template"]
+    assert metadata["url_template"] == metadata["tile_url_template"]
+    assert metadata["required_placeholders"] == ["valid_time", "z", "x", "y"]
+    assert metadata["maplibre_source_layer"] == "hydro"
+    valid_times = metadata["valid_times"]
+    assert _iso(rnv1_time) in valid_times
+    assert _iso(rnv2_time) in valid_times
+    assert valid_times == sorted(valid_times)
+
+
+def test_unscoped_discharge_valid_times_endpoint_returns_union() -> None:
+    with _store() as session:
+        rnv1_time, rnv2_time = _seed_second_basin_national_run(session)
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get("/api/v1/layers/discharge/valid-times")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert _iso(rnv1_time) in data["valid_times"]
+    assert _iso(rnv2_time) in data["valid_times"]
+    assert data["items"] == data["valid_times"]
+    assert data["valid_times"] == sorted(data["valid_times"])
+
+
+def test_scoped_discharge_catalog_keeps_single_run_template() -> None:
+    with _client() as client:
+        response = client.get(f"/api/v1/layers?run_id={RUN_ID}")
+
+    assert response.status_code == 200
+    discharge = next(layer for layer in response.json()["data"] if layer["layer_id"] == "discharge")
+    metadata = discharge["metadata"]
+    assert metadata["tile_url_template"] == "/api/v1/tiles/hydro/{run_id}/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    assert metadata["required_placeholders"] == ["run_id", "valid_time", "z", "x", "y"]
+
+
+def test_hydro_national_tile_sql_binds_only_variable_and_valid_time() -> None:
+    statement = flood_alert_routes.postgis_tile_sql("hydro-national")
+    sql = re.sub(r"\s+", " ", statement)
+    source_cte = sql[sql.index("source_rows AS") : sql.index("bounded_rows AS")]
+    assert ":variable" in source_cte
+    assert ":valid_time" in source_cte
+    assert ":run_id" not in source_cte
+    assert ":basin_version_id" not in source_cte
+    assert ":river_network_version_id" not in source_cte
+    assert "DISTINCT ON (mi.river_network_version_id)" in source_cte
+    assert "ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC" in source_cte
+    # National reuses the "hydro" maplibre source layer name for frontend parity.
+    assert "ST_AsMVT(tile_rows, 'hydro'," in sql
+
+
 @pytest.mark.parametrize(
     "layer_id",
     ["flood-return-period", "warning-level", "discharge", "water-level"],
@@ -3733,7 +3864,8 @@ def test_layer_metadata_endpoint_scopes_cache_identity_to_explicit_run_id() -> N
     assert unscoped.status_code == 200
     scoped_metadata = {layer["layer_id"]: layer["metadata"] for layer in scoped.json()["data"]}
     unscoped_metadata = {layer["layer_id"]: layer["metadata"] for layer in unscoped.json()["data"]}
-    for layer_id in ("discharge", "flood-return-period", "warning-level"):
+    # Flood/warning keep single-run cache identity for both scoped and unscoped requests.
+    for layer_id in ("flood-return-period", "warning-level"):
         assert scoped_metadata[layer_id]["source_refs"]["run_id"] == old_run_id
         assert unscoped_metadata[layer_id]["source_refs"]["run_id"] == new_run_id
         assert scoped_metadata[layer_id]["source_refs"]["basin_version_id"] == "basin_v1"
@@ -3744,6 +3876,13 @@ def test_layer_metadata_endpoint_scopes_cache_identity_to_explicit_run_id() -> N
         assert scoped_metadata[layer_id]["source_refs"]["source_version"] != unscoped_metadata[layer_id]["source_refs"][
             "source_version"
         ]
+    # Scoped discharge is still single-run bound; unscoped discharge is national (run-less).
+    assert scoped_metadata["discharge"]["source_refs"]["run_id"] == old_run_id
+    assert scoped_metadata["discharge"]["source_refs"]["river_network_version_id"] == "rnv_v1"
+    assert "run_id" not in unscoped_metadata["discharge"]["source_refs"]
+    assert unscoped_metadata["discharge"]["tile_url_template"] == (
+        "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    )
 
 
 def test_flood_layer_valid_times_default_to_one_hour_duration_identity() -> None:
@@ -3989,7 +4128,10 @@ def test_layer_metadata_required_placeholders_resolve_from_source_refs_or_route_
     metadata = {layer["layer_id"]: layer["metadata"] for layer in response.json()["data"]}
     assert metadata["flood-return-period"]["source_refs"]["duration"] == "1h"
     assert metadata["warning-level"]["source_refs"]["duration"] == "1h"
-    for layer_id in ("discharge", "water-level", "flood-return-period", "warning-level", "river-network"):
+    # Unscoped discharge is national: run-less template, no single-run source refs.
+    assert metadata["discharge"]["source_refs"] == {}
+    assert metadata["discharge"]["required_placeholders"] == ["valid_time", "z", "x", "y"]
+    for layer_id in ("water-level", "flood-return-period", "warning-level", "river-network"):
         assert metadata[layer_id]["source_refs"]["basin_version_id"] == "basin_v1"
         assert metadata[layer_id]["source_refs"]["river_network_version_id"] == "rnv_v1"
     assert (
@@ -4158,6 +4300,14 @@ def test_advertised_mvt_layer_cache_identity_matches_route_or_declared_alias(
         for layer_id, tile_input in route_inputs.items():
             metadata = layers[layer_id]
             advertised_run_id = metadata["source_refs"].get("run_id")
+            if layer_id == "discharge" and advertised_run_id is None:
+                # Unscoped discharge is national (run-less); its cache identity is keyed by
+                # the fixed national source id, not an advertised run_id. Live tile-byte and
+                # cache verification for this layer happens on node-27 real Postgres.
+                assert metadata["tile_url_template"] == (
+                    "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+                )
+                continue
             route_tile_input = (
                 flood_alert_routes.TileInput(
                     layer_id=tile_input.layer_id,

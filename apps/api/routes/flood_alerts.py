@@ -38,6 +38,7 @@ from services.tiles.mvt import (
     latest_frequency_ready_run,
     latest_ready_run,
     layer_metadata,
+    national_discharge_valid_times,
     postgis_tile_sql,
     public_hydro_layer_id,
     read_cached_tile_response,
@@ -48,6 +49,12 @@ from services.tiles.mvt import (
 )
 
 router = APIRouter(tags=["flood-alerts"])
+
+# Stable national-overview tile identity. The discharge layer aggregates every basin's
+# latest frequency-ready run, so the tile/cache identity is a fixed national id rather
+# than a single run_id.
+HYDRO_NATIONAL_SOURCE_ID = "hydro-national"
+HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin"
 
 WARNING_COLORS = {
     "normal": "#808080",
@@ -337,6 +344,7 @@ def list_layers(
         river_network_source_version=river_network_source_version,
         basin_version_id=basin_version_id,
         river_network_version_id=river_network_version_id,
+        national=run_id is None,
     )
     if flood_product_quality is not None:
         _annotate_flood_layer_quality(layers, flood_product_quality)
@@ -361,6 +369,17 @@ def list_layer_valid_times(
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     validate_identifier(layer_id, "layer_id")
+    if run_id is None and layer_id == "discharge":
+        # National discharge: union of valid-times across every basin's latest
+        # frequency-ready run, matching the run-less catalog/tile template.
+        if duration is not None:
+            raise ApiError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Duration is only supported for flood return-period valid-time discovery.",
+                details={"layer_id": layer_id, "duration": duration},
+            )
+        return _ok(request, national_discharge_valid_times(session).model_dump())
     if run_id is not None:
         validate_identifier(run_id, "run_id")
         run = _require_frequency_ready(session, run_id)
@@ -970,6 +989,54 @@ def hydro_mvt_tile(
 
 
 @router.get(
+    "/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+    responses=MVT_ROUTE_RESPONSES,
+    response_class=Response,
+)
+def hydro_national_mvt_tile(
+    variable: str,
+    valid_time: datetime,
+    z: int,
+    x: int,
+    y: int,
+    session: Session = Depends(get_flood_alert_session),
+) -> Response:
+    """National discharge overview tile.
+
+    Renders the requested hydrological variable for every basin by joining each river
+    network's latest frequency-ready run (selected inside the SQL). There is no single
+    run/basin identity, so the per-run frequency-ready / source-identity preconditions
+    used by the single-run hydro route do not apply; the live-PostGIS gate still does.
+    """
+    validate_identifier(variable, "variable")
+    _validate_supported_hydro_variable(variable)
+    validate_xyz(z, x, y)
+    tile_input = TileInput(
+        layer_id=public_hydro_layer_id(variable),
+        source_id=HYDRO_NATIONAL_SOURCE_ID,
+        source_version=HYDRO_NATIONAL_SOURCE_VERSION,
+        valid_time=_format_time(valid_time),
+        z=z,
+        x=x,
+        y=y,
+        variant_id=f"variable:{variable}",
+    )
+    cached = read_cached_tile_response(session, tile_input)
+    if cached is not None:
+        return _mvt_response(cached)
+    _require_live_postgis_mvt(session, tile_input.layer_id)
+    data = _fetch_hydro_national_mvt_tile_bytes(
+        session,
+        variable=variable,
+        valid_time=valid_time,
+        z=z,
+        x=x,
+        y=y,
+    )
+    return _mvt_response(build_raw_tile_response(session, tile_input, data))
+
+
+@router.get(
     "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
     responses=MVT_ROUTE_RESPONSES,
     response_class=Response,
@@ -1044,7 +1111,9 @@ def _require_live_postgis_mvt(session: Session, layer_id: str) -> None:
 def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, Any], *, z: int, x: int, y: int) -> bytes:
     _require_live_postgis_mvt(session, layer)
     detail_layer_id = (
-        public_hydro_layer_id(str(params["variable"])) if layer == "hydro" and "variable" in params else layer
+        public_hydro_layer_id(str(params["variable"]))
+        if layer in {"hydro", "hydro-national"} and "variable" in params
+        else layer
     )
     row = session.execute(
         text(postgis_tile_sql(layer)),
@@ -1193,6 +1262,27 @@ def _fetch_hydro_mvt_tile_bytes(
             "basin_version_id": basin_version_id,
             "river_network_version_id": river_network_version_id,
         },
+        z=z,
+        x=x,
+        y=y,
+    )
+
+
+def _fetch_hydro_national_mvt_tile_bytes(
+    session: Session,
+    *,
+    variable: str,
+    valid_time: datetime,
+    z: int,
+    x: int,
+    y: int,
+) -> bytes:
+    # National overview binds only variable/valid_time; the latest-per-basin run/network
+    # identity is resolved inside postgis_tile_sql("hydro-national").
+    return _fetch_postgis_tile_bytes(
+        session,
+        "hydro-national",
+        {"variable": variable, "valid_time": valid_time},
         z=z,
         x=x,
         y=y,
@@ -1648,6 +1738,7 @@ def _default_layer_catalog(
     basin_version_id: str | None,
     river_network_version_id: str | None = None,
     river_network_source_version: str | None = None,
+    national: bool = False,
 ) -> list[Layer]:
     if run_id is not None and (basin_version_id is None or river_network_version_id is None):
         raise ApiError(
@@ -1670,17 +1761,21 @@ def _default_layer_catalog(
     ]
     layers = []
     for layer_id, name, layer_type, variables in definitions:
-        valid_time_sample = (
-            valid_times_for_layer(
+        national_discharge = national and layer_id == "discharge"
+        if national_discharge:
+            # No run_id: discharge becomes a national overview (union across every
+            # basin's latest frequency-ready run), with a run-less tile template.
+            valid_time_sample = national_discharge_valid_times(session)
+        elif run_id is not None:
+            valid_time_sample = valid_times_for_layer(
                 session,
                 layer_id,
                 run_id=run_id,
                 basin_version_id=basin_version_id,
                 river_network_version_id=river_network_version_id,
             )
-            if run_id is not None
-            else _empty_valid_times()
-        )
+        else:
+            valid_time_sample = _empty_valid_times()
         layers.append(
             Layer(
                 layer_id=layer_id,
@@ -1698,6 +1793,7 @@ def _default_layer_catalog(
                     basin_version_id=basin_version_id,
                     river_network_version_id=river_network_version_id,
                     release_blocking=not _mvt_live_postgis_enabled(session),
+                    national=national_discharge,
                 ),
             )
         )

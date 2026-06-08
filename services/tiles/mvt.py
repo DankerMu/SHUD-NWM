@@ -343,6 +343,51 @@ def postgis_tile_sql(layer: str) -> str:
               AND ts.variable = :variable
               AND ts.valid_time = :valid_time
         """
+    elif layer == "hydro-national":
+        # National overview: render q_down for every basin by joining each river
+        # network's latest frequency-ready run. Identity (run/network) is chosen by
+        # the deterministic DISTINCT ON sub-select, not by request parameters; only
+        # :variable and :valid_time are bound. Output columns/checks match "hydro".
+        required_property_checks = {
+            "feature_id": "feature_id IS NULL OR feature_id::text = ''",
+            "segment_id": "segment_id IS NULL OR segment_id::text = ''",
+            "river_segment_id": "river_segment_id IS NULL OR river_segment_id::text = ''",
+            "river_network_version_id": "river_network_version_id IS NULL OR river_network_version_id::text = ''",
+            "basin_version_id": "basin_version_id IS NULL OR basin_version_id::text = ''",
+            "value": f"value IS NULL OR value::double precision IN ({POSTGIS_NON_FINITE_DOUBLE_SQL})",
+            "unit": "unit IS NULL OR unit::text = ''",
+            "quality_flag": "quality_flag IS NULL OR quality_flag::text = ''",
+            "run_id": "run_id IS NULL OR run_id::text = ''",
+            "variable": "variable IS NULL OR variable::text = ''",
+            "valid_time": "valid_time IS NULL",
+        }
+        source_cte = """
+            SELECT (ts.river_network_version_id || '::' || ts.river_segment_id) AS feature_id,
+                   ts.river_segment_id AS segment_id,
+                   ts.river_segment_id,
+                   ts.river_network_version_id,
+                   ts.basin_version_id,
+                   ts.value, ts.unit,
+                   ts.quality_flag,
+                   ts.run_id, ts.variable,
+                   to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
+                   rs.geom
+            FROM hydro.river_timeseries ts
+            JOIN (
+                SELECT DISTINCT ON (mi.river_network_version_id)
+                       h.run_id, mi.river_network_version_id
+                FROM hydro.hydro_run h
+                JOIN core.model_instance mi ON mi.model_id = h.model_id
+                WHERE h.status IN ('frequency_done', 'published')
+                  AND mi.river_network_version_id IS NOT NULL
+                ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
+            ) lr ON lr.run_id = ts.run_id AND lr.river_network_version_id = ts.river_network_version_id
+            JOIN core.river_segment rs
+              ON rs.river_segment_id = ts.river_segment_id
+             AND rs.river_network_version_id = ts.river_network_version_id
+            WHERE ts.variable = :variable
+              AND ts.valid_time = :valid_time
+        """
     elif layer == "flood-return-period":
         required_property_checks = {
             "feature_id": "feature_id IS NULL OR feature_id::text = ''",
@@ -512,7 +557,7 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
             "basin_version_id",
             "mvt_geom",
         )
-    if layer == "hydro":
+    if layer in {"hydro", "hydro-national"}:
         return (
             "feature_id",
             "segment_id",
@@ -547,6 +592,12 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
     raise ValueError(f"Unsupported tile layer: {layer}")
 
 
+_NATIONAL_DISCHARGE_METADATA = {
+    "tile_url_template": "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf",
+    "required_placeholders": ["valid_time", "z", "x", "y"],
+}
+
+
 def layer_metadata(
     layer_id: str,
     *,
@@ -559,6 +610,7 @@ def layer_metadata(
     basin_version_id: str | None = None,
     river_network_version_id: str | None = None,
     release_blocking: bool = False,
+    national: bool = False,
 ) -> dict[str, Any]:
     metadata_by_layer = {
         "river-network": {
@@ -652,17 +704,26 @@ def layer_metadata(
             "fallback_available": True,
             "release_blocking": release_blocking,
         }
+    # National discharge overview: each basin's latest run is selected server-side, so
+    # the public tile route carries no run_id/basin/network placeholders.
+    national_discharge = national and layer_id == "discharge"
+    if national_discharge:
+        base = {**base, **_NATIONAL_DISCHARGE_METADATA}
     cache_layer_id = "flood-return-period" if layer_id == "warning-level" else layer_id
     is_warning_alias = layer_id == "warning-level"
-    source_refs = _layer_source_refs(
-        layer_id,
-        run_id=run_id,
-        source_version=source_version,
-        basin_version_id=basin_version_id,
-        river_network_version_id=river_network_version_id,
+    source_refs = (
+        {}
+        if national_discharge
+        else _layer_source_refs(
+            layer_id,
+            run_id=run_id,
+            source_version=source_version,
+            basin_version_id=basin_version_id,
+            river_network_version_id=river_network_version_id,
+        )
     )
     source_ref_constants = {"z", "x", "y", "valid_time"}
-    if any(
+    if not national_discharge and any(
         placeholder not in source_ref_constants and not source_refs.get(placeholder)
         for placeholder in base["required_placeholders"]
     ):
@@ -930,6 +991,59 @@ def valid_times_for_layer(
     return _valid_time_discovery(rows, sample_limit)
 
 
+def national_discharge_valid_times(
+    session: Session,
+    *,
+    variable: str = "q_down",
+    limit: int = MVT_VALID_TIME_SAMPLE_LIMIT,
+) -> ValidTimeDiscovery:
+    """Union of distinct discharge valid-times across every basin's latest frequency-ready run.
+
+    Mirrors the national tile SQL identity selection (each river network's latest
+    frequency_done/published run) but only enumerates DISTINCT valid_time. Written
+    with a ROW_NUMBER() window instead of Postgres-only DISTINCT ON so the catalog /
+    valid-times contract stays testable on sqlite while remaining equivalent on
+    Postgres. No data is fabricated: empty when no ready run/series exists.
+    """
+    sample_limit = max(0, limit)
+    rows = (
+        session.execute(
+            text(
+                """
+                WITH latest_run AS (
+                    SELECT run_id, river_network_version_id
+                    FROM (
+                        SELECT h.run_id,
+                               mi.river_network_version_id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY mi.river_network_version_id
+                                   ORDER BY h.cycle_time DESC, h.run_id DESC
+                               ) AS rn
+                        FROM hydro.hydro_run h
+                        JOIN core.model_instance mi ON mi.model_id = h.model_id
+                        WHERE h.status IN ('frequency_done', 'published')
+                          AND mi.river_network_version_id IS NOT NULL
+                    ) ranked
+                    WHERE rn = 1
+                )
+                SELECT DISTINCT ts.valid_time
+                FROM hydro.river_timeseries ts
+                JOIN latest_run lr
+                  ON lr.run_id = ts.run_id
+                 AND lr.river_network_version_id = ts.river_network_version_id
+                WHERE ts.variable = :variable
+                ORDER BY ts.valid_time DESC
+                LIMIT :limit
+                """
+            ),
+            {"variable": variable, "limit": sample_limit + 1},
+        )
+        .mappings()
+        .all()
+    )
+    return _valid_time_discovery(rows, sample_limit)
+
+
 def _valid_time_discovery(rows: Iterable[Mapping[str, Any]], limit: int) -> ValidTimeDiscovery:
     formatted = [_format_time(row["valid_time"]) for row in rows]
     truncated = len(formatted) > limit
@@ -943,7 +1057,14 @@ def _valid_time_discovery(rows: Iterable[Mapping[str, Any]], limit: int) -> Vali
 
 
 def _source_layer_id(layer: str) -> str:
-    return {"river-network": "river_network", "hydro": "hydro", "flood-return-period": "flood_return_period"}[layer]
+    # "hydro-national" reuses the "hydro" maplibre source layer so the frontend
+    # source-layer name stays identical between single-run and national tiles.
+    return {
+        "river-network": "river_network",
+        "hydro": "hydro",
+        "hydro-national": "hydro",
+        "flood-return-period": "flood_return_period",
+    }[layer]
 
 
 def _enforce_feature_budget(features: list[Mapping[str, Any]]) -> None:
