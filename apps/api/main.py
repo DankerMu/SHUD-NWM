@@ -1810,6 +1810,17 @@ def _register_static_and_health_routes(api: FastAPI) -> None:
     async def spa_fallback(full_path: str) -> FileResponse:
         if full_path.startswith("api/") or full_path == "api":
             raise HTTPException(status_code=404, detail="Not found")
+        # Serve real built static files outside /assets (e.g. /geo/*.geojson, favicon)
+        # before falling back to index.html for SPA client routes. Reject path
+        # traversal by confirming the resolved path stays inside the dist root.
+        if full_path:
+            candidate = (FRONTEND_DIST_DIR / full_path).resolve()
+            try:
+                candidate.relative_to(FRONTEND_DIST_DIR.resolve())
+            except ValueError:
+                candidate = None
+            if candidate is not None and candidate.is_file():
+                return FileResponse(candidate)
         return FileResponse(FRONTEND_INDEX)
 
 
