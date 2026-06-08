@@ -4,12 +4,12 @@
 
 ## 1. Inventory and classification
 
-- [ ] 1.1 Create a persistent legacy path inventory covering `apps/web`, hyphenated worker placeholders, `workers/sbatch_templates`, `services/tile-publisher`, QHH diagnostic scripts, mocked e2e specs, and paused CI jobs.
-- [ ] 1.2 For each inventory row, record exact path, status, owner area, active build/import/deploy evidence, docs/runbook migration, final action, and verification command.
-- [ ] 1.3 For issue #362, keep the PR inventory-only: do not delete, move, rename, archive, or wrap any governed path.
-- [ ] 1.4 Classify owner area with the four-role vocabulary from `docs/governance/ROLE_BOUNDARY.md`: `compute_control`, `display_readonly`, `slurm_gateway`, or `shared_contract`.
-- [ ] 1.5 Record discovery commands and results precisely enough that #363-#366 can proceed without redoing broad discovery.
-- [ ] 1.6 Required #362 evidence:
+- [x] 1.1 Create a persistent legacy path inventory covering `apps/web`, hyphenated worker placeholders, `workers/sbatch_templates`, `services/tile-publisher`, QHH diagnostic scripts, mocked e2e specs, and paused CI jobs. Evidence: `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`.
+- [x] 1.2 For each inventory row, record exact path, status, owner area, active build/import/deploy evidence, docs/runbook migration, final action, and verification command. Evidence: governed inventory and active counterpart tables.
+- [x] 1.3 For issue #362, keep the PR inventory-only: do not delete, move, rename, archive, or wrap any governed path. Evidence: inventory scope and follow-up ownership sections keep #363-#366 actions separate.
+- [x] 1.4 Classify owner area with the four-role vocabulary from `docs/governance/ROLE_BOUNDARY.md`: `compute_control`, `display_readonly`, `slurm_gateway`, or `shared_contract`. Evidence: every inventory row uses the role-boundary vocabulary.
+- [x] 1.5 Record discovery commands and results precisely enough that #363-#366 can proceed without redoing broad discovery. Evidence: discovery command register `D1`-`D9` and required discovery results.
+- [x] 1.6 Required #362 evidence:
   - Input command:
     `rg -n --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**' --glob '!**/__pycache__/**' "apps/web|workers/(forcing-producer|shud-runtime|output-parser|flood-frequency|sbatch_templates)|services/tile-publisher|services/tile_publisher|infra/sbatch|SLURM_GATEWAY_TEMPLATE_DIR|template_dir|run_qhh_continuous|run_qhh_cycle|run_qhh_backend_smoke|create_qhh_shud_manifest|frontend-m15-visual|&& false|page\\.route\\('.*api/v1" .`
     Expected output: references needed to classify the governed paths plus
@@ -28,7 +28,7 @@
   - Input command:
     `npx --yes markdownlint-cli2 --config .markdownlint.yaml 'docs/**/*.md'`
     Expected output: exit 0.
-- [ ] 1.7 #362 non-goals:
+- [x] 1.7 #362 non-goals:
   - No placeholder deletion/archive.
   - No QHH script move/wrapper.
   - No Playwright spec rename or live e2e config.

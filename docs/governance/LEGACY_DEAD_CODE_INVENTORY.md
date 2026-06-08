@@ -88,7 +88,8 @@ rg -n "frontend-m15-visual|&& false" .github/workflows/ci.yml CLAUDE.md progress
   `scripts/run_qhh_backend_smoke.sh` is documented by `docs/runbooks/qhh-backend-smoke.md` and `docs/runbooks/qhh-mvp-smoke-evidence.md` as live diagnostic/reproduction evidence, invokes `scripts/create_qhh_shud_manifest.py`, and is covered by static tests in `tests/test_qhh_scripts_static.py`.
   Static guard tests also exist in `tests/test_role_boundary_static.py`.
 - Broad API route mocks exist in eight Playwright specs under `apps/frontend/e2e`.
-- `.github/workflows/ci.yml` contains the paused `frontend-m15-visual` job with `if: needs.changes.outputs.frontend == 'true' && false`.
+  Paused CI evidence is captured by `D9`, because `D1` does not use `--hidden`
+  and does not scan hidden `.github` paths.
 
 `D2` confirmed both governed candidates and active counterparts are present, with generated directories intentionally excluded:
 
@@ -123,6 +124,10 @@ rg -n "frontend-m15-visual|&& false" .github/workflows/ci.yml CLAUDE.md progress
 - `services/tiles/mvt.py` provides MVT cache, metadata, SQL, and tile URL-template helpers for the display routes.
 - `apps/frontend/src/components/flood` and `apps/frontend/src/components/map` consume flood-return-period tile metadata and render GeoJSON/MVT display layers.
 
+`D9` confirmed `.github/workflows/ci.yml` contains the paused
+`frontend-m15-visual` job with
+`if: needs.changes.outputs.frontend == 'true' && false`.
+
 ## Governed Inventory
 
 | path | status | owner_area | active_counterpart | active build/import/deploy evidence | docs/runbook migration | proposed final action | verification_command |
@@ -147,7 +152,7 @@ rg -n "frontend-m15-visual|&& false" .github/workflows/ci.yml CLAUDE.md progress
 | `apps/frontend/e2e/meteorology.spec.ts` | `test-only` | `display_readonly` | Future live display-readonly e2e profile; current app under `apps/frontend` | `D4` found 1 broad API route mock. It is mocked frontend regression, not live API evidence. | #365 should rename or group as mocked regression. | #365 owns any rename/config split/no-mock guard. | `D1`, `D4` |
 | `apps/frontend/e2e/monitoring.spec.ts` | `test-only` | `display_readonly` | Future live display-readonly e2e profile; current app under `apps/frontend` | `D4` found 2 broad API route mocks. `docs/bugs.md` already records that these mocks do not connect to local real API, shared PostgreSQL, or Slurm. | #365 should rename or group as mocked regression and update validation docs. | #365 owns any rename/config split/no-mock guard. | `D1`, `D4` |
 | `apps/frontend/e2e/preview-deeplink.spec.ts` | `test-only` | `display_readonly` | `apps/frontend/playwright.preview.config.ts`; future live preview/e2e profile if needed | `D4` found 2 broad API route mocks. `apps/frontend/playwright.preview.config.ts` limits this preview profile to `preview-deeplink.spec.ts`, but the spec still mocks API responses. | #365 should classify preview mocked regression separately from any live display-readonly proof. | #365 owns any rename/config split/no-mock guard. | `D1`, `D4` |
-| `.github/workflows/ci.yml` | `test-only` | `display_readonly` | Active `frontend-build` job; future manual visual workflow or archived evidence | Job `frontend-m15-visual` is paused with `if: needs.changes.outputs.frontend == 'true' && false`. Comments say it is M15-specific legacy visual evidence and not node-27 or m25 frontend production. | #366 should replace the hidden false condition with archived documentation or an explicit manual workflow. | #366 owns removal, archive, manual dispatch, or CI behavior change. This row is not approval to edit CI in #362. | `D1`, `D9` |
+| `.github/workflows/ci.yml` | `test-only` | `display_readonly` | Active `frontend-build` job; future manual visual workflow or archived evidence | Job `frontend-m15-visual` is paused with `if: needs.changes.outputs.frontend == 'true' && false`. Comments say it is M15-specific legacy visual evidence and not node-27 or m25 frontend production. | #366 should replace the hidden false condition with archived documentation or an explicit manual workflow. | #366 owns removal, archive, manual dispatch, or CI behavior change. This row is not approval to edit CI in #362. | `D9` |
 
 ## Active Counterparts
 
