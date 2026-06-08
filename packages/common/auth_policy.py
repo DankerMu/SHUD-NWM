@@ -71,24 +71,26 @@ class PolicyDecision:
     role_mapping_result: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "action_id": self.action_id,
-            "decision": self.decision,
-            "required_roles": list(self.required_roles),
-            "matched_roles": list(self.matched_roles),
-            "actor_id": self.actor_id,
-            "target_type": self.target_type,
-            "target_id": self.target_id,
-            "reason": self.reason,
-            "reason_code": self.reason_code,
-            "roles": list(self.roles),
-            "execution_mode": self.execution_mode,
-            "no_mutation_expected": self.no_mutation_expected,
-            "auth_mode": self.auth_mode,
-            "live_backend_auth_executed": self.live_backend_auth_executed,
-            "provider_metadata": redact_audit_payload(dict(self.provider_metadata or {})),
-            "role_mapping_result": redact_audit_payload(dict(self.role_mapping_result or {})),
-        }
+        return redact_audit_payload(
+            {
+                "action_id": self.action_id,
+                "decision": self.decision,
+                "required_roles": list(self.required_roles),
+                "matched_roles": list(self.matched_roles),
+                "actor_id": self.actor_id,
+                "target_type": self.target_type,
+                "target_id": self.target_id,
+                "reason": self.reason,
+                "reason_code": self.reason_code,
+                "roles": list(self.roles),
+                "execution_mode": self.execution_mode,
+                "no_mutation_expected": self.no_mutation_expected,
+                "auth_mode": self.auth_mode,
+                "live_backend_auth_executed": self.live_backend_auth_executed,
+                "provider_metadata": dict(self.provider_metadata or {}),
+                "role_mapping_result": dict(self.role_mapping_result or {}),
+            }
+        )
 
 
 def evaluate_policy(

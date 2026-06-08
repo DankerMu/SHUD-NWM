@@ -125,6 +125,75 @@ def test_unknown_action_fails_closed_with_stable_config_error() -> None:
     assert decision.required_roles == ()
 
 
+@pytest.mark.parametrize(
+    ("actor_id", "target_id"),
+    [
+        ("api-operator", "active_model"),
+        ("model-admin", "model_v1"),
+        ("public-importer", "unknown"),
+    ],
+)
+def test_policy_decision_to_dict_preserves_normal_identity_ids(actor_id: str, target_id: str) -> None:
+    decision = evaluate_policy(
+        AuthContext(
+            actor_id=actor_id,
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.activate",
+        target_type="model_instance",
+        target_id=target_id,
+    )
+
+    exported = decision.to_dict()
+
+    assert decision.actor_id == actor_id
+    assert decision.target_id == target_id
+    assert exported["actor_id"] == actor_id
+    assert exported["target_id"] == target_id
+
+
+@pytest.mark.parametrize(
+    ("actor_id", "target_id", "expected_actor_id", "expected_target_id"),
+    [
+        ("token=actor-secret", "credential=model-secret", "token=[redacted]", "credential=[redacted]"),
+        ("/tmp/nhms/actor", "/srv/nhms/model-id", "[redacted]", "[redacted]"),
+        (
+            "s3://user:pass@bucket/actor?token=secret",
+            "https://example.test/model?credential=secret",
+            "[redacted]",
+            "[redacted]",
+        ),
+        ("api-operator", "a" * 64, "api-operator", "[redacted]"),
+    ],
+)
+def test_policy_decision_to_dict_redacts_secret_shaped_identity_ids(
+    actor_id: str,
+    target_id: str,
+    expected_actor_id: str,
+    expected_target_id: str,
+) -> None:
+    decision = evaluate_policy(
+        AuthContext(
+            actor_id=actor_id,
+            roles=("model_admin",),
+            auth_mode="dev_test",
+            live_backend_auth_executed=False,
+        ),
+        "models.activate",
+        target_type="model_instance",
+        target_id=target_id,
+    )
+
+    exported = decision.to_dict()
+
+    assert decision.actor_id == actor_id
+    assert decision.target_id == target_id
+    assert exported["actor_id"] == expected_actor_id
+    assert exported["target_id"] == expected_target_id
+
+
 def test_audit_redaction_preserves_numeric_log_id_evidence_only() -> None:
     redacted = redact_audit_payload(
         {
