@@ -639,7 +639,7 @@ describe('M11 visual foundation shell', () => {
       type: 'vector',
       promoteId: 'feature_id',
       tiles: [
-        '/api/v1/tiles/flood-return-period/run-gfs/1h/2026-05-18T06%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=flood-cache-v1',
+        `${window.location.origin}/api/v1/tiles/flood-return-period/run-gfs/1h/2026-05-18T06%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=flood-cache-v1`,
       ],
     })
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
@@ -691,7 +691,7 @@ describe('M11 visual foundation shell', () => {
       id: 'm11-discharge-source',
       type: 'vector',
       tiles: [
-        '/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=discharge-cache-v1',
+        `${window.location.origin}/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=discharge-cache-v1`,
       ],
     })
     const paint = JSON.stringify(mapLayers.at(-1)?.paint)
@@ -717,7 +717,7 @@ describe('M11 visual foundation shell', () => {
       type: 'vector',
       minzoom: 7,
       tiles: [
-        '/api/v1/tiles/hydro-national/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=discharge-national-cache-v1',
+        `${window.location.origin}/api/v1/tiles/hydro-national/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=discharge-national-cache-v1`,
       ],
     })
     // 模板无 {run_id}，填充后不得残留未替换占位。
@@ -770,7 +770,7 @@ describe('M11 visual foundation shell', () => {
       id: 'm11-water-level-source',
       type: 'vector',
       tiles: [
-        '/api/v1/tiles/hydro/run-gfs/water_level/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=water-level-cache-v1',
+        `${window.location.origin}/api/v1/tiles/hydro/run-gfs/water_level/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=water-level-cache-v1`,
       ],
     })
     expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-water-level-line', source: 'm11-water-level-source' })
