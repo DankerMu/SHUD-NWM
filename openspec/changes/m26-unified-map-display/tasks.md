@@ -3,7 +3,7 @@
 - [x] 0.1 用 `openspec validate m26-unified-map-display --strict --no-interactive` 校验本 change 4/4 complete 后再开实现。
 - [x] 0.2 记录基线：现有路由表（`App.tsx`）、`AppShell`/`NavBar` 导航项、`M11QueryState` 字段、`overviewData` store 的 `loadOverview`/`loadBasinDetail` 签名与 snapshot 匹配函数，作为回归基准。
 - [x] 0.3 清点 honest-display 库的导出与消费点（`bootstrap.ts`/`stationSeries.ts`/`riverForecast.ts`/`ReturnPeriodSection.tsx`），列出迁移后需保留的导出名（防测试大面积改 import）。
-- [x] 0.4 记录 node-27 实测约束作为实现依据：`best` 不被 latest-product 接受（仅 GFS/IFS）、`/api/v1/layers` 空、river-network 瓦片 424 / hydro 瓦片 409（→ 当前用 GeoJSON 河网渲染，overlay 待注册自动点亮）。
+- [x] 0.4 记录 node-27 实测约束作为实现依据：`best` 不被 latest-product 接受（仅 GFS/IFS）、`/api/v1/layers` 空、river-network 瓦片 424 / hydro 瓦片 409（→ 当前用 GeoJSON 河网渲染，overlay 待注册自动点亮）。【2026-06-08 更新（issue #343 收尾）：已置 `NHMS_ENABLE_LIVE_POSTGIS_MVT=true`，`/api/v1/layers`=5 图层、hydro-national 瓦片 200/370KB live PostGIS MVT 已点亮；根因+决策+receipt 见 `docs/runbooks/display-readonly-live-mvt.md`。】
 
 ## 1. 去导航 + 路由收敛（single-map-shell-routing）
 
