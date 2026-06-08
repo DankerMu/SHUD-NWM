@@ -24,13 +24,13 @@ Rows below cite these command IDs in `verification_command`.
 `D1` required broad reference inventory:
 
 ```bash
-rg -n --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**' --glob '!**/__pycache__/**' "apps/web|workers/(forcing-producer|shud-runtime|output-parser|flood-frequency|sbatch_templates)|services/tile-publisher|services/tile_publisher|infra/sbatch|SLURM_GATEWAY_TEMPLATE_DIR|template_dir|run_qhh_continuous|run_qhh_cycle|create_qhh_shud_manifest|frontend-m15-visual|&& false|page\\.route\\('.*api/v1" .
+rg -n --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**' --glob '!**/__pycache__/**' "apps/web|workers/(forcing-producer|shud-runtime|output-parser|flood-frequency|sbatch_templates)|services/tile-publisher|services/tile_publisher|infra/sbatch|SLURM_GATEWAY_TEMPLATE_DIR|template_dir|run_qhh_continuous|run_qhh_cycle|run_qhh_backend_smoke|create_qhh_shud_manifest|frontend-m15-visual|&& false|page\\.route\\('.*api/v1" .
 ```
 
 `D2` required directory inventory:
 
 ```bash
-find apps workers services scripts .github/workflows -maxdepth 3 -type d | sort
+find apps workers services scripts .github/workflows -maxdepth 3 \( -path apps/frontend/node_modules -o -path apps/frontend/dist -o -path '*/__pycache__' \) -prune -o -type d -print | sort
 ```
 
 `D3` placeholder file inventory:
@@ -62,13 +62,13 @@ rg -n "template_dir|SLURM_GATEWAY_TEMPLATE_DIR|infra/sbatch|workers/sbatch_templ
 `D7` tile publisher counterpart inventory:
 
 ```bash
-rg -n "tile_publisher|publish_tiles|services/tile-publisher|services/tile_publisher" apps services workers infra tests docs openspec --glob '!**/__pycache__/**' --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**'
+rg -n "tile|Tile|flood-return-period|FloodReturnPeriod|api/v1/tiles|services\.tiles|tile_publisher|publish_tiles|services/tile-publisher|services/tile_publisher" apps/api/routes/flood_alerts.py services/tiles apps/frontend/src/components/flood apps/frontend/src/components/map services/tile_publisher services/tile-publisher infra/sbatch/publish_tiles.sbatch services/orchestrator tests docs openspec --glob '!**/__pycache__/**' --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**'
 ```
 
 `D8` QHH diagnostic inventory:
 
 ```bash
-rg -n "DIAGNOSTIC-ONLY|run_qhh_continuous|run_qhh_cycle|create_qhh_shud_manifest" scripts tests docs/runbooks docs/governance services/orchestrator --glob '!**/__pycache__/**'
+rg -n "DIAGNOSTIC-ONLY|run_qhh_continuous|run_qhh_cycle|run_qhh_backend_smoke|create_qhh_shud_manifest" scripts tests docs/runbooks docs/governance services/orchestrator --glob '!**/__pycache__/**'
 ```
 
 `D9` paused CI inventory:
@@ -84,15 +84,18 @@ rg -n "frontend-m15-visual|&& false" .github/workflows/ci.yml CLAUDE.md progress
 - Placeholder and legacy path references are concentrated in placeholder READMEs, `docs/modules/00_module_index.md`, historical OpenSpec fixtures, and this governance fixture.
 - `services/slurm_gateway/config.py` records that `workers/sbatch_templates/` is legacy and that `SlurmGatewaySettings.template_dir` defaults to `infra/sbatch`.
 - Active Slurm deployment and test evidence points to `infra/sbatch`: `infra/compose.compute.yml`, `infra/systemd/nhms-slurm-gateway.service`, `infra/docker/Dockerfile.app`, `tests/test_orchestrator.py`, `tests/test_analysis_pipeline.py`, `tests/test_real_slurm_gateway.py`, and `tests/test_slurm_route_contract.py`.
-- QHH diagnostic references are headed by `DIAGNOSTIC-ONLY` markers in `scripts/run_qhh_continuous.py`, `scripts/run_qhh_cycle.sh`, and `scripts/create_qhh_shud_manifest.py`. Static guard tests exist in `tests/test_qhh_scripts_static.py` and `tests/test_role_boundary_static.py`.
+- QHH diagnostic references are headed by `DIAGNOSTIC-ONLY` markers in `scripts/run_qhh_continuous.py`, `scripts/run_qhh_cycle.sh`, and `scripts/create_qhh_shud_manifest.py`.
+  `scripts/run_qhh_backend_smoke.sh` is documented by `docs/runbooks/qhh-backend-smoke.md` and `docs/runbooks/qhh-mvp-smoke-evidence.md` as live diagnostic/reproduction evidence, invokes `scripts/create_qhh_shud_manifest.py`, and is covered by static tests in `tests/test_qhh_scripts_static.py`.
+  Static guard tests also exist in `tests/test_role_boundary_static.py`.
 - Broad API route mocks exist in eight Playwright specs under `apps/frontend/e2e`.
 - `.github/workflows/ci.yml` contains the paused `frontend-m15-visual` job with `if: needs.changes.outputs.frontend == 'true' && false`.
 
-`D2` confirmed both governed candidates and active counterparts are present:
+`D2` confirmed both governed candidates and active counterparts are present, with generated directories intentionally excluded:
 
 - Governed candidates: `apps/web`, `services/tile-publisher`, `workers/flood-frequency`, `workers/forcing-producer`, `workers/output-parser`, `workers/sbatch_templates`, and `workers/shud-runtime`.
-- Active counterparts: `apps/frontend`, `services/tile_publisher`, `workers/flood_frequency`, `workers/forcing_producer`, `workers/output_parser`, and `workers/shud_runtime`.
+- Active counterparts: `apps/frontend`, `services/tile_publisher`, `services/tiles`, `workers/flood_frequency`, `workers/forcing_producer`, `workers/output_parser`, and `workers/shud_runtime`.
 - Test and workflow surfaces: `apps/frontend/e2e`, `scripts`, and `.github/workflows`.
+- Excluded generated directories: `apps/frontend/node_modules`, `apps/frontend/dist`, and any `__pycache__` subtree.
 
 `D3` confirmed the placeholder candidates are not full implementation trees:
 
@@ -113,6 +116,13 @@ rg -n "frontend-m15-visual|&& false" .github/workflows/ci.yml CLAUDE.md progress
 
 `D6` confirmed `workers/sbatch_templates` contains legacy single-run templates, while `infra/sbatch` contains the canonical production template set including `publish_tiles.sbatch`, array templates, analysis templates, `hindcast.sbatch`, and `smoke.sbatch`.
 
+`D7` confirmed both the tile publisher production counterpart and display tile consumers:
+
+- `services/orchestrator/cli.py` and `services/orchestrator/chain.py` import `services.tile_publisher`; `infra/sbatch/publish_tiles.sbatch` invokes `nhms-pipeline publish-tiles`.
+- `apps/api/routes/flood_alerts.py` imports `services.tiles.mvt` and owns `/api/v1/tiles/flood-return-period`, hydro, national hydro, and river-network tile routes.
+- `services/tiles/mvt.py` provides MVT cache, metadata, SQL, and tile URL-template helpers for the display routes.
+- `apps/frontend/src/components/flood` and `apps/frontend/src/components/map` consume flood-return-period tile metadata and render GeoJSON/MVT display layers.
+
 ## Governed Inventory
 
 | path | status | owner_area | active_counterpart | active build/import/deploy evidence | docs/runbook migration | proposed final action | verification_command |
@@ -127,6 +137,7 @@ rg -n "frontend-m15-visual|&& false" .github/workflows/ci.yml CLAUDE.md progress
 | `scripts/run_qhh_continuous.py` | `diagnostic` | `compute_control` | Production scheduler/orchestrator paths under `services/orchestrator`; canonical Slurm templates under `infra/sbatch` | File has a `DIAGNOSTIC-ONLY` header. `docs/runbooks/qhh-continuous.md` and `docs/runbooks/qhh-22-business-bringup.md` describe it as QHH bring-up, diagnostic, reproduction, or evidence path. Static tests keep QHH diagnostic tokens out of production orchestrator code. | #364 should add or update a diagnostic manifest and point production runbooks to generic scheduler/orchestrator commands. | Keep available until #364 explicitly retires, wraps, or relocates it with compatibility notes. This row is not approval to move it. | `D1`, `D8` |
 | `scripts/run_qhh_cycle.sh` | `diagnostic` | `compute_control` | Production scheduler/orchestrator paths under `services/orchestrator`; canonical Slurm templates under `infra/sbatch` | File has a `DIAGNOSTIC-ONLY` header. It invokes `scripts/create_qhh_shud_manifest.py` and is called by the diagnostic continuous runner and diagnostic sbatch wrapper. Static tests cover QHH diagnostic script tokens. | #364 should keep the runbook migration explicit: diagnostic reproduction remains separate from production automation. | Keep available until #364 explicitly retires, wraps, or relocates it with compatibility notes. | `D1`, `D8` |
 | `scripts/run_qhh_cycle.sbatch` | `diagnostic` | `compute_control` | Production scheduler/orchestrator paths under `services/orchestrator`; canonical Slurm templates under `infra/sbatch` | Companion diagnostic sbatch invokes `scripts/run_qhh_cycle.sh`. It is documented by QHH diagnostic runbooks and is not a canonical gateway-owned `infra/sbatch` production template. | #364 should include it in the diagnostic manifest if QHH script isolation changes path layout. | Keep available unless #364 replaces it with wrappers and runbook migration. | `D1`, `D8` |
+| `scripts/run_qhh_backend_smoke.sh` | `diagnostic` | `compute_control` | Production scheduler/orchestrator paths under `services/orchestrator`; canonical Slurm templates under `infra/sbatch` | Backend-smoke script invokes `scripts/create_qhh_shud_manifest.py` as part of a live diagnostic/reproduction chain. `docs/runbooks/qhh-backend-smoke.md` documents it as QHH GFS backend-smoke live diagnostic/reproduction evidence, and `docs/runbooks/qhh-mvp-smoke-evidence.md` records the `Q214-GFS-01` diagnostic evidence boundary. `tests/test_qhh_scripts_static.py` covers backend-smoke script assumptions while static guard tests keep diagnostic manifest-builder tokens out of production orchestrator code. | #364 should include backend-smoke in any QHH diagnostic manifest and keep production scheduler/runbook replacement separate from this reproduction evidence. | Keep available until #364 explicitly retires, wraps, or relocates it with compatibility notes and production replacement evidence. | `D1`, `D8` |
 | `scripts/create_qhh_shud_manifest.py` | `diagnostic` | `compute_control` | Production manifest generation under orchestrator/model-registry paths, not this standalone QHH helper | File has a `DIAGNOSTIC-ONLY` header. `scripts/run_qhh_cycle.sh` calls it; static tests assert production orchestrator sources do not invoke the diagnostic manifest builder. | #364 should state the production manifest replacement and keep the diagnostic manifest-builder status explicit. | Keep available until #364 explicitly retires, wraps, or relocates it with production replacement evidence. | `D1`, `D8` |
 | `apps/frontend/e2e/forecast.spec.ts` | `test-only` | `display_readonly` | Future live display-readonly e2e profile; current app under `apps/frontend` | `D4` found 6 broad `page.route('**/api/v1/**')` mocks. It is useful deterministic frontend regression evidence, not live API evidence. | #365 should rename or group as mocked regression and keep live receipt docs separate. | #365 owns any rename/config split/no-mock guard. | `D1`, `D4` |
 | `apps/frontend/e2e/flood-alerts.spec.ts` | `test-only` | `display_readonly` | Future live display-readonly e2e profile; current app under `apps/frontend` | `D4` found 3 broad API route mocks. It cannot be cited as live display proof. | #365 should rename or group as mocked regression and keep live flood display receipt docs separate. | #365 owns any rename/config split/no-mock guard. | `D1`, `D4` |

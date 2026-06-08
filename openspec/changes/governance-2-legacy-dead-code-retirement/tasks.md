@@ -1,6 +1,6 @@
 ## 0. Dependency gate
 
-- [ ] 0.1 Confirm `governance-0-ci-contract-baseline` is merged and green, or record an explicit maintainer waiver listing current red checks.
+- [x] 0.1 Confirm `governance-0-ci-contract-baseline` is merged and green, or record an explicit maintainer waiver listing current red checks. Evidence recorded 2026-06-09: issue #358 closed 2026-06-08 17:33:44Z via merged PR #375 (`fix(contract): reconcile generated frontend API types`, merged 2026-06-08 17:33:43Z); issue #359 closed 2026-06-08 18:21:30Z via merged PR #376 (`chore(tooling): run Makefile Python targets via uv`, merged 2026-06-08 18:21:28Z); parent baseline issue #353 closed 2026-06-08 18:22:19Z before #362 inventory completion.
 
 ## 1. Inventory and classification
 
@@ -11,16 +11,18 @@
 - [ ] 1.5 Record discovery commands and results precisely enough that #363-#366 can proceed without redoing broad discovery.
 - [ ] 1.6 Required #362 evidence:
   - Input command:
-    `rg -n --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**' --glob '!**/__pycache__/**' "apps/web|workers/(forcing-producer|shud-runtime|output-parser|flood-frequency|sbatch_templates)|services/tile-publisher|services/tile_publisher|infra/sbatch|SLURM_GATEWAY_TEMPLATE_DIR|template_dir|run_qhh_continuous|run_qhh_cycle|create_qhh_shud_manifest|frontend-m15-visual|&& false|page\\.route\\('.*api/v1" .`
+    `rg -n --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**' --glob '!**/__pycache__/**' "apps/web|workers/(forcing-producer|shud-runtime|output-parser|flood-frequency|sbatch_templates)|services/tile-publisher|services/tile_publisher|infra/sbatch|SLURM_GATEWAY_TEMPLATE_DIR|template_dir|run_qhh_continuous|run_qhh_cycle|run_qhh_backend_smoke|create_qhh_shud_manifest|frontend-m15-visual|&& false|page\\.route\\('.*api/v1" .`
     Expected output: references needed to classify the governed paths plus
     active counterparts such as `apps/frontend`, underscore worker packages,
     `infra/sbatch`, Slurm gateway template settings, and tile publisher/display
     implementation. Each relevant hit is reflected or summarized in the
     inventory evidence column.
   - Input command:
-    `find apps workers services scripts .github/workflows -maxdepth 3 -type d | sort`
+    `find apps workers services scripts .github/workflows -maxdepth 3 \( -path apps/frontend/node_modules -o -path apps/frontend/dist -o -path '*/__pycache__' \) -prune -o -type d -print | sort`
     Expected output: governed candidate directories and active counterpart
-    directories are visible and reflected in the inventory.
+    directories are visible and reflected in the inventory; generated directories
+    such as `apps/frontend/node_modules`, `apps/frontend/dist`, and `__pycache__`
+    subtrees are intentionally excluded.
   - Input command: `uv run ruff check .`
     Expected output: exit 0.
   - Input command:
