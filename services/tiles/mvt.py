@@ -790,7 +790,7 @@ def layer_metadata(
         "source_layer": base["maplibre_source_layer"],
         "property_schema_version": MVT_SCHEMA_VERSION,
         "property_schema": property_schema,
-        "min_zoom": 0,
+        "min_zoom": base.get("min_zoom", 0),
         "max_zoom": MVT_MAX_ZOOM,
         "bounds_crs": "EPSG:3857",
         "bounds": WEB_MERCATOR_BOUNDS,

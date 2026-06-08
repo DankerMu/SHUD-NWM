@@ -3320,6 +3320,10 @@ def test_unscoped_discharge_catalog_uses_national_template_and_union_valid_times
     assert metadata["url_template"] == metadata["tile_url_template"]
     assert metadata["required_placeholders"] == ["valid_time", "z", "x", "y"]
     assert metadata["maplibre_source_layer"] == "hydro"
+    # National union tiles are gated to z>=7: a single low-zoom tile holding an entire
+    # basin's segments overruns the per-tile MVT budget (413). Front-end source must not
+    # request z<7. Guards against regressing the hardcoded min_zoom=0 in layer_metadata().
+    assert metadata["min_zoom"] == 7
     valid_times = metadata["valid_times"]
     assert _iso(rnv1_time) in valid_times
     assert _iso(rnv2_time) in valid_times
