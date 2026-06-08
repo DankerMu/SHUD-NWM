@@ -249,7 +249,7 @@ Current guard tests:
 
 ## #361 Hard Gate
 
-#361 moved the API-independent auth policy contract to
+`#361` moved the API-independent auth policy contract to
 `packages/common/auth_policy.py`. Shared packages, orchestrator modules,
 workers, documented shared-contract Python files, and
 `services/production_closure/ops_validation.py` must have zero imports from
