@@ -3320,11 +3320,12 @@ def test_unscoped_discharge_catalog_uses_national_template_and_union_valid_times
     assert metadata["url_template"] == metadata["tile_url_template"]
     assert metadata["required_placeholders"] == ["valid_time", "z", "x", "y"]
     assert metadata["maplibre_source_layer"] == "hydro"
-    # National union tiles are gated to z>=4: low zoom no longer overruns the per-tile
+    # National union tiles are gated to z>=3: low zoom no longer overruns the per-tile
     # budget because postgis_tile_sql("hydro-national") generalizes to the q_down trunk
-    # (per-network PERCENT_RANK) and coarsens geometry by zoom. Front-end source may
-    # request z>=4. Guards against regressing the hardcoded min_zoom=0 in layer_metadata().
-    assert metadata["min_zoom"] == 4
+    # (per-network PERCENT_RANK) and coarsens geometry by zoom. min_zoom=3 aligns with the
+    # front-end initial national view (zoom 3.35) so trunk rivers show without zooming in.
+    # Guards against regressing the hardcoded min_zoom=0 in layer_metadata().
+    assert metadata["min_zoom"] == 3
     valid_times = metadata["valid_times"]
     assert _iso(rnv1_time) in valid_times
     assert _iso(rnv2_time) in valid_times

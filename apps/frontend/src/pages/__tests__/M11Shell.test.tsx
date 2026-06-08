@@ -67,7 +67,8 @@ vi.mock('react-map-gl/maplibre', () => ({
     ) => {
       const canvasStyle: Record<string, string> = {}
       const overlayFeature = {
-        layer: { id: 'm11-flood-return-period-line' },
+        // 交互命中走透明加宽热区层（-hit），可见主线保持细，故 hover/click 命中 id 带 -hit 后缀。
+        layer: { id: 'm11-flood-return-period-line-hit' },
         properties: { segment_id: 'seg-1', river_network_version_id: 'rn-v1' },
       }
       const riverFeature = {
@@ -633,7 +634,7 @@ describe('M11 visual foundation shell', () => {
 
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period')
-    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-flood-return-period-line')
+    expect(screen.getByTestId('mock-maplibre-map')).toHaveAttribute('data-interactive-layer-ids', 'm11-flood-return-period-line-hit')
     expect(mapSources.at(-1)).toMatchObject({
       id: 'm11-flood-return-period-source',
       type: 'vector',
@@ -643,9 +644,15 @@ describe('M11 visual foundation shell', () => {
       ],
     })
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
-    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line', source: 'm11-flood-return-period-source' })
-    expect(JSON.stringify(mapLayers.at(-1)?.paint)).toContain('warning_level')
-    expect(JSON.stringify(mapLayers.at(-1)?.paint)).toContain('return_period')
+    const floodMainLayer = mapLayers.find((layer) => layer.id === 'm11-flood-return-period-line')
+    expect(floodMainLayer).toMatchObject({ id: 'm11-flood-return-period-line', source: 'm11-flood-return-period-source' })
+    expect(JSON.stringify(floodMainLayer?.paint)).toContain('warning_level')
+    expect(JSON.stringify(floodMainLayer?.paint)).toContain('return_period')
+    // 透明加宽热区层存在且不可见（line-opacity:0），让细河段可点中。
+    expect(mapLayers.find((layer) => layer.id === 'm11-flood-return-period-line-hit')).toMatchObject({
+      id: 'm11-flood-return-period-line-hit',
+      source: 'm11-flood-return-period-source',
+    })
 
     await user.click(screen.getByRole('button', { name: '地形底图' }))
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'terrain' })
@@ -655,7 +662,7 @@ describe('M11 visual foundation shell', () => {
     rerender(<M11MapSurface state={{ ...floodState, basemap: 'terrain' }} layers={layersWithMvt} onQueryChange={onQueryChange} />)
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
     expect(mapSources.at(-1)).toMatchObject({ id: 'm11-flood-return-period-source', type: 'vector' })
-    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-flood-return-period-line' })
+    expect(mapLayers.find((layer) => layer.id === 'm11-flood-return-period-line')).toMatchObject({ id: 'm11-flood-return-period-line' })
   })
 
   it('does not register M11 vector overlays when selected valid time is not advertised by metadata', () => {
@@ -694,7 +701,7 @@ describe('M11 visual foundation shell', () => {
         `${window.location.origin}/api/v1/tiles/hydro/run-gfs/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=discharge-cache-v1`,
       ],
     })
-    const paint = JSON.stringify(mapLayers.at(-1)?.paint)
+    const paint = JSON.stringify(mapLayers.find((layer) => layer.id === 'm11-discharge-line')?.paint)
     expect(paint).toContain('value')
     expect(paint).not.toContain('warning_level')
     expect(paint).not.toContain('return_period')
@@ -723,10 +730,15 @@ describe('M11 visual foundation shell', () => {
     // 模板无 {run_id}，填充后不得残留未替换占位。
     expect(String((source?.tiles as string[])[0])).not.toContain('{run_id}')
     expect(String((source?.tiles as string[])[0])).not.toContain('run-gfs')
-    expect(mapLayers.at(-1)).toMatchObject({
+    expect(mapLayers.find((layer) => layer.id === 'm11-discharge-line')).toMatchObject({
       id: 'm11-discharge-line',
       source: 'm11-discharge-source',
       'source-layer': 'hydro',
+    })
+    // 透明加宽热区层（-hit）也注册，让细河段可点中开流量弹窗。
+    expect(mapLayers.find((layer) => layer.id === 'm11-discharge-line-hit')).toMatchObject({
+      id: 'm11-discharge-line-hit',
+      source: 'm11-discharge-source',
     })
     // national 正常注册 → 不应再出现"缺少可追溯 run_id"诚实空态。
     expect(screen.queryByTestId('m11-map-unavailable')).not.toBeInTheDocument()
@@ -773,8 +785,8 @@ describe('M11 visual foundation shell', () => {
         `${window.location.origin}/api/v1/tiles/hydro/run-gfs/water_level/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=water-level-cache-v1`,
       ],
     })
-    expect(mapLayers.at(-1)).toMatchObject({ id: 'm11-water-level-line', source: 'm11-water-level-source' })
-    const paint = JSON.stringify(mapLayers.at(-1)?.paint)
+    expect(mapLayers.find((layer) => layer.id === 'm11-water-level-line')).toMatchObject({ id: 'm11-water-level-line', source: 'm11-water-level-source' })
+    const paint = JSON.stringify(mapLayers.find((layer) => layer.id === 'm11-water-level-line')?.paint)
     const dischargePaint = JSON.stringify(
       buildM11RegisteredOverlay(
         state,

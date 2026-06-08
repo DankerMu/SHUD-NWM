@@ -654,9 +654,9 @@ _NATIONAL_DISCHARGE_METADATA = {
     # 全国并集瓦片低 zoom 单块塞下整流域河段会超 per-tile 预算（413）。改为按 zoom 干流概化：
     # postgis_tile_sql("hydro-national") 用 q_down(value) 的 per-network PERCENT_RANK 在低 zoom
     # 只保留高流量干流（z<=4 顶 10%、z5 顶 30%、z6 顶 60%、z>=7 全量），并按 zoom 加粗
-    # ST_SimplifyPreserveTopology 容差，使 z4 起也能落入预算。故 min_zoom 从 7 降到 4，
-    # 前端 source 可请求 z>=4 看主干河道。
-    "min_zoom": 4,
+    # ST_SimplifyPreserveTopology 容差，使 z3 起也能落入预算（z3 实测 ~55KB）。
+    # min_zoom=3 对齐前端初始全国视图 zoom=3.35，使默认（未放大）也能看到主干河道。
+    "min_zoom": 3,
 }
 
 

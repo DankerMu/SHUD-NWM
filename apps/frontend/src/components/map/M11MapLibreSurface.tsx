@@ -249,7 +249,7 @@ export function M11MapLibreSurface({
   const interactiveLayerIds = [
     ...(basinRiverFeatureCollection.features.length > 0 ? ['m11-basin-river-line'] : []),
     ...(basinFeatureCollection.features.length > 0 ? ['m11-basin-fill'] : []),
-    ...(renderableOverlay ? [renderableOverlay.layer.id] : []),
+    ...(renderableOverlay ? [`${renderableOverlay.layer.id}-hit`] : []),
     ...(showStationLayer ? [MET_STATION_POINT_LAYER_ID, MET_STATION_CLUSTER_LAYER_ID] : []),
   ]
 
@@ -306,7 +306,7 @@ export function M11MapLibreSurface({
           return
         }
       }
-      const overlayFeature = renderableOverlay ? findEventFeature(event, renderableOverlay.layer.id) : null
+      const overlayFeature = renderableOverlay ? findEventFeature(event, `${renderableOverlay.layer.id}-hit`) : null
       if (!renderableOverlay || !overlayFeature) {
         setHoveredRiverSegmentId(null)
         onOverlayHover?.(null)
@@ -354,7 +354,7 @@ export function M11MapLibreSurface({
           return
         }
       }
-      const overlayFeature = renderableOverlay ? findEventFeature(event, renderableOverlay.layer.id) : null
+      const overlayFeature = renderableOverlay ? findEventFeature(event, `${renderableOverlay.layer.id}-hit`) : null
       if (renderableOverlay && overlayFeature) {
         onOverlayClick?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
       }
@@ -687,18 +687,31 @@ function M11OverlayPrimitive({
   overlay: M11RegisteredOverlay
   data: FloodReturnPeriodFeatureCollection | null
 }) {
-  // 深色底衬（casing）：在主线之下垫一条更宽的深色线，浅色底图上让河网清晰可辨。
-  // 仅对 line 叠加层生成；id 带 -casing 后缀且不进 interactiveLayerIds，故不参与点击/hover。
-  const casingLayer =
-    overlay.layer.type === 'line'
-      ? {
-          id: `${overlay.layer.id}-casing`,
-          type: 'line' as const,
-          source: overlay.sourceId,
-          ...(overlay.layer['source-layer'] ? { 'source-layer': overlay.layer['source-layer'] } : {}),
-          paint: m11OverlayCasingPaint(overlay.layerId),
-        }
-      : null
+  // line 叠加层渲染三层（z 序自下而上）：白色光晕底衬 → 彩色主线 → 透明加宽点击热区。
+  // 热区 id 带 -hit 后缀，是唯一进 interactiveLayerIds 的层，让细河段也好点中。
+  const isLine = overlay.layer.type === 'line'
+  const sourceLayerProp = overlay.layer['source-layer'] ? { 'source-layer': overlay.layer['source-layer'] } : {}
+  const casingLayer = isLine
+    ? {
+        id: `${overlay.layer.id}-casing`,
+        type: 'line' as const,
+        source: overlay.sourceId,
+        ...sourceLayerProp,
+        layout: M11_ROUND_LINE_LAYOUT,
+        paint: m11OverlayCasingPaint(overlay.layerId),
+      }
+    : null
+  const hitLayer = isLine
+    ? {
+        id: `${overlay.layer.id}-hit`,
+        type: 'line' as const,
+        source: overlay.sourceId,
+        ...sourceLayerProp,
+        layout: M11_ROUND_LINE_LAYOUT,
+        paint: M11_OVERLAY_HIT_PAINT,
+      }
+    : null
+  const mainLayer = isLine ? { ...overlay.layer, layout: M11_ROUND_LINE_LAYOUT } : overlay.layer
   if (overlay.source.type === 'vector') {
     return (
       <Source
@@ -711,7 +724,8 @@ function M11OverlayPrimitive({
         promoteId="feature_id"
       >
         {casingLayer ? <Layer {...casingLayer} /> : null}
-        <Layer {...overlay.layer} />
+        <Layer {...mainLayer} />
+        {hitLayer ? <Layer {...hitLayer} /> : null}
       </Source>
     )
   }
@@ -719,21 +733,31 @@ function M11OverlayPrimitive({
   return (
     <Source id={overlay.sourceId} type="geojson" data={data} promoteId="feature_id">
       {casingLayer ? <Layer {...casingLayer} /> : null}
-      <Layer {...overlay.layer} />
+      <Layer {...mainLayer} />
+      {hitLayer ? <Layer {...hitLayer} /> : null}
     </Source>
   )
 }
 
-// 底衬 paint：深色、比主线宽约 2px、半透明，仅作对比衬底，不传达数值。
+// 光晕底衬 paint：白色、比主线宽约 2px、半透明，给彩色河段一圈干净的描边光晕（类似标注 halo），
+// 浅底图上清晰可辨且不像深色道路（弃用早期深色 casing）。
 function m11OverlayCasingPaint(layerId: string): LayerProps['paint'] {
   const isWaterLevel = layerId === 'water-level'
   const valueStops = isWaterLevel ? [0, 3.4, 1, 4, 2, 5, 4, 6.2, 8, 7.4] : [0, 3.6, 1000, 4.2, 5000, 5.4, 10000, 6.6, 50000, 8.2]
   return {
-    'line-color': '#0B2942',
-    'line-opacity': 0.5,
+    'line-color': '#FFFFFF',
+    'line-opacity': 0.85,
     'line-width': ['interpolate', ['linear'], ['coalesce', ['get', 'value'], 0], ...valueStops],
   }
 }
+
+// 透明点击热区 paint：不可见但加宽，便于鼠标点中细河段（可见线仍细）。
+const M11_OVERLAY_HIT_PAINT: LayerProps['paint'] = {
+  'line-color': '#000000',
+  'line-opacity': 0,
+  'line-width': 16,
+}
+const M11_ROUND_LINE_LAYOUT = { 'line-cap': 'round', 'line-join': 'round' } as const
 
 function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection }) {
   return (
