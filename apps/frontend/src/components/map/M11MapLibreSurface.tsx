@@ -604,39 +604,41 @@ function m11RegisteredOverlayPaint(layerId: string): LayerProps['paint'] {
 
 function dischargeTileLayerPaint(): LayerProps['paint'] {
   return {
+    // 颜色下限改可见中蓝（原 #E3F2FD 近白，浅底图上隐形）；低→高流量 蓝→红。
     'line-color': [
       'interpolate',
       ['linear'],
       ['coalesce', ['get', 'value'], 0],
       0,
-      '#E3F2FD',
+      '#6BAED6',
       500,
-      '#90CAF9',
+      '#3182BD',
       1000,
-      '#42A5F5',
+      '#08519C',
       5000,
-      '#1E88E5',
+      '#08306B',
       10000,
-      '#FF9800',
+      '#F16913',
       50000,
-      '#F44336',
+      '#CB181D',
     ],
+    // 最小线宽 1.2→2.2，干流更粗，浅底图上清晰可见。
     'line-width': [
       'interpolate',
       ['linear'],
       ['coalesce', ['get', 'value'], 0],
       0,
-      1.2,
+      2.2,
       1000,
-      2,
+      3,
       5000,
-      3.2,
+      4.2,
       10000,
-      4.4,
+      5.4,
       50000,
-      6,
+      7,
     ],
-    'line-opacity': ['case', ['has', 'value'], 0.86, 0.42],
+    'line-opacity': ['case', ['has', 'value'], 0.95, 0.5],
   }
 }
 
@@ -664,17 +666,17 @@ function waterLevelTileLayerPaint(): LayerProps['paint'] {
       ['linear'],
       ['coalesce', ['get', 'value'], 0],
       0,
-      1.2,
+      2.2,
       1,
-      2,
-      2,
       3,
+      2,
+      3.8,
       4,
-      4.2,
+      5,
       8,
-      5.4,
+      6.2,
     ],
-    'line-opacity': ['case', ['has', 'value'], 0.86, 0.42],
+    'line-opacity': ['case', ['has', 'value'], 0.95, 0.5],
   }
 }
 
@@ -685,6 +687,18 @@ function M11OverlayPrimitive({
   overlay: M11RegisteredOverlay
   data: FloodReturnPeriodFeatureCollection | null
 }) {
+  // 深色底衬（casing）：在主线之下垫一条更宽的深色线，浅色底图上让河网清晰可辨。
+  // 仅对 line 叠加层生成；id 带 -casing 后缀且不进 interactiveLayerIds，故不参与点击/hover。
+  const casingLayer =
+    overlay.layer.type === 'line'
+      ? {
+          id: `${overlay.layer.id}-casing`,
+          type: 'line' as const,
+          source: overlay.sourceId,
+          ...(overlay.layer['source-layer'] ? { 'source-layer': overlay.layer['source-layer'] } : {}),
+          paint: m11OverlayCasingPaint(overlay.layerId),
+        }
+      : null
   if (overlay.source.type === 'vector') {
     return (
       <Source
@@ -696,6 +710,7 @@ function M11OverlayPrimitive({
         maxzoom={overlay.source.maxzoom}
         promoteId="feature_id"
       >
+        {casingLayer ? <Layer {...casingLayer} /> : null}
         <Layer {...overlay.layer} />
       </Source>
     )
@@ -703,9 +718,21 @@ function M11OverlayPrimitive({
   if (!data) return null
   return (
     <Source id={overlay.sourceId} type="geojson" data={data} promoteId="feature_id">
+      {casingLayer ? <Layer {...casingLayer} /> : null}
       <Layer {...overlay.layer} />
     </Source>
   )
+}
+
+// 底衬 paint：深色、比主线宽约 2px、半透明，仅作对比衬底，不传达数值。
+function m11OverlayCasingPaint(layerId: string): LayerProps['paint'] {
+  const isWaterLevel = layerId === 'water-level'
+  const valueStops = isWaterLevel ? [0, 3.4, 1, 4, 2, 5, 4, 6.2, 8, 7.4] : [0, 3.6, 1000, 4.2, 5000, 5.4, 10000, 6.6, 50000, 8.2]
+  return {
+    'line-color': '#0B2942',
+    'line-opacity': 0.5,
+    'line-width': ['interpolate', ['linear'], ['coalesce', ['get', 'value'], 0], ...valueStops],
+  }
 }
 
 function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection }) {

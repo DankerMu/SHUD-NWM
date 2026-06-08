@@ -361,32 +361,88 @@ def postgis_tile_sql(layer: str) -> str:
             "variable": "variable IS NULL OR variable::text = ''",
             "valid_time": "valid_time IS NULL",
         }
+        # Trunk generalization by zoom. The DB has no stream_order (core.river_segment
+        # only carries an unreliable segment_order index), so q_down (`value` joined by
+        # :valid_time) is the only trunk-importance proxy: high flow == main channel.
+        # We rank segments WITHIN each river network (PERCENT_RANK partitioned by
+        # river_network_version_id, so a small basin's trunk is kept even though its
+        # absolute q is lower than a big river's tributary) and keep only the top
+        # fraction at low zoom. NULL-value segments cannot be ranked as trunk and are
+        # dropped at low zoom (low zoom only shows data-bearing main channels). The CASE
+        # is keyed on the existing :z bind (ST_TileEnvelope(:z,...)). Cutoffs:
+        #   z<=4 -> top 10% (cutoff 0.90): main trunk only
+        #   z=5  -> top 30% (cutoff 0.70)
+        #   z=6  -> top 60% (cutoff 0.40)
+        #   z>=7 -> no filter (full detail; preserves prior behavior).
+        # The percent_rank filter runs BEFORE bounded_rows/budget counting (it is in the
+        # source CTE), so it truly reduces the feature set fed to the per-tile budget.
+        #
+        # Per-zoom coarse ST_SimplifyPreserveTopology (mercator metres) on the source geom
+        # is applied here too so low-zoom trunks are also cheaper in coordinates; tolerance
+        # decreases with zoom. Topology is preserved. z>=7 keeps the raw geom and relies on
+        # the shared pixel-based simplify in the template.
+        #   z<=4 -> 2000m, z=5 -> 1000m, z=6 -> 500m, z>=7 -> 0 (no extra simplify).
         source_cte = """
-            SELECT (ts.river_network_version_id || '::' || ts.river_segment_id) AS feature_id,
-                   ts.river_segment_id AS segment_id,
-                   ts.river_segment_id,
-                   ts.river_network_version_id,
-                   ts.basin_version_id,
-                   ts.value, ts.unit,
-                   ts.quality_flag,
-                   ts.run_id, ts.variable,
-                   to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
-                   rs.geom
-            FROM hydro.river_timeseries ts
-            JOIN (
-                SELECT DISTINCT ON (mi.river_network_version_id)
-                       h.run_id, mi.river_network_version_id
-                FROM hydro.hydro_run h
-                JOIN core.model_instance mi ON mi.model_id = h.model_id
-                WHERE h.status IN ('frequency_done', 'published')
-                  AND mi.river_network_version_id IS NOT NULL
-                ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
-            ) lr ON lr.run_id = ts.run_id AND lr.river_network_version_id = ts.river_network_version_id
-            JOIN core.river_segment rs
-              ON rs.river_segment_id = ts.river_segment_id
-             AND rs.river_network_version_id = ts.river_network_version_id
-            WHERE ts.variable = :variable
-              AND ts.valid_time = :valid_time
+            SELECT feature_id, segment_id, river_segment_id, river_network_version_id,
+                   basin_version_id, value, unit, quality_flag, run_id, variable,
+                   valid_time,
+                   CASE
+                       WHEN :z >= 7 THEN geom
+                       ELSE ST_Transform(
+                           ST_SimplifyPreserveTopology(
+                               ST_Transform(geom, 3857),
+                               CASE
+                                   WHEN :z <= 4 THEN 2000.0
+                                   WHEN :z = 5 THEN 1000.0
+                                   ELSE 500.0
+                               END
+                           ),
+                           4490
+                       )
+                   END AS geom
+            FROM (
+                SELECT (ts.river_network_version_id || '::' || ts.river_segment_id) AS feature_id,
+                       ts.river_segment_id AS segment_id,
+                       ts.river_segment_id,
+                       ts.river_network_version_id,
+                       ts.basin_version_id,
+                       ts.value, ts.unit,
+                       ts.quality_flag,
+                       ts.run_id, ts.variable,
+                       to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
+                       rs.geom,
+                       CASE
+                           WHEN ts.value IS NULL THEN NULL
+                           ELSE PERCENT_RANK() OVER (
+                               PARTITION BY ts.river_network_version_id
+                               ORDER BY ts.value
+                           )
+                       END AS value_percent_rank
+                FROM hydro.river_timeseries ts
+                JOIN (
+                    SELECT DISTINCT ON (mi.river_network_version_id)
+                           h.run_id, mi.river_network_version_id
+                    FROM hydro.hydro_run h
+                    JOIN core.model_instance mi ON mi.model_id = h.model_id
+                    WHERE h.status IN ('frequency_done', 'published')
+                      AND mi.river_network_version_id IS NOT NULL
+                    ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
+                ) lr ON lr.run_id = ts.run_id AND lr.river_network_version_id = ts.river_network_version_id
+                JOIN core.river_segment rs
+                  ON rs.river_segment_id = ts.river_segment_id
+                 AND rs.river_network_version_id = ts.river_network_version_id
+                WHERE ts.variable = :variable
+                  AND ts.valid_time = :valid_time
+            ) ranked
+            WHERE :z >= 7
+               OR (
+                   value_percent_rank IS NOT NULL
+                   AND value_percent_rank >= CASE
+                       WHEN :z <= 4 THEN 0.90
+                       WHEN :z = 5 THEN 0.70
+                       ELSE 0.40
+                   END
+               )
         """
     elif layer == "flood-return-period":
         required_property_checks = {
@@ -595,9 +651,12 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
 _NATIONAL_DISCHARGE_METADATA = {
     "tile_url_template": "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf",
     "required_placeholders": ["valid_time", "z", "x", "y"],
-    # 全国并集瓦片在低 zoom 单块塞下整流域河段会超 per-tile 预算（实测最密流域 Heihe z7 起进预算）。
-    # 设 min_zoom=7 让前端 source 不请求 z<7、避开 413；低 zoom 看干流需 stream_order 概化（后续）。
-    "min_zoom": 7,
+    # 全国并集瓦片低 zoom 单块塞下整流域河段会超 per-tile 预算（413）。改为按 zoom 干流概化：
+    # postgis_tile_sql("hydro-national") 用 q_down(value) 的 per-network PERCENT_RANK 在低 zoom
+    # 只保留高流量干流（z<=4 顶 10%、z5 顶 30%、z6 顶 60%、z>=7 全量），并按 zoom 加粗
+    # ST_SimplifyPreserveTopology 容差，使 z4 起也能落入预算。故 min_zoom 从 7 降到 4，
+    # 前端 source 可请求 z>=4 看主干河道。
+    "min_zoom": 4,
 }
 
 

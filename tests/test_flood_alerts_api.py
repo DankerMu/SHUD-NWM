@@ -3320,10 +3320,11 @@ def test_unscoped_discharge_catalog_uses_national_template_and_union_valid_times
     assert metadata["url_template"] == metadata["tile_url_template"]
     assert metadata["required_placeholders"] == ["valid_time", "z", "x", "y"]
     assert metadata["maplibre_source_layer"] == "hydro"
-    # National union tiles are gated to z>=7: a single low-zoom tile holding an entire
-    # basin's segments overruns the per-tile MVT budget (413). Front-end source must not
-    # request z<7. Guards against regressing the hardcoded min_zoom=0 in layer_metadata().
-    assert metadata["min_zoom"] == 7
+    # National union tiles are gated to z>=4: low zoom no longer overruns the per-tile
+    # budget because postgis_tile_sql("hydro-national") generalizes to the q_down trunk
+    # (per-network PERCENT_RANK) and coarsens geometry by zoom. Front-end source may
+    # request z>=4. Guards against regressing the hardcoded min_zoom=0 in layer_metadata().
+    assert metadata["min_zoom"] == 4
     valid_times = metadata["valid_times"]
     assert _iso(rnv1_time) in valid_times
     assert _iso(rnv2_time) in valid_times
@@ -3372,6 +3373,39 @@ def test_hydro_national_tile_sql_binds_only_variable_and_valid_time() -> None:
     assert "ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC" in source_cte
     # National reuses the "hydro" maplibre source layer name for frontend parity.
     assert "ST_AsMVT(tile_rows, 'hydro'," in sql
+
+
+def test_hydro_national_tile_sql_generalizes_trunk_by_zoom() -> None:
+    statement = flood_alert_routes.postgis_tile_sql("hydro-national")
+    sql = re.sub(r"\s+", " ", statement)
+    source_cte = sql[sql.index("source_rows AS") : sql.index("bounded_rows AS")]
+    # Trunk proxy: per-network PERCENT_RANK over q_down (value); :z drives the cutoff.
+    assert "PERCENT_RANK() OVER ( PARTITION BY ts.river_network_version_id" in source_cte
+    assert "value_percent_rank" in source_cte
+    # Zoom-keyed value-threshold filter lives in the source CTE (before budget counting).
+    assert ":z >= 7" in source_cte
+    assert ":z <= 4 THEN 0.90" in source_cte
+    assert ":z = 5 THEN 0.70" in source_cte
+    # NULL-value segments are dropped at low zoom (only the z>=7 branch keeps them).
+    assert "value_percent_rank IS NOT NULL" in source_cte
+    # Per-zoom coarse simplification on the source geom, topology preserved.
+    assert "ST_SimplifyPreserveTopology" in source_cte
+    assert ":z <= 4 THEN 2000.0" in source_cte
+    # National still binds only :variable/:valid_time for identity (run/network resolved
+    # by DISTINCT ON); :z is the shared tile-envelope bind, not a national identity param.
+    assert ":run_id" not in source_cte
+    assert ":basin_version_id" not in source_cte
+    assert ":river_network_version_id" not in source_cte
+
+
+def test_single_run_hydro_tile_sql_has_no_zoom_trunk_filter() -> None:
+    # Zero-regression guard: the single-run "hydro" layer must not gain the national
+    # trunk-generalization clauses.
+    sql = re.sub(r"\s+", " ", flood_alert_routes.postgis_tile_sql("hydro"))
+    source_cte = sql[sql.index("source_rows AS") : sql.index("bounded_rows AS")]
+    assert "PERCENT_RANK" not in source_cte
+    assert "value_percent_rank" not in source_cte
+    assert ":z <= 4 THEN 0.90" not in source_cte
 
 
 @pytest.mark.parametrize(

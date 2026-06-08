@@ -277,12 +277,12 @@ function basinDetailToOverviewBasin(detail: BasinDetail): OverviewBasin {
   }
 }
 
-function mapFeatureStringProperty(feature: M11MapOverlayInteraction['feature'], key: string) {
+export function mapFeatureStringProperty(feature: M11MapOverlayInteraction['feature'], key: string) {
   const value = feature?.properties?.[key]
   return typeof value === 'string' && value.length > 0 ? value : null
 }
 
-function popupAnchorFromInteraction(interaction: M11MapOverlayInteraction): [number, number] | null {
+export function popupAnchorFromInteraction(interaction: M11MapOverlayInteraction): [number, number] | null {
   const geometry = interaction.feature?.geometry
   if (geometry && geometry.type === 'Point' && Array.isArray(geometry.coordinates)) {
     const [lon, lat] = geometry.coordinates as number[]

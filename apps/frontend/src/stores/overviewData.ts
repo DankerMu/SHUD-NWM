@@ -74,6 +74,10 @@ export interface OverviewDataSnapshot {
   summary: OverviewSummary
   layers: LayerState[]
   aggregationDecision: AggregationEndpointDecision
+  // basin_version_id → basin_id（人类 id）映射，源自已取的 model 列表。
+  // 全国总览不取 basin versions（basinCount>1），但点全国 discharge 河段开流量弹窗需要
+  // 由 feature.basin_version_id 反查 basin_id 去取该流域 latest-product 曲线。
+  basinVersionToBasinId: Record<string, string>
 }
 
 export interface BasinDataSnapshot {
@@ -1068,12 +1072,17 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
         resolvedRun: useSingleRunFloodSurfaces ? latestRun : null,
       })
       const aggregationDecision = decideAggregationEndpoint(requestPlan)
+      const basinVersionToBasinId: Record<string, string> = {}
+      for (const model of models as ApiModelInstance[]) {
+        if (model.basin_version_id && model.basin_id) basinVersionToBasinId[model.basin_version_id] = model.basin_id
+      }
       const snapshot: OverviewDataSnapshot = {
         requestScope: overviewRequestScope(query),
         basins: overviewBasins,
         summary,
         layers: layerStates,
         aggregationDecision,
+        basinVersionToBasinId,
       }
       if (requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey) {
         set({ overview: snapshot, loading: false, error: partialErrors[0] ?? null })
@@ -1098,6 +1107,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
             createsPerBasinNPlusOne: false,
             missingRequiredFields: [],
           }),
+          basinVersionToBasinId: {},
         }
         set({ overview: fallback, loading: false, error: message })
       }
