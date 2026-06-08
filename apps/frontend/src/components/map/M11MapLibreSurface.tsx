@@ -430,19 +430,19 @@ export function M11MapLibreSurface({
 
       {basins.length > 0 && basinFeatureCollection.features.length === 0 ? (
         <div
-          className="absolute left-5 top-20 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
+          className="absolute left-1/2 -translate-x-1/2 top-20 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
           role="status"
           data-testid="m11-basin-layer-unavailable"
         >
           {skippedBasinGeometryCount > 0
             ? '当前可见流域边界超过客户端渲染预算，地图不会注册过大的边界源。'
-            : '当前没有可见流域边界。请在左侧流域树恢复选择。'}
+            : '当前没有可见流域边界。'}
         </div>
       ) : null}
 
       {unavailableReason ? (
         <div
-          className="absolute left-5 top-20 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
+          className="absolute left-1/2 -translate-x-1/2 top-20 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
           role="status"
           data-testid="m11-map-unavailable"
         >
@@ -452,7 +452,7 @@ export function M11MapLibreSurface({
 
       {basinRiverFeatureCollection.unavailableReason ? (
         <div
-          className="absolute left-5 top-32 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
+          className="absolute left-1/2 -translate-x-1/2 top-32 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
           role="status"
           data-testid="m11-basin-river-unavailable"
         >
@@ -466,7 +466,7 @@ export function M11MapLibreSurface({
 
       {selectedSegmentMapState === 'unavailable' ? (
         <div
-          className="absolute left-5 top-44 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
+          className="absolute left-1/2 -translate-x-1/2 top-44 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
           role="status"
           data-testid="m11-selected-segment-map-unavailable"
         >
@@ -476,7 +476,7 @@ export function M11MapLibreSurface({
 
       {mapSourceError ? (
         <div
-          className="absolute left-5 top-32 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
+          className="absolute left-1/2 -translate-x-1/2 top-32 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
           role="status"
           data-testid="m11-map-source-error"
         >
