@@ -39,6 +39,79 @@ The repository already enforces generated frontend types. The missing piece is a
 | `slurm_gateway` | No direct code change expected, but CI baseline must prove gateway tests remain unaffected. |
 | `shared_contract` | Primary target: OpenAPI, frontend generated types, Makefile command discipline, and CI contract drift. |
 
+## Issue Slices
+
+Governance-0 is implemented by two child PRs:
+
+- #358 closes only the shared OpenAPI/generated frontend type drift.
+- #359 closes only Makefile `uv run` command discipline.
+
+The #358 PR must not change Makefile targets, role-boundary docs, dead-code paths, or entropy automation. The #359 PR must not regenerate OpenAPI or frontend type artifacts unless a new drift is introduced by its own change.
+
+## #358 OpenSpec Fixture
+
+Fixture level: expanded
+
+Project profile: NHMS
+
+Change surface:
+
+- `openapi/nhms.v1.yaml`
+- `apps/frontend/src/api/types.ts`
+- `tests/test_api_contract.py::test_generated_frontend_types_match_openapi`
+- `tests/test_openapi_drift.py`
+- `apps/frontend` `check:api-types`
+
+Must preserve:
+
+- The committed OpenAPI document remains the source of truth for generated frontend API types.
+- Runtime/static OpenAPI drift allowlists remain issue-scoped and unchanged unless a #358 contract mismatch requires a narrow correction.
+- Existing frontend consumers of `apps/frontend/src/api/types.ts` remain compatible with the current frontend CI gate.
+- #359 Makefile command discipline remains out of scope for #358.
+
+Must add/change:
+
+- Reconcile `apps/frontend/src/api/types.ts` so regeneration from `openapi/nhms.v1.yaml` produces byte-for-byte identical output.
+- Record focused evidence that the OpenAPI/generated-type drift is closed.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - OpenAPI is the public API contract and the frontend generation command is the contract entrypoint.
+- Config / project setup: selected - #358 must use the existing frontend toolchain and not ambient system Python.
+- File IO / path safety / overwrite: not selected - generated output is a committed artifact under a fixed repo path; no user-controlled path behavior changes.
+- Schema / columns / units / field names: selected - the generated TypeScript schema must match OpenAPI exactly.
+- Auth / permissions / secrets: not selected - no auth or credential behavior changes.
+- Concurrency / shared state / ordering: not selected - no shared runtime state or ordering behavior changes.
+- Resource limits / large input / discovery: not selected - no data discovery or large-input runtime code changes.
+- Legacy compatibility / examples: selected - existing frontend generated-type consumers must remain compatible.
+- Error handling / rollback / partial outputs: not selected - no runtime failure or publish path behavior changes.
+- Release / packaging / dependency compatibility: selected - use the repository frontend generation/check command.
+- Documentation / migration notes: selected - PR evidence must say Governance-1/2/3/4 depend on the restored baseline.
+- Geospatial / CRS / basin geometry: not selected - no geospatial contract semantics change.
+- Hydro-met time series / forcing windows: not selected - no hydro-met time semantics change.
+- SHUD numerical runtime / conservation / NaN: not selected - no runtime solver change.
+- PostGIS / TimescaleDB domain behavior: not selected - no database behavior change.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm behavior change.
+- External hydro-met providers / snapshot reproducibility: not selected - no provider snapshot change.
+- Run manifest / QC provenance: not selected - no run evidence contract change.
+- Published NHMS artifacts / display identity: not selected - only generated frontend API type identity changes.
+
+Required evidence:
+
+- `uv run pytest -q tests/test_api_contract.py::test_generated_frontend_types_match_openapi`: committed `types.ts` equals regenerated output from committed OpenAPI.
+- `uv run pytest -q tests/test_api_contract.py tests/test_openapi_drift.py`: focused API contract and drift checks pass.
+- `cd apps/frontend && corepack pnpm run check:api-types`: frontend toolchain sees no generated-type drift.
+- `cd apps/frontend && corepack pnpm test`: existing frontend regression consumers still pass.
+- `cd apps/frontend && corepack pnpm build`: current frontend build remains green.
+- If the regenerated diff changes TypeScript declarations rather than comments/JSDoc only, run an additional focused consumer/typecheck proof or split the broader frontend type debt into a separate issue. A pre-existing full-project `tsc -p tsconfig.app.json --noEmit` failure is not a #358 blocker when the #358 diff is declaration-shape neutral and the current CI frontend gate passes.
+
+Non-goals:
+
+- #359 Makefile target updates.
+- Full backend fast-gate remediation beyond reporting current evidence if an unrelated pre-existing failure remains.
+- Full frontend `tsc -p tsconfig.app.json --noEmit` debt remediation when failures are unrelated to generated API type declaration shape.
+- Role-boundary, docs-status, legacy cleanup, or entropy automation changes.
+
 ## Risks / Mitigations
 
 - **Risk: regenerating types changes broad frontend snapshots.** Mitigation: only accept changes generated from the committed OpenAPI and verify with focused contract tests plus frontend type checks.
@@ -51,3 +124,5 @@ The repository already enforces generated frontend types. The missing piece is a
 - `uv run pytest -q tests/test_api_contract.py tests/test_openapi_drift.py`
 - `uv run pytest -q -m "not e2e and not grib and not integration"`
 - `cd apps/frontend && corepack pnpm run check:api-types`
+- `cd apps/frontend && corepack pnpm test`
+- `cd apps/frontend && corepack pnpm build`
