@@ -29,6 +29,7 @@ import {
   serializeM11QueryState,
 } from '@/lib/m11/queryState'
 import { resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
+import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { useAuthStore } from '@/stores/auth'
 import { overviewSnapshotMatchesQuery, overviewSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
@@ -78,6 +79,7 @@ function M11FullscreenMap({
   basins,
   visibleBasinIds,
   basinSegments,
+  nationalRiverGeo,
   selectedSegmentId,
   selectedSegmentGeometry,
   stationFeatureCollection,
@@ -96,6 +98,7 @@ function M11FullscreenMap({
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
   basinSegments?: import('@/lib/m11/overviewDataContracts').BasinSegmentRow[]
+  nationalRiverGeo?: import('geojson').FeatureCollection | null
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: import('@/api/types').components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
@@ -131,6 +134,7 @@ function M11FullscreenMap({
         basins={basins}
         visibleBasinIds={visibleBasinIds}
         basinSegments={basinSegments}
+        nationalRiverGeo={nationalRiverGeo}
         selectedSegmentId={selectedSegmentId}
         selectedSegmentGeometry={selectedSegmentGeometry}
         stationFeatureCollection={stationFeatureCollection}
@@ -321,6 +325,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     cycle: state.cycle,
   })
 
+  // 常态河网底图（basin shp 静态化）：全国总览常激活，秒显河流、不等慢的总览接口。
+  const nationalGeo = useNationalBasinGeo(true)
+
   const boundaryCount = basins.filter((basin) => basin.boundary).length
   const emptyBasinReason =
     !loading && basins.length === 0
@@ -338,6 +345,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       layers={layers}
       basins={basins}
       visibleBasinIds={visibleBasinIdList}
+      nationalRiverGeo={nationalGeo.river}
       stationFeatureCollection={stationLayer.featureCollection}
       popup={riverForecastPopup}
       fitTo={mapFitTo}

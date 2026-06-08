@@ -10,6 +10,7 @@ import Map, {
   type MapStyle,
 } from 'react-map-gl/maplibre'
 import type { ReactNode } from 'react'
+import type { FeatureCollection } from 'geojson'
 import type { LayerProps } from 'react-map-gl/maplibre'
 import type { FilterSpecification } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
@@ -90,6 +91,8 @@ interface M11MapLibreSurfaceProps {
   basins?: OverviewBasin[]
   visibleBasinIds?: string[]
   basinSegments?: BasinSegmentRow[]
+  /** 常态河网底图（来自 basin shp，WGS84，按 Type 分级）。null 则 honest 降级不画。 */
+  nationalRiverGeo?: FeatureCollection | null
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
@@ -193,6 +196,7 @@ export function M11MapLibreSurface({
   basins = [],
   visibleBasinIds,
   basinSegments = [],
+  nationalRiverGeo = null,
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   stationFeatureCollection = null,
@@ -386,6 +390,7 @@ export function M11MapLibreSurface({
       data-overlay-source-type={renderableOverlay?.source.type ?? ''}
       data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
       data-met-station-feature-count={showStationLayer ? stationFeatureCollection?.features.length ?? 0 : 0}
+      data-national-river-feature-count={nationalRiverGeo?.features.length ?? 0}
     >
       <Map
         ref={mapRef}
@@ -400,6 +405,9 @@ export function M11MapLibreSurface({
       >
         <NavigationControl position="top-right" visualizePitch />
         <ScaleControl position="bottom-left" unit="metric" />
+        {nationalRiverGeo && nationalRiverGeo.features.length > 0 ? (
+          <M11NationalRiverPrimitive collection={nationalRiverGeo} />
+        ) : null}
         {basinFeatureCollection.features.length > 0 ? <M11BasinPrimitive collection={basinFeatureCollection} /> : null}
         {basinRiverFeatureCollection.features.length > 0 ? (
           <M11BasinRiverPrimitive
@@ -758,6 +766,52 @@ const M11_OVERLAY_HIT_PAINT: LayerProps['paint'] = {
   'line-width': 16,
 }
 const M11_ROUND_LINE_LAYOUT = { 'line-cap': 'round', 'line-join': 'round' } as const
+
+// 常态河网底图 paint：蓝色按 Type(1..5,5=主干)深浅，线宽随 zoom×Type 增大，
+// 透明度按「zoom 越大、Type 越低越晚出现」实现分级常显——低 zoom 只见主干，放大渐显支流。
+const M11_NATIONAL_RIVER_COLOR: LayerProps['paint'] = {
+  'line-color': ['interpolate', ['linear'], ['get', 'Type'], 1, '#9cc7e8', 3, '#3f88c5', 5, '#14487f'],
+  'line-width': [
+    'interpolate',
+    ['linear'],
+    ['zoom'],
+    3,
+    ['interpolate', ['linear'], ['get', 'Type'], 1, 0.3, 5, 1.4],
+    7,
+    ['interpolate', ['linear'], ['get', 'Type'], 1, 0.8, 5, 2.6],
+    12,
+    ['interpolate', ['linear'], ['get', 'Type'], 1, 1.6, 5, 4.5],
+  ],
+  'line-opacity': [
+    'interpolate',
+    ['linear'],
+    ['zoom'],
+    3,
+    ['match', ['get', 'Type'], 5, 0.9, 4, 0.55, 0],
+    5,
+    ['match', ['get', 'Type'], 5, 0.95, 4, 0.85, 3, 0.55, 0],
+    7,
+    ['match', ['get', 'Type'], 5, 1, 4, 0.95, 3, 0.85, 2, 0.6, 0],
+    9,
+    0.9,
+  ],
+}
+
+// 全国静态河网（basin shp 溶出）作为常态底图：秒显、不依赖 discharge run/接口；
+// 流量 MVT 叠加在其上着色。honest：无文件 → 不渲染（OverviewPage 不传即可）。
+function M11NationalRiverPrimitive({ collection }: { collection: FeatureCollection }) {
+  return (
+    <Source id="m11-national-river-source" type="geojson" data={collection}>
+      <Layer
+        id="m11-national-river-line"
+        type="line"
+        source="m11-national-river-source"
+        layout={M11_ROUND_LINE_LAYOUT}
+        paint={M11_NATIONAL_RIVER_COLOR}
+      />
+    </Source>
+  )
+}
 
 function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection }) {
   return (

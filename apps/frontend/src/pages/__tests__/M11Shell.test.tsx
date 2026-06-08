@@ -578,6 +578,33 @@ describe('M11 visual foundation shell', () => {
     expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
   })
 
+  it('registers the always-on national river basemap (Type+zoom graded) from static basin shp geo', () => {
+    const riverGeo = {
+      type: 'FeatureCollection' as const,
+      features: [
+        { type: 'Feature' as const, properties: { basin_id: 'basins_qhh', Type: 5 }, geometry: { type: 'LineString' as const, coordinates: [[100, 37], [100.1, 37.1]] } },
+        { type: 'Feature' as const, properties: { basin_id: 'basins_heihe', Type: 1 }, geometry: { type: 'LineString' as const, coordinates: [[99, 39], [99.1, 39.1]] } },
+      ],
+    }
+    render(<M11MapSurface state={state} layers={layers} nationalRiverGeo={riverGeo} onQueryChange={vi.fn()} />)
+
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-national-river-feature-count', '2')
+    expect(mapSources.find((source) => source.id === 'm11-national-river-source')).toMatchObject({ type: 'geojson', data: riverGeo })
+    const riverLayer = mapLayers.find((layer) => layer.id === 'm11-national-river-line')
+    expect(riverLayer).toMatchObject({ type: 'line', source: 'm11-national-river-source' })
+    // Type+zoom 分级：color/width/opacity 都引用 Type 与 zoom（按缩放等级常态显示）。
+    const paint = JSON.stringify(riverLayer?.paint)
+    expect(paint).toContain('Type')
+    expect(paint).toContain('zoom')
+  })
+
+  it('honestly skips the national river basemap when no static geo is available', () => {
+    render(<M11MapSurface state={state} layers={layers} nationalRiverGeo={null} onQueryChange={vi.fn()} />)
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-national-river-feature-count', '0')
+    expect(mapSources.find((source) => source.id === 'm11-national-river-source')).toBeUndefined()
+    expect(mapLayers.find((layer) => layer.id === 'm11-national-river-line')).toBeUndefined()
+  })
+
   it('marks hydrology data layers renderable and keeps river network unavailable', () => {
     const normalizedLayers = normalizeLayerStates({
       query: state,
