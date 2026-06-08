@@ -397,7 +397,7 @@ export function M11MapLibreSurface({
         onError={handleMapError}
         attributionControl
       >
-        <NavigationControl position="top-left" visualizePitch />
+        <NavigationControl position="top-right" visualizePitch />
         <ScaleControl position="bottom-left" unit="metric" />
         {basinFeatureCollection.features.length > 0 ? <M11BasinPrimitive collection={basinFeatureCollection} /> : null}
         {basinRiverFeatureCollection.features.length > 0 ? (

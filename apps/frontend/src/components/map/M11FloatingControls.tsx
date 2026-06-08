@@ -176,14 +176,14 @@ export function M11BackToOverviewButton({ onClick }: { onClick: () => void }) {
   )
 }
 
-/** 低调运维直链（operator+ 可见），浮在地图右上角。 */
+/** 低调运维直链（operator+ 可见），浮在地图右上角缩放控件下方。 */
 export function M11OpsLink({ visible }: { visible: boolean }) {
   if (!visible) return null
   return (
     <Link
       to="/ops"
       className={cn(
-        'absolute right-4 top-4 z-[120] flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-neutral-700 transition-colors hover:bg-white/70',
+        'absolute right-4 top-28 z-[120] flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-neutral-700 transition-colors hover:bg-white/70',
         GLASS_PANEL,
       )}
       data-testid="m11-ops-link"
