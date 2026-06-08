@@ -23,6 +23,6 @@ The code already has runtime role guards for `compute_control`, `display_readonl
 
 - Dependency: starts after `governance-0-ci-contract-baseline` is merged, or with an explicit maintainer waiver that lists current red checks.
 - Documentation: `docs/governance/ROLE_BOUNDARY.md`.
-- Static tests: `tests/test_role_boundary_static.py`, plus focused updates to existing runtime/two-node tests.
+- Static tests: `tests/test_role_boundary_static.py`, plus references to existing runtime/two-node tests as evidence. #360 does not edit existing runtime/two-node test files unless a pre-existing test name/path has to be corrected for this new static test to import.
 - Runtime/config reference points: `apps/api/runtime_mode.py`, `apps/api/main.py`, `apps/api/routes/pipeline.py`, `services/slurm_gateway/app.py`, `infra/env/*.example`, `infra/compose.*.yml`.
 - Refactor planning: `packages/common/model_registry.py`, `services/orchestrator/retry.py`, `workers/flood_frequency/*`, `workers/model_registry/*`, `workers/shud_runtime/runtime.py`.

@@ -56,6 +56,10 @@ Shared contract packages, workers, and orchestrator modules SHALL NOT import `ap
 - **WHEN** static boundary tests scan `packages/common`, `services/orchestrator`, and `workers/**`
 - **THEN** imports from `apps.api.*` are absent, except for a temporary issue-scoped allowlist that points to the shared auth/policy extraction issue
 
-#### Scenario: shared policy helper extraction lands
-- **WHEN** CLI, worker, or shared package code needs policy evidence helpers
-- **THEN** it imports those helpers from a shared package rather than `apps.api.auth`
+#### Scenario: temporary API import allowlist is issue-scoped
+- **WHEN** #360 static tests encounter the known `apps.api.auth` imports outside `apps/api`
+- **THEN** only the exact paths documented for #361 are allowed, and any new `apps.api.*` import outside the allowlist fails
+
+#### Scenario: shared policy helper extraction remains a follow-up
+- **WHEN** #360 lands before #361
+- **THEN** the static guard documents the exact temporary allowlist and does not require helper moves or call-site rewrites in the #360 PR

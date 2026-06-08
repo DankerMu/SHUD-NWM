@@ -1,0 +1,247 @@
+# Role Boundary Inventory
+
+This inventory is the repository source of truth for the current NHMS role
+boundary. The governing invariant is: runtime role determines allowed
+control-plane capability, and shared contracts must not depend upward on
+API-layer helpers except through the temporary #361 allowlist below.
+
+`ServiceRole` in `apps/api/runtime_mode.py` is the runtime role source for
+application startup. `shared_contract` is a governance category, not a
+`ServiceRole` value. `dev_monolith` is local-development compatibility for the
+full API and is not a production deployment category.
+
+## Node Relation
+
+node-22 runs `compute_control` services and may also run the standalone
+`slurm_gateway`. node-22 owns scheduler execution, Slurm submission, writable
+workspace/object-store roots, database mutation, and publication of display
+artifacts. node-27 runs `display_readonly`, serves the display API/frontend, and
+reads the readonly database plus published artifacts.
+
+Shared contracts are not "node-22 code" or "node-27 code". Paths such as
+`packages/common`, `openapi/nhms.v1.yaml`, `db/migrations`, `schemas`, and
+generated API types define contracts used by both nodes. node-22 may produce or
+apply those contracts during controlled deployment/publish flows, and node-27
+may consume them, but the contracts remain `shared_contract`.
+
+## `compute_control`
+
+Representative active paths:
+
+- `apps/api/main.py` when `NHMS_SERVICE_ROLE=compute_control`, including Slurm
+  route registration through `services.slurm_gateway.routes`.
+- `apps/api/routes/pipeline.py` control-plane retry, cancel, queue, run, and
+  artifact endpoints.
+- `services/orchestrator/cli.py`, `services/orchestrator/scheduler.py`,
+  `services/orchestrator/chain.py`, `services/orchestrator/retry.py`,
+  `services/orchestrator/reconcile.py`, and `services/orchestrator/persistence.py`.
+- `workers/data_adapters`, `workers/forcing_producer`,
+  `workers/canonical_converter`, `workers/shud_runtime`,
+  `workers/output_parser`, `workers/flood_frequency`, and
+  `workers/model_registry`.
+- `services/tile_publisher` and `services/production_closure`.
+- `infra/compose.compute.yml`, `infra/env/compute.example`, `infra/sbatch`,
+  `workers/sbatch_templates`, and compute-side systemd/runbook assets.
+
+Allowed mutations:
+
+- Use writer database credentials for model registry, pipeline lifecycle,
+  retry/cancel, active model/version changes, scheduler reservation, and
+  production closure evidence.
+- Write workspace, scheduler lock/evidence/runtime/temp roots, object-store
+  roots, published artifact roots, tiles, manifests, logs, and run evidence.
+- Submit, inspect, and cancel Slurm jobs through the configured Slurm gateway.
+- Apply shared migrations and publish shared artifacts as a controlled
+  deployment action; the migration/schema contract itself remains
+  `shared_contract`.
+
+Forbidden capabilities:
+
+- Running the full business API with `NHMS_SERVICE_ROLE=slurm_gateway`.
+- Treating QHH diagnostic scripts (`scripts/run_qhh_*` or
+  `scripts/create_qhh_shud_manifest.py`) as production orchestrator entrypoints.
+- Adding new upward imports from `packages/common`, `services/orchestrator`, or
+  `workers/**` into `apps.api.*` outside the temporary #361 allowlist.
+- Depending on display-only environment to gain control mutations.
+
+Verification oracle:
+
+- `ServiceRole` and `RuntimeConfig` in `apps/api/runtime_mode.py`.
+- Full API route inventory in `apps/api/main.py`.
+- Compute env and compose identity in `infra/env/compute.example` and
+  `infra/compose.compute.yml`.
+- Diagnostic-token scans of `services/orchestrator/*.py`.
+
+Current guard tests:
+
+- `tests/test_runtime_mode.py`
+- `tests/test_two_node_docker_runtime.py`
+- `tests/test_qhh_scripts_static.py`
+- `tests/test_retry_cancel_consistency.py`
+- `tests/test_monitoring_api.py`
+- `tests/test_role_boundary_static.py`
+
+## `display_readonly`
+
+Representative active paths:
+
+- `apps/api/main.py` when `NHMS_SERVICE_ROLE=display_readonly`.
+- Readonly API routes in `apps/api/routes/forecast.py`,
+  `apps/api/routes/models.py`, `apps/api/routes/pipeline.py`,
+  `apps/api/routes/flood_alerts.py`, `apps/api/routes/best_available.py`,
+  `apps/api/routes/data_sources.py`, and
+  `apps/api/routes/state_snapshots.py`.
+- Frontend display assets under `apps/frontend`.
+- Display deployment inputs `infra/compose.display.yml`,
+  `infra/env/display.example`, `infra/systemd/nhms-display-compose.service`,
+  and display runbooks under `docs/runbooks`.
+
+Allowed mutations:
+
+- No business/control-plane mutations.
+- Serve readonly responses, frontend/static assets, MVT/display data, health,
+  runtime config, and fail-closed error responses.
+- Read the readonly database role and readonly published artifacts.
+
+Forbidden capabilities:
+
+- Registering `/api/v1/slurm/*` on the display API.
+- Configuring `SLURM_GATEWAY_URL`, `SLURM_GATEWAY_BACKEND`,
+  `SLURM_GATEWAY_TEMPLATE_DIR`, `SLURM_GATEWAY_WORKSPACE_DIR`,
+  `WORKSPACE_ROOT`, `RUN_WORKSPACE_ROOT`, `SHARED_LOG_ROOT`,
+  `OBJECT_STORE_ROOT`, scheduler roots, `NHMS_BASINS_ROOT`,
+  `NHMS_MODEL_ASSET_ROOT`, `SHUD_EXECUTABLE`, `MUNGE_SOCKET`, `MUNGE_KEY`, or
+  `DOCKER_HOST`.
+- Opting into control mutations by setting
+  `NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=false`.
+- Performing retry/cancel actions or live queue-depth control-plane queries;
+  these fail closed with display-specific error codes.
+- Writing business state, scheduler state, Slurm state, workspace roots, or
+  published artifact roots.
+
+Verification oracle:
+
+- `display_boundary_blockers()` and `load_runtime_config()` in
+  `apps/api/runtime_mode.py`.
+- Display route inventory from `apps/api/main.py:create_app()`.
+- Display env/compose static checks in `scripts/validate_two_node_docker_runtime.py`.
+- Display fail-closed error contracts in `apps/api/routes/pipeline.py`.
+
+Current guard tests:
+
+- `tests/test_runtime_mode.py`
+- `tests/test_two_node_docker_runtime.py`
+- `tests/test_retry_cancel_consistency.py`
+- `tests/test_monitoring_api.py`
+- `tests/test_role_boundary_static.py`
+
+## `slurm_gateway`
+
+Representative active paths:
+
+- `services/slurm_gateway/app.py`
+- `services/slurm_gateway/routes.py`
+- `services/slurm_gateway/config.py`
+- `services/slurm_gateway/gateway.py`
+- `services/slurm_gateway/real_backend.py`
+- `services/slurm_gateway/mock_backend.py`
+- `services/slurm_gateway/models.py`
+- `services/slurm_gateway/__main__.py`
+- `infra/systemd/nhms-slurm-gateway.service`
+- `infra/sbatch`
+
+Allowed mutations:
+
+- Submit Slurm jobs, submit Slurm job arrays, inspect job state, cancel jobs,
+  and fetch logs through `/api/v1/slurm/*`.
+- Maintain gateway-local/mock backend state.
+- Register `/api/v1/slurm/internal/reset` only when
+  `SLURM_GATEWAY_ALLOW_INTERNAL_RESET` is explicitly enabled; it is absent by
+  default.
+
+Forbidden capabilities:
+
+- Serving forecast, model, pipeline, data-source, static, or frontend business
+  routes.
+- Starting the full API as `NHMS_SERVICE_ROLE=slurm_gateway`.
+- Mutating NHMS business database state or published artifact state directly.
+- Becoming a general-purpose compute-control API.
+
+Verification oracle:
+
+- Standalone route inventory from
+  `services.slurm_gateway.app:create_gateway_app()`.
+- Gateway settings in `services/slurm_gateway/config.py`.
+- Full API fail-fast behavior for `ServiceRole.SLURM_GATEWAY`.
+
+Current guard tests:
+
+- `tests/test_slurm_gateway_app.py`
+- `tests/test_runtime_mode.py`
+- `tests/test_role_boundary_static.py`
+- `tests/test_gateway.py`
+- `tests/test_slurm_route_contract.py`
+
+## `shared_contract`
+
+Representative active paths:
+
+- `packages/common`
+- `openapi/nhms.v1.yaml`
+- `apps/frontend/src/api/types.ts`
+- `db/migrations`
+- `schemas`
+- `services/slurm_gateway/models.py`
+- `workers/sbatch_templates`
+- `infra/sbatch`
+- `docs/modules/*_spec.md`
+
+Allowed mutations:
+
+- Define shared schemas, OpenAPI contracts, database migrations, run manifests,
+  storage object contracts, source identity, model registry data structures,
+  Slurm request/response models, and generated client types.
+- Change contracts through explicit contract/migration work with corresponding
+  tests and generated artifacts.
+
+Forbidden capabilities:
+
+- Depending upward on `apps.api.*` from shared packages, workers, or
+  orchestrator code, except for the exact temporary #361 allowlist below.
+- Hiding role-specific control-plane actions inside common helpers.
+- Changing `openapi/nhms.v1.yaml` or generated frontend API types as part of
+  #360.
+- Classifying shared contracts as exclusively node-22 or node-27 owned paths.
+
+Verification oracle:
+
+- AST import scan over `packages/common`, `services/orchestrator`, and
+  `workers/**`.
+- OpenAPI drift, migration, schema, and static route tests.
+- Review of generated/public artifacts before contract changes land.
+
+Current guard tests:
+
+- `tests/test_role_boundary_static.py`
+- `tests/test_openapi_drift.py`
+- `tests/test_migrations.py`
+- `tests/test_api_contract.py`
+- `tests/test_slurm_route_contract.py`
+
+## Temporary #361 Allowlist
+
+The following upward imports into `apps.api.auth` are allowed only while #361
+extracts shared auth/policy evidence helpers into a shared package. This is
+temporary and not permanent. #360 must not move helpers or rewrite call sites;
+it only documents and guards the current allowlist. New `apps.api.*` imports
+outside `apps/api` must fail static review.
+
+| Path | Temporary module |
+| --- | --- |
+| `packages/common/model_registry.py` | `apps.api.auth` |
+| `services/orchestrator/retry.py` | `apps.api.auth` |
+| `workers/flood_frequency/cli.py` | `apps.api.auth` |
+| `workers/flood_frequency/frequency.py` | `apps.api.auth` |
+| `workers/flood_frequency/hindcast.py` | `apps.api.auth` |
+| `workers/model_registry/basins_registry_import.py` | `apps.api.auth` |
+| `workers/model_registry/cli.py` | `apps.api.auth` |
