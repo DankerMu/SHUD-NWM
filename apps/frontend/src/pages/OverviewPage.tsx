@@ -112,12 +112,18 @@ function M11FullscreenMap({
   const opsVisible = OPERATOR_ROLES.includes(role)
 
   return (
-    <section
-      className="relative h-[calc(100vh-var(--m11-nav-height))] min-h-[40rem] w-full overflow-hidden bg-[#d7e7ef]"
+    <div
+      className="flex h-[calc(100vh-var(--m11-nav-height))] min-h-[40rem] w-full flex-col overflow-hidden bg-[#d7e7ef]"
       style={{ '--m11-nav-height': '0px' } as React.CSSProperties}
-      aria-label={mapLabel}
-      data-testid="m11-fullscreen-map"
     >
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-neutral-200 bg-white px-4 shadow-sm">
+        <span className="text-base font-semibold tracking-wide text-primary-700">全国水文预报系统</span>
+      </header>
+      <section
+        className="relative w-full flex-1 overflow-hidden"
+        aria-label={mapLabel}
+        data-testid="m11-fullscreen-map"
+      >
       <M11MapLibreSurface
         state={state}
         layers={layers}
@@ -138,7 +144,8 @@ function M11FullscreenMap({
       {state.layer === 'met-raster' ? <M11MetRasterNotice /> : null}
       {children}
       <M11FloatingLegend layer={state.layer} layers={layers} />
-    </section>
+      </section>
+    </div>
   )
 }
 
