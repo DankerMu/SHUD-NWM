@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 import yaml
 from fastapi.routing import APIRoute
+from starlette.routing import Mount
 
 from services.slurm_gateway.app import INTERNAL_RESET_PATH, create_gateway_app
 from services.slurm_gateway.config import SlurmGatewaySettings
@@ -15,8 +17,23 @@ from services.slurm_gateway.mock_backend import MockSlurmGateway
 from services.slurm_gateway.models import SLURM_HEALTH_BINARIES
 from services.slurm_gateway.real_backend import RealSlurmGateway
 
-ALLOWED_PREFIXES = ("/health", "/api/v1/slurm")
+FRAMEWORK_ROUTE_PATHS = frozenset(
+    {
+        "/openapi.json",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+    }
+)
 BUSINESS_MARKERS = ("forecast", "model", "pipeline", "hindcast", "flood", "data-source")
+
+
+@dataclass(frozen=True)
+class GatewayRouteInventoryEntry:
+    path: str
+    route_type: str
+    is_api_route: bool
+    is_mount: bool
 
 
 def _write_resource_profiles(tmp_path: Path) -> Path:
@@ -54,8 +71,55 @@ def _real_gateway(tmp_path: Path) -> RealSlurmGateway:
     )
 
 
-def _route_paths(app) -> set[str]:
-    return {route.path for route in app.routes if isinstance(route, APIRoute)}
+def _route_inventory(app: object) -> set[GatewayRouteInventoryEntry]:
+    entries: set[GatewayRouteInventoryEntry] = set()
+    for route in getattr(app, "routes", []):
+        route_type = type(route).__name__
+        is_api_route = isinstance(route, APIRoute)
+        is_mount = isinstance(route, Mount)
+        for attribute in ("path", "path_format"):
+            path = getattr(route, attribute, None)
+            if isinstance(path, str) and path:
+                entries.add(
+                    GatewayRouteInventoryEntry(
+                        path=path,
+                        route_type=route_type,
+                        is_api_route=is_api_route,
+                        is_mount=is_mount,
+                    )
+                )
+    return entries
+
+
+def _route_paths(app: object) -> set[str]:
+    return {entry.path for entry in _route_inventory(app)}
+
+
+def _is_slurm_gateway_route_path(path: str) -> bool:
+    return path == "/api/v1/slurm" or path.startswith("/api/v1/slurm/")
+
+
+def _is_allowed_gateway_route_path(path: str) -> bool:
+    return path == "/health" or _is_slurm_gateway_route_path(path) or path in FRAMEWORK_ROUTE_PATHS
+
+
+def _is_allowed_gateway_route_entry(entry: GatewayRouteInventoryEntry) -> bool:
+    if entry.is_mount:
+        return False
+    if entry.path in FRAMEWORK_ROUTE_PATHS:
+        return True
+    return entry.is_api_route and (
+        entry.path == "/health" or _is_slurm_gateway_route_path(entry.path)
+    )
+
+
+def _forbidden_gateway_route_entries(
+    entries: set[GatewayRouteInventoryEntry],
+) -> list[GatewayRouteInventoryEntry]:
+    return sorted(
+        (entry for entry in entries if not _is_allowed_gateway_route_entry(entry)),
+        key=lambda entry: (entry.path, entry.route_type),
+    )
 
 
 def test_health_probes_sbatch_squeue_sacct_scancel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,15 +191,54 @@ def test_mock_health_can_inject_unhealthy() -> None:
 
 def test_gateway_app_exposes_only_slurm_routes() -> None:
     app = create_gateway_app(SlurmGatewaySettings(backend="mock"))
-    paths = _route_paths(app)
+    inventory = _route_inventory(app)
+    paths = {entry.path for entry in inventory}
     assert paths, "gateway app must expose at least one route"
     assert "/api/v1/slurm/health" in paths
-    assert any(path.startswith("/api/v1/slurm") for path in paths)
-    for path in paths:
-        assert path.startswith(ALLOWED_PREFIXES), f"unexpected route: {path}"
+    assert any(_is_slurm_gateway_route_path(path) for path in paths)
+    for entry in inventory:
+        assert _is_allowed_gateway_route_entry(entry), (
+            f"unexpected route: {entry.path} ({entry.route_type})"
+        )
     joined = " ".join(paths)
     for marker in BUSINESS_MARKERS:
         assert marker not in joined, f"business route leaked: {marker}"
+
+
+def test_gateway_route_scope_rejects_slurm_sibling_prefixes() -> None:
+    assert _is_allowed_gateway_route_path("/api/v1/slurm")
+    assert _is_allowed_gateway_route_path("/api/v1/slurm/jobs")
+    assert not _is_allowed_gateway_route_path("/api/v1/slurmish")
+    assert not _is_allowed_gateway_route_path("/api/v1/slurm-admin")
+
+
+def test_gateway_route_inventory_includes_mounts() -> None:
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock"))
+    app.mount("/frontend", _NoopAsgiApp(), name="frontend")
+    inventory = _route_inventory(app)
+    paths = {entry.path for entry in inventory}
+
+    assert "/frontend" in paths
+    assert "/frontend" in {entry.path for entry in _forbidden_gateway_route_entries(inventory)}
+
+
+def test_gateway_route_inventory_rejects_same_namespace_mounts() -> None:
+    app = create_gateway_app(SlurmGatewaySettings(backend="mock"))
+    app.mount("/api/v1/slurm/extra", _NoopAsgiApp(), name="same-namespace")
+    inventory = _route_inventory(app)
+
+    forbidden_mounts = [
+        entry
+        for entry in _forbidden_gateway_route_entries(inventory)
+        if entry.path == "/api/v1/slurm/extra"
+    ]
+    assert forbidden_mounts
+    assert all(entry.is_mount for entry in forbidden_mounts)
+
+
+class _NoopAsgiApp:
+    async def __call__(self, scope: object, receive: object, send: object) -> None:
+        del scope, receive, send
 
 
 def test_internal_reset_disabled_by_default() -> None:

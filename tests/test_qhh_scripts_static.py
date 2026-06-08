@@ -27,16 +27,21 @@ _QHH_DIAGNOSTIC_TOKENS = (
 def _production_cohort_sources() -> list[Path]:
     """Production scheduler/chain modules that drive the cohort path.
 
-    Globs every services/orchestrator/*.py so new orchestrator modules are covered
-    automatically; the diagnostic scripts and this test file are NOT scanned (they
-    legitimately contain the diagnostic basenames).
+    Recursively globs services/orchestrator production Python modules so new
+    orchestrator subpackages are covered automatically; the diagnostic scripts
+    and this test file are NOT scanned because they legitimately contain the
+    diagnostic basenames.
     """
-    return sorted(Path("services/orchestrator").glob("*.py"))
+    return sorted(
+        path
+        for path in Path("services/orchestrator").rglob("*.py")
+        if "__pycache__" not in path.parts
+    )
 
 
 def test_production_scheduler_does_not_invoke_qhh_diagnostic_scripts() -> None:
     sources = _production_cohort_sources()
-    assert sources, "expected services/orchestrator/*.py production modules to scan"
+    assert sources, "expected services/orchestrator production Python modules to scan"
 
     for source_path in sources:
         text = source_path.read_text(encoding="utf-8")
