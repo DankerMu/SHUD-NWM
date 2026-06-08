@@ -280,6 +280,26 @@ const dischargeMvtMetadata: NonNullable<LayerState['metadata']> = {
   encoder_version: 'encoder-v1',
 }
 
+// national 总览（无 basinId）：discharge 多流域并集 MVT，url_template 无 {run_id} 占位、
+// required_placeholders 不含 run_id、min_zoom=7、release_blocking=false。
+const dischargeNationalMvtMetadata: NonNullable<LayerState['metadata']> = {
+  layer_id: 'discharge',
+  tile_format: 'mvt',
+  url_template: '/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf',
+  tile_url_template: '/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf',
+  maplibre_source_layer: 'hydro',
+  source_layer: 'hydro',
+  fallback_available: false,
+  release_blocking: false,
+  required_placeholders: ['valid_time', 'z', 'x', 'y'],
+  min_zoom: 7,
+  max_zoom: 14,
+  valid_times: ['2026-05-18T00:00:00Z', '2026-05-18T06:00:00Z', '2026-05-18T12:00:00Z'],
+  cache_version: 'discharge-national-cache-v1',
+  schema_version: 'schema-v1',
+  encoder_version: 'encoder-v1',
+}
+
 const waterLevelMvtMetadata: NonNullable<LayerState['metadata']> = {
   layer_id: 'water-level',
   tile_format: 'mvt',
@@ -679,6 +699,54 @@ describe('M11 visual foundation shell', () => {
     expect(paint).not.toContain('warning_level')
     expect(paint).not.toContain('return_period')
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
+  })
+
+  it('registers national discharge vector source without run_id when metadata is national', async () => {
+    // national：discharge 图层无可追溯 run_id（freshness.runId=null），但元数据为 national 形态。
+    const layersNational = layers.map((layer) =>
+      layer.layerId === 'discharge'
+        ? { ...layer, metadata: dischargeNationalMvtMetadata, freshness: { ...layer.freshness, runId: null } }
+        : layer,
+    )
+    render(<M11MapSurface state={state} layers={layersNational} onQueryChange={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'discharge'))
+    const source = mapSources.at(-1)
+    expect(source).toMatchObject({
+      id: 'm11-discharge-source',
+      type: 'vector',
+      minzoom: 7,
+      tiles: [
+        '/api/v1/tiles/hydro-national/q_down/2026-05-18T00%3A00%3A00.000Z/{z}/{x}/{y}.pbf?_mvt_cache_version=discharge-national-cache-v1',
+      ],
+    })
+    // 模板无 {run_id}，填充后不得残留未替换占位。
+    expect(String((source?.tiles as string[])[0])).not.toContain('{run_id}')
+    expect(String((source?.tiles as string[])[0])).not.toContain('run-gfs')
+    expect(mapLayers.at(-1)).toMatchObject({
+      id: 'm11-discharge-line',
+      source: 'm11-discharge-source',
+      'source-layer': 'hydro',
+    })
+    // national 正常注册 → 不应再出现"缺少可追溯 run_id"诚实空态。
+    expect(screen.queryByTestId('m11-map-unavailable')).not.toBeInTheDocument()
+  })
+
+  it('builds distinct national source keys per valid_time without run_id collision', () => {
+    const buildAt = (validTime: string) =>
+      buildM11RegisteredOverlay(
+        { ...state, validTime },
+        layers.map((layer) =>
+          layer.layerId === 'discharge'
+            ? { ...layer, metadata: dischargeNationalMvtMetadata, freshness: { ...layer.freshness, runId: null } }
+            : layer,
+        ),
+      )
+    const overlayA = buildAt('2026-05-18T00:00:00.000Z')
+    const overlayB = buildAt('2026-05-18T06:00:00.000Z')
+    expect(overlayA?.sourceKey).toBeTruthy()
+    expect(overlayA?.sourceKey).not.toEqual(overlayB?.sourceKey)
+    expect(overlayA?.sourceKey).toContain('"run_id":null')
   })
 
   it('registers water-level vector source from advertised hydrology MVT metadata', async () => {

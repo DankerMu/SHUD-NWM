@@ -26,6 +26,18 @@ export function isMvtLayerMetadata(value: unknown): value is MvtLayerMetadata {
   )
 }
 
+/**
+ * National 总览形态：MVT 元数据但 required_placeholders 不含 run_id（无 {run_id} 占位的多流域并集瓦片）。
+ * 用于让 overlay 走"不要求单 run"的注册分支；basin detail 单 run 模板（含 run_id）返回 false。
+ */
+export function isNationalOverlayMetadata(value: unknown): value is MvtLayerMetadata {
+  return (
+    isMvtLayerMetadata(value) &&
+    Array.isArray(value.required_placeholders) &&
+    !value.required_placeholders.includes('run_id')
+  )
+}
+
 export function buildMvtTileUrlTemplate(metadata: MvtLayerMetadata, replacements: Record<string, string>): string {
   let template = metadata.url_template
   for (const [key, value] of Object.entries(replacements)) {

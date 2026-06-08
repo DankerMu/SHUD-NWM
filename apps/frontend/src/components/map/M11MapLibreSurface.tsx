@@ -22,6 +22,7 @@ import type { FloodReturnPeriodFeatureCollection } from '@/lib/floodReturnPeriod
 import {
   buildMvtTileUrlTemplate,
   isMvtLayerMetadata,
+  isNationalOverlayMetadata,
   metadataHasValidTime,
   metadataMatchesRun,
   type MvtLayerMetadata,
@@ -505,62 +506,64 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   const selectedLayer = layers.find((layer) => layer.layerId === state.layer)
   if (!selectedLayer?.available) return null
 
-  const runId = selectedLayer.freshness.runId
   const selectedValidTime = normalizeIso(state.validTime)
   const validTime =
     selectedValidTime && selectedLayer.validTimes.includes(selectedValidTime) ? selectedValidTime : selectedLayer.currentValidTime
-  if (!runId || !validTime) return null
+  if (!validTime) return null
 
-  const sourceId = `m11-${state.layer}-source`
-  const layerId = `m11-${state.layer}-line`
+  const metadata = selectedLayer.metadata
+  if (!isMvtLayerMetadata(metadata) || metadata.release_blocking || !metadataHasValidTime(metadata, validTime)) {
+    return null
+  }
 
-  if (
-    isMvtLayerMetadata(selectedLayer.metadata) &&
-    !selectedLayer.metadata.release_blocking &&
-    metadataHasValidTime(selectedLayer.metadata, validTime) &&
-    metadataMatchesRun(selectedLayer.metadata, runId, {
-      basin_version_id: selectedLayer.freshness.basinVersionId,
-      river_network_version_id: selectedLayer.freshness.riverNetworkVersionId,
-    })
-  ) {
-    const variable = selectedLayer.layerId === 'water-level' ? 'water_level' : 'q_down'
-    const tiles = [
-      buildMvtTileUrlTemplate(selectedLayer.metadata, {
-        run_id: runId,
-        duration: DEFAULT_FLOOD_RETURN_PERIOD_DURATION,
-        valid_time: validTime,
-        variable,
-      }),
-    ]
-    return {
-      layerId: state.layer,
-      sourceId,
-      sourceKey: m11VectorSourceKey({
-        layerId: selectedLayer.layerId,
-        runId,
-        validTime,
-        variable,
-        metadata: selectedLayer.metadata,
-      }),
-      source: {
-        type: 'vector',
-        tiles,
-        sourceLayer: selectedLayer.metadata.maplibre_source_layer,
-        minzoom: selectedLayer.metadata.min_zoom ?? 0,
-        maxzoom: selectedLayer.metadata.max_zoom ?? 14,
-        metadata: selectedLayer.metadata,
-      },
-      layer: {
-        id: layerId,
-        type: 'line',
-        source: sourceId,
-        'source-layer': selectedLayer.metadata.maplibre_source_layer,
-        paint: m11RegisteredOverlayPaint(selectedLayer.layerId),
-      },
+  // national 总览（无 {run_id} 占位）：不要求 runId、跳过 metadataMatchesRun；single-run 保持原契约。
+  const national = isNationalOverlayMetadata(metadata)
+  const runId = selectedLayer.freshness.runId
+  if (!national) {
+    if (!runId) return null
+    if (
+      !metadataMatchesRun(metadata, runId, {
+        basin_version_id: selectedLayer.freshness.basinVersionId,
+        river_network_version_id: selectedLayer.freshness.riverNetworkVersionId,
+      })
+    ) {
+      return null
     }
   }
 
-  return null
+  const sourceId = `m11-${state.layer}-source`
+  const layerId = `m11-${state.layer}-line`
+  const variable = selectedLayer.layerId === 'water-level' ? 'water_level' : 'q_down'
+  const replacements: Record<string, string> = national
+    ? { valid_time: validTime, variable }
+    : { run_id: runId as string, duration: DEFAULT_FLOOD_RETURN_PERIOD_DURATION, valid_time: validTime, variable }
+
+  return {
+    layerId: state.layer,
+    sourceId,
+    sourceKey: m11VectorSourceKey({
+      layerId: selectedLayer.layerId,
+      runId: national ? null : runId,
+      validTime,
+      variable,
+      metadata,
+    }),
+    source: {
+      type: 'vector',
+      tiles: [buildMvtTileUrlTemplate(metadata, replacements)],
+      sourceLayer: metadata.maplibre_source_layer,
+      minzoom: metadata.min_zoom ?? 0,
+      maxzoom: metadata.max_zoom ?? 14,
+      metadata,
+    },
+    layer: {
+      id: layerId,
+      type: 'line',
+      source: sourceId,
+      'source-layer': metadata.maplibre_source_layer,
+      paint: m11RegisteredOverlayPaint(selectedLayer.layerId),
+    },
+  }
 }
 
 function m11VectorSourceKey({
@@ -571,7 +574,7 @@ function m11VectorSourceKey({
   metadata,
 }: {
   layerId: string
-  runId: string
+  runId: string | null
   validTime: string
   variable: string
   metadata: NonNullable<LayerState['metadata']>
@@ -1121,7 +1124,10 @@ function m11SelectedLayerUnavailableReason(
   const selectedLayer = layers.find((layer) => layer.layerId === state.layer)
   if (!selectedLayer) return '当前图层尚未由 /api/v1/layers 注册，地图不会渲染该叠加层。'
   if (!selectedLayer.available) return selectedLayer.disabledReason ?? '当前图层没有可渲染的有效时间。'
-  if (!selectedLayer.freshness.runId) return '当前图层缺少可追溯 run_id，地图不会注册叠加层。'
+  // national 总览（无 run_id 占位）不要求 run_id，跳过该诚实空态分支。
+  if (!isNationalOverlayMetadata(selectedLayer.metadata) && !selectedLayer.freshness.runId) {
+    return '当前图层缺少可追溯 run_id，地图不会注册叠加层。'
+  }
   if (!selectedLayer.currentValidTime) return '当前图层缺少有效时间，地图不会注册叠加层。'
   if (state.layer === 'discharge' || state.layer === 'water-level' || state.layer === 'flood-return-period' || state.layer === 'warning-level') {
     return '当前水文图层缺少可用 MVT 元数据或处于 release-blocked 状态，地图不会请求无边界 GeoJSON 兼容源。'

@@ -595,6 +595,9 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
 _NATIONAL_DISCHARGE_METADATA = {
     "tile_url_template": "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf",
     "required_placeholders": ["valid_time", "z", "x", "y"],
+    # 全国并集瓦片在低 zoom 单块塞下整流域河段会超 per-tile 预算（实测最密流域 Heihe z7 起进预算）。
+    # 设 min_zoom=7 让前端 source 不请求 z<7、避开 413；低 zoom 看干流需 stream_order 概化（后续）。
+    "min_zoom": 7,
 }
 
 
