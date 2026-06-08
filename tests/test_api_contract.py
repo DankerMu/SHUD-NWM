@@ -1279,13 +1279,15 @@ def test_qhh_latest_product_openapi_and_generated_types_include_bootstrap_contra
     parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
 
     assert operation["operationId"] == "getQhhLatestProduct"
-    assert set(parameters) == {"source", "basin_id", "run_id", "cycle_time", "model_id"}
+    assert set(parameters) == {"source", "basin_id", "run_id", "cycle_time", "model_id", "identity_only"}
     assert parameters["source"]["required"] is True
     assert parameters["source"]["schema"] == {"type": "string", "enum": ["GFS", "IFS"]}
     for parameter_name in ("basin_id", "run_id", "cycle_time", "model_id"):
         assert parameters[parameter_name]["required"] is False
         assert parameters[parameter_name]["schema"]["type"] == "string"
     assert parameters["cycle_time"]["schema"]["format"] == "date-time"
+    assert parameters["identity_only"]["required"] is False
+    assert parameters["identity_only"]["schema"] == {"type": "boolean", "default": False}
     response_data = operation["responses"]["200"]["content"]["application/json"]["schema"]["allOf"][1]["properties"][
         "data"
     ]
