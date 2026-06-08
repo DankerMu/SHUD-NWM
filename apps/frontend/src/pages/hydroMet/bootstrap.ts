@@ -64,13 +64,21 @@ async function getLatestProduct(request: HydroMetBootstrapRequest) {
 }
 
 /**
- * 仅解析 latest-product，不附带 stations / river-segments 候选。
- * 河段流量弹窗只需要产品身份（cycle/horizon）来取 forecast-series，
- * 用 loadHydroMetBootstrap 会白白多发 2 个整页才用得到的请求 → 弹窗变慢。
- * 失败抛错（与 getLatestProduct 一致）。
+ * 弹窗专用轻量 latest-product 解析（identity_only=true）。
+ * 后端只跑 run 身份 + cycle + horizon（实测 ~50ms），不算 station/segment 覆盖（实测 ~17s），
+ * 也不附带 stations / river-segments 候选；并返回最近 N 个 cycle 作为可选起报时间。
+ * request.cycle 可指定具体起报 cycle（起报时间选择器重取用）。失败抛错。
  */
 export async function fetchHydroMetLatestProduct(request: HydroMetBootstrapRequest): Promise<QhhLatestProduct> {
-  return getLatestProduct(request)
+  const basinId = request.basinId?.trim() ? { basin_id: request.basinId.trim() } : {}
+  const cycle = request.cycle?.trim() ? { cycle_time: request.cycle.trim() } : {}
+  const { data, error } = await client.GET('/api/v1/mvp/qhh/latest-product', {
+    params: { query: { source: request.source, identity_only: true, ...cycle, ...basinId } },
+  })
+  if (error) throw new Error(getApiErrorMessage(error, 'latest-product 不可用'))
+  const product = unwrapApiData<QhhLatestProduct>(data, 'latest-product 不可用')
+  if (!product || typeof product !== 'object') throw new Error('latest-product 不可用')
+  return product
 }
 
 export interface HydroMetStationQuery {

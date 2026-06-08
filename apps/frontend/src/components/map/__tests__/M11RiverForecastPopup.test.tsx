@@ -154,6 +154,34 @@ describe('M11RiverForecastPopup', () => {
     expect(options).toEqual(['2026-05-21T00:00:00Z'])
   })
 
+  it('lists all real cycles from available_issue_times and refetches with the chosen cycle', async () => {
+    const cycles = ['2026-05-21T00:00:00Z', '2026-05-20T12:00:00Z', '2026-05-20T00:00:00Z']
+    vi.mocked(fetchHydroMetLatestProduct).mockResolvedValue(product({ available_issue_times: cycles } as Partial<QhhLatestProduct>))
+    mockForecast(validForecast)
+    const user = userEvent.setup()
+    render(<M11RiverForecastPopup basinId="basins_qhh" initialSource="GFS" segment={segment} />)
+
+    await screen.findByTestId('m11-river-popup-loaded')
+    const issueTime = screen.getByTestId('m11-popup-issue-time') as HTMLSelectElement
+    expect(Array.from(issueTime.querySelectorAll('option')).map((o) => o.value)).toEqual(cycles)
+
+    await user.selectOptions(issueTime, '2026-05-20T12:00:00Z')
+    await waitFor(() =>
+      expect(fetchHydroMetLatestProduct).toHaveBeenLastCalledWith(
+        expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh', cycle: '2026-05-20T12:00:00Z' }),
+      ),
+    )
+  })
+
+  it('shows current and peak discharge KPIs derived from rendered points', async () => {
+    mockForecast(validForecast)
+    render(<M11RiverForecastPopup basinId="basins_qhh" initialSource="GFS" segment={segment} />)
+
+    await screen.findByTestId('m11-river-popup-loaded')
+    expect(screen.getByTestId('m11-river-popup-kpi-current')).toHaveTextContent('3225')
+    expect(screen.getByTestId('m11-river-popup-kpi-peak')).toHaveTextContent('3300')
+  })
+
   it('refetches with the new source when the user switches GFS to IFS', async () => {
     const user = userEvent.setup()
     mockForecast(validForecast)

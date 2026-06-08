@@ -373,28 +373,36 @@ def postgis_tile_sql(layer: str) -> str:
         #   z<=4 -> top 10% (cutoff 0.90): main trunk only
         #   z=5  -> top 30% (cutoff 0.70)
         #   z=6  -> top 60% (cutoff 0.40)
-        #   z>=7 -> no filter (full detail; preserves prior behavior).
-        # The percent_rank filter runs BEFORE bounded_rows/budget counting (it is in the
-        # source CTE), so it truly reduces the feature set fed to the per-tile budget.
+        #   z=7  -> top 85% (cutoff 0.15)
+        #   z=8  -> top 96% (cutoff 0.04)
+        #   z>=9 -> no filter (full detail).
+        # Why z7/z8 still filter: a dense basin (e.g. Heihe) packs >10k segments / >50k
+        # coordinates into a single z7 tile, blowing the per-tile budget (HTTP 413). The
+        # progressive cutoff keeps the main channels and stays inside budget; by z9 a tile
+        # covers a small enough area that full detail fits. The percent_rank filter runs
+        # BEFORE bounded_rows/budget counting (it is in the source CTE), so it truly reduces
+        # the feature set fed to the per-tile budget.
         #
         # Per-zoom coarse ST_SimplifyPreserveTopology (mercator metres) on the source geom
         # is applied here too so low-zoom trunks are also cheaper in coordinates; tolerance
-        # decreases with zoom. Topology is preserved. z>=7 keeps the raw geom and relies on
+        # decreases with zoom. Topology is preserved. z>=9 keeps the raw geom and relies on
         # the shared pixel-based simplify in the template.
-        #   z<=4 -> 2000m, z=5 -> 1000m, z=6 -> 500m, z>=7 -> 0 (no extra simplify).
+        #   z<=4 -> 2000m, z=5 -> 1000m, z=6 -> 500m, z=7 -> 200m, z=8 -> 80m, z>=9 -> 0.
         source_cte = """
             SELECT feature_id, segment_id, river_segment_id, river_network_version_id,
                    basin_version_id, basin_id, value, unit, quality_flag, run_id, variable,
                    valid_time,
                    CASE
-                       WHEN :z >= 7 THEN geom
+                       WHEN :z >= 9 THEN geom
                        ELSE ST_Transform(
                            ST_SimplifyPreserveTopology(
                                ST_Transform(geom, 3857),
                                CASE
                                    WHEN :z <= 4 THEN 2000.0
                                    WHEN :z = 5 THEN 1000.0
-                                   ELSE 500.0
+                                   WHEN :z = 6 THEN 500.0
+                                   WHEN :z = 7 THEN 200.0
+                                   ELSE 80.0
                                END
                            ),
                            4490
@@ -437,13 +445,15 @@ def postgis_tile_sql(layer: str) -> str:
                 WHERE ts.variable = :variable
                   AND ts.valid_time = :valid_time
             ) ranked
-            WHERE :z >= 7
+            WHERE :z >= 9
                OR (
                    value_percent_rank IS NOT NULL
                    AND value_percent_rank >= CASE
                        WHEN :z <= 4 THEN 0.90
                        WHEN :z = 5 THEN 0.70
-                       ELSE 0.40
+                       WHEN :z = 6 THEN 0.40
+                       WHEN :z = 7 THEN 0.15
+                       ELSE 0.04
                    END
                )
         """
@@ -672,10 +682,10 @@ def _mvt_public_tile_columns(layer: str) -> tuple[str, ...]:
 _NATIONAL_DISCHARGE_METADATA = {
     "tile_url_template": "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf",
     "required_placeholders": ["valid_time", "z", "x", "y"],
-    # 全国并集瓦片低 zoom 单块塞下整流域河段会超 per-tile 预算（413）。改为按 zoom 干流概化：
-    # postgis_tile_sql("hydro-national") 用 q_down(value) 的 per-network PERCENT_RANK 在低 zoom
-    # 只保留高流量干流（z<=4 顶 10%、z5 顶 30%、z6 顶 60%、z>=7 全量），并按 zoom 加粗
-    # ST_SimplifyPreserveTopology 容差，使 z3 起也能落入预算（z3 实测 ~55KB）。
+    # 全国并集瓦片在密集流域（如黑河）单块塞下整流域河段会超 per-tile 预算（413）。改为按 zoom
+    # 干流概化：postgis_tile_sql("hydro-national") 用 q_down(value) 的 per-network PERCENT_RANK
+    # 渐进保留高流量干流（z<=4 顶 10%、z5 顶 30%、z6 顶 60%、z7 顶 85%、z8 顶 96%、z>=9 全量），
+    # 并按 zoom 加粗 ST_SimplifyPreserveTopology 容差，使每个 zoom 都落入预算（含 z7/z8 密集流域）。
     # min_zoom=3 对齐前端初始全国视图 zoom=3.35，使默认（未放大）也能看到主干河道。
     "min_zoom": 3,
     # 全国瓦片自带 basin_id（LEFT JOIN core.basin_version），点击河段即可直接定位流域取曲线，

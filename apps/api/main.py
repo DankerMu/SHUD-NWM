@@ -618,6 +618,17 @@ def _patch_qhh_latest_product_openapi(schema: dict) -> None:
                 "the API will not fall back to source-only latest selection."
             ),
         },
+        {
+            "name": "identity_only",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "boolean", "default": False},
+            "description": (
+                "Lightweight resolver for popups: returns run identity + cycle + horizon "
+                "(+ recent cycles as available_issue_times) WITHOUT the expensive station/segment "
+                "coverage computation. cycle_time may be supplied alone to select a specific cycle."
+            ),
+        },
     ]
     operation["responses"] = {
         "200": {
@@ -1657,6 +1668,14 @@ def _qhh_latest_product_schema() -> dict:
             "model_id": {"type": "string"},
             "basin_version_id": {"type": "string"},
             "river_network_version_id": {"type": "string"},
+            "available_issue_times": {
+                "type": "array",
+                "items": {"type": "string", "format": "date-time"},
+                "description": (
+                    "Recent forecast cycles (newest first) for the issue-time selector. "
+                    "Only populated by the identity_only resolver."
+                ),
+            },
             "source_id": {"type": "string", "enum": ["GFS", "IFS"]},
             "cycle_time": {"type": "string", "format": "date-time"},
             "run_id": {"type": "string"},

@@ -392,19 +392,20 @@ class PsycopgForecastStore:
         start_time: datetime,
         end_time: datetime,
     ) -> list[dict[str, Any]]:
-        return self._fetch_all(
+        return self._attach_forcing_lineage(
             cursor,
-            """
+            self._fetch_all(
+                cursor,
+                """
             SELECT DISTINCT ON (rt.valid_time)
                 h.scenario_id,
                 h.source_id,
-                fv.lineage_json,
+                h.forcing_version_id,
                 rt.valid_time,
                 rt.value,
                 rt.unit
             FROM hydro.river_timeseries rt
             JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
               AND rt.river_network_version_id = %s
@@ -414,7 +415,8 @@ class PsycopgForecastStore:
               AND rt.valid_time < %s
             ORDER BY rt.valid_time, h.end_time DESC, h.created_at DESC
             """,
-            (basin_version_id, segment_id, river_network_version_id, start_time, end_time),
+                (basin_version_id, segment_id, river_network_version_id, start_time, end_time),
+            ),
         )
 
     def _fetch_forecast_segment_rows(
@@ -436,9 +438,11 @@ class PsycopgForecastStore:
             selected_cycle_params: list[Any] = []
             for scenario_id, cycle_time in cycle_times_by_scenario.items():
                 selected_cycle_params.extend([scenario_id, _ensure_utc(cycle_time)])
-            return self._fetch_all(
+            return self._attach_forcing_lineage(
                 cursor,
-                f"""
+                self._fetch_all(
+                    cursor,
+                    f"""
                 WITH selected_cycles(scenario_id, cycle_time) AS (
                     VALUES {selected_cycle_values}
                 )
@@ -448,7 +452,7 @@ class PsycopgForecastStore:
                     h.source_id,
                     h.cycle_time,
                     h.end_time AS run_end_time,
-                    fv.lineage_json,
+                    h.forcing_version_id,
                     rt.river_network_version_id,
                     rt.valid_time,
                     rt.value,
@@ -458,7 +462,6 @@ class PsycopgForecastStore:
                 JOIN selected_cycles sc
                   ON sc.scenario_id = h.scenario_id
                  AND sc.cycle_time = h.cycle_time
-                LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
                 WHERE rt.basin_version_id = %s
                   AND rt.river_segment_id = %s
                   AND rt.river_network_version_id = %s
@@ -469,33 +472,35 @@ class PsycopgForecastStore:
                   {scenario_filter.sql}
                 ORDER BY h.scenario_id, rt.valid_time
                 """,
-                (
-                    *selected_cycle_params,
-                    basin_version_id,
-                    segment_id,
-                    river_network_version_id,
-                    *scenario_filter.params,
+                    (
+                        *selected_cycle_params,
+                        basin_version_id,
+                        segment_id,
+                        river_network_version_id,
+                        *scenario_filter.params,
+                    ),
                 ),
             )
 
         forecast_end = end_time or issue_time + timedelta(days=7)
-        return self._fetch_all(
+        return self._attach_forcing_lineage(
             cursor,
-            f"""
+            self._fetch_all(
+                cursor,
+                f"""
             SELECT
                 h.scenario_id,
                 h.model_id,
                 h.source_id,
                 h.cycle_time,
                 h.end_time AS run_end_time,
-                fv.lineage_json,
+                h.forcing_version_id,
                 rt.river_network_version_id,
                 rt.valid_time,
                 rt.value,
                 rt.unit
             FROM hydro.river_timeseries rt
             JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
               AND rt.river_network_version_id = %s
@@ -507,14 +512,15 @@ class PsycopgForecastStore:
               {scenario_filter.sql}
             ORDER BY h.scenario_id, rt.valid_time
             """,
-            (
-                basin_version_id,
-                segment_id,
-                river_network_version_id,
-                issue_time,
-                issue_time,
-                forecast_end,
-                *scenario_filter.params,
+                (
+                    basin_version_id,
+                    segment_id,
+                    river_network_version_id,
+                    issue_time,
+                    issue_time,
+                    forecast_end,
+                    *scenario_filter.params,
+                ),
             ),
         )
 
@@ -554,23 +560,24 @@ class PsycopgForecastStore:
         end_time: datetime,
     ) -> list[dict[str, Any]]:
         start_time = end_time - timedelta(days=7)
-        return self._fetch_all(
+        return self._attach_forcing_lineage(
             cursor,
-            """
+            self._fetch_all(
+                cursor,
+                """
             SELECT
                 h.scenario_id,
                 h.model_id,
                 h.source_id,
                 h.cycle_time,
                 h.end_time AS run_end_time,
-                fv.lineage_json,
+                h.forcing_version_id,
                 rt.river_network_version_id,
                 rt.valid_time,
                 rt.value,
                 rt.unit
             FROM hydro.river_timeseries rt
             JOIN hydro.hydro_run h ON h.run_id = rt.run_id
-            LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id
             WHERE rt.basin_version_id = %s
               AND rt.river_segment_id = %s
               AND rt.river_network_version_id = %s
@@ -580,7 +587,8 @@ class PsycopgForecastStore:
               AND rt.valid_time <= %s
             ORDER BY h.scenario_id, rt.valid_time
             """,
-            (basin_version_id, segment_id, river_network_version_id, list(run_types), start_time, end_time),
+                (basin_version_id, segment_id, river_network_version_id, list(run_types), start_time, end_time),
+            ),
         )
 
     def _frequency_thresholds_for_rows(
@@ -1109,6 +1117,107 @@ class PsycopgForecastStore:
             details=details,
         )
 
+    def latest_qhh_product_identity(
+        self,
+        source: str,
+        *,
+        basin_id: str = QHH_BASIN_ID,
+        cycle_time: datetime | str | None = None,
+        limit: int = 12,
+    ) -> dict[str, Any]:
+        """轻量 latest-product：只解析 run 身份 + cycle + horizon，不算站点/段覆盖。
+
+        河段/站点弹窗只需要产品身份去取曲线，全套覆盖计算（station_sample_rows 等）实测 ~17s。
+        本路径只跑 candidate_runs（实测 ~12ms），并把最近 N 个 cycle 作为可选起报时间返回。
+        """
+        source_id = _qhh_latest_source_id(source)
+        requested_cycle = _parse_qhh_latest_cycle_time(cycle_time) if cycle_time is not None else None
+        with self._transaction() as cursor:
+            rows = self._fetch_latest_qhh_identity_candidates(
+                cursor, basin_id=basin_id, source_id=source_id, limit=max(1, limit)
+            )
+        if not rows:
+            raise ForecastStoreError(
+                status_code=404,
+                code="QHH_LATEST_PRODUCT_UNAVAILABLE",
+                message=f"No usable latest QHH display product is available for source {source_id}.",
+                details={"source_id": source_id, "basin_id": basin_id, "status": "unavailable"},
+            )
+        available_issue_times = [
+            _format_time(_datetime_value(row.get("cycle_time")))
+            for row in rows
+            if row.get("cycle_time") is not None
+        ]
+        target = rows[0]
+        if requested_cycle is not None:
+            target = next(
+                (row for row in rows if _datetime_value(row.get("cycle_time")) == requested_cycle),
+                rows[0],
+            )
+        return _qhh_identity_product(
+            target, basin_id=basin_id, available_issue_times=available_issue_times
+        )
+
+    def _fetch_latest_qhh_identity_candidates(
+        self,
+        cursor: Any,
+        *,
+        basin_id: str,
+        source_id: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        # candidate_runs CTE 的精简版：只取身份/窗口列，不接 station/river 覆盖 CTE（昂贵）。
+        return self._fetch_all(
+            cursor,
+            """
+            SELECT
+                h.run_id,
+                h.model_id,
+                h.basin_version_id,
+                h.forcing_version_id,
+                h.source_id,
+                h.cycle_time,
+                h.start_time AS run_start_time,
+                h.end_time AS run_end_time,
+                h.status,
+                mi.river_network_version_id,
+                bv.basin_id,
+                COALESCE(
+                    CASE WHEN mi.resource_profile->>'output_segment_count' ~ '^[0-9]+$'
+                        THEN (mi.resource_profile->>'output_segment_count')::integer END,
+                    CASE WHEN mi.resource_profile->>'shud_output_segment_count' ~ '^[0-9]+$'
+                        THEN (mi.resource_profile->>'shud_output_segment_count')::integer END,
+                    rnv.segment_count
+                ) AS expected_segment_count,
+                fv.station_count AS expected_station_count,
+                fv.start_time AS forcing_start_time,
+                fv.end_time AS forcing_end_time,
+                GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
+                LEAST(
+                    h.end_time,
+                    fv.end_time,
+                    h.cycle_time + (%s * INTERVAL '1 hour')
+                ) AS display_end_time
+            FROM hydro.hydro_run h
+            JOIN core.basin_version bv
+              ON bv.basin_version_id = h.basin_version_id
+            LEFT JOIN core.model_instance mi
+              ON mi.model_id = h.model_id
+            LEFT JOIN core.river_network_version rnv
+              ON rnv.river_network_version_id = mi.river_network_version_id
+            LEFT JOIN met.forcing_version fv
+              ON fv.forcing_version_id = h.forcing_version_id
+            WHERE bv.basin_id = %s
+              AND h.run_type = 'forecast'
+              AND h.status IN ('parsed', 'frequency_done', 'published')
+              AND LOWER(h.source_id) = LOWER(%s)
+              AND h.cycle_time IS NOT NULL
+            ORDER BY h.cycle_time DESC, h.run_id DESC
+            LIMIT %s
+            """,
+            (QHH_LATEST_EXPECTED_HORIZON_HOURS, basin_id, source_id, limit),
+        )
+
     def _fetch_latest_qhh_display_candidates(
         self,
         cursor: Any,
@@ -1162,7 +1271,6 @@ class PsycopgForecastStore:
                     fv.end_time AS forcing_end_time,
                     fv.station_count AS expected_station_count,
                     fv.checksum AS forcing_checksum,
-                    fv.lineage_json AS forcing_lineage_json,
                     GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
                     LEAST(
                         h.end_time,
@@ -1689,7 +1797,6 @@ class PsycopgForecastStore:
                 fv.end_time AS forcing_end_time,
                 fv.station_count AS expected_station_count,
                 fv.checksum AS forcing_checksum,
-                fv.lineage_json AS forcing_lineage_json,
                 GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
                 LEAST(
                     h.end_time,
@@ -2078,6 +2185,25 @@ class PsycopgForecastStore:
     def _fetch_all(self, cursor: Any, statement: str, parameters: Sequence[Any]) -> list[dict[str, Any]]:
         cursor.execute(statement, tuple(parameters))
         return [dict(row) for row in cursor.fetchall()]
+
+    def _attach_forcing_lineage(self, cursor: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # lineage_json 是 forcing-version 级元数据（实测单条可达 ~3MB）。若在 per-point 查询里
+        # LEFT JOIN 取 fv.lineage_json，会把它在每个时间点行上复制一份——一次 168 点的曲线
+        # 即传输/解析数百 MB，实测耗时 ~17s。改为：per-point 查询只取 h.forcing_version_id，
+        # 取完后按 forcing_version 一次性取 lineage_json 贴回各行，保持 row['lineage_json'] 契约。
+        forcing_version_ids = {row.get("forcing_version_id") for row in rows if row.get("forcing_version_id")}
+        if not forcing_version_ids:
+            for row in rows:
+                row.setdefault("lineage_json", None)
+            return rows
+        cursor.execute(
+            "SELECT forcing_version_id, lineage_json FROM met.forcing_version WHERE forcing_version_id = ANY(%s)",
+            (list(forcing_version_ids),),
+        )
+        lineage_by_forcing_version = {row["forcing_version_id"]: row.get("lineage_json") for row in cursor.fetchall()}
+        for row in rows:
+            row["lineage_json"] = lineage_by_forcing_version.get(row.get("forcing_version_id"))
+        return rows
 
     def _transaction(self) -> Any:
         return _PsycopgTransaction(self.database_url)
@@ -2491,6 +2617,71 @@ def _qhh_latest_return_period_status(row: Mapping[str, Any]) -> dict[str, Any]:
                 "run_id": str(row.get("run_id") or "") or None,
             }
         ],
+    }
+
+
+def _qhh_identity_product(
+    row: Mapping[str, Any],
+    *,
+    basin_id: str = QHH_BASIN_ID,
+    available_issue_times: list[str] | None = None,
+) -> dict[str, Any]:
+    """从精简 candidate 行构造 latest-product（身份 + cycle + horizon），coverage 字段置空。
+
+    弹窗只用身份取曲线，故 status 恒为 ready（信任已发布/解析完成的 run），
+    不做覆盖门控；available_issue_times 给前端起报时间选择器。
+    """
+    source_id = _display_source_id(str(row.get("source_id") or ""))
+    cycle_time = _datetime_value(row.get("cycle_time"))
+    available_start_time, available_end_time = _qhh_latest_available_window(row)
+    horizon_hours = _qhh_latest_horizon_hours(
+        row, cycle_time=cycle_time, available_end_time=available_end_time
+    )
+    expected_horizon_hours = QHH_LATEST_EXPECTED_HORIZON_HOURS
+    shorter_horizon = horizon_hours is not None and horizon_hours < expected_horizon_hours
+    return {
+        "basin_id": str(row.get("basin_id") or basin_id),
+        "model_id": str(row.get("model_id") or ""),
+        "basin_version_id": str(row.get("basin_version_id") or ""),
+        "river_network_version_id": str(row.get("river_network_version_id") or ""),
+        "source_id": source_id,
+        "cycle_time": _format_time(cycle_time),
+        "run_id": str(row.get("run_id") or ""),
+        "forcing_version_id": str(row.get("forcing_version_id") or ""),
+        "station_count": 0,
+        "expected_station_count": _optional_non_negative_response_int(row.get("expected_station_count")),
+        "segment_count": 0,
+        "expected_segment_count": _optional_non_negative_response_int(row.get("expected_segment_count")),
+        "status": "ready",
+        "run_status": str(row.get("status") or ""),
+        "valid_time_start": _format_time(available_start_time),
+        "valid_time_end": _format_time(available_end_time),
+        "river_valid_time_start": _format_time(_datetime_value(row.get("display_start_time")) or cycle_time),
+        "river_valid_time_end": _format_time(available_end_time),
+        "forcing_valid_time_start": _format_time_value(row.get("forcing_start_time")),
+        "forcing_valid_time_end": _format_time_value(row.get("forcing_end_time")),
+        "available_horizon_hours": horizon_hours,
+        "expected_horizon_hours": expected_horizon_hours,
+        "shorter_horizon": shorter_horizon,
+        "available_issue_times": available_issue_times or [],
+        "availability": {
+            "ready": True,
+            "unavailable_reasons": [],
+            "quality_flags": ["shorter_horizon"] if shorter_horizon else [],
+            "quality_notes": [],
+            "return_period_status": "unavailable",
+            "return_period_reasons": [],
+        },
+        "quality": {
+            "station_sample_count": 0,
+            "river_sample_count": 0,
+            "required_station_variables": list(MVP_STATION_VARIABLES),
+            "station_variable_coverage": [],
+            "candidate_limit": QHH_LATEST_CANDIDATE_LIMIT,
+            "search_limit": QHH_LATEST_SEARCH_LIMIT,
+            "context_limit": QHH_LATEST_CONTEXT_LIMIT,
+            "query_indexes": [],
+        },
     }
 
 

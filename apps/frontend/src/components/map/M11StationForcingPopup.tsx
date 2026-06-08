@@ -137,6 +137,7 @@ export function M11StationForcingPopup({
         onSourceChange={popupProduct.setSource}
         issueTimes={popupProduct.issueTimes}
         issueTime={popupProduct.issueTime}
+        onIssueTimeChange={popupProduct.setIssueTime}
       />
       <StationVariableSelector selected={selectedVariables} onToggle={toggleVariable} />
 

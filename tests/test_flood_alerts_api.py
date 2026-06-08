@@ -3384,14 +3384,19 @@ def test_hydro_national_tile_sql_generalizes_trunk_by_zoom() -> None:
     assert "PERCENT_RANK() OVER ( PARTITION BY ts.river_network_version_id" in source_cte
     assert "value_percent_rank" in source_cte
     # Zoom-keyed value-threshold filter lives in the source CTE (before budget counting).
-    assert ":z >= 7" in source_cte
+    # Progressive trunk cutoff extends through z7/z8 so dense basins (Heihe) stay inside
+    # the per-tile budget; full detail only at z>=9.
+    assert ":z >= 9" in source_cte
     assert ":z <= 4 THEN 0.90" in source_cte
     assert ":z = 5 THEN 0.70" in source_cte
-    # NULL-value segments are dropped at low zoom (only the z>=7 branch keeps them).
+    assert ":z = 6 THEN 0.40" in source_cte
+    assert ":z = 7 THEN 0.15" in source_cte
+    # NULL-value segments are dropped at low zoom (only the z>=9 branch keeps them).
     assert "value_percent_rank IS NOT NULL" in source_cte
     # Per-zoom coarse simplification on the source geom, topology preserved.
     assert "ST_SimplifyPreserveTopology" in source_cte
     assert ":z <= 4 THEN 2000.0" in source_cte
+    assert ":z = 7 THEN 200.0" in source_cte
     # National still binds only :variable/:valid_time for identity (run/network resolved
     # by DISTINCT ON); :z is the shared tile-envelope bind, not a national identity param.
     assert ":run_id" not in source_cte

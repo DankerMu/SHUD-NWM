@@ -138,8 +138,36 @@ def get_qhh_latest_product(
         default=None,
         description="Strict QHH model identity. Requires source, run_id, and cycle_time when supplied.",
     ),
+    identity_only: bool = Query(
+        default=False,
+        description=(
+            "Lightweight resolver for popups: returns run identity + cycle + horizon "
+            "(+ recent cycles as available_issue_times) WITHOUT the expensive station/segment "
+            "coverage computation. cycle_time may be supplied alone to select a specific cycle."
+        ),
+    ),
     store: PsycopgForecastStore = Depends(get_forecast_store),
 ) -> dict[str, Any]:
+    if identity_only:
+        if not source:
+            raise _api_error(
+                ForecastStoreError(
+                    status_code=400,
+                    code="QHH_LATEST_SOURCE_REQUIRED",
+                    message="source is required for identity_only latest-product.",
+                )
+            )
+        try:
+            return _ok(
+                request,
+                store.latest_qhh_product_identity(
+                    str(source),
+                    basin_id=basin_id or QHH_BASIN_ID,
+                    cycle_time=cycle_time,
+                ),
+            )
+        except ForecastStoreError as error:
+            raise _api_error(error) from error
     _validate_qhh_latest_identity_query(
         source=source,
         run_id=run_id,

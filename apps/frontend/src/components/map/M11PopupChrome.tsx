@@ -9,6 +9,17 @@ import { M11_POPUP_SOURCES } from '@/components/map/useHydroMetPopupProduct'
 export const M11_POPUP_GLASS =
   'rounded-xl border border-white/50 bg-white/80 shadow-2xl ring-1 ring-black/5 backdrop-blur-xl supports-[backdrop-filter]:bg-white/70'
 
+// 起报时间显示：ISO → 「MM-DD HH:mm UTC」，下拉更易读；option value 仍用原始 ISO。
+function formatIssueTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(date.getUTCDate()).padStart(2, '0')
+  const hh = String(date.getUTCHours()).padStart(2, '0')
+  const mi = String(date.getUTCMinutes()).padStart(2, '0')
+  return `${mm}-${dd} ${hh}:${mi} UTC`
+}
+
 export function M11PopupShell({ children, testId }: { children: ReactNode; testId: string }) {
   return (
     <div className={cn('w-[min(25rem,82vw)] overflow-hidden', M11_POPUP_GLASS)} data-testid={testId}>
@@ -64,11 +75,13 @@ export function M11PopupSourceControls({
   onSourceChange,
   issueTimes,
   issueTime,
+  onIssueTimeChange,
 }: {
   source: HydroMetSource
   onSourceChange: (source: HydroMetSource) => void
   issueTimes: string[]
   issueTime: string | null
+  onIssueTimeChange?: (issueTime: string) => void
 }) {
   return (
     <div className="flex flex-wrap items-center gap-3 border-b border-white/40 px-4 py-2.5" data-testid="m11-popup-source-controls">
@@ -97,13 +110,14 @@ export function M11PopupSourceControls({
           <select
             aria-label="起报时间选择"
             data-testid="m11-popup-issue-time"
-            className="h-7 min-w-0 max-w-[12rem] flex-1 rounded-md border border-white/60 bg-white/60 px-1.5 font-mono text-[11px] text-neutral-800"
+            className="h-7 min-w-0 max-w-[12rem] flex-1 cursor-pointer rounded-md border border-white/60 bg-white/60 px-1.5 font-mono text-[11px] text-neutral-800 transition-colors hover:border-primary-400 focus:border-primary-500 focus:outline-none"
             value={issueTime ?? issueTimes[0]}
-            onChange={() => undefined}
+            onChange={(event) => onIssueTimeChange?.(event.target.value)}
+            disabled={!onIssueTimeChange}
           >
             {issueTimes.map((time) => (
               <option key={time} value={time}>
-                {time}
+                {formatIssueTime(time)}
               </option>
             ))}
           </select>

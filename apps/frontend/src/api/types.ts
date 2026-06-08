@@ -1120,6 +1120,8 @@ export interface components {
             model_id: string;
             basin_version_id: string;
             river_network_version_id: string;
+            /** @description Recent forecast cycles (newest first) for the issue-time selector. Only populated by the identity_only resolver. */
+            available_issue_times?: string[];
             /** @enum {string} */
             source_id: "GFS" | "IFS";
             /** Format: date-time */
@@ -2436,6 +2438,8 @@ export interface operations {
                 cycle_time?: string;
                 /** @description Strict QHH model identity. If supplied, source, run_id, and cycle_time must also be supplied; the API will not fall back to source-only latest selection. */
                 model_id?: string;
+                /** @description Lightweight resolver for popups. Returns run identity, cycle, and horizon plus recent cycles as available_issue_times, WITHOUT the expensive station/segment coverage computation. cycle_time may be supplied alone to select a specific cycle. */
+                identity_only?: boolean;
             };
             header?: never;
             path?: never;

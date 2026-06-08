@@ -132,6 +132,7 @@ export function M11RiverForecastPopup({
         onSourceChange={popupProduct.setSource}
         issueTimes={popupProduct.issueTimes}
         issueTime={popupProduct.issueTime}
+        onIssueTimeChange={popupProduct.setIssueTime}
       />
 
       {!product ? (
@@ -201,8 +202,14 @@ function RiverForecastBody({
   const leadHours = validation.series.availableLeadHours
   const horizonText = leadHours != null ? `预见期 ${leadHours}h` : '预见期'
 
+  const flowValues = validation.renderedPoints.map((point) => point.value).filter((value): value is number => value != null)
+  const currentFlow = flowValues.length > 0 ? flowValues[0] : null
+  const peakIndex = flowValues.reduce((best, value, index) => (value > flowValues[best] ? index : best), 0)
+  const peakFlow = flowValues.length > 0 ? flowValues[peakIndex] : null
+  const peakTime = peakFlow != null ? validation.renderedPoints[peakIndex]?.timestamp ?? null : null
+
   return (
-    <div className="space-y-2 px-4 pb-4 pt-2.5" data-testid="m11-river-popup-loaded">
+    <div className="space-y-2.5 px-4 pb-4 pt-2.5" data-testid="m11-river-popup-loaded">
       <div className="flex items-center justify-between gap-2">
         <span
           className="inline-flex items-center rounded-full bg-primary-50 px-2 py-0.5 text-[11px] font-medium tracking-wide text-primary-700"
@@ -219,7 +226,58 @@ function RiverForecastBody({
           {validation.capped ? ` · ${validation.renderedPoints.length}/${validation.pointCount}` : ''}
         </span>
       </div>
+      <RiverForecastKpiStrip current={currentFlow} peak={peakFlow} peakTime={peakTime} unit={validation.unit} />
       <ForecastChart data={forecastData} segmentName={segment.name} variant="compact" />
     </div>
   )
+}
+
+/** KPI 条：当前/峰值流量，等宽数字 + 强调色，符合气象水文驾驶舱风格。仅展示真实渲染点导出的数值。 */
+function RiverForecastKpiStrip({
+  current,
+  peak,
+  peakTime,
+  unit,
+}: {
+  current: number | null
+  peak: number | null
+  peakTime: string | null
+  unit: string
+}) {
+  const formatFlow = (value: number | null) => (value == null ? '—' : value.toFixed(value >= 100 ? 0 : 1))
+  const peakClock = peakTime ? formatPeakClock(peakTime) : null
+  return (
+    <div className="grid grid-cols-2 gap-2" data-testid="m11-river-popup-kpi">
+      <div className="rounded-lg border border-white/50 bg-white/50 px-3 py-2">
+        <div className="text-[10px] uppercase tracking-wide text-neutral-500">当前流量</div>
+        <div className="mt-0.5 flex items-baseline gap-1">
+          <span className="text-lg font-semibold tabular-nums text-neutral-900" data-testid="m11-river-popup-kpi-current">
+            {formatFlow(current)}
+          </span>
+          <span className="text-[10px] text-neutral-500">{unit}</span>
+        </div>
+      </div>
+      <div className="rounded-lg border border-primary-200/60 bg-primary-50/60 px-3 py-2">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] uppercase tracking-wide text-primary-700">峰值流量</span>
+          {peakClock ? <span className="text-[10px] tabular-nums text-primary-600/80">{peakClock}</span> : null}
+        </div>
+        <div className="mt-0.5 flex items-baseline gap-1">
+          <span className="text-lg font-semibold tabular-nums text-primary-800" data-testid="m11-river-popup-kpi-peak">
+            {formatFlow(peak)}
+          </span>
+          <span className="text-[10px] text-primary-600/80">{unit}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function formatPeakClock(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(date.getUTCDate()).padStart(2, '0')
+  const hh = String(date.getUTCHours()).padStart(2, '0')
+  return `${mm}-${dd} ${hh}:00`
 }
