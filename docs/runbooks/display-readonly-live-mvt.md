@@ -1,0 +1,69 @@
+# display_readonly Live PostGIS MVT Runbook
+
+排查/启用 node-27（`display_readonly`）的 live PostGIS 矢量瓦片（MVT）。对应 issue #343（[M26-7]）。
+
+## 背景与原始症状
+
+M26 初验时 node-27 实测：`/api/v1/layers` 返回 `[]`、river-network 瓦片 **424**、hydro 瓦片 **409**。
+需确认是只读节点故意关闭 live tile、图层未注册、还是只读副本缺 tile 函数/数据。
+
+## 根因（7.1）
+
+只读节点 **未启用 live PostGIS MVT 特性开关**，且图层 catalog 因此未注册：
+
+- `NHMS_ENABLE_LIVE_POSTGIS_MVT` 未置 `true` → `_require_live_postgis_mvt()` 直接抛 **424**（`MVT_LIVE_POSTGIS_UNAVAILABLE`）。
+- 开关关闭时 `/api/v1/layers` 图层目录为空（`[]`），前端 overlay 无从点亮。
+- 数据并不缺：`display_readonly` 经只读角色 `nhms_display_ro` 连 node-22 的 `nhms` 库（`210.77.77.22:55433`），
+  业务表分布在 `core` / `hydro` / `map` / `flood` / `met` 等 schema（`public` 仅 PostGIS 系统表），
+  几何与时序数据齐备。所以 424/409 是**运行配置**问题，不是只读副本能力缺失。
+
+## 决策（7.2）
+
+**在 display_readonly 启用 live MVT**（已落地），分工：
+
+- 河网几何走**静态 shp 底图常显**（`/geo/national-basin-river.geojson`，`scripts/geo/build_national_river_geo.py`
+  从 basin `river.shp` 可复现生成），不依赖 river-network MVT，规避其低 zoom 预算问题。
+- 流量 / 水位 / 洪频走 **live PostGIS MVT overlay**（`hydro-national` 等端点）做上色与点击。
+- 不引入预生成 tile cache 发布层——live 查询在只读副本上延迟可接受（见 receipt）。
+
+## 启用配置
+
+`infra/env/display.env`：
+
+```bash
+NHMS_ENABLE_LIVE_POSTGIS_MVT=true
+DATABASE_URL=postgresql://nhms_display_ro@210.77.77.22:55433/nhms   # 只读角色
+```
+
+改后重启服务（`/tmp/start_display.sh`：pkill uvicorn → source display.env → exec uvicorn 127.0.0.1:8080）。
+
+## node-27 Live Receipt（2026-06-08，本机实测）
+
+```text
+NHMS_ENABLE_LIVE_POSTGIS_MVT=true
+/api/v1/layers                        http=200  layers=5  [discharge, water-level,
+                                      flood-return-period, warning-level, river-network]
+hydro-national/q_down z6/49/24        http=200  370276 bytes  0.66s  (稳定 ×3)
+river-network/<bv> z9/394/198         http=200  0 bytes        (空瓦片：该坐标无河段，正常)
+river-network/<bv> z6/49/24           http=413  353 bytes      (低 zoom 整流域超 MVT 预算)
+```
+
+结论：live PostGIS MVT 在只读节点**完全可用**，424/409 根因（开关未启用 + 图层未注册）已消除。
+
+## 残留风险与处置
+
+- **首请求偶发 424（瞬态）**：冷连接池 fast-fail，立即重试即 200（receipt 复测 ×3 全 200）。
+  客户端应对 tile 424 做一次静默重试，不要据此判定 live MVT 不可用。
+- **river-network 低 zoom 413**：整流域河网在 z≤6 超 `MVT_MAX_BYTES`。当前**不阻塞**——河网常显已由静态
+  shp 底图承担；river-network MVT 仅在高 zoom 点击/上色用到。若日后要让 river-network MVT 全 zoom 可用，
+  按 `services/tiles/mvt.py` 中 `hydro-national` 的渐进 trunk 过滤（按 zoom 提高 `percent_rank` cutoff +
+  几何 simplify）同法处理，不要无脑放宽预算。
+- **只读边界**：`nhms_display_ro` 为只读角色，任何写操作应被 DB 拒绝（denied-write live 验证见
+  `node-27-bringup-checklist.md`）。
+
+## 相关
+
+- 图层目录：`/api/v1/layers`（`map.tile_layer` 注册 + 代码 metadata）
+- 端点：`apps/api/routes/flood_alerts.py`（river-network / hydro-national tile 路由、`_require_live_postgis_mvt`）
+- 预算门：`services/tiles/mvt.py`（`MVT_MAX_BYTES`、percent_rank/simplify 分级）
+- 静态河网底图：`scripts/geo/build_national_river_geo.py`、`apps/frontend/src/pages/m11/useNationalBasinGeo.ts`
