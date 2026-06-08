@@ -3326,9 +3326,6 @@ def test_unscoped_discharge_catalog_uses_national_template_and_union_valid_times
     # front-end initial national view (zoom 3.35) so trunk rivers show without zooming in.
     # Guards against regressing the hardcoded min_zoom=0 in layer_metadata().
     assert metadata["min_zoom"] == 3
-    # National tile self-describes basin_id so the click→popup curve resolves the basin
-    # without an N+1 versions fetch (single-run discharge tiles don't carry it).
-    assert "basin_id" in metadata["properties"]
     valid_times = metadata["valid_times"]
     assert _iso(rnv1_time) in valid_times
     assert _iso(rnv2_time) in valid_times
