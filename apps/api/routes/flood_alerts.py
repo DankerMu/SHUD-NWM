@@ -35,6 +35,7 @@ from services.tiles.mvt import (
     build_raw_tile_response,
     build_tile_response,
     canonical_mvt_time,
+    latest_frequency_ready_run,
     latest_ready_run,
     layer_metadata,
     postgis_tile_sql,
@@ -312,7 +313,10 @@ def list_layers(
         validate_identifier(run_id, "run_id")
         run = _require_frequency_ready(session, run_id)
     else:
-        run = latest_ready_run(session)
+        # 目录默认 run 选最新 frequency-ready（不要求洪频完整）：discharge/water-level/river-network
+        # 仅需 frequency-ready 水文 run；洪频/预警可用性由 _annotate_flood_layer_quality 独立标注。
+        # 无洪频基线的流域（QHH/Heihe）因此仍能暴露 discharge，而非整目录空。
+        run = latest_frequency_ready_run(session)
         if run is None:
             return _ok(request, [])
     resolved_run_id = str(run["run_id"]) if run else None

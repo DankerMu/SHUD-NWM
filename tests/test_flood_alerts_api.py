@@ -3325,6 +3325,39 @@ def test_layer_catalog_unscoped_no_ready_run_returns_empty_without_discovery(
     assert response.json()["data"] == []
 
 
+def test_layer_catalog_unscoped_frequency_ready_without_flood_product_still_exposes_discharge() -> None:
+    """无洪频基线的 frequency-ready run（QHH/Heihe 现实：有 q_down 无 return-period）仍应暴露 discharge。
+
+    解耦回归：目录默认 run 选最新 frequency-ready（latest_frequency_ready_run），不再像 latest_ready_run
+    那样内连接 flood.return_period_result。discharge/water-level/river-network 暴露，flood/warning 层
+    仍在目录但被 _annotate_flood_layer_quality 标注 unavailable，不阻塞水文图层。
+    """
+    with _store() as session:
+        # RUN_ID 设为唯一 frequency-ready run，并移除其洪频产品
+        rid = {"rid": RUN_ID}
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed' WHERE run_id != :rid"), rid)
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'frequency_done' WHERE run_id = :rid"), rid)
+        session.execute(text("DELETE FROM flood.return_period_result WHERE run_id = :rid"), rid)
+        session.commit()
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get("/api/v1/layers")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    by_id = {layer["layer_id"]: layer for layer in data}
+    # 无洪频仍暴露 discharge，且带可渲染 MVT 瓦片契约
+    assert "discharge" in by_id
+    assert by_id["discharge"]["metadata"]["tile_url_template"]
+    assert "river-network" in by_id
+    # 洪频/预警层仍在目录但被标注 unavailable（return_period_result 缺）
+    flood = by_id["flood-return-period"]
+    assert "return_period_result" in flood["metadata"]["unavailable_products"]
+
+
 def test_layer_catalog_explicit_missing_run_source_identity_returns_stable_error_without_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

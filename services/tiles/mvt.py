@@ -824,6 +824,33 @@ def latest_ready_run(session: Session) -> Mapping[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+def latest_frequency_ready_run(session: Session) -> Mapping[str, Any] | None:
+    """Latest frequency-ready run for the layer catalog, independent of flood return-period completeness.
+
+    `/api/v1/layers` exposes hydrology layers (discharge / water-level / river-network) that only need a
+    frequency-ready hydro run; flood return-period / warning-level availability is annotated separately
+    (see `_annotate_flood_layer_quality`). Unlike `latest_ready_run`, this does NOT inner-join
+    `flood.return_period_result`, so basins without a flood baseline (e.g. QHH/Heihe) still expose
+    discharge instead of an empty catalog. Source-identity resolution and the stable 404 contract for a
+    ready run missing source identity stay with the caller (`_require_run_source_identity`), matching
+    `latest_ready_run`.
+    """
+    row = session.execute(
+        text(
+            """
+            SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time, h.updated_at,
+                   mi.river_network_version_id
+            FROM hydro.hydro_run h
+            LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
+            WHERE h.status IN ('frequency_done', 'published')
+            ORDER BY h.cycle_time DESC, h.run_id DESC
+            LIMIT 1
+            """
+        )
+    ).mappings().first()
+    return dict(row) if row is not None else None
+
+
 def valid_times_for_layer(
     session: Session,
     layer_id: str,
