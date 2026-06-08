@@ -1915,7 +1915,7 @@ class ProductionScheduler:
         for (source_id, cycle_time_text), skipped in sorted(grouped.items()):
             cycle_time = _ensure_utc(datetime.fromisoformat(cycle_time_text.replace("Z", "+00:00")))
             cycle_id = cycle_id_for(source_id, cycle_time)
-            orchestrator = self._orchestrator_for(source_id)
+            orchestrator = self._cancel_orchestrator_for(source_id)
             cancel = getattr(orchestrator, "cancel_active_cycle_jobs", None)
             if not callable(cancel):
                 evidence.append(
@@ -1992,6 +1992,14 @@ class ProductionScheduler:
     def _orchestrator_for(self, source_id: str) -> ForecastOrchestrator:
         if self.orchestrator_factory is not None:
             return self.orchestrator_factory(source_id)
+        return self._default_orchestrator_for(source_id, state_manager=StateManager.from_env())
+
+    def _cancel_orchestrator_for(self, source_id: str) -> ForecastOrchestrator:
+        if self.orchestrator_factory is not None:
+            return self.orchestrator_factory(source_id)
+        return self._default_orchestrator_for(source_id, state_manager=None)
+
+    def _default_orchestrator_for(self, source_id: str, *, state_manager: Any | None) -> ForecastOrchestrator:
         config = OrchestratorConfig.from_env()
         if self.config.slurm_execution_enabled:
             config = OrchestratorConfig(
@@ -2032,7 +2040,7 @@ class ProductionScheduler:
         return ForecastOrchestrator(
             config=config,
             repository=_orchestrator_repository_from_env(),
-            state_manager=StateManager.from_env(),
+            state_manager=state_manager,
             retry_service=_retry_service_from_env(),
         )
 
@@ -4243,10 +4251,10 @@ def _call_active_slurm_jobs_provider(
 def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     validation = evidence.get("production_identity_validation")
     if not isinstance(validation, Mapping):
-        return dict(state)
+        return _candidate_scoped_shared_cycle_aggregate_state(state, evidence)
     legacy_sources = {str(source) for source in validation.get("legacy_non_authoritative", [])}
     if not legacy_sources:
-        return dict(state)
+        return _candidate_scoped_shared_cycle_aggregate_state(state, evidence)
     filtered = dict(state)
     if "candidate_state" in legacy_sources:
         _strip_top_level_candidate_state_decision_fields(filtered)
@@ -4281,7 +4289,166 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
         _strip_top_level_pipeline_decision_fields(filtered)
     if filtered.get("pipeline_events") == [] and not filtered.get("pipeline_jobs"):
         _strip_top_level_pipeline_decision_fields(filtered)
+    return _candidate_scoped_shared_cycle_aggregate_state(filtered, evidence)
+
+
+def _candidate_scoped_shared_cycle_aggregate_state(
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    filtered = dict(state)
+    if filtered.get("shared_cycle_aggregate") is not True:
+        return filtered
+    candidate_identity = evidence.get("candidate_identity")
+    if not isinstance(candidate_identity, Mapping):
+        return filtered
+    expected = _candidate_identity_from_evidence(candidate_identity)
+    if not expected:
+        return filtered
+    if _shared_cycle_aggregate_has_candidate_failure(expected, filtered):
+        filtered["pipeline_events"] = _candidate_scoped_shared_cycle_events(expected, _state_events(filtered))
+        filtered.pop("events", None)
+        return filtered
+    _strip_top_level_pipeline_decision_fields(filtered)
+    filtered["pipeline_jobs"] = [
+        dict(job) for job in _state_jobs(filtered) if _shared_cycle_row_is_candidate_scoped(expected, job)
+    ]
+    filtered.pop("jobs", None)
+    filtered["pipeline_events"] = _candidate_scoped_shared_cycle_events(expected, _state_events(filtered))
+    filtered.pop("events", None)
+    if filtered.get("pipeline_jobs") == []:
+        filtered.pop("pipeline_jobs", None)
+    if filtered.get("pipeline_events") == []:
+        filtered.pop("pipeline_events", None)
     return filtered
+
+
+def _candidate_identity_from_evidence(candidate_identity: Mapping[str, Any]) -> dict[str, Any]:
+    identity = {
+        "run_id": candidate_identity.get("run_id"),
+        "model_id": candidate_identity.get("model_id"),
+        "basin_id": candidate_identity.get("basin_id"),
+        "source": candidate_identity.get("source") or candidate_identity.get("source_id"),
+        "source_id": candidate_identity.get("source_id") or candidate_identity.get("source"),
+        "cycle_time": candidate_identity.get("cycle_time") or candidate_identity.get("cycle_time_utc"),
+        "cycle_time_utc": candidate_identity.get("cycle_time_utc") or candidate_identity.get("cycle_time"),
+        "basin_version_id": candidate_identity.get("basin_version_id"),
+        "river_network_version_id": candidate_identity.get("river_network_version_id"),
+        "canonical_product_id": candidate_identity.get("canonical_product_id"),
+        "forcing_version_id": candidate_identity.get("forcing_version_id"),
+        "hydro_run_id": candidate_identity.get("hydro_run_id") or candidate_identity.get("run_id"),
+        "published_manifest_id": candidate_identity.get("published_manifest_id"),
+    }
+    return {key: value for key, value in identity.items() if value not in (None, "")}
+
+
+def _shared_cycle_aggregate_has_candidate_failure(
+    expected: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> bool:
+    for job in _state_jobs(state):
+        status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+        if status not in FAILED_PIPELINE_STATUSES and job.get("error_code") in (None, ""):
+            continue
+        if _shared_cycle_row_is_candidate_scoped(expected, job):
+            return True
+    for event in _state_events(state):
+        if _event_has_candidate_scoped_failure(expected, event):
+            return True
+    return False
+
+
+def _candidate_scoped_shared_cycle_events(
+    expected: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    scoped_events: list[dict[str, Any]] = []
+    for event in events:
+        event_payload = dict(event)
+        details = event_payload.get("details")
+        if isinstance(details, Mapping):
+            scoped_tasks = [
+                dict(task)
+                for task in _bounded_task_result_rows(details)
+                if _task_result_is_candidate_scoped(expected, task)
+            ]
+            details_payload = dict(details)
+            if scoped_tasks:
+                details_payload["task_results"] = scoped_tasks
+                details_payload["task_results_total"] = len(scoped_tasks)
+                details_payload["task_results_included"] = len(scoped_tasks)
+                details_payload["task_results_limit"] = CANDIDATE_STATE_TASK_RESULT_LIMIT
+                details_payload["task_results_overflow"] = False
+            else:
+                details_payload.pop("task_results", None)
+                details_payload.pop("task_results_total", None)
+                details_payload.pop("task_results_included", None)
+                details_payload.pop("task_results_limit", None)
+                details_payload.pop("task_results_overflow", None)
+                details_payload.pop("task_results_omitted", None)
+            event_payload["details"] = details_payload
+        if _shared_cycle_row_is_candidate_scoped(expected, event_payload) or _event_has_candidate_scoped_failure(
+            expected,
+            event_payload,
+        ):
+            scoped_events.append(event_payload)
+    return scoped_events
+
+
+def _event_has_candidate_scoped_failure(expected: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    details = event.get("details")
+    if not isinstance(details, Mapping):
+        return False
+    for key in ("task_identity", "failed_task", "failed_task_identity"):
+        value = details.get(key)
+        if (
+            isinstance(value, Mapping)
+            and _state_row_has_authoritative_candidate_proof(expected, value)
+            and _state_task_payload_failed(value)
+        ):
+            return True
+    for task in _bounded_task_result_rows(details):
+        if _task_result_is_candidate_scoped(expected, task) and _state_task_payload_failed(task):
+            return True
+    return False
+
+
+def _task_result_is_candidate_scoped(expected: Mapping[str, Any], task: Mapping[str, Any]) -> bool:
+    return _shared_cycle_row_is_candidate_scoped(expected, task)
+
+
+def _shared_cycle_row_is_candidate_scoped(expected: Mapping[str, Any], row: Mapping[str, Any]) -> bool:
+    row_values = _legacy_identity_values(row)
+    expected_values = _legacy_identity_values(expected)
+    if _shared_cycle_identity_values_match_candidate(row_values, expected_values):
+        return True
+    for nested in _nested_state_identity_payloads(row):
+        if _shared_cycle_identity_values_match_candidate(_legacy_identity_values(nested), expected_values):
+            return True
+    return False
+
+
+def _shared_cycle_identity_values_match_candidate(
+    row_values: Mapping[str, str],
+    expected_values: Mapping[str, str],
+) -> bool:
+    if not row_values:
+        return False
+    if _state_values_are_scoped_to_other_candidate(row_values, expected_values):
+        return False
+    if _state_values_have_complete_m23_identity(row_values, expected_values):
+        return True
+    for identity_field in ("model_id", "forcing_version_id", "hydro_run_id", "published_manifest_id", "run_id"):
+        value = row_values.get(identity_field)
+        expected = expected_values.get(identity_field)
+        if value not in (None, "") and expected not in (None, "") and value == expected:
+            return True
+    return False
+
+
+def _state_task_payload_failed(payload: Mapping[str, Any]) -> bool:
+    status = str(payload.get("status") or payload.get("state") or "")
+    return status not in {"", "succeeded", "complete", "published"}
 
 
 def _candidate_state_source_has_authoritative_ancestor(source: str, authoritative_sources: set[str]) -> bool:
