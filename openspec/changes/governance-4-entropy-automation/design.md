@@ -61,3 +61,60 @@ Initial hard-fail candidates after cleanup:
 - `uv run python scripts/governance/audit_repo_entropy.py --format json`
 - `uv run python scripts/governance/audit_repo_entropy.py --format markdown`
 - Governance workflow dry run or local equivalent.
+
+## Governance-4A Fixture
+
+Issue #371 implements only the report script. Documentation, CI workflow, and
+hard-gate wiring remain in later Governance-4 slices.
+
+Fixture level: expanded
+Project profile: NHMS
+Repair intensity: medium
+Change surface:
+- New `scripts/governance/audit_repo_entropy.py`.
+- Focused tests may be added for report schema, check classification, and
+  no-baseline-write behavior.
+Must preserve:
+- Default report mode does not create or update `.entropy-baseline/latest.json`.
+- Findings are report-only signals; script exit status stays successful for
+  detected baseline findings unless a later hard-gate mode is explicitly added.
+- Existing static guard tests remain the source of truth for enforced gates.
+Must add/change:
+- JSON and Markdown output formats.
+- Six-axis heatmap fields: `structure`, `semantics`, `behavior`, `context`,
+  `protocol`, `control`, and derived `priority`.
+- Finding fields: `governance_face`, `role`, `evidence_path`, `severity`,
+  `priority`, `owner_area`, and optional allowlist reason.
+- Required check families from the #371 issue body in report-only mode.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - new script CLI and output modes.
+- Config / project setup: selected - scans `.gitignore`, `.dockerignore`,
+  workflows, Makefile, and ownership policy.
+- File IO / path safety / overwrite: selected - recursively reads repository
+  files and must avoid writing baseline files by default.
+- Schema / columns / units / field names: selected - JSON report schema is a
+  machine-readable contract for later CI/docs.
+- Auth / permissions / secrets: selected - hard-coded private host/path and
+  generated evidence checks must avoid leaking file contents unnecessarily.
+- Concurrency / shared state / ordering: not selected - single-process read-only
+  script with no shared runtime state.
+- Resource limits / large input / discovery: selected - script must skip large
+  generated/vendor directories and avoid walking ignored runtime data.
+- Legacy compatibility / examples: selected - checks intentionally report
+  placeholder/legacy paths and must not delete or rewrite them.
+- Error handling / rollback / partial outputs: selected - CLI errors should be
+  stable and report mode must not partially write baseline metadata.
+- Release / packaging / dependency compatibility: selected - script should use
+  standard-library or existing project dependencies so CI can run it with
+  `uv run`.
+- Documentation / migration notes: selected - output must be useful enough for
+  later #372 docs and #373 non-blocking CI.
+Domain packs:
+- Published NHMS artifacts / display identity: selected - artifact ownership
+  and frontend evidence paths are audited.
+- Slurm production lifecycle / mock-vs-real parity: selected - standalone
+  gateway route leakage and diagnostic-token checks cover Slurm boundaries.
+- Run manifest / QC provenance: not selected - no manifest parsing behavior.
+- Other NHMS domain packs: not selected - no geospatial, forcing, SHUD
+  numerical, provider, or DB behavior change.

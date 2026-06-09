@@ -1,0 +1,1490 @@
+#!/usr/bin/env python3
+"""Report-only repository entropy audit for Governance-4A.
+
+The script intentionally emits signals instead of gates. It reads repository
+files, classifies known governance drift families, and never writes
+``.entropy-baseline/latest.json`` in the default report modes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Iterable, Literal
+
+AXES = ("structure", "semantics", "behavior", "context", "protocol", "control")
+CHECK_FAMILIES = (
+    "role-env-boundary",
+    "qhh-diagnostic-token",
+    "paused-workflow-condition",
+    "broad-e2e-api-mock",
+    "stale-display-route-token",
+    "placeholder-path-token",
+    "placeholder-path-exists",
+    "makefile-toolchain-discipline",
+    "openapi-frontend-types-delegated",
+    "openapi-frontend-types-presence",
+    "openapi-frontend-types-signal",
+    "slurm-gateway-route-leakage",
+    "agent-artifact-ownership-policy",
+    "agent-artifact-ignore-policy",
+    "tracked-generated-artifact",
+    "apps-api-layer-inversion",
+)
+SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
+PRIORITY_RANK = {"P3": 1, "P2": 2, "P1": 3, "P0": 4}
+SCORE_RANK = {"low": 1, "medium": 2, "high": 3}
+RANK_SCORE = {1: "low", 2: "medium", 3: "high"}
+SCAN_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "node_modules",
+        "dist",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+        ".cache",
+    }
+)
+SCAN_SKIP_ROOT_DIRS = frozenset({"artifacts", "data"})
+SCAN_SKIP_PREFIXES = (".nhms-",)
+TEXT_EXTENSIONS = frozenset(
+    {
+        ".cfg",
+        ".css",
+        ".env",
+        ".example",
+        ".html",
+        ".ini",
+        ".js",
+        ".json",
+        ".jsx",
+        ".lock",
+        ".md",
+        ".mjs",
+        ".py",
+        ".rst",
+        ".sh",
+        ".sql",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+)
+MAX_SCANNED_TEXT_FILE_BYTES = 1_048_576
+MAX_ARTIFACT_FINGERPRINT_BYTES = 1_048_576
+HASH_CHUNK_BYTES = 1_048_576
+
+FindingAxis = Literal["structure", "semantics", "behavior", "context", "protocol", "control"]
+
+
+@dataclass(frozen=True)
+class FindingSpec:
+    check_id: str
+    title: str
+    axis: FindingAxis
+    governance_face: str
+    role: str
+    evidence_path: str
+    severity: Literal["low", "medium", "high"]
+    priority: Literal["P0", "P1", "P2", "P3"]
+    owner_area: str
+    description: str
+    recommendation: str
+    module: str
+    allowlist_reason: str | None = None
+    line: int | None = None
+
+
+def repo_root_from(start: Path | None = None) -> Path:
+    start = (start or Path.cwd()).resolve()
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists() and (candidate / ".git").exists():
+            return candidate
+    return start
+
+
+def build_report(repo_root: Path | None = None) -> dict[str, object]:
+    root = repo_root_from(repo_root)
+    findings = sorted(
+        _dedupe_findings(_collect_findings(root)),
+        key=lambda item: (
+            -PRIORITY_RANK[item.priority],
+            -SEVERITY_RANK[item.severity],
+            item.check_id,
+            item.evidence_path,
+            item.line or 0,
+        ),
+    )
+    finding_records = [_finding_record(index, finding) for index, finding in enumerate(findings, start=1)]
+    return {
+        "metadata": _metadata(root, findings),
+        "module_heatmap": _module_heatmap(finding_records),
+        "findings": finding_records,
+        "high_spread_patterns": _high_spread_patterns(finding_records),
+    }
+
+
+def render_markdown(report: dict[str, object]) -> str:
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    heatmap = report["module_heatmap"]
+    findings = report["findings"]
+    patterns = report["high_spread_patterns"]
+    assert isinstance(heatmap, list)
+    assert isinstance(findings, list)
+    assert isinstance(patterns, list)
+
+    lines = [
+        "# Repository Entropy Audit",
+        "",
+        f"- Mode: `{metadata['mode']}`",
+        f"- Generated: `{metadata['generated_at']}`",
+        f"- Baseline path: `{metadata['baseline_path']}`",
+        f"- Baseline written: `{str(metadata['baseline_written']).lower()}`",
+        f"- Findings: `{metadata['finding_count']}`",
+        "",
+        "## Entropy Heatmap",
+        "",
+        "| Module | Structure | Semantics | Behavior | Context | Protocol | Control | Priority | Findings |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---:|",
+    ]
+    for row in heatmap:
+        assert isinstance(row, dict)
+        lines.append(
+            "| {module} | {structure} | {semantics} | {behavior} | {context} | {protocol} | "
+            "{control} | {priority} | {finding_count} |".format(**row)
+        )
+
+    lines.extend(["", "## High-Spread Patterns", ""])
+    if patterns:
+        for pattern in patterns:
+            assert isinstance(pattern, dict)
+            lines.append(
+                "- **{pattern}**: {occurrence_count} findings across {module_count} modules; "
+                "top priority `{top_priority}`; roles `{roles}`.".format(
+                    pattern=pattern["pattern"],
+                    occurrence_count=pattern["occurrence_count"],
+                    module_count=pattern["module_count"],
+                    top_priority=pattern["top_priority"],
+                    roles=", ".join(pattern["roles"]) if pattern["roles"] else "none",
+                )
+            )
+    else:
+        lines.append("- No replicated patterns detected.")
+
+    lines.extend(["", "## Prioritized Cleanup Targets", ""])
+    if findings:
+        for finding in findings[:20]:
+            assert isinstance(finding, dict)
+            location = finding["evidence_path"]
+            if finding.get("line"):
+                location = f"{location}:{finding['line']}"
+            lines.append(
+                "- `{priority}` `{severity}` **{title}** ({axis}, {role}) at `{location}`: "
+                "{recommendation}".format(
+                    priority=finding["priority"],
+                    severity=finding["severity"],
+                    title=finding["title"],
+                    axis=finding["axis"],
+                    role=finding["role"],
+                    location=location,
+                    recommendation=finding["recommendation"],
+                )
+            )
+    else:
+        lines.append("- No cleanup targets detected.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate a report-only repository entropy audit.")
+    parser.add_argument("--format", choices=("json", "markdown"), default="json")
+    args = parser.parse_args(argv)
+
+    report = build_report()
+    if args.format == "json":
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(render_markdown(report))
+    return 0
+
+
+def _metadata(root: Path, findings: list[FindingSpec]) -> dict[str, object]:
+    baseline_path = ".entropy-baseline/latest.json"
+    return {
+        "schema_version": "governance-4a.entropy-report.v1",
+        "mode": "report-only",
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "repo_root": root.as_posix(),
+        "baseline_path": baseline_path,
+        "baseline_exists": (root / baseline_path).exists(),
+        "baseline_written": False,
+        "finding_count": len(findings),
+        "check_family_count": len({finding.check_id for finding in findings}),
+        "max_scanned_text_file_bytes": MAX_SCANNED_TEXT_FILE_BYTES,
+        "max_artifact_fingerprint_bytes": MAX_ARTIFACT_FINGERPRINT_BYTES,
+        "executed_check_families": list(CHECK_FAMILIES),
+        "skipped_path_families": sorted(
+            [
+                ".git",
+                ".venv",
+                "node_modules",
+                "dist",
+                "artifacts",
+                "data",
+                ".nhms-*",
+                "caches",
+            ]
+        ),
+    }
+
+
+def _collect_findings(root: Path) -> list[FindingSpec]:
+    findings: list[FindingSpec] = []
+    findings.extend(_check_display_env_boundaries(root))
+    findings.extend(_check_qhh_diagnostic_tokens(root))
+    findings.extend(_check_paused_workflows(root))
+    findings.extend(_check_broad_e2e_mocks(root))
+    findings.extend(_check_stale_route_tokens(root))
+    findings.extend(_check_placeholder_paths(root))
+    findings.extend(_check_makefile_toolchain(root))
+    findings.extend(_check_openapi_frontend_type_drift(root))
+    findings.extend(_check_slurm_gateway_route_leakage(root))
+    findings.extend(_check_agent_artifact_ownership(root))
+    findings.extend(_check_apps_api_layer_inversion(root))
+    return findings
+
+
+def _check_display_env_boundaries(root: Path) -> list[FindingSpec]:
+    compute_only_tokens = (
+        "WORKSPACE_ROOT",
+        "SHUD_EXECUTABLE",
+        "SLURM_GATEWAY_URL",
+        "SLURM_GATEWAY_BACKEND",
+        "SLURM_PARTITION",
+        "SLURM_ACCOUNT",
+    )
+    findings: list[FindingSpec] = []
+    for path in _infra_role_env_scan_files(root):
+        text = _read_repo_text(root, path)
+        lines = text.splitlines()
+        for line_no, line in _matching_lines(text, compute_only_tokens):
+            if line.lstrip().startswith("#"):
+                continue
+            if not _is_display_boundary_context(root, path, lines, line_no):
+                continue
+            token = next(token for token in compute_only_tokens if token in line)
+            findings.append(
+                FindingSpec(
+                    check_id="role-env-boundary",
+                    title="Display configuration references compute-only environment",
+                    axis="protocol",
+                    governance_face="role boundary",
+                    role="display_readonly",
+                    evidence_path=_rel(root, path),
+                    line=line_no,
+                    severity="high",
+                    priority="P1",
+                    owner_area="infra/runtime",
+                    module=_module_for_path(root, path),
+                    description=(
+                        f"Display-facing env or compose file references `{token}`, which is part of the "
+                        "compute/control-plane boundary inventory."
+                    ),
+                    recommendation=(
+                        "Keep display config limited to read-only runtime identity and public display inputs; "
+                        "move compute-only values to compute env/compose files."
+                    ),
+                )
+            )
+    return findings
+
+
+def _infra_role_env_scan_files(root: Path) -> Iterable[Path]:
+    roots = [root / "infra", root / "apps" / "frontend"]
+    for path in _iter_text_files(root, roots):
+        if (
+            path.name == ".env"
+            or path.name.startswith(".env.")
+            or path.suffix in {".env", ".example", ".yaml", ".yml"}
+        ):
+            yield path
+
+
+def _is_display_boundary_context(root: Path, path: Path, lines: list[str], line_no: int) -> bool:
+    rel = _rel(root, path).lower()
+    env_like = path.name == ".env" or path.name.startswith(".env.") or path.suffix in {".env", ".example"}
+    if env_like:
+        if _path_has_display_hint(rel) and not _path_has_compute_hint(rel):
+            return True
+        return _line_has_display_env_section(lines, line_no)
+    if path.suffix in {".yaml", ".yml"}:
+        if _path_has_display_hint(rel) and not _path_has_compute_hint(rel):
+            return True
+        return any(start <= line_no <= end for start, end in _display_yaml_line_ranges(lines))
+    if _path_has_display_hint(rel) and not _path_has_compute_hint(rel):
+        return True
+    return False
+
+
+def _path_has_display_hint(relative: str) -> bool:
+    parts = re.split(r"[/_.-]+", relative)
+    return any(part in {"display", "frontend", "webui"} for part in parts)
+
+
+def _path_has_compute_hint(relative: str) -> bool:
+    parts = re.split(r"[/_.-]+", relative)
+    return any(part in {"api", "backend", "compute", "gateway", "slurm", "worker"} for part in parts)
+
+
+def _display_yaml_line_ranges(lines: list[str]) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    services_indent: int | None = None
+    service_indent: int | None = None
+    current_name: str | None = None
+    current_start: int | None = None
+    current_lines: list[str] = []
+
+    def close_current(end_line: int) -> None:
+        nonlocal current_name, current_start, current_lines
+        if current_name is not None and current_start is not None:
+            if _yaml_service_looks_display_facing(current_name, current_lines):
+                ranges.append((current_start, end_line))
+        current_name = None
+        current_start = None
+        current_lines = []
+
+    for index, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if not stripped or stripped.startswith("#"):
+            if current_name is not None:
+                current_lines.append(line)
+            continue
+        if re.match(r"services\s*:\s*(?:#.*)?$", stripped):
+            close_current(index - 1)
+            services_indent = indent
+            service_indent = None
+            continue
+        if services_indent is None:
+            continue
+        if indent <= services_indent:
+            close_current(index - 1)
+            services_indent = None
+            service_indent = None
+            continue
+
+        key_match = re.match(r"['\"]?([A-Za-z0-9_.-]+)['\"]?\s*:\s*(?:#.*)?$", stripped)
+        if key_match:
+            if service_indent is None:
+                service_indent = indent
+            if indent == service_indent:
+                close_current(index - 1)
+                current_name = key_match.group(1)
+                current_start = index
+                current_lines = [line]
+                continue
+        if current_name is not None:
+            current_lines.append(line)
+
+    close_current(len(lines))
+    return ranges
+
+
+def _yaml_service_looks_display_facing(service_name: str, service_lines: list[str]) -> bool:
+    name = service_name.lower()
+    service_text = "\n".join(service_lines).lower()
+    if any(hint in name for hint in ("display", "frontend", "webui")):
+        return True
+    if any(hint in name for hint in ("compute", "slurm", "gateway", "api", "worker", "db", "postgres", "redis")):
+        return False
+    return any(
+        hint in service_text
+        for hint in (
+            "apps/frontend",
+            "frontend",
+            "display",
+            "nginx",
+            "caddy",
+            "vite",
+            "web-ui",
+            "webui",
+        )
+    )
+
+
+def _line_has_display_env_section(lines: list[str], line_no: int) -> bool:
+    for index in range(line_no - 2, max(-1, line_no - 12), -1):
+        stripped = lines[index].strip().lower()
+        if not stripped:
+            break
+        if "compute" in stripped or "slurm" in stripped or "backend" in stripped:
+            return False
+        if "display" in stripped or "frontend" in stripped or "web-ui" in stripped or "webui" in stripped:
+            return True
+    return False
+
+
+def _check_qhh_diagnostic_tokens(root: Path) -> list[FindingSpec]:
+    tokens = (
+        "DIAGNOSTIC-ONLY",
+        "run_qhh_cycle",
+        "run_qhh_continuous",
+        "run_qhh_backend_smoke",
+        "create_qhh_shud_manifest",
+        "scripts/run_qhh_cycle.sh",
+        "scripts/run_qhh_continuous.py",
+        "scripts/run_qhh_backend_smoke.sh",
+        "scripts/create_qhh_shud_manifest.py",
+    )
+    production_roots = [
+        root / "services" / "orchestrator",
+        root / "services" / "production_closure",
+        root / "workers",
+    ]
+    findings: list[FindingSpec] = []
+    for path in _iter_text_files(root, production_roots):
+        text = _read_repo_text(root, path)
+        for line_no, line in _matching_lines(text, tokens):
+            token = next(token for token in tokens if token in line)
+            findings.append(
+                FindingSpec(
+                    check_id="qhh-diagnostic-token",
+                    title="Production path references QHH diagnostic token",
+                    axis="behavior",
+                    governance_face="legacy/dead-code",
+                    role="compute_control",
+                    evidence_path=_rel(root, path),
+                    line=line_no,
+                    severity="high" if _rel(root, path).startswith("services/orchestrator/") else "medium",
+                    priority="P1",
+                    owner_area="production scheduler",
+                    module=_module_for_path(root, path),
+                    description=f"Production-adjacent source references diagnostic token `{token}`.",
+                    recommendation=(
+                        "Keep QHH diagnostic runners in scripts/diagnostic evidence lanes; production scheduling "
+                        "should use the generic orchestrator and standalone Slurm gateway path."
+                    ),
+                )
+            )
+    return findings
+
+
+def _check_paused_workflows(root: Path) -> list[FindingSpec]:
+    findings: list[FindingSpec] = []
+    for path in _iter_text_files(root, [root / ".github" / "workflows"]):
+        text = _read_repo_text(root, path)
+        for line_no, line in _matching_lines(text, ("&& false",)):
+            findings.append(
+                FindingSpec(
+                    check_id="paused-workflow-condition",
+                    title="Workflow condition is paused with hidden false branch",
+                    axis="control",
+                    governance_face="entropy automation/control",
+                    role="shared_contract",
+                    evidence_path=_rel(root, path),
+                    line=line_no,
+                    severity="medium",
+                    priority="P2",
+                    owner_area="ci",
+                    module=_module_for_path(root, path),
+                    description="A workflow line contains `&& false`, which can hide disabled validation.",
+                    recommendation=(
+                        "Replace hidden false conditions with explicit workflow_dispatch, path filters, or a "
+                        "documented non-blocking job state."
+                    ),
+                )
+            )
+    return findings
+
+
+def _check_broad_e2e_mocks(root: Path) -> list[FindingSpec]:
+    token_patterns = ("page.route('**/api/v1/**'", 'page.route("**/api/v1/**"')
+    findings: list[FindingSpec] = []
+    for path in _iter_text_files(root, [root / "apps" / "frontend"]):
+        rel = _rel(root, path)
+        if not ("/e2e/" in rel or rel.endswith(".spec.ts") or _path_has_label(rel, {"live"})):
+            continue
+        text = _read_repo_text(root, path)
+        for line_no, line in _matching_lines(text, token_patterns):
+            classification = _classify_broad_e2e_mock_path(rel)
+            findings.append(
+                FindingSpec(
+                    check_id="broad-e2e-api-mock",
+                    title=classification["title"],
+                    axis="behavior",
+                    governance_face="docs alignment",
+                    role="display_readonly",
+                    evidence_path=rel,
+                    line=line_no,
+                    severity=classification["severity"],
+                    priority=classification["priority"],
+                    owner_area="frontend e2e",
+                    module=_module_for_path(root, path),
+                    allowlist_reason=classification["allowlist_reason"],
+                    description="Broad `page.route('**/api/v1/**')` mocks can be mistaken for live display evidence.",
+                    recommendation=(
+                        "Keep broad API mocks in deterministic mocked regressions and label live evidence specs so "
+                        "they use real API calls or narrowly scoped mocks."
+                    ),
+                )
+            )
+    return findings
+
+
+def _classify_broad_e2e_mock_path(
+    relative: str,
+) -> dict[str, Literal["medium", "high", "P1", "P2"] | str | None]:
+    if _path_has_label(relative, {"live"}):
+        return {
+            "title": "Live-labeled frontend E2E path uses broad API mock",
+            "severity": "high",
+            "priority": "P1",
+            "allowlist_reason": None,
+        }
+    if _path_has_label(relative, {"deterministic", "fixture", "fixtures", "mock", "mocked", "preview", "visual"}):
+        return {
+            "title": "Deterministic frontend E2E path uses broad API mock",
+            "severity": "medium",
+            "priority": "P2",
+            "allowlist_reason": "deterministic mocked/preview/visual e2e broad mock",
+        }
+    return {
+        "title": "Frontend E2E path uses broad API mock",
+        "severity": "medium",
+        "priority": "P2",
+        "allowlist_reason": None,
+    }
+
+
+def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
+    tokens = ("/hydro-met", "HydroMetPage")
+    findings: list[FindingSpec] = []
+    for path in _iter_text_files(root, [root / "apps", root / "docs", root / "openspec", root / "progress.md"]):
+        rel = _rel(root, path)
+        if rel.startswith(("docs/archived/",)):
+            continue
+        text = _read_repo_text(root, path)
+        for line_no, line in _matching_lines(text, tokens):
+            token = next(token for token in tokens if token in line)
+            allowed_reason = _stale_route_allowlist_reason(rel, line)
+            findings.append(
+                FindingSpec(
+                    check_id="stale-display-route-token",
+                    title="Stale display route or HydroMetPage token remains",
+                    axis="context",
+                    governance_face="docs alignment",
+                    role="display_readonly",
+                    evidence_path=rel,
+                    line=line_no,
+                    severity="low" if allowed_reason else "medium",
+                    priority="P3" if allowed_reason else "P2",
+                    owner_area="frontend/docs",
+                    module=_module_for_path(root, path),
+                    allowlist_reason=allowed_reason,
+                    description=f"Reference to `{token}` remains after M26 single-map routing consolidation.",
+                    recommendation=(
+                        "Confirm whether the reference is historical/redirect evidence or should point to the "
+                        "current single-map `/` display entrypoint."
+                    ),
+                )
+            )
+    return findings
+
+
+def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
+    placeholder_patterns = (
+        "apps/web",
+        "workers/forcing-producer",
+        "workers/shud-runtime",
+        "workers/output-parser",
+        "workers/flood-frequency",
+        "workers/sbatch_templates",
+        "services/tile-publisher",
+    )
+    findings: list[FindingSpec] = []
+    for path in _iter_text_files(root, [root / "docs", root / "openspec", root / "services", root / "infra"]):
+        text = _read_repo_text(root, path)
+        for line_no, line in _matching_lines(text, placeholder_patterns):
+            token = next(token for token in placeholder_patterns if token in line)
+            allowlist = None
+            if _rel(root, path).startswith("docs/governance/LEGACY_DEAD_CODE_INVENTORY.md"):
+                allowlist = "governance inventory documents retired placeholder paths"
+            findings.append(
+                FindingSpec(
+                    check_id="placeholder-path-token",
+                    title="Placeholder or retired path token remains",
+                    axis="semantics",
+                    governance_face="legacy/dead-code",
+                    role="shared_contract",
+                    evidence_path=_rel(root, path),
+                    line=line_no,
+                    severity="low" if allowlist else "medium",
+                    priority="P3" if allowlist else "P2",
+                    owner_area="docs/modules",
+                    module=_module_for_path(root, path),
+                    allowlist_reason=allowlist,
+                    description=f"Reference to retired placeholder path `{token}` remains in active scan scope.",
+                    recommendation=(
+                        "Use canonical underscore package paths or mark the reference as historical inventory with "
+                        "a narrow reason."
+                    ),
+                )
+            )
+    for placeholder in placeholder_patterns:
+        if (root / placeholder).exists():
+            findings.append(
+                FindingSpec(
+                    check_id="placeholder-path-exists",
+                    title="Retired placeholder path exists in repository",
+                    axis="structure",
+                    governance_face="legacy/dead-code",
+                    role="shared_contract",
+                    evidence_path=placeholder,
+                    severity="medium",
+                    priority="P2",
+                    owner_area="repo structure",
+                    module=_module_for_path(root, root / placeholder),
+                    description=f"Retired placeholder path `{placeholder}` exists in the active tree.",
+                    recommendation="Remove the placeholder path or document why it is intentionally retained.",
+                )
+            )
+    return findings
+
+
+def _check_makefile_toolchain(root: Path) -> list[FindingSpec]:
+    makefile = root / "Makefile"
+    if not makefile.exists():
+        return []
+    findings: list[FindingSpec] = []
+    for line_no, line in enumerate(_read_repo_text(root, makefile).splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _makefile_line_has_unmanaged_python_tool(stripped):
+            findings.append(
+                FindingSpec(
+                    check_id="makefile-toolchain-discipline",
+                    title="Makefile command bypasses repository-managed Python environment",
+                    axis="protocol",
+                    governance_face="entropy automation/control",
+                    role="shared_contract",
+                    evidence_path="Makefile",
+                    line=line_no,
+                    severity="medium",
+                    priority="P2",
+                    owner_area="developer tooling",
+                    module="Makefile",
+                    description="Makefile line invokes system Python tooling instead of `uv run`.",
+                    recommendation="Route Python, pytest, and ruff commands through `uv run` from the repository root.",
+                )
+            )
+    return findings
+
+
+def _check_openapi_frontend_type_drift(root: Path) -> list[FindingSpec]:
+    findings: list[FindingSpec] = []
+    openapi = root / "openapi" / "nhms.v1.yaml"
+    frontend_types = root / "apps" / "frontend" / "src" / "api" / "types.ts"
+    drift_test = root / "tests" / "test_openapi_drift.py"
+    if not openapi.exists() or not frontend_types.exists():
+        return [
+            FindingSpec(
+                check_id="openapi-frontend-types-presence",
+                title="OpenAPI or generated frontend types are missing",
+                axis="protocol",
+                governance_face="entropy automation/control",
+                role="shared_contract",
+                evidence_path="openapi/nhms.v1.yaml",
+                severity="high",
+                priority="P1",
+                owner_area="api contract",
+                module="openapi",
+                description="Could not find both static OpenAPI spec and generated frontend type file.",
+                recommendation=(
+                    "Restore the OpenAPI spec and generated frontend type artifact before enabling CI drift checks."
+                ),
+            )
+        ]
+    if drift_test.exists():
+        findings.append(
+            FindingSpec(
+                check_id="openapi-frontend-types-delegated",
+                title="OpenAPI/frontend type drift delegated to existing contract checks",
+                axis="protocol",
+                governance_face="entropy automation/control",
+                role="shared_contract",
+                evidence_path="tests/test_openapi_drift.py",
+                severity="low",
+                priority="P3",
+                owner_area="api contract",
+                module="openapi",
+                allowlist_reason="existing OpenAPI drift tests are the enforced contract oracle",
+                description=(
+                    "Static OpenAPI and generated frontend types are present; this report records delegation to the "
+                    "existing contract-drift test lane."
+                ),
+                recommendation="Keep running `tests/test_openapi_drift.py` and frontend API type generation checks.",
+            )
+        )
+    fingerprint_reason, fingerprint_available = _artifact_fingerprint_pair_reason(root, openapi, frontend_types)
+    findings.append(
+        FindingSpec(
+            check_id="openapi-frontend-types-signal",
+            title="OpenAPI/frontend type artifacts have comparable fingerprints",
+            axis="control",
+            governance_face="entropy automation/control",
+            role="shared_contract",
+            evidence_path="apps/frontend/src/api/types.ts",
+            severity="low",
+            priority="P3",
+            owner_area="api contract",
+            module="openapi",
+            allowlist_reason=fingerprint_reason,
+            description=(
+                "Report-only drift signal records both artifacts without asserting byte-level generation parity."
+                if fingerprint_available
+                else (
+                    "Report-only drift signal records artifact presence but skipped unsafe or oversized "
+                    "fingerprinting."
+                )
+            ),
+            recommendation=(
+                "Use the existing OpenAPI drift test and frontend `check:api-types` command as hard oracles."
+            ),
+        )
+    )
+    return findings
+
+
+def _makefile_line_has_unmanaged_python_tool(line: str) -> bool:
+    for segment in _shell_command_segments(line):
+        command_index, command_name = _shell_command_name(segment)
+        if command_name in {"python", "pytest", "ruff"}:
+            return True
+        if command_name == "pip" and command_index + 1 < len(segment) and segment[command_index + 1] == "install":
+            return True
+    return False
+
+
+def _shell_command_segments(line: str) -> list[list[str]]:
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return [[line]]
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token and all(char in ";&|" for char in token):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _shell_command_name(tokens: list[str]) -> tuple[int, str]:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index].lstrip("@-+") if index == 0 else tokens[index]
+        if not token or _is_shell_assignment(token):
+            index += 1
+            continue
+        if token == "env":
+            index += 1
+            while index < len(tokens) and (tokens[index].startswith("-") or _is_shell_assignment(tokens[index])):
+                index += 1
+            continue
+        return index, token
+    return len(tokens), ""
+
+
+def _is_shell_assignment(token: str) -> bool:
+    return re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token) is not None
+
+
+def _check_slurm_gateway_route_leakage(root: Path) -> list[FindingSpec]:
+    path = root / "services" / "slurm_gateway" / "app.py"
+    if not path.exists():
+        return []
+    findings: list[FindingSpec] = []
+    text = _read_repo_text(root, path)
+    for line_no, reason in _slurm_gateway_leakage_lines(text):
+        findings.append(
+            FindingSpec(
+                check_id="slurm-gateway-route-leakage",
+                title="Standalone Slurm gateway references business route surface",
+                axis="structure",
+                governance_face="role boundary",
+                role="slurm_gateway",
+                evidence_path=_rel(root, path),
+                line=line_no,
+                severity="high",
+                priority="P1",
+                owner_area="slurm gateway",
+                module=_module_for_path(root, path),
+                description=(
+                    "Standalone Slurm gateway source contains a token associated with "
+                    f"business/static routes: {reason}."
+                ),
+                recommendation=(
+                    "Keep the standalone gateway limited to `/health` and `/api/v1/slurm/*`; expose business "
+                    "routes only from `apps.api.main`."
+                ),
+            )
+        )
+    return findings
+
+
+def _slurm_gateway_leakage_lines(text: str) -> list[tuple[int, str]]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+
+    findings: dict[int, str] = {}
+    docstring_lines = _docstring_line_numbers(tree)
+    for node in ast.walk(tree):
+        line_no = getattr(node, "lineno", None)
+        if not isinstance(line_no, int) or line_no in docstring_lines:
+            continue
+        if isinstance(node, ast.Call):
+            reason = _slurm_gateway_forbidden_call_reason(node)
+            if reason:
+                findings.setdefault(line_no, reason)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            reason = _slurm_gateway_forbidden_path_reason(node.value)
+            if reason:
+                findings.setdefault(line_no, reason)
+    return sorted(findings.items())
+
+
+def _docstring_line_numbers(tree: ast.AST) -> set[int]:
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if not node.body:
+            continue
+        first = node.body[0]
+        if not (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            continue
+        start = getattr(first, "lineno", None)
+        end = getattr(first, "end_lineno", start)
+        if isinstance(start, int) and isinstance(end, int):
+            lines.update(range(start, end + 1))
+    return lines
+
+
+def _slurm_gateway_forbidden_call_reason(node: ast.Call) -> str | None:
+    func_name = _call_name(node.func)
+    if func_name.endswith(".include_router"):
+        for arg in node.args:
+            arg_name = _name_for_ast(arg)
+            if _slurm_gateway_router_name_is_forbidden(arg_name):
+                return f"business router registration `{arg_name}`"
+    if func_name.endswith(".mount"):
+        return "static/frontend mount call"
+    if func_name == "StaticFiles" or func_name.endswith(".StaticFiles"):
+        return "StaticFiles registration"
+    if _call_is_route_decorator(node):
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                reason = _slurm_gateway_forbidden_path_reason(arg.value)
+                if reason:
+                    return f"direct route decorator for {reason}"
+    return None
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _call_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _name_for_ast(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _name_for_ast(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _slurm_gateway_router_name_is_forbidden(name: str) -> bool:
+    normalized = name.lower()
+    return any(token in normalized for token in ("forecast", "model", "pipeline", "static", "frontend"))
+
+
+def _call_is_route_decorator(node: ast.Call) -> bool:
+    func_name = _call_name(node.func)
+    return any(
+        func_name.endswith(f".{method}")
+        for method in ("get", "post", "put", "delete", "patch", "options", "head", "api_route")
+    )
+
+
+def _slurm_gateway_forbidden_path_reason(value: str) -> str | None:
+    if not value.startswith("/"):
+        return None
+    normalized = value.rstrip("/") or "/"
+    segments = [segment for segment in re.split(r"[/?#]+", normalized.strip("/")) if segment]
+    forbidden_segment_tokens = ("forecast", "model", "pipeline", "static", "assets", "frontend")
+    for segment in segments:
+        if segment == "slurm":
+            continue
+        if any(token in segment.lower() for token in forbidden_segment_tokens):
+            return f"path literal `{value}`"
+    forbidden_prefixes = (
+        "/api/v1/forecast",
+        "/api/v1/models",
+        "/api/v1/model",
+        "/api/v1/pipeline",
+        "/forecast",
+        "/models",
+        "/model",
+        "/pipeline",
+        "/static",
+        "/assets",
+        "/frontend",
+    )
+    for prefix in forbidden_prefixes:
+        if normalized == prefix or normalized.startswith(f"{prefix}/") or normalized.startswith(f"{prefix}{{"):
+            return f"path literal `{value}`"
+    return None
+
+
+def _check_agent_artifact_ownership(root: Path) -> list[FindingSpec]:
+    doc_status = root / "docs" / "governance" / "DOC_STATUS.md"
+    findings: list[FindingSpec] = []
+    required_terms = (
+        ".agents/skills/**",
+        ".codex/tmp/",
+        ".codex/cache/",
+        ".codex/evidence/",
+        "apps/frontend/artifacts/**",
+        "Root `artifacts/`",
+        ".dockerignore",
+    )
+    text = _read_repo_text(root, doc_status) if doc_status.exists() else ""
+    for term in required_terms:
+        if term not in text:
+            findings.append(
+                FindingSpec(
+                    check_id="agent-artifact-ownership-policy",
+                    title="DOC_STATUS ownership policy misses governed artifact term",
+                    axis="context",
+                    governance_face="docs alignment",
+                    role="shared_contract",
+                    evidence_path=_rel(root, doc_status),
+                    severity="medium",
+                    priority="P2",
+                    owner_area="governance docs",
+                    module="docs/governance",
+                    description=f"`DOC_STATUS.md` does not mention expected ownership term `{term}`.",
+                    recommendation=(
+                        "Update the ownership policy before relying on generated agent/artifact path handling."
+                    ),
+                )
+            )
+    ignore_text = _read_repo_text(root, root / ".gitignore")
+    dockerignore_text = _read_repo_text(root, root / ".dockerignore")
+    ignore_expectations = {
+        ".codex/": ignore_text,
+        "artifacts/": ignore_text,
+        "apps/frontend/artifacts/": ignore_text,
+        ".agents": dockerignore_text,
+        ".codex": dockerignore_text,
+        "apps/frontend/artifacts": dockerignore_text,
+    }
+    for token, haystack in ignore_expectations.items():
+        if token not in haystack:
+            findings.append(
+                FindingSpec(
+                    check_id="agent-artifact-ignore-policy",
+                    title="Generated agent/artifact path is not covered by ignore policy",
+                    axis="control",
+                    governance_face="entropy automation/control",
+                    role="shared_contract",
+                    evidence_path=(
+                        ".gitignore" if "artifacts" in token or token.startswith(".codex") else ".dockerignore"
+                    ),
+                    severity="medium",
+                    priority="P2",
+                    owner_area="repo hygiene",
+                    module="repo policy",
+                    description=f"Expected ignore token `{token}` was not found in the relevant ignore file.",
+                    recommendation="Align ignore files with `docs/governance/DOC_STATUS.md` ownership policy.",
+                )
+            )
+    tracked = _git_tracked_paths(root)
+    unexpected = [
+        path
+        for path in tracked
+        if path.startswith((".codex/tmp/", ".codex/cache/", ".codex/evidence/", "artifacts/"))
+        or (
+            path.startswith("apps/frontend/artifacts/")
+            and not fnmatch.fnmatch(path, "apps/frontend/artifacts/m11-*.png")
+        )
+    ]
+    for path in unexpected:
+        findings.append(
+            FindingSpec(
+                check_id="tracked-generated-artifact",
+                title="Generated artifact path appears tracked",
+                axis="control",
+                governance_face="entropy automation/control",
+                role="shared_contract",
+                evidence_path=path,
+                severity="medium",
+                priority="P2",
+                owner_area="repo hygiene",
+                module=_module_for_relative(path),
+                description="A generated agent/artifact path conflicts with the documented ownership policy.",
+                recommendation=(
+                    "Remove the generated artifact from tracking or promote it with explicit issue-scoped review."
+                ),
+            )
+        )
+    return findings
+
+
+def _check_apps_api_layer_inversion(root: Path) -> list[FindingSpec]:
+    scan_roots = [root / "packages", root / "services", root / "workers"]
+    scan_files = [
+        root / "services" / "slurm_gateway" / "models.py",
+        root / "services" / "production_closure" / "ops_validation.py",
+    ]
+    findings: list[FindingSpec] = []
+    for path in sorted({*list(_iter_python_files(root, scan_roots)), *[file for file in scan_files if file.exists()]}):
+        rel = _rel(root, path)
+        if rel.startswith("apps/api/"):
+            continue
+        try:
+            tree = ast.parse(_read_repo_text(root, path), filename=rel)
+        except SyntaxError as exc:
+            findings.append(
+                FindingSpec(
+                    check_id="apps-api-layer-parse-error",
+                    title="Could not parse Python file for apps.api layer inversion scan",
+                    axis="structure",
+                    governance_face="role boundary",
+                    role="shared_contract",
+                    evidence_path=rel,
+                    line=exc.lineno,
+                    severity="low",
+                    priority="P3",
+                    owner_area="layering",
+                    module=_module_for_path(root, path),
+                    description="The AST import scan skipped a file because it could not be parsed.",
+                    recommendation="Fix parse errors or exclude generated files from the source tree.",
+                )
+            )
+            continue
+        for module in sorted(_normalized_apps_api_import_modules(tree)):
+            findings.append(
+                FindingSpec(
+                    check_id="apps-api-layer-inversion",
+                    title="Non-API layer imports apps.api",
+                    axis="structure",
+                    governance_face="role boundary",
+                    role="shared_contract",
+                    evidence_path=rel,
+                    severity="high",
+                    priority="P1",
+                    owner_area="layering",
+                    module=_module_for_path(root, path),
+                    description=f"Shared/service/worker source imports `{module}` from the API layer.",
+                    recommendation=(
+                        "Move shared contracts to packages/common or inject API-only behavior from apps/api."
+                    ),
+                )
+            )
+    return findings
+
+
+def _dedupe_findings(findings: Iterable[FindingSpec]) -> list[FindingSpec]:
+    seen: set[tuple[object, ...]] = set()
+    result: list[FindingSpec] = []
+    for finding in findings:
+        key = (
+            finding.check_id,
+            finding.evidence_path,
+            finding.line,
+            finding.title,
+            finding.description,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(finding)
+    return result
+
+
+def _finding_record(index: int, finding: FindingSpec) -> dict[str, object]:
+    axis_scores = {axis: "low" for axis in AXES}
+    axis_scores[finding.axis] = finding.severity
+    return {
+        "id": f"ENT-{index:04d}",
+        "check_id": finding.check_id,
+        "title": finding.title,
+        "axis": finding.axis,
+        "axis_scores": axis_scores,
+        "governance_face": finding.governance_face,
+        "role": finding.role,
+        "evidence_path": finding.evidence_path,
+        "line": finding.line,
+        "severity": finding.severity,
+        "priority": finding.priority,
+        "owner_area": finding.owner_area,
+        "module": finding.module,
+        "allowlist_reason": finding.allowlist_reason,
+        "description": finding.description,
+        "recommendation": finding.recommendation,
+    }
+
+
+def _module_heatmap(findings: list[dict[str, object]]) -> list[dict[str, object]]:
+    modules: dict[str, dict[str, object]] = {}
+    for finding in findings:
+        module = str(finding["module"])
+        row = modules.setdefault(
+            module,
+            {
+                "module": module,
+                "structure": "low",
+                "semantics": "low",
+                "behavior": "low",
+                "context": "low",
+                "protocol": "low",
+                "control": "low",
+                "priority": "P3",
+                "finding_count": 0,
+            },
+        )
+        row["finding_count"] = int(row["finding_count"]) + 1
+        axis = str(finding["axis"])
+        severity = str(finding["severity"])
+        if SCORE_RANK[severity] > SCORE_RANK[str(row[axis])]:
+            row[axis] = severity
+        priority = str(finding["priority"])
+        if PRIORITY_RANK[priority] > PRIORITY_RANK[str(row["priority"])]:
+            row["priority"] = priority
+    return sorted(
+        modules.values(),
+        key=lambda row: (-PRIORITY_RANK[str(row["priority"])], -int(row["finding_count"]), str(row["module"])),
+    )
+
+
+def _high_spread_patterns(findings: list[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for finding in findings:
+        grouped[str(finding["check_id"])].append(finding)
+    patterns: list[dict[str, object]] = []
+    for check_id, group in grouped.items():
+        modules = sorted({str(finding["module"]) for finding in group})
+        if len(group) < 2 and len(modules) < 2:
+            continue
+        priorities = [str(finding["priority"]) for finding in group]
+        severities = [str(finding["severity"]) for finding in group]
+        patterns.append(
+            {
+                "pattern": check_id,
+                "occurrence_count": len(group),
+                "module_count": len(modules),
+                "modules": modules,
+                "roles": sorted({str(finding["role"]) for finding in group}),
+                "governance_faces": sorted({str(finding["governance_face"]) for finding in group}),
+                "top_priority": max(priorities, key=lambda item: PRIORITY_RANK[item]),
+                "top_severity": max(severities, key=lambda item: SEVERITY_RANK[item]),
+            }
+        )
+    return sorted(
+        patterns,
+        key=lambda item: (
+            -PRIORITY_RANK[str(item["top_priority"])],
+            -int(item["occurrence_count"]),
+            str(item["pattern"]),
+        ),
+    )
+
+
+def _existing_files(paths: Iterable[Path]) -> list[Path]:
+    return sorted({path for path in paths if path.is_file()})
+
+
+def _iter_text_files(root: Path, roots: Iterable[Path]) -> Iterable[Path]:
+    root = root.resolve(strict=False)
+    for scan_root in roots:
+        if scan_root.is_file():
+            if _repo_text_rejection_reason(root, scan_root) is None:
+                yield scan_root
+            continue
+        if not scan_root.exists():
+            continue
+        if not _is_scannable_dir(root, scan_root):
+            continue
+        for current, dirnames, filenames in os.walk(scan_root):
+            current_path = Path(current)
+            dirnames[:] = [
+                dirname
+                for dirname in dirnames
+                if _is_scannable_dir(root, current_path / dirname)
+            ]
+            for filename in filenames:
+                path = current_path / filename
+                if _repo_text_rejection_reason(root, path) is None:
+                    yield path
+
+
+def _iter_python_files(root: Path, roots: Iterable[Path]) -> Iterable[Path]:
+    for path in _iter_text_files(root, roots):
+        if path.suffix == ".py":
+            yield path
+
+
+def _is_scannable_dir(root: Path, path: Path) -> bool:
+    try:
+        file_stat = path.lstat()
+        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISDIR(file_stat.st_mode):
+            return False
+        relative = path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except ValueError:
+        return False
+    except OSError:
+        return False
+    if any(part in SCAN_SKIP_DIRS for part in relative.parts):
+        return False
+    if any(part.startswith(SCAN_SKIP_PREFIXES) for part in relative.parts):
+        return False
+    return not (relative.parts and relative.parts[0] in SCAN_SKIP_ROOT_DIRS)
+
+
+def _read_repo_text(root: Path, path: Path) -> str:
+    if _repo_text_rejection_reason(root, path) is not None:
+        return ""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return handle.read(MAX_SCANNED_TEXT_FILE_BYTES)
+    except OSError:
+        return ""
+
+
+def _repo_text_rejection_reason(root: Path, path: Path) -> str | None:
+    root_resolved = root.resolve(strict=False)
+    try:
+        file_stat = path.lstat()
+    except OSError:
+        return "stat-error"
+    if stat.S_ISLNK(file_stat.st_mode):
+        return "symlink"
+    if not stat.S_ISREG(file_stat.st_mode):
+        return "not-regular-file"
+    try:
+        relative = path.resolve(strict=False).relative_to(root_resolved)
+    except (OSError, ValueError):
+        return "outside-repo"
+    if _repo_relative_path_is_skipped(relative):
+        return "skipped-path"
+    if not _has_scannable_text_name(path):
+        return "unsupported-extension"
+    if file_stat.st_size > MAX_SCANNED_TEXT_FILE_BYTES:
+        return f"exceeds-{MAX_SCANNED_TEXT_FILE_BYTES}-bytes"
+    return None
+
+
+def _repo_relative_path_is_skipped(relative: Path) -> bool:
+    if any(part in SCAN_SKIP_DIRS for part in relative.parts):
+        return True
+    if any(part.startswith(SCAN_SKIP_PREFIXES) for part in relative.parts):
+        return True
+    return bool(relative.parts and relative.parts[0] in SCAN_SKIP_ROOT_DIRS)
+
+
+def _has_scannable_text_name(path: Path) -> bool:
+    return (
+        path.suffix in TEXT_EXTENSIONS
+        or path.name in {"Makefile", ".gitignore", ".dockerignore", ".env"}
+        or path.name.startswith(".env.")
+    )
+
+
+def _matching_lines(text: str, tokens: tuple[str, ...]) -> Iterable[tuple[int, str]]:
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if any(token in line for token in tokens):
+            yield line_no, line
+
+
+def _normalized_apps_api_import_modules(tree: ast.AST) -> frozenset[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "apps.api" or alias.name.startswith("apps.api."):
+                    modules.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                continue
+            if module == "apps":
+                for alias in node.names:
+                    if alias.name == "api":
+                        modules.add("apps.api")
+                    elif alias.name == "*":
+                        modules.add("apps.api.*")
+            elif module == "apps.api":
+                for alias in node.names:
+                    modules.add("apps.api.*" if alias.name == "*" else f"apps.api.{alias.name}")
+            elif module.startswith("apps.api."):
+                modules.add(f"{module}.*" if any(alias.name == "*" for alias in node.names) else module)
+    return frozenset(modules)
+
+
+def _stale_route_allowlist_reason(relative_path: str, line: str) -> str | None:
+    if relative_path.startswith("openspec/changes/m26-") or "redirect" in line.lower():
+        return "M26 route-consolidation evidence or redirect contract"
+    if relative_path.startswith("docs/plans/") or relative_path.startswith("openspec/changes/m22-"):
+        return "historical plan or pre-M26 display evidence"
+    if relative_path in {"progress.md"}:
+        return "current entrypoint summarizes historical milestone context"
+    if "__tests__" in relative_path and "/hydro-met" in line:
+        return "frontend redirect regression test"
+    if relative_path.startswith("apps/frontend/src/lib/hydroMet/") and "HydroMetPage" in line:
+        return "library extraction provenance comment"
+    return None
+
+
+def _path_has_label(relative_path: str, labels: set[str]) -> bool:
+    parts = re.split(r"[^a-z0-9]+", relative_path.lower())
+    return any(part in labels for part in parts)
+
+
+def _module_for_path(root: Path, path: Path) -> str:
+    return _module_for_relative(_rel(root, path))
+
+
+def _module_for_relative(relative: str) -> str:
+    parts = Path(relative).parts
+    if not parts:
+        return "repo"
+    if parts[0] in {"apps", "services", "workers", "packages"} and len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    if parts[0] == "openspec" and len(parts) >= 3:
+        return f"openspec/{parts[2]}"
+    if parts[0] == "docs" and len(parts) >= 2:
+        return f"docs/{parts[1]}"
+    if parts[0] == ".github":
+        return ".github/workflows"
+    if parts[0] == "infra" and len(parts) >= 2:
+        return f"infra/{parts[1]}"
+    return parts[0]
+
+
+def _rel(root: Path, path: Path) -> str:
+    try:
+        return path.absolute().relative_to(root.resolve(strict=False)).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _artifact_fingerprint_pair_reason(root: Path, left: Path, right: Path) -> tuple[str, bool]:
+    left_fingerprint = _bounded_artifact_sha256(root, left, MAX_ARTIFACT_FINGERPRINT_BYTES)
+    right_fingerprint = _bounded_artifact_sha256(root, right, MAX_ARTIFACT_FINGERPRINT_BYTES)
+    failures = [
+        fingerprint
+        for fingerprint in (left_fingerprint, right_fingerprint)
+        if fingerprint.startswith("skipped:")
+    ]
+    if failures:
+        return f"report-only fingerprint skipped ({'; '.join(failures)})", False
+    hash_pair = f"{left_fingerprint}:{right_fingerprint}"
+    return f"report-only fingerprint {hash_pair[:24]}", True
+
+
+def _bounded_artifact_sha256(root: Path, path: Path, max_bytes: int) -> str:
+    try:
+        root_resolved = root.resolve(strict=False)
+        relative = path.absolute().relative_to(root_resolved)
+    except (OSError, ValueError):
+        return f"skipped:{path.as_posix()}:outside-repo"
+    rel = relative.as_posix()
+    try:
+        file_stat = path.lstat()
+    except OSError:
+        return f"skipped:{rel}:stat-error"
+    if stat.S_ISLNK(file_stat.st_mode):
+        return f"skipped:{rel}:symlink"
+    if not stat.S_ISREG(file_stat.st_mode):
+        return f"skipped:{rel}:not-regular-file"
+    if file_stat.st_size > max_bytes:
+        return f"skipped:{rel}:exceeds-{max_bytes}-bytes"
+    try:
+        return _file_sha256(path, max_bytes)
+    except OSError:
+        return f"skipped:{rel}:read-error"
+
+
+def _file_sha256(path: Path, max_bytes: int) -> str:
+    digest = hashlib.sha256()
+    remaining = max_bytes
+    with path.open("rb") as handle:
+        while remaining > 0:
+            chunk = handle.read(min(HASH_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+    return digest.hexdigest()
+
+
+def _git_tracked_paths(root: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return result.stdout.splitlines()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

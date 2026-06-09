@@ -20,17 +20,21 @@ The repository SHALL provide a script that scans entropy signals and emits both 
 - **WHEN** the audit script runs in non-blocking mode
 - **THEN** it reports checks for role/env boundaries, diagnostic tokens, paused `&& false` workflow jobs, mocked-vs-live e2e broad mocks, stale route/doc tokens, placeholder paths, Makefile/toolchain discipline, OpenAPI/frontend type drift, standalone gateway business-route leakage, tracked agent/artifact ownership, and `apps.api.*` layer inversion outside API code
 
-### Requirement: Initial governance CI is non-blocking
+### Future Requirement: Initial governance CI is non-blocking
 
 The first governance automation workflow SHALL report entropy findings without failing PRs for known existing issues.
+
+This requirement is owned by Governance-4C (#373), not Governance-4A (#371).
 
 #### Scenario: known legacy token exists during initial rollout
 - **WHEN** the governance workflow detects an existing legacy token
 - **THEN** it records the finding in the report but does not fail CI during non-blocking rollout
 
-### Requirement: Stable role-boundary violations can become hard gates
+### Future Requirement: Stable role-boundary violations can become hard gates
 
 After baseline cleanup, selected stable invariants SHALL be eligible for hard-fail enforcement.
+
+This requirement is owned by Governance-4D (#374), not Governance-4A (#371).
 
 #### Scenario: display env includes compute-only env
 - **WHEN** a display env or compose file contains compute-only env such as `WORKSPACE_ROOT`, `SHUD_EXECUTABLE`, or `SLURM_GATEWAY_URL`
