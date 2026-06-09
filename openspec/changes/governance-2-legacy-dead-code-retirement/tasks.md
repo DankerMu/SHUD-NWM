@@ -86,10 +86,12 @@
   manifest before deleting or archiving the active-tree directory. Required
   evidence:
   - Input command:
-    `find docs/archived workers/sbatch_templates infra/sbatch -maxdepth 2 -type f | sort`
-    Expected output: legacy template names and migration notes exist under
-    `docs/archived/**`, `workers/sbatch_templates` tracked files are absent
-    after cleanup if deleted, and `infra/sbatch` active templates remain.
+    `git ls-files docs/archived/legacy-slurm-templates.md workers/sbatch_templates infra/sbatch | sort`
+    Expected output: the legacy archive doc and active `infra/sbatch` templates
+    are tracked; no `workers/sbatch_templates` tracked files remain.
+  - Input command:
+    `test ! -e workers/sbatch_templates && printf '%s\n' 'workers/sbatch_templates absent'`
+    Expected output: `workers/sbatch_templates absent`.
   - Input command:
     `rg -n "workers/sbatch_templates|infra/sbatch|SLURM_GATEWAY_TEMPLATE_DIR|template_dir|DEFAULT_JOB_TYPE_TEMPLATES" services/slurm_gateway infra tests docs openspec/project-profile.md openspec/changes/governance-2-legacy-dead-code-retirement --glob '!docs/archived/**' --glob '!**/__pycache__/**'`
     Expected output: active config/tests/docs point to `infra/sbatch`; remaining

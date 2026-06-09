@@ -13,21 +13,28 @@
 
 ## 2. 作业类型
 
-| 作业 | 说明 |
-|---|---|
-| `download_source_cycle` | 下载并校验 GFS/IFS/ERA5/CLDAS 原始资料。 |
-| `convert_canonical` | 转换为 canonical meteorological product。 |
-| `produce_forcing_array` | 对每个流域/模型生成 forcing package。 |
-| `run_shud_analysis_array` | 批量运行 analysis。 |
-| `run_shud_forecast_array` | 批量运行 forecast。 |
-| `parse_output_array` | 批量解析 SHUD 输出。 |
-| `compute_frequency_array` | 批量计算重现期。 |
-| `publish_tiles` | 发布瓦片和前端图层索引。 |
+生产提交通过 Slurm gateway 的 `job_type` 渲染 `infra/sbatch` 模板；
+权威映射以 `services/slurm_gateway/config.py` 的
+`DEFAULT_JOB_TYPE_TEMPLATES` 为准。
+
+| `job_type` | 模板 | 说明 |
+|---|---|---|
+| `download_source_cycle` | `infra/sbatch/download_source_cycle.sbatch` | 下载并校验 GFS/IFS 原始资料。 |
+| `convert_canonical` | `infra/sbatch/convert_canonical.sbatch` | 转换为 canonical meteorological product。 |
+| `produce_forcing_array` | `infra/sbatch/produce_forcing_array.sbatch` | 对每个流域/模型生成 forcing package。 |
+| `run_shud_analysis` | `infra/sbatch/run_shud_analysis.sbatch` | 运行 analysis。 |
+| `run_shud_forecast_array` | `infra/sbatch/run_shud_forecast_array.sbatch` | 批量运行 forecast。 |
+| `parse_output_array` | `infra/sbatch/parse_output_array.sbatch` | 批量解析 SHUD 输出。 |
+| `compute_frequency_array` | `infra/sbatch/compute_frequency_array.sbatch` | 批量计算重现期。 |
+| `publish_tiles` | `infra/sbatch/publish_tiles.sbatch` | 发布瓦片和前端图层索引。 |
 
 ## 3. Job array 策略
 
-```bash
-sbatch --array=0-29%8 run_shud_forecast.sbatch --source GFS --cycle 2026043000
+```text
+job_type: run_shud_forecast_array
+template: infra/sbatch/run_shud_forecast_array.sbatch
+array: 0-29%8
+manifest_index: manifests/run_index.txt
 ```
 
 含义：30 个流域任务，最多 8 个并发。每个 array task 通过 `SLURM_ARRAY_TASK_ID` 读取对应流域和模型。
@@ -44,13 +51,16 @@ download
   → publish_tiles
 ```
 
-示例：
+示例提交顺序：
 
-```bash
-jid1=$(sbatch download_gfs.sbatch | awk '{print $4}')
-jid2=$(sbatch --dependency=afterok:$jid1 convert_canonical.sbatch | awk '{print $4}')
-jid3=$(sbatch --dependency=afterok:$jid2 --array=0-29%10 forcing.sbatch | awk '{print $4}')
-jid4=$(sbatch --dependency=afterok:$jid3 --array=0-29%6 shud_forecast.sbatch | awk '{print $4}')
+```text
+download_source_cycle       -> infra/sbatch/download_source_cycle.sbatch
+convert_canonical           -> infra/sbatch/convert_canonical.sbatch
+produce_forcing_array       -> infra/sbatch/produce_forcing_array.sbatch
+run_shud_forecast_array     -> infra/sbatch/run_shud_forecast_array.sbatch
+parse_output_array          -> infra/sbatch/parse_output_array.sbatch
+compute_frequency_array     -> infra/sbatch/compute_frequency_array.sbatch
+publish_tiles               -> infra/sbatch/publish_tiles.sbatch
 ```
 
 ## 5. Resource profile
