@@ -124,7 +124,59 @@
 
 ## 4. Agent/artifact ownership
 
-- [ ] Deferred to #370.
+- [x] 4.1 Inventory tracked agent/evidence/artifact assets:
+  `git ls-files .agents .codex apps/frontend/artifacts`.
+  Evidence: command returns tracked `.agents/skills/**`, two tracked
+  `.codex/reviews/**` historical fixtures, and six tracked
+  `apps/frontend/artifacts/m11-*.png` screenshots.
+- [x] 4.2 Define the policy in docs: tracked `.agents/skills/**` are reviewed
+  project assets; unpromoted `.agents/skills/**` additions, new `.codex`
+  workflow outputs, new frontend artifacts, and root `artifacts/` are
+  local/generated unless explicitly promoted by a later PR.
+  Evidence: `docs/governance/DOC_STATUS.md` and `progress.md` distinguish
+  reviewed project assets from local/generated workflow evidence, visual
+  evidence, installed/scratch skill copies, and root `artifacts/`.
+- [x] 4.3 Align `.gitignore` so new local/generated evidence is ignored while
+  existing tracked project assets remain visible through `git ls-files`.
+  Evidence: `.gitignore` ignores `.codex/`, `apps/frontend/artifacts/`,
+  unpromoted `.agents/skills/**` additions, and root `/artifacts/`, while
+  `git ls-files .agents .codex apps/frontend/artifacts` still returns the
+  existing tracked assets.
+- [x] 4.4 Align `.dockerignore` so non-runtime agent/evidence paths do not
+  enter Docker build context.
+  Evidence: `.dockerignore` explicitly excludes `.agents/`, `.codex/`, and
+  `apps/frontend/artifacts/`.
+- [x] 4.5 Update `progress.md` and `docs/governance/DOC_STATUS.md` so the
+  do-not-stage guidance no longer contradicts tracked project assets.
+  Evidence: `progress.md` no longer says all `.agents/` are do-not-stage; both
+  files describe tracked `.agents/skills/**`, tracked `.codex/reviews/**`
+  fixtures, and tracked `apps/frontend/artifacts/m11-*.png` as project assets
+  or historical project evidence.
+- [x] 4.6 Verify ignore behavior:
+  `git check-ignore -v .codex/reviews/new.md .codex/evidence/x .agents/skills/repo-entropy-audit/SKILL.md apps/frontend/artifacts/new.png artifacts/foo`.
+  Evidence must cite `.gitignore` for paths governed by versioned repository
+  policy; `.git/info/exclude` alone is insufficient.
+  Evidence: command returns `.gitignore` for all five paths:
+  `.codex/reviews/new.md`, `.codex/evidence/x`,
+  `.agents/skills/repo-entropy-audit/SKILL.md`,
+  `apps/frontend/artifacts/new.png`, and `artifacts/foo`.
+- [x] 4.6a Verify unpromoted skill additions are ignored:
+  `git check-ignore -v .agents/skills/repo-entropy-audit/SKILL.md .agents/skills/scratch-local/SKILL.md .agents/skills/local-installed/SKILL.md`.
+  Evidence: command returns `.gitignore` for the installed skill copy and both
+  representative unpromoted local/scratch skill paths.
+- [x] 4.7 Verify tracked assets remain tracked:
+  `git ls-files .agents .codex apps/frontend/artifacts`.
+  Evidence: command still returns the tracked `.agents/skills/**` project
+  skills, two tracked `.codex/reviews/**` fixtures, and six tracked
+  `apps/frontend/artifacts/m11-*.png` screenshots.
+- [x] 4.8 Verify docs/guidance references:
+  `rg -n "\\.agents|\\.codex|apps/frontend/artifacts|artifacts/|do-not-stage|不要误 stage|project asset|local/generated" progress.md docs/governance/DOC_STATUS.md .gitignore .dockerignore`.
+  Evidence: command returns aligned guidance in `progress.md`,
+  `docs/governance/DOC_STATUS.md`, `.gitignore`, and `.dockerignore`.
+- [x] 4.9 Verify Docker context exclusion is explicit:
+  `rg -n "^(\\.agents|\\.codex|apps/frontend/artifacts)(/|$)" .dockerignore`.
+  Evidence: command returns explicit exclusions for
+  `apps/frontend/artifacts/`, `.agents/`, and `.codex/`.
 
 ## 5. Verification for #367
 
@@ -137,5 +189,6 @@
 - [x] 5.3 Verify implementation plan status:
   `rg -n "historical|superseded|archived|DOC_STATUS|current entrypoints" IMPLEMENTATION_PLAN.md docs/archived README.md`.
 - [x] 5.4 Second-round PR #387 finding: qualify current-entrypoint status so
-  `CLAUDE.md` remains linked as an entrypoint without claiming its deferred M23
-  facts are fresh before #368.
+  `CLAUDE.md` remains linked as an entrypoint without over-claiming embedded
+  milestone/current-active facts beyond the current issue evidence reconciled
+  by #368.

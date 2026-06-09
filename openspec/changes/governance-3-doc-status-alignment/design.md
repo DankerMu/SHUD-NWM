@@ -64,10 +64,83 @@ At minimum, BUG-20260527-003 and BUG-20260527-007 through
 BUG-20260527-013 must be triaged. Still-open bugs must link to a GitHub issue
 or have an explicit owner area and retest command.
 
-### D4. Defer tracked local/agent asset ownership to Governance-3D
+### D4. Govern tracked agent and generated artifact ownership
 
-`.agents`, `.codex`, and `apps/frontend/artifacts` ownership remains required
-for the Governance-3 epic, but it is not part of #367.
+Governance-3D resolves the tracked/local contradiction by classifying path
+families rather than whole directories:
+
+- `.agents/skills/**` that is already tracked is a reviewed project asset. New
+  or changed project skills require normal PR review. Local installed skills
+  and scratch skill work remain local/generated unless a PR explicitly promotes
+  them.
+- Unpromoted `.agents/skills/**` additions remain ignored because they are
+  local/generated installed or scratch skill copies, not governed project
+  skills in this repository snapshot. Promoting a new project skill file
+  requires intentional force-add and PR review.
+- `.codex/tmp/`, `.codex/cache/`, `.codex/evidence/`, and new
+  `.codex/reviews/**` files are local/generated workflow evidence by default.
+  Existing tracked `.codex/reviews/**` fixtures remain historical project
+  evidence, but that history does not make future review outputs tracked by
+  default.
+- `apps/frontend/artifacts/m11-*.png` remains tracked historical visual
+  evidence. New files under `apps/frontend/artifacts/**` are local/generated
+  visual evidence by default unless a future issue explicitly promotes them.
+- Root `artifacts/` remains local/generated production or review evidence and
+  stays ignored.
+- Docker build context should exclude agent/evidence directories that are not
+  runtime inputs, including `.agents`, `.codex`, and frontend visual artifacts.
+
+`progress.md` and `docs/governance/DOC_STATUS.md` must state this policy without
+saying that all `.agents`, all `.codex`, or all frontend artifacts are
+untracked. Ignore rules must prevent accidental staging of new generated
+evidence while preserving already tracked project assets.
+
+Fixture level: expanded
+Project profile: NHMS
+Repair intensity: medium
+Change surface:
+- `.gitignore`, `.dockerignore`, `progress.md`,
+  `docs/governance/DOC_STATUS.md`, and this OpenSpec change.
+Must preserve:
+- Existing tracked `.agents/skills/**`, tracked `.codex/reviews/**` fixtures,
+  and tracked `apps/frontend/artifacts/m11-*.png` remain visible in
+  `git ls-files`.
+- Root `artifacts/` remains ignored while `services/artifacts/*.py` remains
+  trackable.
+Must add/change:
+- Contributor guidance distinguishes reviewed project assets from new local
+  generated artifacts.
+- `git check-ignore -v` demonstrates new generated review/evidence/frontend
+  artifact paths are ignored by versioned `.gitignore` rules, not only by local
+  `.git/info/exclude`.
+- `.dockerignore` directly excludes non-runtime agent/evidence directories from
+  Docker build context.
+
+Risk packs considered:
+- Public API / CLI / script entry: not selected - no runtime entrypoint change.
+- Config / project setup: selected - `.gitignore` and `.dockerignore` govern
+  contributor and build-context behavior.
+- File IO / path safety / overwrite: selected - path-family ignore policy
+  affects whether generated evidence is accidentally staged or shipped.
+- Schema / columns / units / field names: not selected - no data schema change.
+- Auth / permissions / secrets: not selected - no secret handling change.
+- Concurrency / shared state / ordering: not selected - no runtime state change.
+- Resource limits / large input / discovery: selected - Docker context exclusion
+  limits generated evidence and agent assets from build contexts.
+- Legacy compatibility / examples: selected - existing tracked historical
+  evidence must not disappear.
+- Error handling / rollback / partial outputs: not selected - no runtime
+  rollback behavior.
+- Release / packaging / dependency compatibility: selected - Docker context
+  contents are packaging inputs.
+- Documentation / migration notes: selected - docs are the primary policy
+  surface.
+Domain packs:
+- Published NHMS artifacts / display identity: selected - root `artifacts/` and
+  frontend visual evidence are artifact/evidence path families, though no
+  runtime publish identity changes.
+- Other NHMS domain packs: not selected - no geospatial, forcing, SHUD, Slurm,
+  provider, DB, or manifest behavior changes.
 
 ## Four-Role Coverage
 

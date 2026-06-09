@@ -31,7 +31,8 @@ When sources disagree, use the highest applicable source in this order:
    readers, but they do not override role-specific runbooks or validation
    requirements. For `CLAUDE.md`, use its workflow and entrypoint guidance as
    current, while treating embedded milestone/current-active sections as
-   potentially stale until reconciled by the deferred stale-fact update in #368.
+   current only where they have been reconciled by current issue evidence such
+   as #368.
 5. **Architecture/spec documents**: specs define intended contracts when current
    code or generated artifacts do not already settle the question.
 6. **Module decomposition docs**: module docs are implementation guidance and
@@ -43,12 +44,36 @@ If two current sources at the same level conflict, prefer the more specific
 source for the affected role, path, or issue. Record the conflict in the next
 docs or OpenSpec change rather than silently choosing a stale fact.
 
+## Agent And Artifact Ownership
+
+- Tracked `.agents/skills/**` are reviewed project assets. New or changed
+  project skills require normal PR review before they are treated as governed
+  repository assets. Local installed skills and scratch skill work remain
+  local/generated unless a later PR explicitly promotes them.
+- Unpromoted `.agents/skills/**` additions remain ignored as local/generated
+  installed or scratch skill copies. Promoting a new project skill file
+  requires intentional force-add and PR review.
+- `.codex/tmp/`, `.codex/cache/`, `.codex/evidence/`, and new
+  `.codex/reviews/**` files are local/generated workflow evidence by default.
+  Existing tracked `.codex/reviews/**` fixtures remain historical project
+  evidence; they do not make future generated review outputs tracked by
+  default.
+- Existing tracked `apps/frontend/artifacts/m11-*.png` files remain historical
+  visual project evidence. New files under `apps/frontend/artifacts/**` are
+  local/generated visual evidence by default unless a later issue or PR
+  explicitly promotes them.
+- Root `artifacts/` remains local/generated production or review evidence and
+  stays ignored. `services/artifacts/*.py` is source code and stays trackable.
+- Docker build context excludes non-runtime agent/evidence paths including
+  `.agents`, `.codex`, and `apps/frontend/artifacts`.
+
 ## Current Notes
 
 - `IMPLEMENTATION_PLAN.md` at the repository root is a historical / superseded
   baseline. Use current entrypoints, active OpenSpec changes, runbooks, and
   validation matrices for implementation decisions.
-- High-impact stale fact updates for node-27 MVT facts and display env/compose
-  are deferred to #368.
-- `docs/bugs.md` triage is deferred to #369.
-- `.agents` / `.codex` / artifact ownership policy is deferred to #370.
+- High-impact node-27 MVT facts and display env/compose guidance were
+  reconciled by #368.
+- `docs/bugs.md` is governed as a status ledger after #369 triage.
+- `.agents`, `.codex`, `apps/frontend/artifacts`, and root `artifacts/`
+  ownership policy is defined above by path family.

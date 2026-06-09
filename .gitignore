@@ -34,11 +34,11 @@ Thumbs.db
 pgdata/
 minio-data/
 
-# Local project runtime/data products
+# Local project runtime/data products and generated evidence.
 .nhms-runs/
 .nhms-workspace/
 .nhms-object-store/
-artifacts/
+/artifacts/
 !services/artifacts/
 !services/artifacts/*.py
 .pgdata/
@@ -47,9 +47,10 @@ artifacts/
 .conda-pkgs/
 .conda-postgres-runtime/
 data/
-.codex/tmp/
-.codex/cache/
-.codex/evidence/
+# Local/generated Codex workflow outputs. Existing tracked .codex/reviews/**
+# fixtures remain historical project evidence.
+.codex/
+apps/frontend/artifacts/
 .tmp/
 
 # Coverage
@@ -71,9 +72,11 @@ SHUD/
 rSHUD/
 AutoSHUD/
 
-# Claude Code local config
+# Agent local config and generated installed/scratch skill copies. Existing
+# tracked .agents/skills/** project assets remain visible via git ls-files;
+# promoting new project skill files requires intentional force-add / PR review.
 .claude/
-.agents/skills/repo-entropy-audit/
+.agents/skills/
 
 # Design artifacts (tracked separately)
 设计图/
