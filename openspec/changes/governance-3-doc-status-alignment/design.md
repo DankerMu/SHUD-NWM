@@ -24,10 +24,22 @@ The audit found several concrete drifts:
 - superseded
 - archived
 
-### D2. Defer high-impact stale facts to Governance-3B
+### D2. Align high-impact stale facts in Governance-3B
 
 Active milestone, node-27 live MVT facts, display env config, and current issue
-status are not part of #367. They are governed by the next Governance-3 slice.
+status are governed by #368. This slice updates only the high-impact facts that
+can mislead current development or display deployment:
+
+- `CLAUDE.md` must stop presenting M23 as the current active milestone.
+- `progress.md` and `node-27-bringup-checklist.md` must stop presenting #343
+  as the unresolved live PostGIS MVT root cause after #351 closed #343 with
+  the 2026-06-08 live receipt.
+- #342 station-MVT must remain separate and open.
+- `infra/env/display.example` and `infra/compose.display.yml` must expose
+  `NHMS_ENABLE_LIVE_POSTGIS_MVT` for display readonly deployments.
+- Display config updates must preserve readonly safety: `display_readonly`
+  role, disabled control mutations, readonly DB intent, compose `read_only`,
+  readonly published bind mount, and no new Slurm/control-plane capabilities.
 
 ### D3. Defer bugs ledger conversion to Governance-3C
 
@@ -61,3 +73,8 @@ for the Governance-3 epic, but it is not part of #367.
 - `rg` check that a current entrypoint links `docs/governance/DOC_STATUS.md`.
 - `rg` check that `IMPLEMENTATION_PLAN.md` clearly says historical/superseded,
   or that a root pointer exists when the historical plan is archived.
+- `rg` checks for concrete stale/current facts: M23 is no longer current,
+  #351/#343 live MVT closure is stated, #342 remains separate/open, and display
+  readonly safety keys remain present.
+- `docker compose --env-file infra/env/display.example -f infra/compose.display.yml config`
+  shows `NHMS_ENABLE_LIVE_POSTGIS_MVT`.

@@ -21,6 +21,7 @@ services:
       UV_CACHE_DIR: /tmp/nhms-uv-cache
       NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS: "true"
       NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS: "false"
+      NHMS_ENABLE_LIVE_POSTGIS_MVT: ${NHMS_ENABLE_LIVE_POSTGIS_MVT:-false}
       DATABASE_URL: ${DATABASE_URL:?set readonly display database url}
       NHMS_PUBLISHED_ARTIFACT_ROOT: ${NHMS_PUBLISHED_ARTIFACT_ROOT:?set container published artifact root}
       NHMS_PUBLISHED_ARTIFACT_URI_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_URI_PREFIX:-published://}
