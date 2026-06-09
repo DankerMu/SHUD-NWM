@@ -1,11 +1,12 @@
 ## Issue Ownership
 
-#400 owns only task group 1 and the #400 evidence rows in task group 5. It is a
+Issue #400 owns only task group 1 and the #400 evidence rows in task group 5. It is a
 compact documentation/governance slice and must not change audit script logic,
 runtime code, CI workflows, or node-27 frontend implementation files.
 
-#401 owns task group 2, #402 owns task group 3, and #403 owns task group 4 after
-#401/#402 land.
+Issue #401 owns task group 2 and the shared verification rows needed for schema,
+hard-gate, JSON/Markdown, and baseline non-write behavior. #402 owns task group
+3, and #403 owns task group 4 after #401/#402 land.
 
 ## 1. Baseline Triage Contract
 
@@ -15,10 +16,11 @@ runtime code, CI workflows, or node-27 frontend implementation files.
 
 ## 2. Audit Schema Semantics
 
-- [ ] 2.1 Add normalized finding fields for allowlist state, allowlist key, budget countability, and gate eligibility.
-- [ ] 2.2 Update hard-gate evaluation to count only gate-eligible findings instead of whole check families.
-- [ ] 2.3 Add summary counts by `check_id`, priority, role, allowlist state, and gate eligibility.
-- [ ] 2.4 Preserve report-only behavior and verify `.entropy-baseline/latest.json` is not created or updated.
+- [x] 2.1 Add normalized finding fields for allowlist state, allowlist key, budget countability, and gate eligibility.
+- [x] 2.2 Update hard-gate evaluation to count only gate-eligible findings instead of whole check families.
+- [x] 2.3 Add summary counts by `check_id`, priority, role, allowlist state, and gate eligibility.
+- [x] 2.4 Preserve report-only behavior and verify `.entropy-baseline/latest.json` is not created or updated.
+- [x] 2.5 Add focused tests for equivalent allowlist wording, deterministic mocked evidence not being gate-eligible, live broad API mocks being gate-eligible, and parseable hard-gate JSON.
 
 ## 3. Retired Path Return Guard
 
@@ -37,9 +39,9 @@ runtime code, CI workflows, or node-27 frontend implementation files.
 - [x] 5.1 For #400, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` and record the counts/dispositions used by the triage artifact.
 - [x] 5.2 For #400, run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.
 - [x] 5.3 For #400, confirm `git diff --name-only` is limited to E1 OpenSpec clarification and governed docs/triage artifacts, with no runtime code, audit script, CI workflow, or node-27 frontend implementation changes.
-- [ ] 5.4 For #401/#402/#403, run `uv run --no-sync pytest -q tests/test_entropy_audit_script.py`.
-- [ ] 5.5 For #401/#402/#403, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`.
-- [ ] 5.6 For #401/#402/#403, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`.
-- [ ] 5.7 For #401/#402/#403, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` and confirm JSON remains parseable, hard-gate counts only gate-eligible findings, and `.entropy-baseline/latest.json` is not written.
-- [ ] 5.8 For #401/#402/#403, confirm `.github/workflows/governance.yml` does not use `--mode hard-gate`.
-- [ ] 5.9 Run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.
+- [x] 5.4 For #401, run `uv run --no-sync pytest -q tests/test_entropy_audit_script.py`.
+- [x] 5.5 For #401, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`.
+- [x] 5.6 For #401, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`.
+- [x] 5.7 For #401, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` and confirm JSON remains parseable, hard-gate counts only gate-eligible findings, and `.entropy-baseline/latest.json` is not written.
+- [x] 5.8 For #401, confirm `.github/workflows/governance.yml` does not use `--mode hard-gate`.
+- [x] 5.9 Run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.

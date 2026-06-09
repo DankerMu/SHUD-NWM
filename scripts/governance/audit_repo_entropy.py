@@ -107,6 +107,7 @@ HASH_CHUNK_BYTES = 1_048_576
 
 FindingAxis = Literal["structure", "semantics", "behavior", "context", "protocol", "control"]
 AuditMode = Literal["report", "hard-gate"]
+AllowlistState = Literal["allowlisted", "unallowlisted"]
 
 
 @dataclass(frozen=True)
@@ -149,7 +150,7 @@ def build_report(repo_root: Path | None = None, *, mode: AuditMode = "report") -
     )
     finding_records = [_finding_record(index, finding) for index, finding in enumerate(findings, start=1)]
     return {
-        "metadata": _metadata(root, findings, mode=mode),
+        "metadata": _metadata(root, finding_records, mode=mode),
         "module_heatmap": _module_heatmap(finding_records),
         "findings": finding_records,
         "high_spread_patterns": _high_spread_patterns(finding_records),
@@ -187,6 +188,8 @@ def render_markdown(report: dict[str, object]) -> str:
             f"- Baseline path: `{metadata['baseline_path']}`",
             f"- Baseline written: `{str(metadata['baseline_written']).lower()}`",
             f"- Findings: `{metadata['finding_count']}`",
+            f"- Budget-counted findings: `{metadata['budget_counted_count']}`",
+            f"- Gate-eligible findings: `{metadata['gate_eligible_count']}`",
             "",
             "## Entropy Heatmap",
             "",
@@ -225,9 +228,11 @@ def render_markdown(report: dict[str, object]) -> str:
             location = finding["evidence_path"]
             if finding.get("line"):
                 location = f"{location}:{finding['line']}"
+            state = str(finding["allowlist_state"])
+            gate = "gate-eligible" if finding["gate_eligible"] else "not gate-eligible"
             lines.append(
                 "- `{priority}` `{severity}` **{title}** ({axis}, {role}) at `{location}`: "
-                "{recommendation}".format(
+                "{recommendation} [{state}; {gate}]".format(
                     priority=finding["priority"],
                     severity=finding["severity"],
                     title=finding["title"],
@@ -235,6 +240,8 @@ def render_markdown(report: dict[str, object]) -> str:
                     role=finding["role"],
                     location=location,
                     recommendation=finding["recommendation"],
+                    state=state,
+                    gate=gate,
                 )
             )
     else:
@@ -262,8 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     return _exit_code_for_report(report)
 
 
-def _metadata(root: Path, findings: list[FindingSpec], *, mode: AuditMode) -> dict[str, object]:
+def _metadata(root: Path, findings: list[dict[str, object]], *, mode: AuditMode) -> dict[str, object]:
     baseline_path = ".entropy-baseline/latest.json"
+    summary_counts = _summary_counts(findings)
     metadata: dict[str, object] = {
         "schema_version": "governance-4a.entropy-report.v1",
         "mode": "hard-gate" if mode == "hard-gate" else "report-only",
@@ -273,7 +281,10 @@ def _metadata(root: Path, findings: list[FindingSpec], *, mode: AuditMode) -> di
         "baseline_exists": (root / baseline_path).exists(),
         "baseline_written": False,
         "finding_count": len(findings),
-        "check_family_count": len({finding.check_id for finding in findings}),
+        "check_family_count": len({str(finding["check_id"]) for finding in findings}),
+        "budget_counted_count": int(summary_counts["by_budget_count"]["budget_counted"]),
+        "gate_eligible_count": int(summary_counts["by_gate_eligibility"]["gate_eligible"]),
+        "summary_counts": summary_counts,
         "max_scanned_text_file_bytes": MAX_SCANNED_TEXT_FILE_BYTES,
         "max_artifact_fingerprint_bytes": MAX_ARTIFACT_FINGERPRINT_BYTES,
         "executed_check_families": list(CHECK_FAMILIES),
@@ -302,9 +313,8 @@ def _metadata(root: Path, findings: list[FindingSpec], *, mode: AuditMode) -> di
     return metadata
 
 
-def _hard_gate_failing_count(findings: Iterable[FindingSpec]) -> int:
-    gated = set(HARD_GATE_CHECK_IDS)
-    return sum(1 for finding in findings if finding.check_id in gated)
+def _hard_gate_failing_count(findings: Iterable[dict[str, object]]) -> int:
+    return sum(1 for finding in findings if bool(finding["gate_eligible"]))
 
 
 def _exit_code_for_report(report: dict[str, object]) -> int:
@@ -680,12 +690,11 @@ def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
     )
     findings: list[FindingSpec] = []
     for path in _iter_text_files(root, [root / "docs", root / "openspec", root / "services", root / "infra"]):
+        rel = _rel(root, path)
         text = _read_repo_text(root, path)
         for line_no, line in _matching_lines(text, placeholder_patterns):
             token = next(token for token in placeholder_patterns if token in line)
-            allowlist = None
-            if _rel(root, path).startswith("docs/governance/LEGACY_DEAD_CODE_INVENTORY.md"):
-                allowlist = "governance inventory documents retired placeholder paths"
+            allowlist = _placeholder_path_allowlist_reason(rel)
             findings.append(
                 FindingSpec(
                     check_id="placeholder-path-token",
@@ -693,7 +702,7 @@ def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
                     axis="semantics",
                     governance_face="legacy/dead-code",
                     role="shared_contract",
-                    evidence_path=_rel(root, path),
+                    evidence_path=rel,
                     line=line_no,
                     severity="low" if allowlist else "medium",
                     priority="P3" if allowlist else "P2",
@@ -1214,6 +1223,10 @@ def _dedupe_findings(findings: Iterable[FindingSpec]) -> list[FindingSpec]:
 def _finding_record(index: int, finding: FindingSpec) -> dict[str, object]:
     axis_scores = {axis: "low" for axis in AXES}
     axis_scores[finding.axis] = finding.severity
+    allowlist_key = _allowlist_key(finding)
+    allowlist_state = _allowlist_state(allowlist_key)
+    budget_counted = allowlist_state == "unallowlisted"
+    gate_eligible = budget_counted and finding.check_id in HARD_GATE_CHECK_IDS
     return {
         "id": f"ENT-{index:04d}",
         "check_id": finding.check_id,
@@ -1229,9 +1242,122 @@ def _finding_record(index: int, finding: FindingSpec) -> dict[str, object]:
         "owner_area": finding.owner_area,
         "module": finding.module,
         "allowlist_reason": finding.allowlist_reason,
+        "allowlist_key": allowlist_key,
+        "allowlist_state": allowlist_state,
+        "budget_counted": budget_counted,
+        "gate_eligible": gate_eligible,
         "description": finding.description,
         "recommendation": finding.recommendation,
     }
+
+
+def _allowlist_state(allowlist_key: str | None) -> AllowlistState:
+    return "allowlisted" if allowlist_key else "unallowlisted"
+
+
+def _allowlist_key(finding: FindingSpec) -> str | None:
+    reason = finding.allowlist_reason
+    if reason is None or not reason.strip():
+        return None
+    reason_key = _allowlist_reason_key(finding.check_id, reason)
+    return f"{finding.check_id}:{reason_key}"
+
+
+def _allowlist_reason_key(check_id: str, reason: str) -> str:
+    normalized = _normalized_reason_text(reason)
+    tokens = set(normalized.split())
+    if check_id == "broad-e2e-api-mock" and tokens & {"deterministic", "mock", "mocked", "preview", "visual"}:
+        return "deterministic-mocked-preview-visual"
+    if check_id == "stale-display-route-token":
+        if "milestone" in tokens or "progress" in tokens:
+            return "historical-milestone-summary"
+        if "provenance" in tokens or "extraction" in tokens:
+            return "library-extraction-provenance"
+        if "historical" in tokens or "pre" in tokens or "plans" in tokens:
+            return "historical-plan-or-pre-m26-evidence"
+        if "m26" in tokens or "redirect" in tokens:
+            return "m26-route-consolidation-or-redirect"
+    if check_id == "placeholder-path-token" and {"governance", "inventory"} <= tokens:
+        return "governance-retired-placeholder-inventory"
+    if check_id == "placeholder-path-token" and {"governed", "archived", "evidence"} <= tokens:
+        return "governed-archived-retired-placeholder-evidence"
+    if check_id == "placeholder-path-token" and {"governed", "completed", "openspec", "evidence"} <= tokens:
+        return "governed-completed-openspec-retired-placeholder-evidence"
+    if check_id == "openapi-frontend-types-delegated":
+        return "existing-contract-oracle-delegation"
+    if check_id == "openapi-frontend-types-signal":
+        if "skipped" in tokens:
+            return "report-only-fingerprint-skipped"
+        if "fingerprint" in tokens:
+            return "report-only-fingerprint-record"
+    return _slug(normalized)
+
+
+def _normalized_reason_text(reason: str) -> str:
+    text = reason.lower()
+    text = text.replace("report only", "report-only")
+    text = text.replace("allow listed", "allowlisted")
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def _slug(text: str) -> str:
+    return "-".join(text.split()) or "unspecified"
+
+
+def _summary_counts(findings: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "by_check_id": _count_by(findings, "check_id"),
+        "by_priority": _count_by(findings, "priority"),
+        "by_role": _count_by(findings, "role"),
+        "by_allowlist_state": _count_by_with_defaults(
+            findings,
+            "allowlist_state",
+            ("allowlisted", "unallowlisted"),
+        ),
+        "by_gate_eligibility": _boolean_count_by(
+            findings,
+            "gate_eligible",
+            true_key="gate_eligible",
+            false_key="not_gate_eligible",
+        ),
+        "by_budget_count": _boolean_count_by(
+            findings,
+            "budget_counted",
+            true_key="budget_counted",
+            false_key="not_budget_counted",
+        ),
+    }
+
+
+def _count_by(findings: list[dict[str, object]], field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for finding in findings:
+        key = str(finding[field])
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _count_by_with_defaults(
+    findings: list[dict[str, object]],
+    field: str,
+    defaults: tuple[str, ...],
+) -> dict[str, int]:
+    counts = {key: 0 for key in defaults}
+    counts.update(_count_by(findings, field))
+    return counts
+
+
+def _boolean_count_by(
+    findings: list[dict[str, object]],
+    field: str,
+    *,
+    true_key: str,
+    false_key: str,
+) -> dict[str, int]:
+    counts = {true_key: 0, false_key: 0}
+    for finding in findings:
+        counts[true_key if bool(finding[field]) else false_key] += 1
+    return counts
 
 
 def _module_heatmap(findings: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -1441,6 +1567,16 @@ def _stale_route_allowlist_reason(relative_path: str, line: str) -> str | None:
         return "frontend redirect regression test"
     if relative_path.startswith("apps/frontend/src/lib/hydroMet/") and "HydroMetPage" in line:
         return "library extraction provenance comment"
+    return None
+
+
+def _placeholder_path_allowlist_reason(relative_path: str) -> str | None:
+    if relative_path == "docs/governance/LEGACY_DEAD_CODE_INVENTORY.md":
+        return "governance inventory documents retired placeholder paths"
+    if relative_path.startswith("docs/archived/"):
+        return "governed archived evidence documents retired placeholder paths"
+    if relative_path.startswith("openspec/changes/governance-2-legacy-dead-code-retirement/"):
+        return "governed completed OpenSpec evidence documents retired placeholder paths"
     return None
 
 
