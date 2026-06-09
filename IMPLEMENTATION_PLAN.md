@@ -1,5 +1,11 @@
 # 全国水文模拟系统：实施计划
 
+> Status: historical / superseded baseline. This root document is kept for audit
+> context from the 2026-05-06 design-freeze plan. For current entrypoints and
+> conflict resolution, use `README.md`, `progress.md`, active OpenSpec changes,
+> current runbooks, `docs/VALIDATION.md`, source code, and
+> `docs/governance/DOC_STATUS.md`.
+
 版本：v0.2-design-freeze  
 日期：2026-05-06
 
