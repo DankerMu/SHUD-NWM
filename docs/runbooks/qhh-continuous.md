@@ -8,7 +8,8 @@
 `scripts/run_qhh_continuous.py` 是 qhh 专用的诊断、回归复现和证据采集入口。
 它们用于证明 `data/Basins/qhh` 标准链路可以完成 GFS/IFS 下载、canonical
 转换、forcing、native SHUD、parse 和 display product 发布，但不是 backend
-production scheduler 的依赖。
+production scheduler 的依赖。诊断入口、直接 helper 依赖、out-of-chain helper
+和静态 guard 统一记录在 [`../../scripts/diagnostic/qhh/README.md`](../../scripts/diagnostic/qhh/README.md)。
 
 生产多流域连续调度入口在 backend orchestrator：
 
@@ -43,7 +44,7 @@ uv run nhms-pipeline plan-production \
 业务验证证据；真实生产提交必须使用 `--submit`。
 
 生产提交路径使用同一个 backend scheduler，在 Slurm/database/storage preflight
-通过后用 `--submit` 关闭 dry-run：
+通过后用 `--submit` 关闭 dry-run。一次性生产提交示例：
 
 ```bash
 export DATABASE_URL=postgresql://nhms:<strong-password>@pg.cluster.example:5432/nhms
@@ -67,6 +68,20 @@ uv run nhms-pipeline plan-production \
 Slurm preflight、提交、状态/重试/取消证据和 readiness 输入。qhh 脚本产生的
 证据可作为诊断或复现材料，不应写成生产 scheduler dependency，也不应作为最终
 production readiness proof。
+
+连续生产守护进程同样必须显式带 `--submit`；不带 `--submit` 的
+`--continuous` 仍是 dry-run/no-mutation 轮询：
+
+```bash
+uv run nhms-pipeline plan-production \
+  --continuous \
+  --submit \
+  --source gfs \
+  --source IFS \
+  --interval-seconds "$NHMS_SCHEDULER_INTERVAL_SECONDS" \
+  --max-passes "$NHMS_SCHEDULER_MAX_PASSES" \
+  --workspace-root "$WORKSPACE_ROOT"
+```
 
 ## #214 evidence boundary
 

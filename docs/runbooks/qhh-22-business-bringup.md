@@ -4,15 +4,16 @@
 >
 > 状态标注：✅ 已实测验证 / ⏳ 待完成 / ⚠️ 已知待修。
 >
-> 最后更新：2026-06-04（GFS+IFS 双源跑通至 `frequency_done`；本文路径定性为**诊断 lane**，正式业务化迁移至 m24 通用 daemon——见下方横幅）。
+> 最后更新：2026-06-04（GFS+IFS 双源跑通至 `frequency_done`；本文保留 node-22 首跑诊断记录，正式业务化已迁移至 m24 通用 daemon——见下方横幅）。
 >
 > ⚠️ **架构转向（m24）**：本 runbook 记录的是 `run_qhh_continuous.py → run_qhh_cycle.sh` **诊断/bring-up 路径**，m23 `design.md` 已**否决其作为生产自动化**。
 > 正式"全持续守护"迁移到**通用编排器**（`services/orchestrator` scheduler/chain + Slurm HTTP gateway），由 **m24** 落地：多流域并发 + 跨周期暖启动承接 + 退役诊断脚本。
 > OpenSpec：`openspec/changes/m24-multibasin-continuous-daemon-live/`；跟踪 epic **#285**（子任务 #286–#293）。本文继续作为诊断/排障与 m24 bring-up 期回退手册。
 >
 > ✅ **生产路径 = 通用守护进程（M24，权威）**：正式业务运行是通用 daemon
-> `nhms-pipeline plan-production --continuous`（→ `services/orchestrator/scheduler.py` `run_continuous`），
+> `nhms-pipeline plan-production --continuous --submit`（→ `services/orchestrator/scheduler.py` `run_continuous`），
 > 经**独立 Slurm gateway** 提交；多流域并发 + 两阶段预留 + 跨周期暖启动均在此路径。
+> 不带 `--submit` 的 `plan-production` 默认 dry-run/no-mutation，即使同时带 `--continuous` 也不会作为生产提交 daemon。
 > 本 runbook 的 `run_qhh_continuous.py → run_qhh_cycle.sh` 诊断 lane **仅作 bring-up 回退/排障**，
 > **不**声称 production；M24 §5/#293 已加护栏测试
 > （`tests/test_qhh_scripts_static.py::test_production_scheduler_does_not_invoke_qhh_diagnostic_scripts`）
@@ -33,7 +34,7 @@
    `/ghdc` 会导致作业 1 秒即死（连 sbatch 日志都写不出）。
 3. **DB 要用集群 IP**，不能用容器名或 127.0.0.1 —— 计算节点解析不了 docker 容器名 `nhms-22-e2e-db`，也连不上登录节点的 `127.0.0.1`。用 `10.0.2.100:55433`（DB 容器在宿主机发布的端口 + 集群网 IP），登录节点与计算节点都可达。
 4. **`OBJECT_STORE_ROOT` 必须等于 `QHH_RUN_ROOT`** —— QHH 包经 s3 前缀发布到 object-store，seed 步骤在 run-root 找；二者不一致会"package path unsafe / 找不到"。
-5. **业务运行器是 `scripts/run_qhh_continuous.py --executor slurm`**（runbook 记载的 QHH 业务路径，自带模型注册 + 全链路）；`--once` 一轮、去掉即连续。**不是** `plan-production`（后者假设模型已注册，且容器内无法提交 Slurm）。
+5. **生产/业务运行器是 `nhms-pipeline plan-production --continuous --submit`**；它通过通用 orchestrator + standalone Slurm gateway 提交所有 active runnable 注册模型。`scripts/run_qhh_continuous.py --executor slurm` 只保留为 QHH 诊断/bring-up fallback；`--once` 仅做一次诊断扫描，去掉 `--once` 也不是生产 daemon。
 6. **对象存储用生产前缀 `s3://nhms`**（`OBJECT_STORE_PREFIX`，文件系统对象存储的 URI 标签）——e2e 标签 `s3://nhms-22-e2e` 已废弃；`object_store.py` 会校验 URI 桶名==前缀,切前缀必须先清干净旧标签数据(否则旧 URI 解析报错)。
 7. **SHUD 输出间隔 = 5min**（`QHH_MODEL_OUTPUT_INTERVAL`，代码默认已改 5）——洪频分析假设 hourly，3h 太粗；5min 对任意整数小时窗口可整除（7天=2004步）。窗口必须被输出间隔整除，否则 `INVALID_TIME_WINDOW`。
 8. **⚠️ 运行纪律：作业运行中禁止在 node-22 `git pull`**——git 换 inode 会让正在逐行 exec `run_qhh_cycle.sh` 的 bash 句柄失效（`Stale file handle`），秒杀作业。要 pull 必须先等作业结束。代码更新与作业运行错开。
@@ -44,7 +45,7 @@
 
 | 角色 | 位置 | 职责 | 可见文件系统 |
 |------|------|------|------|
-| 控制/调度面 | node-22 登录节点 `xnode`（10.0.2.100 / 10.0.1.100 / 210.77.77.22） | 跑 `run_qhh_continuous.py`、提交 sbatch、等待、写 DB | `/scratch`、`/ghdc`、`/volume`、`/users`、容器 |
+| 控制/调度面 | node-22 登录节点 `xnode`（10.0.2.100 / 10.0.1.100 / 210.77.77.22） | 生产：跑 `nhms-pipeline plan-production --continuous --submit` 并通过 standalone Slurm gateway 提交；诊断 fallback：手动跑 `run_qhh_continuous.py --executor slurm` | `/scratch`、`/ghdc`、`/volume`、`/users`、容器 |
 | 计算执行面 | 计算节点 cn01-24（CPU 分区） | sbatch 内跑全链路（下载→canonical→forcing→SHUD→parse→publish） | `/scratch`、`/volume/data/nwm/Basins`、`/users/frd_muziyao/sundials` ❌ **无 `/ghdc`** |
 | 数据库 | 容器 `nhms-22-e2e-db`（timescaledb-ha pg15） | hydro/met/ops/flood schema（26 迁移） | 宿主端口 55433；集群可达 10.0.2.100:55433 |
 
@@ -140,9 +141,9 @@ uv run python -m packages.common.migrate        # 全量迁移；已应用则全
 | `NHMS_DOWNLOAD_BBOX_*` | S8/N64/W63/E145 | 中国+10° |
 | 首跑期 | `NHMS_SCHEDULER_BACKFILL_ENABLED=false`、`NHMS_RETENTION_ENABLED=false` | 受控验证；业务化再开（见 §7） |
 
-### 3.2 启动脚本：`run_qhh_business_slurm.sh`
+### 3.2 诊断 fallback 启动脚本：`run_qhh_business_slurm.sh`
 
-（位于仓库根，**不提交**；source 上面 env 后追加 QHH_* 覆盖）业务参数：
+（位于仓库根，**不提交**；source 上面 env 后追加 QHH_* 覆盖）历史首跑/诊断参数：
 
 ```bash
 export QHH_RUN_ROOT=/scratch/frd_muziyao/nhms-prod/qhh-continuous
@@ -176,7 +177,7 @@ uv run python scripts/run_qhh_continuous.py --once --executor slurm
 
 ---
 
-## 4. 运行流程
+## 4. 诊断 fallback 运行流程
 
 ```bash
 ssh -p 32099 frd_muziyao@210.77.77.22
@@ -184,7 +185,7 @@ cd /scratch/frd_muziyao/NWM
 nohup ./run_qhh_once_slurm.sh > /tmp/qhh-once-slurm.log 2>&1 &
 ```
 
-运行器 `run_qhh_continuous.py --once --executor slurm` 会：
+诊断 runner `run_qhh_continuous.py --once --executor slurm` 会：
 1. 发现窗口内 cycle（lookback/cycle_lag），选 1 个；
 2. 渲染 `scripts/run_qhh_cycle.sbatch` → `sbatch` 提交到 CPU 分区（一个作业包整 cycle）；
 3. `--slurm-wait` 等作业结束并回流状态。

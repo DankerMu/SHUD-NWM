@@ -233,6 +233,125 @@ Boundary-surface checklist for #363:
 
 The QHH scripts already have `DIAGNOSTIC-ONLY` headers and static tests that keep them out of production orchestrator code. First create a diagnostic README/manifest and optionally move them behind short compatibility wrappers later.
 
+Issue #364 applies the first diagnostic-isolation slice. It MUST NOT delete or
+move QHH diagnostic scripts. It adds an explicit diagnostic manifest under
+`scripts/diagnostic/qhh/` that names the current root-level diagnostic
+entrypoints, their direct helper dependencies, out-of-chain QHH smoke helpers,
+the production replacement commands, and the static guard tests that keep these
+tokens out of production orchestrator code.
+
+Fixture level for #364: `expanded`. The issue touches script-entry
+classification, production-vs-diagnostic documentation, runbook guidance, and
+static tests guarding production orchestrator boundaries.
+
+Repair intensity for #364: `high`. The main risk is accidentally converting a
+diagnostic/reproduction path into a production-looking entrypoint, or breaking a
+diagnostic path that still has bring-up value.
+
+Risk packs considered for #364:
+
+- Public API / CLI / script entry: selected - the manifest classifies supported
+  diagnostic script entrypoints and production replacement commands.
+- Config / project setup: selected - production replacement must point to
+  `infra/env/compute.example`, generic daemon, and `nhms-pipeline
+  plan-production` rather than QHH-only scripts.
+- File IO / path safety / overwrite: not selected - #364 does not add runtime
+  file operations or move/delete scripts.
+- Schema / columns / units / field names: not selected - no DB/API/schema
+  contract changes.
+- Auth / permissions / secrets: not selected - no auth or secret handling
+  changes.
+- Concurrency / shared state / ordering: selected - production scheduler and
+  diagnostic continuous-loop ownership must remain separate.
+- Resource limits / large input / discovery: selected - repository scans must be
+  scoped to QHH diagnostic and orchestrator boundaries, not generated trees.
+- Legacy compatibility / examples: selected - root-level diagnostic script
+  paths remain available; any future move requires wrappers and runbook updates.
+- Error handling / rollback / partial outputs: not selected - no runtime error
+  or cleanup behavior changes.
+- Release / packaging / dependency compatibility: selected - no console script,
+  import package, or deployment entrypoint should switch to QHH diagnostics.
+- Documentation / migration notes: selected - the manifest and runbook notes are
+  the deliverable.
+- Geospatial / CRS / basin geometry: not selected - no GIS behavior change.
+- Hydro-met time series / forcing windows: not selected - no forcing/time-series
+  behavior change.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver behavior
+  change.
+- PostGIS / TimescaleDB domain behavior: not selected - no database behavior
+  change.
+- Slurm production lifecycle / mock-vs-real parity: selected - the manifest must
+  distinguish diagnostic QHH sbatch wrappers from gateway-owned production
+  `infra/sbatch` templates.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider behavior change.
+- Run manifest / QC provenance: selected - diagnostic manifest-builder and QHH
+  smoke evidence artifacts must remain diagnostic-only and not substitute for
+  production readiness.
+- Published NHMS artifacts / display identity: selected - diagnostic display
+  product publication must remain separate from production display-readiness
+  proof.
+
+Must preserve for #364:
+
+- Existing root-level diagnostic paths remain callable:
+  `scripts/run_qhh_continuous.py`, `scripts/run_qhh_cycle.sh`,
+  `scripts/run_qhh_cycle.sbatch`, `scripts/run_qhh_backend_smoke.sh`, and
+  `scripts/create_qhh_shud_manifest.py`.
+- Direct helper dependencies recorded in the inventory remain root-level unless
+  a later issue deliberately moves them with wrappers.
+- Production scheduler/orchestrator code does not import, shell out to, or name
+  QHH diagnostic tokens.
+- `infra/sbatch` remains the production Slurm template ownership; QHH diagnostic
+  sbatch is not a gateway template.
+- #365 Playwright/e2e and #366 CI paused-job surfaces are not changed.
+
+Invariant Matrix for #364:
+
+- Governing invariant: QHH diagnostic scripts remain visible and usable as
+  diagnostic/reproduction assets, while production scheduler/orchestrator paths
+  stay generic and cannot depend on QHH diagnostic entrypoints.
+- Source-of-truth identity/contract: diagnostic manifest under
+  `scripts/diagnostic/qhh/`, `DIAGNOSTIC-ONLY` script headers,
+  `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`, static guard tests in
+  `tests/test_qhh_scripts_static.py`, and production replacement commands in
+  `infra/env/compute.example` / orchestrator docs.
+- Producers: diagnostic manifest and any runbook/governance doc updates.
+- Validators/preflight: `tests/test_qhh_scripts_static.py`, focused `rg` scans
+  over `services/orchestrator`, `scripts`, `docs/runbooks`, and governance docs,
+  plus docs lint and ruff.
+- Storage/cache/query: none - no DB/object-store/cache/query changes.
+- Public routes/entrypoints: root-level QHH diagnostic scripts stay stable;
+  generic production entrypoints remain `nhms-pipeline plan-production` and
+  orchestrator scheduler commands.
+- Frontend/downstream consumers: none - no frontend or display API code changes.
+- Failure paths/rollback/stale state: future moves require wrappers; this slice
+  should leave no moved-path runbook breakage.
+- Evidence/audit/readiness: manifest entries for diagnostic entrypoints, helper
+  dependencies, out-of-chain helper note, production replacement, and guard
+  tests.
+- Regression rows:
+  - `tests/test_qhh_scripts_static.py` -> passes and confirms production
+    orchestrator sources do not reference QHH diagnostic tokens.
+  - `rg` over `services/orchestrator/**/*.py` for QHH diagnostic tokens -> no
+    production references.
+  - Root diagnostic scripts -> remain tracked at their current paths.
+  - Manifest -> lists backend-smoke, continuous/cycle, sbatch wrapper,
+    manifest-builder, helper dependencies, out-of-chain helper, production
+    replacement, and guard tests.
+  - #365/#366 surfaces -> unchanged.
+
+Boundary-surface checklist for #364:
+
+- Public script surfaces: root `scripts/run_qhh_*`, backend-smoke, and
+  diagnostic manifest builder.
+- Shared production surfaces: `services/orchestrator/**`, `infra/sbatch`,
+  `infra/env/compute.example`, and `nhms-pipeline plan-production`.
+- Evidence boundaries: QHH smoke summaries/display products must be described as
+  diagnostic evidence, not production live readiness.
+- Unchanged downstream consumers: frontend e2e, CI workflows, placeholder
+  retired paths from #363, production scheduler implementation.
+
 ### D3. Delete or archive placeholders only with import/CI/runbook evidence
 
 Empty or README-only placeholders can be deleted or archived after grep/import/CI evidence proves no active path depends on them. `workers/sbatch_templates` needs a stronger migration note because it contains actual sbatch templates.
