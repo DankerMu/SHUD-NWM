@@ -24,17 +24,20 @@ The audit found several concrete drifts:
 - superseded
 - archived
 
-### D2. Fix high-impact stale facts before broad docs cleanup
+### D2. Defer high-impact stale facts to Governance-3B
 
-The first docs PR should update the documents most likely to mislead implementation: active milestone, node-27 live MVT facts, display env config, and current issue status.
+Active milestone, node-27 live MVT facts, display env config, and current issue
+status are not part of #367. They are governed by the next Governance-3 slice.
 
-### D3. Convert bugs into a ledger
+### D3. Defer bugs ledger conversion to Governance-3C
 
-`docs/bugs.md` should stop being a chronological pile. Each bug should have status, owner area, resolved/superseded evidence, and retest command.
+`docs/bugs.md` ledger conversion remains required for the Governance-3 epic, but
+it is not part of the #367 document authority PR.
 
-### D4. Decide tracked local/agent assets explicitly
+### D4. Defer tracked local/agent asset ownership to Governance-3D
 
-`.agents`, `.codex`, and `apps/frontend/artifacts` must be either project assets or local/generated artifacts. The repo should not say "do not stage" for assets it intentionally tracks.
+`.agents`, `.codex`, and `apps/frontend/artifacts` ownership remains required
+for the Governance-3 epic, but it is not part of #367.
 
 ## Four-Role Coverage
 
@@ -47,12 +50,14 @@ The first docs PR should update the documents most likely to mislead implementat
 
 ## Risks / Mitigations
 
-- **Risk: docs update changes claims without evidence.** Mitigation: every status change must link to PR, issue, runbook, test, or retest command.
+- **Risk: document status claims overreach into stale fact fixes.** Mitigation:
+  #367 only defines the authority model and marks the historical implementation
+  plan status; concrete stale fact fixes stay in G3-B/C/D.
 - **Risk: archiving root docs breaks discoverability.** Mitigation: leave a small root pointer if `IMPLEMENTATION_PLAN.md` is archived.
-- **Risk: `.agents` ownership decision affects tooling.** Mitigation: make the choice explicit before changing ignore rules.
 
 ## Verification
 
 - Markdown lint if enabled by CI.
-- `rg` checks for stale `#343` open wording and M23 current milestone wording.
-- `docker compose --env-file infra/env/display.example -f infra/compose.display.yml config` if display env/compose changes.
+- `rg` check that a current entrypoint links `docs/governance/DOC_STATUS.md`.
+- `rg` check that `IMPLEMENTATION_PLAN.md` clearly says historical/superseded,
+  or that a root pointer exists when the historical plan is archived.
