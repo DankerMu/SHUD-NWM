@@ -9,9 +9,9 @@ runtime code, CI workflows, or node-27 frontend implementation files.
 
 ## 1. Baseline Triage Contract
 
-- [ ] 1.1 Capture the current Governance-4 report counts and classify each high-spread family as `fix`, `historical`, `archived`, `false-positive`, or `defer`.
-- [ ] 1.2 Document non-goals: no QHH diagnostic deletion, no repeated Governance-2 placeholder deletion, no CI hard-gate enablement.
-- [ ] 1.3 Add or update a governed triage artifact that maps the report families to downstream Governance-5 changes.
+- [x] 1.1 Capture the current Governance-4 report counts and classify each high-spread family as `fix`, `historical`, `archived`, `false-positive`, or `defer`.
+- [x] 1.2 Document non-goals: no QHH diagnostic deletion, no repeated Governance-2 placeholder deletion, no CI hard-gate enablement.
+- [x] 1.3 Add or update a governed triage artifact that maps the report families to downstream Governance-5 changes.
 
 ## 2. Audit Schema Semantics
 
@@ -34,9 +34,9 @@ runtime code, CI workflows, or node-27 frontend implementation files.
 
 ## 5. Verification
 
-- [ ] 5.1 For #400, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` and record the counts/dispositions used by the triage artifact.
-- [ ] 5.2 For #400, run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.
-- [ ] 5.3 For #400, confirm `git diff --name-only` is limited to E1 OpenSpec clarification and governed docs/triage artifacts, with no runtime code, audit script, CI workflow, or node-27 frontend implementation changes.
+- [x] 5.1 For #400, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` and record the counts/dispositions used by the triage artifact.
+- [x] 5.2 For #400, run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.
+- [x] 5.3 For #400, confirm `git diff --name-only` is limited to E1 OpenSpec clarification and governed docs/triage artifacts, with no runtime code, audit script, CI workflow, or node-27 frontend implementation changes.
 - [ ] 5.4 For #401/#402/#403, run `uv run --no-sync pytest -q tests/test_entropy_audit_script.py`.
 - [ ] 5.5 For #401/#402/#403, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`.
 - [ ] 5.6 For #401/#402/#403, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`.
