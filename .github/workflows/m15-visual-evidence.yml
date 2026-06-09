@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Git ref to check out for historical M15 mocked visual evidence.
+        description: Branch or tag context for the manual evidence run; checkout is pinned by evidence_sha.
         required: true
         default: master
         type: string
       evidence_sha:
-        description: Expected commit SHA for the checked-out ref.
+        description: Commit SHA to check out and verify for historical M15 mocked visual evidence.
         required: true
         type: string
 

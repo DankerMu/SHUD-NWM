@@ -555,8 +555,9 @@ Must preserve for #366:
   build/test path; it must not contain a job disabled by `&& false`.
 - Historical M15 visual evidence remains either archived or manually runnable
   with explicit `workflow_dispatch`.
-- Manual M15 workflow checks out the requested ref/SHA and verifies evidence
-  identity before running the visual command.
+- Manual M15 workflow records operator-facing ref context, checks out the
+  immutable evidence SHA, and verifies evidence identity before running the
+  visual command.
 - M15 visual evidence remains classified as mocked/historical visual evidence,
   not live display_readonly receipt.
 - No backend, API, Slurm, QHH diagnostic, or live display e2e behavior changes.
@@ -611,8 +612,9 @@ Implementation evidence recorded 2026-06-09:
   `CI` workflow.
 - `.github/workflows/m15-visual-evidence.yml` retains the historical M15 mocked
   visual lane as an explicit manual workflow with read-only permissions,
-  bounded timeout, explicit ref/SHA inputs, `M15_EVIDENCE_SHA` checkout
-  verification, Node/pnpm/Playwright setup, and scoped artifact upload.
+  bounded timeout, explicit ref context plus immutable SHA input,
+  `M15_EVIDENCE_SHA` checkout verification, Node/pnpm/Playwright setup, and
+  scoped artifact upload.
 - `CLAUDE.md`, `progress.md`, and the governance inventory classify the lane as
   historical mocked visual evidence, not current node-27 live display proof.
 
