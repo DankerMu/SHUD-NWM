@@ -30,7 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.evidence_sha }}
+          persist-credentials: false
       - name: Verify M15 evidence checkout identity
         run: |
           if [[ ! "$M15_EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then

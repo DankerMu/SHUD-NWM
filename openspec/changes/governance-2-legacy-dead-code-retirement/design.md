@@ -490,8 +490,8 @@ Boundary-surface checklist for #365:
 
 ### D1E. Issue #366 removes hidden paused CI entropy
 
-Issue #366 owns the `frontend-m15-visual` lane currently hidden behind
-`if: needs.changes.outputs.frontend == 'true' && false` in
+Issue #366 owns the `frontend-m15-visual` lane that, before #366, was hidden
+behind `if: needs.changes.outputs.frontend == 'true' && false` in
 `.github/workflows/ci.yml`.
 
 The preferred resolution is to remove the hidden-disabled job from the main
