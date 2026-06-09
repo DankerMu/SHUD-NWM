@@ -112,10 +112,12 @@ evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/db/qhh_schema_aware_counts.log
   - packages/common/forecast_store.py
   - docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
-retest_command: >-
-  rg -n "bv\\.basin_id = 'qhh'" docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
-  || psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c
-  "select count(*) from core.basin_version bv where bv.basin_id = 'basins_qhh';"
+retest_command: |-
+  set -euo pipefail
+  ! rg -n "bv\\.basin_id = 'qhh'" docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
+  rg -n "basins_qhh" docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c
+    "select count(*) from core.basin_version bv where bv.basin_id = 'basins_qhh';"
 ```
 
 `packages/common/forecast_store.py` keeps `QHH_BASIN_ID = "basins_qhh"`.
@@ -263,7 +265,7 @@ returns mismatch/not-found contracts.
 
 ```yaml
 status: stale-needs-repro
-owner_area: shared_contract
+owner_area: display_readonly
 github_issue: none
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/api/api_job_logs_known_frequency.json
@@ -274,12 +276,22 @@ evidence:
   - services/artifacts/reader.py
   - tests/test_pipeline_logs_artifacts.py
   - tests/test_monitoring_api.py
-retest_command: >-
-  curl -i "$API_BASE_URL/api/v1/jobs/$JOB_ID/logs?source=GFS&cycle_time=$CYCLE_TIME&run_id=$RUN_ID&model_id=basins_qhh_shud"
+retest_command: |-
+  set -euo pipefail
+  tmp="$(mktemp)"
+  status="$(curl -sS -o "$tmp" -w '%{http_code}'
+    "$API_BASE_URL/api/v1/jobs/$JOB_ID/logs?source=GFS&cycle_time=$CYCLE_TIME&run_id=$RUN_ID&model_id=basins_qhh_shud")"
+  jq -e --arg status "$status" --arg job_id "$JOB_ID" '
+    ($status == "200" and .status == "ok" and .data.job_id == $job_id and (.data.content | type == "string"))
+    or
+    ($status == "404" and .status == "error" and (.error.code | IN("JOB_LOG_NOT_PUBLISHED", "JOB_LOG_NOT_FOUND", "JOB_NOT_FOUND")))
+  ' "$tmp"
 ```
 
 M22 replaced local-path log reading with `ArtifactReader` and stable published
-artifact errors such as `JOB_LOG_NOT_PUBLISHED`. Whether all current production
+artifact errors such as `JOB_LOG_NOT_PUBLISHED`. Compute-side log publication
+remains a dependency, but this entry is owned by node-27 display log
+consumption and the published artifact reader; whether all current production
 jobs write display-readable log URIs still requires a fresh strict-identity
 job/log receipt.
 
@@ -295,14 +307,24 @@ evidence:
   - apps/api/routes/pipeline.py
   - tests/test_monitoring_api.py
   - tests/test_retry_cancel_consistency.py
-retest_command: >-
-  curl -i -X POST "$API_BASE_URL/api/v1/runs/run_missing/cancel"
-  -H "X-User-Role: operator"
+retest_command: |-
+  set -euo pipefail
+  tmp="$(mktemp)"
+  status="$(curl -sS -o "$tmp" -w '%{http_code}' -X POST
+    "$API_BASE_URL/api/v1/runs/run_missing/cancel" -H "X-User-Role: operator")"
+  test "$status" != "200"
+  jq -e --arg status "$status" '
+    .status == "error"
+    and ($status | test("^(404|409|422)$"))
+    and (.error.code | type == "string")
+  ' "$tmp"
 ```
 
 The compute-control cancel route still starts from active jobs for a run. The
-display-readonly route correctly fails closed as manual action, but the
-operator missing-run semantics are not yet fixed by that display safety work.
+fixed state is that operator cancel for a missing run returns a stable non-200
+error body, not HTTP 200 with empty `cancelled_jobs`. The display-readonly route
+correctly fails closed as manual action, but the operator missing-run semantics
+are not yet fixed by that display safety work.
 
 ### BUG-20260527-012: Default Playwright E2E specs were mocked regression, not live E2E
 
@@ -346,10 +368,17 @@ evidence:
   - services/slurm_gateway/mock_backend.py
   - tests/test_real_slurm_gateway.py
   - tests/test_monitoring_api.py
-retest_command: >-
-  SLURM_GATEWAY_BACKEND=slurm curl -fsS "$SLURM_GATEWAY_URL/api/v1/slurm/health"
-  && curl -fsS -X POST "$API_BASE_URL/api/v1/runs/$RUN_ID/retry"
-  -H "X-User-Role: operator" | jq -e '.data.slurm_job_id | test("^[0-9]+(_[0-9]+)?$")'
+retest_command: |-
+  # Preconditions: gateway and API are already running against a real Slurm backend.
+  set -euo pipefail
+  curl -fsS "$SLURM_GATEWAY_URL/api/v1/slurm/health" |
+    jq -e '(.backend? // "slurm") == "slurm" and (.healthy? // true) == true'
+  job_id="$(curl -fsS -X POST "$API_BASE_URL/api/v1/runs/$RUN_ID/retry"
+    -H "X-User-Role: operator" |
+    jq -er '.data.slurm_job_id | select(test("^[0-9]+(_[0-9]+)?$"))')"
+  curl -fsS "$SLURM_GATEWAY_URL/api/v1/slurm/jobs/$job_id" |
+    jq -e --arg job_id "$job_id" '.job_id == $job_id'
+  sacct -j "$job_id" --noheader --format=JobID,State | rg -n "$job_id"
 ```
 
 `services/slurm_gateway/config.py` still defaults the gateway backend to

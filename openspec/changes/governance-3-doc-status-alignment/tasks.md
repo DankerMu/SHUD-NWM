@@ -85,9 +85,12 @@
 - [x] 3.2 Triage at least BUG-20260527-003, BUG-20260527-007,
   BUG-20260527-008, BUG-20260527-009, BUG-20260527-010, BUG-20260527-011,
   BUG-20260527-012, and BUG-20260527-013. Evidence: required entries are
-  triaged as BUG-003 `open`, BUG-007 `resolved`, BUG-008 `resolved`, BUG-009
-  `superseded`, BUG-010 `stale-needs-repro`, BUG-011 `open`, BUG-012
-  `superseded`, and BUG-013 `open`.
+  triaged as BUG-003 `open`/`shared_contract`, BUG-007
+  `resolved`/`display_readonly`, BUG-008 `resolved`/`compute_control`, BUG-009
+  `superseded`/`shared_contract`, BUG-010
+  `stale-needs-repro`/`display_readonly`, BUG-011 `open`/`compute_control`,
+  BUG-012 `superseded`/`display_readonly`, and BUG-013
+  `open`/`slurm_gateway`.
 - [x] 3.3 Mark each required bug `open`, `resolved`, `superseded`,
   `stale-needs-repro`, or `archived` with evidence from source code, tests,
   docs, runbooks, GitHub issues/PRs, or existing artifact paths. Evidence:
@@ -99,7 +102,7 @@
   `owner_area` values and concrete retest commands; no direct existing GitHub
   issue was found for those required bug IDs.
 - [x] 3.5 Verify the ledger fields:
-  `rg -n "BUG-20260527-00(3|7|8|9|10|11|12|13)|status:|owner_area:|evidence:|retest_command:" docs/bugs.md`.
+  `rg -n "BUG-20260527-(003|007|008|009|010|011|012|013)|status:|owner_area:|resolved_by:|superseded_by:|evidence:|retest_command:" docs/bugs.md`.
   Evidence: command returned all required BUG headings and ledger fields,
   including `resolved_by` for resolved entries and `superseded_by` for
   superseded entries.
