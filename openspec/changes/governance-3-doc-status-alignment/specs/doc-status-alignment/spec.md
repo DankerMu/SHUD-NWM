@@ -86,3 +86,29 @@ undifferentiated open backlog.
 
 - **WHEN** a bug remains open
 - **THEN** it has an owner area among `compute_control`, `display_readonly`, `slurm_gateway`, or `shared_contract`, plus a GitHub issue link when one exists or a concrete retest command when no issue exists
+
+### Requirement: Agent and generated artifact ownership is explicit
+
+Repository governance documentation and ignore rules SHALL distinguish reviewed
+project assets from local/generated agent and evidence outputs for `.agents`,
+`.codex`, `apps/frontend/artifacts`, and root `artifacts/`.
+
+#### Scenario: contributor checks agent assets
+
+- **WHEN** a contributor sees tracked `.agents/skills/**`
+- **THEN** governance guidance and ignore rules identify reviewed project skills as project assets while unpromoted local installed or scratch skill additions remain local/generated unless explicitly promoted by PR
+
+#### Scenario: contributor generates workflow evidence
+
+- **WHEN** a contributor creates new `.codex/reviews/**`, `.codex/evidence/**`, or root `artifacts/**` files
+- **THEN** ignore rules and guidance classify those files as local/generated evidence by default and prevent accidental staging
+
+#### Scenario: historical evidence remains tracked
+
+- **WHEN** existing tracked `.codex/reviews/**` fixtures or `apps/frontend/artifacts/m11-*.png` files are inspected
+- **THEN** they remain tracked historical project evidence, while future generated review outputs or frontend visual artifacts are ignored unless a later issue explicitly promotes them
+
+#### Scenario: Docker context is built
+
+- **WHEN** Docker build context is prepared from the repository
+- **THEN** non-runtime agent/evidence directories such as `.agents`, `.codex`, and frontend visual artifacts are excluded from the context

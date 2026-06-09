@@ -90,6 +90,7 @@ cross-plane identity（同一 `run_id/source/cycle/model/basin` 串起 22 生产
 
 ## 操作注意
 
-- 不要误 stage 本地/生成物：`.agents/`、`.codex/`、`data/`、`node_modules/`、`dist/`、`__pycache__`、`artifacts/`（`artifacts/` 保持 ignored）。
+- 不要误 stage 本地/生成物：`.codex/tmp/`、`.codex/cache/`、`.codex/evidence/`、新的 `.codex/reviews/**`、未提升的 `.agents/skills/**` 本地安装/草稿 skill、新的 `apps/frontend/artifacts/**`、根 `artifacts/`、`data/`、`node_modules/`、`dist/`、`__pycache__`。
+- ownership 边界：已跟踪的 `.agents/skills/**` 是 reviewed project asset，修改已跟踪项目 skill 走正常 PR review；新增项目 skill 默认被忽略，必须显式 force-add 并经 PR 提升；已跟踪的 `.codex/reviews/**` fixture 和 `apps/frontend/artifacts/m11-*.png` 是历史 project evidence；新生成的 review/evidence/frontend artifact 默认 local/generated，除非后续 issue/PR 明确提升为项目资产。
 - 生产 Linux 环境不复用他机 `.venv`/`node_modules`，按 `AGENTS.md` 在目标机重新 `uv sync` / `pnpm install --frozen-lockfile`。
 - 完成度判断以源码、测试、`docs/VALIDATION.md`、runbook 和本文为准；历史 OpenSpec 任务状态仅供审计。

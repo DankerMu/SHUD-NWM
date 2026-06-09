@@ -45,11 +45,11 @@ htmlcov
 
 apps/frontend/node_modules
 apps/frontend/dist
-apps/frontend/artifacts
+apps/frontend/artifacts/
 apps/frontend/test-results
 apps/frontend/playwright-report
 
-artifacts
+artifacts/
 data
 .nhms-runs
 .nhms-workspace
@@ -59,7 +59,8 @@ data
 .pgsocket
 .conda-pkgs
 .conda-postgres-runtime
-.codex
+.agents/
+.codex/
 .claude
 
 SHUD

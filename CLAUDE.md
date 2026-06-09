@@ -58,7 +58,7 @@ ssh -p 32099 nwm@210.77.77.27           # node-27 display_readonly
 
 - **Governance-3B #368**：对齐高影响 stale 文档事实与 display readonly live MVT 配置。
 - **Governance-3C #369**：后续整理 `docs/bugs.md` ledger。
-- **Governance-3D #370**：后续明确 `.agents` / `.codex` / artifact ownership。
+- **Governance-3D #370**：对齐 `.agents` / `.codex` / artifact ownership；已跟踪 project assets 走 PR review，新生成证据默认 local/generated。
 - **node-27 / station-MVT #342**：station-MVT 点图层端点仍是独立 open backend 工作，不并入 #368。
 
 ### Issue 验证模板
