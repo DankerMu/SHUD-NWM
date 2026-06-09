@@ -3,9 +3,11 @@ import { expect, test } from '@playwright/test'
 import {
   assertLiveDisplayPageEvidence,
   classifyLiveDisplayControlRequest,
+  createLiveDisplayReadApiEvidence,
   isLiveDisplayReadApiUrl,
   isLiveDisplayRuntimeConfigUrl,
   liveDisplayApiBinding,
+  parseLiveDisplayRuntimeConfigEvidence,
   type LiveDisplayBrowserResponse,
 } from '../playwright.config.helpers'
 
@@ -32,12 +34,14 @@ test.describe('live display_readonly evidence', () => {
       const url = response.url()
       if (!isLiveDisplayRuntimeConfigUrl(url, binding) && !isLiveDisplayReadApiUrl(url, binding)) return
 
-      const target = isLiveDisplayRuntimeConfigUrl(url, binding) ? runtimeConfigResponses : readApiResponses
-      responseParses.push(response.json()
-        .catch(() => null)
-        .then((body) => {
-          target.push({ url, status: response.status(), body })
+      if (isLiveDisplayRuntimeConfigUrl(url, binding)) {
+        responseParses.push(parseLiveDisplayRuntimeConfigEvidence(response).then((evidence) => {
+          runtimeConfigResponses.push(evidence)
         }))
+        return
+      }
+
+      readApiResponses.push(createLiveDisplayReadApiEvidence(response))
     })
 
     await page.goto('/monitoring')

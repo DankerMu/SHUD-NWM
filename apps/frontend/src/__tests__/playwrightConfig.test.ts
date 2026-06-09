@@ -7,11 +7,14 @@ import {
   assertLiveDisplayPageEvidence,
   assertLiveDisplaySpecsDoNotMockApis,
   classifyLiveDisplayControlRequest,
+  createLiveDisplayReadApiEvidence,
   findLiveDisplaySpecFiles,
+  isLiveDisplaySpecFile,
   isLiveDisplayReadApiUrl,
   isLiveDisplayRuntimeConfigUrl,
   liveDisplayApiBinding,
   loadLiveDisplayEnv,
+  parseLiveDisplayRuntimeConfigEvidence,
   parsePlaywrightWorkers,
 } from '../../playwright.config.helpers'
 
@@ -50,6 +53,18 @@ describe('Playwright config helpers', () => {
         PLAYWRIGHT_LIVE_API_BASE_URL: 'https://api.example.test',
       }),
     ).toThrow(/PLAYWRIGHT_LIVE_BASE_URL must use http or https/)
+    expect(() =>
+      loadLiveDisplayEnv({
+        PLAYWRIGHT_LIVE_BASE_URL: 'https://user:pass@display.example.test',
+        PLAYWRIGHT_LIVE_API_BASE_URL: 'https://api.example.test',
+      }),
+    ).toThrow(/PLAYWRIGHT_LIVE_BASE_URL must not include username\/password userinfo/)
+    expect(() =>
+      loadLiveDisplayEnv({
+        PLAYWRIGHT_LIVE_BASE_URL: 'https://display.example.test',
+        PLAYWRIGHT_LIVE_API_BASE_URL: 'https://user:pass@api.example.test',
+      }),
+    ).toThrow(/PLAYWRIGHT_LIVE_API_BASE_URL must not include username\/password userinfo/)
 
     expect(
       loadLiveDisplayEnv({
@@ -63,6 +78,12 @@ describe('Playwright config helpers', () => {
     })
   })
 
+  it('uses the same exact live spec matcher for config and static guard discovery', () => {
+    expect(isLiveDisplaySpecFile('/repo/apps/frontend/e2e/live-display.spec.ts')).toBe(true)
+    expect(isLiveDisplaySpecFile('/repo/apps/frontend/e2e/xlive-display.spec.ts')).toBe(false)
+    expect(isLiveDisplaySpecFile('/repo/apps/frontend/e2e/nested/live-display.spec.ts')).toBe(true)
+  })
+
   it('fails the live display guard for broad API route mocks only in live specs', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'nhms-live-display-'))
     try {
@@ -70,6 +91,10 @@ describe('Playwright config helpers', () => {
       mkdirSync(e2eDir)
       writeFileSync(
         path.join(e2eDir, 'monitoring.spec.ts'),
+        "await page.route('**/api/v1/**', async () => undefined)\n",
+      )
+      writeFileSync(
+        path.join(e2eDir, 'xlive-display.spec.ts'),
         "await page.route('**/api/v1/**', async () => undefined)\n",
       )
       writeFileSync(path.join(e2eDir, 'live-display.spec.ts'), "await page.goto('/monitoring')\n")
@@ -189,7 +214,7 @@ describe('Playwright config helpers', () => {
         permissionDeniedVisible: false,
         runtimeConfigUnavailableVisible: false,
       }),
-    ).toThrow(/browser-observed \/api\/v1\/runtime\/config response with display_readonly/)
+    ).toThrow(/browser-observed \/api\/v1\/runtime\/config response with service_role exactly display_readonly/)
 
     expect(() =>
       assertLiveDisplayPageEvidence({
@@ -206,6 +231,95 @@ describe('Playwright config helpers', () => {
         runtimeConfigUnavailableVisible: false,
       }),
     ).toThrow(/successful browser-observed monitoring read API/)
+
+    expect(() =>
+      assertLiveDisplayPageEvidence({
+        runtimeConfigResponses: [
+          {
+            url: 'https://api.example.test/api/v1/runtime/config',
+            status: 200,
+            body: { data: { service_role: 'compute_control', display_readonly: true } },
+          },
+        ],
+        readApiResponses: [
+          {
+            url: 'https://api.example.test/api/v1/pipeline/status?source=GFS',
+            status: 200,
+          },
+        ],
+        forbiddenControlRequests: [],
+        permissionDeniedVisible: false,
+        runtimeConfigUnavailableVisible: false,
+      }),
+    ).toThrow(/service_role exactly display_readonly/)
+
+    expect(() =>
+      assertLiveDisplayPageEvidence({
+        runtimeConfigResponses: [
+          {
+            url: 'https://api.example.test/api/v1/runtime/config',
+            status: 200,
+            body: { data: { service_role: 'display_readonly', display_readonly: false } },
+          },
+        ],
+        readApiResponses: [
+          {
+            url: 'https://api.example.test/api/v1/pipeline/status?source=GFS',
+            status: 200,
+          },
+        ],
+        forbiddenControlRequests: [],
+        permissionDeniedVisible: false,
+        runtimeConfigUnavailableVisible: false,
+      }),
+    ).toThrow(/service_role exactly display_readonly/)
+  })
+
+  it('parses runtime config evidence only inside an explicit bounded body size', async () => {
+    const runtimeConfig = { data: { service_role: 'display_readonly', display_readonly: true } }
+    const body = JSON.stringify(runtimeConfig)
+    const response = {
+      url: () => 'https://api.example.test/api/v1/runtime/config',
+      status: () => 200,
+      headerValue: async (name: string) => (name === 'content-length' ? String(body.length) : null),
+      text: async () => body,
+    }
+
+    await expect(parseLiveDisplayRuntimeConfigEvidence(response)).resolves.toEqual({
+      url: 'https://api.example.test/api/v1/runtime/config',
+      status: 200,
+      body: runtimeConfig,
+    })
+
+    await expect(parseLiveDisplayRuntimeConfigEvidence({
+      ...response,
+      headerValue: async (name: string) => (name === 'content-length' ? '4097' : null),
+    })).resolves.toMatchObject({
+      url: 'https://api.example.test/api/v1/runtime/config',
+      status: 200,
+      parseError: expect.stringMatching(/exceeding the 4096 byte evidence limit/),
+    })
+
+    await expect(parseLiveDisplayRuntimeConfigEvidence({
+      ...response,
+      headerValue: async (name: string) => (name === 'content-length' ? '12' : null),
+      text: async () => '{not json}',
+    })).resolves.toMatchObject({
+      parseError: expect.stringMatching(/not valid JSON/),
+    })
+  })
+
+  it('records read API evidence from URL and status without reading response bodies', () => {
+    const readEvidence = createLiveDisplayReadApiEvidence({
+      url: () => 'https://api.example.test/api/v1/jobs?limit=12',
+      status: () => 200,
+    })
+
+    expect(readEvidence).toEqual({
+      url: 'https://api.example.test/api/v1/jobs?limit=12',
+      status: 200,
+    })
+    expect(readEvidence).not.toHaveProperty('body')
   })
 
   it('does not count denied or unavailable page state as live PASS evidence', () => {

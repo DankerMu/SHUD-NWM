@@ -3,6 +3,7 @@ import { defineConfig, devices } from '@playwright/test'
 import {
   assertLiveDisplaySpecsDoNotMockApis,
   loadLiveDisplayEnv,
+  liveDisplaySpecPattern,
   parsePlaywrightWorkers,
 } from './playwright.config.helpers'
 
@@ -13,7 +14,7 @@ assertLiveDisplaySpecsDoNotMockApis(new URL('./e2e', import.meta.url))
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: /live-display\.spec\.ts/,
+  testMatch: liveDisplaySpecPattern,
   metadata: {
     evidenceLane: 'live-display-readonly',
     requiredEnv: ['PLAYWRIGHT_LIVE_BASE_URL', 'PLAYWRIGHT_LIVE_API_BASE_URL'],

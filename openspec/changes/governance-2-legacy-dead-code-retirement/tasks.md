@@ -387,6 +387,20 @@
   - Evidence recorded 2026-06-09: `corepack pnpm test
     src/__tests__/playwrightConfig.test.ts` passed 11 tests covering the live
     API binding and non-PASS classifications.
+- [x] 4.2.2 Phase 6.2 invariant closure: close live evidence-boundary drift.
+  Required evidence:
+  - The live Playwright `testMatch` and static no-mock guard share the same
+    exact live spec predicate; `xlive-display.spec.ts` is covered as a
+    near-match regression and cannot be executed by the live profile without
+    the same guard semantics.
+  - `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL` reject
+    username/password URL userinfo before browser execution.
+  - Live PASS requires runtime config `service_role` exactly
+    `display_readonly`; `display_readonly: true` cannot override another
+    service role.
+  - Browser evidence parses only bounded runtime config JSON and records
+    monitoring read API evidence from URL/status without parsing response
+    bodies.
 - [x] 4.3 Add a static guard that fails if files classified as live e2e contain
   broad API route mocks. Required evidence:
   - Input command:

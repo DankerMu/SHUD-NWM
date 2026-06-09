@@ -23,7 +23,8 @@ export interface LiveDisplayApiBinding {
 export interface LiveDisplayBrowserResponse {
   url: string
   status: number
-  body: unknown
+  body?: unknown
+  parseError?: string
 }
 
 export interface LiveDisplayPageEvidence {
@@ -35,14 +36,22 @@ export interface LiveDisplayPageEvidence {
 }
 
 const liveDisplayRequiredEnv = ['PLAYWRIGHT_LIVE_BASE_URL', 'PLAYWRIGHT_LIVE_API_BASE_URL'] as const
-const liveDisplaySpecPattern = /(^|[./\\-])live-display\.spec\.ts$/
+export const liveDisplaySpecPattern = /(^|[/\\])live-display\.spec\.ts$/
 const broadApiRouteMockPattern = /page\s*\.\s*route\s*\(\s*(['"`])\*\*\/api\/v1\/\*\*\1/g
+const liveDisplayRuntimeConfigMaxBytes = 4096
 const generatedDirNames = new Set(['node_modules', 'dist', 'coverage', 'playwright-report', 'test-results'])
 const monitoringReadApiPaths = new Set([
   '/api/v1/pipeline/status',
   '/api/v1/pipeline/stages',
   '/api/v1/jobs',
 ])
+
+export interface LiveDisplayResponseSource {
+  url(): string
+  status(): number
+  headerValue(name: string): Promise<string | null>
+  text(): Promise<string>
+}
 
 export function parsePlaywrightWorkers(value: string | undefined) {
   if (value === undefined || value.trim() === '') return 1
@@ -63,6 +72,11 @@ function normalizeHttpUrl(name: string, value: string) {
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`${name} must use http or https for the live display Playwright profile.`)
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(
+      `${name} must not include username/password userinfo for the live display Playwright profile.`,
+    )
   }
   return trimmed
 }
@@ -104,11 +118,15 @@ export function findLiveDisplaySpecFiles(testDir: string | URL) {
       for (const child of readdirSync(resolved)) visit(path.join(resolved, child))
       return
     }
-    if (stat.isFile() && liveDisplaySpecPattern.test(resolved)) files.push(resolved)
+    if (stat.isFile() && isLiveDisplaySpecFile(resolved)) files.push(resolved)
   }
 
   visit(root)
   return files.sort()
+}
+
+export function isLiveDisplaySpecFile(file: string) {
+  return liveDisplaySpecPattern.test(file)
 }
 
 export function findBroadApiRouteMocks(files: string[]) {
@@ -147,7 +165,76 @@ export function unwrapApiData(value: unknown) {
 export function isDisplayReadonlyRuntimeConfig(value: unknown) {
   const runtimeConfig = unwrapApiData(value) as LiveDisplayRuntimeConfig | null
   if (!runtimeConfig || typeof runtimeConfig !== 'object') return false
-  return runtimeConfig.service_role === 'display_readonly' || runtimeConfig.display_readonly === true
+  if (runtimeConfig.service_role !== 'display_readonly') return false
+  return runtimeConfig.display_readonly === undefined || runtimeConfig.display_readonly === true
+}
+
+function runtimeConfigParseFailure(url: string, status: number, parseError: string): LiveDisplayBrowserResponse {
+  return { url, status, parseError }
+}
+
+function parseBoundedContentLength(
+  contentLength: string | null,
+  maxBytes: number,
+): { ok: true } | { ok: false; message: string } {
+  if (contentLength === null || contentLength.trim() === '') {
+    return { ok: false, message: 'missing content-length for bounded runtime config evidence' }
+  }
+
+  const parsed = Number(contentLength)
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return { ok: false, message: `invalid content-length for bounded runtime config evidence: ${contentLength}` }
+  }
+  if (parsed > maxBytes) {
+    return {
+      ok: false,
+      message: `runtime config response body is ${parsed} bytes, exceeding the ${maxBytes} byte evidence limit`,
+    }
+  }
+
+  return { ok: true }
+}
+
+export function createLiveDisplayReadApiEvidence(
+  response: Pick<LiveDisplayResponseSource, 'url' | 'status'>,
+): LiveDisplayBrowserResponse {
+  return { url: response.url(), status: response.status() }
+}
+
+export async function parseLiveDisplayRuntimeConfigEvidence(
+  response: LiveDisplayResponseSource,
+  maxBytes = liveDisplayRuntimeConfigMaxBytes,
+): Promise<LiveDisplayBrowserResponse> {
+  const url = response.url()
+  const status = response.status()
+  const contentEncoding = await response.headerValue('content-encoding')
+  if (contentEncoding && contentEncoding.trim().toLowerCase() !== 'identity') {
+    return runtimeConfigParseFailure(
+      url,
+      status,
+      `runtime config response uses content-encoding ${contentEncoding}; bounded evidence requires identity encoding`,
+    )
+  }
+
+  const contentLength = parseBoundedContentLength(await response.headerValue('content-length'), maxBytes)
+  if (!contentLength.ok) return runtimeConfigParseFailure(url, status, contentLength.message)
+
+  const text = await response.text()
+  const actualBytes = new TextEncoder().encode(text).byteLength
+  if (actualBytes > maxBytes) {
+    return runtimeConfigParseFailure(
+      url,
+      status,
+      `runtime config response body is ${actualBytes} bytes after read, exceeding the ${maxBytes} byte evidence limit`,
+    )
+  }
+
+  try {
+    return { url, status, body: JSON.parse(text) as unknown }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return runtimeConfigParseFailure(url, status, `runtime config response is not valid JSON: ${message}`)
+  }
 }
 
 export function liveDisplayApiBinding(baseURL: string, apiBaseURL: string): LiveDisplayApiBinding {
@@ -202,8 +289,13 @@ export function assertLiveDisplayPageEvidence(evidence: LiveDisplayPageEvidence)
     response.status >= 200 && response.status < 300 && isDisplayReadonlyRuntimeConfig(response.body),
   )
   if (!runtimeConfigResponse) {
+    const parseErrors = evidence.runtimeConfigResponses
+      .filter((response) => response.parseError)
+      .map((response) => `${response.url}: ${response.parseError}`)
+      .join('; ')
     throw new Error(
-      'Live display browser evidence requires a browser-observed /api/v1/runtime/config response with display_readonly service role.',
+      'Live display browser evidence requires a browser-observed /api/v1/runtime/config response with service_role exactly display_readonly in a bounded JSON body.' +
+        (parseErrors ? ` Runtime config parse failures: ${parseErrors}` : ''),
     )
   }
 

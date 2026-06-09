@@ -427,12 +427,15 @@ Must preserve for #365:
 - The live display_readonly lane has its own config/script and refuses broad API
   route mocks.
 - The live profile requires explicit frontend base URL and API base URL; it must
-  not default to `https://api.example.test` or a local dev server with mocked
-  API data.
+  not default to `https://api.example.test`, accept username/password userinfo
+  credentials, or use a local dev server with mocked API data.
 - A live PASS requires browser-observed runtime config and read API responses
-  from the configured live API binding; request-context-only checks, RBAC
-  denied pages, runtime-config unavailable pages, Slurm browser requests, and
-  retry/cancel mutations are not live receipts.
+  from the configured live API binding; the runtime config service role must be
+  exactly `display_readonly`, runtime config body evidence is bounded, read API
+  evidence records URL/status without parsing response bodies,
+  request-context-only checks, RBAC denied pages, runtime-config unavailable
+  pages, Slurm browser requests, and retry/cancel mutations are not live
+  receipts.
 - Runtime unavailable is recorded as `BLOCKED` with required variables, not as a
   passing live receipt.
 
@@ -460,7 +463,8 @@ Invariant Matrix for #365:
   - Existing mocked-regression lane -> still runs deterministic specs that mock
     `/api/v1`.
   - Live display_readonly static guard -> fails if a live e2e file registers
-    `page.route('**/api/v1/**')`.
+    `page.route('**/api/v1/**')`, using the same exact live spec matcher as
+    the live Playwright config.
   - Live config without required base URL/API base URL -> fails clearly before
     browser execution.
   - Live browser/API binding -> page responses include display_readonly runtime

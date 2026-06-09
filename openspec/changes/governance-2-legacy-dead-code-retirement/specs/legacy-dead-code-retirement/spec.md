@@ -68,11 +68,14 @@ Frontend e2e tests that mock API responses SHALL be named and documented as mock
 #### Scenario: live display-readonly e2e is added
 
 - **WHEN** a live e2e profile runs against node-27 or a live display API
-- **THEN** it forbids broad API route mocks and requires explicit base URL/API URL configuration
+- **THEN** it forbids broad API route mocks using the same live spec matcher as the profile test matcher
+- **AND** it requires explicit base URL/API URL configuration without username/password userinfo
 - **AND** a passing receipt requires browser-observed `/api/v1/runtime/config`
-  from the configured API binding with `display_readonly`
+  from the configured API binding with `service_role` exactly `display_readonly`
+- **AND** runtime config JSON evidence is parsed only inside an explicit body-size boundary
 - **AND** a passing receipt requires at least one browser-observed monitoring
-  read API response from that same configured API binding
+  read API response URL/status from that same configured API binding without
+  parsing the read API response body
 
 #### Scenario: live display-readonly page is denied or unavailable
 

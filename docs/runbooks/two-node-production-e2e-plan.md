@@ -672,8 +672,8 @@ curl -i 'http://127.0.0.1:8000/api/v1/jobs/<job_id>/logs?source=GFS&cycle_time=<
 
 要求新增或使用无 API mock 的浏览器测试。现有含 `page.route('**/api/v1/**')` 的测试只能算 mocked regression。
 生产级 display_readonly 浏览器证据使用 `cd apps/frontend && PLAYWRIGHT_LIVE_BASE_URL=<27 frontend> PLAYWRIGHT_LIVE_API_BASE_URL=<27 api> corepack pnpm run test:e2e:live-display`。
-缺少 `PLAYWRIGHT_LIVE_BASE_URL` 或 `PLAYWRIGHT_LIVE_API_BASE_URL` 时该 lane 记为 `BLOCKED`，不能用默认 mocked regression lane 补为 live receipt。
-live receipt 还必须证明浏览器页面实际从配置的 API binding 读取 display_readonly runtime config 和监控只读 API。RBAC `权限不足`、runtime config 不可用、任何 `/api/v1/slurm/*` 浏览器请求、retry/cancel mutation 都不能算 PASS。
+缺少 `PLAYWRIGHT_LIVE_BASE_URL` 或 `PLAYWRIGHT_LIVE_API_BASE_URL` 时该 lane 记为 `BLOCKED`，不能用默认 mocked regression lane 补为 live receipt；两个 URL 都不得通过 username/password userinfo 携带凭据。
+live receipt 还必须证明浏览器页面实际从配置的 API binding 读取 `service_role` 严格等于 `display_readonly` 的有界 runtime config 和监控只读 API。监控只读 API 证据只记录 URL/status，不解析响应体。RBAC `权限不足`、runtime config 不可用、任何 `/api/v1/slurm/*` 浏览器请求、retry/cancel mutation 都不能算 PASS。
 
 必须覆盖：
 
