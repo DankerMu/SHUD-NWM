@@ -116,9 +116,8 @@ retest_command: |-
   set -euo pipefail
   ! rg -n "bv\\.basin_id = 'qhh'" docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
   rg -n "basins_qhh" docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
-    "select exists(select 1 from core.basin_version bv where bv.basin_id = 'basins_qhh');" |
-    grep -qx t
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -Atq -c \
+    "select exists(select 1 from core.basin_version bv where bv.basin_id = 'basins_qhh');" | grep -qx t
 ```
 
 `packages/common/forecast_store.py` keeps `QHH_BASIN_ID = "basins_qhh"`.
@@ -153,11 +152,12 @@ evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/scheduler_dry_run.log
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/scheduler_dry_run_compact_summary.json
   - services/orchestrator/scheduler.py
-retest_command: >-
-  uv run nhms-pipeline plan-production --dry-run --source gfs
-  --model-id basins_qhh_shud --basin-id basins_qhh 2>&1 |
-  tee /tmp/nhms-dry-run.log && ! rg -n "download|Downloading|GRIB"
-  /tmp/nhms-dry-run.log
+retest_command: |-
+  set -euo pipefail
+  dry_run_log="$(mktemp)"
+  uv run nhms-pipeline plan-production --dry-run --source gfs \
+    --model-id basins_qhh_shud --basin-id basins_qhh 2>&1 | tee "$dry_run_log"
+  ! rg -n "download|Downloading|GRIB" "$dry_run_log"
 ```
 
 The old no-mutation proof covered execution candidates, not source discovery
@@ -226,10 +226,13 @@ evidence:
   - tests/test_qhh_production_bootstrap.py
   - tests/test_basins_registry_import.py
   - tests/test_production_scheduler.py
-retest_command: >-
-  uv run pytest -q tests/test_qhh_production_bootstrap.py
-  tests/test_basins_registry_import.py tests/test_production_scheduler.py
-  -k output_segment_count
+retest_command: |-
+  set -euo pipefail
+  uv run pytest -q \
+    tests/test_qhh_production_bootstrap.py \
+    tests/test_basins_registry_import.py \
+    tests/test_production_scheduler.py \
+    -k output_segment_count
 ```
 
 The current contract distinguishes GIS geometry segments from SHUD output river

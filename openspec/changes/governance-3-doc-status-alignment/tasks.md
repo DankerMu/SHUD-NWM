@@ -154,6 +154,9 @@
   PY
   ```
 
+  Additional evidence: extracted required BUG-003 and BUG-007..013
+  `retest_command` snippets from `docs/bugs.md` and each passed `bash -n`.
+
 ## 4. Agent/artifact ownership
 
 - [ ] Deferred to #370.
