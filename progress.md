@@ -2,7 +2,7 @@
 
 > 跨 session 继承的进度索引：只记**当前到哪了 + 边界 + 入口**。逐 commit/逐缺陷细节以 GitHub issue、PR、OpenSpec、runbook 为准，不在此重复。
 
-## 最新（2026-06-07）
+## 最新（2026-06-08）
 
 **M26 统一地图展示交付**（`openspec/changes/m26-unified-map-display/`，EPIC **#336 已关闭**，子 issue #337–#341 全合并，tasks 7 节全勾）——node-27 `display_readonly` 展示端从 ~10 条路由 + 顶部导航的碎片化（含 2496 行 M21 玩具页 `HydroMetPage`）收敛为**字面一张全屏地图 = 整个展示端**：
 
@@ -13,9 +13,10 @@
 4. **两类地图 popup**（#340）：点河段→`q_down` 曲线 + 重现期三态；点代站→六要素 forcing 曲线；maplibre `Popup` 内嵌 echarts，复用 honest-display 校验（不画假曲线、`ok:false` 空态、strict identity）。
 5. **删玩具页**（#341）：删 `HydroMetPage`（2496 行）+ 专属测试，迁移 honest-display 库（`bootstrap/stationSeries/riverForecast/ReturnPeriodSection`）供 popup 复用，river 诚实展示覆盖迁移。
 6. **node-27 live receipt**（`worklogs/node27-live-receipt.md`，`execution_mode=live_proof`）：①重定向矩阵 7/7 ②全屏无导航 ③QHH↔Heihe 同页 zoom（pathname 恒 `/`）⑥overlay 未注册如实显示「Layer is not registered」=**live-PASS**（均为本地 vitest 无法验、仅 live 可证之项）；
-   ④⑤ popup 绘制不变量本地单测全覆盖 + 数据 live 就绪，**live 点击延后**（`/api/v1/basins` 无 bbox 无法自动 framing + CLI 难命中 WebGL 要素，归 #343）。
-7. **解耦平行 issue（不在本变更）**：**#342** 后端 station-MVT 点图层端点（全国万级代站，仿 river-network `ST_AsMVT`，node-22 oracle）；**#343** `display_readonly` live PostGIS MVT 排查（river-network 瓦片 424 / hydro 409，决定全国态 overlay 能否点亮，并入 basin bbox 暴露缺口）。
-8. **边界**：当前 2 流域规模（QHH 386 站/1633 河段、Heihe 1709 站/2352 河段）用 M11 既有 GeoJSON 河网渲染；全国级（数万代站/百万河段）依赖 #342/#343 解耦任务；④⑤ live 点击截图待 overlay 注册 + bbox 暴露后补。
+   ④⑤ popup 绘制不变量本地单测全覆盖 + 数据 live 就绪，**live 点击证据由 #389 单独承接**（`/api/v1/basins` 无 bbox 无法自动 framing + CLI 难命中 WebGL 要素），不再归为 live MVT 开关/根因问题。
+7. **live MVT closure（#351 → #343）**：#351 已用 2026-06-08 node-27 live receipt 闭合 #343：`NHMS_ENABLE_LIVE_POSTGIS_MVT=true` 后 `/api/v1/layers` 返回 5 个 live layer，`hydro-national/q_down` tile 200；原 river-network 424 / hydro 409 根因是 display readonly 未启用 live PostGIS MVT 和图层未注册。
+8. **解耦平行 issue（不在本变更）**：**#342** 后端 station-MVT 点图层端点（全国万级代站，仿 river-network `ST_AsMVT`，node-22 oracle）仍 open；**#389** 承接 bbox/framing/点击自动化/popup live click 浏览器证据缺口；二者均和 #343 已闭合的 live MVT flag/root cause 分开跟踪。
+9. **边界**：当前 2 流域规模（QHH 386 站/1633 河段、Heihe 1709 站/2352 河段）用 M11 既有 GeoJSON 河网渲染；全国级（数万代站）仍依赖 #342 station-MVT；④⑤ live 点击截图待 #389 补齐 bbox/framing 与 WebGL 命中证据。
 
 **M25 多流域前端生产化交付**（`openspec/changes/m25-multibasin-frontend-production/`，9 子 issue：#310–#317 已合并，#318 本 PR 收尾）——node-27 `display_readonly` 前端去 QHH 硬编码、按数据驱动：
 

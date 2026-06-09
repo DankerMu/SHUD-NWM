@@ -54,12 +54,12 @@ ssh -p 32099 nwm@210.77.77.27           # node-27 display_readonly
 
 每个 issue 的验证标准写在 `openspec/changes/<milestone>/tasks.md` 的 "Evidence Floor" 中。
 
-### 当前活跃里程碑
+### 当前优先事项
 
-- **M23**: `openspec/changes/m23-qhh-22-production-automation/`
-  - 设计文档: `design.md`、`proposal.md`
-  - 规格文档: `specs/<feature>/spec.md`
-  - 任务清单: `tasks.md`（含 Evidence Floor 和验证命令）
+- **Governance-3B #368**：对齐高影响 stale 文档事实与 display readonly live MVT 配置。
+- **Governance-3C #369**：后续整理 `docs/bugs.md` ledger。
+- **Governance-3D #370**：后续明确 `.agents` / `.codex` / artifact ownership。
+- **node-27 / station-MVT #342**：station-MVT 点图层端点仍是独立 open backend 工作，不并入 #368。
 
 ### Issue 验证模板
 

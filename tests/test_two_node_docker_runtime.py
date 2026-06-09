@@ -1524,6 +1524,22 @@ def test_static_checker_rejects_compute_compose_alias_interpolation_keys_absent_
     assert _codes(result) >= {"COMPUTE_INTERPOLATION_ENV_MISSING", "COMPUTE_INTERPOLATION_ENV_UNAPPROVED"}
 
 
+def test_static_checker_rejects_live_mvt_flag_as_compute_interpolation(tmp_path: Path) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"]["NHMS_ENABLE_LIVE_POSTGIS_MVT"] = "${NHMS_ENABLE_LIVE_POSTGIS_MVT:-true}"
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_INTERPOLATION_ENV_UNAPPROVED"
+        and finding.details["unapproved_keys"] == ["NHMS_ENABLE_LIVE_POSTGIS_MVT"]
+        for finding in result.findings
+    )
+
+
 @pytest.mark.parametrize(
     ("role", "omitted_key", "process_value"),
     [
