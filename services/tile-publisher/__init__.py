@@ -1,1 +1,0 @@
-"""Tile publisher — M3+."""

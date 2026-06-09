@@ -43,10 +43,78 @@
 
 ## 2. Placeholder cleanup (#363 follow-up, not #362)
 
-- [ ] 2.1 Remove or archive `apps/web` after updating docs that mention it.
-- [ ] 2.2 Remove or archive hyphenated worker placeholder directories after proving canonical underscore packages are the only active entrypoints.
-- [ ] 2.3 Decide `services/tile-publisher` status and either archive it or document its active role.
-- [ ] 2.4 Treat `workers/sbatch_templates` separately: add an archive/legacy manifest before any deletion.
+- [x] 2.1 Remove or archive `apps/web` after updating current docs that mention
+  it. Required evidence:
+  - Input command:
+    `git ls-files apps/web apps/frontend | sort`
+    Expected output: `apps/web` files are absent after cleanup, while
+    `apps/frontend` tracked files remain.
+  - Input command:
+    `rg -n "apps/web" README.md docs openspec/project-profile.md openspec/changes/governance-2-legacy-dead-code-retirement --glob '!docs/archived/**'`
+    Expected output: no current-source-of-truth doc presents `apps/web` as an
+    active entrypoint; any remaining mention is in this change, the legacy
+    inventory, or explicit historical/archive context.
+- [x] 2.2 Remove or archive hyphenated worker placeholder directories after
+  proving canonical underscore packages are the only active entrypoints.
+  Required evidence:
+  - Input command:
+    `git ls-files workers/forcing-producer workers/shud-runtime workers/output-parser workers/flood-frequency workers/forcing_producer workers/shud_runtime workers/output_parser workers/flood_frequency | sort`
+    Expected output: hyphenated placeholder files are absent after cleanup,
+    while underscore worker package files remain.
+  - Input command:
+    `rg -n "workers/(forcing-producer|shud-runtime|output-parser|flood-frequency)" README.md docs openspec/project-profile.md pyproject.toml services workers tests scripts --glob '!docs/archived/**' --glob '!**/__pycache__/**'`
+    Expected output: no current active reference depends on hyphenated worker
+    paths; remaining mentions are explicit historical/governance references.
+  - Input command:
+    `sed -n '35,55p' pyproject.toml`
+    Expected output: console scripts point to underscore worker packages.
+- [x] 2.3 Remove or archive `services/tile-publisher` after proving active tile
+  publication and display paths use `services/tile_publisher`, `infra/sbatch`,
+  API tile routes, and frontend consumers. Required evidence:
+  - Input command:
+    `git ls-files services/tile-publisher services/tile_publisher services/tiles infra/sbatch/publish_tiles.sbatch apps/api/routes/flood_alerts.py | sort`
+    Expected output: hyphenated placeholder files are absent after cleanup,
+    while active tile publisher, tile service, sbatch, and API route files
+    remain.
+  - Input command:
+    `rg -n "services/tile-publisher|services\\.tile_publisher|services/tile_publisher|publish_tiles|api/v1/tiles" services apps infra tests docs openspec/project-profile.md openspec/changes/governance-2-legacy-dead-code-retirement --glob '!docs/archived/**' --glob '!**/__pycache__/**' --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**'`
+    Expected output: current active references use `services.tile_publisher`,
+    `services/tile_publisher`, `infra/sbatch/publish_tiles.sbatch`, or display
+    tile routes; `services/tile-publisher` appears only as retired/historical
+    governance context.
+- [x] 2.4 Treat `workers/sbatch_templates` separately: preserve a legacy/archive
+  manifest before deleting or archiving the active-tree directory. Required
+  evidence:
+  - Input command:
+    `git ls-files docs/archived/legacy-slurm-templates.md workers/sbatch_templates infra/sbatch | sort`
+    Expected output: the legacy archive doc and active `infra/sbatch` templates
+    are tracked; no `workers/sbatch_templates` tracked files remain.
+  - Input command:
+    `test ! -e workers/sbatch_templates && printf '%s\n' 'workers/sbatch_templates absent'`
+    Expected output: `workers/sbatch_templates absent`.
+  - Input command:
+    `rg -n "workers/sbatch_templates|infra/sbatch|SLURM_GATEWAY_TEMPLATE_DIR|template_dir|DEFAULT_JOB_TYPE_TEMPLATES" services/slurm_gateway infra tests docs openspec/project-profile.md openspec/changes/governance-2-legacy-dead-code-retirement --glob '!docs/archived/**' --glob '!**/__pycache__/**'`
+    Expected output: active config/tests/docs point to `infra/sbatch`; remaining
+    `workers/sbatch_templates` mentions are explicit legacy/governance context.
+- [x] 2.5 Update current governance docs and module index so new contributors
+  can identify active versus retired paths without opening historical OpenSpec
+  records. Required evidence:
+  - Input command:
+    `npx --yes markdownlint-cli2 --config .markdownlint.yaml 'docs/**/*.md'`
+    Expected output: exit 0.
+  - Input command:
+    `uv run ruff check .`
+    Expected output: exit 0.
+  - Input command:
+    `uv run pytest -q tests/test_role_boundary_static.py tests/test_slurm_gateway_app.py tests/test_slurm_route_contract.py`
+    Expected output: exit 0.
+- [x] 2.6 Confirm #363 did not modify deferred #364-#366 surfaces. Required
+  evidence:
+  - Input command:
+    `git diff --name-only origin/master...HEAD`
+    Expected output: no changes under `scripts/run_qhh*`,
+    `scripts/create_qhh_shud_manifest.py`, `apps/frontend/e2e`, or
+    `.github/workflows/ci.yml`.
 
 ## 3. Diagnostic isolation (#364 follow-up, not #362)
 

@@ -58,7 +58,8 @@
 ## 6. 接口
 
 - `CLI nhms-shud-runtime execute --manifest`
-- `Slurm batch template run_shud_forecast.sbatch`
+- `Slurm gateway job_type run_shud_forecast_array`
+- `infra/sbatch/run_shud_forecast_array.sbatch`
 
 ## 7. 配置项
 
