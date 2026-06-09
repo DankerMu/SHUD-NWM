@@ -1,6 +1,13 @@
 ## 0. Dependency gate
 
-- [x] 0.1 Confirm `governance-0-ci-contract-baseline` is merged and green, or record an explicit maintainer waiver listing current red checks. Evidence recorded 2026-06-09: issue #358 closed 2026-06-08 17:33:44Z via merged PR #375 (`fix(contract): reconcile generated frontend API types`, merged 2026-06-08 17:33:43Z); issue #359 closed 2026-06-08 18:21:30Z via merged PR #376 (`chore(tooling): run Makefile Python targets via uv`, merged 2026-06-08 18:21:28Z); parent baseline issue #353 closed 2026-06-08 18:22:19Z before #362 inventory completion.
+- [x] 0.1 Confirm `governance-0-ci-contract-baseline` is merged and green, or
+  record an explicit maintainer waiver listing current red checks. Evidence
+  recorded 2026-06-09: issue #358 closed 2026-06-08 17:33:44Z via merged PR
+  #375 (`fix(contract): reconcile generated frontend API types`, merged
+  2026-06-08 17:33:43Z); issue #359 closed 2026-06-08 18:21:30Z via merged PR
+  #376 (`chore(tooling): run Makefile Python targets via uv`, merged
+  2026-06-08 18:21:28Z); parent baseline issue #353 closed 2026-06-08
+  18:22:19Z before #362 inventory completion.
 
 ## 1. Inventory and classification
 
@@ -11,7 +18,21 @@
 - [x] 1.5 Record discovery commands and results precisely enough that #363-#366 can proceed without redoing broad discovery. Evidence: discovery command register `D1`-`D10` and required discovery results.
 - [x] 1.6 Required #362 evidence:
   - Input command:
-    `rg -n --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**' --glob '!**/__pycache__/**' "apps/web|workers/(forcing-producer|shud-runtime|output-parser|flood-frequency|sbatch_templates)|services/tile-publisher|services/tile_publisher|infra/sbatch|SLURM_GATEWAY_TEMPLATE_DIR|template_dir|run_qhh_continuous|run_qhh_cycle|run_qhh_backend_smoke|create_qhh_shud_manifest|frontend-m15-visual|&& false|page\\.route\\('.*api/v1" .`
+
+    ```bash
+    pattern="apps/web|workers/(forcing-producer|shud-runtime|output-parser|flood-frequency|sbatch_templates)"
+    pattern="${pattern}|services/tile-publisher|services/tile_publisher|infra/sbatch"
+    pattern="${pattern}|SLURM_GATEWAY_TEMPLATE_DIR|template_dir"
+    pattern="${pattern}|run_qhh_continuous|run_qhh_cycle|run_qhh_backend_smoke|create_qhh_shud_manifest"
+    pattern="${pattern}|frontend-m15-visual|&& false|page\\.route\\('.*api/v1"
+    rg -n \
+      --glob '!apps/frontend/node_modules/**' \
+      --glob '!apps/frontend/dist/**' \
+      --glob '!**/__pycache__/**' \
+      "$pattern" \
+      .
+    ```
+
     Expected output: references needed to classify the governed paths plus
     active counterparts such as `apps/frontend`, underscore worker packages,
     `infra/sbatch`, Slurm gateway template settings, and tile publisher/display
@@ -26,7 +47,18 @@
   - Input command: `uv run ruff check .`
     Expected output: exit 0.
   - Input command:
-    `npx --yes markdownlint-cli2 --config .markdownlint.yaml 'docs/**/*.md'`
+
+    ```bash
+    npx --yes markdownlint-cli2 --config .markdownlint.yaml \
+      docs/governance/LEGACY_DEAD_CODE_INVENTORY.md \
+      docs/runbooks/qhh-continuous.md \
+      docs/runbooks/qhh-22-business-bringup.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/design.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/specs/legacy-dead-code-retirement/spec.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/tasks.md \
+      scripts/diagnostic/qhh/README.md
+    ```
+
     Expected output: exit 0.
   - Input command:
     `rg -n "seed_qhh|reset_qhh|summarize_qhh|publish_qhh|apply_smoke_migrations|create_qhh_shud_manifest|run_qhh_backend_smoke|run_qhh_cycle" scripts docs/runbooks tests docs/governance --glob '!**/__pycache__/**'`
@@ -77,7 +109,18 @@
     while active tile publisher, tile service, sbatch, and API route files
     remain.
   - Input command:
-    `rg -n "services/tile-publisher|services\\.tile_publisher|services/tile_publisher|publish_tiles|api/v1/tiles" services apps infra tests docs openspec/project-profile.md openspec/changes/governance-2-legacy-dead-code-retirement --glob '!docs/archived/**' --glob '!**/__pycache__/**' --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**'`
+
+    ```bash
+    pattern="services/tile-publisher|services\\.tile_publisher|services/tile_publisher|publish_tiles|api/v1/tiles"
+    rg -n "$pattern" \
+      services apps infra tests docs openspec/project-profile.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement \
+      --glob '!docs/archived/**' \
+      --glob '!**/__pycache__/**' \
+      --glob '!apps/frontend/node_modules/**' \
+      --glob '!apps/frontend/dist/**'
+    ```
+
     Expected output: current active references use `services.tile_publisher`,
     `services/tile_publisher`, `infra/sbatch/publish_tiles.sbatch`, or display
     tile routes; `services/tile-publisher` appears only as retired/historical
@@ -100,7 +143,18 @@
   can identify active versus retired paths without opening historical OpenSpec
   records. Required evidence:
   - Input command:
-    `npx --yes markdownlint-cli2 --config .markdownlint.yaml 'docs/**/*.md'`
+
+    ```bash
+    npx --yes markdownlint-cli2 --config .markdownlint.yaml \
+      docs/governance/LEGACY_DEAD_CODE_INVENTORY.md \
+      docs/runbooks/qhh-continuous.md \
+      docs/runbooks/qhh-22-business-bringup.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/design.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/specs/legacy-dead-code-retirement/spec.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/tasks.md \
+      scripts/diagnostic/qhh/README.md
+    ```
+
     Expected output: exit 0.
   - Input command:
     `uv run ruff check .`
@@ -118,9 +172,125 @@
 
 ## 3. Diagnostic isolation (#364 follow-up, not #362)
 
-- [ ] 3.1 Add `scripts/diagnostic/qhh/README.md` or an equivalent diagnostic manifest listing QHH diagnostic scripts, direct helper dependencies, out-of-chain QHH helper notes, and production replacement commands.
-- [ ] 3.2 Keep or strengthen `tests/test_qhh_scripts_static.py`.
-- [ ] 3.3 If scripts are moved, add temporary wrappers and update runbooks in the same PR.
+- [x] 3.1 Add `scripts/diagnostic/qhh/README.md` or an equivalent diagnostic
+  manifest. Required manifest content:
+  - QHH diagnostic entrypoints:
+    `scripts/run_qhh_continuous.py`, `scripts/run_qhh_cycle.sh`,
+    `scripts/run_qhh_cycle.sbatch`, `scripts/run_qhh_backend_smoke.sh`, and
+    `scripts/create_qhh_shud_manifest.py`.
+  - Direct helper dependencies:
+    `scripts/apply_smoke_migrations.py`, `scripts/reset_qhh_smoke_db.py`,
+    `scripts/seed_qhh_forcing_stations.py`,
+    `scripts/seed_qhh_shud_output_segments.py`,
+    `scripts/summarize_qhh_smoke_results.py`, and
+    `scripts/publish_qhh_display_products.py`.
+  - Out-of-chain helper note for `scripts/seed_qhh_smoke_met_station.py`.
+  - Production replacement: generic production scheduler/daemon path, not QHH
+    scripts.
+  - Static guard tests that enforce production isolation.
+  Required evidence:
+  - Input command:
+    `test -f scripts/diagnostic/qhh/README.md && sed -n '1,220p' scripts/diagnostic/qhh/README.md`
+    Expected output: manifest names the entrypoints, helpers, out-of-chain
+    helper, production replacement, and guard tests above.
+- [x] 3.2 Preserve current root-level diagnostic paths unless this issue moves
+  them with wrappers. Required evidence:
+  - Input command:
+
+    ```bash
+    git ls-files \
+      scripts/run_qhh_continuous.py \
+      scripts/run_qhh_cycle.sh \
+      scripts/run_qhh_cycle.sbatch \
+      scripts/run_qhh_backend_smoke.sh \
+      scripts/create_qhh_shud_manifest.py \
+      scripts/apply_smoke_migrations.py \
+      scripts/reset_qhh_smoke_db.py \
+      scripts/seed_qhh_forcing_stations.py \
+      scripts/seed_qhh_shud_output_segments.py \
+      scripts/summarize_qhh_smoke_results.py \
+      scripts/publish_qhh_display_products.py \
+      scripts/seed_qhh_smoke_met_station.py \
+      | sort
+    ```
+
+    Expected output: existing root-level QHH diagnostic entrypoints and helper
+    files remain tracked.
+- [x] 3.3 Keep or strengthen production-orchestrator static guards. Required
+  evidence:
+  - Input command:
+    `uv run pytest -q tests/test_qhh_scripts_static.py`
+    Expected output: exit 0.
+  - Input command:
+    Explicit negative assertion:
+
+    ```bash
+    if rg -n "run_qhh_continuous|run_qhh_cycle|run_qhh_backend_smoke|create_qhh_shud_manifest" \
+      services/orchestrator \
+      --glob '*.py'
+    then
+      printf '%s\n' 'unexpected QHH diagnostic token in services/orchestrator'
+      exit 1
+    else
+      status=$?
+      if [ "$status" -eq 1 ]; then
+        printf '%s\n' 'no QHH diagnostic tokens in services/orchestrator (rg exit 1)'
+      else
+        printf '%s\n' "rg failed unexpectedly with exit $status"
+        exit "$status"
+      fi
+    fi
+    ```
+
+    Expected output: `no QHH diagnostic tokens in services/orchestrator (rg exit
+    1)` and exit 0; raw `rg` exit 1 is the passing no-match condition.
+  - Input command:
+
+    ```bash
+    pattern="DIAGNOSTIC-ONLY|run_qhh_continuous|run_qhh_cycle|run_qhh_backend_smoke|create_qhh_shud_manifest"
+    pattern="${pattern}|seed_qhh_forcing_stations|seed_qhh_shud_output_segments"
+    pattern="${pattern}|summarize_qhh_smoke_results|publish_qhh_display_products|seed_qhh_smoke_met_station"
+    rg -n "$pattern" \
+      scripts docs/runbooks docs/governance tests/test_qhh_scripts_static.py \
+      scripts/diagnostic/qhh \
+      --glob '!**/__pycache__/**'
+    ```
+
+    Expected output: diagnostic entrypoints, helper dependencies, runbook
+    evidence, inventory, static tests, and the new manifest are visible; no
+    production orchestrator source is part of this result set.
+- [x] 3.4 Update runbook/governance docs only if needed to point at the
+  diagnostic manifest and preserve production replacement wording. Required
+  evidence:
+  - Input command:
+    `rg -n "run_qhh_continuous|run_qhh_cycle|run_qhh_backend_smoke|create_qhh_shud_manifest|diagnostic/qhh|plan-production|generic production scheduler|DIAGNOSTIC-ONLY" docs/runbooks docs/governance infra/env/compute.example scripts/diagnostic/qhh`
+    Expected output: QHH diagnostic runbooks remain diagnostic/reproduction
+    guidance, and production replacement wording points to generic production
+    scheduler or `nhms-pipeline plan-production`.
+  - Input command:
+    `uv run ruff check .`
+    Expected output: exit 0.
+  - Input command:
+
+    ```bash
+    npx --yes markdownlint-cli2 --config .markdownlint.yaml \
+      docs/governance/LEGACY_DEAD_CODE_INVENTORY.md \
+      docs/runbooks/qhh-continuous.md \
+      docs/runbooks/qhh-22-business-bringup.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/design.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/specs/legacy-dead-code-retirement/spec.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/tasks.md \
+      scripts/diagnostic/qhh/README.md
+    ```
+
+    Expected output: exit 0.
+- [x] 3.5 Confirm #364 did not modify deferred #365-#366 surfaces or move
+  diagnostic scripts without wrappers. Required evidence:
+  - Input command:
+    `git diff --name-only origin/master...HEAD`
+    Expected output: changes are limited to the QHH diagnostic manifest,
+    OpenSpec fixture, and directly relevant QHH runbook/governance docs/tests;
+    no changes under `apps/frontend/e2e` or `.github/workflows/ci.yml`.
 
 ## 4. E2E evidence split (#365 follow-up, not #362)
 

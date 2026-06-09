@@ -9,7 +9,7 @@ from packages.common.object_store import LocalObjectStore, sha256_bytes
 from scripts import create_qhh_shud_manifest as qhh_manifest
 from workers.model_registry import qhh_production_bootstrap
 
-# M24 §5.1 diagnostic-retirement guardrail: the three QHH diagnostic scripts are
+# M24 §5.1 diagnostic-retirement guardrail: QHH diagnostic scripts are
 # RETAINED for manual debugging but MUST NOT be referenced/invoked by the production
 # scheduler/chain cohort path. The supported production runner is the generic daemon
 # (`nhms-pipeline plan-production --continuous` -> services/orchestrator scheduler.run_continuous,
@@ -17,9 +17,11 @@ from workers.model_registry import qhh_production_bootstrap
 _QHH_DIAGNOSTIC_TOKENS = (
     "run_qhh_cycle",
     "run_qhh_continuous",
+    "run_qhh_backend_smoke",
     "create_qhh_shud_manifest",
     "scripts/run_qhh_cycle.sh",
     "scripts/run_qhh_continuous.py",
+    "scripts/run_qhh_backend_smoke.sh",
     "scripts/create_qhh_shud_manifest.py",
 )
 
@@ -48,7 +50,7 @@ def test_production_scheduler_does_not_invoke_qhh_diagnostic_scripts() -> None:
         for token in _QHH_DIAGNOSTIC_TOKENS:
             assert token not in text, (
                 f"production cohort module {source_path} references diagnostic token "
-                f"{token!r}; the three QHH scripts are diagnostic-only and must not be "
+                f"{token!r}; QHH scripts are diagnostic-only and must not be "
                 "wired into the production scheduler/chain path (M24 §5.1)"
             )
         # The manifest builder must be the chain's own runtime-manifest assembly,
