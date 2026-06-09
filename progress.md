@@ -6,28 +6,18 @@
 
 **M26 统一地图展示交付**（`openspec/changes/m26-unified-map-display/`，EPIC **#336 已关闭**，子 issue #337–#341 全合并，tasks 7 节全勾）——node-27 `display_readonly` 展示端从 ~10 条路由 + 顶部导航的碎片化（含 2496 行 M21 玩具页 `HydroMetPage`）收敛为**字面一张全屏地图 = 整个展示端**：
 
-1. **去导航 + 路由收敛**（#337）：`AppShell` 删 `NavBar`，全屏布局（`--m11-nav-height`→0）；
-   `/overview`/`/forecast`/`/hydro-met`/`/meteorology`/`/flood-alerts`/`/basins/:id`/`/segments/:id`
-   全 `replace` 重定向到 `/`，**保留原始 search + 附加语义参数**（`layer=`/`basinId=`/`segmentId=`，
-   同名键以原始 search 为准）；`/ops`/`/monitoring`/`/system/model-assets` 经 RBAC 保留可达。
+1. **去导航 + 路由收敛**（#337）：`AppShell` 删 `NavBar`，全屏布局（`--m11-nav-height`→0）；`/overview`/`/forecast`/`/hydro-met`/`/meteorology`/`/flood-alerts`/`/basins/:id`/`/segments/:id` 全 `replace` 重定向到 `/`，**保留原始 search + 附加语义参数**（`layer=`/`basinId=`/`segmentId=`，同名键以原始 search 为准）；`/ops`/`/monitoring`/`/system/model-assets` 经 RBAC 保留可达。
 2. **总览↔详情就地化**（#338）：M11 query 新增 `basinId`，`overviewData` store 的 basinId **改从 query 读**（不再依赖路由 param），单页按 `basinId` 双模式（null=全国总览 / 非 null=流域详情同图 zoom-in），删 `BasinDetailPage` 路由 + 文件。
 3. **气象代站 clustered-GeoJSON 图层**（#339）：新 `stationLayerData` store + `M11StationClusterPrimitive`，按选中流域 latest-product 严格身份取 `/met/stations`；**超 500 站流域（Heihe 1709）分页拉取至 client cap，诚实暴露 `total/loaded/truncated`**；全国无 basinId 显"选择流域"honest 空态；为 station-MVT 预留 source 抽象。
 4. **两类地图 popup**（#340）：点河段→`q_down` 曲线 + 重现期三态；点代站→六要素 forcing 曲线；maplibre `Popup` 内嵌 echarts，复用 honest-display 校验（不画假曲线、`ok:false` 空态、strict identity）。
 5. **删玩具页**（#341）：删 `HydroMetPage`（2496 行）+ 专属测试，迁移 honest-display 库（`bootstrap/stationSeries/riverForecast/ReturnPeriodSection`）供 popup 复用，river 诚实展示覆盖迁移。
-6. **node-27 live receipt**（`worklogs/node27-live-receipt.md`，`execution_mode=live_proof`）：①重定向矩阵
-   7/7 ②全屏无导航 ③QHH↔Heihe 同页 zoom（pathname 恒 `/`）⑥overlay 未注册如实显示「Layer is not
-   registered」=**live-PASS**（均为本地 vitest 无法验、仅 live 可证之项）；④⑤ popup 绘制不变量本地单测全覆盖
-   以及数据 live 就绪，**live 点击延后**（`/api/v1/basins` 无 bbox 无法自动 framing + CLI 难命中 WebGL 要素，归
-   #343）。
+6. **node-27 live receipt**（`worklogs/node27-live-receipt.md`，`execution_mode=live_proof`）：①重定向矩阵 7/7 ②全屏无导航 ③QHH↔Heihe 同页 zoom（pathname 恒 `/`）⑥overlay 未注册如实显示「Layer is not registered」=**live-PASS**（均为本地 vitest 无法验、仅 live 可证之项）；④⑤ popup 绘制不变量本地单测全覆盖 + 数据 live 就绪，**live 点击延后**（`/api/v1/basins` 无 bbox 无法自动 framing + CLI 难命中 WebGL 要素，归 #343）。
 7. **解耦平行 issue（不在本变更）**：**#342** 后端 station-MVT 点图层端点（全国万级代站，仿 river-network `ST_AsMVT`，node-22 oracle）；**#343** `display_readonly` live PostGIS MVT 排查（river-network 瓦片 424 / hydro 409，决定全国态 overlay 能否点亮，并入 basin bbox 暴露缺口）。
 8. **边界**：当前 2 流域规模（QHH 386 站/1633 河段、Heihe 1709 站/2352 河段）用 M11 既有 GeoJSON 河网渲染；全国级（数万代站/百万河段）依赖 #342/#343 解耦任务；④⑤ live 点击截图待 overlay 注册 + bbox 暴露后补。
 
 **M25 多流域前端生产化交付**（`openspec/changes/m25-multibasin-frontend-production/`，9 子 issue：#310–#317 已合并，#318 本 PR 收尾）——node-27 `display_readonly` 前端去 QHH 硬编码、按数据驱动：
 
-1. **后端动态发现 + 去硬编码**：`list_basins` 增 `has_display_product`（EXISTS run-status 集合过滤，复用
-   `QHH_LATEST_READY_RUN_STATUSES` 单一口径，**无 basin_id 白名单**）（#310）；latest-product 去
-   `QHH_BASIN_ID` 写死、`basin_id` 参数化（缺省 `basins_qhh` 向后兼容 + 旧 `/mvp/qhh/latest-product`
-   路径保留）（#311）；河段/站点列表 `search`+分页+`variable`/`stream_order` 字段可用性降级契约（#313）。
+1. **后端动态发现 + 去硬编码**：`list_basins` 增 `has_display_product`（EXISTS run-status 集合过滤，复用 `QHH_LATEST_READY_RUN_STATUSES` 单一口径，**无 basin_id 白名单**）（#310）；latest-product 去 `QHH_BASIN_ID` 写死、`basin_id` 参数化（缺省 `basins_qhh` 向后兼容 + 旧 `/mvp/qhh/latest-product` 路径保留）（#311）；河段/站点列表 `search`+分页+`variable`/`stream_order` 字段可用性降级契约（#313）。
 2. **return-period 诚实展示**：`availability.return_period_status`（ready/unavailable）作**独立 supplemental 字段**，不进 blocking reasons（有 q_down 无洪频基线的产品不掉 ready/404）（#312/#316）；无真实产品时仅静态图例 + "暂未发布正式产品"，不渲染假数据。
 3. **前端生产化**：流域选择器数据驱动（无前端白名单，新流域自动出现）+ 切流域以 `basin_id` 重拉、strict identity 一致（#314）；河段/站点列表走后端 search/分页（#315）；`/ops`+`/monitoring` 入口按 `display_readonly` 降级（保留 `/meteorology` 门控）（#317）。
 4. **可扩展性验证 + 文档收尾**（#318）：真 DB 集成测试断言「全新注册 basin 仅靠数据即在发现接口出现，零代码改动」（`tests/test_real_basin_discovery_integration.py`），前端 `BasinSelector.test.tsx` 数据驱动断言新流域自动渲染。
@@ -60,11 +50,7 @@
 
 - **GFS / IFS 双源 7 天全流程已 live 跑通至 `frequency_done` 并 publish**（诊断 lane，cycle 2026060400，`s3://nhms`）：download→canonical→forcing→SHUD→parse→frequency→publish；return_period 诚实标注、无伪造洪水位。**双流域（qhh+heihe）并发 published receipt** 亦取得（#291，流量 display 口径）。
 - **科学链已验证正确**（worker 链），但**正式连续业务化在 m24 通用 daemon 上重做并 live**——上述跑通走的是 `run_qhh_continuous.py` **诊断脚本**（m23 已否决其作生产，保留为排障 lane + `DIAGNOSTIC-ONLY` 头 + 护栏测试 #293）。
-- **m24 转向**（epic #285，子任务 #286–#293 + #300）：生产路径 = 通用 scheduler/chain daemon 经独立
-  Slurm gateway。三道硬坎 = ① gateway 在 node-22 部署（#288，从未 live）② 跨周期暖启动 path(b) 短
-  analysis 段（#289）③ 并发 submit-and-return + durable reservation（#290，代码已合并，未 live）。
-  **部署前置**：迁移 `db/migrations/000029_pipeline_reservation.sql` 必须在 #292 go-live 前 apply
-  （node-22 prod DB 尚未 apply）。
+- **m24 转向**（epic #285，子任务 #286–#293 + #300）：生产路径 = 通用 scheduler/chain daemon 经独立 Slurm gateway。三道硬坎 = ① gateway 在 node-22 部署（#288，从未 live）② 跨周期暖启动 path(b) 短 analysis 段（#289）③ 并发 submit-and-return + durable reservation（#290，代码已合并，未 live）。**部署前置**：迁移 `db/migrations/000029_pipeline_reservation.sql` 必须在 #292 go-live 前 apply（node-22 prod DB 尚未 apply）。
 - **业务化数据 source-of-truth（硬约束）**：每个流域参数以 `data/Basins/<流域>/input/<流域>/` 真实 SHUD 模型为唯一真值（`.sp.riv` 河道=产品/输出层 1633、`.sp.rivseg`/`seg.shp` GIS 层、`.cfg.para` 参数…）；注册与运行参数一律从此派生，**严禁手配/即兴覆盖**。
 - ⚠️ **已知待修（不阻塞）**：`QHH_FORCE_UPSTREAM` 未透传进 sbatch（兜底删 canonical 行触发重转，runbook §6/§9；m24 改走 chain 自动重转消解）；`curve_duration` 跨标签 re-run 孤儿 peak 行（fresh 跑不受影响）。
 - ⚠️ **运行纪律**：作业运行中**禁止在 node-22 `git pull`**（换 inode 触发 NFS stale handle 杀作业）。
@@ -79,11 +65,7 @@
 
 ## 仍需 live proof（正式上线前）
 
-目标环境 receipt：PostgreSQL/PostGIS/TimescaleDB（含 27 readonly denied-write probes）、对象存储/published
-artifacts（`log_uri` 指向 27 可读 URI）、两节点部署角色、cross-plane identity（同一
-`run_id/source/cycle/model/basin` 串起 22 生产→DB→published→`/hydro-met`+`/ops`）、live Slurm 全套、
-live `/hydro-met` + `/ops` browser run、alert sink/rollback/nationwide MVT。逐项归因见
-[`docs/bugs.md`](docs/bugs.md)。
+目标环境 receipt：PostgreSQL/PostGIS/TimescaleDB（含 27 readonly denied-write probes）、对象存储/published artifacts（`log_uri` 指向 27 可读 URI）、两节点部署角色、cross-plane identity（同一 `run_id/source/cycle/model/basin` 串起 22 生产→DB→published→`/hydro-met`+`/ops`）、live Slurm 全套、live `/hydro-met` + `/ops` browser run、alert sink/rollback/nationwide MVT。逐项归因见 [`docs/bugs.md`](docs/bugs.md)。
 
 ## 入口
 
