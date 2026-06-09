@@ -1,0 +1,79 @@
+name: Governance Audit
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: governance-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  entropy-audit:
+    name: Entropy Audit (report-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Generate entropy reports
+        run: |
+          mkdir -p artifacts/governance
+          uv run python scripts/governance/audit_repo_entropy.py --format json \
+            > artifacts/governance/entropy-report.json
+          uv run python scripts/governance/audit_repo_entropy.py --format markdown \
+            > artifacts/governance/entropy-report.md
+
+      - name: Verify report contract
+        run: |
+          test -s artifacts/governance/entropy-report.json
+          test -s artifacts/governance/entropy-report.md
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("artifacts/governance/entropy-report.json").read_text())
+          metadata = report["metadata"]
+          assert metadata["mode"] == "report-only", metadata
+          assert metadata["baseline_written"] is False, metadata
+          PY
+
+      - name: Verify entropy baseline was not written
+        run: |
+          git diff --exit-code -- .entropy-baseline/latest.json
+          test -z "$(git status --porcelain -- .entropy-baseline/latest.json)"
+
+      - name: Add governance report summary
+        run: |
+          {
+            echo "## Governance entropy audit"
+            echo ""
+            echo "- JSON report: \`artifacts/governance/entropy-report.json\`"
+            echo "- Markdown report: \`artifacts/governance/entropy-report.md\`"
+            echo "- Mode: \`report-only\`"
+            echo ""
+            cat artifacts/governance/entropy-report.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload governance entropy reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-entropy-reports
+          path: |
+            artifacts/governance/entropy-report.json
+            artifacts/governance/entropy-report.md
+          if-no-files-found: error
+          retention-days: 14
