@@ -68,6 +68,12 @@ Governance-4C is active as a non-blocking report workflow. Governance-4D
 prepares an explicit hard-gate mode, but CI remains report-only until a later
 maintainer-approved enablement change.
 
+Governance-5 E1 triage is tracked in
+`docs/governance/entropy-burndown-triage.md`. That artifact records the current
+report counts, high-spread family dispositions, owner issues/changes, and
+the #400-specific non-goals before later automation work changes the report
+semantics.
+
 ## Baseline Write Policy
 
 `.entropy-baseline/latest.json` is project metadata. It creates a comparison

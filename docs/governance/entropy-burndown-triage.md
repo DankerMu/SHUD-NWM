@@ -1,0 +1,165 @@
+# Governance-5 E1 Entropy Burn-Down Triage
+
+This artifact is the #400 Governance-5 E1 triage snapshot. It turns the
+current Governance-4 entropy report into burn-down dispositions. It is a
+governance document only; it does not change audit schema, runtime behavior,
+tests, CI workflows, frontend source, or API code.
+
+## Snapshot
+
+| Field | Value |
+|---|---|
+| Snapshot date | 2026-06-10 Asia/Shanghai |
+| Report metadata timestamp | `2026-06-09T16:30:48+00:00` |
+| Command | `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` |
+| Mode | `report-only` |
+| Schema | `governance-4a.entropy-report.v1` |
+| Baseline state | `.entropy-baseline/latest.json` did not exist and was not written |
+| Finding-bearing check families | 7 |
+| Executed check families | 16 |
+| Total findings | 360 |
+| High-spread families | 4 |
+
+## Current Counts
+
+| Metric | Count |
+|---|---:|
+| Total findings | 360 |
+| Allowlisted findings | 134 |
+| Unallowlisted findings | 226 |
+| P1 findings | 3 |
+| P2 findings | 226 |
+| P3 findings | 131 |
+| High severity findings | 3 |
+| Medium severity findings | 226 |
+| Low severity findings | 131 |
+| `display_readonly` findings | 245 |
+| `shared_contract` findings | 115 |
+
+## High-Spread Family Dispositions
+
+| Family | Current count | Allowlist split | Current spread | Disposition | Owner |
+|---|---:|---:|---|---|---|
+| `apps-api-layer-inversion` | 3 | 0 allowlisted / 3 unallowlisted | 2 modules, top P1/high | `fix` | #399, `governance-5-e4-layer-inversion-hardgate-prep` |
+| `stale-display-route-token` | 225 | 100 allowlisted / 125 unallowlisted | 12 modules, top P2/medium | `fix` | #397, `governance-5-e2-display-route-evidence-cleanup` |
+| `placeholder-path-token` | 109 | 29 allowlisted / 80 unallowlisted | 15 modules, top P2/medium | `archived` | Governance-2/#363 for completed active-tree retirement; future #401/#402 semantics and guard work |
+| `broad-e2e-api-mock` | 20 | 3 allowlisted / 17 unallowlisted | 1 module, top P2/medium | `fix` | #397, `governance-5-e2-display-route-evidence-cleanup`; Governance-2/#365 classification remains the prior mocked-vs-live source |
+
+### `apps-api-layer-inversion`
+
+Disposition: `fix`.
+
+The current findings are active role-boundary defects, not historical evidence:
+non-API modules import `apps.api.*`. The owner is #399 /
+`governance-5-e4-layer-inversion-hardgate-prep`.
+
+Current modules:
+
+- `services/production_closure`
+- `services/tiles`
+
+Burn-down rule: remove the layer inversion in the owner change before this
+family becomes future hard-gate eligible. #400 records the disposition only.
+
+### `stale-display-route-token`
+
+Disposition: `fix`.
+
+The family mixes current route-authority cleanup with historical M26 evidence.
+The actionable owner is #397 /
+`governance-5-e2-display-route-evidence-cleanup`. Historical route references
+should be classified or retained as evidence where appropriate; #400 does not
+delete frontend routes or retire node-27 pages.
+
+Current modules:
+
+- `apps/frontend`
+- `docs/governance`
+- `docs/plans`
+- `docs/runbooks`
+- `openspec/governance-4-entropy-automation`
+- `openspec/governance-5-e2-display-route-evidence-cleanup`
+- `openspec/m20-production-multibasin-continuous-automation`
+- `openspec/m21-qhh-hydro-met-ops-mvp`
+- `openspec/m22-two-node-docker-readonly-display`
+- `openspec/m25-multibasin-frontend-production`
+- `openspec/m26-unified-map-display`
+- `progress.md`
+
+Burn-down rule: current docs and validation evidence should stop presenting
+pre-M26 routes as primary live display entrypoints. Historical redirect,
+compatibility, and worklog evidence should remain auditable.
+
+### `placeholder-path-token`
+
+Disposition: `archived`.
+
+Governance-2/#363 already retired the active-looking placeholder paths. The
+remaining high spread is primarily historical, archived, governance inventory,
+or compatibility text. It is not a repeated deletion queue.
+
+Current modules:
+
+- `docs/archived`
+- `docs/governance`
+- `docs/modules`
+- `openspec/governance-2-legacy-dead-code-retirement`
+- `openspec/governance-4-entropy-automation`
+- `openspec/governance-5-e1-entropy-baseline-burndown`
+- `openspec/issue-122-publish-tiles`
+- `openspec/issue-124-slurm-production-paths`
+- `openspec/m0-engineering-init`
+- `openspec/m1-gfs-forecast-loop`
+- `openspec/m5-flood-frequency-warning`
+- `openspec/m6-system-hardening-alignment`
+- `openspec/m7-second-review-remediation`
+- `openspec/m8-fourth-review-remediation`
+- `services/slurm_gateway`
+
+Burn-down rule: preserve governed historical and archived evidence, then let
+future #401/#402 work add normalized allowlist semantics and tracked retired-path
+guards. #400 does not delete QHH diagnostics or repeat Governance-2 placeholder
+retirement.
+
+### `broad-e2e-api-mock`
+
+Disposition: `fix`.
+
+The findings are deterministic mocked frontend regression evidence that can be
+mistaken for live display proof. The owner is #397 /
+`governance-5-e2-display-route-evidence-cleanup`, which consumes the
+Governance-2/#365 mocked-vs-live classification instead of reopening it.
+
+Current modules:
+
+- `apps/frontend`
+
+Burn-down rule: keep deterministic mocked coverage clearly separated from live
+node-27 display receipts. #400 does not edit Playwright specs or implement
+finding-level gate eligibility.
+
+## Owner Notes
+
+- #397 owns the display route authority and mocked-vs-live evidence cleanup
+  mapped from `stale-display-route-token` and `broad-e2e-api-mock`.
+- #398, `governance-5-e3-api-contract-retirement`, has no current high-spread
+  family assigned by this snapshot. It remains the API contract retirement owner
+  if later entropy or contract inventory work surfaces actionable legacy API
+  route findings.
+- #399 owns the active `apps-api-layer-inversion` defects.
+- #401/#402/#403 remain future automation/report work and are not implemented by
+  #400.
+
+## Explicit Non-Goals
+
+- No QHH diagnostic deletion, relocation, wrapper insertion, or helper-chain
+  rewrite.
+- No repeated Governance-2 placeholder deletion.
+- No CI hard-gate enablement and no workflow change.
+- No node-27 frontend route/page retirement, source migration, test migration,
+  or visual evidence movement.
+- No audit script schema change, allowlist normalization, finding-level
+  hard-gate eligibility implementation, tracked retired-path guard, or refreshed
+  report example schema.
+- No API endpoint deprecation, removal, OpenAPI contraction, or generated type
+  regeneration.
