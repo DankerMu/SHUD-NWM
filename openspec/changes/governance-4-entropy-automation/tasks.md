@@ -198,6 +198,69 @@ Out of scope for #371. Owned by #373.
 
 Out of scope for #371. Owned by #374.
 
-- [ ] 4.1 Add CLI flags or config for hard-gate mode.
-- [ ] 4.2 Prepare hard-gate checks for display compute-only env, production diagnostic token references, live e2e broad mocks, standalone gateway business route leakage, OpenAPI/frontend type drift, paused CI jobs, Makefile command discipline, and tracked agent/artifact ownership.
-- [ ] 4.3 Keep hard-gate mode disabled in CI until Governance-0 through Governance-3 are complete or explicitly waived.
+- [x] 4.1 Add CLI flags or config for hard-gate mode.
+  Evidence: `scripts/governance/audit_repo_entropy.py` now accepts
+  `--mode report|hard-gate`, defaults to `report`, keeps default metadata as
+  `metadata.mode == "report-only"`, and emits hard-gate metadata only for
+  explicit `--mode hard-gate`.
+- [x] 4.2 Prepare hard-gate checks for display compute-only env, production diagnostic token references, live e2e broad mocks, standalone gateway business route leakage, OpenAPI/frontend type drift, paused CI jobs, Makefile command discipline, and tracked agent/artifact ownership.
+  Required mapping:
+  - `role-env-boundary`
+  - `qhh-diagnostic-token`
+  - `broad-e2e-api-mock`
+  - `slurm-gateway-route-leakage`
+  - `openapi-frontend-types-presence` only; `openapi-frontend-types-delegated`
+    and `openapi-frontend-types-signal` remain report-only signals.
+  - `paused-workflow-condition`
+  - `makefile-toolchain-discipline`
+  - `agent-artifact-ownership-policy`, `agent-artifact-ignore-policy`, and
+    `tracked-generated-artifact`
+  Evidence: `HARD_GATE_CHECK_IDS` contains exactly this sorted mapping; focused
+  tests cover each gated `check_id` and confirm
+  `openapi-frontend-types-delegated` and `openapi-frontend-types-signal`
+  remain report-only signals.
+- [x] 4.3 Keep hard-gate mode disabled in CI until Governance-0 through Governance-3 are complete or explicitly waived.
+  Evidence: `.github/workflows/governance.yml` still invokes only
+  `audit_repo_entropy.py --format json` and
+  `audit_repo_entropy.py --format markdown`; local workflow inspection asserted
+  no hard-gate mode string is present.
+- [x] 4.4 Verify default JSON and Markdown report commands still exit 0 for
+  known findings and report `metadata.mode == "report-only"` with
+  `metadata.baseline_written == false`.
+  Evidence:
+  `uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`
+  exited 0 and parsed with `metadata.mode == "report-only"`,
+  `metadata.baseline_written == false`, and 351 findings.
+  `uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`
+  exited 0 and included `## Entropy Heatmap`, `## High-Spread Patterns`, and
+  `## Prioritized Cleanup Targets`.
+- [x] 4.5 Add focused hard-gate tests using temporary fixtures for the prepared
+  candidate families, plus a passing fixture with no gated findings.
+  Evidence:
+  `uv run --no-sync pytest -q tests/test_entropy_audit_script.py` returned
+  `44 passed`; new tests cover default report metadata, parseable hard-gate
+  JSON failure, hard-gate pass with no gated findings, Markdown hard-gate
+  status, every gated `check_id`, and non-gated OpenAPI delegated/fingerprint
+  signals.
+- [x] 4.6 Verify explicit `--mode hard-gate` invocation exits non-zero only
+  when configured gated findings are present and includes machine-readable
+  hard-gate status in JSON output:
+  - `metadata.mode == "hard-gate"`
+  - `metadata.hard_gate_status in {"pass", "fail"}`
+  - `metadata.hard_gate_gated_check_ids` lists the gated check IDs.
+  - `metadata.hard_gate_failing_count` counts only gated failing findings.
+  Evidence: a temporary fixture containing a gated Makefile finding exited 1
+  while emitting parseable JSON with `metadata.hard_gate_status == "fail"` and
+  `metadata.hard_gate_failing_count == 1`; a temporary fixture with no gated
+  findings exited 0 with `metadata.hard_gate_status == "pass"` and
+  `metadata.hard_gate_failing_count == 0`.
+- [x] 4.7 Verify `.github/workflows/governance.yml` does not pass hard-gate
+  flags/config and remains non-blocking.
+  Evidence: local inspection asserted `.github/workflows/governance.yml`
+  contains neither `--mode hard-gate` nor any hard-gate mode string while still
+  using the report-only JSON and Markdown command paths.
+- [x] 4.8 Verify `.entropy-baseline/latest.json` is not created or updated by
+  default or explicit hard-gate invocations.
+  Evidence: `test ! -e .entropy-baseline/latest.json` passed before default
+  report commands and after default plus explicit hard-gate temporary-fixture
+  invocations.

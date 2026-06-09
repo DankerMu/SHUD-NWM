@@ -13,10 +13,12 @@ scope before making a change.
 ```bash
 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json
 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown
+uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json
 ```
 
 Report-only generation must not create or update
-`.entropy-baseline/latest.json`.
+`.entropy-baseline/latest.json`. Explicit hard-gate generation also must not
+create or update `.entropy-baseline/latest.json`.
 
 ## JSON Shape
 
@@ -188,8 +190,11 @@ Report-only generation must not create or update
 ## Field Notes
 
 `metadata.schema_version` is the contract identifier for automation and docs
-examples. `metadata.mode` remains `report-only` until a later Governance-4
-slice adds CI or hard-gate modes.
+examples. Default report mode emits `metadata.mode == "report-only"`. Explicit
+`--mode hard-gate` emits `metadata.mode == "hard-gate"` plus
+`hard_gate_status`, `hard_gate_gated_check_ids`, and
+`hard_gate_failing_count`; JSON output remains parseable even when hard-gate
+mode exits non-zero.
 
 `module_heatmap` rows summarize the highest observed severity on each axis for
 a module. The axis fields are `structure`, `semantics`, `behavior`, `context`,

@@ -271,3 +271,142 @@ Non-goals:
 - No new audit check families.
 - No hard-gate mode or fail-on-finding threshold.
 - No baseline file creation or update.
+
+## Governance-4D Fixture
+
+Issue #374 prepares hard-gate mechanics but keeps them disabled in CI. The
+change may add explicit CLI/config surfaces and tests, but default report mode
+and the Governance Audit workflow must stay non-blocking.
+
+Fixture level: expanded
+Project profile: NHMS
+Repair intensity: high
+Change surface:
+- `scripts/governance/audit_repo_entropy.py` CLI/config only.
+- `tests/test_entropy_audit_script.py` focused hard-gate/default-mode tests.
+- `docs/governance/entropy-budget.md` or report docs if needed to explain
+  future enablement.
+- OpenSpec task evidence for section 4.
+Must preserve:
+- Running without a hard-gate flag remains report-only and returns exit code 0
+  for known baseline findings.
+- `.github/workflows/governance.yml` continues to call report-only commands and
+  must not enable hard-gate mode.
+- `.entropy-baseline/latest.json` is not created or updated.
+- No cleanup is required to satisfy prepared gates in this PR.
+Must add/change:
+- An explicit disabled-by-default hard-gate mode or config surface.
+- Prepared hard-gate evaluation for stable existing check families: display
+  compute-only env, production diagnostic tokens, live e2e broad mocks,
+  standalone gateway business route leakage, OpenAPI/frontend drift,
+  paused CI, Makefile discipline, and tracked agent/artifact ownership.
+- Machine-readable output that identifies hard-gate mode/status when explicitly
+  requested.
+
+Hard-gate CLI and JSON contract:
+- CLI opt-in surface: `--mode report|hard-gate`, default `report`.
+- Report mode metadata remains `metadata.mode == "report-only"`.
+- Explicit hard-gate mode sets `metadata.mode == "hard-gate"`.
+- Explicit hard-gate mode adds:
+  - `metadata.hard_gate_status`: `"pass"` or `"fail"`.
+  - `metadata.hard_gate_gated_check_ids`: sorted list of gated `check_id`
+    values.
+  - `metadata.hard_gate_failing_count`: count of findings whose `check_id` is
+    gated and whose priority/severity is configured to fail.
+- JSON output remains parseable on hard-gate failure.
+- Markdown hard-gate output must state hard-gate mode/status without hiding the
+  ordinary report sections.
+
+Stable hard-gate candidate mapping:
+- display compute-only env -> `role-env-boundary`
+- production diagnostic tokens -> `qhh-diagnostic-token`
+- live e2e broad mocks -> `broad-e2e-api-mock`
+- standalone gateway business route leakage -> `slurm-gateway-route-leakage`
+- OpenAPI/frontend drift -> `openapi-frontend-types-presence` only; existing
+  delegated/fingerprint signals remain report-only delegation signals.
+- paused CI -> `paused-workflow-condition`
+- Makefile discipline -> `makefile-toolchain-discipline`
+- tracked artifact ownership -> `agent-artifact-ownership-policy`,
+  `agent-artifact-ignore-policy`, and `tracked-generated-artifact`
+
+Invariant Matrix
+Governing invariant: hard-gate behavior is opt-in only; report mode remains
+non-blocking and baseline-safe across CLI, workflow, and tests.
+Source-of-truth identity/contract: explicit hard-gate CLI/config value and
+`metadata.mode` / `metadata.baseline_written` in the JSON report.
+Surfaces:
+- Producers: `scripts/governance/audit_repo_entropy.py`.
+- Validators/preflight: `tests/test_entropy_audit_script.py`, OpenSpec tasks.
+- Storage/cache/query: `.entropy-baseline/latest.json` must remain unwritten.
+- Public routes/entrypoints: CLI invocation from local users and
+  `.github/workflows/governance.yml`.
+- Frontend/downstream consumers: JSON/Markdown report readers and uploaded CI
+  artifacts.
+- Failure paths/rollback/stale state: hard-gate exit codes and report metadata.
+- Evidence/audit/readiness: PR validation commands and Governance Audit CI.
+Regression rows:
+- Default CLI report with known findings -> exit code 0,
+  `metadata.mode == "report-only"`, and `baseline_written == false`.
+- Explicit hard-gate invocation with a configured failing finding -> non-zero
+  exit, parseable JSON output, `metadata.mode == "hard-gate"`,
+  `metadata.hard_gate_status == "fail"`, and
+  `metadata.hard_gate_failing_count > 0`.
+- Explicit hard-gate invocation with no gated findings -> exit code 0,
+  `metadata.mode == "hard-gate"`, `metadata.hard_gate_status == "pass"`, and
+  `metadata.hard_gate_failing_count == 0`.
+- Governance Audit workflow command -> remains report-only and does not pass
+  the hard-gate flag.
+- Baseline path before/after any mode -> no create/update without explicit
+  maintainer-approved baseline write feature.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - hard-gate mode is a public script
+  CLI/config surface.
+- Config / project setup: selected - workflow must remain report-only while the
+  gate is prepared.
+- File IO / path safety / overwrite: selected - no mode may write the baseline
+  by default.
+- Schema / columns / units / field names: selected - JSON metadata changes are
+  consumed by docs, CI, and tests.
+- Auth / permissions / secrets: not selected - no secrets or credentialed
+  surfaces change.
+- Concurrency / shared state / ordering: not selected - single-process script
+  remains stateless.
+- Resource limits / large input / discovery: selected - hard-gate mode must
+  reuse the existing bounded scan behavior.
+- Legacy compatibility / examples: selected - default report-only behavior and
+  existing report schema consumers must remain compatible.
+- Error handling / rollback / partial outputs: selected - hard-gate failure
+  must be explicit and stable while baseline writes remain absent.
+- Release / packaging / dependency compatibility: selected - script should keep
+  using the existing standard-library/project dependency footprint.
+- Documentation / migration notes: selected - docs must state future enablement
+  dependencies and that CI remains non-blocking.
+Domain packs:
+- Published NHMS artifacts / display identity: selected - display env and
+  artifact ownership candidates are part of hard-gate preparation.
+- Slurm production lifecycle / mock-vs-real parity: selected - gateway leakage
+  and QHH diagnostic token candidates are part of hard-gate preparation.
+- Run manifest / QC provenance: not selected - no manifest/QC parsing changes.
+- Other NHMS domain packs: not selected - no geospatial, forcing, SHUD
+  numerical, provider, DB, or runtime pipeline behavior change.
+
+Required evidence:
+- Default JSON and Markdown report commands still exit 0 and report
+  `metadata.mode == "report-only"` with `baseline_written == false`.
+- Explicit hard-gate invocation is tested against temporary fixtures for each
+  prepared stable invariant family and fails only when configured findings are
+  present.
+- A no-findings or non-gated finding fixture passes explicit hard-gate mode.
+- Governance Audit workflow inspection proves no hard-gate flag/config is used.
+- `.entropy-baseline/latest.json` remains absent before and after default and
+  explicit hard-gate invocations.
+- Focused tests for hard-gate/default behavior pass.
+- `openspec validate governance-4-entropy-automation --strict --no-interactive`
+  passes.
+
+Non-goals:
+- No CI hard-gate enablement.
+- No cleanup to make current repository findings pass hard-gate mode.
+- No new check-family implementation beyond evaluating existing findings.
+- No baseline file creation or update.

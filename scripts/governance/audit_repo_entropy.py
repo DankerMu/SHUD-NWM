@@ -44,6 +44,18 @@ CHECK_FAMILIES = (
     "tracked-generated-artifact",
     "apps-api-layer-inversion",
 )
+HARD_GATE_CHECK_IDS = (
+    "agent-artifact-ignore-policy",
+    "agent-artifact-ownership-policy",
+    "broad-e2e-api-mock",
+    "makefile-toolchain-discipline",
+    "openapi-frontend-types-presence",
+    "paused-workflow-condition",
+    "qhh-diagnostic-token",
+    "role-env-boundary",
+    "slurm-gateway-route-leakage",
+    "tracked-generated-artifact",
+)
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
 PRIORITY_RANK = {"P3": 1, "P2": 2, "P1": 3, "P0": 4}
 SCORE_RANK = {"low": 1, "medium": 2, "high": 3}
@@ -94,6 +106,7 @@ MAX_ARTIFACT_FINGERPRINT_BYTES = 1_048_576
 HASH_CHUNK_BYTES = 1_048_576
 
 FindingAxis = Literal["structure", "semantics", "behavior", "context", "protocol", "control"]
+AuditMode = Literal["report", "hard-gate"]
 
 
 @dataclass(frozen=True)
@@ -122,7 +135,7 @@ def repo_root_from(start: Path | None = None) -> Path:
     return start
 
 
-def build_report(repo_root: Path | None = None) -> dict[str, object]:
+def build_report(repo_root: Path | None = None, *, mode: AuditMode = "report") -> dict[str, object]:
     root = repo_root_from(repo_root)
     findings = sorted(
         _dedupe_findings(_collect_findings(root)),
@@ -136,7 +149,7 @@ def build_report(repo_root: Path | None = None) -> dict[str, object]:
     )
     finding_records = [_finding_record(index, finding) for index, finding in enumerate(findings, start=1)]
     return {
-        "metadata": _metadata(root, findings),
+        "metadata": _metadata(root, findings, mode=mode),
         "module_heatmap": _module_heatmap(finding_records),
         "findings": finding_records,
         "high_spread_patterns": _high_spread_patterns(finding_records),
@@ -157,16 +170,30 @@ def render_markdown(report: dict[str, object]) -> str:
         "# Repository Entropy Audit",
         "",
         f"- Mode: `{metadata['mode']}`",
-        f"- Generated: `{metadata['generated_at']}`",
-        f"- Baseline path: `{metadata['baseline_path']}`",
-        f"- Baseline written: `{str(metadata['baseline_written']).lower()}`",
-        f"- Findings: `{metadata['finding_count']}`",
-        "",
-        "## Entropy Heatmap",
-        "",
-        "| Module | Structure | Semantics | Behavior | Context | Protocol | Control | Priority | Findings |",
-        "|---|---:|---:|---:|---:|---:|---:|---|---:|",
     ]
+    if metadata["mode"] == "hard-gate":
+        lines.extend(
+            [
+                f"- Hard gate status: `{metadata['hard_gate_status']}`",
+                f"- Hard gate failing findings: `{metadata['hard_gate_failing_count']}`",
+                "- Hard gate gated check IDs: `"
+                + "`, `".join(str(check_id) for check_id in metadata["hard_gate_gated_check_ids"])
+                + "`",
+            ]
+        )
+    lines.extend(
+        [
+            f"- Generated: `{metadata['generated_at']}`",
+            f"- Baseline path: `{metadata['baseline_path']}`",
+            f"- Baseline written: `{str(metadata['baseline_written']).lower()}`",
+            f"- Findings: `{metadata['finding_count']}`",
+            "",
+            "## Entropy Heatmap",
+            "",
+            "| Module | Structure | Semantics | Behavior | Context | Protocol | Control | Priority | Findings |",
+            "|---|---:|---:|---:|---:|---:|---:|---|---:|",
+        ]
+    )
     for row in heatmap:
         assert isinstance(row, dict)
         lines.append(
@@ -217,23 +244,29 @@ def render_markdown(report: dict[str, object]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Generate a report-only repository entropy audit.")
+    parser = argparse.ArgumentParser(description="Generate a repository entropy audit.")
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
+    parser.add_argument(
+        "--mode",
+        choices=("report", "hard-gate"),
+        default="report",
+        help="Run in report-only mode by default, or explicitly evaluate prepared hard-gate findings.",
+    )
     args = parser.parse_args(argv)
 
-    report = build_report()
+    report = build_report(mode=args.mode)
     if args.format == "json":
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(render_markdown(report))
-    return 0
+    return _exit_code_for_report(report)
 
 
-def _metadata(root: Path, findings: list[FindingSpec]) -> dict[str, object]:
+def _metadata(root: Path, findings: list[FindingSpec], *, mode: AuditMode) -> dict[str, object]:
     baseline_path = ".entropy-baseline/latest.json"
-    return {
+    metadata: dict[str, object] = {
         "schema_version": "governance-4a.entropy-report.v1",
-        "mode": "report-only",
+        "mode": "hard-gate" if mode == "hard-gate" else "report-only",
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "repo_root": root.as_posix(),
         "baseline_path": baseline_path,
@@ -257,6 +290,29 @@ def _metadata(root: Path, findings: list[FindingSpec]) -> dict[str, object]:
             ]
         ),
     }
+    if mode == "hard-gate":
+        failing_count = _hard_gate_failing_count(findings)
+        metadata.update(
+            {
+                "hard_gate_status": "fail" if failing_count else "pass",
+                "hard_gate_gated_check_ids": list(HARD_GATE_CHECK_IDS),
+                "hard_gate_failing_count": failing_count,
+            }
+        )
+    return metadata
+
+
+def _hard_gate_failing_count(findings: Iterable[FindingSpec]) -> int:
+    gated = set(HARD_GATE_CHECK_IDS)
+    return sum(1 for finding in findings if finding.check_id in gated)
+
+
+def _exit_code_for_report(report: dict[str, object]) -> int:
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    if metadata.get("mode") != "hard-gate":
+        return 0
+    return 1 if int(metadata["hard_gate_failing_count"]) > 0 else 0
 
 
 def _collect_findings(root: Path) -> list[FindingSpec]:
