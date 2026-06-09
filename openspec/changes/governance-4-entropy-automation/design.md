@@ -118,3 +118,69 @@ Domain packs:
 - Run manifest / QC provenance: not selected - no manifest parsing behavior.
 - Other NHMS domain packs: not selected - no geospatial, forcing, SHUD
   numerical, provider, or DB behavior change.
+
+## Governance-4B Fixture
+
+Issue #372 documents the report contract and entropy budget only. It does not
+change the audit script, add CI jobs, or enable hard-gate behavior.
+
+Fixture level: compact
+Project profile: NHMS
+Repair intensity: low
+Change surface:
+- `docs/governance/entropy-budget.md`
+- `docs/governance/entropy-report.example.md`
+Must preserve:
+- The audit script remains report-only by default.
+- `.entropy-baseline/latest.json` remains unwritten unless a maintainer
+  explicitly confirms baseline creation in a future change.
+- Governance-4C owns non-blocking CI and Governance-4D owns hard-gate wiring.
+Must add/change:
+- A maintained entropy budget describing report-only, non-blocking CI, and
+  future hard-gate stages.
+- A report example matching `governance-4a.entropy-report.v1` top-level fields:
+  `metadata`, `module_heatmap`, `findings`, and `high_spread_patterns`.
+- Documentation of the four roles and four governance faces used by the audit
+  report.
+
+Risk packs considered:
+- Public API / CLI / script entry: not selected - docs-only change; script CLI
+  is unchanged.
+- Config / project setup: selected - future CI and baseline policy are
+  documented but not implemented.
+- File IO / path safety / overwrite: selected - baseline write policy must
+  forbid accidental `.entropy-baseline/latest.json` creation.
+- Schema / columns / units / field names: selected - example report fields must
+  match the script schema.
+- Auth / permissions / secrets: not selected - docs must not add credentials or
+  private deployment paths.
+- Concurrency / shared state / ordering: not selected - docs-only change.
+- Resource limits / large input / discovery: not selected - scan limits are
+  described from existing metadata only.
+- Legacy compatibility / examples: selected - docs distinguish report findings
+  from deletion instructions.
+- Error handling / rollback / partial outputs: not selected - no runtime error
+  path changes.
+- Release / packaging / dependency compatibility: not selected - no dependency
+  or packaging change.
+- Documentation / migration notes: selected - primary scope.
+
+Required evidence:
+- `uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`
+  parses and exposes the fields used by the example.
+- Extract the fenced JSON example from
+  `docs/governance/entropy-report.example.md` and compare its schema against
+  live JSON output from the audit script. The comparison must cover top-level
+  keys, `metadata.schema_version`, heatmap axes, finding fields, and
+  high-spread pattern fields.
+- `uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`
+  still emits heatmap and cleanup-target sections.
+- Markdown lint or equivalent local docs check covers the two new governance
+  docs and this OpenSpec change.
+- `openspec validate governance-4-entropy-automation --strict --no-interactive`
+  passes.
+
+Non-goals:
+- No changes to `scripts/governance/audit_repo_entropy.py`.
+- No `.github/workflows/**` changes.
+- No `.entropy-baseline/latest.json` creation or update.
