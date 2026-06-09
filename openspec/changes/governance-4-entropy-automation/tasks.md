@@ -129,9 +129,68 @@ Out of scope for #371. Owned by #372.
 
 Out of scope for #371. Owned by #373.
 
-- [ ] 3.1 Add a governance workflow or CI job that runs the audit in non-blocking report mode.
-- [ ] 3.2 Upload or print the Markdown/JSON report without failing PRs for known baseline findings.
+- [x] 3.1 Add a governance workflow or CI job that runs the audit in non-blocking report mode.
+  Evidence: `.github/workflows/governance.yml` adds an independent
+  `Governance Audit` workflow for `push`, `pull_request`, and manual dispatch.
+  The workflow runs
+  `uv run python scripts/governance/audit_repo_entropy.py --format json` and
+  Markdown mode into fixed report paths under `artifacts/governance/` so GitHub
+  runners can create or sync a fresh environment.
+- [x] 3.2 Upload or print the Markdown/JSON report without failing PRs for known baseline findings.
+  Evidence: the workflow uploads
+  `artifacts/governance/entropy-report.json` and
+  `artifacts/governance/entropy-report.md` with `actions/upload-artifact@v4`
+  and appends the Markdown report to `$GITHUB_STEP_SUMMARY`. It does not add
+  fail thresholds or fail-on-finding logic; only command/tooling failures fail
+  the job.
 - [ ] 3.3 Verify workflow execution on a branch and include report evidence in PR body.
+  Evidence: not completed locally in this leaf task because it requires a
+  pushed branch/PR workflow run. Local equivalent report evidence is recorded
+  in 3.7.
+- [x] 3.4 Verify the CI command path does not create or update
+  `.entropy-baseline/latest.json`.
+  Evidence: `test ! -e .entropy-baseline/latest.json` passed before and after
+  local JSON/Markdown report commands equivalent to the CI command path but run
+  with `uv run --no-sync` because the local `.venv/.lock` was held. The workflow also runs
+  `git diff --exit-code -- .entropy-baseline/latest.json` and checks
+  `git status --porcelain -- .entropy-baseline/latest.json` is empty.
+- [x] 3.5 Verify the workflow does not enable hard-gate mode, fail thresholds,
+  or required status semantics for known report-only findings.
+  Evidence: `.github/workflows/governance.yml` only invokes the existing
+  `--format json` and `--format markdown` report modes, validates
+  `metadata.mode == "report-only"` and `metadata.baseline_written == false`,
+  and contains no hard-gate, fail-threshold, fail-on-finding, or baseline-write
+  command.
+- [x] 3.6 Validate workflow syntax by inspection or local action tooling when
+  available, and run
+  `openspec validate governance-4-entropy-automation --strict --no-interactive`.
+  Evidence: `actionlint` was not available locally. Fallback validation passed:
+  `uv run --no-sync python` parsed `.github/workflows/governance.yml` with
+  `PyYAML`, extracted every workflow `run:` block and checked it with
+  `bash -n`, and asserted the workflow uses CI-portable `uv run python`
+  commands while referencing the fixed report paths, `actions/upload-artifact@v4`,
+  and `$GITHUB_STEP_SUMMARY`.
+  `openspec validate governance-4-entropy-automation --strict --no-interactive`
+  returned `Change 'governance-4-entropy-automation' is valid`.
+- [x] 3.7 Verify local report materialization with CI-equivalent paths:
+  - Run JSON and Markdown commands redirected to
+    `artifacts/governance/entropy-report.json` and
+    `artifacts/governance/entropy-report.md`.
+  - `test -s artifacts/governance/entropy-report.json`.
+  - `test -s artifacts/governance/entropy-report.md`.
+  - Parse `artifacts/governance/entropy-report.json` and assert
+    `metadata.mode == "report-only"` and
+    `metadata.baseline_written == false`.
+  - Confirm artifact upload or `$GITHUB_STEP_SUMMARY` references those exact
+    JSON and Markdown report paths.
+  Evidence: local commands equivalent to the CI report generation, using
+  `uv run --no-sync` only to avoid the known local uv lock wait, generated both
+  fixed report paths; both `test -s` checks passed. Parsing
+  `artifacts/governance/entropy-report.json` asserted
+  `metadata.mode == "report-only"` and
+  `metadata.baseline_written == false`, reporting 351 findings. Workflow
+  inspection confirmed the same paths in report generation, contract checks,
+  `$GITHUB_STEP_SUMMARY`, and artifact upload.
 
 ## 4. Hard-gate preparation
 

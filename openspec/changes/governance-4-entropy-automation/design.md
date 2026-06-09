@@ -184,3 +184,90 @@ Non-goals:
 - No changes to `scripts/governance/audit_repo_entropy.py`.
 - No `.github/workflows/**` changes.
 - No `.entropy-baseline/latest.json` creation or update.
+
+## Governance-4C Fixture
+
+Issue #373 integrates the existing report-only audit into CI. It must make the
+report visible in pull requests and master pushes without converting existing
+known findings into failures.
+
+Fixture level: expanded
+Project profile: NHMS
+Repair intensity: medium
+Change surface:
+- `.github/workflows/governance.yml` or a narrowly scoped addition to an
+  existing workflow.
+- OpenSpec task evidence for section 3.
+Must preserve:
+- The audit script remains report-only and exits successfully for baseline
+  findings.
+- `.entropy-baseline/latest.json` is not created or updated.
+- Governance-4D owns disabled hard-gate preparation; this change must not add
+  hard-gate CLI flags, fail thresholds, or required status semantics for
+  known findings.
+Must add/change:
+- CI runs JSON and Markdown entropy reports.
+- CI exposes reports by upload artifact, job summary, log output, or an
+  equivalent reviewable surface.
+- CI remains non-blocking for known report findings; only workflow/tooling
+  failures such as script exceptions, artifact upload failures, or invalid
+  command syntax should fail the job.
+- Report paths are fixed for this slice:
+  `artifacts/governance/entropy-report.json` and
+  `artifacts/governance/entropy-report.md`.
+
+Risk packs considered:
+- Public API / CLI / script entry: selected - CI invokes the audit script CLI.
+- Config / project setup: selected - workflow behavior and triggers change.
+- File IO / path safety / overwrite: selected - workflow writes temporary
+  report files and must not write `.entropy-baseline/latest.json`.
+- Schema / columns / units / field names: selected - CI must preserve JSON and
+  Markdown report artifacts from the existing schema.
+- Auth / permissions / secrets: selected - workflow should use read-only repo
+  permissions and avoid exposing secrets.
+- Concurrency / shared state / ordering: selected - workflow should use a
+  normal concurrency key or remain independent of stateful gates.
+- Resource limits / large input / discovery: selected - audit scan must run
+  within a bounded CI timeout.
+- Legacy compatibility / examples: selected - existing findings remain report
+  signals, not failures.
+- Error handling / rollback / partial outputs: selected - report generation
+  failures should be visible, and artifact upload should run when reports
+  exist.
+- Release / packaging / dependency compatibility: selected - CI must install or
+  use the repository Python/uv toolchain predictably.
+- Documentation / migration notes: selected - PR evidence must state
+  non-blocking behavior and future hard-gate boundary.
+- New audit checks / hard-gate enforcement: not selected - #373 only wires the
+  existing report-only command into CI; #374 owns fail-on-finding behavior.
+- Baseline writes: not selected - #373 must not add any command or flag that
+  creates or updates `.entropy-baseline/latest.json`.
+Domain packs:
+- Published NHMS artifacts / display identity: not selected - no published
+  artifact, display API, or frontend evidence behavior changes.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm
+  gateway, scheduler, retry, cancellation, or live/mock parity behavior changes.
+- Run manifest / QC provenance: not selected - no manifest parsing or QC
+  provenance changes.
+- Other NHMS domain packs: not selected - no geospatial, forcing, SHUD
+  numerical, provider, DB, or pipeline runtime behavior change.
+
+Required evidence:
+- Local equivalent of the workflow command writes JSON and Markdown reports to
+  `artifacts/governance/entropy-report.json` and
+  `artifacts/governance/entropy-report.md`, then `test -s` verifies both files
+  exist.
+- Parse the generated JSON and assert `metadata.mode == "report-only"` and
+  `metadata.baseline_written == false`.
+- Verify the artifact upload or `$GITHUB_STEP_SUMMARY` step references the same
+  fixed JSON and Markdown report paths produced by the workflow command.
+- CI workflow syntax is valid by inspection or a local parser/action linter if
+  available.
+- `.entropy-baseline/latest.json` remains absent before and after report runs.
+- `openspec validate governance-4-entropy-automation --strict --no-interactive`
+  passes.
+
+Non-goals:
+- No new audit check families.
+- No hard-gate mode or fail-on-finding threshold.
+- No baseline file creation or update.
