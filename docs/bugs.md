@@ -117,7 +117,8 @@ retest_command: |-
   ! rg -n "bv\\.basin_id = 'qhh'" docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
   rg -n "basins_qhh" docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
-    "select count(*) from core.basin_version bv where bv.basin_id = 'basins_qhh';"
+    "select exists(select 1 from core.basin_version bv where bv.basin_id = 'basins_qhh');" |
+    grep -qx t
 ```
 
 `packages/common/forecast_store.py` keeps `QHH_BASIN_ID = "basins_qhh"`.
@@ -257,9 +258,9 @@ retest_command: |-
   tmp="$(mktemp -d)"
   stages="$tmp/stages.json"
   jobs="$tmp/jobs.json"
-  stages_status="$(curl -sS -o "$stages" -w '%{http_code}'
+  stages_status="$(curl -sS -o "$stages" -w '%{http_code}' \
     "$API_BASE_URL/api/v1/pipeline/stages?source=GFS&cycle_time=$CYCLE_TIME&run_id=$RUN_ID&model_id=basins_qhh_shud")"
-  jobs_status="$(curl -sS -o "$jobs" -w '%{http_code}'
+  jobs_status="$(curl -sS -o "$jobs" -w '%{http_code}' \
     "$API_BASE_URL/api/v1/jobs?source=GFS&cycle_time=$CYCLE_TIME&run_id=$RUN_ID&model_id=basins_qhh_shud&limit=20")"
   jq -e --arg status "$stages_status" --arg run_id "$RUN_ID" --arg model_id basins_qhh_shud '
     $status == "200" and .status == "ok" and (.data | type == "array")
@@ -294,13 +295,14 @@ evidence:
   - tests/test_monitoring_api.py
 retest_command: |-
   set -euo pipefail
+  # JOB_ID must name an existing strict-identity job for the source/cycle/run/model tuple.
   tmp="$(mktemp)"
-  status="$(curl -sS -o "$tmp" -w '%{http_code}'
+  status="$(curl -sS -o "$tmp" -w '%{http_code}' \
     "$API_BASE_URL/api/v1/jobs/$JOB_ID/logs?source=GFS&cycle_time=$CYCLE_TIME&run_id=$RUN_ID&model_id=basins_qhh_shud")"
   jq -e --arg status "$status" --arg job_id "$JOB_ID" '
     ($status == "200" and .status == "ok" and .data.job_id == $job_id and (.data.content | type == "string"))
     or
-    ($status == "404" and .status == "error" and (.error.code | IN("JOB_LOG_NOT_PUBLISHED", "JOB_LOG_NOT_FOUND", "JOB_NOT_FOUND")))
+    ($status == "404" and .status == "error" and (.error.code | IN("JOB_LOG_NOT_PUBLISHED", "JOB_LOG_NOT_FOUND")))
   ' "$tmp"
 ```
 
@@ -326,7 +328,7 @@ evidence:
 retest_command: |-
   set -euo pipefail
   tmp="$(mktemp)"
-  status="$(curl -sS -o "$tmp" -w '%{http_code}' -X POST
+  status="$(curl -sS -o "$tmp" -w '%{http_code}' -X POST \
     "$API_BASE_URL/api/v1/runs/run_missing/cancel" -H "X-User-Role: operator")"
   test "$status" != "200"
   jq -e --arg status "$status" '
@@ -389,7 +391,7 @@ retest_command: |-
   set -euo pipefail
   curl -fsS "$SLURM_GATEWAY_URL/api/v1/slurm/health" |
     jq -e '(.backend? // "slurm") == "slurm" and (.healthy? // true) == true'
-  job_id="$(curl -fsS -X POST "$API_BASE_URL/api/v1/runs/$RUN_ID/retry"
+  job_id="$(curl -fsS -X POST "$API_BASE_URL/api/v1/runs/$RUN_ID/retry" \
     -H "X-User-Role: operator" |
     jq -er '.data.slurm_job_id | select(test("^[0-9]+(_[0-9]+)?$"))')"
   curl -fsS "$SLURM_GATEWAY_URL/api/v1/slurm/jobs/$job_id" |
