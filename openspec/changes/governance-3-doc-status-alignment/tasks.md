@@ -113,7 +113,8 @@
   `status:`, `owner_area:`, `evidence:`, and `retest_command:`, and that
   `resolved` entries include `resolved_by:` while `superseded` entries include
   `superseded_by:`. Evidence: parser reported valid status and owner area for
-  all eight required entries, with conditional resolution fields present.
+  all eight required entries, with conditional resolution fields present; BUG-009
+  and BUG-012 retest commands assert their replacement contracts.
 
 ## 4. Agent/artifact ownership
 

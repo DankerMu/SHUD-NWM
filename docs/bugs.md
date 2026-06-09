@@ -252,9 +252,25 @@ evidence:
   - apps/api/routes/pipeline.py
   - tests/test_monitoring_api.py
   - docs/runbooks/two-node-production-e2e-plan.md
-retest_command: >-
-  curl -fsS "$API_BASE_URL/api/v1/pipeline/stages?source=GFS&cycle_time=$CYCLE_TIME&run_id=$RUN_ID&model_id=basins_qhh_shud"
-  && curl -fsS "$API_BASE_URL/api/v1/jobs?source=GFS&cycle_time=$CYCLE_TIME&run_id=$RUN_ID&model_id=basins_qhh_shud&limit=20"
+retest_command: |-
+  set -euo pipefail
+  tmp="$(mktemp -d)"
+  stages="$tmp/stages.json"
+  jobs="$tmp/jobs.json"
+  stages_status="$(curl -sS -o "$stages" -w '%{http_code}'
+    "$API_BASE_URL/api/v1/pipeline/stages?source=GFS&cycle_time=$CYCLE_TIME&run_id=$RUN_ID&model_id=basins_qhh_shud")"
+  jobs_status="$(curl -sS -o "$jobs" -w '%{http_code}'
+    "$API_BASE_URL/api/v1/jobs?source=GFS&cycle_time=$CYCLE_TIME&run_id=$RUN_ID&model_id=basins_qhh_shud&limit=20")"
+  jq -e --arg status "$stages_status" --arg run_id "$RUN_ID" --arg model_id basins_qhh_shud '
+    $status == "200" and .status == "ok" and (.data | type == "array")
+    and ([.data[].basin_results[]?] | length > 0)
+    and all(.data[].basin_results[]?; .run_id == $run_id and .model_id == $model_id)
+  ' "$stages"
+  jq -e --arg status "$jobs_status" --arg run_id "$RUN_ID" --arg model_id basins_qhh_shud '
+    $status == "200" and .status == "ok" and (.data.items | type == "array")
+    and (.data.total > 0)
+    and all(.data.items[]; .run_id == $run_id and .model_id == $model_id)
+  ' "$jobs"
 ```
 
 The old source/cycle-only historical query is no longer the acceptance path for
@@ -343,7 +359,7 @@ evidence:
   - apps/frontend/e2e/live-display.spec.ts
   - apps/frontend/src/__tests__/playwrightConfig.test.ts
 retest_command: >-
-  cd apps/frontend && corepack pnpm run test:e2e:live-display -- --list
+  cd apps/frontend && corepack pnpm test -- playwrightConfig.test.ts
 ```
 
 The mocked specs are now explicitly named `mocked-regression-chromium`.
