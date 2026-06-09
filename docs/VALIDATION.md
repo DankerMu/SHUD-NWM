@@ -1190,12 +1190,34 @@ corepack pnpm build
 
 ## Frontend E2E
 
-Use the existing Playwright scripts with the frontend preview server and any required API service for the target scenario.
+Frontend Playwright evidence has separate lanes. The default lane is mocked
+regression only: existing deterministic specs may use
+`page.route('**/api/v1/**')`, and their output cannot be cited as a live
+receipt or display_readonly proof.
 
 ```bash
 cd apps/frontend
 corepack pnpm test:e2e
+corepack pnpm run test:e2e:mocked-regression
 ```
+
+Live display_readonly browser evidence must use the dedicated live profile. It
+requires both runtime URLs and has no local dev-server or
+`https://api.example.test` fallback:
+
+```bash
+cd apps/frontend
+PLAYWRIGHT_LIVE_BASE_URL=https://display.example.internal \
+PLAYWRIGHT_LIVE_API_BASE_URL=https://api.example.internal \
+  corepack pnpm run test:e2e:live-display
+```
+
+If either `PLAYWRIGHT_LIVE_BASE_URL` or `PLAYWRIGHT_LIVE_API_BASE_URL` is
+missing, `test:e2e:live-display` exits before browser execution with
+`Live display Playwright profile BLOCKED`. Record unavailable live runtime as
+`BLOCKED`, not `PASS`. Live-display specs must not register broad
+`page.route('**/api/v1/**')` mocks; those mocks are allowed only in
+mocked regression, preview, or visual evidence lanes.
 
 ## OpenSpec
 

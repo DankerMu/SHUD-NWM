@@ -671,6 +671,8 @@ curl -i 'http://127.0.0.1:8000/api/v1/jobs/<job_id>/logs?source=GFS&cycle_time=<
 ### 7.6 浏览器 E2E
 
 要求新增或使用无 API mock 的浏览器测试。现有含 `page.route('**/api/v1/**')` 的测试只能算 mocked regression。
+生产级 display_readonly 浏览器证据使用 `cd apps/frontend && PLAYWRIGHT_LIVE_BASE_URL=<27 frontend> PLAYWRIGHT_LIVE_API_BASE_URL=<27 api> corepack pnpm run test:e2e:live-display`。
+缺少 `PLAYWRIGHT_LIVE_BASE_URL` 或 `PLAYWRIGHT_LIVE_API_BASE_URL` 时该 lane 记为 `BLOCKED`，不能用默认 mocked regression lane 补为 live receipt。
 
 必须覆盖：
 

@@ -70,6 +70,17 @@ Frontend e2e tests that mock API responses SHALL be named and documented as mock
 - **WHEN** a live e2e profile runs against node-27 or a live display API
 - **THEN** it forbids broad API route mocks and requires explicit base URL/API URL configuration
 
+#### Scenario: mocked regression lane remains available
+
+- **WHEN** frontend developers run the default/local mocked Playwright lane
+- **THEN** specs with broad API mocks remain runnable only as mocked regression
+- **AND** their lane/config/docs do not describe the result as live display proof
+
+#### Scenario: live profile is missing required runtime URLs
+
+- **WHEN** the live display-readonly profile starts without explicit frontend base URL or API base URL
+- **THEN** the profile fails before browser execution with a clear configuration error
+
 #### Scenario: live display-readonly runtime is unavailable
 
 - **WHEN** node-27 or a live display API is not available during implementation

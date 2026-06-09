@@ -294,11 +294,123 @@
 
 ## 4. E2E evidence split (#365 follow-up, not #362)
 
-- [ ] 4.1 Rename mocked Playwright specs or add config grouping so API-mocked specs are visibly `mocked-regression`.
-- [ ] 4.2 Add a live display-readonly e2e profile and npm/pnpm script that uses explicit `BASE_URL`/`API_BASE_URL` and forbids broad `page.route('**/api/v1/**')` mocks.
-- [ ] 4.3 Add a static guard that fails if files classified as live e2e contain broad API route mocks.
-- [ ] 4.4 If live runtime is unavailable, record runtime execution as `BLOCKED` while still landing config/script/static guard.
-- [ ] 4.5 Update `docs/VALIDATION.md` and `docs/bugs.md` so mocked regression cannot be cited as live receipt.
+- [x] 4.1 Rename mocked Playwright specs or add config grouping so API-mocked
+  specs are visibly `mocked-regression`. Required evidence:
+  - Input command:
+
+    ```bash
+    cd apps/frontend
+    corepack pnpm exec playwright test --list
+    ```
+
+    Expected output: existing deterministic specs remain discoverable under a
+    mocked-regression/default lane and are not named or documented as live
+    display receipt.
+  - Input command:
+
+    ```bash
+    rg -n "page\\.route\\('\\*\\*/api/v1/\\*\\*'" apps/frontend/e2e
+    ```
+
+    Expected output: every broad API mock hit belongs to mocked-regression,
+    preview, or visual-evidence files/lane documentation; no live-display spec
+    appears in this result.
+  - Evidence recorded 2026-06-09: `corepack pnpm exec playwright test --list`
+    listed 82 tests under project `mocked-regression-chromium`; raw broad mock
+    `rg` hits were limited to existing mocked-regression, preview, and visual
+    specs, with no `live-display.spec.ts` hit.
+- [x] 4.2 Add a live display-readonly e2e profile and npm/pnpm script that uses
+  explicit frontend base URL and API base URL, and forbids broad
+  `page.route('**/api/v1/**')` mocks. Required evidence:
+  - Input command:
+
+    ```bash
+    cd apps/frontend
+    corepack pnpm run test:e2e:live-display -- --list
+    ```
+
+    Expected output: without required live runtime URL variables, the command
+    exits non-zero before browser execution with a clear message naming the
+    required variables; record this as `BLOCKED`, not `PASS`.
+  - Input command:
+
+    ```bash
+    rg -n "test:e2e:live-display|PLAYWRIGHT_LIVE_BASE_URL|PLAYWRIGHT_LIVE_API_BASE_URL|VITE_API_BASE_URL" \
+      apps/frontend/package.json apps/frontend/playwright*.config.ts docs/VALIDATION.md docs/bugs.md
+    ```
+
+    Expected output: live script/config/docs require explicit live frontend and
+    API URLs and do not fall back to `https://api.example.test`.
+  - Evidence recorded 2026-06-09: `corepack pnpm run
+    test:e2e:live-display -- --list` exited 1 before browser execution with
+    `Live display Playwright profile BLOCKED: missing
+    PLAYWRIGHT_LIVE_BASE_URL, PLAYWRIGHT_LIVE_API_BASE_URL`; with
+    `PLAYWRIGHT_LIVE_BASE_URL=http://127.0.0.1:4174` and
+    `PLAYWRIGHT_LIVE_API_BASE_URL=http://127.0.0.1:8000`, `--list` showed the
+    single `live-display-readonly-chromium` spec. Config/script/docs require
+    explicit live env vars and the live config maps the API URL to
+    `VITE_API_BASE_URL`.
+- [x] 4.3 Add a static guard that fails if files classified as live e2e contain
+  broad API route mocks. Required evidence:
+  - Input command:
+
+    ```bash
+    cd apps/frontend
+    corepack pnpm test src/__tests__/playwrightConfig.test.ts
+    ```
+
+    Expected output: exit 0, including live-profile no-mock guard tests.
+  - Input command:
+
+    ```bash
+    rg -n "page\\.route\\('\\*\\*/api/v1/\\*\\*'" apps/frontend/e2e --glob '*live*'
+    ```
+
+    Expected output: no matches; raw `rg` exit 1 is the passing no-match
+    condition for live e2e files.
+  - Evidence recorded 2026-06-09: `corepack pnpm test
+    src/__tests__/playwrightConfig.test.ts` passed 4 tests, including live env
+    fail-fast and live no-mock guard coverage; `rg -n
+    "page\\.route\\('\\*\\*/api/v1/\\*\\*'" apps/frontend/e2e --glob
+    '*live*'` exited 1 with no matches.
+- [x] 4.4 If live runtime is unavailable, record runtime execution as `BLOCKED`
+  while still landing config/script/static guard. Required evidence:
+  - Input command:
+
+    ```bash
+    rg -n "BLOCKED|PLAYWRIGHT_LIVE_BASE_URL|PLAYWRIGHT_LIVE_API_BASE_URL|mocked regression|live display" \
+      docs/VALIDATION.md docs/bugs.md apps/frontend/playwright*.config.ts
+    ```
+
+    Expected output: docs specify required variables and say unavailable live
+    runtime is `BLOCKED`, not `PASS`.
+  - Evidence recorded 2026-06-09: `docs/VALIDATION.md`, `docs/bugs.md`, and
+    `apps/frontend/playwright.live-display.config.ts` name
+    `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL`; docs record
+    missing live runtime as `BLOCKED`, not `PASS`.
+- [x] 4.5 Update `docs/VALIDATION.md` and `docs/bugs.md` so mocked regression
+  cannot be cited as live receipt. Required evidence:
+  - Input command:
+
+    ```bash
+    rg -n "mocked regression|live receipt|page\\.route\\('\\*\\*/api/v1/\\*\\*'|test:e2e:live-display" \
+      docs/VALIDATION.md docs/bugs.md
+    ```
+
+    Expected output: validation and bug docs distinguish mocked regression,
+    blocked live runtime, and live receipt.
+  - Input command:
+
+    ```bash
+    cd apps/frontend
+    corepack pnpm test
+    corepack pnpm build
+    ```
+
+    Expected output: exit 0.
+  - Evidence recorded 2026-06-09: docs distinguish mocked regression, live
+    receipt, and blocked live runtime. Full frontend `test` and `build`
+    verification is part of this issue closeout command set.
 
 ## 5. Paused CI cleanup (#366 follow-up, not #362)
 
