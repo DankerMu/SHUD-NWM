@@ -84,6 +84,8 @@ openspec validate <change-name> --strict --no-interactive
 
 ## 文档更新要求
 
+文档权威状态与冲突解决顺序见 [`docs/governance/DOC_STATUS.md`](docs/governance/DOC_STATUS.md)。
+
 开发过程中必须同步维护以下文档：
 
 1. **OpenSpec tasks.md**: 完成一个 task 后立即勾选对应 checkbox

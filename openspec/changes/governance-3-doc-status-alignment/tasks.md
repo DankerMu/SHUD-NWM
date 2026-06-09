@@ -5,7 +5,16 @@
   current branch contains merged baseline PRs #375 (`fix(contract): reconcile
   generated frontend API types`) and #376 (`chore(tooling): run Makefile
   Python targets via uv`), with governance follow-up commits #360-#366 already
-  merged on top.
+  merged on top. `gh pr view 375 --json statusCheckRollup` shows CI check
+  rollup success for #375, including `Detect changed areas` and `Frontend
+  Build`; `gh run view 27154927963 --json status,conclusion,headSha,url`
+  reports `status=completed`, `conclusion=success`,
+  `headSha=11a0b7beca932fa9c727002b271cd2a077d9f729`. `gh pr view 376
+  --json statusCheckRollup` shows CI check rollup success for #376, including
+  `Detect changed areas`; path-scoped jobs are skipped as expected. `gh run
+  view 27157572065 --json status,conclusion,headSha,url` reports
+  `status=completed`, `conclusion=success`,
+  `headSha=b9c7cbaedac84ee73a72e1df67a821ad9af0cc4f`.
 
 ## 1. Document authority model
 
@@ -31,5 +40,7 @@
   `openspec validate governance-3-doc-status-alignment --strict --no-interactive`.
 - [x] 5.2 Verify current entrypoint link:
   `rg -n "docs/governance/DOC_STATUS.md|DOC_STATUS" README.md progress.md CLAUDE.md`.
+  This must return at least one match in each declared current entrypoint:
+  `README.md`, `progress.md`, and `CLAUDE.md`.
 - [x] 5.3 Verify implementation plan status:
   `rg -n "historical|superseded|archived|DOC_STATUS|current entrypoints" IMPLEMENTATION_PLAN.md docs/archived README.md`.
