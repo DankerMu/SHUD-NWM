@@ -42,7 +42,15 @@ Representative active paths:
   `workers/model_registry`.
 - `services/tile_publisher` and `services/production_closure`.
 - `infra/compose.compute.yml`, `infra/env/compute.example`, `infra/sbatch`,
-  `workers/sbatch_templates`, and compute-side systemd/runbook assets.
+  and compute-side systemd/runbook assets.
+
+Legacy Slurm template note: `workers/sbatch_templates` contains legacy
+single-run Slurm templates. It is governed by
+`docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`, not listed as a representative
+active role-boundary path. The active real Slurm template directory is
+`infra/sbatch`, matching `services/slurm_gateway/config.py` where
+`SlurmGatewaySettings.template_dir` defaults to `infra/sbatch` and
+`SLURM_GATEWAY_TEMPLATE_DIR` maps to that setting.
 
 Allowed mutations:
 
@@ -208,7 +216,6 @@ Representative active paths:
 - `db/migrations`
 - `schemas`
 - `services/slurm_gateway/models.py`
-- `workers/sbatch_templates`
 - `infra/sbatch`
 - `docs/modules/*_spec.md`
 

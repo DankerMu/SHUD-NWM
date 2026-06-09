@@ -1,5 +1,9 @@
 ## ADDED Requirements
 
+Issue #362 implements only the persistent inventory scenarios below. Cleanup,
+diagnostic relocation, live e2e separation, and paused CI retirement scenarios
+are follow-up work for #363-#366 unless explicitly marked as inventory evidence.
+
 ### Requirement: Legacy and diagnostic paths have explicit status
 
 Every governed historical path SHALL be classified as `production`, `diagnostic`, `test-only`, or `archived` before deletion or relocation.
