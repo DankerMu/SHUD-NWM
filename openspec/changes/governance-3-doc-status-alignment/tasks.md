@@ -77,7 +77,50 @@
 
 ## 3. Bugs ledger
 
-- [ ] Deferred to #369.
+- [x] 3.1 Define ledger status vocabulary and required fields in
+  `docs/bugs.md`: `status`, `owner_area`, `resolved_by`/`superseded_by`,
+  `evidence`, and `retest_command`. Evidence: `docs/bugs.md` now defines the
+  governed status vocabulary, owner-area vocabulary, conditional
+  `resolved_by`/`superseded_by` fields, `evidence`, and `retest_command`.
+- [x] 3.2 Triage at least BUG-20260527-003, BUG-20260527-007,
+  BUG-20260527-008, BUG-20260527-009, BUG-20260527-010, BUG-20260527-011,
+  BUG-20260527-012, and BUG-20260527-013. Evidence: required entries are
+  triaged as BUG-003 `open`/`shared_contract`, BUG-007
+  `resolved`/`display_readonly`, BUG-008 `resolved`/`compute_control`, BUG-009
+  `superseded`/`shared_contract`, BUG-010
+  `stale-needs-repro`/`display_readonly`, BUG-011 `open`/`compute_control`,
+  BUG-012 `superseded`/`display_readonly`, and BUG-013
+  `open`/`slurm_gateway`.
+- [x] 3.3 Mark each required bug `open`, `resolved`, `superseded`,
+  `stale-needs-repro`, or `archived` with evidence from source code, tests,
+  docs, runbooks, GitHub issues/PRs, or existing artifact paths. Evidence:
+  `docs/bugs.md` cites original 2026-05-27 artifacts plus current source/tests,
+  #291/#365/#233, M22/M24/M26 OpenSpec receipts, and live-display docs.
+- [x] 3.4 Link still-open bugs to a GitHub issue when one exists; otherwise
+  record an explicit `owner_area` and actionable `retest_command`. Evidence:
+  required still-open entries BUG-003, BUG-011, and BUG-013 have explicit
+  `owner_area` values and concrete retest commands; no direct existing GitHub
+  issue was found for those required bug IDs.
+- [x] 3.5 Verify the ledger fields:
+  `rg -n "BUG-20260527-(003|007|008|009|010|011|012|013)|status:|owner_area:|resolved_by:|superseded_by:|evidence:|retest_command:" docs/bugs.md`.
+  Evidence: command returned all required BUG headings and ledger fields,
+  including `resolved_by` for resolved entries and `superseded_by` for
+  superseded entries.
+- [x] 3.6 Verify each required bug block has required fields, conditional
+  resolution fields, `github_issue` format coverage, retest shell syntax, and
+  post-gate retest invariants.
+  Evidence: `uv run --no-sync python scripts/validate_bugs_ledger.py` returned:
+
+  ```text
+  BUG-20260527-003: open shared_contract retest-shell-ok
+  BUG-20260527-007: resolved display_readonly retest-shell-ok
+  BUG-20260527-008: resolved compute_control retest-shell-ok
+  BUG-20260527-009: superseded shared_contract retest-shell-ok
+  BUG-20260527-010: stale-needs-repro display_readonly retest-shell-ok
+  BUG-20260527-011: open compute_control retest-shell-ok
+  BUG-20260527-012: superseded display_readonly retest-shell-ok
+  BUG-20260527-013: open slurm_gateway retest-shell-ok
+  ```
 
 ## 4. Agent/artifact ownership
 
