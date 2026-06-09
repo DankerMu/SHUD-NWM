@@ -480,5 +480,87 @@
 
 ## 5. Paused CI cleanup (#366 follow-up, not #362)
 
-- [ ] 5.1 Replace the `frontend-m15-visual` `&& false` job with archived documentation or a manual workflow.
-- [ ] 5.2 Verify workflow files no longer contain indefinite `&& false` disabled jobs.
+- [x] 5.1 Replace the `frontend-m15-visual` `&& false` job with archived
+  documentation or a manual workflow. Preferred implementation: remove the
+  hidden-disabled job from `.github/workflows/ci.yml` and add an explicit
+  `workflow_dispatch` workflow for historical M15 visual evidence.
+  Required evidence:
+  - Input command:
+
+    ```bash
+    rg -n "frontend-m15-visual|&& false|M15 visual|test:e2e:m15-visual" \
+      .github/workflows CLAUDE.md progress.md docs/governance \
+      openspec/changes/governance-2-legacy-dead-code-retirement \
+      --glob '!**/__pycache__/**'
+    ```
+
+    Expected output: no automatic PR/push CI job remains hidden behind
+    `&& false`; remaining `frontend-m15-visual` or M15 visual hits are an
+    explicit manual workflow, governance history, or documentation saying the
+    lane is historical mocked visual evidence.
+  - Input command:
+
+    ```bash
+    rg -n "workflow_dispatch|M15_EVIDENCE_SHA|test:e2e:m15-visual|mocked-regression-chromium" \
+      .github/workflows apps/frontend/package.json docs/governance CLAUDE.md progress.md
+    ```
+
+    Expected output: retained M15 evidence, if any, is manual, verifies evidence
+    SHA, and uses the mocked-regression visual command.
+  - Evidence recorded 2026-06-09: removed the hidden-disabled automatic CI job
+    from `.github/workflows/ci.yml`; added
+    `.github/workflows/m15-visual-evidence.yml` with `workflow_dispatch`,
+    read-only permissions, bounded timeout, explicit `ref` and `evidence_sha`
+    inputs, checkout SHA verification through `M15_EVIDENCE_SHA`,
+    Node/pnpm/Playwright setup, `test:e2e:m15-visual`, and artifact upload
+    scoped to `.codex/evidence/issue-176/**`.
+  - Evidence recorded 2026-06-09: `CLAUDE.md`, `progress.md`, and
+    `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md` classify the retained lane
+    as historical mocked visual evidence, not node-27 live display proof.
+- [x] 5.2 Verify workflow files no longer contain indefinite `&& false` disabled
+  jobs. Required evidence:
+  - Input command:
+
+    ```bash
+    if rg -n "&& false" .github/workflows; then
+      printf '%s\n' 'unexpected hidden disabled workflow job'
+      exit 1
+    else
+      status=$?
+      if [ "$status" -eq 1 ]; then
+        printf '%s\n' 'no hidden && false workflow jobs (rg exit 1)'
+      else
+        printf '%s\n' "rg failed unexpectedly with exit $status"
+        exit "$status"
+      fi
+    fi
+    ```
+
+    Expected output: `no hidden && false workflow jobs (rg exit 1)` and exit 0.
+  - Evidence recorded 2026-06-09: focused workflow grep returned no
+    `.github/workflows` `&& false` hits.
+- [x] 5.3 Keep automatic CI scope unchanged except for removing the hidden
+  paused job. Required evidence:
+  - Input command:
+
+    ```bash
+    git diff --name-only origin/master...HEAD
+    ```
+
+    Expected output: #366 changes are limited to workflow cleanup, OpenSpec
+    fixture/evidence, and directly related governance docs; no backend, Slurm,
+    QHH diagnostic, live e2e, or frontend implementation behavior changes.
+  - Input command:
+
+    ```bash
+    npx --yes markdownlint-cli2 --config .markdownlint.yaml \
+      CLAUDE.md progress.md docs/governance/LEGACY_DEAD_CODE_INVENTORY.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/design.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/tasks.md \
+      openspec/changes/governance-2-legacy-dead-code-retirement/specs/legacy-dead-code-retirement/spec.md
+    ```
+
+    Expected output: exit 0.
+  - Evidence recorded 2026-06-09: #366 changed workflow cleanup, direct
+    governance docs, and OpenSpec evidence only; no backend, Slurm, QHH
+    diagnostic, live e2e, or frontend implementation files were modified.

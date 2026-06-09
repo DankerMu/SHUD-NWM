@@ -22,14 +22,16 @@ The PNG files are volatile local review evidence and should not be committed unl
 policy changes. The manifest records route, viewport, fixture mode, SHA, state label, command, and
 artifact path for each captured screenshot.
 
-The manifest SHA is always the checked-out `git rev-parse HEAD` commit. CI sets
-`M15_EVIDENCE_SHA` to the pull request head SHA for PR events and to `github.sha` for push/non-PR
-events, checks out that same SHA, and fails before capture if `M15_EVIDENCE_SHA` differs from
-`HEAD`. Local evidence may set `M15_EVIDENCE_SHA`, PR head SHA env, `GITHUB_SHA`, or
-`CI_COMMIT_SHA`, but those values are assertions that must match `HEAD`; they are not allowed to
-override the checked-out tree identity. PR evidence must be rerun after the final commit so it cites
-the frozen PR head SHA under review. Placeholder values such as `local-uncommitted` are blocking for
-CI/PR evidence.
+The manifest SHA is always the checked-out `git rev-parse HEAD` commit. The historical CI evidence
+lane is an explicit manual `.github/workflows/m15-visual-evidence.yml` `workflow_dispatch`
+workflow, not an automatic PR/push gate. The manual workflow accepts `ref` and `evidence_sha`
+inputs, checks out `evidence_sha`, sets `M15_EVIDENCE_SHA` from that same input, and fails before
+capture if `M15_EVIDENCE_SHA` differs from `HEAD`. Use `ref` as operator-facing context for the
+branch or tag under review; `evidence_sha` is the immutable checkout identity. Local evidence may
+set `M15_EVIDENCE_SHA`, PR head SHA env, `GITHUB_SHA`, or `CI_COMMIT_SHA`, but those values are
+assertions that must match `HEAD`; they are not allowed to override the checked-out tree identity.
+PR evidence must be rerun after the final commit so it cites the frozen PR head SHA under review.
+Placeholder values such as `local-uncommitted` are blocking for CI/PR evidence.
 
 ## Required Matrix
 

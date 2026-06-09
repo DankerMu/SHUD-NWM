@@ -1,0 +1,66 @@
+name: M15 Visual Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or tag context for the manual evidence run; checkout is pinned by evidence_sha.
+        required: true
+        default: master
+        type: string
+      evidence_sha:
+        description: Commit SHA to check out and verify for historical M15 mocked visual evidence.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m15-visual-evidence-${{ inputs.evidence_sha }}
+  cancel-in-progress: false
+
+jobs:
+  m15-visual-evidence:
+    name: Historical M15 Mocked Visual Evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      M15_EVIDENCE_SHA: ${{ inputs.evidence_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.evidence_sha }}
+          persist-credentials: false
+      - name: Verify M15 evidence checkout identity
+        run: |
+          if [[ ! "$M15_EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "M15_EVIDENCE_SHA must be a 40-character lowercase hex commit SHA." >&2
+            exit 1
+          fi
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "$HEAD_SHA" != "$M15_EVIDENCE_SHA" ]; then
+            echo "M15 evidence checkout mismatch: HEAD=$HEAD_SHA M15_EVIDENCE_SHA=$M15_EVIDENCE_SHA" >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.11.0 --activate
+      - name: Install frontend dependencies
+        run: cd apps/frontend && CI=true corepack pnpm install --frozen-lockfile
+      - name: Install Playwright browser
+        run: cd apps/frontend && corepack pnpm exec playwright install --with-deps chromium
+      - name: Run M15 visual evidence gate
+        run: cd apps/frontend && corepack pnpm run test:e2e:m15-visual
+      - name: Upload M15 visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-176-m15-visual-evidence-${{ env.M15_EVIDENCE_SHA }}
+          path: .codex/evidence/issue-176/**
+          if-no-files-found: ignore
+          retention-days: 14

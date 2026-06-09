@@ -488,11 +488,144 @@ Boundary-surface checklist for #365:
 - Unchanged downstream consumers: API/backend routes, scheduler, Slurm gateway,
   QHH diagnostic scripts, and #366 CI paused-job cleanup.
 
+### D1E. Issue #366 removes hidden paused CI entropy
+
+Issue #366 owns the `frontend-m15-visual` lane that, before #366, was hidden
+behind `if: needs.changes.outputs.frontend == 'true' && false` in
+`.github/workflows/ci.yml`.
+
+The preferred resolution is to remove the hidden-disabled job from the main
+`CI` workflow and preserve the historical M15 visual evidence lane as an
+explicit `workflow_dispatch` workflow. This keeps normal PR/push CI honest
+while retaining a manual, intentionally named historical/mocked visual evidence
+entrypoint.
+
+Fixture level for #366: `expanded`. The issue changes GitHub Actions workflow
+entrypoints and evidence semantics for a legacy visual lane.
+
+Repair intensity for #366: `high`. Workflow changes can silently remove
+validation, add accidental PR gates, or mislabel historical mocked visual
+evidence as current live display proof.
+
+Risk packs considered for #366:
+
+- Public API / CLI / script entry: selected - GitHub workflow entrypoints and
+  package scripts are public validation commands.
+- Config / project setup: selected - workflow triggers, permissions, checkout
+  ref, Node/pnpm setup, and artifact upload behavior change.
+- File IO / path safety / overwrite: selected - artifact upload path must stay
+  scoped to M15 evidence and not upload unrelated local files.
+- Schema / columns / units / field names: not selected - no DB/API/schema field
+  changes.
+- Auth / permissions / secrets: selected - manual workflow permissions and
+  checkout inputs must not introduce write tokens, secrets, or credentialed
+  URLs.
+- Concurrency / shared state / ordering: selected - CI concurrency and manual
+  workflow identity checks must avoid stale evidence.
+- Resource limits / large input / discovery: selected - manual visual lane
+  should remain bounded and not run automatically on every frontend PR.
+- Legacy compatibility / examples: selected - historical M15 visual evidence is
+  retained as manual or archived, not silently dropped as active production
+  proof.
+- Error handling / rollback / partial outputs: selected - failed manual evidence
+  should upload artifacts when available without affecting main CI.
+- Release / packaging / dependency compatibility: selected - Node/pnpm/Playwright
+  setup must match the existing frontend toolchain.
+- Documentation / migration notes: selected - `CLAUDE.md`, `progress.md`, and
+  governance inventory must no longer instruct developers to remove `&& false`.
+- Geospatial / CRS / basin geometry: not selected - no GIS behavior change.
+- Hydro-met time series / forcing windows: not selected - no forcing/time-series
+  behavior change.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver/runtime
+  behavior change.
+- PostGIS / TimescaleDB domain behavior: not selected - no database behavior
+  change.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm
+  behavior change.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider behavior change.
+- Run manifest / QC provenance: selected - historical visual evidence artifacts
+  must be explicitly manual/mocked and bound to the checked-out SHA.
+- Published NHMS artifacts / display identity: selected - M15 visual evidence
+  must not be cited as live node-27 display proof.
+
+Must preserve for #366:
+
+- Main `CI` PR/push workflow still runs normal changed-area jobs and frontend
+  build/test path; it must not contain a job disabled by `&& false`.
+- Historical M15 visual evidence remains either archived or manually runnable
+  with explicit `workflow_dispatch`.
+- Manual M15 workflow records operator-facing ref context, checks out the
+  immutable evidence SHA, and verifies evidence identity before running the
+  visual command.
+- M15 visual evidence remains classified as mocked/historical visual evidence,
+  not live display_readonly receipt.
+- No backend, API, Slurm, QHH diagnostic, or live display e2e behavior changes.
+
+Invariant Matrix for #366:
+
+- Governing invariant: hidden-disabled CI jobs must be removed from automatic
+  PR/push CI, and any retained historical visual evidence lane must be explicit,
+  manual, bounded, and not misclassified as live display proof.
+- Source-of-truth identity/contract: `.github/workflows/ci.yml`,
+  the manual M15 workflow if retained, `apps/frontend/package.json`
+  `test:e2e:m15-visual`, governance inventory, `CLAUDE.md`, `progress.md`, and
+  OpenSpec task evidence.
+- Producers: GitHub workflow definitions and docs/governance references.
+- Validators/preflight: workflow grep for `&& false`, YAML parse/list checks,
+  focused `rg` over `frontend-m15-visual`, docs lint, and frontend command
+  list smoke where needed.
+- Storage/cache/query: none - no DB/cache/query changes.
+- Public routes/entrypoints: automatic `CI` workflow, manual M15 visual workflow,
+  `corepack pnpm run test:e2e:m15-visual`.
+- Frontend/downstream consumers: existing `apps/frontend/e2e/m15-visual-conformance.spec.ts`
+  and mocked-regression project remain unchanged unless command docs require
+  explicit classification.
+- Failure paths/rollback/stale state: manual workflow upload runs `if: always()`
+  and evidence SHA check prevents stale checkout/evidence mismatch.
+- Evidence/audit/readiness: updated inventory and docs state the lane is manual
+  historical visual evidence; workflow grep proves no hidden `&& false` job
+  remains.
+- Regression rows:
+  - Main `.github/workflows/ci.yml` scan for `&& false` -> no hidden paused job.
+  - `frontend-m15-visual` entrypoint -> absent from automatic CI or present only
+    in an explicit `workflow_dispatch` workflow.
+  - Manual workflow input/ref checkout -> evidence SHA is verified before test.
+  - M15 command -> still uses `test:e2e:m15-visual` and the
+    `mocked-regression-chromium` project from #365.
+  - Docs/governance search -> no current source-of-truth tells developers to
+    re-enable by deleting `&& false`.
+
+Boundary-surface checklist for #366:
+
+- Workflow surfaces: `.github/workflows/ci.yml` and any added manual workflow.
+- Evidence docs: `CLAUDE.md`, `progress.md`,
+  `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`, OpenSpec tasks/spec.
+- Frontend command surface: `apps/frontend/package.json` and existing M15 visual
+  spec command.
+- Unchanged downstream consumers: frontend build/test, live display e2e, backend
+  CI jobs, Slurm gateway, QHH diagnostic scripts.
+
+Implementation evidence recorded 2026-06-09:
+
+- The hidden-disabled `frontend-m15-visual` job was removed from the automatic
+  `CI` workflow.
+- `.github/workflows/m15-visual-evidence.yml` retains the historical M15 mocked
+  visual lane as an explicit manual workflow with read-only permissions,
+  bounded timeout, explicit ref context plus immutable SHA input,
+  `M15_EVIDENCE_SHA` checkout verification, Node/pnpm/Playwright setup, and
+  scoped artifact upload.
+- `CLAUDE.md`, `progress.md`, and the governance inventory classify the lane as
+  historical mocked visual evidence, not current node-27 live display proof.
+
 ## Risks / Mitigations
 
 - **Risk: removing historical placeholders breaks old docs.** Mitigation: update docs or archive historical docs in the same PR.
 - **Risk: moving diagnostic scripts breaks runbooks.** Mitigation: first add README/manifest; move only with wrappers and deprecation messaging.
 - **Risk: live e2e cannot run locally.** Mitigation: separate config/profile and make live receipt explicit, not part of fast local tests.
+- **Risk: moving paused visual CI hides evidence loss.** Mitigation: keep any
+  retained M15 visual lane as an explicit manual workflow and update docs so it
+  is not mistaken for current live node-27 proof.
 
 ## Verification
 
