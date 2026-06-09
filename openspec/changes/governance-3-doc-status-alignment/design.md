@@ -35,6 +35,8 @@ can mislead current development or display deployment:
   as the unresolved live PostGIS MVT root cause after #351 closed #343 with
   the 2026-06-08 live receipt.
 - #342 station-MVT must remain separate and open.
+- #389 must route the remaining bbox/framing popup live-click browser evidence
+  gap separately from #342 station-MVT and #343 live MVT closure.
 - `infra/env/display.example` and `infra/compose.display.yml` must expose
   `NHMS_ENABLE_LIVE_POSTGIS_MVT` for display readonly deployments.
 - Display config updates must preserve readonly safety: `display_readonly`

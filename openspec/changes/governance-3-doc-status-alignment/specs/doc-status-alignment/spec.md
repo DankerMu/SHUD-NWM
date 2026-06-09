@@ -37,8 +37,9 @@ Current entrypoints, node-27 runbooks, and display readonly example config SHALL
 reflect the 2026-06-08 live PostGIS MVT receipt: `NHMS_ENABLE_LIVE_POSTGIS_MVT`
 is enabled for display readonly deployments, `/api/v1/layers` returns live
 layers when the feature is enabled, #351 is recorded as the PR that closed #343's
-live MVT root-cause investigation, and #342 station-MVT remains a separate open
-backend issue.
+live MVT root-cause investigation, #342 station-MVT remains a separate open
+backend issue, and #389 routes the remaining bbox/framing popup live-click
+browser evidence gap.
 
 #### Scenario: display env example is used
 
@@ -63,4 +64,4 @@ backend issue.
 #### Scenario: node-27 checklist references MVT status
 
 - **WHEN** node-27 bringup checklist describes C4/MVT status
-- **THEN** it no longer treats #343 as open, cites #351/live receipt for the closed live MVT root cause, and clearly separates remaining station-MVT/#342 or bbox/click automation gaps
+- **THEN** it no longer treats #343 as open, cites #351/live receipt for the closed live MVT root cause, keeps station-MVT/#342 separate, and routes bbox/framing popup live-click evidence to #389
