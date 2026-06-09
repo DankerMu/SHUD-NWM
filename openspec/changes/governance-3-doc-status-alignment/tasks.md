@@ -107,7 +107,8 @@
   including `resolved_by` for resolved entries and `superseded_by` for
   superseded entries.
 - [x] 3.6 Verify each required bug block has required fields, conditional
-  resolution fields, retest shell syntax, and post-gate retest invariants.
+  resolution fields, `github_issue` format coverage, retest shell syntax, and
+  post-gate retest invariants.
   Evidence: `uv run --no-sync python scripts/validate_bugs_ledger.py` returned:
 
   ```text

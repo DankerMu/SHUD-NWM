@@ -24,7 +24,12 @@ ALLOWED_STATUSES = frozenset(
 ALLOWED_OWNER_AREAS = frozenset(
     {"compute_control", "display_readonly", "slurm_gateway", "shared_contract"}
 )
-REQUIRED_FIELDS = frozenset({"status", "owner_area", "evidence", "retest_command"})
+REQUIRED_FIELDS = frozenset(
+    {"status", "owner_area", "github_issue", "evidence", "retest_command"}
+)
+GITHUB_ISSUE_RE = re.compile(
+    r"^(?:none|#\d+|https://github\.com/[^/\s]+/[^/\s]+/issues/\d+)$"
+)
 
 
 @dataclass(frozen=True)
@@ -150,6 +155,13 @@ def _validate_fields(entry: LedgerEntry) -> None:
         allowed = ", ".join(sorted(ALLOWED_OWNER_AREAS))
         raise LedgerError(
             f"{entry.bug_id}: invalid owner_area {owner_area!r}; allowed: {allowed}"
+        )
+
+    github_issue = entry.fields["github_issue"]
+    if not GITHUB_ISSUE_RE.fullmatch(github_issue):
+        raise LedgerError(
+            f"{entry.bug_id}: invalid github_issue {github_issue!r}; "
+            "expected none, #<issue-number>, or https://github.com/<owner>/<repo>/issues/<number>"
         )
 
     if not re.search(r"(?m)^evidence:\n(?:  .*\n)*  - \S", entry.body):
