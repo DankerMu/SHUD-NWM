@@ -1190,12 +1190,47 @@ corepack pnpm build
 
 ## Frontend E2E
 
-Use the existing Playwright scripts with the frontend preview server and any required API service for the target scenario.
+Frontend Playwright evidence has separate lanes. The default lane is mocked
+regression only: existing deterministic specs may use
+`page.route('**/api/v1/**')`, and their output cannot be cited as a live
+receipt or display_readonly proof.
 
 ```bash
 cd apps/frontend
 corepack pnpm test:e2e
+corepack pnpm run test:e2e:mocked-regression
 ```
+
+Live display_readonly browser evidence must use the dedicated live profile. It
+requires both runtime URLs and has no local dev-server or
+`https://api.example.test` fallback. A passing live receipt requires the browser
+page itself to fetch `/api/v1/runtime/config` from the configured API binding
+and receive `service_role` exactly `display_readonly`, then fetch at least one
+monitoring read API from that same binding. The runtime config body is the only
+live response body parsed for evidence and must fit the bounded evidence size;
+monitoring read API evidence records URL/status only. Both distinct API origins
+and same-origin `/api` proxy deployments are valid when
+`PLAYWRIGHT_LIVE_API_BASE_URL` names the expected API origin.
+
+```bash
+cd apps/frontend
+PLAYWRIGHT_LIVE_BASE_URL=https://display.example.internal \
+PLAYWRIGHT_LIVE_API_BASE_URL=https://api.example.internal \
+  corepack pnpm run test:e2e:live-display
+```
+
+If either `PLAYWRIGHT_LIVE_BASE_URL` or `PLAYWRIGHT_LIVE_API_BASE_URL` is
+missing, or either URL includes username/password userinfo,
+`test:e2e:live-display` exits before browser execution with
+`Live display Playwright profile BLOCKED` or a live display profile URL error.
+Do not supply credentials through URL userinfo. Record unavailable live runtime
+as `BLOCKED`, not `PASS`. RBAC `权限不足`, page-visible runtime config
+unavailability, any browser request to `/api/v1/slurm/*`, or retry/cancel
+mutations also cannot be recorded as a live `PASS`. Live-display specs must not
+register broad `page.route('**/api/v1/**')` mocks; those mocks are allowed only
+in mocked regression, preview, or visual evidence lanes. Do not use
+`--project=chromium` for mocked evidence; use
+`--project=mocked-regression-chromium`.
 
 ## OpenSpec
 

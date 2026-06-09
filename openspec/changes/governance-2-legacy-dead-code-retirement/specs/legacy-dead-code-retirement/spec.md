@@ -68,7 +68,37 @@ Frontend e2e tests that mock API responses SHALL be named and documented as mock
 #### Scenario: live display-readonly e2e is added
 
 - **WHEN** a live e2e profile runs against node-27 or a live display API
-- **THEN** it forbids broad API route mocks and requires explicit base URL/API URL configuration
+- **THEN** it forbids broad API route mocks using the same live spec matcher as the profile test matcher
+- **AND** it requires explicit base URL/API URL configuration without username/password userinfo
+- **AND** a passing receipt requires browser-observed `/api/v1/runtime/config`
+  from the configured API binding with `service_role` exactly `display_readonly`
+- **AND** runtime config JSON evidence is parsed only inside an explicit body-size boundary
+- **AND** a passing receipt requires at least one browser-observed monitoring
+  read API response URL/status from that same configured API binding without
+  parsing the read API response body
+
+#### Scenario: live display-readonly page is denied or unavailable
+
+- **WHEN** the live display-readonly browser page shows RBAC `权限不足` or runtime config unavailability
+- **THEN** the live receipt is not recorded as `PASS`
+
+#### Scenario: live display-readonly page touches control surfaces
+
+- **WHEN** the live display-readonly browser page requests `/api/v1/slurm/*`
+- **THEN** the live receipt is not recorded as `PASS`, regardless of HTTP method
+- **AND** retry/cancel run endpoints remain forbidden for non-GET mutation requests
+
+#### Scenario: mocked regression lane remains available
+
+- **WHEN** frontend developers run the default/local mocked Playwright lane
+- **THEN** specs with broad API mocks remain runnable only as mocked regression
+- **AND** their lane/config/docs do not describe the result as live display proof
+- **AND** broad-mock specs are not listed under a generic `chromium` project name
+
+#### Scenario: live profile is missing required runtime URLs
+
+- **WHEN** the live display-readonly profile starts without explicit frontend base URL or API base URL
+- **THEN** the profile fails before browser execution with a clear configuration error
 
 #### Scenario: live display-readonly runtime is unavailable
 

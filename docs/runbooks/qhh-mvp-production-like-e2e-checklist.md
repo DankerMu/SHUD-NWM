@@ -801,7 +801,7 @@ corepack pnpm preview --host 0.0.0.0 --port 4173 \
 cd apps/frontend
 NHMS_E2E_LIVE_API_BASE="$NHMS_API_BASE_URL" \
 NHMS_E2E_FRONTEND_BASE="$NHMS_FRONTEND_BASE_URL" \
-corepack pnpm test:e2e -- hydro-met.spec.ts --project=chromium --workers=1 \
+corepack pnpm test:e2e -- hydro-met.spec.ts --project=mocked-regression-chromium --workers=1 \
   2>&1 | tee "../../$MVP_E2E_EVIDENCE_ROOT/e2e_hydro_met_live.log"
 ```
 
@@ -842,7 +842,7 @@ corepack pnpm test:e2e -- hydro-met.spec.ts --project=chromium --workers=1 \
 cd apps/frontend
 NHMS_E2E_LIVE_API_BASE="$NHMS_API_BASE_URL" \
 NHMS_E2E_FRONTEND_BASE="$NHMS_FRONTEND_BASE_URL" \
-corepack pnpm test:e2e -- monitoring.spec.ts --project=chromium --workers=1 \
+corepack pnpm test:e2e -- monitoring.spec.ts --project=mocked-regression-chromium --workers=1 \
   2>&1 | tee "../../$MVP_E2E_EVIDENCE_ROOT/e2e_ops_live.log"
 ```
 

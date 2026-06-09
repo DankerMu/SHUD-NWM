@@ -21,7 +21,7 @@ deterministic 模式只使用测试数据库、mocked Slurm gateway fixture 和 
 uv run pytest -q tests/test_monitoring_api.py tests/test_retry_cancel_consistency.py
 
 cd apps/frontend
-corepack pnpm test:e2e -- monitoring.spec.ts --project=chromium --workers=1
+corepack pnpm test:e2e -- monitoring.spec.ts --project=mocked-regression-chromium --workers=1
 ```
 
 重点覆盖：

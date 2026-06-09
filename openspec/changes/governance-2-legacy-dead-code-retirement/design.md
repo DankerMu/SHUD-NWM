@@ -362,6 +362,132 @@ Mocked Playwright tests remain useful, but filenames/config/docs must say mocked
 
 The live display-readonly profile is a deliverable, not only a plan. If live credentials or node access are unavailable, the issue may mark runtime execution blocked, but the config/script/static no-mock guard still needs to land.
 
+Issue #365 applies this split. It should prefer a low-churn classification
+surface over renaming every existing Playwright file: existing broad API-mocked
+specs may remain in `apps/frontend/e2e/` if the default/local config and docs
+classify them as mocked regression, while the new live profile owns a distinct
+file pattern/config/script and cannot run specs that register broad API mocks.
+
+Fixture level for #365: `expanded`. The issue touches frontend test
+configuration, package scripts, evidence semantics, validation docs, and bug
+ledger status.
+
+Repair intensity for #365: `high`. The main risk is evidence laundering:
+deterministic mocked browser tests are useful, but they must not be cited as
+node-27/live display proof. A second risk is introducing a live Playwright
+profile that silently falls back to local mocked APIs or placeholder base URLs.
+
+Risk packs considered for #365:
+
+- Public API / CLI / script entry: selected - package scripts and Playwright
+  configs are user-facing validation entrypoints.
+- Config / project setup: selected - the live profile must require explicit
+  base URL and API base URL inputs.
+- File IO / path safety / overwrite: not selected - no artifact write or file
+  movement beyond frontend test/config/docs is expected.
+- Schema / columns / units / field names: not selected - no API or DB schema
+  changes.
+- Auth / permissions / secrets: selected - live URL docs must not hard-code
+  secrets, private credentials, or write-capable control-plane actions.
+- Concurrency / shared state / ordering: not selected - no shared scheduler or
+  runtime state changes.
+- Resource limits / large input / discovery: selected - static guards should
+  scan bounded frontend e2e/config files and avoid generated directories.
+- Legacy compatibility / examples: selected - existing mocked specs should
+  remain runnable under a clearly named mocked-regression lane.
+- Error handling / rollback / partial outputs: selected - missing live runtime
+  is `BLOCKED`, not `PASS`.
+- Release / packaging / dependency compatibility: selected - pnpm scripts and
+  Playwright configs must work with the existing frontend toolchain.
+- Documentation / migration notes: selected - `docs/VALIDATION.md` and
+  `docs/bugs.md` must say mocked specs are not live receipts.
+- Geospatial / CRS / basin geometry: not selected - no GIS implementation
+  changes.
+- Hydro-met time series / forcing windows: not selected - no data semantics
+  changes.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver
+  changes.
+- PostGIS / TimescaleDB domain behavior: not selected - no database behavior
+  changes.
+- Slurm production lifecycle / mock-vs-real parity: selected - live display
+  proof must not be replaced by deterministic mocked UI tests.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider snapshot behavior changes.
+- Run manifest / QC provenance: selected - browser evidence status must be
+  bound to live-vs-mocked provenance.
+- Published NHMS artifacts / display identity: selected - live display profile
+  must target display_readonly API/frontend surfaces and not mocked artifacts.
+
+Must preserve for #365:
+
+- Existing deterministic Playwright specs remain available as frontend
+  regression coverage.
+- Broad `page.route('**/api/v1/**')` mocks are allowed only in files/lane names
+  classified as mocked regression, preview, or visual evidence.
+- The live display_readonly lane has its own config/script and refuses broad API
+  route mocks.
+- The live profile requires explicit frontend base URL and API base URL; it must
+  not default to `https://api.example.test`, accept username/password userinfo
+  credentials, or use a local dev server with mocked API data.
+- A live PASS requires browser-observed runtime config and read API responses
+  from the configured live API binding; the runtime config service role must be
+  exactly `display_readonly`, runtime config body evidence is bounded, read API
+  evidence records URL/status without parsing response bodies,
+  request-context-only checks, RBAC denied pages, runtime-config unavailable
+  pages, Slurm browser requests, and retry/cancel mutations are not live
+  receipts.
+- Runtime unavailable is recorded as `BLOCKED` with required variables, not as a
+  passing live receipt.
+
+Invariant Matrix for #365:
+
+- Governing invariant: mocked frontend Playwright regression and live
+  display_readonly evidence are separate evidence classes; a spec that broadly
+  mocks `/api/v1` cannot satisfy live display receipt.
+- Source-of-truth identity/contract: Playwright config/script names, live spec
+  file pattern, static no-mock guard, `docs/VALIDATION.md`, `docs/bugs.md`, and
+  `docs/runbooks/two-node-production-e2e-plan.md`.
+- Producers: frontend Playwright configs, package scripts, live display spec or
+  profile, mocked-regression grouping, and docs updates.
+- Validators/preflight: frontend unit tests, focused e2e/static guard, bounded
+  `rg` scans over `apps/frontend/e2e`, and docs lint.
+- Storage/cache/query: none - no DB/cache/query implementation changes.
+- Public routes/entrypoints: `corepack pnpm test`, existing mocked-regression
+  e2e lane, new live display_readonly e2e lane.
+- Frontend/downstream consumers: existing Playwright specs and validation docs.
+- Failure paths/rollback/stale state: missing live runtime records `BLOCKED`
+  with required env vars and does not mutate the default mocked lane.
+- Evidence/audit/readiness: docs and test output distinguish mocked regression,
+  live blocked, and live pass.
+- Regression rows:
+  - Existing mocked-regression lane -> still runs deterministic specs that mock
+    `/api/v1`.
+  - Live display_readonly static guard -> fails if a live e2e file registers
+    `page.route('**/api/v1/**')`, using the same exact live spec matcher as
+    the live Playwright config.
+  - Live config without required base URL/API base URL -> fails clearly before
+    browser execution.
+  - Live browser/API binding -> page responses include display_readonly runtime
+    config and monitoring read API responses from either the configured distinct
+    API origin or documented same-origin proxy.
+  - Live display control guard -> any `/api/v1/slurm/*` browser request is
+    forbidden, while retry/cancel checks remain mutation-sensitive.
+  - Live runtime unavailable during implementation -> documented as `BLOCKED`
+    with required variables, not `PASS`.
+  - `docs/VALIDATION.md` / `docs/bugs.md` -> no longer cite mocked Playwright
+    specs as live receipt.
+
+Boundary-surface checklist for #365:
+
+- Frontend config surfaces: `apps/frontend/playwright*.config.ts`,
+  `apps/frontend/package.json`, and config helper tests.
+- Frontend e2e surfaces: existing broad-mock specs, any new live spec pattern,
+  and preview/visual evidence lanes that may intentionally mock APIs.
+- Evidence docs: `docs/VALIDATION.md`, `docs/bugs.md`, and two-node e2e runbook
+  compatibility.
+- Unchanged downstream consumers: API/backend routes, scheduler, Slurm gateway,
+  QHH diagnostic scripts, and #366 CI paused-job cleanup.
+
 ## Risks / Mitigations
 
 - **Risk: removing historical placeholders breaks old docs.** Mitigation: update docs or archive historical docs in the same PR.
