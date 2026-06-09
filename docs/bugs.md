@@ -116,7 +116,7 @@ retest_command: |-
   set -euo pipefail
   ! rg -n "bv\\.basin_id = 'qhh'" docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
   rg -n "basins_qhh" docs/runbooks/qhh-mvp-production-like-e2e-checklist.md
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
     "select count(*) from core.basin_version bv where bv.basin_id = 'basins_qhh';"
 ```
 
