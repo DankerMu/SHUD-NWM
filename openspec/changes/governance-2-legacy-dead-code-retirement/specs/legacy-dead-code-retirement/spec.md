@@ -113,3 +113,17 @@ CI jobs SHALL NOT remain indefinitely disabled by conditions such as `&& false`.
 
 - **WHEN** governance scans workflow files
 - **THEN** a job disabled by `&& false` is reported until it is removed, archived, or converted to manual dispatch
+
+#### Scenario: historical visual evidence is retained manually
+
+- **WHEN** a historical visual evidence lane is retained
+- **THEN** it is exposed through an explicit manual workflow
+- **AND** it is not part of automatic PR/push CI
+- **AND** it verifies the checked-out evidence SHA before running visual tests
+- **AND** docs classify the result as historical mocked visual evidence, not live display-readonly proof
+
+#### Scenario: hidden paused visual job is retired
+
+- **WHEN** governance scans automatic PR/push workflow files after #366
+- **THEN** no automatic CI job for M15 visual evidence is disabled behind `&& false`
+- **AND** any retained M15 visual evidence command is reachable only from an explicit manual workflow

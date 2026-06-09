@@ -128,8 +128,10 @@ CI 是**人工合并门**（master 无 branch protection / required checks），
     合并门。**合并前务必把 PR 转 ready** 以触发全量。
   - **Fail-safe**：忘记标 draft → 默认走全量门，只会多跑、绝不漏测。
 - **`concurrency: cancel-in-progress`**：同一 PR 连推多次，自动取消被取代的旧 run。
-- **`frontend-m15-visual` 已暂停**（`if: … && false`）：它是 M15 里程碑的 Playwright 视觉证据门（遗留），
-  与 node-27 / m25 前端生产化无关；待 m25 重定义前端 e2e 门后，删掉 `&& false` 一行即可重启。
+- **M15 visual evidence 已从自动 CI 移出**：历史 M15 Playwright 视觉证据现在只通过
+  `.github/workflows/m15-visual-evidence.yml` 手动触发，运行 `test:e2e:m15-visual`
+  / `mocked-regression-chromium`，并校验输入 SHA；它是历史 mocked 视觉证据，不是
+  node-27 live display proof。
 
 ## 技术栈速查
 

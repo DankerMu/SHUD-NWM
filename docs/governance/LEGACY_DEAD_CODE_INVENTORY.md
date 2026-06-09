@@ -2,15 +2,16 @@
 
 Generated: 2026-06-09
 
-Updated: 2026-06-09 for Governance-2A issue #364 QHH diagnostic manifest.
+Updated: 2026-06-09 for Governance-2E issue #366 hidden paused CI cleanup.
 
 Scope: Current source of truth for governed legacy/dead-code paths. Issue #362
 created the inventory without runtime changes. Issue #363 retired the
 active-looking placeholder paths listed below. Issue #364 added the QHH
 diagnostic manifest at `scripts/diagnostic/qhh/README.md` without moving or
-rewiring root diagnostic scripts. Later issues still own the remaining
-behavioral changes: #365 owns mocked-vs-live Playwright separation, and #366
-owns paused CI retirement.
+rewiring root diagnostic scripts. Issue #365 separated mocked-vs-live
+Playwright evidence. Issue #366 removed the hidden paused M15 visual CI job and
+retained the historical mocked visual evidence lane as an explicit manual
+workflow.
 
 ## Status Vocabulary
 
@@ -162,9 +163,10 @@ templates, `hindcast.sbatch`, and `smoke.sbatch`.
 - `services/tiles/mvt.py` provides MVT cache, metadata, SQL, and tile URL-template helpers for the display routes.
 - `apps/frontend/src/components/flood` and `apps/frontend/src/components/map` consume flood-return-period tile metadata and render GeoJSON/MVT display layers.
 
-`D9` confirmed `.github/workflows/ci.yml` contains the paused
-`frontend-m15-visual` job with
-`if: needs.changes.outputs.frontend == 'true' && false`.
+`D9` originally confirmed `.github/workflows/ci.yml` contained the paused
+`frontend-m15-visual` job. Issue #366 removed that hidden-disabled job from
+automatic PR/push CI and added `.github/workflows/m15-visual-evidence.yml` as
+an explicit manual historical mocked visual evidence workflow.
 
 `D10` confirmed the QHH diagnostic chain includes direct helper dependencies:
 
@@ -219,7 +221,7 @@ templates, `hindcast.sbatch`, and `smoke.sbatch`.
 | `apps/frontend/e2e/meteorology.spec.ts` | `test-only` | `display_readonly` | Future live display-readonly e2e profile; current app under `apps/frontend` | `D4` found 1 broad API route mock. It is mocked frontend regression, not live API evidence. | #365 should rename or group as mocked regression. | #365 owns any rename/config split/no-mock guard. | `D1`, `D4` |
 | `apps/frontend/e2e/monitoring.spec.ts` | `test-only` | `display_readonly` | Future live display-readonly e2e profile; current app under `apps/frontend` | `D4` found 2 broad API route mocks. `docs/bugs.md` already records that these mocks do not connect to local real API, shared PostgreSQL, or Slurm. | #365 should rename or group as mocked regression and update validation docs. | #365 owns any rename/config split/no-mock guard. | `D1`, `D4` |
 | `apps/frontend/e2e/preview-deeplink.spec.ts` | `test-only` | `display_readonly` | `apps/frontend/playwright.preview.config.ts`; future live preview/e2e profile if needed | `D4` found 2 broad API route mocks. `apps/frontend/playwright.preview.config.ts` limits this preview profile to `preview-deeplink.spec.ts`, but the spec still mocks API responses. | #365 should classify preview mocked regression separately from any live display-readonly proof. | #365 owns any rename/config split/no-mock guard. | `D1`, `D4` |
-| `.github/workflows/ci.yml` | `test-only` | `display_readonly` | Active `frontend-build` job; future manual visual workflow or archived evidence | Job `frontend-m15-visual` is paused with `if: needs.changes.outputs.frontend == 'true' && false`. Comments say it is M15-specific legacy visual evidence and not node-27 or m25 frontend production. | #366 should replace the hidden false condition with archived documentation or an explicit manual workflow. | #366 owns removal, archive, manual dispatch, or CI behavior change. This row is not approval to edit CI in #362. | `D9` |
+| `.github/workflows/ci.yml` | `test-only` | `display_readonly` | Active `frontend-build` job; `.github/workflows/m15-visual-evidence.yml` for manual historical mocked visual evidence | #366 removed the hidden-disabled `frontend-m15-visual` job from automatic PR/push CI. The retained M15 lane is explicit `workflow_dispatch`, verifies `M15_EVIDENCE_SHA`, runs `test:e2e:m15-visual` / `mocked-regression-chromium`, and uploads only `.codex/evidence/issue-176/**` artifacts when present. | Do not re-enable by editing automatic CI. Run the manual M15 workflow only for historical mocked visual evidence; it is not node-27 live display proof. | Retired hidden paused CI in #366; keep automatic changed-area CI behavior otherwise unchanged. | `D9` plus #366 focused checks |
 
 ## QHH Out-of-Chain Note
 
@@ -257,5 +259,9 @@ path.
 
 - #363 retired `apps/web`, hyphenated worker placeholders, `workers/sbatch_templates`, and `services/tile-publisher`; active counterparts remain the only current entrypoints.
 - #364 added `scripts/diagnostic/qhh/README.md`, preserved root QHH diagnostic paths, and strengthened static diagnostic-token guards. Future QHH diagnostic moves must preserve diagnostic value or add wrappers and runbook migration.
-- #365 may split Playwright mocked regression from live display-readonly evidence, but must not cite specs with broad `page.route('**/api/v1/**')` as live receipt.
-- #366 may remove `&& false`, archive visual evidence, or create a manual workflow for `frontend-m15-visual`; #362 makes no CI behavior change.
+- #365 split Playwright mocked regression from live display-readonly evidence;
+  specs with broad `page.route('**/api/v1/**')` must not be cited as live
+  receipt.
+- #366 removed the hidden paused automatic CI job and added manual M15 visual
+  evidence. The manual lane is historical mocked visual evidence, not live
+  node-27 display proof.
