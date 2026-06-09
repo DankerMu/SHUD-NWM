@@ -71,7 +71,7 @@ maintainer-approved enablement change.
 Governance-5 E1 triage is tracked in
 `docs/governance/entropy-burndown-triage.md`. That artifact records the current
 report counts, high-spread family dispositions, owner issues/changes, and
-#400-specific non-goals before later automation work changes the report
+the #400-specific non-goals before later automation work changes the report
 semantics.
 
 ## Baseline Write Policy
