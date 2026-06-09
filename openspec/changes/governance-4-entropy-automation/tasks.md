@@ -146,9 +146,10 @@ Out of scope for #371. Owned by #373.
 - [x] 3.3 Verify workflow execution on a branch and include report evidence in PR body.
   Evidence: PR #394 ran `Governance Audit / Entropy Audit (report-only)` on
   branch `feat/issue-373-governance-audit-ci` at commit
-  `cf2317f1fb0cbcf4986e297ed9410eb79f366cbb` and completed successfully:
-  https://github.com/DankerMu/SHUD-NWM/actions/runs/27210674640/job/80338535740
-  The PR body records the fixed report paths and artifact/summary behavior.
+  `00a15a5ab3b5d9f32163fd0e5152e7b374abe391` and completed successfully:
+  https://github.com/DankerMu/SHUD-NWM/actions/runs/27210806796/job/80339011474
+  The PR evidence records the fixed report paths, job summary, and artifact
+  upload behavior.
 - [x] 3.4 Verify the CI command path does not create or update
   `.entropy-baseline/latest.json`.
   Evidence: `test ! -e .entropy-baseline/latest.json` passed before and after
