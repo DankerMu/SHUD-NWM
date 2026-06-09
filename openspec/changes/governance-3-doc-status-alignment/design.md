@@ -43,10 +43,26 @@ can mislead current development or display deployment:
   role, disabled control mutations, readonly DB intent, compose `read_only`,
   readonly published bind mount, and no new Slurm/control-plane capabilities.
 
-### D3. Defer bugs ledger conversion to Governance-3C
+### D3. Convert bugs into a governance ledger
 
-`docs/bugs.md` ledger conversion remains required for the Governance-3 epic, but
-it is not part of the #367 document authority PR.
+`docs/bugs.md` must stop being a chronological stale list. #369 converts it
+into a ledger with consistent fields, a small status vocabulary, and
+role-oriented ownership. Required fields:
+
+- `status`: `open`, `resolved`, `superseded`, `stale-needs-repro`, or
+  `archived`.
+- `owner_area`: one of `compute_control`, `display_readonly`,
+  `slurm_gateway`, or `shared_contract`.
+- `resolved_by` or `superseded_by`: PR, issue, runbook, commit, or current
+  source-of-truth evidence when applicable.
+- `retest_command`: concrete command or explicit live receipt needed to
+  re-check the bug.
+- `evidence`: existing artifact, doc, issue, PR, test, or source path backing
+  the status.
+
+At minimum, BUG-20260527-003 and BUG-20260527-007 through
+BUG-20260527-013 must be triaged. Still-open bugs must link to a GitHub issue
+or have an explicit owner area and retest command.
 
 ### D4. Defer tracked local/agent asset ownership to Governance-3D
 
@@ -80,3 +96,5 @@ for the Governance-3 epic, but it is not part of #367.
   readonly safety keys remain present.
 - `docker compose --env-file infra/env/display.example -f infra/compose.display.yml config`
   shows `NHMS_ENABLE_LIVE_POSTGIS_MVT`.
+- `rg` checks that required bug IDs have `status`, `owner_area`, `evidence`,
+  and `retest_command` fields in `docs/bugs.md`.

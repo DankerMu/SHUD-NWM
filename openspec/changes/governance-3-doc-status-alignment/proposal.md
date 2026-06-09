@@ -10,10 +10,10 @@ The repository has many useful documents, but their authority levels are unclear
 - Align high-impact stale node-27 live MVT facts in current entrypoints and runbooks.
 - Route the remaining node-27 bbox/framing popup live-click evidence gap to #389.
 - Add and pass through `NHMS_ENABLE_LIVE_POSTGIS_MVT` in display readonly example config and compose.
+- Convert `docs/bugs.md` into a triaged governance ledger with status, owner area, evidence, and retest commands for governed historical bugs.
 
 ## Out of Scope
 
-- `docs/bugs.md` ledger triage is owned by Governance-3C.
 - `.agents`/`.codex`/frontend artifact ownership policy is owned by Governance-3D.
 
 ## Capabilities
@@ -34,3 +34,4 @@ The repository has many useful documents, but their authority levels are unclear
 - Historical docs: `IMPLEMENTATION_PLAN.md` or a root pointer plus archived copy.
 - Current node-27 docs: `CLAUDE.md`, `progress.md`, `docs/runbooks/node-27-bringup-checklist.md`, `docs/runbooks/display-readonly-live-mvt.md`.
 - Display config: `infra/env/display.example`, `infra/compose.display.yml`.
+- Bug ledger: `docs/bugs.md`.

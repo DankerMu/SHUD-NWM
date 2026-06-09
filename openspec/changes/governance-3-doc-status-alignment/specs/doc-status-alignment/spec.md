@@ -65,3 +65,24 @@ browser evidence gap.
 
 - **WHEN** node-27 bringup checklist describes C4/MVT status
 - **THEN** it no longer treats #343 as open, cites #351/live receipt for the closed live MVT root cause, keeps station-MVT/#342 separate, and routes bbox/framing popup live-click evidence to #389
+
+### Requirement: Bugs are triaged as a governance ledger
+
+`docs/bugs.md` SHALL record governed bugs with consistent status, owner area,
+evidence, and retest commands so historical defects no longer read as an
+undifferentiated open backlog.
+
+#### Scenario: required historical bug is evaluated
+
+- **WHEN** a reader evaluates BUG-20260527-003 or BUG-20260527-007 through BUG-20260527-013
+- **THEN** the bug entry includes `status`, `owner_area`, `evidence`, and `retest_command`, plus `resolved_by` or `superseded_by` when its status is `resolved` or `superseded`
+
+#### Scenario: old bug is resolved or superseded
+
+- **WHEN** later milestones, PRs, tests, runbooks, or source contracts resolve or supersede an old bug
+- **THEN** the bug entry is marked `resolved` or `superseded` with `resolved_by` or `superseded_by` evidence
+
+#### Scenario: bug remains open
+
+- **WHEN** a bug remains open
+- **THEN** it has an owner area among `compute_control`, `display_readonly`, `slurm_gateway`, or `shared_contract`, plus a GitHub issue link when one exists or a concrete retest command when no issue exists
