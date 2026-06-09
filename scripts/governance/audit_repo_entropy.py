@@ -690,12 +690,11 @@ def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
     )
     findings: list[FindingSpec] = []
     for path in _iter_text_files(root, [root / "docs", root / "openspec", root / "services", root / "infra"]):
+        rel = _rel(root, path)
         text = _read_repo_text(root, path)
         for line_no, line in _matching_lines(text, placeholder_patterns):
             token = next(token for token in placeholder_patterns if token in line)
-            allowlist = None
-            if _rel(root, path).startswith("docs/governance/LEGACY_DEAD_CODE_INVENTORY.md"):
-                allowlist = "governance inventory documents retired placeholder paths"
+            allowlist = _placeholder_path_allowlist_reason(rel)
             findings.append(
                 FindingSpec(
                     check_id="placeholder-path-token",
@@ -703,7 +702,7 @@ def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
                     axis="semantics",
                     governance_face="legacy/dead-code",
                     role="shared_contract",
-                    evidence_path=_rel(root, path),
+                    evidence_path=rel,
                     line=line_no,
                     severity="low" if allowlist else "medium",
                     priority="P3" if allowlist else "P2",
@@ -1258,7 +1257,7 @@ def _allowlist_state(allowlist_key: str | None) -> AllowlistState:
 
 def _allowlist_key(finding: FindingSpec) -> str | None:
     reason = finding.allowlist_reason
-    if reason is None:
+    if reason is None or not reason.strip():
         return None
     reason_key = _allowlist_reason_key(finding.check_id, reason)
     return f"{finding.check_id}:{reason_key}"
@@ -1280,6 +1279,8 @@ def _allowlist_reason_key(check_id: str, reason: str) -> str:
             return "m26-route-consolidation-or-redirect"
     if check_id == "placeholder-path-token" and {"governance", "inventory"} <= tokens:
         return "governance-retired-placeholder-inventory"
+    if check_id == "placeholder-path-token" and {"governed", "archived", "evidence"} <= tokens:
+        return "governed-archived-retired-placeholder-evidence"
     if check_id == "openapi-frontend-types-delegated":
         return "existing-contract-oracle-delegation"
     if check_id == "openapi-frontend-types-signal":
@@ -1564,6 +1565,14 @@ def _stale_route_allowlist_reason(relative_path: str, line: str) -> str | None:
         return "frontend redirect regression test"
     if relative_path.startswith("apps/frontend/src/lib/hydroMet/") and "HydroMetPage" in line:
         return "library extraction provenance comment"
+    return None
+
+
+def _placeholder_path_allowlist_reason(relative_path: str) -> str | None:
+    if relative_path == "docs/governance/LEGACY_DEAD_CODE_INVENTORY.md":
+        return "governance inventory documents retired placeholder paths"
+    if relative_path.startswith("docs/archived/"):
+        return "governed archived evidence documents retired placeholder paths"
     return None
 
 

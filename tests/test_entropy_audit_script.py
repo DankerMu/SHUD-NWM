@@ -554,6 +554,107 @@ def test_allowlist_key_normalizes_equivalent_broad_mock_wording() -> None:
     assert equivalent_record["gate_eligible"] is False
 
 
+@pytest.mark.parametrize("allowlist_reason", [None, "", " \t\n "])
+def test_empty_allowlist_reason_does_not_allowlist_gated_check(
+    allowlist_reason: str | None,
+) -> None:
+    record = audit_repo_entropy._finding_record(
+        1,
+        audit_repo_entropy.FindingSpec(
+            check_id="broad-e2e-api-mock",
+            title="Live-labeled frontend E2E path uses broad API mock",
+            axis="behavior",
+            governance_face="docs alignment",
+            role="display_readonly",
+            evidence_path="apps/frontend/e2e/live.spec.ts",
+            line=1,
+            severity="high",
+            priority="P1",
+            owner_area="frontend e2e",
+            module="apps/frontend",
+            allowlist_reason=allowlist_reason,
+            description="Broad API mocks can be mistaken for live display evidence.",
+            recommendation="Keep live evidence specs on real API calls or narrowly scoped mocks.",
+        ),
+    )
+
+    assert record["allowlist_key"] is None
+    assert record["allowlist_state"] == "unallowlisted"
+    assert record["budget_counted"] is True
+    assert record["gate_eligible"] is True
+
+
+def test_non_empty_unknown_allowlist_reason_uses_stable_slug_and_skips_budget() -> None:
+    record = audit_repo_entropy._finding_record(
+        1,
+        audit_repo_entropy.FindingSpec(
+            check_id="broad-e2e-api-mock",
+            title="Frontend E2E path uses broad API mock",
+            axis="behavior",
+            governance_face="docs alignment",
+            role="display_readonly",
+            evidence_path="apps/frontend/e2e/contract.spec.ts",
+            line=1,
+            severity="medium",
+            priority="P2",
+            owner_area="frontend e2e",
+            module="apps/frontend",
+            allowlist_reason="Approved QA fixture exception",
+            description="Broad API mocks can be mistaken for live display evidence.",
+            recommendation="Keep broad API mocks in deterministic mocked regressions.",
+        ),
+    )
+
+    assert record["allowlist_key"] == "broad-e2e-api-mock:approved-qa-fixture-exception"
+    assert record["allowlist_state"] == "allowlisted"
+    assert record["budget_counted"] is False
+    assert record["gate_eligible"] is False
+
+
+def test_archived_retired_path_tokens_are_allowlisted_without_budget_count(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "docs" / "archived" / "m22.md", "Historical evidence mentions apps/web.\n")
+    _write(
+        tmp_path / "docs" / "governance" / "LEGACY_DEAD_CODE_INVENTORY.md",
+        "Inventory keeps workers/sbatch_templates as retired evidence.\n",
+    )
+
+    findings = {
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "placeholder-path-token")
+    }
+
+    archived = findings["docs/archived/m22.md"]
+    assert archived["allowlist_reason"] == "governed archived evidence documents retired placeholder paths"
+    assert archived["allowlist_key"] == (
+        "placeholder-path-token:governed-archived-retired-placeholder-evidence"
+    )
+    assert archived["allowlist_state"] == "allowlisted"
+    assert archived["budget_counted"] is False
+    assert archived["gate_eligible"] is False
+
+    inventory = findings["docs/governance/LEGACY_DEAD_CODE_INVENTORY.md"]
+    assert inventory["allowlist_key"] == "placeholder-path-token:governance-retired-placeholder-inventory"
+    assert inventory["budget_counted"] is False
+
+
+def test_active_doc_retired_path_tokens_remain_budget_counted(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "docs" / "active.md", "Current docs still mention apps/web.\n")
+
+    findings = _findings_by_check(tmp_path, "placeholder-path-token")
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "docs/active.md"
+    assert findings[0]["allowlist_reason"] is None
+    assert findings[0]["allowlist_key"] is None
+    assert findings[0]["allowlist_state"] == "unallowlisted"
+    assert findings[0]["budget_counted"] is True
+    assert findings[0]["gate_eligible"] is False
+
+
 def test_slurm_gateway_route_leakage_finds_direct_business_route_decorators_and_path_literals(
     tmp_path: Path,
 ) -> None:
