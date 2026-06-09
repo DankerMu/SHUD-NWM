@@ -5,9 +5,9 @@ Active profile for `codex-codeagent-workflow`. It supplements
 
 ## Entry surfaces
 
-- User surfaces: `apps/api`, `apps/web`, `apps/frontend`
+- User surfaces: `apps/api`, `apps/frontend`
 - Orchestration: `services/orchestrator`, `services/production_closure`
-- HPC bridge: `services/slurm_gateway`, `workers/sbatch_templates`
+- HPC bridge: `services/slurm_gateway`, `infra/sbatch`
 - Pipeline workers: `workers/data_adapters`, `canonical_converter`, `forcing_producer`
 - Model workers: `model_registry`, `shud_runtime`, `output_parser`, `flood_frequency`
 - Shared model state: `packages/common`, `nhms-state`

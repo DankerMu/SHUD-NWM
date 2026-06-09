@@ -22,6 +22,11 @@ The classification SHALL be recorded in a persistent inventory with exact path, 
 - **WHEN** `workers/sbatch_templates` is considered for archive or deletion
 - **THEN** the inventory records that it contains legacy single-run templates, documents the canonical `infra/sbatch` replacement, and verifies no active Slurm gateway or production scheduler path depends on it
 
+#### Scenario: legacy placeholder paths are retired
+- **WHEN** legacy placeholder paths are removed or archived after inventory proof
+- **THEN** current source-of-truth docs no longer present those paths as active entrypoints
+- **AND** active counterparts for frontend, workers, tile publication, and Slurm templates remain present and documented
+
 #### Scenario: diagnostic path is evaluated
 - **WHEN** a path has `DIAGNOSTIC-ONLY`
 - **THEN** it is not deleted as dead code unless production replacement evidence and runbook migration are both present

@@ -2,9 +2,13 @@
 
 Generated: 2026-06-09
 
-Scope: Governance-2A issue #362. This artifact is inventory-only. It does not delete, move, rename, archive, wrap, or change runtime behavior for any governed path.
+Updated: 2026-06-09 for Governance-2A issue #363 placeholder retirement.
 
-Proposed final actions below are not cleanup approval. Later issues own the destructive or behavioral changes: #363 owns placeholder deletion/archive decisions, #364 owns QHH diagnostic isolation, #365 owns mocked-vs-live Playwright separation, and #366 owns paused CI retirement.
+Scope: Current source of truth for governed legacy/dead-code paths. Issue #362
+created the inventory without runtime changes. Issue #363 retired the
+active-looking placeholder paths listed below. Later issues still own the
+remaining behavioral changes: #364 owns QHH diagnostic isolation, #365 owns
+mocked-vs-live Playwright separation, and #366 owns paused CI retirement.
 
 ## Status Vocabulary
 
@@ -33,7 +37,7 @@ rg -n --glob '!apps/frontend/node_modules/**' --glob '!apps/frontend/dist/**' --
 find apps workers services scripts .github/workflows -maxdepth 3 \( -path apps/frontend/node_modules -o -path apps/frontend/dist -o -path '*/__pycache__' \) -prune -o -type d -print | sort
 ```
 
-`D3` placeholder file inventory:
+`D3` pre-#363 placeholder file inventory:
 
 ```bash
 find apps/web workers/forcing-producer workers/shud-runtime workers/output-parser workers/flood-frequency services/tile-publisher -maxdepth 2 -type f | sort
@@ -101,18 +105,37 @@ rg -n "seed_qhh|reset_qhh|summarize_qhh|publish_qhh|apply_smoke_migrations|creat
   Paused CI evidence is captured by `D9`, because `D1` does not use `--hidden`
   and does not scan hidden `.github` paths.
 
-`D2` confirmed both governed candidates and active counterparts are present, with generated directories intentionally excluded:
+`D2` confirmed both governed candidates and active counterparts were present
+before #363 retirement, with generated directories intentionally excluded:
 
 - Governed candidates: `apps/web`, `services/tile-publisher`, `workers/flood-frequency`, `workers/forcing-producer`, `workers/output-parser`, `workers/sbatch_templates`, and `workers/shud-runtime`.
 - Active counterparts: `apps/frontend`, `services/tile_publisher`, `services/tiles`, `workers/flood_frequency`, `workers/forcing_producer`, `workers/output_parser`, and `workers/shud_runtime`.
 - Test and workflow surfaces: `apps/frontend/e2e`, `scripts`, and `.github/workflows`.
 - Excluded generated directories: `apps/frontend/node_modules`, `apps/frontend/dist`, and any `__pycache__` subtree.
 
-`D3` confirmed the placeholder candidates are not full implementation trees:
+`D3` confirmed the placeholder candidates were not full implementation trees before #363 retirement:
 
 - `apps/web` contains only `.gitkeep` and `README.md`.
 - Each hyphenated worker placeholder contains `README.md` and `__init__.py`.
 - `services/tile-publisher` contains `README.md` and `__init__.py`.
+
+## Post-#363 Retirement State
+
+Issue #363 deleted the tracked active-tree files under `apps/web`,
+`workers/forcing-producer`, `workers/shud-runtime`, `workers/output-parser`,
+`workers/flood-frequency`, `services/tile-publisher`, and
+`workers/sbatch_templates`.
+
+The legacy Slurm template names and migration notes are preserved in `docs/archived/legacy-slurm-templates.md`. Active counterparts remain:
+
+- frontend: `apps/frontend`
+- workers: `workers/forcing_producer`, `workers/shud_runtime`, `workers/output_parser`, and `workers/flood_frequency`
+- Slurm templates: `infra/sbatch` and `services/slurm_gateway/config.py`
+- tile publication/display: `services/tile_publisher`,
+  `infra/sbatch/publish_tiles.sbatch`, `services/tiles`,
+  `apps/api/routes/flood_alerts.py`, and frontend flood/map consumers
+
+Issue #363 did not modify QHH diagnostic scripts, mocked Playwright specs, or `.github/workflows/ci.yml`.
 
 `D4` confirmed broad API mocks by exact spec:
 
@@ -125,7 +148,10 @@ rg -n "seed_qhh|reset_qhh|summarize_qhh|publish_qhh|apply_smoke_migrations|creat
 - `apps/frontend/e2e/monitoring.spec.ts`: 2 matches.
 - `apps/frontend/e2e/preview-deeplink.spec.ts`: 2 matches.
 
-`D6` confirmed `workers/sbatch_templates` contains legacy single-run templates, while `infra/sbatch` contains the canonical production template set including `publish_tiles.sbatch`, array templates, analysis templates, `hindcast.sbatch`, and `smoke.sbatch`.
+`D6` confirmed before #363 that `workers/sbatch_templates` contained legacy
+single-run templates, while `infra/sbatch` contains the canonical production
+template set including `publish_tiles.sbatch`, array templates, analysis
+templates, `hindcast.sbatch`, and `smoke.sbatch`.
 
 `D7` confirmed both the tile publisher production counterpart and display tile consumers:
 
@@ -165,13 +191,13 @@ rg -n "seed_qhh|reset_qhh|summarize_qhh|publish_qhh|apply_smoke_migrations|creat
 
 | path | status | owner_area | active_counterpart | active build/import/deploy evidence | docs/runbook migration | proposed final action | verification_command |
 |---|---|---|---|---|---|---|---|
-| `apps/web` | `archived` | `display_readonly` | `apps/frontend` | `apps/web/README.md` states `apps/frontend/` is canonical and says this path is not used by active build, tests, or deployment. `D2` found `apps/frontend`; `apps/frontend/package.json` owns `build`, `test`, and e2e scripts. | Before #363 removes or archives it, update any stale docs that still point to `apps/web`; current module index already says `apps/frontend` is active. | #363 may delete or archive after stale docs are updated. This row is not approval to remove it. | `D1`, `D2`, `D3` |
-| `workers/forcing-producer` | `archived` | `compute_control` | `workers/forcing_producer` | Placeholder README points to `workers/forcing_producer/`. `pyproject.toml` exposes `nhms-forcing = "workers.forcing_producer.cli:main"`. Scheduler, tests, and worker imports use the underscore package. | Keep docs and runbooks on `workers/forcing_producer`; remove historical hyphenated references before #363 cleanup. | #363 may delete or archive the placeholder after import and doc checks. | `D1`, `D2`, `D3`, `D5` |
-| `workers/shud-runtime` | `archived` | `compute_control` | `workers/shud_runtime` | Placeholder README points to `workers/shud_runtime/`. `pyproject.toml` exposes `nhms-shud-runtime = "workers.shud_runtime.cli:main"`. Runtime tests and orchestrator paths import underscore package modules. | Keep docs and runbooks on `workers/shud_runtime`; remove historical hyphenated references before #363 cleanup. | #363 may delete or archive the placeholder after import and doc checks. | `D1`, `D2`, `D3`, `D5` |
-| `workers/output-parser` | `archived` | `compute_control` | `workers/output_parser` | Placeholder README points to `workers/output_parser/`. `pyproject.toml` exposes `nhms-parse = "workers.output_parser.cli:main"`. Tests and worker chain imports use the underscore package. | Keep docs and runbooks on `workers/output_parser`; remove historical hyphenated references before #363 cleanup. | #363 may delete or archive the placeholder after import and doc checks. | `D1`, `D2`, `D3`, `D5` |
-| `workers/flood-frequency` | `archived` | `compute_control` | `workers/flood_frequency` | Placeholder README points to `workers/flood_frequency/`. `pyproject.toml` exposes `nhms-flood = "workers.flood_frequency.cli:main"`. Flood, hindcast, return-period, API, and test imports use the underscore package. | Keep docs and runbooks on `workers/flood_frequency`; remove historical hyphenated references before #363 cleanup. | #363 may delete or archive the placeholder after import and doc checks. | `D1`, `D2`, `D3`, `D5` |
-| `workers/sbatch_templates` | `archived` | `slurm_gateway` | `infra/sbatch`; `services/slurm_gateway/config.py`; `SLURM_GATEWAY_TEMPLATE_DIR` | Contains legacy single-run `.sbatch` templates, so it is not an empty placeholder. `services/slurm_gateway/config.py` says it is legacy and not used by M3+ array orchestration; `SlurmGatewaySettings.template_dir` defaults to `infra/sbatch`. Active deploy/config references point to `infra/sbatch` through compute env, compose, systemd, Dockerfile, and gateway tests. | Keep migration notes pointing to `infra/sbatch`, `DEFAULT_JOB_TYPE_TEMPLATES`, and `SLURM_GATEWAY_TEMPLATE_DIR`. Any archive/delete PR must preserve the legacy-template manifest first. | #363 may archive or delete only after a stronger migration note and no-active-dependency proof. It must not be treated like the empty placeholders. | `D1`, `D2`, `D6` |
-| `services/tile-publisher` | `archived` | `compute_control` | `services/tile_publisher`; `infra/sbatch/publish_tiles.sbatch`; display API/frontend tile consumers | Placeholder README states there is no active Python package under the hyphenated path. Active imports use `services.tile_publisher` from orchestrator CLI/chain and tests; active Slurm uses `infra/sbatch/publish_tiles.sbatch`; display consumption uses API tile routes and frontend map/flood components. | Keep docs on `services/tile_publisher`, `publish_tiles.sbatch`, and display API/frontend paths. Update historical OpenSpec references before #363 cleanup. | #363 may archive or delete the hyphenated placeholder after docs are aligned and active import evidence is rechecked. | `D1`, `D2`, `D3`, `D7` |
+| `apps/web` | `archived` | `display_readonly` | `apps/frontend` | #363 removed the active-tree placeholder. `apps/frontend/package.json` remains the active frontend build/test/e2e metadata. | Current docs point contributors to `apps/frontend`; no active docs should use `apps/web` as an entrypoint. | Retired in #363; do not recreate this active-looking placeholder. | `D1`, `D2`, `D3` plus #363 focused checks |
+| `workers/forcing-producer` | `archived` | `compute_control` | `workers/forcing_producer` | #363 removed the active-tree placeholder. `pyproject.toml` exposes `nhms-forcing = "workers.forcing_producer.cli:main"`. Scheduler, tests, and worker imports use the underscore package. | Keep docs and runbooks on `workers/forcing_producer`; hyphenated path mentions must be historical/governance context only. | Retired in #363; do not recreate this active-looking placeholder. | `D1`, `D2`, `D3`, `D5` plus #363 focused checks |
+| `workers/shud-runtime` | `archived` | `compute_control` | `workers/shud_runtime` | #363 removed the active-tree placeholder. `pyproject.toml` exposes `nhms-shud-runtime = "workers.shud_runtime.cli:main"`. Runtime tests and orchestrator paths import underscore package modules. | Keep docs and runbooks on `workers/shud_runtime`; hyphenated path mentions must be historical/governance context only. | Retired in #363; do not recreate this active-looking placeholder. | `D1`, `D2`, `D3`, `D5` plus #363 focused checks |
+| `workers/output-parser` | `archived` | `compute_control` | `workers/output_parser` | #363 removed the active-tree placeholder. `pyproject.toml` exposes `nhms-parse = "workers.output_parser.cli:main"`. Tests and worker chain imports use the underscore package. | Keep docs and runbooks on `workers/output_parser`; hyphenated path mentions must be historical/governance context only. | Retired in #363; do not recreate this active-looking placeholder. | `D1`, `D2`, `D3`, `D5` plus #363 focused checks |
+| `workers/flood-frequency` | `archived` | `compute_control` | `workers/flood_frequency` | #363 removed the active-tree placeholder. `pyproject.toml` exposes `nhms-flood = "workers.flood_frequency.cli:main"`. Flood, hindcast, return-period, API, and test imports use the underscore package. | Keep docs and runbooks on `workers/flood_frequency`; hyphenated path mentions must be historical/governance context only. | Retired in #363; do not recreate this active-looking placeholder. | `D1`, `D2`, `D3`, `D5` plus #363 focused checks |
+| `workers/sbatch_templates` | `archived` | `slurm_gateway` | `infra/sbatch`; `services/slurm_gateway/config.py`; `SLURM_GATEWAY_TEMPLATE_DIR` | #363 removed the active-tree legacy template directory after preserving legacy names and migration notes in `docs/archived/legacy-slurm-templates.md`. `SlurmGatewaySettings.template_dir` defaults to `infra/sbatch`, and active deploy/config references point to `infra/sbatch` through compute env, compose, systemd, Dockerfile, and gateway tests. | Use `infra/sbatch`, `DEFAULT_JOB_TYPE_TEMPLATES`, and `SLURM_GATEWAY_TEMPLATE_DIR`; archived legacy names are historical compatibility context only. | Retired in #363; do not recreate this active-tree directory. | `D1`, `D2`, `D6` plus #363 focused checks |
+| `services/tile-publisher` | `archived` | `compute_control` | `services/tile_publisher`; `infra/sbatch/publish_tiles.sbatch`; display API/frontend tile consumers | #363 removed the active-tree placeholder. Active imports use `services.tile_publisher` from orchestrator CLI/chain and tests; active Slurm uses `infra/sbatch/publish_tiles.sbatch`; display consumption uses API tile routes and frontend map/flood components. | Keep docs on `services/tile_publisher`, `publish_tiles.sbatch`, and display API/frontend paths. Hyphenated path mentions must be historical/governance context only. | Retired in #363; do not recreate this active-looking placeholder. | `D1`, `D2`, `D3`, `D7` plus #363 focused checks |
 | `scripts/run_qhh_continuous.py` | `diagnostic` | `compute_control` | Production scheduler/orchestrator paths under `services/orchestrator`; canonical Slurm templates under `infra/sbatch` | File has a `DIAGNOSTIC-ONLY` header. `docs/runbooks/qhh-continuous.md` and `docs/runbooks/qhh-22-business-bringup.md` describe it as QHH bring-up, diagnostic, reproduction, or evidence path. It dispatches `scripts/run_qhh_cycle.sh` locally or through `scripts/run_qhh_cycle.sbatch`, so its direct helper dependency chain is the cycle script chain recorded by `D10`. Static tests keep QHH diagnostic tokens out of production orchestrator code. | #364 should add or update a diagnostic manifest and point production runbooks to generic scheduler/orchestrator commands. | Keep available until #364 explicitly retires, wraps, or relocates it with compatibility notes. This row is not approval to move it. | `D1`, `D8`, `D10` |
 | `scripts/run_qhh_cycle.sh` | `diagnostic` | `compute_control` | Production scheduler/orchestrator paths under `services/orchestrator`; canonical Slurm templates under `infra/sbatch` | File has a `DIAGNOSTIC-ONLY` header. It invokes `scripts/apply_smoke_migrations.py`, `scripts/seed_qhh_forcing_stations.py`, `scripts/seed_qhh_shud_output_segments.py`, `scripts/create_qhh_shud_manifest.py`, `scripts/summarize_qhh_smoke_results.py`, and `scripts/publish_qhh_display_products.py`; it is called by the diagnostic continuous runner and diagnostic sbatch wrapper. Static tests cover QHH diagnostic script tokens. | #364 should keep the runbook migration explicit: diagnostic reproduction remains separate from production automation, and helper dependencies must move only with wrappers or runbook migration. | Keep available until #364 explicitly retires, wraps, or relocates it with compatibility notes. | `D1`, `D8`, `D10` |
 | `scripts/run_qhh_cycle.sbatch` | `diagnostic` | `compute_control` | Production scheduler/orchestrator paths under `services/orchestrator`; canonical Slurm templates under `infra/sbatch` | Companion diagnostic sbatch invokes `scripts/run_qhh_cycle.sh`, so its helper dependency chain is the cycle script chain recorded by `D10`. It is documented by QHH diagnostic runbooks and is not a canonical gateway-owned `infra/sbatch` production template. | #364 should include it in the diagnostic manifest if QHH script isolation changes path layout. | Keep available unless #364 replaces it with wrappers and runbook migration. | `D1`, `D8`, `D10` |
@@ -205,27 +231,29 @@ wrap, or retire it without another broad discovery pass.
 
 ## Active Counterparts
 
-These are not cleanup candidates in #362. They are recorded so follow-up issues can migrate references without rediscovering the active path.
+These active counterparts are not retirement candidates. They are recorded so
+future cleanup work can migrate references without rediscovering the active
+path.
 
 | path | status | owner_area | active build/import/deploy evidence | docs/runbook migration | proposed final action | verification_command |
 |---|---|---|---|---|---|---|
-| `apps/frontend` | `production` | `display_readonly` | `apps/frontend/package.json` owns `build`, `test`, `test:e2e`, and preview scripts. CI `frontend-build` installs, builds, tests, and checks bundle size from this directory. | Replacement for `apps/web`. | Retain active path; no #362 cleanup action. | `D1`, `D2` |
-| `workers/forcing_producer` | `production` | `compute_control` | `pyproject.toml` exposes `nhms-forcing`; scheduler and tests import underscore package modules. | Replacement for `workers/forcing-producer`. | Retain active path; no #362 cleanup action. | `D2`, `D5` |
-| `workers/shud_runtime` | `production` | `compute_control` | `pyproject.toml` exposes `nhms-shud-runtime`; runtime and tests import underscore package modules. | Replacement for `workers/shud-runtime`. | Retain active path; no #362 cleanup action. | `D2`, `D5` |
-| `workers/output_parser` | `production` | `compute_control` | `pyproject.toml` exposes `nhms-parse`; parser tests and worker-chain smoke paths import underscore package modules. | Replacement for `workers/output-parser`. | Retain active path; no #362 cleanup action. | `D2`, `D5` |
-| `workers/flood_frequency` | `production` | `compute_control` | `pyproject.toml` exposes `nhms-flood`; flood, hindcast, return-period, API, and tests import underscore package modules. | Replacement for `workers/flood-frequency`. | Retain active path; no #362 cleanup action. | `D2`, `D5` |
-| `infra/sbatch` | `production` | `slurm_gateway` | `services/slurm_gateway/config.py` defaults `template_dir` to `infra/sbatch`; compute env, compose, systemd, Docker image copy, and tests reference this directory. | Replacement for `workers/sbatch_templates`. | Retain active path and canonical template ownership; no #362 cleanup action. | `D1`, `D6` |
-| `services/slurm_gateway/config.py` | `production` | `slurm_gateway` | Owns `DEFAULT_JOB_TYPE_TEMPLATES` and `SlurmGatewaySettings.template_dir`; env prefix maps `SLURM_GATEWAY_TEMPLATE_DIR` to the same setting. | Source of truth for template migration and gateway defaults. | Retain active path and defaults; no #362 cleanup action. | `D1`, `D6` |
-| `services/tile_publisher` | `production` | `compute_control` | Orchestrator CLI/chain import `services.tile_publisher`; tests cover tile publication behavior. | Replacement for `services/tile-publisher`. | Retain active path; no #362 cleanup action. | `D2`, `D7` |
-| `infra/sbatch/publish_tiles.sbatch` | `production` | `slurm_gateway` | `services/slurm_gateway/config.py` maps `publish_tiles` to this template; `tests/test_slurm_array_contract.py` covers the publish command path. | Active Slurm entry for tile publication. | Retain active path; no #362 cleanup action. | `D1`, `D6`, `D7` |
-| `apps/api/routes/flood_alerts.py` | `production` | `display_readonly` | Implements display flood alert and tile API routes used by frontend flood/map surfaces. | Active display API counterpart for legacy tile-publisher placeholder claims. | Retain active path; no #362 cleanup action. | `D7` |
-| `services/tiles` | `production` | `display_readonly` | Provides tile helpers used by `apps/api/routes/flood_alerts.py`. | Active display tile implementation counterpart. | Retain active path; no #362 cleanup action. | `D2`, `D7` |
-| `apps/frontend/src/components/flood` | `production` | `display_readonly` | Frontend flood alert components consume display API and tile products. | Active display frontend counterpart. | Retain active path; no #362 cleanup action. | `D7` |
-| `apps/frontend/src/components/map` | `production` | `display_readonly` | Map components render active display layers and MVT/GeoJSON overlays. | Active display frontend counterpart. | Retain active path; no #362 cleanup action. | `D7` |
+| `apps/frontend` | `production` | `display_readonly` | `apps/frontend/package.json` owns `build`, `test`, `test:e2e`, and preview scripts. CI `frontend-build` installs, builds, tests, and checks bundle size from this directory. | Replacement for `apps/web`. | Retain active path; no retirement action. | `D1`, `D2` |
+| `workers/forcing_producer` | `production` | `compute_control` | `pyproject.toml` exposes `nhms-forcing`; scheduler and tests import underscore package modules. | Replacement for `workers/forcing-producer`. | Retain active path; no retirement action. | `D2`, `D5` |
+| `workers/shud_runtime` | `production` | `compute_control` | `pyproject.toml` exposes `nhms-shud-runtime`; runtime and tests import underscore package modules. | Replacement for `workers/shud-runtime`. | Retain active path; no retirement action. | `D2`, `D5` |
+| `workers/output_parser` | `production` | `compute_control` | `pyproject.toml` exposes `nhms-parse`; parser tests and worker-chain smoke paths import underscore package modules. | Replacement for `workers/output-parser`. | Retain active path; no retirement action. | `D2`, `D5` |
+| `workers/flood_frequency` | `production` | `compute_control` | `pyproject.toml` exposes `nhms-flood`; flood, hindcast, return-period, API, and tests import underscore package modules. | Replacement for `workers/flood-frequency`. | Retain active path; no retirement action. | `D2`, `D5` |
+| `infra/sbatch` | `production` | `slurm_gateway` | `services/slurm_gateway/config.py` defaults `template_dir` to `infra/sbatch`; compute env, compose, systemd, Docker image copy, and tests reference this directory. | Replacement for `workers/sbatch_templates`. | Retain active path and canonical template ownership; no retirement action. | `D1`, `D6` |
+| `services/slurm_gateway/config.py` | `production` | `slurm_gateway` | Owns `DEFAULT_JOB_TYPE_TEMPLATES` and `SlurmGatewaySettings.template_dir`; env prefix maps `SLURM_GATEWAY_TEMPLATE_DIR` to the same setting. | Source of truth for template migration and gateway defaults. | Retain active path and defaults; no retirement action. | `D1`, `D6` |
+| `services/tile_publisher` | `production` | `compute_control` | Orchestrator CLI/chain import `services.tile_publisher`; tests cover tile publication behavior. | Replacement for `services/tile-publisher`. | Retain active path; no retirement action. | `D2`, `D7` |
+| `infra/sbatch/publish_tiles.sbatch` | `production` | `slurm_gateway` | `services/slurm_gateway/config.py` maps `publish_tiles` to this template; `tests/test_slurm_array_contract.py` covers the publish command path. | Active Slurm entry for tile publication. | Retain active path; no retirement action. | `D1`, `D6`, `D7` |
+| `apps/api/routes/flood_alerts.py` | `production` | `display_readonly` | Implements display flood alert and tile API routes used by frontend flood/map surfaces. | Active display API counterpart for legacy tile-publisher placeholder claims. | Retain active path; no retirement action. | `D7` |
+| `services/tiles` | `production` | `display_readonly` | Provides tile helpers used by `apps/api/routes/flood_alerts.py`. | Active display tile implementation counterpart. | Retain active path; no retirement action. | `D2`, `D7` |
+| `apps/frontend/src/components/flood` | `production` | `display_readonly` | Frontend flood alert components consume display API and tile products. | Active display frontend counterpart. | Retain active path; no retirement action. | `D7` |
+| `apps/frontend/src/components/map` | `production` | `display_readonly` | Map components render active display layers and MVT/GeoJSON overlays. | Active display frontend counterpart. | Retain active path; no retirement action. | `D7` |
 
 ## Follow-Up Ownership
 
-- #363 may act on `apps/web`, hyphenated worker placeholders, `workers/sbatch_templates`, and `services/tile-publisher`, but must re-run focused import/doc checks and update docs in the same PR.
+- #363 retired `apps/web`, hyphenated worker placeholders, `workers/sbatch_templates`, and `services/tile-publisher`; active counterparts remain the only current entrypoints.
 - #364 may act on QHH diagnostics, but must preserve diagnostic value or add wrappers and runbook migration if paths move.
 - #365 may split Playwright mocked regression from live display-readonly evidence, but must not cite specs with broad `page.route('**/api/v1/**')` as live receipt.
 - #366 may remove `&& false`, archive visual evidence, or create a manual workflow for `frontend-m15-visual`; #362 makes no CI behavior change.
