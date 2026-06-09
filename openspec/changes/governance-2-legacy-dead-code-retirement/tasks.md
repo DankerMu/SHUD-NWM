@@ -318,7 +318,24 @@
   - Evidence recorded 2026-06-09: `corepack pnpm exec playwright test --list`
     listed 82 tests under project `mocked-regression-chromium`; raw broad mock
     `rg` hits were limited to existing mocked-regression, preview, and visual
-    specs, with no `live-display.spec.ts` hit.
+    specs, with no `live-display.spec.ts` hit. Phase 6 verification additionally
+    confirmed `corepack pnpm exec playwright test --project=chromium --list`
+    exits non-zero with available project `mocked-regression-chromium`.
+- [x] 4.1.1 Phase 6 fix: remove the generic `chromium` project alias so an
+  explicit `--project=chromium` caller cannot list broad-mock specs as generic
+  Chromium evidence. Required evidence:
+  - Input command:
+
+    ```bash
+    cd apps/frontend
+    corepack pnpm exec playwright test e2e/m15-visual-conformance.spec.ts --project=mocked-regression-chromium --list
+    ```
+
+    Expected output: M15 visual conformance tests list under
+    `mocked-regression-chromium`; `--project=chromium` is not a supported
+    compatibility alias.
+  - Evidence recorded 2026-06-09: command listed 41 M15 visual conformance
+    tests under `mocked-regression-chromium`.
 - [x] 4.2 Add a live display-readonly e2e profile and npm/pnpm script that uses
   explicit frontend base URL and API base URL, and forbids broad
   `page.route('**/api/v1/**')` mocks. Required evidence:
@@ -350,6 +367,26 @@
     single `live-display-readonly-chromium` spec. Config/script/docs require
     explicit live env vars and the live config maps the API URL to
     `VITE_API_BASE_URL`.
+- [x] 4.2.1 Phase 6 fix: tighten live display PASS criteria so the browser page
+  itself must observe display_readonly runtime config and a monitoring read API
+  from the configured live API binding. Required evidence:
+  - Input command:
+
+    ```bash
+    cd apps/frontend
+    corepack pnpm test src/__tests__/playwrightConfig.test.ts
+    ```
+
+    Expected output: helper tests cover distinct API and same-origin proxy
+    binding, browser-observed runtime/read evidence, RBAC-denied and runtime
+    unavailable non-PASS states, and forbidden control request classification.
+  - Runtime acceptance: `corepack pnpm run test:e2e:live-display` may record
+    `BLOCKED` when live runtime is unavailable, but a PASS requires browser
+    responses from the configured API binding rather than Playwright request
+    context alone.
+  - Evidence recorded 2026-06-09: `corepack pnpm test
+    src/__tests__/playwrightConfig.test.ts` passed 11 tests covering the live
+    API binding and non-PASS classifications.
 - [x] 4.3 Add a static guard that fails if files classified as live e2e contain
   broad API route mocks. Required evidence:
   - Input command:
@@ -369,10 +406,25 @@
     Expected output: no matches; raw `rg` exit 1 is the passing no-match
     condition for live e2e files.
   - Evidence recorded 2026-06-09: `corepack pnpm test
-    src/__tests__/playwrightConfig.test.ts` passed 4 tests, including live env
-    fail-fast and live no-mock guard coverage; `rg -n
+    src/__tests__/playwrightConfig.test.ts` passed 11 tests, including live env
+    fail-fast, live no-mock guard coverage, symlink-safe discovery, browser/API
+    binding, and forbidden request classification; `rg -n
     "page\\.route\\('\\*\\*/api/v1/\\*\\*'" apps/frontend/e2e --glob
     '*live*'` exited 1 with no matches.
+- [x] 4.3.1 Phase 6 fix: bound live spec discovery to intended e2e files and
+  skip symlink traversal, generated directories, outside-root symlinks, and
+  symlink cycles. Required evidence:
+  - Input command:
+
+    ```bash
+    cd apps/frontend
+    corepack pnpm test src/__tests__/playwrightConfig.test.ts
+    ```
+
+    Expected output: guard tests include outside symlink and symlink
+    cycle/self-reference coverage.
+  - Evidence recorded 2026-06-09: focused config helper test passed 11 tests,
+    including outside symlink and symlink cycle/self-reference cases.
 - [x] 4.4 If live runtime is unavailable, record runtime execution as `BLOCKED`
   while still landing config/script/static guard. Required evidence:
   - Input command:

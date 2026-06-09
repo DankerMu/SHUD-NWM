@@ -891,7 +891,7 @@ apps/frontend/src/**/__tests__/*ops*
 cd apps/frontend
 corepack pnpm test
 corepack pnpm build
-corepack pnpm test:e2e -- monitoring.spec.ts --project=chromium --workers=1
+corepack pnpm test:e2e -- monitoring.spec.ts --project=mocked-regression-chromium --workers=1
 ```
 
 注意：如果该 E2E 仍使用 mock API，证据必须标注 mocked regression，不得当成 live。

@@ -429,6 +429,10 @@ Must preserve for #365:
 - The live profile requires explicit frontend base URL and API base URL; it must
   not default to `https://api.example.test` or a local dev server with mocked
   API data.
+- A live PASS requires browser-observed runtime config and read API responses
+  from the configured live API binding; request-context-only checks, RBAC
+  denied pages, runtime-config unavailable pages, Slurm browser requests, and
+  retry/cancel mutations are not live receipts.
 - Runtime unavailable is recorded as `BLOCKED` with required variables, not as a
   passing live receipt.
 
@@ -459,6 +463,11 @@ Invariant Matrix for #365:
     `page.route('**/api/v1/**')`.
   - Live config without required base URL/API base URL -> fails clearly before
     browser execution.
+  - Live browser/API binding -> page responses include display_readonly runtime
+    config and monitoring read API responses from either the configured distinct
+    API origin or documented same-origin proxy.
+  - Live display control guard -> any `/api/v1/slurm/*` browser request is
+    forbidden, while retry/cancel checks remain mutation-sensitive.
   - Live runtime unavailable during implementation -> documented as `BLOCKED`
     with required variables, not `PASS`.
   - `docs/VALIDATION.md` / `docs/bugs.md` -> no longer cite mocked Playwright

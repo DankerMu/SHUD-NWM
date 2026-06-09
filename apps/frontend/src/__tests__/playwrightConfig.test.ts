@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
+  assertLiveDisplayPageEvidence,
   assertLiveDisplaySpecsDoNotMockApis,
-  isPlaywrightProjectRequested,
+  classifyLiveDisplayControlRequest,
+  findLiveDisplaySpecFiles,
+  isLiveDisplayReadApiUrl,
+  isLiveDisplayRuntimeConfigUrl,
+  liveDisplayApiBinding,
   loadLiveDisplayEnv,
   parsePlaywrightWorkers,
 } from '../../playwright.config.helpers'
@@ -22,11 +27,12 @@ describe('Playwright config helpers', () => {
     expect(() => parsePlaywrightWorkers('abc')).toThrow('PLAYWRIGHT_WORKERS must be a positive integer.')
   })
 
-  it('keeps a legacy chromium project alias only when explicitly requested', () => {
-    expect(isPlaywrightProjectRequested('chromium', ['node', 'playwright', '--list'])).toBe(false)
-    expect(isPlaywrightProjectRequested('chromium', ['node', 'playwright', '--project=chromium'])).toBe(true)
-    expect(isPlaywrightProjectRequested('chromium', ['node', 'playwright', '--project', 'chromium'])).toBe(true)
-    expect(isPlaywrightProjectRequested('chromium', ['node', 'playwright', '--project=mocked-regression-chromium'])).toBe(false)
+  it('keeps the default mocked regression project explicitly named', async () => {
+    const config = await import('../../playwright.config')
+    const projectNames = config.default.projects?.map((project: { name: string }) => project.name)
+
+    expect(projectNames).toEqual(['mocked-regression-chromium'])
+    expect(projectNames).not.toContain('chromium')
   })
 
   it('requires explicit live display frontend and API URLs', () => {
@@ -80,5 +86,168 @@ describe('Playwright config helpers', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  it('does not follow symlinks outside the e2e root during live spec discovery', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'nhms-live-display-'))
+    try {
+      const e2eDir = path.join(root, 'e2e')
+      const outsideDir = path.join(root, 'outside')
+      mkdirSync(e2eDir)
+      mkdirSync(outsideDir)
+      writeFileSync(path.join(outsideDir, 'live-display.spec.ts'), "await page.route('**/api/v1/**')\n")
+      symlinkSync(outsideDir, path.join(e2eDir, 'outside-link'), 'dir')
+
+      expect(findLiveDisplaySpecFiles(e2eDir)).toEqual([])
+      expect(assertLiveDisplaySpecsDoNotMockApis(e2eDir)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not traverse symlink cycles or self-references during live spec discovery', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'nhms-live-display-'))
+    try {
+      const e2eDir = path.join(root, 'e2e')
+      const nestedDir = path.join(e2eDir, 'nested')
+      mkdirSync(nestedDir, { recursive: true })
+      writeFileSync(path.join(e2eDir, 'live-display.spec.ts'), "await page.goto('/monitoring')\n")
+      symlinkSync(e2eDir, path.join(nestedDir, 'cycle'), 'dir')
+      symlinkSync(nestedDir, path.join(nestedDir, 'self'), 'dir')
+
+      expect(findLiveDisplaySpecFiles(e2eDir)).toEqual([path.join(e2eDir, 'live-display.spec.ts')])
+      expect(assertLiveDisplaySpecsDoNotMockApis(e2eDir)).toEqual([path.join(e2eDir, 'live-display.spec.ts')])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('classifies live display API binding for distinct API and same-origin proxy cases', () => {
+    const distinct = liveDisplayApiBinding('http://127.0.0.1:4174', 'http://127.0.0.1:8000')
+    expect(distinct).toEqual({ mode: 'distinct-api', expectedOrigin: 'http://127.0.0.1:8000' })
+    expect(isLiveDisplayRuntimeConfigUrl('http://127.0.0.1:8000/api/v1/runtime/config', distinct)).toBe(true)
+    expect(isLiveDisplayReadApiUrl('http://127.0.0.1:8000/api/v1/pipeline/status?source=GFS', distinct)).toBe(true)
+    expect(isLiveDisplayRuntimeConfigUrl('http://127.0.0.1:4174/api/v1/runtime/config', distinct)).toBe(false)
+
+    const sameOrigin = liveDisplayApiBinding('https://display.example.test/app', 'https://display.example.test')
+    expect(sameOrigin).toEqual({ mode: 'same-origin-proxy', expectedOrigin: 'https://display.example.test' })
+    expect(isLiveDisplayRuntimeConfigUrl('https://display.example.test/api/v1/runtime/config', sameOrigin)).toBe(true)
+    expect(isLiveDisplayReadApiUrl('https://display.example.test/api/v1/jobs?limit=12', sameOrigin)).toBe(true)
+  })
+
+  it('classifies forbidden live display control-plane browser requests', () => {
+    expect(classifyLiveDisplayControlRequest('GET', 'https://api.example.test/api/v1/slurm/jobs')).toBe(
+      'forbidden-slurm-control',
+    )
+    expect(classifyLiveDisplayControlRequest('POST', 'https://api.example.test/api/v1/slurm/jobs')).toBe(
+      'forbidden-slurm-control',
+    )
+    expect(classifyLiveDisplayControlRequest('POST', 'https://api.example.test/api/v1/runs/run-1/retry')).toBe(
+      'forbidden-run-mutation',
+    )
+    expect(classifyLiveDisplayControlRequest('DELETE', 'https://api.example.test/api/v1/runs/run-1/cancel')).toBe(
+      'forbidden-run-mutation',
+    )
+    expect(classifyLiveDisplayControlRequest('GET', 'https://api.example.test/api/v1/runs/run-1/retry')).toBeNull()
+    expect(classifyLiveDisplayControlRequest('GET', 'https://api.example.test/api/v1/pipeline/status')).toBeNull()
+  })
+
+  it('requires browser-observed display runtime config and live read API evidence', () => {
+    expect(() =>
+      assertLiveDisplayPageEvidence({
+        runtimeConfigResponses: [
+          {
+            url: 'https://api.example.test/api/v1/runtime/config',
+            status: 200,
+            body: { data: { service_role: 'display_readonly', display_readonly: true } },
+          },
+        ],
+        readApiResponses: [
+          {
+            url: 'https://api.example.test/api/v1/pipeline/status?source=GFS',
+            status: 200,
+            body: { data: { source: 'GFS' } },
+          },
+        ],
+        forbiddenControlRequests: [],
+        permissionDeniedVisible: false,
+        runtimeConfigUnavailableVisible: false,
+      }),
+    ).not.toThrow()
+
+    expect(() =>
+      assertLiveDisplayPageEvidence({
+        runtimeConfigResponses: [],
+        readApiResponses: [
+          {
+            url: 'https://api.example.test/api/v1/pipeline/status?source=GFS',
+            status: 200,
+            body: { data: { source: 'GFS' } },
+          },
+        ],
+        forbiddenControlRequests: [],
+        permissionDeniedVisible: false,
+        runtimeConfigUnavailableVisible: false,
+      }),
+    ).toThrow(/browser-observed \/api\/v1\/runtime\/config response with display_readonly/)
+
+    expect(() =>
+      assertLiveDisplayPageEvidence({
+        runtimeConfigResponses: [
+          {
+            url: 'https://api.example.test/api/v1/runtime/config',
+            status: 200,
+            body: { data: { service_role: 'display_readonly', display_readonly: true } },
+          },
+        ],
+        readApiResponses: [],
+        forbiddenControlRequests: [],
+        permissionDeniedVisible: false,
+        runtimeConfigUnavailableVisible: false,
+      }),
+    ).toThrow(/successful browser-observed monitoring read API/)
+  })
+
+  it('does not count denied or unavailable page state as live PASS evidence', () => {
+    const passingResponses = {
+      runtimeConfigResponses: [
+        {
+          url: 'https://api.example.test/api/v1/runtime/config',
+          status: 200,
+          body: { data: { service_role: 'display_readonly', display_readonly: true } },
+        },
+      ],
+      readApiResponses: [
+        {
+          url: 'https://api.example.test/api/v1/jobs?limit=12',
+          status: 200,
+          body: { data: { items: [] } },
+        },
+      ],
+      forbiddenControlRequests: [],
+    }
+
+    expect(() =>
+      assertLiveDisplayPageEvidence({
+        ...passingResponses,
+        permissionDeniedVisible: true,
+        runtimeConfigUnavailableVisible: false,
+      }),
+    ).toThrow(/RBAC 权限不足/)
+    expect(() =>
+      assertLiveDisplayPageEvidence({
+        ...passingResponses,
+        permissionDeniedVisible: false,
+        runtimeConfigUnavailableVisible: true,
+      }),
+    ).toThrow(/runtime config is unavailable/)
+    expect(() =>
+      assertLiveDisplayPageEvidence({
+        ...passingResponses,
+        forbiddenControlRequests: ['GET /api/v1/slurm/jobs (forbidden-slurm-control)'],
+        permissionDeniedVisible: false,
+        runtimeConfigUnavailableVisible: false,
+      }),
+    ).toThrow(/forbidden control requests/)
   })
 })

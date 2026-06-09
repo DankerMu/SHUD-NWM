@@ -314,8 +314,9 @@ curl 'http://127.0.0.1:8001/api/v1/jobs/qhh_gfs_2026052100_smoke_frequency/logs'
 根因分析：
 
 - 已确认根因：现有 Playwright specs 是 deterministic frontend regression 设计，通过 `page.route('**/api/v1/**')` 截获 API 响应；它们不连接本地真实 API、共享 PostgreSQL 或 Slurm。
-- 定位入口：默认 `corepack pnpm test:e2e` / `corepack pnpm exec playwright test --list` 现在列出 `mocked-regression-chromium`，明确不是 live receipt。
+- 定位入口：默认 `corepack pnpm test:e2e` / `corepack pnpm exec playwright test --list` 现在只列出 `mocked-regression-chromium`；不再提供 generic `chromium` alias，明确不是 live receipt。
 - 已落地修复：保留 mocked specs 作为前端回归测试，新增 `test:e2e:live-display` profile/spec，要求显式 `PLAYWRIGHT_LIVE_BASE_URL` 和 `PLAYWRIGHT_LIVE_API_BASE_URL`，并通过静态 guard 禁止 live-display specs 注册 `page.route('**/api/v1/**')`。
+- live PASS 标准：浏览器页面本身必须从配置的 API binding 读取 `/api/v1/runtime/config` 并收到 `display_readonly`，同时从同一 binding 读取监控只读 API；RBAC `权限不足`、runtime config 不可用、任何 `/api/v1/slurm/*` 浏览器请求、retry/cancel mutation 都不能算 PASS。
 - 剩余状态：当前本地没有 live display_readonly runtime；`corepack pnpm run test:e2e:live-display -- --list` 在缺少 required env vars 时按预期输出 `Live display Playwright profile BLOCKED` 并非零退出。这是 `BLOCKED`，不能记为 `PASS`。
 
 证据：
@@ -327,7 +328,7 @@ curl 'http://127.0.0.1:8001/api/v1/jobs/qhh_gfs_2026052100_smoke_frequency/logs'
 - `apps/frontend/src/__tests__/playwrightConfig.test.ts`
 - `docs/VALIDATION.md`
 
-复测条件：提供真实 display_readonly frontend/API runtime，设置 `PLAYWRIGHT_LIVE_BASE_URL` 和 `PLAYWRIGHT_LIVE_API_BASE_URL`，运行 `corepack pnpm run test:e2e:live-display`；live-display spec 不得使用 broad `page.route('**/api/v1/**')` mock。
+复测条件：提供真实 display_readonly frontend/API runtime，设置 `PLAYWRIGHT_LIVE_BASE_URL` 和 `PLAYWRIGHT_LIVE_API_BASE_URL`，运行 `corepack pnpm run test:e2e:live-display`；目标页面必须可进入 `/monitoring` 而非 RBAC deny，live-display spec 不得使用 broad `page.route('**/api/v1/**')` mock。
 
 ### BUG-20260527-013: retry/cancel API 在本环境创建 mock Slurm job id，不能算 live Slurm retry receipt
 

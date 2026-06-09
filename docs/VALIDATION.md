@@ -1203,7 +1203,12 @@ corepack pnpm run test:e2e:mocked-regression
 
 Live display_readonly browser evidence must use the dedicated live profile. It
 requires both runtime URLs and has no local dev-server or
-`https://api.example.test` fallback:
+`https://api.example.test` fallback. A passing live receipt requires the browser
+page itself to fetch `/api/v1/runtime/config` from the configured API binding
+and receive `display_readonly`, then fetch at least one monitoring read API from
+that same binding. Both distinct API origins and same-origin `/api` proxy
+deployments are valid when `PLAYWRIGHT_LIVE_API_BASE_URL` names the expected API
+origin.
 
 ```bash
 cd apps/frontend
@@ -1215,9 +1220,13 @@ PLAYWRIGHT_LIVE_API_BASE_URL=https://api.example.internal \
 If either `PLAYWRIGHT_LIVE_BASE_URL` or `PLAYWRIGHT_LIVE_API_BASE_URL` is
 missing, `test:e2e:live-display` exits before browser execution with
 `Live display Playwright profile BLOCKED`. Record unavailable live runtime as
-`BLOCKED`, not `PASS`. Live-display specs must not register broad
-`page.route('**/api/v1/**')` mocks; those mocks are allowed only in
-mocked regression, preview, or visual evidence lanes.
+`BLOCKED`, not `PASS`. RBAC `权限不足`, page-visible runtime config
+unavailability, any browser request to `/api/v1/slurm/*`, or retry/cancel
+mutations also cannot be recorded as a live `PASS`. Live-display specs must not
+register broad `page.route('**/api/v1/**')` mocks; those mocks are allowed only
+in mocked regression, preview, or visual evidence lanes. Do not use
+`--project=chromium` for mocked evidence; use
+`--project=mocked-regression-chromium`.
 
 ## OpenSpec
 

@@ -1,15 +1,14 @@
 import { defineConfig, devices } from '@playwright/test'
 
-import { isPlaywrightProjectRequested, parsePlaywrightWorkers } from './playwright.config.helpers'
+import { parsePlaywrightWorkers } from './playwright.config.helpers'
 
-export { isPlaywrightProjectRequested, parsePlaywrightWorkers } from './playwright.config.helpers'
+export { parsePlaywrightWorkers } from './playwright.config.helpers'
 
 const e2ePort = Number(process.env.PLAYWRIGHT_DEV_PORT ?? 5174)
 const externalBaseURL = process.env.PLAYWRIGHT_TEST_BASE_URL
 const baseURL = externalBaseURL ?? `http://127.0.0.1:${e2ePort}`
 const apiBaseURL = process.env.VITE_API_BASE_URL ?? 'https://api.example.test'
 const workers = parsePlaywrightWorkers(process.env.PLAYWRIGHT_WORKERS)
-const projectName = isPlaywrightProjectRequested('chromium') ? 'chromium' : 'mocked-regression-chromium'
 
 export default defineConfig({
   testDir: './e2e',
@@ -31,7 +30,7 @@ export default defineConfig({
       }),
   projects: [
     {
-      name: projectName,
+      name: 'mocked-regression-chromium',
       use: { ...devices['Desktop Chrome'] },
     },
   ],

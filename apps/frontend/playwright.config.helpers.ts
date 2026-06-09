@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -8,9 +8,41 @@ export interface LiveDisplayEnv {
   viteApiBaseURL: string
 }
 
+export interface LiveDisplayRuntimeConfig {
+  display_readonly?: boolean
+  service_role?: string
+}
+
+export type LiveDisplayApiBindingMode = 'distinct-api' | 'same-origin-proxy'
+
+export interface LiveDisplayApiBinding {
+  mode: LiveDisplayApiBindingMode
+  expectedOrigin: string
+}
+
+export interface LiveDisplayBrowserResponse {
+  url: string
+  status: number
+  body: unknown
+}
+
+export interface LiveDisplayPageEvidence {
+  runtimeConfigResponses: LiveDisplayBrowserResponse[]
+  readApiResponses: LiveDisplayBrowserResponse[]
+  forbiddenControlRequests: string[]
+  permissionDeniedVisible: boolean
+  runtimeConfigUnavailableVisible: boolean
+}
+
 const liveDisplayRequiredEnv = ['PLAYWRIGHT_LIVE_BASE_URL', 'PLAYWRIGHT_LIVE_API_BASE_URL'] as const
 const liveDisplaySpecPattern = /(^|[./\\-])live-display\.spec\.ts$/
 const broadApiRouteMockPattern = /page\s*\.\s*route\s*\(\s*(['"`])\*\*\/api\/v1\/\*\*\1/g
+const generatedDirNames = new Set(['node_modules', 'dist', 'coverage', 'playwright-report', 'test-results'])
+const monitoringReadApiPaths = new Set([
+  '/api/v1/pipeline/status',
+  '/api/v1/pipeline/stages',
+  '/api/v1/jobs',
+])
 
 export function parsePlaywrightWorkers(value: string | undefined) {
   if (value === undefined || value.trim() === '') return 1
@@ -19,14 +51,6 @@ export function parsePlaywrightWorkers(value: string | undefined) {
     throw new Error('PLAYWRIGHT_WORKERS must be a positive integer.')
   }
   return Math.min(parsed, 4)
-}
-
-export function isPlaywrightProjectRequested(projectName: string, argv = process.argv) {
-  return argv.some((arg, index) => {
-    if (arg === `--project=${projectName}`) return true
-    if (arg === '--project' && argv[index + 1] === projectName) return true
-    return false
-  })
 }
 
 function normalizeHttpUrl(name: string, value: string) {
@@ -64,17 +88,23 @@ function pathFromInput(input: string | URL) {
 }
 
 export function findLiveDisplaySpecFiles(testDir: string | URL) {
-  const root = pathFromInput(testDir)
+  const root = path.resolve(pathFromInput(testDir))
   if (!existsSync(root)) return []
 
   const files: string[] = []
   const visit = (entry: string) => {
-    const stat = statSync(entry)
+    const resolved = path.resolve(entry)
+    const relative = path.relative(root, resolved)
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return
+
+    const stat = lstatSync(resolved)
+    if (stat.isSymbolicLink()) return
     if (stat.isDirectory()) {
-      for (const child of readdirSync(entry)) visit(path.join(entry, child))
+      if (generatedDirNames.has(path.basename(resolved))) return
+      for (const child of readdirSync(resolved)) visit(path.join(resolved, child))
       return
     }
-    if (stat.isFile() && liveDisplaySpecPattern.test(entry)) files.push(entry)
+    if (stat.isFile() && liveDisplaySpecPattern.test(resolved)) files.push(resolved)
   }
 
   visit(root)
@@ -105,4 +135,84 @@ export function assertLiveDisplaySpecsDoNotMockApis(testDir: string | URL) {
   const files = findLiveDisplaySpecFiles(testDir)
   assertNoBroadApiRouteMocks(files, 'live display_readonly')
   return files
+}
+
+export function unwrapApiData(value: unknown) {
+  if (value && typeof value === 'object' && 'data' in value) {
+    return (value as { data: unknown }).data
+  }
+  return value
+}
+
+export function isDisplayReadonlyRuntimeConfig(value: unknown) {
+  const runtimeConfig = unwrapApiData(value) as LiveDisplayRuntimeConfig | null
+  if (!runtimeConfig || typeof runtimeConfig !== 'object') return false
+  return runtimeConfig.service_role === 'display_readonly' || runtimeConfig.display_readonly === true
+}
+
+export function liveDisplayApiBinding(baseURL: string, apiBaseURL: string): LiveDisplayApiBinding {
+  const frontend = new URL(baseURL)
+  const api = new URL(apiBaseURL)
+  const mode: LiveDisplayApiBindingMode = frontend.origin === api.origin ? 'same-origin-proxy' : 'distinct-api'
+  return {
+    mode,
+    expectedOrigin: api.origin,
+  }
+}
+
+export function isLiveDisplayRuntimeConfigUrl(url: string, binding: LiveDisplayApiBinding) {
+  const parsed = new URL(url)
+  return parsed.origin === binding.expectedOrigin && parsed.pathname === '/api/v1/runtime/config'
+}
+
+export function isLiveDisplayReadApiUrl(url: string, binding: LiveDisplayApiBinding) {
+  const parsed = new URL(url)
+  return parsed.origin === binding.expectedOrigin && monitoringReadApiPaths.has(parsed.pathname)
+}
+
+export function classifyLiveDisplayControlRequest(method: string, url: string) {
+  const parsed = new URL(url)
+  const normalizedMethod = method.toUpperCase()
+  if (parsed.pathname.startsWith('/api/v1/slurm/')) {
+    return 'forbidden-slurm-control' as const
+  }
+  if (
+    normalizedMethod !== 'GET' &&
+    /^\/api\/v1\/runs\/[^/]+\/(retry|cancel)$/.test(parsed.pathname)
+  ) {
+    return 'forbidden-run-mutation' as const
+  }
+  return null
+}
+
+export function assertLiveDisplayPageEvidence(evidence: LiveDisplayPageEvidence) {
+  if (evidence.permissionDeniedVisible) {
+    throw new Error('Live display browser evidence cannot PASS on RBAC 权限不足 page state.')
+  }
+  if (evidence.runtimeConfigUnavailableVisible) {
+    throw new Error('Live display browser evidence cannot PASS when runtime config is unavailable in the page.')
+  }
+  if (evidence.forbiddenControlRequests.length > 0) {
+    throw new Error(
+      `Live display browser issued forbidden control requests: ${evidence.forbiddenControlRequests.join(', ')}`,
+    )
+  }
+
+  const runtimeConfigResponse = evidence.runtimeConfigResponses.find((response) =>
+    response.status >= 200 && response.status < 300 && isDisplayReadonlyRuntimeConfig(response.body),
+  )
+  if (!runtimeConfigResponse) {
+    throw new Error(
+      'Live display browser evidence requires a browser-observed /api/v1/runtime/config response with display_readonly service role.',
+    )
+  }
+
+  const readApiResponse = evidence.readApiResponses.find((response) => response.status >= 200 && response.status < 300)
+  if (!readApiResponse) {
+    throw new Error(
+      'Live display browser evidence requires at least one successful browser-observed monitoring read API response from the configured live API.',
+    )
+  }
+
+  return { runtimeConfigResponse, readApiResponse }
 }
