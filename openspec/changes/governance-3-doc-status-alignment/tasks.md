@@ -106,56 +106,20 @@
   Evidence: command returned all required BUG headings and ledger fields,
   including `resolved_by` for resolved entries and `superseded_by` for
   superseded entries.
-- [x] 3.6 Verify each required bug block has required fields and conditional
-  resolution fields. Evidence command:
+- [x] 3.6 Verify each required bug block has required fields, conditional
+  resolution fields, retest shell syntax, and post-gate retest invariants.
+  Evidence: `uv run --no-sync python scripts/validate_bugs_ledger.py` returned:
 
-  ```bash
-  uv run --no-sync python - <<'PY'
-  from pathlib import Path
-  import re
-
-  required = [
-      "BUG-20260527-003",
-      "BUG-20260527-007",
-      "BUG-20260527-008",
-      "BUG-20260527-009",
-      "BUG-20260527-010",
-      "BUG-20260527-011",
-      "BUG-20260527-012",
-      "BUG-20260527-013",
-  ]
-  statuses = {"open", "resolved", "superseded", "stale-needs-repro", "archived"}
-  owners = {"compute_control", "display_readonly", "slurm_gateway", "shared_contract"}
-  text = Path("docs/bugs.md").read_text()
-  for bug in required:
-      match = re.search(rf"### {bug}:.*?\n\n```yaml\n(?P<body>.*?)\n```", text, re.S)
-      if match is None:
-          raise SystemExit(f"{bug}: missing yaml ledger block")
-      body = match.group("body")
-      fields = {
-          line.split(":", 1)[0]: line.split(":", 1)[1].strip()
-          for line in body.splitlines()
-          if re.match(r"^[a-z_]+:", line)
-      }
-      missing = {"status", "owner_area", "evidence", "retest_command"} - fields.keys()
-      if missing:
-          raise SystemExit(f"{bug}: missing {sorted(missing)}")
-      if fields["status"] not in statuses:
-          raise SystemExit(f"{bug}: invalid status {fields['status']!r}")
-      if fields["owner_area"] not in owners:
-          raise SystemExit(f"{bug}: invalid owner_area {fields['owner_area']!r}")
-      if not re.search(r"(?m)^evidence:\n  - ", body):
-          raise SystemExit(f"{bug}: evidence has no list item")
-      if fields["status"] == "resolved" and not fields.get("resolved_by"):
-          raise SystemExit(f"{bug}: resolved entry lacks resolved_by")
-      if fields["status"] == "superseded" and not fields.get("superseded_by"):
-          raise SystemExit(f"{bug}: superseded entry lacks superseded_by")
-      print(f"{bug}: {fields['status']} {fields['owner_area']}")
-  PY
+  ```text
+  BUG-20260527-003: open shared_contract retest-shell-ok
+  BUG-20260527-007: resolved display_readonly retest-shell-ok
+  BUG-20260527-008: resolved compute_control retest-shell-ok
+  BUG-20260527-009: superseded shared_contract retest-shell-ok
+  BUG-20260527-010: stale-needs-repro display_readonly retest-shell-ok
+  BUG-20260527-011: open compute_control retest-shell-ok
+  BUG-20260527-012: superseded display_readonly retest-shell-ok
+  BUG-20260527-013: open slurm_gateway retest-shell-ok
   ```
-
-  Additional evidence: extracted required BUG-003 and BUG-007..013
-  `retest_command` snippets from `docs/bugs.md` and each passed `bash -n`.
 
 ## 4. Agent/artifact ownership
 
