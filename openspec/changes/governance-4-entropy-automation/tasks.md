@@ -143,10 +143,12 @@ Out of scope for #371. Owned by #373.
   and appends the Markdown report to `$GITHUB_STEP_SUMMARY`. It does not add
   fail thresholds or fail-on-finding logic; only command/tooling failures fail
   the job.
-- [ ] 3.3 Verify workflow execution on a branch and include report evidence in PR body.
-  Evidence: not completed locally in this leaf task because it requires a
-  pushed branch/PR workflow run. Local equivalent report evidence is recorded
-  in 3.7.
+- [x] 3.3 Verify workflow execution on a branch and include report evidence in PR body.
+  Evidence: PR #394 ran `Governance Audit / Entropy Audit (report-only)` on
+  branch `feat/issue-373-governance-audit-ci` at commit
+  `cf2317f1fb0cbcf4986e297ed9410eb79f366cbb` and completed successfully:
+  https://github.com/DankerMu/SHUD-NWM/actions/runs/27210674640/job/80338535740
+  The PR body records the fixed report paths and artifact/summary behavior.
 - [x] 3.4 Verify the CI command path does not create or update
   `.entropy-baseline/latest.json`.
   Evidence: `test ! -e .entropy-baseline/latest.json` passed before and after
