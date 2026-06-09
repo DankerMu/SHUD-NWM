@@ -1,6 +1,10 @@
 ## Context
 
-The Governance-4 report currently exposes a stable baseline of entropy findings, including stale display route tokens, placeholder path tokens, broad e2e API mocks, and `apps.api.*` layer inversion imports. Several of those findings are legitimate cleanup targets, but many are historical evidence, archived inventory, or deliberate compatibility records.
+The Governance-4 report currently exposes a stable baseline of entropy
+findings, including stale display route tokens, placeholder path tokens, broad
+e2e API mocks, and `apps.api.*` layer inversion imports. Several of those
+findings are legitimate cleanup targets, but many are historical evidence,
+archived inventory, or deliberate compatibility records.
 
 Using total finding count or deletion line count as the only success metric would create two bad incentives: deleting evidence that should remain auditable, or adding allowlist text without reducing active drift. E1 defines the automation semantics needed to measure cleanup accurately.
 
@@ -73,6 +77,76 @@ Non-goals for #400:
 - Tracked retired-path return guard implementation is #402.
 - Entropy budget/report example schema refresh is #403.
 - Display route cleanup, API retirement, and layer-inversion cleanup belong to E2/E3/E4.
+
+### #401 normalized finding semantics slice
+
+Fixture level: expanded
+Repair intensity: high
+
+Change surface:
+
+- `scripts/governance/audit_repo_entropy.py` report schema, hard-gate metadata, Markdown rendering, and exit code behavior.
+- `tests/test_entropy_audit_script.py` focused report schema and hard-gate tests.
+- Minimal docs/example updates only if required to keep documented schema truthful.
+
+Must preserve:
+
+- Default `--mode report` remains report-only and exits 0 for known findings.
+- No CI hard-gate enablement and no `.github/workflows/governance.yml` change.
+- `.entropy-baseline/latest.json` is not created or updated by report or hard-gate runs.
+- Existing `allowlist_reason` remains present for compatibility.
+- Existing finding IDs, `check_id`, priority, role, module, and heatmap semantics remain stable unless explicitly extended.
+- #402 tracked retired-path guard and #403 full report-example refresh remain future work.
+
+Must add/change:
+
+- Every finding exposes normalized allowlist semantics: `allowlist_state`, `allowlist_key`, `budget_counted`, and `gate_eligible`.
+- Equivalent allowlist wording maps to a stable normalized allowlist key without losing the human-readable `allowlist_reason`.
+- Hard-gate mode counts only finding records whose `gate_eligible` is true.
+- Metadata exposes summary counts by `check_id`, priority, role, allowlist state, and gate eligibility.
+- JSON remains parseable when explicit hard-gate mode exits non-zero.
+
+Risk packs considered for #401:
+
+- Public API / CLI / script entry: selected - report JSON/Markdown and CLI exit code are automation contracts.
+- Config / project setup: selected - hard-gate metadata must not enable CI or write baselines.
+- File IO / path safety / overwrite: selected - baseline path must remain read-only; no implicit `.entropy-baseline/latest.json` writes.
+- Schema / columns / units / field names: selected - finding and metadata fields are schema contracts.
+- Auth / permissions / secrets: not selected - no credential or permission surface.
+- Concurrency / shared state / ordering: not selected - report construction is local and single-process.
+- Resource limits / large input / discovery: selected - existing scan limits and skipped path behavior must be preserved.
+- Legacy compatibility / examples: selected - archived/deterministic/delegated evidence must normalize without becoming active drift.
+- Error handling / rollback / partial outputs: selected - hard-gate JSON must remain parseable even when exit code is non-zero.
+- Release / packaging / dependency compatibility: not selected - no dependency or packaging change.
+- Documentation / migration notes: selected - any minimal schema docs must match the new fields and preserve report-only policy.
+- NHMS domain packs: not selected - no hydro-met, geospatial, SHUD, Slurm runtime, provider, manifest, or published artifact behavior changes.
+
+Invariant Matrix:
+
+- Governing invariant: the entropy report must separate human-readable evidence from machine gate/budget semantics without changing report-only CI posture or writing baselines.
+- Source-of-truth identity/contract: each finding record's `check_id`, `allowlist_reason`, normalized `allowlist_key`, `allowlist_state`, `budget_counted`, and `gate_eligible` fields.
+- Producers: `_collect_findings`, `FindingSpec`, `_finding_record`, allowlist normalization helpers, hard-gate metadata helpers.
+- Validators/preflight: `tests/test_entropy_audit_script.py` schema, allowlist, summary, hard-gate, and baseline-write tests.
+- Storage/cache/query: no persistent storage writes; `.entropy-baseline/latest.json` read state remains metadata only.
+- Public routes/entrypoints: `scripts/governance/audit_repo_entropy.py --format json|markdown --mode report|hard-gate`.
+- Frontend/downstream consumers: governance CI report-only job, docs/report examples, future #402/#403 consumers.
+- Failure paths/rollback/stale state: hard-gate mode exits non-zero only for `gate_eligible` findings while stdout remains valid JSON/Markdown; report mode exits 0.
+- Evidence/audit/readiness: focused pytest, JSON/Markdown commands, explicit hard-gate JSON command, baseline non-write check.
+- Regression rows:
+  - Deterministic mocked/preview/visual broad e2e finding -> `allowlist_state=allowlisted`, stable `allowlist_key`, `budget_counted=false`, `gate_eligible=false`.
+  - Live-labeled broad e2e finding -> unallowlisted active drift, `budget_counted=true`, `gate_eligible=true`, hard-gate fails with parseable JSON.
+  - Active stale display route token not in gated policy -> `budget_counted=true`, `gate_eligible=false`, hard-gate remains pass if no gate-eligible findings exist.
+  - Existing OpenAPI delegated/fingerprint signals -> retain report-only/allowlisted semantics and do not become hard-gate failures.
+  - Report and hard-gate runs with findings -> `.entropy-baseline/latest.json` is not written or modified.
+
+Boundary-surface checklist:
+
+- Shared helper roots: `FindingSpec`, `_finding_record`, `_metadata`, `_hard_gate_failing_count`, `_exit_code_for_report`, `render_markdown`.
+- Public entrypoints: `main`, JSON stdout, Markdown stdout, process exit code.
+- Read surfaces: repository scan helpers and existing allowlist classifiers.
+- Write/delete/overwrite surfaces: none; baseline path must remain read-only metadata.
+- Producer/consumer evidence boundaries: tests and docs must consume the same field names as emitted JSON.
+- Unchanged downstream consumers: report-only CI workflow and existing heatmap/high-spread report consumers.
 
 ## Decisions
 

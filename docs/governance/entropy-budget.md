@@ -110,9 +110,9 @@ The default remains `--mode report`, which emits
 `metadata.mode == "report-only"` and exits 0 for known findings. Explicit
 hard-gate mode emits `metadata.mode == "hard-gate"`,
 `metadata.hard_gate_status`, `metadata.hard_gate_gated_check_ids`, and
-`metadata.hard_gate_failing_count`; it exits non-zero only when findings from
-the prepared gated check list are present. JSON remains parseable even on a
-hard-gate failure.
+`metadata.hard_gate_failing_count`; it exits non-zero only when finding records
+are marked `gate_eligible: true`. JSON remains parseable even on a hard-gate
+failure.
 
 Prepared gated check IDs:
 
@@ -126,6 +126,13 @@ Prepared gated check IDs:
 - `agent-artifact-ownership-policy`
 - `agent-artifact-ignore-policy`
 - `tracked-generated-artifact`
+
+The prepared check list is only an eligibility boundary. Allowlisted,
+historical, archived, false-positive, delegated, or report-only accepted
+evidence remains `gate_eligible: false` even when its `check_id` appears in the
+list. Unallowlisted active drift is `budget_counted: true`; hard-gate mode
+counts only the budget-counted findings whose individual policy also marks them
+gate-eligible.
 
 `openapi-frontend-types-delegated` and `openapi-frontend-types-signal` remain
 report-only signals. The Governance Audit workflow must not pass

@@ -24,6 +24,19 @@ def test_entropy_audit_json_schema_is_stable() -> None:
     assert metadata["mode"] == "report-only"
     assert metadata["baseline_written"] is False
     assert metadata["baseline_path"] == ".entropy-baseline/latest.json"
+    assert "summary_counts" in metadata
+    summary_counts = metadata["summary_counts"]
+    assert isinstance(summary_counts, dict)
+    assert {
+        "by_check_id",
+        "by_priority",
+        "by_role",
+        "by_allowlist_state",
+        "by_gate_eligibility",
+        "by_budget_count",
+    } <= set(summary_counts)
+    assert metadata["budget_counted_count"] == summary_counts["by_budget_count"]["budget_counted"]
+    assert metadata["gate_eligible_count"] == summary_counts["by_gate_eligibility"]["gate_eligible"]
     assert metadata["max_scanned_text_file_bytes"] == audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES
     assert metadata["max_artifact_fingerprint_bytes"] == audit_repo_entropy.MAX_ARTIFACT_FINGERPRINT_BYTES
     assert ".venv" in metadata["skipped_path_families"]
@@ -75,10 +88,25 @@ def test_entropy_audit_json_schema_is_stable() -> None:
         "priority",
         "owner_area",
         "allowlist_reason",
+        "allowlist_key",
+        "allowlist_state",
+        "budget_counted",
+        "gate_eligible",
         "description",
         "recommendation",
     }
     assert finding_fields <= set(findings[0])
+    for finding in findings:
+        assert finding["allowlist_state"] in {"allowlisted", "unallowlisted"}
+        assert isinstance(finding["budget_counted"], bool)
+        assert isinstance(finding["gate_eligible"], bool)
+        if finding["allowlist_state"] == "allowlisted":
+            assert isinstance(finding["allowlist_key"], str)
+            assert finding["budget_counted"] is False
+            assert finding["gate_eligible"] is False
+        else:
+            assert finding["allowlist_key"] is None
+            assert finding["budget_counted"] is True
     assert {"broad-e2e-api-mock", "stale-display-route-token", "placeholder-path-token"} <= {
         finding["check_id"] for finding in findings
     }
@@ -151,14 +179,21 @@ def test_entropy_audit_hard_gate_json_failure_is_parseable_and_counts_only_gated
     metadata = report["metadata"]
 
     assert result.returncode == 1
+    assert not (tmp_path / ".entropy-baseline" / "latest.json").exists()
     assert metadata["mode"] == "hard-gate"
     assert metadata["hard_gate_status"] == "fail"
     assert metadata["hard_gate_gated_check_ids"] == sorted(audit_repo_entropy.HARD_GATE_CHECK_IDS)
     assert metadata["hard_gate_failing_count"] == 1
+    assert metadata["hard_gate_failing_count"] == metadata["gate_eligible_count"]
     assert {finding["check_id"] for finding in report["findings"]} >= {
         "makefile-toolchain-discipline",
         "stale-display-route-token",
     }
+    stale_finding = next(
+        finding for finding in report["findings"] if finding["check_id"] == "stale-display-route-token"
+    )
+    assert stale_finding["budget_counted"] is True
+    assert stale_finding["gate_eligible"] is False
 
 
 def test_entropy_audit_hard_gate_json_passes_with_no_gated_findings(tmp_path: Path) -> None:
@@ -186,10 +221,18 @@ def test_entropy_audit_hard_gate_json_passes_with_no_gated_findings(tmp_path: Pa
     assert metadata["mode"] == "hard-gate"
     assert metadata["hard_gate_status"] == "pass"
     assert metadata["hard_gate_failing_count"] == 0
+    assert metadata["gate_eligible_count"] == 0
     assert not any(
         finding["check_id"] in audit_repo_entropy.HARD_GATE_CHECK_IDS for finding in report["findings"]
     )
     assert "stale-display-route-token" in {finding["check_id"] for finding in report["findings"]}
+    stale_finding = next(
+        finding for finding in report["findings"] if finding["check_id"] == "stale-display-route-token"
+    )
+    assert stale_finding["allowlist_state"] == "unallowlisted"
+    assert stale_finding["allowlist_key"] is None
+    assert stale_finding["budget_counted"] is True
+    assert stale_finding["gate_eligible"] is False
 
 
 def test_entropy_audit_hard_gate_markdown_includes_status_and_report_sections(tmp_path: Path) -> None:
@@ -276,6 +319,9 @@ def test_openapi_frontend_type_fingerprint_skips_large_contract_files(tmp_path: 
     assert findings[0]["evidence_path"] == "apps/frontend/src/api/types.ts"
     assert str(findings[0]["allowlist_reason"]).startswith("report-only fingerprint skipped ")
     assert "exceeds-" in str(findings[0]["allowlist_reason"])
+    assert findings[0]["allowlist_key"] == "openapi-frontend-types-signal:report-only-fingerprint-skipped"
+    assert findings[0]["budget_counted"] is False
+    assert findings[0]["gate_eligible"] is False
 
 
 def test_openapi_frontend_type_fingerprint_skips_symlink_artifacts(tmp_path: Path) -> None:
@@ -300,6 +346,9 @@ def test_openapi_frontend_type_fingerprint_skips_symlink_artifacts(tmp_path: Pat
     assert len(findings) == 1
     assert str(findings[0]["allowlist_reason"]).startswith("report-only fingerprint skipped ")
     assert "openapi/nhms.v1.yaml:symlink" in str(findings[0]["allowlist_reason"])
+    assert findings[0]["allowlist_key"] == "openapi-frontend-types-signal:report-only-fingerprint-skipped"
+    assert findings[0]["budget_counted"] is False
+    assert findings[0]["gate_eligible"] is False
 
 
 def test_role_env_boundary_finds_display_service_in_generic_compose_without_compute_false_positive(
@@ -441,12 +490,68 @@ def test_broad_e2e_mock_classifies_live_label_as_high_and_mocked_e2e_as_medium(
     assert findings["apps/frontend/e2e/live.spec.ts"]["severity"] == "high"
     assert findings["apps/frontend/e2e/live.spec.ts"]["priority"] == "P1"
     assert findings["apps/frontend/e2e/live.spec.ts"]["allowlist_reason"] is None
+    assert findings["apps/frontend/e2e/live.spec.ts"]["allowlist_state"] == "unallowlisted"
+    assert findings["apps/frontend/e2e/live.spec.ts"]["allowlist_key"] is None
+    assert findings["apps/frontend/e2e/live.spec.ts"]["budget_counted"] is True
+    assert findings["apps/frontend/e2e/live.spec.ts"]["gate_eligible"] is True
     assert findings["apps/frontend/e2e/visual-preview.spec.ts"]["severity"] == "medium"
     assert findings["apps/frontend/e2e/visual-preview.spec.ts"]["priority"] == "P2"
     assert (
         findings["apps/frontend/e2e/visual-preview.spec.ts"]["allowlist_reason"]
         == "deterministic mocked/preview/visual e2e broad mock"
     )
+    assert findings["apps/frontend/e2e/visual-preview.spec.ts"]["allowlist_state"] == "allowlisted"
+    assert (
+        findings["apps/frontend/e2e/visual-preview.spec.ts"]["allowlist_key"]
+        == "broad-e2e-api-mock:deterministic-mocked-preview-visual"
+    )
+    assert findings["apps/frontend/e2e/visual-preview.spec.ts"]["budget_counted"] is False
+    assert findings["apps/frontend/e2e/visual-preview.spec.ts"]["gate_eligible"] is False
+
+
+def test_allowlist_key_normalizes_equivalent_broad_mock_wording() -> None:
+    base = audit_repo_entropy.FindingSpec(
+        check_id="broad-e2e-api-mock",
+        title="Deterministic frontend E2E path uses broad API mock",
+        axis="behavior",
+        governance_face="docs alignment",
+        role="display_readonly",
+        evidence_path="apps/frontend/e2e/visual-preview.spec.ts",
+        line=1,
+        severity="medium",
+        priority="P2",
+        owner_area="frontend e2e",
+        module="apps/frontend",
+        allowlist_reason="deterministic mocked/preview/visual e2e broad mock",
+        description="Broad API mocks can be mistaken for live display evidence.",
+        recommendation="Keep broad API mocks in deterministic mocked regressions.",
+    )
+    equivalent = audit_repo_entropy.FindingSpec(
+        check_id=base.check_id,
+        title=base.title,
+        axis=base.axis,
+        governance_face=base.governance_face,
+        role=base.role,
+        evidence_path="apps/frontend/e2e/mock.visual.spec.ts",
+        line=1,
+        severity=base.severity,
+        priority=base.priority,
+        owner_area=base.owner_area,
+        module=base.module,
+        allowlist_reason="visual preview deterministic API mock evidence",
+        description=base.description,
+        recommendation=base.recommendation,
+    )
+
+    base_record = audit_repo_entropy._finding_record(1, base)
+    equivalent_record = audit_repo_entropy._finding_record(2, equivalent)
+
+    assert base_record["allowlist_key"] == "broad-e2e-api-mock:deterministic-mocked-preview-visual"
+    assert equivalent_record["allowlist_key"] == base_record["allowlist_key"]
+    assert base_record["allowlist_reason"] != equivalent_record["allowlist_reason"]
+    assert base_record["allowlist_state"] == "allowlisted"
+    assert equivalent_record["budget_counted"] is False
+    assert equivalent_record["gate_eligible"] is False
 
 
 def test_slurm_gateway_route_leakage_finds_direct_business_route_decorators_and_path_literals(
@@ -512,9 +617,15 @@ def test_openapi_frontend_type_drift_emits_delegated_and_fingerprint_signals(
     assert len(findings) == 1
     assert findings[0]["evidence_path"] == "tests/test_openapi_drift.py"
     assert findings[0]["allowlist_reason"] == "existing OpenAPI drift tests are the enforced contract oracle"
+    assert findings[0]["allowlist_key"] == "openapi-frontend-types-delegated:existing-contract-oracle-delegation"
+    assert findings[0]["budget_counted"] is False
+    assert findings[0]["gate_eligible"] is False
     assert len(signal_findings) == 1
     assert signal_findings[0]["evidence_path"] == "apps/frontend/src/api/types.ts"
     assert str(signal_findings[0]["allowlist_reason"]).startswith("report-only fingerprint ")
+    assert signal_findings[0]["allowlist_key"] == "openapi-frontend-types-signal:report-only-fingerprint-record"
+    assert signal_findings[0]["budget_counted"] is False
+    assert signal_findings[0]["gate_eligible"] is False
 
 
 def test_openapi_frontend_type_drift_emits_presence_signal_when_artifact_missing(
@@ -717,8 +828,13 @@ def test_entropy_audit_hard_gate_fails_for_each_gated_check_id(
         [
             finding
             for finding in report["findings"]
-            if finding["check_id"] in audit_repo_entropy.HARD_GATE_CHECK_IDS
+            if finding["gate_eligible"]
         ]
+    )
+    assert all(
+        finding["check_id"] in audit_repo_entropy.HARD_GATE_CHECK_IDS
+        for finding in report["findings"]
+        if finding["gate_eligible"]
     )
     assert audit_repo_entropy._exit_code_for_report(report) == 1
 
@@ -739,6 +855,11 @@ def test_entropy_audit_hard_gate_keeps_delegated_and_fingerprint_openapi_signals
     assert metadata["hard_gate_failing_count"] == 0
     assert "openapi-frontend-types-delegated" not in metadata["hard_gate_gated_check_ids"]
     assert "openapi-frontend-types-signal" not in metadata["hard_gate_gated_check_ids"]
+    for finding in report["findings"]:
+        if finding["check_id"] in {"openapi-frontend-types-delegated", "openapi-frontend-types-signal"}:
+            assert finding["allowlist_state"] == "allowlisted"
+            assert finding["budget_counted"] is False
+            assert finding["gate_eligible"] is False
 
 
 def _findings_by_check(root: Path, check_id: str) -> list[dict[str, object]]:

@@ -34,6 +34,36 @@ create or update `.entropy-baseline/latest.json`.
     "baseline_written": false,
     "finding_count": 3,
     "check_family_count": 3,
+    "budget_counted_count": 1,
+    "gate_eligible_count": 1,
+    "summary_counts": {
+      "by_check_id": {
+        "broad-e2e-api-mock": 1,
+        "openapi-frontend-types-delegated": 1,
+        "role-env-boundary": 1
+      },
+      "by_priority": {
+        "P1": 1,
+        "P2": 1,
+        "P3": 1
+      },
+      "by_role": {
+        "display_readonly": 2,
+        "shared_contract": 1
+      },
+      "by_allowlist_state": {
+        "allowlisted": 2,
+        "unallowlisted": 1
+      },
+      "by_gate_eligibility": {
+        "gate_eligible": 1,
+        "not_gate_eligible": 2
+      },
+      "by_budget_count": {
+        "budget_counted": 1,
+        "not_budget_counted": 2
+      }
+    },
     "max_scanned_text_file_bytes": 1048576,
     "max_artifact_fingerprint_bytes": 1048576,
     "executed_check_families": [
@@ -112,6 +142,10 @@ create or update `.entropy-baseline/latest.json`.
       "owner_area": "infra/runtime",
       "module": "infra",
       "allowlist_reason": null,
+      "allowlist_key": null,
+      "allowlist_state": "unallowlisted",
+      "budget_counted": true,
+      "gate_eligible": true,
       "description": "Display-facing env or compose file references a compute/control-plane boundary token.",
       "recommendation": "Keep display config limited to read-only runtime identity and public display inputs."
     },
@@ -137,6 +171,10 @@ create or update `.entropy-baseline/latest.json`.
       "owner_area": "frontend e2e",
       "module": "apps/frontend",
       "allowlist_reason": "deterministic mocked/preview/visual e2e broad mock",
+      "allowlist_key": "broad-e2e-api-mock:deterministic-mocked-preview-visual",
+      "allowlist_state": "allowlisted",
+      "budget_counted": false,
+      "gate_eligible": false,
       "description": "Broad API mocks can be mistaken for live display evidence.",
       "recommendation": "Keep broad API mocks in deterministic mocked regressions and label live evidence specs."
     },
@@ -162,6 +200,10 @@ create or update `.entropy-baseline/latest.json`.
       "owner_area": "api contract",
       "module": "openapi",
       "allowlist_reason": "existing OpenAPI drift tests are the enforced contract oracle",
+      "allowlist_key": "openapi-frontend-types-delegated:existing-contract-oracle-delegation",
+      "allowlist_state": "allowlisted",
+      "budget_counted": false,
+      "gate_eligible": false,
       "description": "Static OpenAPI and generated frontend types are present.",
       "recommendation": "Keep running the existing OpenAPI drift and frontend API type generation checks."
     }
@@ -194,7 +236,8 @@ examples. Default report mode emits `metadata.mode == "report-only"`. Explicit
 `--mode hard-gate` emits `metadata.mode == "hard-gate"` plus
 `hard_gate_status`, `hard_gate_gated_check_ids`, and
 `hard_gate_failing_count`; JSON output remains parseable even when hard-gate
-mode exits non-zero.
+mode exits non-zero. `hard_gate_failing_count` counts finding records where
+`gate_eligible` is `true`, not every finding from a check family.
 
 `module_heatmap` rows summarize the highest observed severity on each axis for
 a module. The axis fields are `structure`, `semantics`, `behavior`, `context`,
@@ -204,6 +247,9 @@ that module.
 `findings` records are issue-ready signals. Required classification fields are
 `governance_face`, `role`, `evidence_path`, `severity`, `priority`, and
 `owner_area`. `allowlist_reason` is present and may be `null`.
+`allowlist_key` is the normalized machine identity for allowlisted findings and
+is `null` for unallowlisted findings. `budget_counted` marks unallowlisted
+active drift; `gate_eligible` marks findings counted by explicit hard-gate mode.
 
 `high_spread_patterns` groups repeated check families. Required fields are
 `pattern`, `occurrence_count`, `module_count`, `top_priority`, and `roles`;
