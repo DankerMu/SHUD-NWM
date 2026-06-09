@@ -62,10 +62,11 @@ before converting stable invariants into enforcement.
 |---|---|---|---|---|
 | Report-only local audit | Governance-4A/#371 and Governance-4B/#372 | Existing findings may be present. The budget is visibility and schema stability, not pass/fail cleanup. | Run JSON/Markdown reports locally, document the schema, and use findings to open targeted follow-up work. | No CI job, no failing gate, no baseline write, no scripted cleanup. |
 | Non-blocking CI report | Governance-4C/#373 | CI may publish findings without failing PRs for known baseline state. | Add a workflow/job that emits or uploads the report and records known findings for review. | No hard fail for known baseline findings; no silent `.entropy-baseline/latest.json` creation. |
-| Future hard gate | Governance-4D/#374 | Only stable, low-noise invariants may become fail conditions after cleanup or explicit waiver. | Add CLI/config support for hard-gate checks and fail on selected regressions. | No broad hard gate before Governance-4C evidence and maintainer-approved invariants. |
+| Disabled hard gate | Governance-4D/#374 | Only the prepared, explicit invariant list is eligible for fail conditions, and only when a maintainer invokes hard-gate mode. | Run `--mode hard-gate` locally or in temporary fixtures to prove future enforcement semantics. | No CI hard-gate enablement; no broad fail-on-finding behavior; no baseline write. |
 
-Governance-4C and Governance-4D remain future work. This page documents their
-intended boundaries but does not implement CI or hard-gate behavior.
+Governance-4C is active as a non-blocking report workflow. Governance-4D
+prepares an explicit hard-gate mode, but CI remains report-only until a later
+maintainer-approved enablement change.
 
 ## Baseline Write Policy
 
@@ -79,29 +80,48 @@ Policy:
   must not create or update `.entropy-baseline/latest.json`.
 - `uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`
   must not create or update `.entropy-baseline/latest.json`.
+- `uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json`
+  must not create or update `.entropy-baseline/latest.json`.
 - A future baseline write requires explicit maintainer confirmation in the
   issue or PR that creates or updates the baseline.
 - Governance-4B/#372 must not create `.entropy-baseline/latest.json`.
 
 The current report metadata may include `baseline_exists` and
-`baseline_written`. In report-only mode, `baseline_written` must remain `false`.
+`baseline_written`. In report-only and explicit hard-gate modes,
+`baseline_written` must remain `false`.
 
 ## Hard-Gate Candidates
 
-After non-blocking CI has produced enough evidence, Governance-4D may promote
-selected stable invariants to hard gates. Candidate gates include:
+Governance-4D prepares disabled-by-default hard-gate evaluation for selected
+stable invariants. The CLI surface is explicit:
 
-- display env/compose files containing compute-only environment values.
-- production scheduler/orchestrator paths referencing QHH diagnostic script
-  tokens.
-- live display e2e specs using broad `page.route('**/api/v1/**')` mocks.
-- standalone Slurm gateway apps exposing business, static, frontend, forecast,
-  model, or pipeline routes.
-- OpenAPI and generated frontend type drift, either directly or through the
-  existing contract-drift oracle.
-- workflow jobs hidden behind `&& false`.
-- Makefile commands bypassing the repository-managed `uv run` Python toolchain.
-- tracked `.agents`, `.codex`, or frontend artifact paths conflicting with
-  `docs/governance/DOC_STATUS.md`.
+```bash
+uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json
+uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format markdown
+```
 
-These are candidates, not active hard gates in Governance-4B.
+The default remains `--mode report`, which emits
+`metadata.mode == "report-only"` and exits 0 for known findings. Explicit
+hard-gate mode emits `metadata.mode == "hard-gate"`,
+`metadata.hard_gate_status`, `metadata.hard_gate_gated_check_ids`, and
+`metadata.hard_gate_failing_count`; it exits non-zero only when findings from
+the prepared gated check list are present. JSON remains parseable even on a
+hard-gate failure.
+
+Prepared gated check IDs:
+
+- `role-env-boundary`
+- `qhh-diagnostic-token`
+- `broad-e2e-api-mock`
+- `slurm-gateway-route-leakage`
+- `openapi-frontend-types-presence`
+- `paused-workflow-condition`
+- `makefile-toolchain-discipline`
+- `agent-artifact-ownership-policy`
+- `agent-artifact-ignore-policy`
+- `tracked-generated-artifact`
+
+`openapi-frontend-types-delegated` and `openapi-frontend-types-signal` remain
+report-only signals. The Governance Audit workflow must not pass
+`--mode hard-gate` until a later enablement change explicitly makes the gate a
+required CI status.

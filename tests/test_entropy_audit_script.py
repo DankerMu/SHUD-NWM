@@ -84,6 +84,19 @@ def test_entropy_audit_json_schema_is_stable() -> None:
     }
 
 
+def test_entropy_audit_report_mode_metadata_excludes_hard_gate_fields() -> None:
+    report = audit_repo_entropy.build_report(REPO_ROOT, mode="report")
+    metadata = report["metadata"]
+
+    assert isinstance(metadata, dict)
+    assert metadata["mode"] == "report-only"
+    assert metadata["baseline_written"] is False
+    assert "hard_gate_status" not in metadata
+    assert "hard_gate_gated_check_ids" not in metadata
+    assert "hard_gate_failing_count" not in metadata
+    assert audit_repo_entropy._exit_code_for_report(report) == 0
+
+
 def test_entropy_audit_cli_outputs_json_and_markdown_without_writing_baseline() -> None:
     before_exists = BASELINE.exists()
     before_content = BASELINE.read_bytes() if before_exists else None
@@ -111,6 +124,86 @@ def test_entropy_audit_cli_outputs_json_and_markdown_without_writing_baseline() 
     assert BASELINE.exists() is before_exists
     if before_exists:
         assert BASELINE.read_bytes() == before_content
+
+
+def test_entropy_audit_hard_gate_json_failure_is_parseable_and_counts_only_gated_findings(
+    tmp_path: Path,
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write(tmp_path / "Makefile", "test:\n\tpython -m pytest\n")
+    _write(tmp_path / "docs" / "active.md", "Historical token /hydro-met remains in docs.\n")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "governance" / "audit_repo_entropy.py"),
+            "--format",
+            "json",
+            "--mode",
+            "hard-gate",
+        ],
+        cwd=tmp_path,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    report = json.loads(result.stdout)
+    metadata = report["metadata"]
+
+    assert result.returncode == 1
+    assert metadata["mode"] == "hard-gate"
+    assert metadata["hard_gate_status"] == "fail"
+    assert metadata["hard_gate_gated_check_ids"] == sorted(audit_repo_entropy.HARD_GATE_CHECK_IDS)
+    assert metadata["hard_gate_failing_count"] == 1
+    assert {finding["check_id"] for finding in report["findings"]} >= {
+        "makefile-toolchain-discipline",
+        "stale-display-route-token",
+    }
+
+
+def test_entropy_audit_hard_gate_json_passes_with_no_gated_findings(tmp_path: Path) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write(tmp_path / "docs" / "active.md", "Historical token /hydro-met remains in docs.\n")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "governance" / "audit_repo_entropy.py"),
+            "--format",
+            "json",
+            "--mode",
+            "hard-gate",
+        ],
+        cwd=tmp_path,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    report = json.loads(result.stdout)
+    metadata = report["metadata"]
+
+    assert result.returncode == 0
+    assert metadata["mode"] == "hard-gate"
+    assert metadata["hard_gate_status"] == "pass"
+    assert metadata["hard_gate_failing_count"] == 0
+    assert not any(
+        finding["check_id"] in audit_repo_entropy.HARD_GATE_CHECK_IDS for finding in report["findings"]
+    )
+    assert "stale-display-route-token" in {finding["check_id"] for finding in report["findings"]}
+
+
+def test_entropy_audit_hard_gate_markdown_includes_status_and_report_sections(tmp_path: Path) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    markdown = audit_repo_entropy.render_markdown(report)
+
+    assert "- Mode: `hard-gate`" in markdown
+    assert "- Hard gate status: `pass`" in markdown
+    assert "- Hard gate failing findings: `0`" in markdown
+    assert "## Entropy Heatmap" in markdown
+    assert "## High-Spread Patterns" in markdown
+    assert "## Prioritized Cleanup Targets" in markdown
 
 
 def test_entropy_audit_skips_root_runtime_trees_without_skipping_source_packages(
@@ -554,6 +647,100 @@ def test_entropy_audit_required_families_emit_positive_signals(
     assert set(check_ids) <= emitted
 
 
+@pytest.mark.parametrize(
+    ("check_id", "setup"),
+    [
+        (
+            "role-env-boundary",
+            lambda root: _write(
+                root / "apps" / "frontend" / ".env.example",
+                "SLURM_GATEWAY_URL=http://gateway:8000\n",
+            ),
+        ),
+        ("qhh-diagnostic-token", lambda root: _write(root / "services/orchestrator/run.py", "run_qhh_cycle()\n")),
+        (
+            "broad-e2e-api-mock",
+            lambda root: _write(
+                root / "apps/frontend/e2e/live.spec.ts",
+                "await page.route('**/api/v1/**', route => route.abort())\n",
+            ),
+        ),
+        (
+            "slurm-gateway-route-leakage",
+            lambda root: _write(
+                root / "services/slurm_gateway/app.py",
+                "from fastapi import FastAPI\n"
+                "app = FastAPI()\n"
+                "@app.get('/api/v1/models')\n"
+                "def list_models():\n"
+                "    return []\n",
+            ),
+        ),
+        ("openapi-frontend-types-presence", lambda root: (root / "apps/frontend/src/api/types.ts").unlink()),
+        (
+            "paused-workflow-condition",
+            lambda root: _write(
+                root / ".github/workflows/check.yml",
+                "if: github.event_name == 'pull_request' && false\n",
+            ),
+        ),
+        (
+            "makefile-toolchain-discipline",
+            lambda root: _write(root / "Makefile", "test:\n\tpython -m pytest\n"),
+        ),
+        (
+            "agent-artifact-ownership-policy",
+            lambda root: _write(root / "docs/governance/DOC_STATUS.md", "Governed docs placeholder.\n"),
+        ),
+        (
+            "agent-artifact-ignore-policy",
+            lambda root: _write(root / ".gitignore", "# missing generated artifact ignores\n"),
+        ),
+        ("tracked-generated-artifact", lambda root: _track_generated_artifact(root)),
+    ],
+)
+def test_entropy_audit_hard_gate_fails_for_each_gated_check_id(
+    tmp_path: Path,
+    check_id: str,
+    setup: Callable[[Path], object],
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    setup(tmp_path)
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    metadata = report["metadata"]
+    gated_findings = [finding for finding in report["findings"] if finding["check_id"] == check_id]
+
+    assert gated_findings
+    assert metadata["hard_gate_status"] == "fail"
+    assert metadata["hard_gate_failing_count"] == len(
+        [
+            finding
+            for finding in report["findings"]
+            if finding["check_id"] in audit_repo_entropy.HARD_GATE_CHECK_IDS
+        ]
+    )
+    assert audit_repo_entropy._exit_code_for_report(report) == 1
+
+
+def test_entropy_audit_hard_gate_keeps_delegated_and_fingerprint_openapi_signals_report_only(
+    tmp_path: Path,
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    metadata = report["metadata"]
+
+    assert {
+        "openapi-frontend-types-delegated",
+        "openapi-frontend-types-signal",
+    } <= {finding["check_id"] for finding in report["findings"]}
+    assert metadata["hard_gate_status"] == "pass"
+    assert metadata["hard_gate_failing_count"] == 0
+    assert "openapi-frontend-types-delegated" not in metadata["hard_gate_gated_check_ids"]
+    assert "openapi-frontend-types-signal" not in metadata["hard_gate_gated_check_ids"]
+
+
 def _findings_by_check(root: Path, check_id: str) -> list[dict[str, object]]:
     return [
         finding
@@ -574,3 +761,64 @@ def _setup_agent_artifact_drift(root: Path) -> None:
     _write(root / "artifacts/leaked.txt", "generated\n")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "add", "artifacts/leaked.txt"], cwd=root, check=True)
+
+
+def _setup_clean_hard_gate_fixture(root: Path) -> None:
+    _write(
+        root / "openapi" / "nhms.v1.yaml",
+        """
+        openapi: 3.1.0
+        info:
+          title: NHMS API
+          version: 1.0.0
+        paths: {}
+        """,
+    )
+    _write(
+        root / "apps" / "frontend" / "src" / "api" / "types.ts",
+        """
+        export interface paths {}
+        export interface components {}
+        """,
+    )
+    _write(
+        root / "tests" / "test_openapi_drift.py",
+        """
+        def test_openapi_generated_types_are_current() -> None:
+            assert True
+        """,
+    )
+    _write(
+        root / "docs" / "governance" / "DOC_STATUS.md",
+        """
+        .agents/skills/**
+        .codex/tmp/
+        .codex/cache/
+        .codex/evidence/
+        apps/frontend/artifacts/**
+        Root `artifacts/`
+        .dockerignore
+        """,
+    )
+    _write(
+        root / ".gitignore",
+        """
+        .codex/
+        artifacts/
+        apps/frontend/artifacts/
+        """,
+    )
+    _write(
+        root / ".dockerignore",
+        """
+        .agents
+        .codex
+        apps/frontend/artifacts
+        """,
+    )
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+
+
+def _track_generated_artifact(root: Path) -> None:
+    _write(root / "artifacts" / "leaked.txt", "generated\n")
+    subprocess.run(["git", "add", "-f", "artifacts/leaked.txt"], cwd=root, check=True)
