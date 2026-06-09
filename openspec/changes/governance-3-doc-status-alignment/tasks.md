@@ -44,3 +44,6 @@
   `README.md`, `progress.md`, and `CLAUDE.md`.
 - [x] 5.3 Verify implementation plan status:
   `rg -n "historical|superseded|archived|DOC_STATUS|current entrypoints" IMPLEMENTATION_PLAN.md docs/archived README.md`.
+- [x] 5.4 Second-round PR #387 finding: qualify current-entrypoint status so
+  `CLAUDE.md` remains linked as an entrypoint without claiming its deferred M23
+  facts are fresh before #368.

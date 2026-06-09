@@ -8,7 +8,7 @@ only tells readers which source should win when two sources disagree.
 
 | Status | Meaning | Typical paths |
 |---|---|---|
-| `current entrypoint` | A maintained orientation page for current project state, onboarding, or navigation. | `README.md`, `progress.md`, `CLAUDE.md` |
+| `current entrypoint` | A maintained orientation page for current project state, onboarding, or navigation. This status covers the page's role as an entrypoint; it does not assert every embedded milestone fact is freshly reconciled. | `README.md`, `progress.md`, `CLAUDE.md` |
 | `current runbook` | Operational procedure that is current for a role, node, deployment, or validation lane. | `docs/runbooks/**` |
 | `current validation matrix` | Maintained validation source of truth for what evidence is required or accepted. | `docs/VALIDATION.md`, active OpenSpec `tasks.md` |
 | `architecture/spec` | Design contract for architecture, API, database, time semantics, operations, or product behavior. | `docs/spec/**`, `openapi/**`, `schemas/**`, `db/migrations/**` |
@@ -29,7 +29,9 @@ When sources disagree, use the highest applicable source in this order:
    win for live deployment, diagnosis, and receipt generation.
 4. **Current entrypoints**: `README.md`, `progress.md`, and `CLAUDE.md` orient
    readers, but they do not override role-specific runbooks or validation
-   requirements.
+   requirements. For `CLAUDE.md`, use its workflow and entrypoint guidance as
+   current, while treating embedded milestone/current-active sections as
+   potentially stale until reconciled by the deferred stale-fact update in #368.
 5. **Architecture/spec documents**: specs define intended contracts when current
    code or generated artifacts do not already settle the question.
 6. **Module decomposition docs**: module docs are implementation guidance and
