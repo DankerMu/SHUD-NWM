@@ -21,6 +21,59 @@ Using total finding count or deletion line count as the only success metric woul
 - No rewrite of historical OpenSpec records solely to remove search tokens.
 - No frontend route, API contract, or layer-inversion implementation; those are separate Governance-5 changes.
 
+## Issue Slice Fixtures
+
+### #400 triage artifact slice
+
+Fixture level: compact
+
+Change surface:
+
+- `docs/governance/**` triage artifact that records current entropy report counts and dispositions.
+- Existing E1 OpenSpec files may be clarified for issue-level scope.
+
+Must preserve:
+
+- No runtime behavior changes.
+- No changes to `scripts/governance/audit_repo_entropy.py`; schema and hard-gate semantics are owned by #401/#402.
+- No CI hard-gate enablement.
+- No QHH diagnostic deletion or relocation.
+- No repeated Governance-2 placeholder deletion.
+- No node-27 frontend route/page retirement.
+
+Must add/change:
+
+- A governed triage artifact that maps high-spread entropy finding families to `fix`, `historical`, `archived`, `false-positive`, or `defer`.
+- The artifact records the report command/date, current counts, concrete owner epic/change for actionable families, and explicit non-goals.
+
+Risk packs considered for #400:
+
+- Public API / CLI / script entry: not selected - #400 runs the audit as evidence but does not change its CLI.
+- Config / project setup: not selected - no workflow, environment, or build configuration changes.
+- File IO / path safety / overwrite: not selected - no new file readers/writers beyond checked-in docs.
+- Schema / columns / units / field names: not selected - no machine-readable report schema change; #401 owns schema semantics.
+- Auth / permissions / secrets: not selected - no credential or permission surface.
+- Concurrency / shared state / ordering: not selected - no shared runtime state.
+- Resource limits / large input / discovery: not selected - no audit discovery logic change.
+- Legacy compatibility / examples: selected - historical, archived, diagnostic, and compatibility findings must not be mistaken for active drift.
+- Error handling / rollback / partial outputs: not selected - no runtime failure path changes.
+- Release / packaging / dependency compatibility: not selected - no package or dependency changes.
+- Documentation / migration notes: selected - the artifact is a current governance document consumed by later Governance-5 issues.
+- NHMS domain packs: not selected - no geospatial, forcing, SHUD runtime, PostGIS/Timescale, Slurm lifecycle, provider, run-manifest, or published artifact behavior changes.
+
+Required #400 evidence:
+
+- Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` and record the generated report counts in the triage artifact.
+- Run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.
+- Confirm `git diff --name-only` contains no runtime code, audit script, CI workflow, or node-27 frontend implementation changes.
+
+Non-goals for #400:
+
+- Normalized allowlist fields, finding-level gate eligibility, and summary schema changes are #401.
+- Tracked retired-path return guard implementation is #402.
+- Entropy budget/report example schema refresh is #403.
+- Display route cleanup, API retirement, and layer-inversion cleanup belong to E2/E3/E4.
+
 ## Decisions
 
 ### D1. Use finding-level semantics instead of check-family gates
