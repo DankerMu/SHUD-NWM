@@ -1281,6 +1281,8 @@ def _allowlist_reason_key(check_id: str, reason: str) -> str:
         return "governance-retired-placeholder-inventory"
     if check_id == "placeholder-path-token" and {"governed", "archived", "evidence"} <= tokens:
         return "governed-archived-retired-placeholder-evidence"
+    if check_id == "placeholder-path-token" and {"governed", "completed", "openspec", "evidence"} <= tokens:
+        return "governed-completed-openspec-retired-placeholder-evidence"
     if check_id == "openapi-frontend-types-delegated":
         return "existing-contract-oracle-delegation"
     if check_id == "openapi-frontend-types-signal":
@@ -1573,6 +1575,8 @@ def _placeholder_path_allowlist_reason(relative_path: str) -> str | None:
         return "governance inventory documents retired placeholder paths"
     if relative_path.startswith("docs/archived/"):
         return "governed archived evidence documents retired placeholder paths"
+    if relative_path.startswith("openspec/changes/governance-2-legacy-dead-code-retirement/"):
+        return "governed completed OpenSpec evidence documents retired placeholder paths"
     return None
 
 

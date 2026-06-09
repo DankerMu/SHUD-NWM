@@ -639,6 +639,44 @@ def test_archived_retired_path_tokens_are_allowlisted_without_budget_count(
     assert inventory["budget_counted"] is False
 
 
+def test_completed_governance_2_openspec_retired_path_tokens_are_allowlisted_without_budget_count(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path
+        / "openspec"
+        / "changes"
+        / "governance-2-legacy-dead-code-retirement"
+        / "tasks.md",
+        "Completed evidence keeps apps/web as a retired placeholder path.\n",
+    )
+    _write(tmp_path / "docs" / "active.md", "Current docs still mention apps/web.\n")
+
+    findings = {
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "placeholder-path-token")
+    }
+
+    governed = findings["openspec/changes/governance-2-legacy-dead-code-retirement/tasks.md"]
+    assert (
+        governed["allowlist_reason"]
+        == "governed completed OpenSpec evidence documents retired placeholder paths"
+    )
+    assert governed["allowlist_key"] == (
+        "placeholder-path-token:governed-completed-openspec-retired-placeholder-evidence"
+    )
+    assert governed["allowlist_state"] == "allowlisted"
+    assert governed["budget_counted"] is False
+    assert governed["gate_eligible"] is False
+
+    active_doc = findings["docs/active.md"]
+    assert active_doc["allowlist_reason"] is None
+    assert active_doc["allowlist_key"] is None
+    assert active_doc["allowlist_state"] == "unallowlisted"
+    assert active_doc["budget_counted"] is True
+    assert active_doc["gate_eligible"] is False
+
+
 def test_active_doc_retired_path_tokens_remain_budget_counted(
     tmp_path: Path,
 ) -> None:
