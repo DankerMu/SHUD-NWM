@@ -88,9 +88,42 @@
 
 Out of scope for #371. Owned by #372.
 
-- [ ] 2.1 Add `docs/governance/entropy-budget.md` defining non-blocking vs hard-gate stages.
-- [ ] 2.2 Add `docs/governance/entropy-report.example.md` showing expected report shape.
-- [ ] 2.3 Document that `.entropy-baseline/latest.json` is not written without explicit confirmation.
+- [x] 2.1 Add `docs/governance/entropy-budget.md` defining non-blocking vs hard-gate stages.
+  Evidence: `docs/governance/entropy-budget.md` documents report-only,
+  Governance-4C non-blocking CI, and Governance-4D future hard-gate stages.
+- [x] 2.2 Add `docs/governance/entropy-report.example.md` showing expected report shape.
+  Evidence: `docs/governance/entropy-report.example.md` contains a fenced JSON
+  example with `metadata`, `module_heatmap`, `findings`, and
+  `high_spread_patterns`.
+- [x] 2.3 Document that `.entropy-baseline/latest.json` is not written without explicit confirmation.
+  Evidence: `docs/governance/entropy-budget.md` records the explicit baseline
+  write policy; JSON and Markdown report validation preserved
+  `.entropy-baseline/latest.json` as absent.
+- [x] 2.4 Verify the report example matches the current script schema:
+  top-level `metadata`, `module_heatmap`, `findings`, and
+  `high_spread_patterns`; heatmap axes `structure`, `semantics`, `behavior`,
+  `context`, `protocol`, `control`, and `priority`; finding fields
+  `governance_face`, `role`, `evidence_path`, `severity`, `priority`, and
+  `owner_area`; high-spread pattern fields `pattern`, `occurrence_count`,
+  `module_count`, `top_priority`, and `roles`; and
+  `metadata.schema_version == "governance-4a.entropy-report.v1"`.
+  Evidence: local fenced-JSON extraction compared these fields against live
+  JSON from `scripts/governance/audit_repo_entropy.py` and returned
+  `result=pass`.
+- [x] 2.5 Verify documentation commands:
+  - `uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`
+  - `uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`
+  - Extract the fenced JSON block from
+    `docs/governance/entropy-report.example.md` and compare its schema with
+    the live JSON report schema.
+  - `openspec validate governance-4-entropy-automation --strict --no-interactive`
+  - Markdown lint or equivalent for the two new governance docs and this
+    OpenSpec change.
+  Evidence: all listed commands passed; JSON reported schema
+  `governance-4a.entropy-report.v1`, 351 findings, 26 heatmap rows, and
+  `baseline_written=False`; Markdown emitted `## Entropy Heatmap` and
+  `## Prioritized Cleanup Targets`; `npx markdownlint-cli2` reported
+  0 errors for the two docs and this tasks file.
 
 ## 3. Non-blocking CI
 
