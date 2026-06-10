@@ -26,3 +26,9 @@
 - [ ] node-27 live verify（oracle）
 - [ ] review panel
 - [ ] merge：CI green → 自动 merge
+
+## Review (2-pack panel, round 1)
+- pack A (正确性+scope) + pack B (测试+回归)：均 **CLEAN，0 blocking**。
+- 共同 non-blocking：`AppRoutes.test.tsx:985` mock fixture 硬编码 `handoffUrl:'/forecast?...'`——mock 输入字段、非断言对象、不由 overviewDataContracts 生成、不致假绿/回归。位于 LegacyPagesHarness 测试 = **#409 迁移范畴**，本 PR 不动（避免越界），留给 #409。
+- 附带提示：`SegmentDetailPage.tsx:488/493` 等孤立页仍生成 `/forecast` handoff → #410 删除时一并消除（LegacyRedirect 兜底，不破网）。
+- 裁定 clean → 进 CI 门 + merge（站点级预授权）。
