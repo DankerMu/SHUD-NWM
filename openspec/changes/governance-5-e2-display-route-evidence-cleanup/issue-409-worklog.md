@@ -34,3 +34,14 @@
 
 本地复核（orchestrator 亲跑）：tsc 0 error；`pnpm test` 34 files / 557 passed；`pnpm build` ✓。
 harness import 清零（仅 legacyPagesHarness.tsx:37 自身定义）；旧页 import NONE。
+
+## node-27 live receipt
+- HEAD d095b92；`corepack pnpm test` → Test Files 34 passed；`corepack pnpm build` → ✓ 16.31s；`rg LegacyPagesHarness src` 仅自身定义。log `node-27:/tmp/verify-409-d095b92.log`，`===DONE_OK===`。
+
+## Review (2-pack panel) + Phase 4.5 裁定
+- pack B（swap 假绿核查）：**CLEAN** —— 65 swap 全为 App 同组件路由（`/`/`/overview`(redirect→/)/`/monitoring`/`/ops`/`/system/model-assets`），无导航旧页路由后断言旧页内容者；basin/popup/overview 抽查断言非永真；invalid-overview-query 适配仍校验"只归一一次"；末两 describe（redirect 契约 / converge）完好；无 skip/only/toBeTruthy。
+- pack A（覆盖丢失审计）：41 删除测试 + MeteorologyPage.test → ForecastPage/FloodAlertPage/MeteorologyPage 三族不变量单图侧**全 COVERED**；SegmentDetailPage 族 core（identity/honest/over-budget/station forcing）COVERED；3 项 flagged 经 **orchestrator 查证裁定**：
+  - #1 segmentId 非法/超长守卫 → **COVERED**（`normalizeM11Identifier` + `m11QueryState.test.ts:73-74` 测 `bad/id→null`、`x*97→null`）。
+  - #2 geometry 缩略图 → **非回归**（geometry budget 计算仍 live 于 overviewDataContracts 且被 `m11OverviewDataContracts.test.ts` 单测；`BasinDetailPanels` 消费 `selectedSegment.geometry`；`LocationThumbnail` 是旧页专属 UI，M26 现代化后弹窗不用缩略图）。
+  - #3 河段侧 Q100/频率曲线 → **REFUTED**（commit `2c09d53 去掉重现期` 有意移除，单图弹窗明确不渲染重现期）。
+- 裁定 **clean**（0 in-scope CONFIRMED / 0 blocking PLAUSIBLE）→ CI 门 + merge。
