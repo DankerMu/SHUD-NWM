@@ -276,9 +276,11 @@ path.
   `live-display-readonly`, script `test:e2e:live-display`), which requires both
   `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL` and records
   unavailable runtime as `BLOCKED`, never `PASS` (see `docs/VALIDATION.md`). The
-  mocked regression specs classified above (`forecast`, `flood-alerts`,
-  `hydro-met`, `meteorology`, `m11-routes`, `m15-visual-conformance`) stay
-  deterministic mocked regression under `--project=mocked-regression-chromium`
-  and must not be cited as live receipts. No further frontend code/config change
+  `test-only` specs classified above (`forecast`, `flood-alerts`, `hydro-met`,
+  `m11-routes`, `m15-visual-conformance`, `meteorology`, `monitoring`, and the
+  preview `preview-deeplink`) stay deterministic mocked regression — under
+  `--project=mocked-regression-chromium`, except `preview-deeplink` which runs in
+  the `playwright.preview.config.ts` preview profile — and must not be cited as
+  live receipts. No further frontend code/config change
   is required for the guard; any newly discovered broad mock inside a live spec
   is a node-27/display_readonly follow-up, not a node-22 edit.
