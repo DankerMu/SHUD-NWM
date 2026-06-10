@@ -997,7 +997,7 @@ describe('useOverviewDataStore', () => {
       lineageStatus: 'failed',
       lineageUnavailableReason: '河段追溯暂不可用',
       handoffUrl:
-        '/forecast?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&riverNetworkVersionId=yangtze_rivnet_v12&segmentId=seg-123',
+        '/?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&riverNetworkVersionId=yangtze_rivnet_v12&segmentId=seg-123',
       geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
     })
     expect(calls.find((call) => call.path === '/api/v1/models')?.query).toMatchObject({
@@ -2427,7 +2427,7 @@ describe('useOverviewDataStore', () => {
       runId: ifsRun.run_id,
       source: 'IFS',
     })
-    expect(snapshot.selectedSegment?.handoffUrl).toContain('/forecast?source=ifs&')
+    expect(snapshot.selectedSegment?.handoffUrl).toContain('/?source=ifs&')
     expect(snapshot.selectedSegment?.handoffUrl).not.toContain('source=best')
     expect(snapshot.layers.find((layer) => layer.layerId === 'flood-return-period')?.freshness).toMatchObject({
       runId: ifsRun.run_id,
@@ -2658,7 +2658,7 @@ describe('useOverviewDataStore', () => {
       riverSegmentId: 'river-seg-123',
       segmentId: 'display-seg-123',
       handoffUrl:
-        '/forecast?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&riverNetworkVersionId=yangtze_rivnet_v12&segmentId=river-seg-123',
+        '/?source=gfs&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&riverNetworkVersionId=yangtze_rivnet_v12&segmentId=river-seg-123',
     })
     expect(
       calls.find((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}')?.pathParams,

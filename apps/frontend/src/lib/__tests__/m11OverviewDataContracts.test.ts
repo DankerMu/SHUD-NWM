@@ -639,7 +639,7 @@ describe('M11 overview data contracts', () => {
       comparisonAvailable: true,
       lineageStatus: 'available',
       handoffUrl:
-        '/forecast?source=compare&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&riverNetworkVersionId=yangtze_rivnet_v12&segmentId=yangtze_rivnet_v12_riv_000123',
+        '/?source=compare&cycle=2026-05-18T00%3A00%3A00.000Z&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=yangtze_v2026_01&riverNetworkVersionId=yangtze_rivnet_v12&segmentId=yangtze_rivnet_v12_riv_000123',
       geometry: featureCollection.features[0].geometry,
     })
     expect(detail.sourceSelection).toMatchObject({
@@ -894,7 +894,7 @@ describe('M11 overview data contracts', () => {
       runId: 'fcst_ifs_2026051800_yangtze_shud_v12',
       source: 'IFS',
     })
-    expect(detail.handoffUrl).toContain('/forecast?source=ifs&')
+    expect(detail.handoffUrl).toContain('/?source=ifs&')
     expect(detail.handoffUrl).not.toContain('source=best')
   })
 
