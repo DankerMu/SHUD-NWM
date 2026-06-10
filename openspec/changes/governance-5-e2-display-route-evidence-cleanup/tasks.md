@@ -15,9 +15,9 @@
 
 ## 3. Historical Visual Evidence
 
-- [ ] 3.1 Relabel or index M11/M15 visual evidence markdown and screenshots as historical mocked evidence without moving tracked assets by default.
-- [ ] 3.2 If any tracked visual evidence is moved or renamed, preserve old-path references, SHA/provenance notes, and the manual M15 workflow evidence contract.
-- [ ] 3.3 Verify new generated visual artifacts remain ignored unless explicitly promoted.
+- [x] 3.1 Relabel or index M11/M15 visual evidence markdown and screenshots as historical mocked evidence without moving tracked assets by default.
+- [x] 3.2 If any tracked visual evidence is moved or renamed, preserve old-path references, SHA/provenance notes, and the manual M15 workflow evidence contract. (No assets moved; provenance — PR #160 / `3e6fc48` — recorded in DOC_STATUS.)
+- [x] 3.3 Verify new generated visual artifacts remain ignored unless explicitly promoted.
 
 ## 4. Node-27 Old Page Retirement Plan
 
