@@ -265,3 +265,22 @@ path.
 - #366 removed the hidden paused automatic CI job and added manual M15 visual
   evidence. The manual lane is historical mocked visual evidence, not live
   node-27 display proof.
+- #405 (Governance-5 E2-02) consumed #365's mocked-vs-live classification above
+  without reopening it. The no-broad-mock guard #365 scoped is implemented and
+  active: `assertLiveDisplaySpecsDoNotMockApis` in
+  `apps/frontend/playwright.config.helpers.ts` runs at load of
+  `apps/frontend/playwright.live-display.config.ts` and fails the live profile if
+  any `e2e/live-display.spec.ts` registers a broad `page.route('**/api/v1/**')`
+  mock (`liveDisplaySpecPattern` + `findBroadApiRouteMocks`). The node-27 live
+  display lane is `apps/frontend/e2e/live-display.spec.ts` (profile
+  `live-display-readonly`, script `test:e2e:live-display`), which requires both
+  `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL` and records
+  unavailable runtime as `BLOCKED`, never `PASS` (see `docs/VALIDATION.md`). The
+  `test-only` specs classified above (`forecast`, `flood-alerts`, `hydro-met`,
+  `m11-routes`, `m15-visual-conformance`, `meteorology`, `monitoring`, and the
+  preview `preview-deeplink`) stay deterministic mocked regression — under
+  `--project=mocked-regression-chromium`, except `preview-deeplink` which runs in
+  the `playwright.preview.config.ts` preview profile — and must not be cited as
+  live receipts. No further frontend code/config change
+  is required for the guard; any newly discovered broad mock inside a live spec
+  is a node-27/display_readonly follow-up, not a node-22 edit.

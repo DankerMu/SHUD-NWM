@@ -8,10 +8,10 @@
 
 ## 2. Mocked And Live Evidence Boundary
 
-- [ ] 2.1 Consume Governance-2/#365's existing mocked-vs-live classification and avoid reopening broad classification work.
-- [ ] 2.2 Ensure docs still identify `live-display.spec.ts` as the node-27 live display lane unless a later issue adds another live profile.
-- [ ] 2.3 Update docs so mocked regression logs cannot be cited as live display receipts.
-- [ ] 2.4 Confirm the existing live no-broad-mock guard is documented; if code changes are needed, split them into a node-27/display_readonly issue.
+- [x] 2.1 Consume Governance-2/#365's existing mocked-vs-live classification and avoid reopening broad classification work.
+- [x] 2.2 Ensure docs still identify `live-display.spec.ts` as the node-27 live display lane unless a later issue adds another live profile.
+- [x] 2.3 Update docs so mocked regression logs cannot be cited as live display receipts.
+- [x] 2.4 Confirm the existing live no-broad-mock guard is documented; if code changes are needed, split them into a node-27/display_readonly issue. (Guard `assertLiveDisplaySpecsDoNotMockApis` already implemented + wired; no code change needed.)
 
 ## 3. Historical Visual Evidence
 
