@@ -23,7 +23,7 @@
 1. **后端动态发现 + 去硬编码**：`list_basins` 增 `has_display_product`（EXISTS run-status 集合过滤，复用 `QHH_LATEST_READY_RUN_STATUSES` 单一口径，**无 basin_id 白名单**）（#310）；latest-product 去 `QHH_BASIN_ID` 写死、`basin_id` 参数化（缺省 `basins_qhh` 向后兼容 + 旧 `/mvp/qhh/latest-product` 路径保留）（#311）；
    河段/站点列表 `search`+分页+`variable`/`stream_order` 字段可用性降级契约（#313）。
 2. **return-period 诚实展示**：`availability.return_period_status`（ready/unavailable）作**独立 supplemental 字段**，不进 blocking reasons（有 q_down 无洪频基线的产品不掉 ready/404）（#312/#316）；无真实产品时仅静态图例 + "暂未发布正式产品"，不渲染假数据。
-3. **前端生产化**：流域选择器数据驱动（无前端白名单，新流域自动出现）+ 切流域以 `basin_id` 重拉、strict identity 一致（#314）；河段/站点列表走后端 search/分页（#315）；`/ops`+`/monitoring` 入口按 `display_readonly` 降级（保留 `/meteorology` 门控）（#317）。
+3. **前端生产化**：流域选择器数据驱动（无前端白名单，新流域自动出现）+ 切流域以 `basin_id` 重拉、strict identity 一致（#314）；河段/站点列表走后端 search/分页（#315）；`/ops`+`/monitoring` 入口按 `display_readonly` 降级（保留 `/meteorology` 门控）（#317；M26 #337 后 `/meteorology` 已 redirect 化）。
 4. **可扩展性验证 + 文档收尾**（#318）：真 DB 集成测试断言「全新注册 basin 仅靠数据即在发现接口出现，零代码改动」（`tests/test_real_basin_discovery_integration.py`），前端 `BasinSelector.test.tsx` 数据驱动断言新流域自动渲染。
 5. **边界**：以上为**功能交付**；node-27 实质上线仍是 **C1–C4 live receipt**（部署/只读 DB denied-write/cross-plane identity/浏览器 e2e），见 `docs/runbooks/node-27-bringup-checklist.md`，属后续。
 
