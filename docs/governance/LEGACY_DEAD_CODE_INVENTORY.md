@@ -284,3 +284,27 @@ path.
   live receipts. No further frontend code/config change
   is required for the guard; any newly discovered broad mock inside a live spec
   is a node-27/display_readonly follow-up, not a node-22 edit.
+- #408 (Governance-5 E2-N27-02) superseded the #365 e2e rename plan for the old
+  display pages by **deleting** the now-stale mocked specs after M26 single-map
+  convergence: `e2e/forecast.spec.ts`, `e2e/flood-alerts.spec.ts`,
+  `e2e/hydro-met.spec.ts`, and `e2e/meteorology.spec.ts` are removed (Governed
+  Inventory rows 216/217/218/221 are historical — those files no longer exist).
+  `e2e/m11-routes.spec.ts` (13→8) and `e2e/monitoring.spec.ts` were migrated to
+  M26 single-map behavior; `e2e/m15-visual-conformance.spec.ts` moved into
+  `playwright.config.ts` `testIgnore` (retained as historical mocked legacy with
+  its own `test:e2e:m15-visual` runner + manual `m15-visual-evidence.yml`).
+  node-27 receipt: `test:e2e:mocked-regression` → 19 passed.
+- #410 (Governance-5 E2-N27-04) deleted the now-isolated old-page components +
+  test harness: `src/pages/{ForecastPage,FloodAlertPage,SegmentDetailPage}.tsx`,
+  `src/pages/meteorology/MeteorologyPage.tsx`, `src/__tests__/legacyPagesHarness.tsx`
+  (grep-proven zero external refs; node-27 receipt `pnpm test` 557 passed + build ✓).
+  **Newly orphaned by #410 (dead-code follow-up, not yet removed):**
+  `src/components/flood/{AlertRankingPanel,AlertStatsPanel,AlertTicker,AlertTimeline,FloodAlertMap,SegmentAlertDetail}`
+  + `src/stores/floodAlert` (component body only — the same-named `AlertTimeline`
+  type / `floodAlert` contracts stay live in single-map overview data, must keep),
+  `src/lib/meteorology/{contracts,viewModels,queryState}`, and suspected
+  `src/components/map/MapView` (only referenced by `AppRoutes.test.tsx` + own test).
+  `AppRoutes.test.tsx:12,214` retains #409-residual flood store/component imports
+  (App no longer routes to flood) = test cruft. These stay because some siblings
+  (`components/forecast/*`, `charts/ForecastChart`, `stores/forecast`) remain live
+  in the single-map forecast popup chain; a focused dead-code sweep owns removal.
