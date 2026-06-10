@@ -792,7 +792,7 @@ export function normalizeSelectedSegmentDetail(input: {
         : normalizeString(input.lineageError) ??
           normalizeString(input.lineageUnavailableReason) ??
           'Lineage is unavailable for this segment/time.',
-    handoffUrl: m11QueryHref('/forecast', {
+    handoffUrl: m11QueryHref('/', {
       source: handoffSource,
       cycle: selectionQuery.cycle,
       validTime: effectiveValidTime,
