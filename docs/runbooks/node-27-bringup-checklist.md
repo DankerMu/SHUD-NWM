@@ -109,6 +109,28 @@ published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm
 - [ ] 证明 27 只展示 22 产生的 retry/cancel 结果，自身从不创建控制面 receipt。
 - [ ] 补 `e2e/monitoring.spec.ts` 的 `display_readonly` 浏览器场景（当前 e2e 无此场景）。
 
+#### ④⑤ 代站/河段 popup live click 证据缺口定义（#389 承接）
+
+> 三类证据严格分离，不得互相冒充：**live MVT closure**（#351→#343，已闭合）/ **station-MVT 端点**
+> （#342，node-22 oracle，open）/ **bbox·framing·popup live click 浏览器自动化**（#389，本节）。
+
+要让 #389 可靠自动化 river/station popup 的 live 点击，需先补齐以下**可被自动化消费的**证据，缺一则
+popup live click 只能人工截图、无法纳入 C4 自动 receipt：
+
+- [ ] **basin/河网 framing bbox**：`/api/v1/basins`（及河段/代站列表响应）当前**不返回 geo bbox**，
+  浏览器无法据此 `map.fitBounds` 自动定位到要素再点击。定义所需：列表/详情响应附带要素 bbox（或
+  提供按 id 取 bbox 的轻端点），使 e2e 能确定性 framing。**此数据契约属 node-22/display API 侧**，
+  与 #342 station-MVT 协同，非本前端 issue 单独可闭合。
+- [ ] **WebGL 要素命中坐标**：MapLibre WebGL canvas 内要素无 DOM 句柄，CLI/Playwright 难以稳定命中
+  点击。定义所需：暴露确定性「测试钩子」（如按 id 触发 popup 的 `window.__m11SelectFeature(id)` 调试入口，
+  或 feature→屏幕坐标的可查询映射），使点击/弹窗可被断言，而非靠像素猜测。
+- [ ] **node-27 浏览器可启动**：live click 自动化依赖 node-27 实机能启动 chromium——当前主机缺
+  `libgbm.so.1`/`libxcb-randr.so.0` 系统库（**#431** 阻塞，nwm 无 sudo），先解此 infra 缺口或固化
+  userspace `LD_LIBRARY_PATH` 方案进本清单，否则 live browser lane 无法跑。
+- [ ] 上述就绪后：river popup（流量/起报时间）+ station popup（forcing 序列）的 live 点击截图 + 断言
+  作为 C4 ④⑤ 的 live receipt 归入 **#389**（绘制不变量已由本地单测全覆盖、数据 live 就绪，仅缺自动化
+  framing/命中/浏览器三要素）。
+
 ---
 
 ## 上线判定
