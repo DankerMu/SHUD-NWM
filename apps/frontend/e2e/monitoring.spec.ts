@@ -154,12 +154,23 @@ async function fulfill(route: Route, data: unknown) {
   })
 }
 
+// AppShell（去 NavBar 后）在每个路由挂载时全局加载一次 runtime config。
+// compute_control 角色：控制变更/Slurm 路由可用，queue depth 正常（非 display_readonly）。
+const runtimeConfig = {
+  service_role: 'compute_control' as const,
+  control_mutations_enabled: true,
+  slurm_routes_enabled: true,
+  queue_depth_mode: 'slurm_gateway' as const,
+  display_readonly: false,
+}
+
 async function mockMonitoringApi(page: Page, options: MonitoringApiMockOptions = {}) {
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
     options.onApiRequest?.(request)
     const url = new URL(request.url())
 
+    if (url.pathname === '/api/v1/runtime/config') return fulfill(route, runtimeConfig)
     if (url.pathname === '/api/v1/pipeline/status') return fulfill(route, cycle)
     if (url.pathname === '/api/v1/pipeline/stages') return fulfill(route, stages)
     if (url.pathname === '/api/v1/queue/depth') return fulfill(route, { running: 2, pending: 4, idle: 6 })
@@ -219,7 +230,9 @@ async function selectRole(page: Page, roleName: 'Viewer' | 'Operator' | 'Model A
 
 async function openMonitoringAsOperator(page: Page, mockOptions?: MonitoringApiMockOptions) {
   await mockMonitoringApi(page, mockOptions)
-  await page.goto('/monitoring')
+  // 监控页默认 cycle = 当前整点并走 strict identity 校验；测试 fixture 是固定周期，
+  // 必须用 URL 钉住该 source/cycle，使页面请求的 cycle 与 mocked 响应身份一致。
+  await page.goto(`/monitoring?source=gfs&cycle=${encodeURIComponent(cycleTime)}`)
   await expect(page.getByText('权限不足')).toBeVisible()
   await selectRole(page, 'Operator')
   await expect(page.getByRole('heading', { name: '监控工作台' })).toBeVisible()
@@ -329,6 +342,7 @@ async function mockControlledOpsApi(page: Page, options: MonitoringApiMockOption
     options.onApiRequest?.(request)
     const url = new URL(request.url())
 
+    if (url.pathname === '/api/v1/runtime/config') return fulfill(route, runtimeConfig)
     if (url.pathname === '/api/v1/pipeline/status') {
       expect(url.searchParams.get('source')).toBe('GFS')
       expect(url.searchParams.get('cycle_time')).toBe(controlledCycleTime)
@@ -511,7 +525,8 @@ test.describe('monitoring page', () => {
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
 
     await selectRole(page, 'Operator')
-    await expect(page.getByRole('heading', { name: '运维工作台' })).toBeVisible()
+    // M26：/ops 工作台标题为「内部诊断」（旧「运维工作台」已改名）。
+    await expect(page.getByRole('heading', { name: '内部诊断' })).toBeVisible()
     const currentStateField = page.getByText('Current State').locator('..')
     await expect(currentStateField).toContainText('failed_run')
     await expect(page.getByRole('cell', { name: controlledRunId })).toBeVisible()
@@ -620,7 +635,9 @@ test.describe('monitoring page', () => {
     await mockMonitoringApi(page)
     await page.goto('/monitoring')
 
-    await expect(page.getByText('NHMS')).toBeVisible()
+    // 去 NavBar 后（#337），SPA fallback 命中的证据是路由真被服务并渲染出 RBAC gate，
+    // 而非旧导航栏品牌字样；viewer 默认角色 → 权限不足占位可见。
     await expect(page.getByText('权限不足')).toBeVisible()
+    await expect(page.getByRole('heading', { name: '监控工作台' })).toHaveCount(0)
   })
 })
