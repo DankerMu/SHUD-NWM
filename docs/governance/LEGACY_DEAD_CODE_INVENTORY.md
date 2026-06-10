@@ -300,7 +300,7 @@ path.
   (grep-proven zero external refs; node-27 receipt `pnpm test` 557 passed + build ✓).
   **Newly orphaned by #410 (dead-code follow-up, not yet removed):**
   `src/components/flood/{AlertRankingPanel,AlertStatsPanel,AlertTicker,AlertTimeline,FloodAlertMap,SegmentAlertDetail}`
-  + `src/stores/floodAlert` (component body only — the same-named `AlertTimeline`
+  and `src/stores/floodAlert` (component body only — the same-named `AlertTimeline`
   type / `floodAlert` contracts stay live in single-map overview data, must keep),
   `src/lib/meteorology/{contracts,viewModels,queryState}`, and suspected
   `src/components/map/MapView` (only referenced by `AppRoutes.test.tsx` + own test).
