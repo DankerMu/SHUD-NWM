@@ -29,8 +29,8 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Run `openspec validate governance-5-e2-display-route-evidence-cleanup --strict --no-interactive`.
-- [ ] 5.2 Run a route-authority grep over current docs and confirm remaining old-route mentions are historical, redirect-alias, or compatibility context.
-- [ ] 5.3 For node-27 implementation issues, require `cd apps/frontend && corepack pnpm test && corepack pnpm build`.
-- [ ] 5.4 For mocked e2e migration issues, require `cd apps/frontend && corepack pnpm run test:e2e:mocked-regression`.
-- [ ] 5.5 For live evidence issues, require explicit node-27 `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL`; missing live env is blocked, not mocked.
+- [x] 5.1 Run `openspec validate governance-5-e2-display-route-evidence-cleanup --strict --no-interactive`.
+- [x] 5.2 Run a route-authority grep over current docs and confirm remaining old-route mentions are historical, redirect-alias, or compatibility context.
+- [x] 5.3 For node-27 implementation issues, require `cd apps/frontend && corepack pnpm test && corepack pnpm build`.
+- [x] 5.4 For mocked e2e migration issues, require `cd apps/frontend && corepack pnpm run test:e2e:mocked-regression`.
+- [x] 5.5 For live evidence issues, require explicit node-27 `PLAYWRIGHT_LIVE_BASE_URL` and `PLAYWRIGHT_LIVE_API_BASE_URL`; missing live env is blocked, not mocked.
