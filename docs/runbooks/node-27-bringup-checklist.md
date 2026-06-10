@@ -124,9 +124,13 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
 - [ ] **WebGL 要素命中坐标**：MapLibre WebGL canvas 内要素无 DOM 句柄，CLI/Playwright 难以稳定命中
   点击。定义所需：暴露确定性「测试钩子」（如按 id 触发 popup 的 `window.__m11SelectFeature(id)` 调试入口，
   或 feature→屏幕坐标的可查询映射），使点击/弹窗可被断言，而非靠像素猜测。
-- [ ] **node-27 浏览器可启动**：live click 自动化依赖 node-27 实机能启动 chromium——当前主机缺
-  `libgbm.so.1`/`libxcb-randr.so.0` 系统库（**#431** 阻塞，nwm 无 sudo），先解此 infra 缺口或固化
-  userspace `LD_LIBRARY_PATH` 方案进本清单，否则 live browser lane 无法跑。
+- [x] **node-27 浏览器可启动**（**#431 已解，2026-06-10**）：曾缺 `libgbm.so.1`/`libxcb-randr.so.0`
+  导致 chromium `exitCode=127`。已用 `sudo apt-get install -y libgbm1 libxcb-randr0`（apt 自动带
+  `libwayland-server0`）系统级安装（Ubuntu jammy 上 `sudo` 验证的是调用者 nwm 自身密码，与被禁用的
+  root 密码无关，无需 root SSH）。验证：`ldd .../chromium-1217/chrome-linux64/chrome` 无缺库、
+  **不带** `LD_LIBRARY_PATH` 启动 chromium exit 0、master `test:e2e:mocked-regression` → 19 passed。
+  临时 `~/pwdeps` userspace hack 已清除。live browser lane（含本节 popup live click、
+  `e2e/live-display.spec.ts`）的浏览器前提已就绪。
 - [ ] 上述就绪后：river popup（流量/起报时间）+ station popup（forcing 序列）的 live 点击截图 + 断言
   作为 C4 ④⑤ 的 live receipt 归入 **#389**（绘制不变量已由本地单测全覆盖、数据 live 就绪，仅缺自动化
   framing/命中/浏览器三要素）。
