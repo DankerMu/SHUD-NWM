@@ -59,9 +59,19 @@ docs or OpenSpec change rather than silently choosing a stale fact.
   evidence; they do not make future generated review outputs tracked by
   default.
 - Existing tracked `apps/frontend/artifacts/m11-*.png` files remain historical
-  visual project evidence. New files under `apps/frontend/artifacts/**` are
-  local/generated visual evidence by default unless a later issue or PR
-  explicitly promotes them.
+  **mocked** visual evidence and are **not** node-27 live display proof. They are
+  the 6 M11 route-review screenshots (basin + overview at 1280×900 / 1440×900 /
+  1920×1080), introduced by PR #160 (`3e6fc48`, M11 route-review gap closure),
+  produced under mocked Playwright visual regression. The M15 visual lane is the
+  spec `apps/frontend/e2e/m15-visual-conformance.spec.ts` plus the explicit
+  manual `.github/workflows/m15-visual-evidence.yml` workflow (pinned by
+  `M15_EVIDENCE_SHA`); both are historical mocked visual evidence, not live
+  display receipts (classification in
+  `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`). Provenance and old paths are
+  preserved by keeping these tracked assets in place; they are not moved by
+  default. New files under `apps/frontend/artifacts/**` are local/generated
+  visual evidence by default (ignored via `.gitignore`) unless a later issue or
+  PR explicitly promotes them.
 - Root `artifacts/` remains local/generated production or review evidence and
   stays ignored. `services/artifacts/*.py` is source code and stays trackable.
 - Docker build context excludes non-runtime agent/evidence paths including
