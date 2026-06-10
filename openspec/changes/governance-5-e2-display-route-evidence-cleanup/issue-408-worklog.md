@@ -31,3 +31,27 @@ mocked-regression = `playwright.config.ts`（testIgnore preview-deeplink + live-
 - 未删旧页组件/未改 App.tsx/未碰 live-display·preview-deeplink/未改 src 业务码。
 
 本地复核（orchestrator 亲跑）：`pnpm run test:e2e:mocked-regression` → **19 passed / exit 0**（m11-routes + monitoring）；`tsc --noEmit` 0 error。
+
+## Review (2-pack panel) + Phase 4.5 裁定
+- **pack A（覆盖丢失审计）**：4 删 spec + m11-routes 13→8 + m15 testIgnore 全审 → **VERDICT: CLEAN**。
+  - 4 删 spec 的 redirect 落点参数（/forecast→bare/、/segments→?segmentId 等 7 条）由 #409 已迁的 vitest 契约 `AppRoutes.test.tsx:4531-4627` 兜底；layer 落点（flood-return-period / met-stations）已迁入新 m11-routes:358-385；其余系旧页专属，随 #410 删页合理消失。
+  - m11-routes 删的 5 个旧 test 全为多页 shell/NavBar 断言，M26 前提消失。
+  - m15-visual-conformance：`toHaveScreenshot`=0（纯多页 DOM/几何断言），多页+NavBar 前提 M26 不成立；有独立 runner `test:e2e:m15-visual`(package.json:14) + CI 已手动化(m15-visual-evidence.yml)；#408 验收语显式允许「explicitly retained mocked legacy coverage」→ testIgnore + 保留文件 = faithful，非 scope-dodge。
+- **pack B（假绿/忠实度审计）**：19 passed 非假绿 → **VERDICT: CLEAN**。
+  - 19 test 全有实质断言（含负向 toHaveCount(0)/not.toHaveURL），无永真/空断言/吞错。
+  - monitoring runtime/config mock = `page.route(**/api/v1/**).fulfill`，role payload 自洽(compute_control)，**mocked-not-live**，未命中即 throw 无 continue。
+  - cycle 钉 fixture = 正当 fixture 对齐（`defaultMonitoringCycleTime()`=运行时整点 vs fixture 固定 cycle），controlled 路径有 `cycle_time===controlledCycleTime` 强校验背书，非掩盖 identity bug。
+  - /ops「内部诊断」源码 `MonitoringPage.tsx:222` 真实渲染；SPA fallback 改 RBAC gate 对应真实行为；flood identity 经 `expect.poll` 校验 mocked `/api/v1/runs` 带 source=GFS。
+  - testIgnore 正则精确（m11≠m15），无误伤。
+- **Phase 4.5 裁定：clean**（0 in-scope CONFIRMED / 0 blocking PLAUSIBLE，全 REFUTED）→ CI 门 + merge。
+
+## node-27 live receipt（含 host 依赖修复）
+- 首跑 19 failed：全 `browserType.launch ... exitCode=127`——**非测试逻辑**，本地同套件 19 passed。
+- 根因：node-27 主机缺系统库 `libgbm.so.1`（Mesa GBM），链式还缺 `libxcb-randr.so.0`；nwm 无 passwordless sudo。
+- 修复（userspace，无 root）：`apt-get download libgbm1 libdrm2 libwayland-server0 libxcb-randr0` → `dpkg-deb -x` 解到 `~/pwdeps/root` → `LD_LIBRARY_PATH=~/pwdeps/root/usr/lib/x86_64-linux-gnu` → chrome/headless-shell ldd 缺库归零。
+- ⚠️ 此 host 缺库**同样阻塞 node-27 的 LIVE 浏览器 lane**（live-display.spec.ts / #389 popup live-click）→ 已记为 out-of-scope infra 待办（见下）。
+- **receipt**：node-27 HEAD `d07cb02`，`corepack pnpm run test:e2e:mocked-regression` → **19 passed (33.1s) / exit 0**（log `node-27:/tmp/verify-408-mocked2.log`）。
+- 本地：`test:e2e:mocked-regression` 19 passed / `tsc --noEmit` 0 error。
+
+## Phase state（终态）
+- [x] Phase 0 scope / [x] Phase 1 迁移 / [x] node-27 verify(19 passed) / [x] review panel(2-pack CLEAN) / [x] merge gate 满足
