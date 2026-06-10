@@ -23,7 +23,7 @@
 1. **后端动态发现 + 去硬编码**：`list_basins` 增 `has_display_product`（EXISTS run-status 集合过滤，复用 `QHH_LATEST_READY_RUN_STATUSES` 单一口径，**无 basin_id 白名单**）（#310）；latest-product 去 `QHH_BASIN_ID` 写死、`basin_id` 参数化（缺省 `basins_qhh` 向后兼容 + 旧 `/mvp/qhh/latest-product` 路径保留）（#311）；
    河段/站点列表 `search`+分页+`variable`/`stream_order` 字段可用性降级契约（#313）。
 2. **return-period 诚实展示**：`availability.return_period_status`（ready/unavailable）作**独立 supplemental 字段**，不进 blocking reasons（有 q_down 无洪频基线的产品不掉 ready/404）（#312/#316）；无真实产品时仅静态图例 + "暂未发布正式产品"，不渲染假数据。
-3. **前端生产化**：流域选择器数据驱动（无前端白名单，新流域自动出现）+ 切流域以 `basin_id` 重拉、strict identity 一致（#314）；河段/站点列表走后端 search/分页（#315）；`/ops`+`/monitoring` 入口按 `display_readonly` 降级（保留 `/meteorology` 门控）（#317）。
+3. **前端生产化**：流域选择器数据驱动（无前端白名单，新流域自动出现）+ 切流域以 `basin_id` 重拉、strict identity 一致（#314）；河段/站点列表走后端 search/分页（#315）；`/ops`+`/monitoring` 入口按 `display_readonly` 降级（保留 `/meteorology` 门控）（#317；M26 #337 后 `/meteorology` 已 redirect 化）。
 4. **可扩展性验证 + 文档收尾**（#318）：真 DB 集成测试断言「全新注册 basin 仅靠数据即在发现接口出现，零代码改动」（`tests/test_real_basin_discovery_integration.py`），前端 `BasinSelector.test.tsx` 数据驱动断言新流域自动渲染。
 5. **边界**：以上为**功能交付**；node-27 实质上线仍是 **C1–C4 live receipt**（部署/只读 DB denied-write/cross-plane identity/浏览器 e2e），见 `docs/runbooks/node-27-bringup-checklist.md`，属后续。
 
@@ -65,13 +65,13 @@
 
 - **M21** QHH 水文气象展示 + 运维监控 MVP：Epic #202 关闭，PR #226 合并（`ec5d535`）。
 - **M22** 两节点 Docker 只读展示重构：Epic #227 关闭，PR #250 合并（`08c72e9`），CI 全绿。
-- 两节点角色边界已落地：22=`compute_control`（scheduler/Slurm/发布/retry），27=`display_readonly`（只读消费 DB + published，`/hydro-met`+`/ops`，无 Slurm/Docker socket/控制面 credential）。
+- 两节点角色边界已落地：22=`compute_control`（scheduler/Slurm/发布/retry），27=`display_readonly`（只读消费 DB + published，`/`(单图展示)+`/ops`，无 Slurm/Docker socket/控制面 credential）。
 - MVP 范围：QHH/有限流域、GFS 主源 + IFS 并行源、河段流量 `q_down`、forcing 代站 `PRCP/TEMP/RH/wind/Rn/Press`、pipeline 运维闭环。**不**声明全国流域 / CLDAS / ERA5 近实时 / 全国 MVT/PBF / final production ready。
 
 ## 仍需 live proof（正式上线前）
 
 目标环境 receipt：PostgreSQL/PostGIS/TimescaleDB（含 27 readonly denied-write probes）、对象存储/published artifacts（`log_uri` 指向 27 可读 URI）、两节点部署角色、
-cross-plane identity（同一 `run_id/source/cycle/model/basin` 串起 22 生产→DB→published→`/hydro-met`+`/ops`）、live Slurm 全套、live `/hydro-met` + `/ops` browser run、alert sink/rollback/nationwide MVT。
+cross-plane identity（同一 `run_id/source/cycle/model/basin` 串起 22 生产→DB→published→`/`(单图展示)+`/ops`）、live Slurm 全套、live `/`(单图展示) + `/ops` browser run、alert sink/rollback/nationwide MVT。
 逐项归因见 [`docs/bugs.md`](docs/bugs.md)。
 
 ## 入口
