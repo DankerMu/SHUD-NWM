@@ -77,3 +77,27 @@ docs or OpenSpec change rather than silently choosing a stale fact.
 - `docs/bugs.md` is governed as a status ledger after #369 triage.
 - `.agents`, `.codex`, `apps/frontend/artifacts`, and root `artifacts/`
   ownership policy is defined above by path family.
+
+## Display Route Authority (M26 single-map)
+
+The current display frontend (`apps/frontend`) is converged to a **single-map**
+entrypoint. This is the authoritative route status for current docs; the matrix
+is defined by `apps/frontend/src/App.tsx`.
+
+- **Active routes**: `/` (the single-map display entrypoint — overview, basin/
+  segment drill-down, and river-flow popups all live here), plus the role-gated
+  pages `/monitoring`, `/ops`, and `/system/model-assets`.
+- **Legacy redirect aliases** (compatibility only; not active independent pages —
+  they `replace`-redirect to `/` preserving search + added semantic params):
+  `/overview`, `/hydro-met`, `/forecast` → `/`; `/meteorology` →
+  `/?layer=met-stations`; `/flood-alerts` → `/?layer=flood-return-period`;
+  `/basins/:basinId` → `/?basinId=…`; `/segments/:segmentId` → `/?segmentId=…`.
+- Current entrypoint docs (`README.md`, `progress.md`, `CLAUDE.md`) must not
+  present the legacy aliases as active independent pages. Remaining old-route
+  mentions in current docs are valid only as historical, redirect-alias, or
+  compatibility context. Dated `docs/plans/**` and historical runbooks are
+  historical by definition and out of this current-entrypoint scope.
+- Route-authority grep (current docs only):
+  `rg -n '/hydro-met|/forecast|/meteorology|/flood-alerts|/segments/|/basins/' README.md progress.md CLAUDE.md`
+  — every hit must be a redirect-alias/historical/compatibility mention, never an
+  active-page claim.

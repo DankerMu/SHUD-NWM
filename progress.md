@@ -65,13 +65,13 @@
 
 - **M21** QHH 水文气象展示 + 运维监控 MVP：Epic #202 关闭，PR #226 合并（`ec5d535`）。
 - **M22** 两节点 Docker 只读展示重构：Epic #227 关闭，PR #250 合并（`08c72e9`），CI 全绿。
-- 两节点角色边界已落地：22=`compute_control`（scheduler/Slurm/发布/retry），27=`display_readonly`（只读消费 DB + published，`/hydro-met`+`/ops`，无 Slurm/Docker socket/控制面 credential）。
+- 两节点角色边界已落地：22=`compute_control`（scheduler/Slurm/发布/retry），27=`display_readonly`（只读消费 DB + published，`/`(单图展示)+`/ops`，无 Slurm/Docker socket/控制面 credential）。
 - MVP 范围：QHH/有限流域、GFS 主源 + IFS 并行源、河段流量 `q_down`、forcing 代站 `PRCP/TEMP/RH/wind/Rn/Press`、pipeline 运维闭环。**不**声明全国流域 / CLDAS / ERA5 近实时 / 全国 MVT/PBF / final production ready。
 
 ## 仍需 live proof（正式上线前）
 
 目标环境 receipt：PostgreSQL/PostGIS/TimescaleDB（含 27 readonly denied-write probes）、对象存储/published artifacts（`log_uri` 指向 27 可读 URI）、两节点部署角色、
-cross-plane identity（同一 `run_id/source/cycle/model/basin` 串起 22 生产→DB→published→`/hydro-met`+`/ops`）、live Slurm 全套、live `/hydro-met` + `/ops` browser run、alert sink/rollback/nationwide MVT。
+cross-plane identity（同一 `run_id/source/cycle/model/basin` 串起 22 生产→DB→published→`/`(单图展示)+`/ops`）、live Slurm 全套、live `/`(单图展示) + `/ops` browser run、alert sink/rollback/nationwide MVT。
 逐项归因见 [`docs/bugs.md`](docs/bugs.md)。
 
 ## 入口
