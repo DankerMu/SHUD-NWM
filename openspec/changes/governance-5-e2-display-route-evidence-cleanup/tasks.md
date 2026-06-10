@@ -23,7 +23,7 @@
 
 - [x] 4.1 On node-27, migrate old URL handoff generation from old paths to `/` query form where production single-map code still generates `/forecast`, `/segments/...`, `/basins/...`, or `/flood-alerts` URLs. (#407: only live single-map handoff was `overviewDataContracts.ts` `m11QueryHref('/forecast', …)` → `/`; remaining old-route handoffs live only in orphaned old pages = #410 deletion scope.)
 - [ ] 4.2 On node-27, migrate mocked Playwright specs from old-page assertions to M26 single-map behavior or explicitly retained mocked legacy coverage.
-- [ ] 4.3 On node-27, migrate Vitest coverage away from `LegacyPagesHarness` and old page imports.
+- [x] 4.3 On node-27, migrate Vitest coverage away from `LegacyPagesHarness` and old page imports.
 - [ ] 4.4 On node-27, delete `ForecastPage`, `FloodAlertPage`, `SegmentDetailPage`, `MeteorologyPage`, and `LegacyPagesHarness` only after imports and tests are clean.
 - [ ] 4.5 Mark all old-page implementation issues as node-27/display_readonly execution items; do not implement frontend source changes from node-22.
 
