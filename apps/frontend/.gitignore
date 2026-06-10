@@ -3,3 +3,7 @@ dist/
 *.tsbuildinfo
 .env
 .env.local
+
+# Playwright 生成物
+test-results/
+playwright-report/
