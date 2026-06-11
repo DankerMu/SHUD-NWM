@@ -18,6 +18,8 @@ from services.orchestrator.retry import RetryConfig, RetryService
 from services.slurm_gateway.gateway import SlurmGatewayError
 from workers.data_adapters.base import cycle_id_for
 
+GENERIC_RETRY_JOB_TYPE = "forecast_qhh_stage"
+
 
 def test_pipeline_status_endpoint() -> None:
     with _store() as store:
@@ -1725,7 +1727,15 @@ def test_job_logs_not_found(tmp_path: Path, monkeypatch) -> None:
 
 def test_retry_rbac() -> None:
     with _store() as store:
-        _create_job(store, job_id="job_retry", run_id="run_retry", status="failed", error_code="SLURM_TIMEOUT")
+        _create_job(
+            store,
+            job_id="job_retry",
+            run_id="run_retry",
+            job_type=GENERIC_RETRY_JOB_TYPE,
+            stage="forecast",
+            status="failed",
+            error_code="SLURM_TIMEOUT",
+        )
         with _client(store, allow_dev_role_header=True) as client:
             allowed = client.post("/api/v1/runs/run_retry/retry", headers={"X-User-Role": "operator"})
             denied = client.post("/api/v1/runs/run_retry/retry", headers={"X-User-Role": "viewer"})
@@ -1761,7 +1771,14 @@ def test_retry_rbac_denies_analyst_without_mutation() -> None:
 def test_retry_all_operator_style_roles_are_allowed() -> None:
     for role in ("operator", "model_admin", "sys_admin"):
         with _store() as store:
-            _create_job(store, job_id=f"job_retry_{role}", run_id=f"run_retry_{role}", status="failed")
+            _create_job(
+                store,
+                job_id=f"job_retry_{role}",
+                run_id=f"run_retry_{role}",
+                job_type=GENERIC_RETRY_JOB_TYPE,
+                stage="forecast",
+                status="failed",
+            )
             with _client(store, allow_dev_role_header=True) as client:
                 response = client.post(f"/api/v1/runs/run_retry_{role}/retry", headers={"X-User-Role": role})
 
@@ -1785,6 +1802,8 @@ def test_retry_accepts_ops_mvp_failed_source_states_and_records_metadata() -> No
                 store,
                 job_id=f"job_retry_{status}",
                 run_id=f"run_retry_{status}",
+                job_type=GENERIC_RETRY_JOB_TYPE,
+                stage="forecast",
                 status=status,
                 error_code="SBATCH_SUBMISSION_FAILED" if status == "submission_failed" else "NODE_FAILURE",
             )
@@ -1804,7 +1823,7 @@ def test_retry_accepts_ops_mvp_failed_source_states_and_records_metadata() -> No
             assert len(retry_jobs) == 1
             retry_job = retry_jobs[0]
             assert retry_job.status == "submitted"
-            assert retry_job.stage == "download"
+            assert retry_job.stage == "forecast"
             retry_event = next(event for event in _events(store) if event.event_type == "retry")
             assert retry_event.entity_id == retry_job.job_id
             assert retry_event.status_from == status
@@ -1823,6 +1842,7 @@ def test_retry_accepts_partial_failed_job_when_later_publish_succeeded_and_run_f
             store,
             job_id="job_frequency_partial",
             run_id="cycle_gfs_qhh",
+            job_type="frequency_qhh_stage",
             stage="frequency",
             status="partially_failed",
             error_code="NO_FREQUENCY_CURVE",
@@ -1835,6 +1855,7 @@ def test_retry_accepts_partial_failed_job_when_later_publish_succeeded_and_run_f
             store,
             job_id="job_publish_succeeded",
             run_id="cycle_gfs_qhh",
+            job_type="publish_qhh_stage",
             stage="publish",
             status="succeeded",
             error_code=None,
@@ -1863,7 +1884,14 @@ def test_retry_accepts_partial_failed_job_when_later_publish_succeeded_and_run_f
 def test_retry_dev_token_defaults_operator_only_when_role_header_absent(monkeypatch: Any) -> None:
     monkeypatch.setenv("NHMS_DEV_AUTH_TOKEN", "dev-token")
     with _store() as store:
-        _create_job(store, job_id="job_retry_dev_token", run_id="run_retry_dev_token", status="failed")
+        _create_job(
+            store,
+            job_id="job_retry_dev_token",
+            run_id="run_retry_dev_token",
+            job_type=GENERIC_RETRY_JOB_TYPE,
+            stage="forecast",
+            status="failed",
+        )
         with _client(store) as client:
             response = client.post(
                 "/api/v1/runs/run_retry_dev_token/retry",
@@ -1925,6 +1953,8 @@ def test_allowed_retry_records_canonical_audit_evidence() -> None:
             store,
             job_id="job_retry_audit",
             run_id="run_retry_audit",
+            job_type=GENERIC_RETRY_JOB_TYPE,
+            stage="forecast",
             status="failed",
             error_code="SLURM_TIMEOUT",
         )
@@ -2065,7 +2095,14 @@ def test_trusted_test_live_proof_allows_retry_with_provider_metadata(monkeypatch
     monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
     monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
     with _store() as store:
-        _create_job(store, job_id="job_trusted_live", run_id="run_trusted_live", status="failed")
+        _create_job(
+            store,
+            job_id="job_trusted_live",
+            run_id="run_trusted_live",
+            job_type=GENERIC_RETRY_JOB_TYPE,
+            stage="forecast",
+            status="failed",
+        )
         with _client(store) as client:
             response = client.post(
                 "/api/v1/runs/run_trusted_live/retry",

@@ -244,6 +244,52 @@ def test_object_store_roots_exported_to_template(monkeypatch, tmp_path):
     assert "export NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://" in captured["script"]
 
 
+def test_download_source_cycle_retry_manifest_exports_object_store_root_not_workspace(monkeypatch, tmp_path):
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(workspace_root),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        )
+    )
+    captured = _capture_sbatch(monkeypatch)
+
+    with _client(monkeypatch, gateway) as client:
+        response = client.post(
+            "/api/v1/slurm/jobs",
+            json={
+                "run_id": "cycle_ifs_2026053106",
+                "model_id": "model_a",
+                "job_type": "download_source_cycle",
+                "manifest": {
+                    "run_id": "cycle_ifs_2026053106",
+                    "model_id": "model_a",
+                    "cycle_id": "ifs_2026053106",
+                    "job_type": "download_source_cycle",
+                    "stage": "download",
+                    "source_id": "ifs",
+                    "cycle_time": "2026053106",
+                    "workspace_dir": str(workspace_root),
+                    "object_store_root": str(object_store_root),
+                    "object_store_prefix": "s3://nhms-prod",
+                    "pipeline_job_id": "cycle_ifs_2026053106_retry_active",
+                    "retry_count": 2,
+                    "manual_retry_marker": True,
+                },
+            },
+        )
+
+    assert response.status_code == 201
+    assert f"export WORKSPACE_ROOT={workspace_root}" in captured["script"]
+    assert f"export OBJECT_STORE_ROOT={object_store_root}" in captured["script"]
+    assert f"export OBJECT_STORE_ROOT={workspace_root}" not in captured["script"]
+    assert "export OBJECT_STORE_PREFIX=s3://nhms-prod" in captured["script"]
+
+
 def test_route_object_store_prefix_quote_breakout_is_shell_quoted(monkeypatch, tmp_path):
     gateway = RealSlurmGateway(
         SlurmGatewaySettings(

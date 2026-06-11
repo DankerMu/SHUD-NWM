@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -328,19 +329,25 @@ def test_manual_retry_submits_to_slurm_when_gateway_available() -> None:
 
 def test_manual_retry_download_source_cycle_submits_source_and_cycle_time() -> None:
     with _store() as store:
-        _create_job(
+        job = _create_job(
             store,
             job_id="job_cycle_ifs_2026053106_download",
             run_id="cycle_ifs_2026053106",
             error_code="NODE_FAILURE",
             retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
         )
-        job = store.get_job("job_cycle_ifs_2026053106_download")
-        assert job is not None
-        job.cycle_id = "ifs_2026053106"
-        job.job_type = "download_source_cycle"
-        store.session.add(job)
-        store.session.commit()
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": "/srv/nhms/object-store",
+                "object_store_prefix": "s3://nhms-prod",
+            },
+        )
         gateway = _RecordingGateway(job_id="slurm_retry_ifs")
         service = RetryService(store, RetryConfig(max_retries=3))
 
@@ -354,6 +361,251 @@ def test_manual_retry_download_source_cycle_submits_source_and_cycle_time() -> N
         assert submission.manifest["source_id"] == "ifs"
         assert submission.manifest["cycle_time"] == "2026053106"
         assert submission.manifest["pipeline_job_id"] == retry.job_id
+        assert submission.manifest["object_store_root"] == "/srv/nhms/object-store"
+        assert submission.manifest["object_store_prefix"] == "s3://nhms-prod"
+
+
+def test_manual_retry_download_source_cycle_preserves_runtime_roots_from_original_event() -> None:
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": "/srv/nhms/object-store",
+                "object_store_prefix": "s3://nhms-prod",
+                "published_artifact_root": "/srv/nhms/published",
+                "published_artifact_uri_prefix": "published://prod",
+            },
+        )
+        gateway = _RecordingGateway(job_id="slurm_retry_ifs")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        submission = gateway.submissions[0]
+        assert retry.status == "submitted"
+        assert submission.run_id == "cycle_ifs_2026053106"
+        assert submission.job_type == "download_source_cycle"
+        assert submission.manifest == {
+            "run_id": "cycle_ifs_2026053106",
+            "model_id": "model_a",
+            "cycle_id": "ifs_2026053106",
+            "job_type": "download_source_cycle",
+            "stage": "download",
+            "pipeline_job_id": retry.job_id,
+            "retry_count": 2,
+            "manual_retry_marker": True,
+            "workspace_dir": "/srv/nhms/workspace",
+            "object_store_root": "/srv/nhms/object-store",
+            "object_store_prefix": "s3://nhms-prod",
+            "published_artifact_root": "/srv/nhms/published",
+            "published_artifact_uri_prefix": "published://prod",
+            "source_id": "ifs",
+            "cycle_time": "2026053106",
+        }
+        event = _events(store)[-1]
+        assert event.status_to == "submitted"
+        evidence = event.details["runtime_root_resolution"]
+        assert evidence["resolved"]["object_store_root"]["value"] == "/srv/nhms/object-store"
+        assert evidence["resolved"]["object_store_root"]["same_as_workspace"] is False
+        assert evidence["resolved"]["object_store_prefix"]["value"] == "s3://nhms-prod"
+        assert event.details["runtime_root_contract"]["object_store_root"] == "/srv/nhms/object-store"
+        assert event.details["runtime_root_contract"]["object_store_prefix"] == "s3://nhms-prod"
+        assert evidence["published_fields_available"] == [
+            "published_artifact_root",
+            "published_artifact_uri_prefix",
+        ]
+
+
+def test_manual_retry_download_source_cycle_missing_object_store_root_fails_closed_without_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_root_env(monkeypatch)
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(store, job, {"workspace_dir": "/srv/nhms/workspace"})
+        gateway = _RecordingGateway(job_id="slurm_retry_ifs")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert gateway.submissions == []
+        assert retry.status == "submission_failed"
+        assert retry.slurm_job_id is None
+        assert retry.error_code == "RETRY_RUNTIME_ROOTS_UNRESOLVED"
+        assert "object-store runtime roots" in str(retry.error_message)
+        event = _events(store)[-1]
+        assert event.status_to == "submission_failed"
+        evidence = event.details["runtime_root_resolution"]
+        assert evidence["missing"] == ["object_store_root"]
+        assert evidence["resolved"]["workspace_dir"]["value"] == "/srv/nhms/workspace"
+
+
+def test_manual_retry_download_source_cycle_gateway_failure_persists_runtime_root_contract() -> None:
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": "/srv/nhms/object-store",
+                "object_store_prefix": "s3://nhms-prod",
+            },
+        )
+        gateway = _RecordingGateway(error=RuntimeError("sbatch unavailable"))
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert retry.status == "submission_failed"
+        assert len(gateway.submissions) == 1
+        event = _events(store)[-1]
+        assert event.status_to == "submission_failed"
+        assert event.details["runtime_root_resolution"]["resolved"]["object_store_root"]["value"] == (
+            "/srv/nhms/object-store"
+        )
+        assert event.details["runtime_root_contract"]["workspace_dir"] == "/srv/nhms/workspace"
+        assert event.details["runtime_root_contract"]["object_store_root"] == "/srv/nhms/object-store"
+        assert event.details["runtime_root_contract"]["object_store_prefix"] == "s3://nhms-prod"
+
+
+def test_manual_retry_download_source_cycle_uses_explicit_runtime_config_after_legacy_workspace_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": "/srv/nhms/workspace",
+                "object_store_prefix": "legacy-prefix",
+            },
+        )
+        monkeypatch.setenv("WORKSPACE_ROOT", "/srv/nhms/workspace")
+        monkeypatch.setenv("OBJECT_STORE_ROOT", "/srv/nhms/object-store")
+        monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms-prod")
+        gateway = _RecordingGateway(job_id="slurm_retry_ifs")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert retry.status == "submitted"
+        submission = gateway.submissions[0]
+        assert submission.manifest["workspace_dir"] == "/srv/nhms/workspace"
+        assert submission.manifest["object_store_root"] == "/srv/nhms/object-store"
+        assert submission.manifest["object_store_prefix"] == "legacy-prefix"
+        evidence = _events(store)[-1].details["runtime_root_resolution"]
+        assert evidence["resolved"]["object_store_root"]["source"] == "runtime_config:environment"
+        assert evidence["resolved"]["object_store_root"]["same_as_workspace"] is False
+        assert any(item["reason"] == "matches_workspace_dir" for item in evidence["rejected"])
+
+
+def test_manual_retry_download_source_cycle_redacts_secret_runtime_root_evidence_and_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_root_env(monkeypatch)
+    secret_root = "https://user:secret-pass@example.com/object-store?token=secret-token"
+    secret_prefix = "s3://bucket/prod?X-Amz-Signature=secret-sig"
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": secret_root,
+                "object_store_prefix": secret_prefix,
+            },
+        )
+        service = RetryService(store, RetryConfig(max_retries=3))
+        gateway = _RecordingGateway(job_id="slurm_retry_ifs")
+        app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+        previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+        try:
+            client = TestClient(app)
+
+            response = client.post("/api/v1/runs/cycle_ifs_2026053106/retry", headers={"X-User-Role": "operator"})
+
+            assert response.status_code == 503
+            error = response.json()["error"]
+            assert error["code"] == "RETRY_RUNTIME_ROOTS_SECRET_BEARING"
+            assert error["details"]["status"] == "submission_failed"
+            assert error["details"]["runtime_root_resolution"]["missing"] == ["object_store_root"]
+            assert gateway.submissions == []
+            event = _events(store)[-1]
+            persisted = json.dumps({"message": event.message, "details": event.details}, sort_keys=True)
+            response_body = json.dumps(response.json(), sort_keys=True)
+            for raw_secret in (
+                "user:secret-pass",
+                "secret-pass",
+                "secret-token",
+                "secret-sig",
+                "X-Amz-Signature=secret-sig",
+            ):
+                assert raw_secret not in persisted
+                assert raw_secret not in response_body
+            assert "https://example.com/object-store" in persisted
+            assert "s3://bucket/prod" in persisted
+            assert "[redacted]" not in persisted
+        finally:
+            if previous_allow_dev_role_header is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+            app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
+            app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
 
 
 def test_manual_retry_submission_failure_marks_submission_failed() -> None:
@@ -945,15 +1197,18 @@ def _create_job(
     status: str = "failed",
     error_code: str | None = "SLURM_TIMEOUT",
     retry_count: int = 0,
+    cycle_id: str = "gfs_2026050100",
+    job_type: str = "run_shud_analysis",
+    stage: str = "run",
 ) -> PipelineJob:
     job = store.create_job(
         job_id=job_id,
         run_id=run_id,
-        cycle_id="gfs_2026050100",
-        job_type="download_source_cycle",
+        cycle_id=cycle_id,
+        job_type=job_type,
         slurm_job_id="123",
         model_id="model_a",
-        stage="download",
+        stage=stage,
         status=status,
     )
     job.error_code = error_code
@@ -963,6 +1218,32 @@ def _create_job(
     store.session.commit()
     store.session.refresh(job)
     return job
+
+
+def _insert_submission_event(store: PipelineStore, job: PipelineJob, runtime_root_contract: dict[str, Any]) -> None:
+    store.insert_event(
+        entity_type="pipeline_job",
+        entity_id=job.job_id,
+        event_type="submission",
+        status_from=None,
+        status_to=job.status,
+        details={
+            "stage": job.stage,
+            "job_type": job.job_type,
+            "runtime_root_contract": runtime_root_contract,
+        },
+    )
+
+
+def _clear_runtime_root_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in (
+        "WORKSPACE_ROOT",
+        "OBJECT_STORE_ROOT",
+        "OBJECT_STORE_PREFIX",
+        "NHMS_PUBLISHED_ARTIFACT_ROOT",
+        "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 def _events(store: PipelineStore) -> list[PipelineEvent]:

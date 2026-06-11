@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -11,7 +12,8 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
 from packages.common.redaction import redact_payload
-from services.orchestrator.persistence import PipelineJob, PipelineStore
+from packages.common.slurm_env import secret_manifest_value_reason
+from services.orchestrator.persistence import PipelineEvent, PipelineJob, PipelineStore
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGatewayError
 from services.slurm_gateway.models import SubmitJobRequest
@@ -47,6 +49,18 @@ TERMINAL_SUCCESS_RETRY_STATUSES = {"succeeded", "complete", "published"}
 DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "frequency_done", "published"}
 PARTIAL_OR_FAILED_HYDRO_STATUSES = {"failed", "cancelled", "partially_failed"}
 REUSABLE_AUTO_RETRY_STATUSES = {"pending", "submission_failed"}
+DOWNLOAD_SOURCE_CYCLE_JOB_TYPE = "download_source_cycle"
+RETRY_RUNTIME_ROOTS_UNRESOLVED = "RETRY_RUNTIME_ROOTS_UNRESOLVED"
+RETRY_RUNTIME_ROOTS_SECRET_BEARING = "RETRY_RUNTIME_ROOTS_SECRET_BEARING"
+_RUNTIME_ROOT_FIELDS = (
+    "workspace_dir",
+    "object_store_root",
+    "object_store_prefix",
+    "published_artifact_root",
+    "published_artifact_uri_prefix",
+)
+_PUBLISHED_RUNTIME_ROOT_FIELDS = ("published_artifact_root", "published_artifact_uri_prefix")
+_ROOT_EVIDENCE_VALUE_MAX_LENGTH = 256
 
 
 def is_transient_error(error_code: str | None) -> bool:
@@ -176,6 +190,19 @@ class RetrySubmitter(Protocol):
 
 
 @dataclass(frozen=True)
+class _RuntimeRootResolution:
+    manifest_fields: dict[str, str]
+    evidence: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _RetrySubmissionResult:
+    payload: dict[str, Any]
+    runtime_root_resolution: dict[str, Any] | None = None
+    runtime_root_contract: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
 class _RetrySubmissionJob:
     job_id: str
     run_id: str | None
@@ -184,6 +211,15 @@ class _RetrySubmissionJob:
     model_id: str | None
     stage: str | None
     retry_count: int
+    previous_job_id: str | None
+
+
+class _RetryRuntimeRootResolutionError(RuntimeError):
+    def __init__(self, code: str, message: str, evidence: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = {"runtime_root_resolution": evidence}
 
 
 class RetryService:
@@ -413,6 +449,7 @@ class RetryService:
                 model_id=self._resolve_retry_model_id(retry_job),
                 stage=retry_job.stage,
                 retry_count=retry_job.retry_count,
+                previous_job_id=failed_job.job_id,
             )
             retry_job_id = retry_job.job_id
             retry_run_id = failed_job.run_id
@@ -420,7 +457,7 @@ class RetryService:
         self.store.session.commit()
 
         try:
-            submitted_payload = self._submit_retry_job(submission_job, gateway)
+            submitted_result = self._submit_retry_job(submission_job, gateway)
         except Exception as error:
             with self.store.session.begin_nested():
                 retry_job = self._locked_retry_job(retry_job_id)
@@ -431,7 +468,12 @@ class RetryService:
 
         with self.store.session.begin_nested():
             retry_job = self._locked_retry_job(retry_job_id)
-            self._record_retry_submission_success(retry_job, submitted_payload)
+            self._record_retry_submission_success(
+                retry_job,
+                submitted_result.payload,
+                runtime_root_resolution=submitted_result.runtime_root_resolution,
+                runtime_root_contract=submitted_result.runtime_root_contract,
+            )
             if retry_run_id and has_hydro_run_table and retry_job.status in {"submitted", "running"}:
                 self.store.session.execute(
                     text(
@@ -499,18 +541,157 @@ class RetryService:
             self.store.session.refresh(job)
         return expired
 
-    def _submit_retry_job(self, retry_job: _RetrySubmissionJob, gateway: RetrySubmitter) -> dict[str, Any]:
-        model_id = retry_job.model_id or _model_id_from_run_id(retry_job.run_id) or "unknown"
-        manifest = _retry_submission_manifest(retry_job, model_id=model_id)
-        submitted = gateway.submit_job(
-            SubmitJobRequest(
-                run_id=retry_job.run_id,
-                model_id=model_id,
-                job_type=retry_job.job_type,
-                manifest=manifest,
-            )
+    def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | None:
+        statement = (
+            select(PipelineEvent)
+            .where(PipelineEvent.entity_type == "pipeline_job")
+            .where(PipelineEvent.entity_id == job_id)
+            .where(PipelineEvent.event_type == "submission")
+            .order_by(PipelineEvent.event_id.desc())
         )
-        return _coerce_gateway_payload(submitted)
+        for event in self.store.session.scalars(statement):
+            details = event.details if isinstance(event.details, Mapping) else {}
+            evidence = details.get("runtime_root_resolution")
+            if isinstance(evidence, Mapping):
+                return _redacted_mapping(evidence)
+        return None
+
+    def _submit_retry_job(self, retry_job: _RetrySubmissionJob, gateway: RetrySubmitter) -> _RetrySubmissionResult:
+        model_id = retry_job.model_id or _model_id_from_run_id(retry_job.run_id) or "unknown"
+        runtime_root_resolution = self._resolve_retry_runtime_roots(retry_job)
+        manifest = _retry_submission_manifest(
+            retry_job,
+            model_id=model_id,
+            runtime_root_fields=runtime_root_resolution.manifest_fields if runtime_root_resolution else None,
+        )
+        try:
+            submitted = gateway.submit_job(
+                SubmitJobRequest(
+                    run_id=retry_job.run_id,
+                    model_id=model_id,
+                    job_type=retry_job.job_type,
+                    manifest=manifest,
+                )
+            )
+        except Exception as error:
+            if runtime_root_resolution is not None:
+                _attach_retry_runtime_root_resolution(error, runtime_root_resolution.evidence)
+                _attach_retry_runtime_root_contract(error, runtime_root_resolution.manifest_fields)
+            raise
+        return _RetrySubmissionResult(
+            payload=_coerce_gateway_payload(submitted),
+            runtime_root_resolution=runtime_root_resolution.evidence if runtime_root_resolution else None,
+            runtime_root_contract=runtime_root_resolution.manifest_fields if runtime_root_resolution else None,
+        )
+
+    def _resolve_retry_runtime_roots(self, retry_job: _RetrySubmissionJob) -> _RuntimeRootResolution | None:
+        if retry_job.job_type != DOWNLOAD_SOURCE_CYCLE_JOB_TYPE:
+            return None
+
+        resolved: dict[str, tuple[str, str]] = {}
+        rejected: list[dict[str, str]] = []
+        candidates = self._retry_runtime_root_candidates(retry_job)
+        for source, candidate in candidates:
+            candidate_values: dict[str, str] = {}
+            for root_field in _RUNTIME_ROOT_FIELDS:
+                if root_field not in candidate:
+                    continue
+                value = _runtime_root_value(candidate.get(root_field))
+                if value is None:
+                    continue
+                secret_reason = secret_manifest_value_reason(value)
+                if secret_reason is not None:
+                    rejected.append(
+                        {
+                            "field": root_field,
+                            "source": source,
+                            "reason": secret_reason,
+                            "value": _bounded_redacted_text(value),
+                        }
+                    )
+                    continue
+                candidate_values[root_field] = value
+            if (
+                candidate_values.get("object_store_root")
+                and candidate_values.get("workspace_dir")
+                and candidate_values["object_store_root"] == candidate_values["workspace_dir"]
+            ):
+                rejected.append(
+                    {
+                        "field": "object_store_root",
+                        "source": source,
+                        "reason": "matches_workspace_dir",
+                        "value": _bounded_redacted_text(candidate_values["object_store_root"]),
+                    }
+                )
+                candidate_values.pop("object_store_root", None)
+            for root_field, value in candidate_values.items():
+                if root_field not in resolved:
+                    resolved[root_field] = (value, source)
+
+        if "object_store_prefix" not in resolved and not _field_was_rejected(rejected, "object_store_prefix"):
+            resolved["object_store_prefix"] = ("", "runtime_config:OBJECT_STORE_PREFIX.default_empty")
+        if (
+            "object_store_root" in resolved
+            and "workspace_dir" in resolved
+            and resolved["object_store_root"][0] == resolved["workspace_dir"][0]
+        ):
+            rejected.append(
+                {
+                    "field": "object_store_root",
+                    "source": resolved["object_store_root"][1],
+                    "reason": "matches_workspace_dir",
+                    "value": _bounded_redacted_text(resolved["object_store_root"][0]),
+                }
+            )
+            replacement = _replacement_object_store_root(
+                candidates,
+                workspace_value=resolved["workspace_dir"][0],
+                current_value=resolved["object_store_root"][0],
+            )
+            if replacement is None:
+                resolved.pop("object_store_root", None)
+            else:
+                resolved["object_store_root"] = replacement
+
+        rejected_unresolved_fields = sorted(
+            {
+                item["field"]
+                for item in rejected
+                if item["field"] not in resolved and item["reason"] != "matches_workspace_dir"
+            }
+        )
+        missing = [] if "object_store_root" in resolved else ["object_store_root"]
+        evidence = _runtime_root_resolution_evidence(
+            retry_job,
+            resolved=resolved,
+            missing=missing,
+            rejected=rejected,
+        )
+        if rejected_unresolved_fields:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_SECRET_BEARING,
+                "Manual retry runtime-root evidence contains secret-bearing values.",
+                evidence,
+            )
+        if missing:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_UNRESOLVED,
+                "Manual retry cannot resolve required object-store runtime roots for download_source_cycle.",
+                evidence,
+            )
+
+        manifest_fields = {field: value for field, (value, _source) in resolved.items()}
+        return _RuntimeRootResolution(manifest_fields=manifest_fields, evidence=evidence)
+
+    def _retry_runtime_root_candidates(self, retry_job: _RetrySubmissionJob) -> list[tuple[str, Mapping[str, Any]]]:
+        candidates: list[tuple[str, Mapping[str, Any]]] = []
+        if retry_job.previous_job_id:
+            candidates.extend(_event_runtime_root_candidates(self.store, retry_job.previous_job_id))
+        env_candidate = _runtime_root_env_candidate()
+        if env_candidate:
+            candidates.append(("runtime_config:environment", env_candidate))
+        return candidates
 
     def _record_retry_submission_failure(self, retry_job: PipelineJob, error: Exception) -> None:
         error_message = _safe_error_message(str(getattr(error, "message", None) or error))
@@ -520,6 +701,17 @@ class RetryService:
         retry_job.finished_at = datetime.now(UTC)
         retry_job.updated_at = retry_job.finished_at
         self.store.session.add(retry_job)
+        details: dict[str, Any] = {
+            "trigger": "manual",
+            "error_code": retry_job.error_code,
+            "error_message": error_message,
+        }
+        runtime_root_resolution = _runtime_root_resolution_from_error(error)
+        if runtime_root_resolution is not None:
+            details["runtime_root_resolution"] = runtime_root_resolution
+        runtime_root_contract = _runtime_root_contract_from_error(error)
+        if runtime_root_contract is not None:
+            details["runtime_root_contract"] = runtime_root_contract
         self.store.insert_event(
             entity_type="pipeline_job",
             entity_id=retry_job.job_id,
@@ -527,15 +719,18 @@ class RetryService:
             status_from="pending",
             status_to="submission_failed",
             message=f"Manual retry submission failed: {error_message}",
-            details={
-                "trigger": "manual",
-                "error_code": retry_job.error_code,
-                "error_message": error_message,
-            },
+            details=details,
             commit=False,
         )
 
-    def _record_retry_submission_success(self, retry_job: PipelineJob, submitted_payload: dict[str, Any]) -> None:
+    def _record_retry_submission_success(
+        self,
+        retry_job: PipelineJob,
+        submitted_payload: dict[str, Any],
+        *,
+        runtime_root_resolution: dict[str, Any] | None = None,
+        runtime_root_contract: dict[str, str] | None = None,
+    ) -> None:
         slurm_job_id = submitted_payload.get("job_id") or submitted_payload.get("slurm_job_id")
         retry_job.slurm_job_id = str(slurm_job_id) if slurm_job_id is not None else None
         retry_job.submitted_at = _parse_gateway_time(submitted_payload.get("submitted_at")) or datetime.now(UTC)
@@ -546,6 +741,15 @@ class RetryService:
         retry_job.error_message = None
         retry_job.updated_at = datetime.now(UTC)
         self.store.session.add(retry_job)
+        details: dict[str, Any] = {
+            "trigger": "manual",
+            "slurm_job_id": retry_job.slurm_job_id,
+            "gateway_status": _gateway_status(submitted_payload),
+        }
+        if runtime_root_resolution is not None:
+            details["runtime_root_resolution"] = runtime_root_resolution
+        if runtime_root_contract is not None:
+            details["runtime_root_contract"] = _redacted_mapping(runtime_root_contract)
         self.store.insert_event(
             entity_type="pipeline_job",
             entity_id=retry_job.job_id,
@@ -553,11 +757,7 @@ class RetryService:
             status_from="pending",
             status_to="submitted",
             message=f"Manual retry submitted as Slurm job {retry_job.slurm_job_id}.",
-            details={
-                "trigger": "manual",
-                "slurm_job_id": retry_job.slurm_job_id,
-                "gateway_status": _gateway_status(submitted_payload),
-            },
+            details=details,
             commit=False,
         )
 
@@ -738,7 +938,12 @@ def _model_id_from_run_id(run_id: str | None) -> str | None:
     return match.group(1)
 
 
-def _retry_submission_manifest(retry_job: _RetrySubmissionJob, *, model_id: str) -> dict[str, Any]:
+def _retry_submission_manifest(
+    retry_job: _RetrySubmissionJob,
+    *,
+    model_id: str,
+    runtime_root_fields: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     manifest: dict[str, Any] = {
         "run_id": retry_job.run_id,
         "model_id": model_id,
@@ -749,8 +954,10 @@ def _retry_submission_manifest(retry_job: _RetrySubmissionJob, *, model_id: str)
         "retry_count": retry_job.retry_count,
         "manual_retry_marker": True,
     }
+    if runtime_root_fields:
+        manifest.update(runtime_root_fields)
     cycle_identity = _source_cycle_identity(retry_job.cycle_id)
-    if retry_job.job_type == "download_source_cycle" and cycle_identity is not None:
+    if retry_job.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE and cycle_identity is not None:
         source_id, cycle_time = cycle_identity
         manifest["source_id"] = source_id
         manifest["cycle_time"] = cycle_time
@@ -796,9 +1003,195 @@ def _gateway_status(payload: dict[str, Any]) -> str | None:
 def _retry_submission_error_code(error: Exception) -> str:
     if isinstance(error, SlurmGatewayError):
         return error.code
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        return code
     return "SBATCH_SUBMISSION_FAILED"
 
 
 def _safe_error_message(message: str) -> str:
     redacted = redact_payload(message)
     return redacted if isinstance(redacted, str) else str(redacted)
+
+
+def _attach_retry_runtime_root_resolution(error: Exception, evidence: dict[str, Any]) -> None:
+    try:
+        setattr(error, "retry_runtime_root_resolution", evidence)
+    except Exception:
+        return
+
+
+def _attach_retry_runtime_root_contract(error: Exception, contract: dict[str, str]) -> None:
+    try:
+        setattr(error, "retry_runtime_root_contract", contract)
+    except Exception:
+        return
+
+
+def _runtime_root_resolution_from_error(error: Exception) -> dict[str, Any] | None:
+    evidence = getattr(error, "retry_runtime_root_resolution", None)
+    if isinstance(evidence, Mapping):
+        return _redacted_mapping(evidence)
+    details = getattr(error, "details", None)
+    if isinstance(details, Mapping):
+        nested = details.get("runtime_root_resolution")
+        if isinstance(nested, Mapping):
+            return _redacted_mapping(nested)
+    return None
+
+
+def _runtime_root_contract_from_error(error: Exception) -> dict[str, Any] | None:
+    contract = getattr(error, "retry_runtime_root_contract", None)
+    if isinstance(contract, Mapping):
+        return _redacted_mapping(contract)
+    return None
+
+
+def _event_runtime_root_candidates(store: PipelineStore, job_id: str) -> list[tuple[str, Mapping[str, Any]]]:
+    statement = (
+        select(PipelineEvent)
+        .where(PipelineEvent.entity_type == "pipeline_job")
+        .where(PipelineEvent.entity_id == job_id)
+        .order_by(PipelineEvent.event_id.desc())
+    )
+    candidates: list[tuple[str, Mapping[str, Any]]] = []
+    for event in store.session.scalars(statement):
+        details = event.details if isinstance(event.details, Mapping) else {}
+        event_source = f"pipeline_event:{event.event_type}:{event.event_id}"
+        for path in (
+            ("runtime_root_contract",),
+            ("submission_manifest",),
+            ("submitted_manifest",),
+            ("request_manifest",),
+            ("slurm_submission_manifest",),
+            ("manifest",),
+            ("gateway_response", "manifest"),
+            ("slurm", "manifest"),
+        ):
+            candidate = _mapping_at(details, path)
+            if candidate and _has_runtime_root_field(candidate):
+                candidates.append((f"{event_source}:{'.'.join(path)}", candidate))
+        if _has_runtime_root_field(details):
+            candidates.append((f"{event_source}:details", details))
+    return candidates
+
+
+def _runtime_root_env_candidate() -> dict[str, str]:
+    candidate: dict[str, str] = {}
+    workspace_root = _runtime_root_value(os.getenv("WORKSPACE_ROOT"))
+    object_store_root = _runtime_root_value(os.getenv("OBJECT_STORE_ROOT"))
+    object_store_prefix = os.getenv("OBJECT_STORE_PREFIX")
+    published_artifact_root = _runtime_root_value(os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT"))
+    published_artifact_uri_prefix = _runtime_root_value(os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX"))
+    if workspace_root is not None:
+        candidate["workspace_dir"] = workspace_root
+    if object_store_root is not None:
+        candidate["object_store_root"] = object_store_root
+    if object_store_prefix is not None:
+        candidate["object_store_prefix"] = str(object_store_prefix)
+    if published_artifact_root is not None:
+        candidate["published_artifact_root"] = published_artifact_root
+        candidate["published_artifact_uri_prefix"] = published_artifact_uri_prefix or "published://"
+    elif published_artifact_uri_prefix is not None:
+        candidate["published_artifact_uri_prefix"] = published_artifact_uri_prefix
+    return candidate
+
+
+def _field_was_rejected(rejected: list[dict[str, str]], field_name: str) -> bool:
+    return any(item.get("field") == field_name for item in rejected)
+
+
+def _replacement_object_store_root(
+    candidates: list[tuple[str, Mapping[str, Any]]],
+    *,
+    workspace_value: str,
+    current_value: str,
+) -> tuple[str, str] | None:
+    for source, candidate in candidates:
+        value = _runtime_root_value(candidate.get("object_store_root"))
+        if value is None or value in {current_value, workspace_value}:
+            continue
+        if secret_manifest_value_reason(value) is not None:
+            continue
+        return value, source
+    return None
+
+
+def _mapping_at(details: Mapping[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
+    value: Any = details
+    for key in path:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value if isinstance(value, Mapping) else None
+
+
+def _has_runtime_root_field(value: Mapping[str, Any]) -> bool:
+    return any(field in value for field in _RUNTIME_ROOT_FIELDS)
+
+
+def _runtime_root_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    return text_value or None
+
+
+def _runtime_root_resolution_evidence(
+    retry_job: _RetrySubmissionJob,
+    *,
+    resolved: Mapping[str, tuple[str, str]],
+    missing: list[str],
+    rejected: list[dict[str, str]],
+) -> dict[str, Any]:
+    resolved_evidence = {}
+    for root_field in _RUNTIME_ROOT_FIELDS:
+        item = resolved.get(root_field)
+        if item is None:
+            continue
+        value, source = item
+        resolved_evidence[root_field] = {
+            "present": True,
+            "source": _bounded_redacted_text(source),
+            "value": _bounded_redacted_text(value),
+        }
+    if "object_store_root" in resolved and "workspace_dir" in resolved:
+        resolved_evidence["object_store_root"]["same_as_workspace"] = (
+            resolved["object_store_root"][0] == resolved["workspace_dir"][0]
+        )
+    return _redacted_mapping(
+        {
+            "job_type": retry_job.job_type,
+            "retry_job_id": retry_job.job_id,
+            "previous_job_id": retry_job.previous_job_id,
+            "cycle_id": retry_job.cycle_id,
+            "required": ["object_store_root"],
+            "resolved": resolved_evidence,
+            "missing": missing,
+            "rejected": [
+                {
+                    "field": _bounded_redacted_text(item.get("field", "")),
+                    "source": _bounded_redacted_text(item.get("source", "")),
+                    "reason": _bounded_redacted_text(item.get("reason", "")),
+                    "value": _bounded_redacted_text(item.get("value", "")),
+                }
+                for item in rejected
+            ],
+            "published_fields_available": [
+                field for field in _PUBLISHED_RUNTIME_ROOT_FIELDS if field in resolved
+            ],
+        }
+    )
+
+
+def _bounded_redacted_text(value: Any) -> str:
+    redacted = redact_payload(str(value))
+    text_value = redacted if isinstance(redacted, str) else str(redacted)
+    if len(text_value) <= _ROOT_EVIDENCE_VALUE_MAX_LENGTH:
+        return text_value
+    return f"{text_value[: _ROOT_EVIDENCE_VALUE_MAX_LENGTH - 3]}..."
+
+
+def _redacted_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    redacted = redact_payload(dict(value))
+    return dict(redacted) if isinstance(redacted, Mapping) else {}
