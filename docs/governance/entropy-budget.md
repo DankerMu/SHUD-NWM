@@ -66,6 +66,7 @@ before converting stable invariants into enforcement.
 | Non-blocking CI report | Governance-4C/#373 | CI may publish findings without failing PRs for known baseline state. | Add a workflow/job that emits or uploads the report and records known findings for review. | No hard fail for known baseline findings; no silent `.entropy-baseline/latest.json` creation. |
 | Disabled hard gate | Governance-4D/#374 | Only the prepared, explicit invariant list is eligible for fail conditions, and only when a maintainer invokes hard-gate mode. | Run `--mode hard-gate` locally or in temporary fixtures to prove future enforcement semantics. | No CI hard-gate enablement; no broad fail-on-finding behavior; no baseline write. |
 | Baseline burn-down semantics | Governance-5 E1/#400-#403 | Findings are split into total findings, budget-counted findings, and gate-eligible findings. Historical, archived, delegated, and false-positive evidence can stay visible without consuming the cleanup budget. | Use normalized finding fields and summary counters to measure cleanup, document owner issues, and guard retired active-tree paths from returning. | No audit logic changes in #403; no CI hard-gate enablement; no baseline write; no example treated as a committed baseline. |
+| Layer-inversion zero-baseline prep | Governance-5 E4/#420 | `apps-api-layer-inversion` is held at zero current findings after #418/#419 cleanup and remains visible as a standalone role-boundary family. | Add tests and docs that make it eligible for a future hard-gate decision after the zero baseline is established. | No CI hard-gate enablement; no addition to the current prepared gated check list; no API retirement or display cleanup scope. |
 
 Governance-4C is active as a non-blocking report workflow. Governance-4D
 prepares an explicit hard-gate mode, but CI remains report-only until a later
@@ -193,3 +194,12 @@ gate-eligible.
 report-only signals. The Governance Audit workflow must not pass
 `--mode hard-gate` until a later enablement change explicitly makes the gate a
 required CI status.
+
+Future hard-gate candidates after zero baseline:
+
+- `apps-api-layer-inversion` is a standalone role-boundary finding family for
+  non-API runtime modules that import `apps.api.*`. After #418/#419, the
+  current repository baseline is zero findings. #420 keeps that zero baseline
+  under test and documents future eligibility only; it does not add the check ID
+  to `HARD_GATE_CHECK_IDS`, does not make it `gate_eligible`, and does not
+  change the Governance Audit workflow from report-only mode.

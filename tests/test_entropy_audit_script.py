@@ -125,6 +125,23 @@ def test_entropy_audit_report_mode_metadata_excludes_hard_gate_fields() -> None:
     assert audit_repo_entropy._exit_code_for_report(report) == 0
 
 
+def test_entropy_audit_current_repo_has_zero_apps_api_layer_inversion_findings() -> None:
+    report = audit_repo_entropy.build_report(REPO_ROOT)
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    summary_counts = metadata["summary_counts"]
+    assert isinstance(summary_counts, dict)
+
+    layer_findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "apps-api-layer-inversion"
+    ]
+
+    assert layer_findings == []
+    assert summary_counts["by_check_id"].get("apps-api-layer-inversion", 0) == 0
+
+
 def test_entropy_audit_cli_outputs_json_and_markdown_without_writing_baseline() -> None:
     before_exists = BASELINE.exists()
     before_content = BASELINE.read_bytes() if before_exists else None
@@ -1229,6 +1246,47 @@ def test_entropy_audit_hard_gate_keeps_delegated_and_fingerprint_openapi_signals
             assert finding["allowlist_state"] == "allowlisted"
             assert finding["budget_counted"] is False
             assert finding["gate_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "packages/common/synthetic_api_import.py",
+        "services/production_closure/synthetic_api_import.py",
+        "workers/flood_frequency/synthetic_api_import.py",
+    ],
+)
+def test_entropy_audit_apps_api_layer_inversion_remains_standalone_report_only_finding(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write(tmp_path / relative_path, "from apps.api.routes.forecast import router\n")
+
+    report = audit_repo_entropy.build_report(tmp_path, mode="hard-gate")
+    metadata = report["metadata"]
+    layer_findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "apps-api-layer-inversion"
+    ]
+
+    assert len(layer_findings) == 1
+    finding = layer_findings[0]
+    assert finding["evidence_path"] == relative_path
+    assert finding["axis"] == "structure"
+    assert finding["governance_face"] == "role boundary"
+    assert finding["role"] == "shared_contract"
+    assert finding["owner_area"] == "layering"
+    assert finding["priority"] == "P1"
+    assert finding["severity"] == "high"
+    assert finding["budget_counted"] is True
+    assert finding["gate_eligible"] is False
+    assert "`apps.api.routes.forecast`" in finding["description"]
+    assert "apps-api-layer-inversion" not in audit_repo_entropy.HARD_GATE_CHECK_IDS
+    assert "apps-api-layer-inversion" not in metadata["hard_gate_gated_check_ids"]
+    assert metadata["hard_gate_status"] == "pass"
+    assert metadata["hard_gate_failing_count"] == 0
 
 
 def _findings_by_check(root: Path, check_id: str) -> list[dict[str, object]]:

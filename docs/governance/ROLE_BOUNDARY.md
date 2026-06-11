@@ -68,7 +68,7 @@ Forbidden capabilities:
 - Running the full business API with `NHMS_SERVICE_ROLE=slurm_gateway`.
 - Treating QHH diagnostic scripts (`scripts/run_qhh_*` or
   `scripts/create_qhh_shud_manifest.py`) as production orchestrator entrypoints.
-- Adding new upward imports from `packages/common`, `services/orchestrator`,
+- Adding new upward imports from `packages/common`, `services/**`,
   `workers/**`, or documented shared-contract Python files such as
   `services/slurm_gateway/models.py` into `apps.api` / `apps.api.*`.
 - Depending on display-only environment to gain control mutations.
@@ -238,9 +238,9 @@ Forbidden capabilities:
 
 Verification oracle:
 
-- AST import scan over `packages/common`, `services/orchestrator`, `workers/**`,
-  and documented shared-contract Python files such as
-  `services/slurm_gateway/models.py`, plus the production-closure auth-policy
+- AST import scan over `packages/common`, `services/**`, and `workers/**`,
+  including documented shared-contract Python files such as
+  `services/slurm_gateway/models.py` and the production-closure auth-policy
   evidence surface `services/production_closure/ops_validation.py`.
 - OpenAPI drift, migration, schema, and static route tests.
 - Review of generated/public artifacts before contract changes land.
@@ -256,14 +256,14 @@ Current guard tests:
 ## #361 Hard Gate
 
 `#361` moved the API-independent auth policy contract to
-`packages/common/auth_policy.py`. Shared packages, orchestrator modules,
-workers, documented shared-contract Python files, and
+`packages/common/auth_policy.py`. Shared packages, service modules, workers,
+documented shared-contract Python files, and
 `services/production_closure/ops_validation.py` must have zero imports from
 `apps.api` or `apps.api.*`.
 
 The static gate normalizes parent-package spellings such as `import apps.api`,
 `from apps.api import auth`, `from apps import api`, and wildcard imports that
-resolve to `apps.api`. Any such import in the scanned shared/orchestrator/worker
+resolve to `apps.api`. Any such import in the scanned shared/service/worker
 surfaces fails `tests/test_role_boundary_static.py`.
 
 API request handling remains in `apps/api/auth.py`: FastAPI `Request` parsing,

@@ -383,3 +383,130 @@ Review focus:
 - Confirm injected test components still mark provenance as simulated and cannot
   produce live PASS evidence.
 - Confirm role-boundary docs no longer preserve a stale exception.
+
+## Issue #420 Fixture
+
+Fixture level: expanded
+Repair intensity: medium
+Project profile: NHMS
+
+Change surface:
+
+- `scripts/governance/audit_repo_entropy.py` `apps-api-layer-inversion`
+  finding family and hard-gate metadata semantics, if a code change is needed.
+- `tests/test_entropy_audit_script.py` and/or
+  `tests/test_role_boundary_static.py` assertions that current code has zero
+  layer-inversion findings after #418/#419.
+- `docs/governance/entropy-budget.md`,
+  `docs/governance/entropy-report.example.md`, and active OpenSpec tasks that
+  describe future hard-gate eligibility and CI posture.
+- `.github/workflows/governance.yml` must be inspected but not converted to
+  hard-gate mode.
+
+Must preserve:
+
+- Default entropy audit mode remains `report-only`, exits 0 for known findings,
+  and does not write `.entropy-baseline/latest.json`.
+- Explicit `--mode hard-gate` remains disabled by default and counts only
+  finding records whose `gate_eligible` field is true.
+- Governance CI remains report-only and must not pass `--mode hard-gate`.
+- `apps-api-layer-inversion` remains a standalone check ID with governance face
+  `role boundary` and role `shared_contract`.
+- The #418 tile and #419 readonly validation boundaries remain clean; no import
+  fix, adapter refactor, API endpoint retirement, OpenAPI contraction, or
+  frontend/node-27 work belongs to #420.
+
+Must add/change:
+
+- Add or strengthen tests that fail if the current repository again emits any
+  `apps-api-layer-inversion` finding.
+- Add or strengthen tests proving synthetic `apps.api.*` imports outside
+  `apps/api` still emit standalone `apps-api-layer-inversion` signals under the
+  role-boundary family.
+- Update entropy budget documentation so layer inversion is documented as a
+  future hard-gate candidate only after the zero baseline is established, while
+  remaining outside current CI hard-gate enablement.
+- Mark only #420 enforcement-prep tasks complete after evidence is run.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - entropy audit CLI output and exit
+  semantics are automation-facing contracts.
+- Config / project setup: selected - `.github/workflows/governance.yml` must
+  remain report-only and not pass `--mode hard-gate`.
+- File IO / path safety / overwrite: selected - audit generation must continue
+  not writing `.entropy-baseline/latest.json`.
+- Schema / columns / units / field names: selected - report fields
+  `check_id`, `summary_counts`, `gate_eligible`, and hard-gate metadata are
+  machine-readable contracts.
+- Auth / permissions / secrets: not selected - no credential or auth surface.
+- Concurrency / shared state / ordering: not selected - no scheduler or shared
+  runtime state transition.
+- Resource limits / large input / discovery: selected - audit scan coverage for
+  service/shared Python files must stay bounded and deterministic.
+- Legacy compatibility / examples: selected - docs/examples must distinguish
+  representative report shape from live current counts.
+- Error handling / rollback / partial outputs: selected - hard-gate JSON must
+  remain parseable and report-only generation must stay non-failing.
+- Release / packaging / dependency compatibility: not selected - no dependency
+  or packaging change.
+- Documentation / migration notes: selected - entropy budget docs carry the
+  future enforcement policy.
+
+Domain packs:
+
+- Published NHMS artifacts / display identity: selected - the governance report
+  is CI-published evidence and must not be confused with live display receipts.
+- PostGIS / TimescaleDB domain behavior: not selected - no DB behavior.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm
+  surface.
+- Run manifest / QC provenance: not selected - no run/QC evidence contract.
+- Geospatial / CRS / basin geometry: not selected - no tile geometry behavior.
+- Hydro-met time series / forcing windows: not selected - no forcing behavior.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver behavior.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider behavior.
+
+Boundary-surface checklist:
+
+- Audit scan family: `apps-api-layer-inversion` is visible in
+  `executed_check_families` and positive fixtures, but current repo count is
+  zero.
+- Hard-gate policy: current `HARD_GATE_CHECK_IDS` and docs do not make
+  `apps-api-layer-inversion` a CI-enforced gate in this PR.
+- Workflow policy: `.github/workflows/governance.yml` keeps report-only command
+  lines and metadata assertions.
+- Docs policy: examples must not imply stale current counts from before
+  #418/#419 are still live.
+
+Required evidence:
+
+- Current audit/static tests:
+  `uv run --no-sync pytest -q tests/test_role_boundary_static.py tests/test_entropy_audit_script.py`.
+- Focused backend regressions:
+  `uv run --no-sync pytest -q tests/test_flood_alerts_api.py tests/test_readonly_db_validation.py`.
+- Static quality:
+  `uv run --no-sync ruff check .`.
+- Entropy audit:
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`
+  shows zero `apps-api-layer-inversion` findings.
+- Report-only workflow proof:
+  inspect `.github/workflows/governance.yml` and verify no `--mode hard-gate`
+  invocation is present.
+- OpenSpec validation:
+  `openspec validate governance-5-e4-layer-inversion-hardgate-prep --strict --no-interactive`.
+
+Non-goals:
+
+- No CI hard-gate enablement.
+- No addition of `apps-api-layer-inversion` to the currently gated CI path.
+- No tile or readonly validation import fixes; #418 and #419 own those.
+- No API endpoint retirement, OpenAPI contraction, or frontend/node-27 work.
+
+Review focus:
+
+- Confirm current repo zero baseline is tested, not only observed manually.
+- Confirm synthetic layer inversions still emit the standalone finding family.
+- Confirm docs make `apps-api-layer-inversion` a future candidate without
+  enabling hard-gate mode or changing governance CI.
+- Confirm OpenSpec tasks do not mark unrelated E3/node-27 work complete.

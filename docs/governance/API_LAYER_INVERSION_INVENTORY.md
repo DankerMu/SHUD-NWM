@@ -1,8 +1,8 @@
 # API Layer Inversion Inventory
 
-This inventory is the #417 source of truth for current non-API references to
-the API layer. It is evidence-only: #417 does not fix imports, change runtime
-behavior, update role-boundary policy, or enable a hard gate.
+This inventory is the #417 source of truth for the pre-cleanup non-API
+references to the API layer. It is evidence-only: #417 did not fix imports,
+change runtime behavior, update role-boundary policy, or enable a hard gate.
 
 ## Evidence Commands
 
@@ -17,9 +17,9 @@ examples, OpenSpec text, deployment entrypoint strings, and scan implementation
 text. Only the AST-based entropy audit decides what is counted by
 `apps-api-layer-inversion`.
 
-## Active Service Import Baseline
+## #417 Active Service Import Baseline
 
-The current entropy-counted layer inversion baseline is two files and three
+The #417 entropy-counted layer inversion baseline was two files and three
 deduplicated audit findings:
 
 - `services/tiles/mvt.py`: imports `apps.api.errors`, counted once by the audit
@@ -39,10 +39,19 @@ deduplicated audit findings:
 | `services/production_closure/readonly_db_validation.py` | 1895 | `from apps.api.routes import pipeline as pipeline_routes` | `apps.api.routes` | Production closure readonly validation | Yes, counted as the `services/production_closure/readonly_db_validation.py` `apps.api.routes` finding | #419 |
 | `services/production_closure/readonly_db_validation.py` | 2970 | `from apps.api.main import create_app` | `apps.api.main` | Production closure readonly validation | Yes, same deduped finding as line 1894 | #419 |
 
-No import is fixed in #417. #418 owns moving or adapting the tile helper
-boundary. #419 owns replacing the readonly validation API probe boundary with an
-API-owned adapter or injected requester. #420 owns zero-baseline enforcement
-prep after #418 and #419 have removed these findings.
+No import was fixed in #417. #418 owned moving or adapting the tile helper
+boundary. #419 owned replacing the readonly validation API probe boundary with
+an API-owned adapter or injected requester. #420 owns zero-baseline enforcement
+prep after #418 and #419 removed these findings.
+
+## Current Zero Baseline
+
+After #418/#419, the live entropy audit is expected to report
+`metadata.summary_counts.by_check_id.get("apps-api-layer-inversion", 0) == 0`.
+Issue #420 keeps that zero baseline under static and entropy-audit tests while
+preserving `apps-api-layer-inversion` as a standalone future hard-gate
+candidate. Governance CI remains report-only and does not pass
+`--mode hard-gate`.
 
 ## Entropy Audit Extraction
 
@@ -63,9 +72,9 @@ priority `P1`, and top severity `high`.
 
 ## Focused Search Classification
 
-The focused `rg` command also returned non-baseline text hits outside the two
-active service files. These are classified separately and are not implementation
-scope for #417.
+The focused #417 `rg` command also returned non-baseline text hits outside the
+two active service files. These were classified separately and were not
+implementation scope for #417.
 
 | Class | Current examples | Classification |
 |---|---|---|
@@ -78,8 +87,9 @@ scope for #417.
 | Other service text | `services/slurm_gateway/app.py` | Docstring/comment reference to the full business API. Not an import statement and not counted by the audit. |
 | Repo-root commands and local instructions | `AGENTS.md`, `Makefile`, `README.md` | Developer command examples. Not active service imports. |
 
-There are no additional current `apps-api-layer-inversion` audit findings beyond
+There were no additional #417 `apps-api-layer-inversion` audit findings beyond
 `services/tiles/mvt.py` and
 `services/production_closure/readonly_db_validation.py`. If a future entropy run
-adds another `apps-api-layer-inversion` finding, it should be filed as a
-separate follow-up candidate instead of expanding #418 or #419 silently.
+adds another `apps-api-layer-inversion` finding after the #420 zero baseline, it
+should be filed as a separate follow-up candidate instead of silently expanding
+issues #418 or #419.
