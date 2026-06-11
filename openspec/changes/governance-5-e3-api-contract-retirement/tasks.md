@@ -19,9 +19,19 @@ Expected #411 inventory outputs:
 
 ## 2. Replacement And Deprecation Plan
 
-- [ ] 2.1 Define replacement endpoint or compatibility policy for each candidate route.
-- [ ] 2.2 Document migration order and rollback for current consumers.
-- [ ] 2.3 Decide whether any deprecation warning, response metadata, or docs-only marker is appropriate before removal.
+- [x] 2.1 For #412, define replacement endpoint or compatibility policy for each #411 candidate route.
+- [x] 2.2 For #412, document migration order and rollback for current consumers.
+- [x] 2.3 For #412, decide whether any deprecation warning, response metadata, or docs-only marker is appropriate before removal.
+- [x] 2.4 For #412, map backend, node-27 frontend, OpenAPI/type/docs sync, and removal/defer follow-up responsibilities to #413/#414/#415/#416.
+
+Expected #412 policy outputs:
+
+- `/api/v1/mvp/qhh/latest-product` has an explicit compatibility/deprecation policy and is not marked deprecated or removal-ready in #412.
+- Canonical `/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series` has an explicit retain/defer policy and is not marked deprecated or removal-ready in #412.
+- Docs-only shorthand `forecast-series` references have a docs-cleanup or historical-retention policy and do not imply a runtime deprecation header.
+- Policy defines migration order: backend/test evidence if needed, node-27/frontend migration on node-27, OpenAPI/generated type/docs sync, then removal/defer decision.
+- Policy defines rollback: keep active routes compatible until replacement consumers are proven and OpenAPI/type sync lands.
+- Policy explicitly notes external consumers are unknown, so repository migration alone is not external deprecation proof.
 
 ## 3. Consumer Migration
 
@@ -43,3 +53,6 @@ Expected #411 inventory outputs:
 - [ ] 5.4 Prove no current consumer still calls a route before removing it from OpenAPI.
 - [x] 5.5 For #411, run repository searches covering route definitions, OpenAPI, generated frontend types, backend tests, frontend consumers, E2E/mocked specs, and docs/runbooks.
 - [x] 5.6 For #411, confirm `git status --short --untracked-files=all` is limited to governance inventory/docs and E3 OpenSpec evidence.
+- [x] 5.7 For #412, run `openspec validate governance-5-e3-api-contract-retirement --strict --no-interactive`.
+- [x] 5.8 For #412, run markdown lint over changed governance docs.
+- [x] 5.9 For #412, confirm `git status --short --untracked-files=all` is limited to governance policy docs and E3 OpenSpec evidence.
