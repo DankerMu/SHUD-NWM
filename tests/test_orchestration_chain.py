@@ -830,6 +830,27 @@ def test_non_array_stage_submissions_carry_slurm_template_and_env_contract(tmp_p
         }
 
 
+def test_cycle_stage_submission_events_record_runtime_root_contract(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+
+    result = orchestrator.orchestrate_cycle("gfs", "2026050100", _basins(1))
+
+    assert result.status == "complete"
+    submission_events = [event for event in repository.events if event["event_type"] == "submission"]
+    download_event = next(event for event in submission_events if event["details"]["stage"] == "download")
+    forecast_event = next(event for event in submission_events if event["details"]["stage"] == "forecast")
+    expected_contract = {
+        "workspace_dir": str(tmp_path / "workspace"),
+        "object_store_root": str(tmp_path / "object-store"),
+        "object_store_prefix": "s3://nhms",
+        "published_artifact_uri_prefix": "published://",
+    }
+    assert download_event["details"]["runtime_root_contract"] == expected_contract
+    assert forecast_event["details"]["runtime_root_contract"] == expected_contract
+
+
 def test_cycle_download_success_without_raw_manifest_is_resubmitted(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     repository.jobs["job_cycle_ifs_2026050100_download"] = {

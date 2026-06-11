@@ -28,6 +28,7 @@ from services.orchestrator.production_contract import (
     PRODUCTION_STATUS_TAXONOMY,
 )
 from tests.test_monitoring_api import (
+    GENERIC_RETRY_JOB_TYPE,
     _client,
     _create_job,
     _cycle_time,
@@ -1059,7 +1060,14 @@ def test_stage_duration_metrics_contract_uses_success_envelope() -> None:
 
 def test_retry_contract_documents_pipeline_job_and_execution_status_fields() -> None:
     with _store() as store:
-        _create_job(store, job_id="job_retry_contract", run_id="run_retry_contract", status="failed")
+        _create_job(
+            store,
+            job_id="job_retry_contract",
+            run_id="run_retry_contract",
+            job_type=GENERIC_RETRY_JOB_TYPE,
+            stage="forecast",
+            status="failed",
+        )
         with _client(store, _RetryGateway(), allow_dev_role_header=True) as client:
             response = client.post("/api/v1/runs/run_retry_contract/retry", headers={"X-User-Role": "operator"})
 

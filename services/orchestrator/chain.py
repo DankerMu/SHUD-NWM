@@ -1774,6 +1774,7 @@ class ForecastOrchestrator:
                         "log_uri": submitted_log_uri,
                     },
                     "manifest_index_path": actual_manifest_index_path or None,
+                    "runtime_root_contract": _submission_runtime_root_contract(stage_manifest),
                 }
             ),
         )
@@ -2708,7 +2709,25 @@ class ForecastOrchestrator:
             status_from=None,
             status_to="submission_failed",
             message=f"{stage.stage} submission failed: {message}",
-            details=_safe_pipeline_event_details({"stage": stage.stage, "job_type": stage.job_type, "error": message}),
+            details=_safe_pipeline_event_details(
+                {
+                    "stage": stage.stage,
+                    "job_type": stage.job_type,
+                    "error": message,
+                    "runtime_root_contract": _submission_runtime_root_contract(
+                        {
+                            "workspace_dir": str(Path(self.config.workspace_root)),
+                            "object_store_root": str(Path(self.config.object_store_root)),
+                            "object_store_prefix": self.config.object_store_prefix,
+                            "published_artifact_root": os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
+                            "published_artifact_uri_prefix": os.getenv(
+                                "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
+                                "published://",
+                            ),
+                        }
+                    ),
+                }
+            ),
         )
         self.repository.update_forecast_cycle_status(
             source_id=context.source_id,
@@ -7357,6 +7376,17 @@ def _resource_metrics_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]
 def _safe_pipeline_event_details(details: Mapping[str, Any]) -> dict[str, Any]:
     redacted = redact_payload(_json_safe_pipeline_event_value(details))
     return dict(redacted) if isinstance(redacted, Mapping) else {}
+
+
+def _submission_runtime_root_contract(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    fields = (
+        "workspace_dir",
+        "object_store_root",
+        "object_store_prefix",
+        "published_artifact_root",
+        "published_artifact_uri_prefix",
+    )
+    return {field: manifest[field] for field in fields if manifest.get(field) not in (None, "")}
 
 
 def _json_safe_pipeline_event_value(value: Any) -> Any:

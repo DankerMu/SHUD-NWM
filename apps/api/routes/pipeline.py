@@ -533,19 +533,23 @@ def retry_run(
 
     if job.status == "submission_failed":
         error_message = _safe_redacted_text(job.error_message or "Retry submission failed.")
+        details = {
+            "run_id": job.run_id,
+            "job_id": job.job_id,
+            "pipeline_job_id": job.job_id,
+            "status": job.status,
+            "slurm_job_id": job.slurm_job_id,
+            "error_code": job.error_code,
+            "error_message": error_message,
+        }
+        runtime_root_resolution = context.service.submission_runtime_root_resolution(job.job_id)
+        if runtime_root_resolution is not None:
+            details["runtime_root_resolution"] = runtime_root_resolution
         raise ApiError(
             status_code=503,
             code=job.error_code or "RETRY_SUBMISSION_FAILED",
             message=error_message,
-            details={
-                "run_id": job.run_id,
-                "job_id": job.job_id,
-                "pipeline_job_id": job.job_id,
-                "status": job.status,
-                "slurm_job_id": job.slurm_job_id,
-                "error_code": job.error_code,
-                "error_message": error_message,
-            },
+            details=details,
         )
 
     return _ok(

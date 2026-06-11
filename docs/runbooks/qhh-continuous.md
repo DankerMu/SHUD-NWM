@@ -319,6 +319,51 @@ forc_{source_lower}_{YYYYMMDDHH}_basins_qhh_shud
   - GFS：`forecast_gfs_deterministic`
   - IFS：`forecast_ifs_deterministic`
 
+## 手动重试 wrong-root 恢复
+
+旧版 shared source-cycle 手动重试可能缺失 `OBJECT_STORE_ROOT`，导致
+`download_source_cycle` Slurm 作业把 raw bundle 写到 `WORKSPACE_ROOT` 下。排障时先识别
+runtime-root 证据，不要直接改 `ops.pipeline_job` / `ops.pipeline_event` 或手工移动 DB 状态：
+
+```sql
+SELECT job_id, run_id, cycle_id, status, error_code, error_message
+FROM ops.pipeline_job
+WHERE job_type = 'download_source_cycle'
+  AND manual_retry_marker IS TRUE
+ORDER BY updated_at DESC
+LIMIT 20;
+```
+
+如果同一 retry 的 submission event 中 `runtime_root_resolution.resolved.object_store_root.same_as_workspace=true`，
+或 raw manifest/bundle 出现在 `$WORKSPACE_ROOT/raw/<SOURCE>/<YYYYMMDDHH>/` 而不是
+`$OBJECT_STORE_ROOT/raw/<SOURCE>/<YYYYMMDDHH>/`，按 legacy wrong-root 处理。保留以下证据：
+
+- retry job id、原始 failed job id、Slurm job id、`run_id`、`cycle_id`。
+- `ops.pipeline_event.details.runtime_root_resolution` 的脱敏 JSON。
+- workspace 下错误 raw bundle 的路径清单和 mtime；不要删除，直到 corrected retry 验证通过。
+
+安全恢复步骤：
+
+1. 在 node-22/operator shell 显式设置 split roots：
+
+   ```bash
+   export WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production
+   export OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
+   export OBJECT_STORE_PREFIX=s3://nhms
+   export NHMS_PUBLISHED_ARTIFACT_ROOT=/scratch/frd_muziyao/nhms-production/published
+   export NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
+   ```
+
+2. 确认 `$OBJECT_STORE_ROOT` 可写，且不是 `$WORKSPACE_ROOT`。如果当前 API 返回
+   `RETRY_RUNTIME_ROOTS_UNRESOLVED` 或 `RETRY_RUNTIME_ROOTS_SECRET_BEARING`，先修正环境变量或原始
+   submission evidence；不要通过 DB update 绕过 fail-closed guard。
+3. 通过既有 retry API 对同一 `run_id` 重新发起手动重试。新的 retry submission event 应包含
+   `runtime_root_resolution.resolved.object_store_root.value=$OBJECT_STORE_ROOT` 且
+   `same_as_workspace=false`。
+4. 只在 corrected retry 完成并确认 `$OBJECT_STORE_ROOT/raw/<SOURCE>/<YYYYMMDDHH>/manifest.json`
+   存在后，再将旧 workspace-root raw bundle 作为证据归档或按保留策略清理。不要把旧 bundle
+   复制到 object store 来制造成功状态。
+
 ## 2026-05-21 诊断实测结果
 
 已通过 qhh 诊断/复现入口按标准链路完成 GFS 与 IFS 两个起报周期：
