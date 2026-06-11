@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from sqlalchemy import inspect, select, text, update
+from sqlalchemy import func, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
@@ -65,6 +65,9 @@ _REQUIRED_RUNTIME_ROOT_FIELDS = ("workspace_dir", "object_store_root")
 _LOCAL_RUNTIME_ROOT_FIELDS = ("workspace_dir", "object_store_root", "published_artifact_root")
 _PUBLISHED_RUNTIME_ROOT_FIELDS = ("published_artifact_root", "published_artifact_uri_prefix")
 _ROOT_EVIDENCE_VALUE_MAX_LENGTH = 256
+_RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT = 32
+_RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT = 64
+_RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT = 16
 _URI_STYLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 
@@ -230,6 +233,24 @@ class _RuntimeRootCandidateResolution:
     @property
     def complete(self) -> bool:
         return not self.missing and not self.secret_rejected and not self.unsafe_rejected
+
+
+@dataclass(frozen=True)
+class _RuntimeRootCandidate:
+    source: str
+    value: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _RuntimeRootCandidateBatch:
+    candidates: list[_RuntimeRootCandidate]
+    event_candidate_returned_count: int = 0
+    event_candidate_total_count: int = 0
+    event_candidate_omitted_count: int = 0
+    event_rows_scanned_count: int = 0
+    event_rows_total_count: int = 0
+    event_rows_omitted_count: int = 0
+    manual_retry_event_rows_ignored: int = 0
 
 
 class _RetryRuntimeRootResolutionError(RuntimeError):
@@ -606,16 +627,20 @@ class RetryService:
         if retry_job.job_type != DOWNLOAD_SOURCE_CYCLE_JOB_TYPE:
             return None
 
-        candidates = self._retry_runtime_root_candidates(retry_job)
+        candidate_batch = self._retry_runtime_root_candidates(retry_job)
         rejected: list[dict[str, str]] = []
+        rejected_total_count = 0
         best_resolved: dict[str, tuple[str, str]] = {}
         best_missing: list[str] = list(_REQUIRED_RUNTIME_ROOT_FIELDS)
         secret_rejected = False
         unsafe_rejected = False
 
-        for source, candidate in candidates:
-            resolution = _resolve_runtime_root_candidate(source, candidate)
-            rejected.extend(resolution.rejected)
+        for candidate in candidate_batch.candidates:
+            resolution = _resolve_runtime_root_candidate(candidate.source, candidate.value)
+            rejected_total_count += len(resolution.rejected)
+            if len(rejected) < _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT:
+                remaining_rejections = _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT - len(rejected)
+                rejected.extend(resolution.rejected[:remaining_rejections])
             secret_rejected = secret_rejected or resolution.secret_rejected
             unsafe_rejected = unsafe_rejected or resolution.unsafe_rejected
             if len(resolution.resolved) > len(best_resolved):
@@ -629,6 +654,8 @@ class RetryService:
                 resolved=resolution.resolved,
                 missing=[],
                 rejected=rejected,
+                rejected_total_count=rejected_total_count,
+                candidate_batch=candidate_batch,
             )
             manifest_fields = {field: value for field, (value, _source) in resolution.resolved.items()}
             return _RuntimeRootResolution(manifest_fields=manifest_fields, evidence=evidence)
@@ -638,6 +665,8 @@ class RetryService:
             resolved=best_resolved,
             missing=best_missing,
             rejected=rejected,
+            rejected_total_count=rejected_total_count,
+            candidate_batch=candidate_batch,
         )
         if secret_rejected:
             raise _RetryRuntimeRootResolutionError(
@@ -663,19 +692,65 @@ class RetryService:
             evidence,
         )
 
-    def _retry_runtime_root_candidates(self, retry_job: _RetrySubmissionJob) -> list[tuple[str, Mapping[str, Any]]]:
-        candidates: list[tuple[str, Mapping[str, Any]]] = []
+    def _retry_runtime_root_candidates(self, retry_job: _RetrySubmissionJob) -> _RuntimeRootCandidateBatch:
+        candidates: list[_RuntimeRootCandidate] = []
         provenance_job_ids: list[str] = []
+        event_candidate_returned_count = 0
+        event_candidate_total_count = 0
+        event_candidate_omitted_count = 0
+        event_rows_scanned_count = 0
+        event_rows_total_count = 0
+        event_rows_omitted_count = 0
+        manual_retry_event_rows_ignored = 0
+
         if retry_job.previous_job_id:
             provenance_job_ids = _retry_provenance_job_ids(self.store, retry_job.previous_job_id)
             for job_id in provenance_job_ids:
-                candidates.extend(_event_runtime_root_candidates(self.store, job_id))
+                event_batch = _event_runtime_root_candidates(
+                    self.store,
+                    job_id,
+                    candidate_budget=_RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT - len(candidates),
+                )
+                candidates.extend(event_batch.candidates)
+                event_candidate_returned_count += event_batch.event_candidate_returned_count
+                event_candidate_total_count += event_batch.event_candidate_total_count
+                event_candidate_omitted_count += event_batch.event_candidate_omitted_count
+                event_rows_scanned_count += event_batch.event_rows_scanned_count
+                event_rows_total_count += event_batch.event_rows_total_count
+                event_rows_omitted_count += event_batch.event_rows_omitted_count
+                manual_retry_event_rows_ignored += event_batch.manual_retry_event_rows_ignored
+                if len(candidates) >= _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT:
+                    break
         for job_id in _same_run_source_submission_job_ids(self.store, retry_job, excluded=set(provenance_job_ids)):
-            candidates.extend(_event_runtime_root_candidates(self.store, job_id))
+            if len(candidates) >= _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT:
+                break
+            event_batch = _event_runtime_root_candidates(
+                self.store,
+                job_id,
+                candidate_budget=_RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT - len(candidates),
+            )
+            candidates.extend(event_batch.candidates)
+            event_candidate_returned_count += event_batch.event_candidate_returned_count
+            event_candidate_total_count += event_batch.event_candidate_total_count
+            event_candidate_omitted_count += event_batch.event_candidate_omitted_count
+            event_rows_scanned_count += event_batch.event_rows_scanned_count
+            event_rows_total_count += event_batch.event_rows_total_count
+            event_rows_omitted_count += event_batch.event_rows_omitted_count
+            manual_retry_event_rows_ignored += event_batch.manual_retry_event_rows_ignored
+
         env_candidate = _runtime_root_env_candidate()
         if env_candidate:
-            candidates.append(("runtime_config:environment", env_candidate))
-        return candidates
+            candidates.append(_RuntimeRootCandidate("runtime_config:environment", env_candidate))
+        return _RuntimeRootCandidateBatch(
+            candidates=candidates,
+            event_candidate_returned_count=event_candidate_returned_count,
+            event_candidate_total_count=event_candidate_total_count,
+            event_candidate_omitted_count=event_candidate_omitted_count,
+            event_rows_scanned_count=event_rows_scanned_count,
+            event_rows_total_count=event_rows_total_count,
+            event_rows_omitted_count=event_rows_omitted_count,
+            manual_retry_event_rows_ignored=manual_retry_event_rows_ignored,
+        )
 
     def _record_retry_submission_failure(self, retry_job: PipelineJob, error: Exception) -> None:
         error_message = _safe_error_message(str(getattr(error, "message", None) or error))
@@ -1086,16 +1161,43 @@ def _same_run_source_submission_job_ids(
     return job_ids
 
 
-def _event_runtime_root_candidates(store: PipelineStore, job_id: str) -> list[tuple[str, Mapping[str, Any]]]:
+def _event_runtime_root_candidates(
+    store: PipelineStore,
+    job_id: str,
+    *,
+    candidate_budget: int,
+) -> _RuntimeRootCandidateBatch:
+    row_filter = (
+        (PipelineEvent.entity_type == "pipeline_job")
+        & (PipelineEvent.entity_id == job_id)
+        & (PipelineEvent.event_type == "submission")
+    )
+    event_rows_total_count = int(
+        store.session.execute(select(func.count()).select_from(PipelineEvent).where(row_filter)).scalar_one() or 0
+    )
+    if _pipeline_job_is_manual_retry(store, job_id):
+        return _RuntimeRootCandidateBatch(
+            candidates=[],
+            event_rows_total_count=event_rows_total_count,
+            manual_retry_event_rows_ignored=event_rows_total_count,
+        )
+
     statement = (
         select(PipelineEvent)
-        .where(PipelineEvent.entity_type == "pipeline_job")
-        .where(PipelineEvent.entity_id == job_id)
+        .where(row_filter)
         .order_by(PipelineEvent.event_id.desc())
+        .limit(_RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT)
     )
-    candidates: list[tuple[str, Mapping[str, Any]]] = []
-    for event in store.session.scalars(statement):
+    candidates: list[_RuntimeRootCandidate] = []
+    event_candidate_total_count = 0
+    manual_retry_event_rows_ignored = 0
+    events = list(store.session.scalars(statement))
+    for event in events:
         details = event.details if isinstance(event.details, Mapping) else {}
+        if _event_details_is_manual_retry_submission(details):
+            manual_retry_event_rows_ignored += 1
+            continue
+
         event_source = f"pipeline_event:{event.event_type}:{event.event_id}"
         for path in (
             ("runtime_root_contract",),
@@ -1109,10 +1211,35 @@ def _event_runtime_root_candidates(store: PipelineStore, job_id: str) -> list[tu
         ):
             candidate = _mapping_at(details, path)
             if candidate and _has_runtime_root_field(candidate):
-                candidates.append((f"{event_source}:{'.'.join(path)}", candidate))
+                event_candidate_total_count += 1
+                if len(candidates) < candidate_budget:
+                    candidates.append(_RuntimeRootCandidate(f"{event_source}:{'.'.join(path)}", candidate))
         if _has_runtime_root_field(details):
-            candidates.append((f"{event_source}:details", details))
-    return candidates
+            event_candidate_total_count += 1
+            if len(candidates) < candidate_budget:
+                candidates.append(_RuntimeRootCandidate(f"{event_source}:details", details))
+
+    return _RuntimeRootCandidateBatch(
+        candidates=candidates,
+        event_candidate_returned_count=len(candidates),
+        event_candidate_total_count=event_candidate_total_count,
+        event_candidate_omitted_count=max(event_candidate_total_count - len(candidates), 0),
+        event_rows_scanned_count=len(events),
+        event_rows_total_count=event_rows_total_count,
+        event_rows_omitted_count=max(event_rows_total_count - len(events), 0),
+        manual_retry_event_rows_ignored=manual_retry_event_rows_ignored,
+    )
+
+
+def _pipeline_job_is_manual_retry(store: PipelineStore, job_id: str) -> bool:
+    value = store.session.execute(
+        select(PipelineJob.manual_retry_marker).where(PipelineJob.job_id == job_id)
+    ).scalar_one_or_none()
+    return value is True
+
+
+def _event_details_is_manual_retry_submission(details: Mapping[str, Any]) -> bool:
+    return details.get("trigger") == "manual" or details.get("manual_retry_marker") is True
 
 
 def _runtime_root_env_candidate() -> dict[str, str]:
@@ -1254,6 +1381,8 @@ def _runtime_root_resolution_evidence(
     resolved: Mapping[str, tuple[str, str]],
     missing: list[str],
     rejected: list[dict[str, str]],
+    rejected_total_count: int,
+    candidate_batch: _RuntimeRootCandidateBatch,
 ) -> dict[str, Any]:
     resolved_evidence = {}
     for root_field in _RUNTIME_ROOT_FIELDS:
@@ -1270,6 +1399,7 @@ def _runtime_root_resolution_evidence(
         resolved_evidence["object_store_root"]["same_as_workspace"] = (
             resolved["object_store_root"][0] == resolved["workspace_dir"][0]
         )
+    rejected_omitted_count = max(rejected_total_count - len(rejected), 0)
     return _redacted_mapping(
         {
             "job_type": retry_job.job_type,
@@ -1279,6 +1409,17 @@ def _runtime_root_resolution_evidence(
             "required": list(_REQUIRED_RUNTIME_ROOT_FIELDS),
             "resolved": resolved_evidence,
             "missing": missing,
+            "candidate_counts": {
+                "event_candidates_returned": candidate_batch.event_candidate_returned_count,
+                "event_candidates_total": candidate_batch.event_candidate_total_count,
+                "event_candidates_omitted": candidate_batch.event_candidate_omitted_count,
+                "event_candidate_limit": _RUNTIME_ROOT_EVENT_CANDIDATE_LIMIT,
+                "event_rows_scanned": candidate_batch.event_rows_scanned_count,
+                "event_rows_total": candidate_batch.event_rows_total_count,
+                "event_rows_omitted": candidate_batch.event_rows_omitted_count,
+                "event_row_scan_limit": _RUNTIME_ROOT_EVENT_ROW_SCAN_LIMIT,
+                "manual_retry_event_rows_ignored": candidate_batch.manual_retry_event_rows_ignored,
+            },
             "rejected": [
                 {
                     "field": _bounded_redacted_text(item.get("field", "")),
@@ -1288,6 +1429,9 @@ def _runtime_root_resolution_evidence(
                 }
                 for item in rejected
             ],
+            "rejected_total_count": rejected_total_count,
+            "rejected_omitted_count": rejected_omitted_count,
+            "rejected_limit": _RUNTIME_ROOT_REJECTION_EVIDENCE_LIMIT,
             "published_fields_available": [
                 field for field in _PUBLISHED_RUNTIME_ROOT_FIELDS if field in resolved
             ],

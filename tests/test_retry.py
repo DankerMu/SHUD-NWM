@@ -728,6 +728,77 @@ def test_manual_retry_download_source_cycle_recovers_original_contract_through_s
         assert evidence["resolved"]["object_store_root"]["source"].startswith("pipeline_event:submission:")
 
 
+def test_manual_retry_download_source_cycle_ignores_stale_manual_retry_contract_for_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_root_env(monkeypatch)
+    with _store() as store:
+        original = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            original,
+            {
+                "workspace_dir": "/srv/original/workspace",
+                "object_store_root": "/srv/original/object-store",
+                "object_store_prefix": "s3://nhms-original",
+            },
+        )
+        stale_retry = _create_job(
+            store,
+            job_id="cycle_ifs_2026053106_retry_active",
+            run_id="cycle_ifs_2026053106",
+            status="submission_failed",
+            error_code="SBATCH_SUBMISSION_FAILED",
+            retry_count=2,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        stale_retry.manual_retry_marker = True
+        stale_retry.slurm_job_id = None
+        store.session.add(stale_retry)
+        store.insert_event(
+            entity_type="pipeline_job",
+            entity_id=stale_retry.job_id,
+            event_type="retry",
+            status_from="failed",
+            status_to="pending",
+            details={"trigger": "manual", "previous_job_id": original.job_id},
+        )
+        _insert_submission_event(
+            store,
+            stale_retry,
+            {
+                "workspace_dir": "/srv/stale/workspace",
+                "object_store_root": "/srv/stale/object-store",
+                "object_store_prefix": "s3://nhms-stale",
+            },
+        )
+        gateway = _RecordingGateway(job_id="slurm_retry_ifs")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert retry.status == "submitted"
+        submission = gateway.submissions[0]
+        assert submission.manifest["workspace_dir"] == "/srv/original/workspace"
+        assert submission.manifest["object_store_root"] == "/srv/original/object-store"
+        assert submission.manifest["object_store_prefix"] == "s3://nhms-original"
+        assert "stale" not in json.dumps(submission.manifest, sort_keys=True)
+        evidence = _events(store)[-1].details["runtime_root_resolution"]
+        assert evidence["resolved"]["object_store_root"]["value"] == "/srv/original/object-store"
+        assert evidence["candidate_counts"]["manual_retry_event_rows_ignored"] == 1
+
+
 def test_manual_retry_download_source_cycle_recovers_original_same_run_submission_before_env_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -851,6 +922,77 @@ def test_manual_retry_download_source_cycle_rejects_mixed_legacy_event_and_incom
         evidence = _events(store)[-1].details["runtime_root_resolution"]
         assert evidence["resolved"]["object_store_prefix"]["value"] == "legacy-prefix"
         assert any(item["reason"] == "resolves_to_workspace_dir" for item in evidence["rejected"])
+
+
+def test_manual_retry_download_source_cycle_bounds_runtime_root_rejection_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_runtime_root_env(monkeypatch)
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        unsafe_contract = {
+            "workspace_dir": "/srv/nhms/workspace",
+            "object_store_root": "/srv/nhms/workspace",
+            "object_store_prefix": "s3://nhms-prod",
+        }
+        candidate_paths = (
+            ("runtime_root_contract",),
+            ("submission_manifest",),
+            ("submitted_manifest",),
+            ("request_manifest",),
+            ("slurm_submission_manifest",),
+            ("manifest",),
+            ("gateway_response", "manifest"),
+            ("slurm", "manifest"),
+        )
+        for index in range(5):
+            details: dict[str, Any] = {
+                "stage": job.stage,
+                "job_type": job.job_type,
+                "event_index": index,
+            }
+            for path in candidate_paths:
+                cursor = details
+                for key in path[:-1]:
+                    cursor = cursor.setdefault(key, {})
+                cursor[path[-1]] = dict(unsafe_contract)
+            store.insert_event(
+                entity_type="pipeline_job",
+                entity_id=job.job_id,
+                event_type="submission",
+                status_from=None,
+                status_to=job.status,
+                details=details,
+            )
+        gateway = _RecordingGateway(job_id="slurm_retry_ifs")
+        service = RetryService(store, RetryConfig(max_retries=3))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert gateway.submissions == []
+        assert retry.status == "submission_failed"
+        assert retry.error_code == "RETRY_RUNTIME_ROOTS_UNSAFE"
+        evidence = _events(store)[-1].details["runtime_root_resolution"]
+        counts = evidence["candidate_counts"]
+        assert counts["event_candidates_returned"] == counts["event_candidate_limit"]
+        assert counts["event_candidates_total"] > counts["event_candidates_returned"]
+        assert counts["event_candidates_omitted"] == (
+            counts["event_candidates_total"] - counts["event_candidates_returned"]
+        )
+        assert len(evidence["rejected"]) == evidence["rejected_limit"]
+        assert evidence["rejected_total_count"] > len(evidence["rejected"])
+        assert evidence["rejected_omitted_count"] == (
+            evidence["rejected_total_count"] - len(evidence["rejected"])
+        )
 
 
 def test_manual_retry_download_source_cycle_redacts_secret_runtime_root_evidence_and_api_error(
