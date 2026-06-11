@@ -6076,6 +6076,64 @@ def test_probe_failed_cycle_does_not_consume_source_budget_or_rewrite_as_unavail
     assert deferred["selection_reason"] == "source_cycle_probe_failed_does_not_consume_source_budget"
 
 
+def test_rate_limited_cycle_does_not_consume_source_budget_or_rewrite_as_unavailable(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-06-08T12:00:00Z"), sources=("IFS",), max_cycles_per_source=1)
+    attempted_sources = [
+        {
+            "source": "aws",
+            "uri": "ecmwf-opendata://aws/ifs/2026060806/ifs.t06z.f000.2t.grib2",
+            "status": "rate_limited",
+            "error_class": "RateLimitedSourceError",
+            "error_message": "source mirror returned 429 Too Many Requests",
+        }
+    ]
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "IFS": FakeAdapter(
+                "IFS",
+                [
+                    (
+                        "2026-06-08T06:00:00Z",
+                        False,
+                        {
+                            "status": "rate_limited",
+                            "reason": "source_cycle_rate_limited",
+                            "classifier": "rate_limited",
+                            "retryable": True,
+                            "evidence": {
+                                "attempted_sources": attempted_sources,
+                                "attempted_source_count": 1,
+                                "emitted_attempt_count": 1,
+                                "attempted_source_limit": 8,
+                                "omitted_attempt_count": 0,
+                            },
+                        },
+                    ),
+                    ("2026-06-08T00:00:00Z", True),
+                ],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    selected = next(item for item in result.evidence["source_cycles"] if item["cycle_id"] == "ifs_2026060800")
+    deferred = next(item for item in result.evidence["source_cycles"] if item["cycle_id"] == "ifs_2026060806")
+    assert selected["cycle_id"] == "ifs_2026060800"
+    assert result.evidence["candidates"][0]["cycle_id"] == "ifs_2026060800"
+    assert deferred["status"] == "rate_limited"
+    assert deferred["reason"] == "source_cycle_rate_limited"
+    assert deferred["classifier"] == "rate_limited"
+    assert deferred["retryable"] is True
+    assert deferred["cycle_status_candidate"] == "rate_limited"
+    assert deferred["db_cycle_status_written"] is None
+    assert deferred["selection_status"] == "not_selected"
+    assert deferred["selection_reason"] == "source_cycle_rate_limited_does_not_consume_source_budget"
+    assert deferred["discovery_evidence"]["attempted_sources"] == attempted_sources
+
+
 @pytest.mark.parametrize("error_code", ["NODE_FAILURE", "OUT_OF_MEMORY"])
 def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reuse_evidence(
     tmp_path: Path,
@@ -7728,6 +7786,82 @@ def test_backfill_probe_failed_gap_keeps_retryable_evidence_and_does_not_consume
     assert probe_failed["selection_reason"] == "source_cycle_probe_failed_does_not_consume_source_budget"
     assert probe_failed["discovery_evidence"]["attempted_sources"] == attempted_sources
     assert probe_failed["discovery_evidence"]["attempted_source_count"] == 1
+    audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "IFS")
+    assert audit["gap_count"] == 2
+    assert audit["available_gap_count"] == 1
+    assert audit["unavailable_gap_count"] == 1
+    assert audit["selected_count"] == 1
+
+
+def test_backfill_rate_limited_gap_keeps_retryable_evidence_and_does_not_consume_budget(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-06-08T12:00:00Z"),
+        sources=("IFS",),
+        backfill_enabled=True,
+        max_cycles_per_source=8,
+    )
+    attempted_sources = [
+        {
+            "source": "aws",
+            "uri": "ecmwf-opendata://aws/ifs/2026060800/ifs.t00z.f000.2t.grib2",
+            "status": "rate_limited",
+            "error_class": "RateLimitedSourceError",
+            "error_message": "source mirror returned 429 Too Many Requests",
+        }
+    ]
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "IFS": FakeAdapter(
+                "IFS",
+                [
+                    (
+                        "2026-06-08T00:00:00Z",
+                        False,
+                        {
+                            "status": "rate_limited",
+                            "reason": "source_cycle_rate_limited",
+                            "classifier": "rate_limited",
+                            "retryable": True,
+                            "evidence": {
+                                "attempted_sources": attempted_sources,
+                                "attempted_source_count": 1,
+                                "emitted_attempt_count": 1,
+                                "attempted_source_limit": 8,
+                                "omitted_attempt_count": 0,
+                            },
+                        },
+                    ),
+                    ("2026-06-08T06:00:00Z", True),
+                ],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    selected = next(
+        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060806"
+    )
+    rate_limited = next(
+        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060800"
+    )
+    assert selected["cycle_id"] == "ifs_2026060806"
+    assert result.evidence["candidates"][0]["cycle_id"] == "ifs_2026060806"
+    assert rate_limited["status"] == "rate_limited"
+    assert rate_limited["reason"] == "source_cycle_rate_limited"
+    assert rate_limited["classifier"] == "rate_limited"
+    assert rate_limited["retryable"] is True
+    assert rate_limited["cycle_status_candidate"] == "rate_limited"
+    assert rate_limited["db_cycle_status_written"] is None
+    assert rate_limited["selection_status"] == "not_selected"
+    assert rate_limited["selection_reason"] == "source_cycle_rate_limited_does_not_consume_source_budget"
+    assert rate_limited["discovery_evidence"]["attempted_sources"] == attempted_sources
+    assert rate_limited["discovery_evidence"]["attempted_source_count"] == 1
     audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "IFS")
     assert audit["gap_count"] == 2
     assert audit["available_gap_count"] == 1

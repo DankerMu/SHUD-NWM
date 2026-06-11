@@ -3836,12 +3836,16 @@ def _source_cycle_status_candidate(discovery: CycleDiscovery, *, available: bool
         return "discovered"
     if discovery.status == "probe_failed" or discovery.reason == "source_cycle_probe_failed":
         return "probe_failed"
+    if discovery.status == "rate_limited" or discovery.reason == "source_cycle_rate_limited":
+        return "rate_limited"
     return "unavailable"
 
 
 def _source_cycle_not_selected_reason(discovery: CycleDiscovery) -> str:
     if discovery.reason == "source_cycle_probe_failed" or discovery.status == "probe_failed":
         return "source_cycle_probe_failed_does_not_consume_source_budget"
+    if discovery.reason == "source_cycle_rate_limited" or discovery.status == "rate_limited":
+        return "source_cycle_rate_limited_does_not_consume_source_budget"
     return "source_cycle_unavailable_does_not_consume_source_budget"
 
 
