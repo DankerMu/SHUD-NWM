@@ -1180,15 +1180,17 @@ def _create_job(
     status: str,
     slurm_job_id: str | None = "slurm_1",
     error_code: str | None = None,
+    job_type: str = "run_shud_analysis",
+    stage: str = "run",
 ) -> PipelineJob:
     job = store.create_job(
         job_id=job_id,
         run_id=run_id,
         cycle_id=cycle_id,
-        job_type="download_source_cycle",
+        job_type=job_type,
         slurm_job_id=slurm_job_id,
         model_id="model_a",
-        stage="download",
+        stage=stage,
         status=status,
         commit=False,
     )

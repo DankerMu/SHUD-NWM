@@ -632,6 +632,28 @@ def test_build_manifest_uses_cycle_specific_lead_policy_and_custom_hours(tmp_pat
     assert sorted({entry.forecast_hour for entry in custom.entries}) == [0, 3, 6]
 
 
+def test_build_manifest_with_split_workspace_and_object_store_uses_prefixed_manifest_uri(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    object_store_root = tmp_path / "object-store"
+    adapter = IFSAdapter(
+        config=IFSAdapterConfig(
+            workspace_root=workspace_root,
+            object_store_root=object_store_root,
+            object_store_prefix="s3://nhms-prod",
+        ),
+        repository=FakeMetRepository(),
+        downloader=lambda _url: b"GRIB IFS mock bytes 7777",
+        availability_checker=lambda _url: True,
+        sleeper=lambda _seconds: None,
+    )
+
+    manifest = adapter.build_manifest("2026050100", forecast_hours=[0])
+
+    assert manifest.manifest_uri == "s3://nhms-prod/raw/IFS/2026050100/manifest.json"
+    assert (object_store_root / "raw" / "IFS" / "2026050100" / "manifest.json").exists()
+    assert not (workspace_root / "raw").exists()
+
+
 def test_manifest_uses_one_physical_ifs_bundle_per_forecast_hour(tmp_path: Path) -> None:
     adapter = build_adapter(tmp_path)
 

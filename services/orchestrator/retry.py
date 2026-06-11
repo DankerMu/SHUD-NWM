@@ -5,6 +5,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Protocol
 
 from sqlalchemy import inspect, select, text, update
@@ -52,6 +53,7 @@ REUSABLE_AUTO_RETRY_STATUSES = {"pending", "submission_failed"}
 DOWNLOAD_SOURCE_CYCLE_JOB_TYPE = "download_source_cycle"
 RETRY_RUNTIME_ROOTS_UNRESOLVED = "RETRY_RUNTIME_ROOTS_UNRESOLVED"
 RETRY_RUNTIME_ROOTS_SECRET_BEARING = "RETRY_RUNTIME_ROOTS_SECRET_BEARING"
+RETRY_RUNTIME_ROOTS_UNSAFE = "RETRY_RUNTIME_ROOTS_UNSAFE"
 _RUNTIME_ROOT_FIELDS = (
     "workspace_dir",
     "object_store_root",
@@ -59,8 +61,11 @@ _RUNTIME_ROOT_FIELDS = (
     "published_artifact_root",
     "published_artifact_uri_prefix",
 )
+_REQUIRED_RUNTIME_ROOT_FIELDS = ("workspace_dir", "object_store_root")
+_LOCAL_RUNTIME_ROOT_FIELDS = ("workspace_dir", "object_store_root", "published_artifact_root")
 _PUBLISHED_RUNTIME_ROOT_FIELDS = ("published_artifact_root", "published_artifact_uri_prefix")
 _ROOT_EVIDENCE_VALUE_MAX_LENGTH = 256
+_URI_STYLE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 
 def is_transient_error(error_code: str | None) -> bool:
@@ -212,6 +217,19 @@ class _RetrySubmissionJob:
     stage: str | None
     retry_count: int
     previous_job_id: str | None
+
+
+@dataclass(frozen=True)
+class _RuntimeRootCandidateResolution:
+    resolved: dict[str, tuple[str, str]]
+    missing: list[str]
+    rejected: list[dict[str, str]]
+    secret_rejected: bool
+    unsafe_rejected: bool
+
+    @property
+    def complete(self) -> bool:
+        return not self.missing and not self.secret_rejected and not self.unsafe_rejected
 
 
 class _RetryRuntimeRootResolutionError(RuntimeError):
@@ -588,106 +606,72 @@ class RetryService:
         if retry_job.job_type != DOWNLOAD_SOURCE_CYCLE_JOB_TYPE:
             return None
 
-        resolved: dict[str, tuple[str, str]] = {}
-        rejected: list[dict[str, str]] = []
         candidates = self._retry_runtime_root_candidates(retry_job)
+        rejected: list[dict[str, str]] = []
+        best_resolved: dict[str, tuple[str, str]] = {}
+        best_missing: list[str] = list(_REQUIRED_RUNTIME_ROOT_FIELDS)
+        secret_rejected = False
+        unsafe_rejected = False
+
         for source, candidate in candidates:
-            candidate_values: dict[str, str] = {}
-            for root_field in _RUNTIME_ROOT_FIELDS:
-                if root_field not in candidate:
-                    continue
-                value = _runtime_root_value(candidate.get(root_field))
-                if value is None:
-                    continue
-                secret_reason = secret_manifest_value_reason(value)
-                if secret_reason is not None:
-                    rejected.append(
-                        {
-                            "field": root_field,
-                            "source": source,
-                            "reason": secret_reason,
-                            "value": _bounded_redacted_text(value),
-                        }
-                    )
-                    continue
-                candidate_values[root_field] = value
-            if (
-                candidate_values.get("object_store_root")
-                and candidate_values.get("workspace_dir")
-                and candidate_values["object_store_root"] == candidate_values["workspace_dir"]
-            ):
-                rejected.append(
-                    {
-                        "field": "object_store_root",
-                        "source": source,
-                        "reason": "matches_workspace_dir",
-                        "value": _bounded_redacted_text(candidate_values["object_store_root"]),
-                    }
-                )
-                candidate_values.pop("object_store_root", None)
-            for root_field, value in candidate_values.items():
-                if root_field not in resolved:
-                    resolved[root_field] = (value, source)
+            resolution = _resolve_runtime_root_candidate(source, candidate)
+            rejected.extend(resolution.rejected)
+            secret_rejected = secret_rejected or resolution.secret_rejected
+            unsafe_rejected = unsafe_rejected or resolution.unsafe_rejected
+            if len(resolution.resolved) > len(best_resolved):
+                best_resolved = resolution.resolved
+                best_missing = resolution.missing
+            if not resolution.complete or secret_rejected:
+                continue
 
-        if "object_store_prefix" not in resolved and not _field_was_rejected(rejected, "object_store_prefix"):
-            resolved["object_store_prefix"] = ("", "runtime_config:OBJECT_STORE_PREFIX.default_empty")
-        if (
-            "object_store_root" in resolved
-            and "workspace_dir" in resolved
-            and resolved["object_store_root"][0] == resolved["workspace_dir"][0]
-        ):
-            rejected.append(
-                {
-                    "field": "object_store_root",
-                    "source": resolved["object_store_root"][1],
-                    "reason": "matches_workspace_dir",
-                    "value": _bounded_redacted_text(resolved["object_store_root"][0]),
-                }
+            evidence = _runtime_root_resolution_evidence(
+                retry_job,
+                resolved=resolution.resolved,
+                missing=[],
+                rejected=rejected,
             )
-            replacement = _replacement_object_store_root(
-                candidates,
-                workspace_value=resolved["workspace_dir"][0],
-                current_value=resolved["object_store_root"][0],
-            )
-            if replacement is None:
-                resolved.pop("object_store_root", None)
-            else:
-                resolved["object_store_root"] = replacement
+            manifest_fields = {field: value for field, (value, _source) in resolution.resolved.items()}
+            return _RuntimeRootResolution(manifest_fields=manifest_fields, evidence=evidence)
 
-        rejected_unresolved_fields = sorted(
-            {
-                item["field"]
-                for item in rejected
-                if item["field"] not in resolved and item["reason"] != "matches_workspace_dir"
-            }
-        )
-        missing = [] if "object_store_root" in resolved else ["object_store_root"]
         evidence = _runtime_root_resolution_evidence(
             retry_job,
-            resolved=resolved,
-            missing=missing,
+            resolved=best_resolved,
+            missing=best_missing,
             rejected=rejected,
         )
-        if rejected_unresolved_fields:
+        if secret_rejected:
             raise _RetryRuntimeRootResolutionError(
                 RETRY_RUNTIME_ROOTS_SECRET_BEARING,
                 "Manual retry runtime-root evidence contains secret-bearing values.",
                 evidence,
             )
-        if missing:
+        if unsafe_rejected:
+            raise _RetryRuntimeRootResolutionError(
+                RETRY_RUNTIME_ROOTS_UNSAFE,
+                "Manual retry runtime-root evidence contains unsafe local root values.",
+                evidence,
+            )
+        if best_missing:
             raise _RetryRuntimeRootResolutionError(
                 RETRY_RUNTIME_ROOTS_UNRESOLVED,
                 "Manual retry cannot resolve required object-store runtime roots for download_source_cycle.",
                 evidence,
             )
-
-        manifest_fields = {field: value for field, (value, _source) in resolved.items()}
-        return _RuntimeRootResolution(manifest_fields=manifest_fields, evidence=evidence)
+        raise _RetryRuntimeRootResolutionError(
+            RETRY_RUNTIME_ROOTS_UNRESOLVED,
+            "Manual retry cannot resolve required object-store runtime roots for download_source_cycle.",
+            evidence,
+        )
 
     def _retry_runtime_root_candidates(self, retry_job: _RetrySubmissionJob) -> list[tuple[str, Mapping[str, Any]]]:
         candidates: list[tuple[str, Mapping[str, Any]]] = []
+        provenance_job_ids: list[str] = []
         if retry_job.previous_job_id:
-            candidates.extend(_event_runtime_root_candidates(self.store, retry_job.previous_job_id))
+            provenance_job_ids = _retry_provenance_job_ids(self.store, retry_job.previous_job_id)
+            for job_id in provenance_job_ids:
+                candidates.extend(_event_runtime_root_candidates(self.store, job_id))
+        for job_id in _same_run_source_submission_job_ids(self.store, retry_job, excluded=set(provenance_job_ids)):
+            candidates.extend(_event_runtime_root_candidates(self.store, job_id))
         env_candidate = _runtime_root_env_candidate()
         if env_candidate:
             candidates.append(("runtime_config:environment", env_candidate))
@@ -1047,6 +1031,61 @@ def _runtime_root_contract_from_error(error: Exception) -> dict[str, Any] | None
     return None
 
 
+def _retry_provenance_job_ids(store: PipelineStore, job_id: str) -> list[str]:
+    job_ids: list[str] = []
+    seen: set[str] = set()
+    current: str | None = job_id
+    for _ in range(16):
+        if not current or current in seen:
+            break
+        seen.add(current)
+        job_ids.append(current)
+        current = _retry_previous_job_id(store, current)
+    return job_ids
+
+
+def _retry_previous_job_id(store: PipelineStore, job_id: str) -> str | None:
+    statement = (
+        select(PipelineEvent)
+        .where(PipelineEvent.entity_type == "pipeline_job")
+        .where(PipelineEvent.entity_id == job_id)
+        .where(PipelineEvent.event_type == "retry")
+        .order_by(PipelineEvent.event_id.desc())
+    )
+    for event in store.session.scalars(statement):
+        details = event.details if isinstance(event.details, Mapping) else {}
+        previous_job_id = details.get("previous_job_id")
+        if isinstance(previous_job_id, str) and previous_job_id.strip():
+            return previous_job_id.strip()
+    return None
+
+
+def _same_run_source_submission_job_ids(
+    store: PipelineStore,
+    retry_job: _RetrySubmissionJob,
+    *,
+    excluded: set[str],
+) -> list[str]:
+    if not retry_job.run_id:
+        return []
+    statement = (
+        select(PipelineJob)
+        .where(PipelineJob.run_id == retry_job.run_id)
+        .where(PipelineJob.job_type == DOWNLOAD_SOURCE_CYCLE_JOB_TYPE)
+        .order_by(PipelineJob.submitted_at.asc(), PipelineJob.created_at.asc(), PipelineJob.job_id.asc())
+    )
+    job_ids: list[str] = []
+    for job in store.session.scalars(statement):
+        if job.job_id in excluded or job.job_id == retry_job.job_id:
+            continue
+        if retry_job.cycle_id and job.cycle_id and job.cycle_id != retry_job.cycle_id:
+            continue
+        if job.manual_retry_marker:
+            continue
+        job_ids.append(job.job_id)
+    return job_ids
+
+
 def _event_runtime_root_candidates(store: PipelineStore, job_id: str) -> list[tuple[str, Mapping[str, Any]]]:
     statement = (
         select(PipelineEvent)
@@ -1097,24 +1136,96 @@ def _runtime_root_env_candidate() -> dict[str, str]:
     return candidate
 
 
-def _field_was_rejected(rejected: list[dict[str, str]], field_name: str) -> bool:
-    return any(item.get("field") == field_name for item in rejected)
+def _resolve_runtime_root_candidate(
+    source: str,
+    candidate: Mapping[str, Any],
+) -> _RuntimeRootCandidateResolution:
+    resolved: dict[str, tuple[str, str]] = {}
+    rejected: list[dict[str, str]] = []
+    comparable_local_roots: dict[str, str] = {}
+    secret_rejected = False
+    unsafe_rejected = False
+
+    for root_field in _RUNTIME_ROOT_FIELDS:
+        if root_field not in candidate:
+            continue
+        value = _runtime_root_value(candidate.get(root_field))
+        if value is None:
+            continue
+
+        secret_reason = secret_manifest_value_reason(value)
+        if secret_reason is not None:
+            secret_rejected = True
+            rejected.append(_runtime_root_rejection(root_field, source, secret_reason, value))
+            continue
+
+        if root_field in _LOCAL_RUNTIME_ROOT_FIELDS and not _is_uri_style_value(value):
+            safety = _local_runtime_root_safety(value)
+            if safety[0] is None:
+                unsafe_rejected = True
+                rejected.append(_runtime_root_rejection(root_field, source, safety[1], value))
+                continue
+            comparable_local_roots[root_field] = safety[0]
+
+        resolved[root_field] = (value, source)
+
+    workspace_value = resolved.get("workspace_dir", ("", source))[0]
+    object_store_value = resolved.get("object_store_root", ("", source))[0]
+    workspace_comparable = comparable_local_roots.get("workspace_dir")
+    object_store_comparable = comparable_local_roots.get("object_store_root")
+    object_store_matches_workspace = bool(
+        workspace_value and object_store_value and workspace_value == object_store_value
+    )
+    object_store_matches_workspace = object_store_matches_workspace or bool(
+        workspace_comparable and object_store_comparable and workspace_comparable == object_store_comparable
+    )
+    if object_store_matches_workspace:
+        unsafe_rejected = True
+        rejected.append(
+            _runtime_root_rejection(
+                "object_store_root",
+                source,
+                "resolves_to_workspace_dir",
+                object_store_value,
+            )
+        )
+        resolved.pop("object_store_root", None)
+
+    if "object_store_prefix" not in resolved:
+        resolved["object_store_prefix"] = ("", f"{source}:OBJECT_STORE_PREFIX.default_empty")
+
+    missing = [field for field in _REQUIRED_RUNTIME_ROOT_FIELDS if field not in resolved]
+    return _RuntimeRootCandidateResolution(
+        resolved=resolved,
+        missing=missing,
+        rejected=rejected,
+        secret_rejected=secret_rejected,
+        unsafe_rejected=unsafe_rejected,
+    )
 
 
-def _replacement_object_store_root(
-    candidates: list[tuple[str, Mapping[str, Any]]],
-    *,
-    workspace_value: str,
-    current_value: str,
-) -> tuple[str, str] | None:
-    for source, candidate in candidates:
-        value = _runtime_root_value(candidate.get("object_store_root"))
-        if value is None or value in {current_value, workspace_value}:
-            continue
-        if secret_manifest_value_reason(value) is not None:
-            continue
-        return value, source
-    return None
+def _runtime_root_rejection(field: str, source: str, reason: str, value: str) -> dict[str, str]:
+    return {
+        "field": field,
+        "source": source,
+        "reason": reason,
+        "value": _bounded_redacted_text(value),
+    }
+
+
+def _is_uri_style_value(value: str) -> bool:
+    return bool(_URI_STYLE_RE.match(value))
+
+
+def _local_runtime_root_safety(value: str) -> tuple[str | None, str]:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        reason = "parent_traversal_local_root" if ".." in path.parts else "relative_local_root"
+        return None, reason
+    try:
+        return str(path.resolve(strict=False)), "ok"
+    except OSError:
+        return None, "unresolvable_local_root"
 
 
 def _mapping_at(details: Mapping[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
@@ -1165,7 +1276,7 @@ def _runtime_root_resolution_evidence(
             "retry_job_id": retry_job.job_id,
             "previous_job_id": retry_job.previous_job_id,
             "cycle_id": retry_job.cycle_id,
-            "required": ["object_store_root"],
+            "required": list(_REQUIRED_RUNTIME_ROOT_FIELDS),
             "resolved": resolved_evidence,
             "missing": missing,
             "rejected": [
