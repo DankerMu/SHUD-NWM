@@ -2059,6 +2059,43 @@ def test_live_mvt_cache_write_failure_returns_tile_with_bypass_status(monkeypatc
     assert tile.cache_status == "bypass"
 
 
+def test_tile_domain_error_maps_to_public_api_error_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_raw_tile_build(*_args: Any, **_kwargs: Any) -> object:
+        raise flood_alert_routes.TileError(
+            status_code=413,
+            code="MVT_TILE_BUDGET_EXCEEDED",
+            message="Raw MVT tile payload exceeded the configured byte budget.",
+            details={
+                "max_bytes": MVT_MAX_BYTES,
+                "payload_bytes": MVT_MAX_BYTES + 1,
+                "layer_id": "flood-return-period",
+            },
+        )
+
+    monkeypatch.setattr(flood_alert_routes, "_require_live_postgis_mvt", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(flood_alert_routes, "_fetch_flood_mvt_tile_bytes", lambda *_args, **_kwargs: b"tile")
+    monkeypatch.setattr(flood_alert_routes, "_build_raw_tile_response", fail_raw_tile_build)
+
+    with _client() as client:
+        response = client.get(
+            f"/api/v1/tiles/flood-return-period/{RUN_ID}/1h/{_iso(VALID_TIME_1)}/6/12/24.pbf",
+        )
+
+    assert response.status_code == 413
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"] == {
+        "code": "MVT_TILE_BUDGET_EXCEEDED",
+        "message": "Raw MVT tile payload exceeded the configured byte budget.",
+        "details": {
+            "max_bytes": MVT_MAX_BYTES,
+            "payload_bytes": MVT_MAX_BYTES + 1,
+            "layer_id": "flood-return-period",
+        },
+    }
+
+
 @pytest.mark.parametrize(
     ("path", "expected_layer_id", "expected_sql_layer", "expected_params"),
     [

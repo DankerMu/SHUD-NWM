@@ -78,11 +78,25 @@ class ValidTimeDiscovery:
         }
 
 
+class TileError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        code: str,
+        message: str,
+        details: Any | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.details = details
+
+
 def validate_identifier(value: str, field_name: str) -> None:
     if not SAFE_TILE_IDENTIFIER_RE.fullmatch(value):
-        from apps.api.errors import ApiError
-
-        raise ApiError(
+        raise TileError(
             status_code=422,
             code="VALIDATION_ERROR",
             message=f"{field_name} must be a stable tile identifier.",
@@ -91,10 +105,8 @@ def validate_identifier(value: str, field_name: str) -> None:
 
 
 def validate_xyz(z: int, x: int, y: int, *, max_zoom: int = MVT_MAX_ZOOM) -> None:
-    from apps.api.errors import ApiError
-
     if z < 0 or z > max_zoom:
-        raise ApiError(
+        raise TileError(
             status_code=422,
             code="TILE_XYZ_INVALID",
             message="Tile z is outside the supported Web Mercator zoom range.",
@@ -102,7 +114,7 @@ def validate_xyz(z: int, x: int, y: int, *, max_zoom: int = MVT_MAX_ZOOM) -> Non
         )
     limit = 1 << z
     if x < 0 or y < 0 or x >= limit or y >= limit:
-        raise ApiError(
+        raise TileError(
             status_code=422,
             code="TILE_XYZ_INVALID",
             message="Tile x/y are outside the standard Web Mercator XYZ tile matrix.",
@@ -165,9 +177,7 @@ def build_tile_response(
 
     data = encode_mvt_layer(layer_name, features, extent=MVT_EXTENT)
     if len(data) > MVT_MAX_BYTES:
-        from apps.api.errors import ApiError
-
-        raise ApiError(
+        raise TileError(
             status_code=413,
             code="MVT_TILE_BUDGET_EXCEEDED",
             message="Encoded MVT tile payload exceeded the configured byte budget.",
@@ -189,9 +199,7 @@ def build_tile_response(
 def build_raw_tile_response(session: Session, tile: TileInput, data: bytes) -> TileResponse:
     validate_xyz(tile.z, tile.x, tile.y)
     if len(data) > MVT_MAX_BYTES:
-        from apps.api.errors import ApiError
-
-        raise ApiError(
+        raise TileError(
             status_code=413,
             code="MVT_TILE_BUDGET_EXCEEDED",
             message="Raw MVT tile payload exceeded the configured byte budget.",
@@ -1177,18 +1185,16 @@ def _source_layer_id(layer: str) -> str:
 
 
 def _enforce_feature_budget(features: list[Mapping[str, Any]]) -> None:
-    from apps.api.errors import ApiError
-
     if len(features) > MVT_MAX_FEATURES:
-        raise ApiError(
+        raise TileError(
             status_code=413,
             code="MVT_TILE_BUDGET_EXCEEDED",
             message="MVT tile feature budget exceeded.",
             details={"feature_count": len(features), "max_features": MVT_MAX_FEATURES},
-        )
+    )
     coordinate_count = len(features)
     if coordinate_count > MVT_MAX_COORDINATES:
-        raise ApiError(
+        raise TileError(
             status_code=413,
             code="MVT_TILE_BUDGET_EXCEEDED",
             message="MVT tile coordinate budget exceeded.",
@@ -1483,10 +1489,8 @@ def _ordered_keys(features: list[Mapping[str, Any]]) -> list[str]:
 
 
 def _validated_property(value: Any, field_name: str) -> str | int | float | bool:
-    from apps.api.errors import ApiError
-
     if value is None:
-        raise ApiError(
+        raise TileError(
             status_code=500,
             code="MVT_PROPERTY_INVALID",
             message="MVT required feature property is missing.",
@@ -1496,7 +1500,7 @@ def _validated_property(value: Any, field_name: str) -> str | int | float | bool
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise ApiError(
+            raise TileError(
                 status_code=500,
                 code="MVT_PROPERTY_INVALID",
                 message="MVT numeric feature property must be finite.",
