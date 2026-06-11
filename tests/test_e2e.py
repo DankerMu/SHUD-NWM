@@ -686,14 +686,13 @@ async def test_m2_analysis_warm_start_spliced_curve_and_selection_e2e(tmp_path: 
 
 
 def test_frontend_forecast_react_requests_segments_and_configures_echarts() -> None:
-    forecast_page = Path("apps/frontend/src/pages/ForecastPage.tsx").read_text(encoding="utf-8")
     forecast_store = Path("apps/frontend/src/stores/forecast.ts").read_text(encoding="utf-8")
     forecast_chart = Path("apps/frontend/src/components/charts/ForecastChart.tsx").read_text(encoding="utf-8")
     forecast_panel = Path("apps/frontend/src/components/forecast/ForecastPanel.tsx").read_text(encoding="utf-8")
 
-    assert "includeAnalysis: true" in forecast_page
+    assert "includeAnalysis: true" in forecast_store
     assert "include_analysis" in forecast_store
-    assert "payload.segments" in forecast_store or "payload.segments" in forecast_chart
+    assert "payload.segments" in forecast_store
     assert "analysis_true_field" in forecast_store
     assert "#2266cc" in forecast_store
     assert "#ef7d22" in forecast_store
