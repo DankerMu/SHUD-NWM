@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import os
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from datetime import datetime
 from functools import lru_cache
 from typing import Any
@@ -30,10 +30,10 @@ from services.tiles.mvt import (
     MVT_VALID_TIME_SAMPLE_LIMIT,
     SUPPORTED_FLOOD_RETURN_PERIOD_DURATIONS,
     SUPPORTED_HYDRO_MVT_VARIABLES,
+    TileError,
     TileInput,
+    TileResponse,
     ValidTimeDiscovery,
-    build_raw_tile_response,
-    build_tile_response,
     canonical_mvt_time,
     latest_frequency_ready_run,
     latest_ready_run,
@@ -41,11 +41,25 @@ from services.tiles.mvt import (
     national_discharge_valid_times,
     postgis_tile_sql,
     public_hydro_layer_id,
-    read_cached_tile_response,
-    simplification_tolerance_m,
     valid_times_for_layer,
-    validate_identifier,
-    validate_xyz,
+)
+from services.tiles.mvt import (
+    build_raw_tile_response as _build_raw_tile_response,
+)
+from services.tiles.mvt import (
+    build_tile_response as _build_tile_response,
+)
+from services.tiles.mvt import (
+    read_cached_tile_response as _read_cached_tile_response,
+)
+from services.tiles.mvt import (
+    simplification_tolerance_m as _simplification_tolerance_m,
+)
+from services.tiles.mvt import (
+    validate_identifier as _validate_tile_identifier,
+)
+from services.tiles.mvt import (
+    validate_xyz as _validate_tile_xyz,
 )
 
 router = APIRouter(tags=["flood-alerts"])
@@ -151,6 +165,62 @@ TILE_Y_DESCRIPTION = (
     f"Web Mercator XYZ tile row. Global schema bounds are 0..{MVT_MAX_TILE_COORDINATE} "
     f"for max zoom {MVT_MAX_ZOOM}; each request also enforces 0 <= y < 2^z."
 )
+
+
+def _tile_api_error(exc: TileError) -> ApiError:
+    return ApiError(
+        status_code=exc.status_code,
+        code=exc.code,
+        message=exc.message,
+        details=exc.details,
+    )
+
+
+def validate_identifier(value: str, field_name: str) -> None:
+    try:
+        _validate_tile_identifier(value, field_name)
+    except TileError as exc:
+        raise _tile_api_error(exc) from exc
+
+
+def validate_xyz(z: int, x: int, y: int, *, max_zoom: int = MVT_MAX_ZOOM) -> None:
+    try:
+        _validate_tile_xyz(z, x, y, max_zoom=max_zoom)
+    except TileError as exc:
+        raise _tile_api_error(exc) from exc
+
+
+def build_tile_response(
+    session: Session,
+    tile: TileInput,
+    layer_name: str,
+    features: list[Mapping[str, Any]],
+) -> TileResponse:
+    try:
+        return _build_tile_response(session, tile, layer_name, features)
+    except TileError as exc:
+        raise _tile_api_error(exc) from exc
+
+
+def build_raw_tile_response(session: Session, tile: TileInput, data: bytes) -> TileResponse:
+    try:
+        return _build_raw_tile_response(session, tile, data)
+    except TileError as exc:
+        raise _tile_api_error(exc) from exc
+
+
+def read_cached_tile_response(session: Session, tile: TileInput) -> TileResponse | None:
+    try:
+        return _read_cached_tile_response(session, tile)
+    except TileError as exc:
+        raise _tile_api_error(exc) from exc
+
+
+def simplification_tolerance_m(z: int) -> float:
+    try:
+        return _simplification_tolerance_m(z)
+    except TileError as exc:
+        raise _tile_api_error(exc) from exc
 
 
 class AlertLevelCount(BaseModel):

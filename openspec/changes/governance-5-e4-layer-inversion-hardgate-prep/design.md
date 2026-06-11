@@ -138,3 +138,114 @@ Non-goals:
 - No import fixes; those belong to #418 and #419.
 - No role-boundary documentation edits except inventory evidence.
 - No hard-gate or workflow behavior changes.
+
+## Issue #418 Fixture
+
+Fixture level: expanded
+Repair intensity: medium
+Project profile: NHMS
+
+Change surface:
+
+- `services/tiles/mvt.py` tile helper validation, budget, and property errors.
+- `apps/api/routes/flood_alerts.py` API route adapter boundary for MVT tile
+  routes and layer metadata routes that call tile helpers.
+- Focused tile/API tests that assert existing public HTTP status, error code,
+  details, and response headers remain stable.
+
+Must preserve:
+
+- Public tile route behavior for identifier validation, XYZ validation, encoded
+  and raw payload byte budgets, feature/coordinate budgets, property validation,
+  cache hit/miss/bypass response headers, and MVT media type.
+- `services/tiles/mvt.py` stays reusable below the API layer and no longer
+  imports `apps.api.*`.
+- #419 readonly validation imports remain out of scope and may still be present
+  after #418.
+
+Must add/change:
+
+- Replace service-to-API `ApiError` construction in `services/tiles/mvt.py`
+  with a lower-layer tile/domain exception or equivalent shared helper.
+- Adapt `apps/api/routes/flood_alerts.py` so tile/domain exceptions become the
+  same `ApiError` response shape currently observed by API callers.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - public `/api/v1/tiles/**` and
+  `/api/v1/layers/**` error contracts must not drift.
+- Config / project setup: not selected - no env, workflow, or deployment config
+  change.
+- File IO / path safety / overwrite: not selected - this PR does not change
+  object-store or filesystem IO; existing DB tile-cache reads/writes stay on the
+  same code paths.
+- Schema / columns / units / field names: selected - MVT error `details`,
+  response headers, and tile metadata fields are API-visible contract fields.
+- Auth / permissions / secrets: not selected - tile routes in scope do not change
+  auth or credential handling.
+- Concurrency / shared state / ordering: not selected - no scheduler, lock, or
+  shared state transition change.
+- Resource limits / large input / discovery: selected - tile byte,
+  feature-count, coordinate-count, and identifier/XYZ bounds are explicit safety
+  limits.
+- Legacy compatibility / examples: selected - existing API tests and frontend
+  route consumers expect stable tile error JSON and MVT responses.
+- Error handling / rollback / partial outputs: selected - service exceptions
+  must map to stable API errors without bypassing FastAPI error handlers.
+- Release / packaging / dependency compatibility: not selected - no dependency
+  or packaging change.
+- Documentation / migration notes: selected - OpenSpec tasks record #418
+  completion while leaving #419/#420 open.
+
+Domain packs:
+
+- Geospatial / CRS / basin geometry: selected - tile XYZ and MVT envelope
+  behavior must remain unchanged even though SQL/geometry generation is not
+  intentionally modified.
+- Hydro-met time series / forcing windows: not selected - no forcing or forecast
+  time-window logic changes.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver or
+  numerical runtime change.
+- PostGIS / TimescaleDB domain behavior: not selected - no SQL or DB schema
+  semantics change is intended.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no Slurm
+  surface.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider surface.
+- Run manifest / QC provenance: not selected - no run manifest or QC evidence
+  change.
+- Published NHMS artifacts / display identity: selected - published display tile
+  identity, cache keys, headers, and response bodies must remain compatible.
+
+Required evidence:
+
+- Focused import proof:
+  `rg -n "from apps\\.api|import apps\\.api|apps\\.api\\." services/tiles/mvt.py`
+  returns no matches.
+- Focused tile/API tests:
+  `uv run --no-sync pytest -q tests/test_flood_alerts_api.py`.
+- Audit tests:
+  `uv run --no-sync pytest -q tests/test_entropy_audit_script.py`.
+- Entropy audit:
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`
+  shows no `services/tiles/mvt.py` `apps-api-layer-inversion` finding; #419
+  readonly validation findings may remain.
+- Static quality:
+  `uv run --no-sync ruff check services/tiles/mvt.py apps/api/routes/flood_alerts.py tests/test_flood_alerts_api.py`.
+- OpenSpec validation:
+  `openspec validate governance-5-e4-layer-inversion-hardgate-prep --strict --no-interactive`.
+
+Non-goals:
+
+- No readonly validation boundary fix; #419 owns
+  `services/production_closure/readonly_db_validation.py`.
+- No CI hard-gate enablement; #420 owns enforcement prep after #418/#419.
+- No frontend changes and no API endpoint retirement.
+
+Review focus:
+
+- Confirm no `apps.api.*` import remains in `services/tiles/mvt.py`.
+- Confirm tile/domain exceptions cannot leak as unhandled 500 errors at public
+  API routes.
+- Confirm HTTP status, error code, details, cache headers, and MVT response
+  behavior remain covered by tests.

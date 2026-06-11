@@ -8,9 +8,11 @@
 
 ## 2. Tile Helper Boundary Fix
 
-- [ ] 2.1 For #418, remove `apps.api.*` imports from `services/tiles/mvt.py`.
-- [ ] 2.2 Move shared tile response/error helpers to a lower-level module or adapt them in `apps/api/routes/flood_alerts.py`.
-- [ ] 2.3 Run focused tile/API tests and confirm public route behavior is unchanged.
+- [x] 2.1 For #418, remove `apps.api.*` imports from `services/tiles/mvt.py`.
+- [x] 2.2 For #418, introduce a lower-layer tile/domain exception or helper that carries status code, stable error code, message, and details without depending on `apps.api`.
+- [x] 2.3 For #418, adapt `apps/api/routes/flood_alerts.py` so tile/domain exceptions map to the existing `ApiError` response shape at the API boundary.
+- [x] 2.4 For #418, run focused tile/API tests and confirm public route behavior is unchanged.
+- [x] 2.5 For #418, confirm the entropy audit no longer reports `services/tiles/mvt.py` while leaving #419 readonly validation findings for the next issue.
 
 ## 3. Production Closure Boundary Fix
 
@@ -39,3 +41,12 @@
 - [x] 6.1 Run `rg -n "from apps\\.api|import apps\\.api|apps\\.api\\." . -g '!apps/api/**'`.
 - [x] 6.2 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`.
 - [x] 6.3 Run `openspec validate governance-5-e4-layer-inversion-hardgate-prep --strict --no-interactive`.
+
+## 7. Issue #418 Verification
+
+- [x] 7.1 Run `rg -n "from apps\\.api|import apps\\.api|apps\\.api\\." services/tiles/mvt.py` and confirm no matches.
+- [x] 7.2 Run `uv run --no-sync pytest -q tests/test_flood_alerts_api.py`.
+- [x] 7.3 Run `uv run --no-sync pytest -q tests/test_entropy_audit_script.py`.
+- [x] 7.4 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` and confirm no `services/tiles/mvt.py` `apps-api-layer-inversion` finding remains.
+- [x] 7.5 Run `uv run --no-sync ruff check services/tiles/mvt.py apps/api/routes/flood_alerts.py tests/test_flood_alerts_api.py`.
+- [x] 7.6 Run `openspec validate governance-5-e4-layer-inversion-hardgate-prep --strict --no-interactive`.
