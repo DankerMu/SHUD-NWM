@@ -7,7 +7,7 @@ runtime code, CI workflows, or node-27 frontend implementation files.
 Issue #401 owns task group 2 and the shared verification rows needed for schema,
 hard-gate, JSON/Markdown, and baseline non-write behavior. Issue #402 owns task
 group 3 and tracked retired-path guard verification. #403 owns task group 4
-after #401/#402 land.
+after #401/#402 land and must stay documentation/example-only.
 
 ## 1. Baseline Triage Contract
 
@@ -48,9 +48,23 @@ Expected #402 test inputs and outputs:
 
 ## 4. Documentation And Report Example
 
-- [ ] 4.1 Update `docs/governance/entropy-budget.md` with E1 burn-down semantics and the continued report-only CI policy.
-- [ ] 4.2 Update `docs/governance/entropy-report.example.md` to include normalized allowlist, budget, and gate eligibility fields.
-- [ ] 4.3 Verify the example schema against live JSON output.
+- [x] 4.1 Update `docs/governance/entropy-budget.md` with E1 burn-down semantics and the continued report-only CI policy.
+- [x] 4.2 Update `docs/governance/entropy-report.example.md` to include normalized allowlist, budget, and gate eligibility fields.
+- [x] 4.3 Verify the example schema against live JSON output.
+- [x] 4.4 Confirm `.github/workflows/governance.yml` remains report-only and does not pass `--mode hard-gate`.
+- [x] 4.5 Document that tracked retired active-tree files are separate from governed historical/archive/OpenSpec text evidence.
+- [x] 4.6 Confirm #403 stays documentation/example-only: no audit script changes, no CI workflow changes, no node-27/frontend/API/layer-inversion work, and no committed baseline.
+
+Expected #403 documentation and evidence outputs:
+
+- Live JSON report exits 0 and exposes documented metadata fields: `summary_counts`, `budget_counted_count`, `gate_eligible_count`, scan byte limits, skipped path families, `module_heatmap`, `findings`, and `high_spread_patterns`.
+- Live JSON findings expose documented finding fields: `allowlist_state`, `allowlist_key`, `budget_counted`, and `gate_eligible`.
+- Live JSON `summary_counts` includes `by_check_id`, `by_priority`, `by_role`, `by_allowlist_state`, `by_gate_eligibility`, and `by_budget_count`.
+- Markdown report exits 0 and includes budget-counted, gate-eligible, allowlist/gate semantics, heatmap, high-spread, and prioritized cleanup sections.
+- Hard-gate JSON may exit non-zero but stdout remains parseable JSON, `metadata.mode == "hard-gate"`, `hard_gate_failing_count` counts only gate-eligible findings, and `.entropy-baseline/latest.json` is absent or unchanged.
+- `rg -- '--mode hard-gate' .github/workflows/governance.yml` exits with no matches.
+- Docs explicitly state the report example is representative schema documentation, not a committed baseline or deletion queue.
+- Docs explicitly state tracked retired active-tree returns are path findings, while governed historical/archive/OpenSpec text references stay text evidence.
 
 ## 5. Verification
 
@@ -67,3 +81,9 @@ Expected #402 test inputs and outputs:
 - [x] 5.11 For #402, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`.
 - [x] 5.12 For #402, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` and confirm JSON remains parseable, tracked retired-path findings have #401 normalized fields, and `.entropy-baseline/latest.json` is not written.
 - [x] 5.13 Run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.
+- [x] 5.14 For #403, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`.
+- [x] 5.15 For #403, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`.
+- [x] 5.16 For #403, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` and confirm JSON remains parseable and `.entropy-baseline/latest.json` is not written.
+- [x] 5.17 For #403, run `rg -- '--mode hard-gate' .github/workflows/governance.yml` and confirm there are no matches.
+- [x] 5.18 For #403, run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.
+- [x] 5.19 For #403, confirm `git diff --name-only` is limited to `docs/governance/entropy-budget.md`, `docs/governance/entropy-report.example.md`, and E1 OpenSpec task/design evidence.
