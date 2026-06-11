@@ -2285,7 +2285,7 @@ class ProductionScheduler:
                 for discovery in unavailable_gaps:
                     item = _source_cycle_evidence(discovery, horizon=_source_horizon_metadata(discovery, adapter))
                     item["selection_status"] = "not_selected"
-                    item["selection_reason"] = "source_cycle_unavailable_does_not_consume_source_budget"
+                    item["selection_reason"] = _source_cycle_not_selected_reason(discovery)
                     evidence.append(item)
                 for discovery in deferred:
                     evidence.append(
@@ -2323,7 +2323,7 @@ class ProductionScheduler:
                 for discovery in [item for item in unavailable_deferred if item.cycle_id not in selected_ids]:
                     item = _source_cycle_evidence(discovery, horizon=_source_horizon_metadata(discovery, adapter))
                     item["selection_status"] = "not_selected"
-                    item["selection_reason"] = "source_cycle_unavailable_does_not_consume_source_budget"
+                    item["selection_reason"] = _source_cycle_not_selected_reason(discovery)
                     evidence.append(item)
 
             for discovery in selected_for_source:
@@ -3808,6 +3808,7 @@ def _filter_expression(model_ids: Sequence[str], basin_ids: Sequence[str]) -> st
 
 def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, Any]) -> dict[str, Any]:
     available = bool(discovery.available)
+    status = discovery.status or ("discovered" if available else "unavailable")
     evidence = {
         "source_id": discovery.source_id,
         "cycle_id": discovery.cycle_id,
@@ -3815,7 +3816,7 @@ def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, A
         "cycle_hour": discovery.cycle_hour,
         "horizon": dict(horizon),
         "available": available,
-        "status": discovery.status or ("discovered" if available else "unavailable"),
+        "status": status,
         "reason": (
             discovery.reason if discovery.reason is not None else (None if available else "source_cycle_unavailable")
         ),
@@ -3823,11 +3824,25 @@ def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, A
         "retryable": discovery.retryable,
         "probe_uri": _source_secret_text_safe(discovery.probe_uri) if discovery.probe_uri is not None else None,
         "db_cycle_status_written": None,
-        "cycle_status_candidate": "discovered" if available else "unavailable",
+        "cycle_status_candidate": _source_cycle_status_candidate(discovery, available=available),
     }
     if discovery.evidence:
         evidence["discovery_evidence"] = _source_discovery_evidence_safe(discovery.evidence)
     return _evidence_safe(evidence)
+
+
+def _source_cycle_status_candidate(discovery: CycleDiscovery, *, available: bool) -> str:
+    if available:
+        return "discovered"
+    if discovery.status == "probe_failed" or discovery.reason == "source_cycle_probe_failed":
+        return "probe_failed"
+    return "unavailable"
+
+
+def _source_cycle_not_selected_reason(discovery: CycleDiscovery) -> str:
+    if discovery.reason == "source_cycle_probe_failed" or discovery.status == "probe_failed":
+        return "source_cycle_probe_failed_does_not_consume_source_budget"
+    return "source_cycle_unavailable_does_not_consume_source_budget"
 
 
 def _source_blocked_evidence(candidate: SchedulerCandidate, discovery: CycleDiscovery) -> dict[str, Any]:
@@ -3903,12 +3918,13 @@ def _source_discovery_evidence_safe(value: Any) -> Any:
 
 
 def _source_secret_text_safe(value: str) -> str:
-    safe = _evidence_safe(value)
+    raw = str(value)
+    safe = redact_payload(raw)
     if not isinstance(safe, str):
         return str(safe)
-    if SOURCE_DISCOVERY_SENSITIVE_TEXT_RE.search(safe):
+    if safe == raw and SOURCE_DISCOVERY_SENSITIVE_TEXT_RE.search(safe):
         return "[redacted]"
-    return safe
+    return SOURCE_DISCOVERY_SENSITIVE_TEXT_RE.sub("[redacted]", safe)
 
 
 def _reason_code(reason: str) -> str:

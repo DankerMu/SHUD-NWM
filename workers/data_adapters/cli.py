@@ -5,6 +5,8 @@ import json
 import sys
 from typing import Sequence
 
+from packages.common.redaction import redact_payload
+
 from .base import parse_cycle_time
 from .era5_adapter import ERA5Adapter, parse_area
 from .gfs_adapter import GFSAdapter
@@ -63,13 +65,34 @@ def _download_ifs(cycle_time: str) -> dict[str, object]:
     discoveries = adapter.discover_cycles(parsed_cycle_time.date())
     requested_cycle = next((cycle for cycle in discoveries if cycle.cycle_time == parsed_cycle_time), None)
     if requested_cycle is None or not requested_cycle.available:
-        result = {
-            "status": "unavailable",
-            "total_bytes_written": 0,
-            "retry_count": 0,
-            "files": 0,
-        }
-        print(f"IFS data not yet available for {cycle_time}", file=sys.stderr)
+        status = requested_cycle.status if requested_cycle is not None and requested_cycle.status else "unavailable"
+        reason = (
+            requested_cycle.reason
+            if requested_cycle is not None and requested_cycle.reason is not None
+            else "source_cycle_unavailable"
+        )
+        classifier = requested_cycle.classifier if requested_cycle is not None else None
+        retryable = requested_cycle.retryable if requested_cycle is not None else True
+        evidence = requested_cycle.evidence if requested_cycle is not None else {}
+        result = redact_payload(
+            {
+                "status": status,
+                "reason": reason,
+                "classifier": classifier,
+                "retryable": retryable,
+                "available": False,
+                "cycle_time": parsed_cycle_time.isoformat(),
+                "source_id": "IFS",
+                "evidence": evidence,
+                "total_bytes_written": 0,
+                "retry_count": 0,
+                "files": 0,
+            }
+        )
+        if status == "probe_failed":
+            print(f"IFS availability probe failed for {cycle_time}", file=sys.stderr)
+        else:
+            print(f"IFS data not yet available for {cycle_time}", file=sys.stderr)
         print(json.dumps(result, sort_keys=True))
         raise SystemExit(1)
     manifest = adapter.build_manifest(parsed_cycle_time)

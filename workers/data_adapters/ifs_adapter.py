@@ -424,15 +424,19 @@ class IFSAdapter(DataSourceAdapter):
         return discoveries
 
     def _discover_cycle_availability(self, cycle_time: datetime) -> dict[str, Any]:
-        attempted_sources: list[str] = []
+        attempted_sources: list[dict[str, Any]] = []
         first_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0])
         last_url = first_url
+        last_source = self.config.preferred_source
+        last_probe_failed_url: str | None = None
+        last_probe_failed_source: str | None = None
         for source in self.config.sources():
             remote_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0], source=source)
             last_url = remote_url
-            attempted_sources.append(source)
+            last_source = source
             try:
                 if self.availability_checker(remote_url):
+                    attempted_sources.append(self._probe_attempt(source, remote_url, status="discovered"))
                     return {
                         "available": True,
                         "status": "discovered",
@@ -443,12 +447,14 @@ class IFSAdapter(DataSourceAdapter):
                         "source": source,
                         "attempted_sources": attempted_sources,
                     }
-            except ForbiddenSourceError:
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="unavailable"))
+            except ForbiddenSourceError as error:
                 LOGGER.warning(
                     "IFS availability check was forbidden for %s",
                     self._safe_text(remote_url),
                     exc_info=True,
                 )
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="forbidden", error=error))
                 return {
                     "available": False,
                     "status": "forbidden",
@@ -459,9 +465,55 @@ class IFSAdapter(DataSourceAdapter):
                     "source": source,
                     "attempted_sources": attempted_sources,
                 }
-            except Exception:
-                LOGGER.warning("Failed to check IFS availability for %s", self._safe_text(remote_url), exc_info=True)
+            except FileUnavailableError as error:
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="unavailable", error=error))
                 continue
+            except RateLimitedError as error:
+                LOGGER.warning("IFS availability check was rate limited for %s", self._safe_text(remote_url))
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="rate_limited", error=error))
+                continue
+            except IFSAdapterError as error:
+                LOGGER.warning("IFS availability probe failed for %s", self._safe_text(remote_url), exc_info=True)
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="probe_failed", error=error))
+                last_probe_failed_url = remote_url
+                last_probe_failed_source = source
+                continue
+            except (URLError, TimeoutError, OSError) as error:
+                LOGGER.warning("IFS availability probe failed for %s", self._safe_text(remote_url), exc_info=True)
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="probe_failed", error=error))
+                last_probe_failed_url = remote_url
+                last_probe_failed_source = source
+                continue
+            except Exception as error:
+                LOGGER.warning("Failed to check IFS availability for %s", self._safe_text(remote_url), exc_info=True)
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="probe_failed", error=error))
+                last_probe_failed_url = remote_url
+                last_probe_failed_source = source
+                continue
+
+        if any(attempt.get("status") == "probe_failed" for attempt in attempted_sources):
+            return {
+                "available": False,
+                "status": "probe_failed",
+                "reason": "source_cycle_probe_failed",
+                "classifier": "network_error",
+                "retryable": True,
+                "probe_uri": last_probe_failed_url or last_url,
+                "source": last_probe_failed_source or last_source,
+                "attempted_sources": attempted_sources,
+            }
+
+        if any(attempt.get("status") == "rate_limited" for attempt in attempted_sources):
+            return {
+                "available": False,
+                "status": "rate_limited",
+                "reason": "source_cycle_rate_limited",
+                "classifier": "rate_limited",
+                "retryable": True,
+                "probe_uri": last_url,
+                "source": last_source,
+                "attempted_sources": attempted_sources,
+            }
 
         return {
             "available": False,
@@ -470,8 +522,24 @@ class IFSAdapter(DataSourceAdapter):
             "classifier": "unavailable",
             "retryable": True,
             "probe_uri": last_url,
-            "source": attempted_sources[-1] if attempted_sources else self.config.preferred_source,
+            "source": last_source,
             "attempted_sources": attempted_sources,
+        }
+
+    def _probe_attempt(
+        self,
+        source: str,
+        remote_url: str,
+        *,
+        status: str,
+        error: BaseException | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "source": self._safe_source_label(source),
+            "uri": self._safe_text(remote_url),
+            "status": status,
+            "error_class": type(error).__name__ if error is not None else None,
+            "error_message": self._safe_text(str(error)) if error is not None else None,
         }
 
     def build_manifest(
@@ -1268,14 +1336,11 @@ class IFSAdapter(DataSourceAdapter):
             return True
         except FileUnavailableError:
             return False
-        except RateLimitedError:
-            LOGGER.warning("IFS availability check was rate limited for %s", self._safe_text(remote_url))
-            return False
         except ForbiddenSourceError:
             raise
         except IFSAdapterError:
             LOGGER.warning("IFS availability check failed for %s", self._safe_text(remote_url), exc_info=True)
-            return False
+            raise
 
     def _client_for_source(self, source: str) -> Any:
         try:
@@ -1389,6 +1454,13 @@ class IFSAdapter(DataSourceAdapter):
 
     def _safe_text(self, value: object) -> str:
         return str(redact_payload(str(value)))
+
+    def _safe_source_label(self, source: str) -> str:
+        safe_url = self._safe_text(f"ecmwf-opendata://{source}/")
+        parsed = urlparse(safe_url)
+        if parsed.netloc:
+            return parsed.netloc
+        return self._safe_text(source)
 
     def _source_object_entry_identities(
         self,

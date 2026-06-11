@@ -270,6 +270,9 @@ compute node 若缺系统 ecCodes，使用项目内 runtime：
 - `running`：当前周期正在执行。
 - `submitted`：Slurm 作业已提交，或 `squeue` / `sacct` 只能确认非终态、未知 accounting、等待超时等 skip-safe 状态；不会写 `finished_at`，后续扫描不会因为控制器或 accounting 暂不可见而重复提交。
 - `unavailable`：数据源暂不可用，IFS CLI 会在 cycle 尚未发布时返回该状态。
+- `probe_failed`：IFS 源周期探测因 compute node DNS、网络或 timeout 失败，CLI payload 会保留
+  `reason=source_cycle_probe_failed`、`classifier=network_error`、`retryable=true` 和已脱敏的
+  `attempted_sources`。这不代表 AWS/Azure/Google/ECMWF 均未发布该 cycle，不应按源数据延迟处理。
 - `already_done`：数据库中同名 run 已是 `frequency_done` 或 `published`。
 - `frequency_done`：完成 SHUD、parse 和 display product 发布。
 - `failed`：单周期脚本非 0 退出。
@@ -298,6 +301,10 @@ forc_{source_lower}_{YYYYMMDDHH}_basins_qhh_shud
 - GFS 下载入口：`nhms-gfs download --source-id gfs --cycle-time ...`
 - IFS 下载入口：`nhms-ifs download --cycle-time ...`
 - IFS 若数据尚未发布，单周期脚本记录 `unavailable` 并停止下游，不伪造 raw/canonical/forcing。
+- IFS 若在 node-22 等 compute node 上返回 `status=probe_failed`，先在同一节点检查 DNS 和出站网络：
+  `getent hosts data.ecmwf.int`、`python - <<'PY'\nimport socket; print(socket.getaddrinfo('data.ecmwf.int', 443)[0])\nPY`、
+  以及集群代理/防火墙设置；网络恢复后重新运行同一 `nhms-ifs download --cycle-time ...` 或等待下一轮 scheduler retry。
+  不要把该状态改写成 `source_cycle_unavailable`，也不要手工写 `met.forecast_cycle` 为 unavailable。
 - IFS canonical 同时保留 `net_radiation` 与 `shortwave_down`；qhh forcing 的 `Rn` 使用 `shortwave_down`，避免把可能为负的净辐射写入 SHUD forcing。
 - manifest scenario：
   - GFS：`forecast_gfs_deterministic`

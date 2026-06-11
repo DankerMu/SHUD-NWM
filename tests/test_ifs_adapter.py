@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError
+from urllib.parse import urlparse
 
 import pytest
 import requests
@@ -34,6 +35,7 @@ IFSAdapterConfig = ifs_module.IFSAdapterConfig
 DownloadedPayload = ifs_module.DownloadedPayload
 RateLimitedError = ifs_module.RateLimitedError
 NetworkDownloadError = ifs_module.NetworkDownloadError
+ForbiddenSourceError = ifs_module.ForbiddenSourceError
 
 
 @pytest.fixture(autouse=True)
@@ -206,9 +208,136 @@ def test_discover_cycles_switches_source_when_primary_probe_fails(tmp_path: Path
 
     assert all(cycle.available for cycle in cycles)
     assert all(cycle.probe_uri.startswith("ecmwf-opendata://azure/") for cycle in cycles)
-    assert cycles[0].evidence["attempted_sources"] == ["aws", "azure"]
+    attempts = cycles[0].evidence["attempted_sources"]
+    assert [attempt["source"] for attempt in attempts] == ["aws", "azure"]
+    assert [attempt["status"] for attempt in attempts] == ["probe_failed", "discovered"]
     assert any("://aws/" in call for call in calls)
     assert any("://azure/" in call for call in calls)
+
+
+def test_discover_cycles_all_ifs_mirrors_dns_failure_is_probe_failed(tmp_path: Path) -> None:
+    repository = FakeMetRepository()
+    calls: list[str] = []
+
+    def checker(url: str) -> bool:
+        calls.append(url)
+        raise NetworkDownloadError(
+            f"NameResolutionError for {url}?token=super-secret&X-Amz-Signature=secret-signature"
+        )
+
+    adapter = build_adapter(tmp_path, repository=repository, availability_checker=checker)
+
+    discovery = next(cycle for cycle in adapter.discover_cycles("2026-06-08") if cycle.cycle_hour == 0)
+
+    assert discovery.available is False
+    assert discovery.status == "probe_failed"
+    assert discovery.reason == "source_cycle_probe_failed"
+    assert discovery.classifier == "network_error"
+    assert discovery.retryable is True
+    assert repository.cycles == {}
+    assert [urlparse(call).netloc for call in calls[:4]] == ["aws", "azure", "google", "ecmwf"]
+    attempts = discovery.evidence["attempted_sources"]
+    assert [attempt["source"] for attempt in attempts] == ["aws", "azure", "google", "ecmwf"]
+    assert {attempt["status"] for attempt in attempts} == {"probe_failed"}
+    assert {attempt["error_class"] for attempt in attempts} == {"NetworkDownloadError"}
+    rendered = json.dumps(discovery.as_dict())
+    assert "super-secret" not in rendered
+    assert "secret-signature" not in rendered
+
+
+def test_discover_cycles_all_ifs_mirrors_unpublished_stays_unavailable(tmp_path: Path) -> None:
+    repository = FakeMetRepository()
+
+    def checker(url: str) -> bool:
+        raise FileUnavailableError(f"Remote IFS file is unavailable: {url}")
+
+    adapter = build_adapter(tmp_path, repository=repository, availability_checker=checker)
+
+    discovery = next(cycle for cycle in adapter.discover_cycles("2026-06-08") if cycle.cycle_hour == 0)
+
+    assert discovery.available is False
+    assert discovery.status == "unavailable"
+    assert discovery.reason == "source_cycle_unavailable"
+    assert discovery.classifier == "unavailable"
+    assert discovery.retryable is True
+    assert repository.cycles == {}
+    attempts = discovery.evidence["attempted_sources"]
+    assert [attempt["source"] for attempt in attempts] == ["aws", "azure", "google", "ecmwf"]
+    assert {attempt["status"] for attempt in attempts} == {"unavailable"}
+    assert {attempt["error_class"] for attempt in attempts} == {"FileUnavailableError"}
+
+
+def test_discover_cycles_all_ifs_mirrors_rate_limited_is_not_network_error(tmp_path: Path) -> None:
+    def checker(url: str) -> bool:
+        raise RateLimitedError(f"IFS source rate limited while checking {url}", retry_after_seconds=60)
+
+    adapter = build_adapter(tmp_path, availability_checker=checker)
+
+    discovery = next(cycle for cycle in adapter.discover_cycles("2026-06-08") if cycle.cycle_hour == 0)
+
+    assert discovery.available is False
+    assert discovery.status == "rate_limited"
+    assert discovery.reason == "source_cycle_rate_limited"
+    assert discovery.classifier == "rate_limited"
+    assert discovery.retryable is True
+    attempts = discovery.evidence["attempted_sources"]
+    assert [attempt["source"] for attempt in attempts] == ["aws", "azure", "google", "ecmwf"]
+    assert {attempt["status"] for attempt in attempts} == {"rate_limited"}
+    assert {attempt["error_class"] for attempt in attempts} == {"RateLimitedError"}
+
+
+def test_discover_cycles_mixed_unpublished_and_dns_failure_is_probe_failed(tmp_path: Path) -> None:
+    def checker(url: str) -> bool:
+        source = urlparse(url).netloc
+        if source in {"aws", "google"}:
+            raise FileUnavailableError(f"{source} not published")
+        raise NetworkDownloadError(f"{source} DNS timeout token=super-secret")
+
+    adapter = build_adapter(tmp_path, availability_checker=checker)
+
+    discovery = next(cycle for cycle in adapter.discover_cycles("2026-06-08") if cycle.cycle_hour == 0)
+
+    assert discovery.available is False
+    assert discovery.status == "probe_failed"
+    assert discovery.reason == "source_cycle_probe_failed"
+    assert discovery.classifier == "network_error"
+    assert discovery.retryable is True
+    attempts = discovery.evidence["attempted_sources"]
+    assert [attempt["source"] for attempt in attempts] == ["aws", "azure", "google", "ecmwf"]
+    assert [attempt["status"] for attempt in attempts] == [
+        "unavailable",
+        "probe_failed",
+        "unavailable",
+        "probe_failed",
+    ]
+    rendered = json.dumps(discovery.as_dict())
+    assert "super-secret" not in rendered
+
+
+def test_discover_cycles_forbidden_source_remains_non_retryable(tmp_path: Path) -> None:
+    def checker(url: str) -> bool:
+        if "://aws/" in url:
+            raise ForbiddenSourceError(f"Remote IFS file is forbidden: {url}")
+        raise AssertionError("forbidden discovery must stop at the forbidden source")
+
+    adapter = build_adapter(tmp_path, availability_checker=checker)
+
+    discovery = next(cycle for cycle in adapter.discover_cycles("2026-06-08") if cycle.cycle_hour == 0)
+
+    assert discovery.available is False
+    assert discovery.status == "forbidden"
+    assert discovery.reason == "source_cycle_forbidden"
+    assert discovery.classifier == "forbidden"
+    assert discovery.retryable is False
+    assert discovery.evidence["attempted_sources"] == [
+        {
+            "source": "aws",
+            "uri": "ecmwf-opendata://aws/ifs/2026060800/ifs.t00z.f000.2t.grib2",
+            "status": "forbidden",
+            "error_class": "ForbiddenSourceError",
+            "error_message": "Remote IFS file is forbidden: ecmwf-opendata://aws/ifs/2026060800/ifs.t00z.f000.2t.grib2",
+        }
+    ]
 
 
 def test_ifs_cli_unavailable_cycle_exits_nonzero(
@@ -246,11 +375,90 @@ def test_ifs_cli_unavailable_cycle_exits_nonzero(
     assert exc_info.value.code == 1
     assert "IFS data not yet available for 2026053000" in captured.err
     assert json.loads(captured.out) == {
+        "available": False,
+        "classifier": "unavailable",
+        "cycle_time": "2026-05-30T00:00:00+00:00",
+        "evidence": {},
         "files": 0,
+        "reason": "source_cycle_unavailable",
         "retry_count": 0,
+        "retryable": True,
+        "source_id": "IFS",
         "status": "unavailable",
         "total_bytes_written": 0,
     }
+
+
+def test_ifs_cli_probe_failure_payload_preserves_redacted_attempted_mirrors(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cycle_time = parse_cycle_time("2026060800")
+    attempted = [
+        {
+            "source": source,
+            "uri": (
+                f"ecmwf-opendata://user:password@{source}/ifs/2026060800/"
+                "ifs.t00z.f000.2t.grib2?token=super-secret&X-Amz-Signature=secret-signature"
+            ),
+            "status": "probe_failed",
+            "error_class": "NetworkDownloadError",
+            "error_message": (
+                f"DNS failed for ecmwf-opendata://user:password@{source}/ifs/2026060800/"
+                "ifs.t00z.f000.2t.grib2?token=super-secret&X-Amz-Signature=secret-signature "
+                "access_key=secret-access-key"
+            ),
+        }
+        for source in ("aws", "azure", "google", "ecmwf")
+    ]
+
+    class ProbeFailedIFSAdapter:
+        @classmethod
+        def from_env(cls) -> "ProbeFailedIFSAdapter":
+            return cls()
+
+        def discover_cycles(self, _cycle_date: object) -> list[CycleDiscovery]:
+            return [
+                CycleDiscovery(
+                    cycle_id="ifs_2026060800",
+                    source_id="IFS",
+                    cycle_time=cycle_time,
+                    cycle_hour=0,
+                    available=False,
+                    status="probe_failed",
+                    reason="source_cycle_probe_failed",
+                    classifier="network_error",
+                    retryable=True,
+                    evidence={"attempted_sources": attempted},
+                )
+            ]
+
+    monkeypatch.setattr(cli_module, "IFSAdapter", ProbeFailedIFSAdapter)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module._download_ifs("2026060800")
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exc_info.value.code == 1
+    assert "IFS availability probe failed for 2026060800" in captured.err
+    assert payload["status"] == "probe_failed"
+    assert payload["reason"] == "source_cycle_probe_failed"
+    assert payload["classifier"] == "network_error"
+    assert payload["retryable"] is True
+    assert payload["files"] == 0
+    assert payload["total_bytes_written"] == 0
+    assert [item["source"] for item in payload["evidence"]["attempted_sources"]] == [
+        "aws",
+        "azure",
+        "google",
+        "ecmwf",
+    ]
+    rendered = json.dumps(payload)
+    assert "super-secret" not in rendered
+    assert "secret-signature" not in rendered
+    assert "password" not in rendered
+    assert "secret-access-key" not in rendered
 
 
 def test_build_manifest_uses_cycle_specific_lead_policy_and_custom_hours(tmp_path: Path) -> None:
