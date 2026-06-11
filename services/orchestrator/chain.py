@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -6319,11 +6319,44 @@ def _raw_manifest_uri_matches_source_cycle(
     if not value:
         return False
     parsed = urlparse(value)
-    path = parsed.path.lstrip("/") if parsed.scheme else value
-    parts = [part for part in path.split("/") if part]
-    if len(parts) != 4:
+    if parsed.scheme:
+        if parsed.scheme != "s3" or not parsed.netloc:
+            return False
+        if parsed.params or parsed.query or parsed.fragment:
+            return False
+        return _raw_manifest_key_matches_source_cycle(
+            unquote(parsed.path).strip("/"),
+            source_id=source_id,
+            cycle_time=cycle_time,
+            allow_prefix=True,
+        )
+    if parsed.netloc:
         return False
-    raw, source, cycle, filename = parts
+    return _raw_manifest_key_matches_source_cycle(
+        unquote(value).strip("/"),
+        source_id=source_id,
+        cycle_time=cycle_time,
+        allow_prefix=False,
+    )
+
+
+def _raw_manifest_key_matches_source_cycle(
+    key: str,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    allow_prefix: bool,
+) -> bool:
+    if not key:
+        return False
+    parts = key.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    if len(parts) < 4:
+        return False
+    if not allow_prefix and len(parts) != 4:
+        return False
+    raw, source, cycle, filename = parts[-4:]
     return (
         raw == "raw"
         and source.lower() == normalize_source_id(source_id).lower()

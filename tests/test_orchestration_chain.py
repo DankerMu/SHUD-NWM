@@ -4790,6 +4790,28 @@ def test_psycopg_candidate_state_source_cycle_retry_success_repairs_stale_failed
     assert retry_job["status"] == "succeeded"
 
 
+def test_psycopg_candidate_state_prefixed_s3_manifest_repairs_stale_failed_source_cycle() -> None:
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+        ],
+        events=[_manual_retry_event()],
+        manifest_uri="s3://nhms-prod/qhh/raw/gfs/2026050100/manifest.json",
+    )
+
+    assert state["pipeline_status"] is None
+    assert state["failed_stage"] is None
+    assert state["error_code"] is None
+    assert state["repaired_stage_evidence"]["manifest_uri"] == (
+        "s3://nhms-prod/qhh/raw/gfs/2026050100/manifest.json"
+    )
+    failed_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026050100_download")
+    assert failed_job["repair_status"] == "repaired"
+    assert failed_job["repaired_by_job_id"] == "job_cycle_gfs_2026050100_retry_active"
+    assert failed_job["active_blocker"] is False
+
+
 def test_psycopg_candidate_state_unrelated_success_does_not_repair_source_cycle_failure() -> None:
     state = _source_cycle_retry_state(
         jobs=[
@@ -4852,8 +4874,22 @@ def test_psycopg_candidate_state_stale_or_non_succeeded_retry_does_not_repair_so
     assert "repaired_stage_evidence" not in state
 
 
-@pytest.mark.parametrize("manifest_uri", [None, "raw/gfs/2026050106/manifest.json", "raw/ifs/2026050100/manifest.json"])
-def test_psycopg_candidate_state_missing_or_mismatched_manifest_leaves_source_cycle_failure_active(
+@pytest.mark.parametrize(
+    "manifest_uri",
+    [
+        None,
+        "raw/gfs/2026050106/manifest.json",
+        "raw/ifs/2026050100/manifest.json",
+        "raw/gfs/2026050100/index.json",
+        "s3://nhms-prod/qhh/raw/gfs/2026050106/manifest.json",
+        "s3://nhms-prod/qhh/raw/ifs/2026050100/manifest.json",
+        "s3://nhms-prod/qhh/raw/gfs/2026050100/index.json",
+        "https://host/raw/gfs/2026050100/manifest.json",
+        "file:///raw/gfs/2026050100/manifest.json",
+        "s3://nhms-prod/qhh/raw/gfs/../2026050100/manifest.json",
+    ],
+)
+def test_psycopg_candidate_state_unsupported_scheme_or_mismatched_manifest_keeps_source_cycle_failure_active(
     manifest_uri: str | None,
 ) -> None:
     state = _source_cycle_retry_state(
@@ -4869,6 +4905,42 @@ def test_psycopg_candidate_state_missing_or_mismatched_manifest_leaves_source_cy
     assert state["failed_stage"] == "download"
     assert state["error_code"] == "SLURM_JOB_FAILED"
     assert "repaired_stage_evidence" not in state
+
+
+def test_psycopg_candidate_state_repaired_source_cycle_then_later_unrepaired_failure_stays_active() -> None:
+    later_failed_job_id = "job_cycle_gfs_2026050100_download_retry_3"
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+            _failed_source_cycle_download_job(
+                job_id=later_failed_job_id,
+                slurm_job_id="6103",
+                status="permanently_failed",
+                retry_count=3,
+                error_code="LATER_UNREPAIRED",
+                error_message="later source cycle retry failed",
+                submitted_at="2026-05-01T01:50:00Z",
+                finished_at="2026-05-01T02:00:00Z",
+                updated_at="2026-05-01T02:00:00Z",
+            ),
+        ],
+        events=[_manual_retry_event()],
+    )
+
+    assert state["pipeline_status"] == "permanently_failed"
+    assert state["failed_stage"] == "download"
+    assert state["error_code"] == "LATER_UNREPAIRED"
+    assert state["pipeline_truth_timestamp"] == "2026-05-01T02:00:00Z"
+    assert "repaired_stage_evidence" not in state
+    older_failed_job = next(
+        job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026050100_download"
+    )
+    later_failed_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == later_failed_job_id)
+    assert older_failed_job["repair_status"] == "repaired"
+    assert older_failed_job["repaired_by_job_id"] == "job_cycle_gfs_2026050100_retry_active"
+    assert older_failed_job["active_blocker"] is False
+    assert "repair_status" not in later_failed_job
 
 
 def test_psycopg_candidate_state_bounds_nested_task_results_before_state_decision() -> None:

@@ -2337,6 +2337,84 @@ def test_candidate_state_evidence_preserves_repaired_stage_metadata_additively()
     assert evidence["pipeline_jobs"][1]["repairs_job_id"] == "job_cycle_gfs_2026052106_download"
 
 
+def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_operators(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_download",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "job_type": "download_source_cycle",
+                    "stage": "download",
+                    "status": "permanently_failed",
+                    "repair_status": "repaired",
+                    "superseded_by_job_id": "job_cycle_gfs_2026052106_retry_active",
+                    "repaired_by_job_id": "job_cycle_gfs_2026052106_retry_active",
+                    "active_blocker": False,
+                },
+                {
+                    "job_id": "job_cycle_gfs_2026052106_retry_active",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "job_type": "download_source_cycle",
+                    "stage": "download",
+                    "status": "succeeded",
+                    "repair_status": "repair_succeeded",
+                    "repairs_job_id": "job_cycle_gfs_2026052106_download",
+                },
+            ],
+            "pipeline_status": None,
+            "failed_stage": None,
+            "error_code": None,
+            "repaired_stage_evidence": {
+                "status": "repaired",
+                "repair_status": "repaired",
+                "stage": "download",
+                "job_type": "download_source_cycle",
+                "original_failed_job_id": "job_cycle_gfs_2026052106_download",
+                "repairing_retry_job_id": "job_cycle_gfs_2026052106_retry_active",
+                "manifest_uri": "s3://nhms-prod/qhh/raw/gfs/2026052106/manifest.json",
+                "forecast_cycle_status": "raw_complete",
+                "source_id": "gfs",
+                "cycle_id": "gfs_2026052106",
+                "cycle_time": "2026-05-21T06:00:00Z",
+            },
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["counts"]["submitted_count"] == 1
+    candidate_state = result.evidence["candidates"][0]["state_evidence"]["candidate_state"]
+    model_run_state = result.evidence["model_run_evidence"][0]["state_evidence"]["candidate_state"]
+    submitted_state = orchestrator.calls[0]["basins"][0]["state_evidence"]["candidate_state"]
+    for state in (candidate_state, model_run_state, submitted_state):
+        assert "decision" not in state
+        assert "failure" not in state
+        assert state["repaired_stage_evidence"]["original_failed_job_id"] == "job_cycle_gfs_2026052106_download"
+        assert state["repaired_stage_evidence"]["repairing_retry_job_id"] == (
+            "job_cycle_gfs_2026052106_retry_active"
+        )
+        assert state["repaired_stage_evidence"]["manifest_uri"] == (
+            "s3://nhms-prod/qhh/raw/gfs/2026052106/manifest.json"
+        )
+        failed_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026052106_download")
+        assert failed_job["repair_status"] == "repaired"
+        assert failed_job["active_blocker"] is False
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
+
+
 def test_non_authoritative_task_results_do_not_bypass_active_cycle_duplicate_block(
     tmp_path: Path,
 ) -> None:

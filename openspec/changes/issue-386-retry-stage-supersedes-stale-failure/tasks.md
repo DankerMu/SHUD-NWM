@@ -18,7 +18,11 @@
   truncation when applicable.
 - [x] 2.5 Require repaired source-cycle evidence to agree with
   `forecast_cycle.manifest_uri`; a missing or mismatched manifest URI must not
-  turn a stale failure into repaired evidence.
+  turn a stale failure into repaired evidence. Phase 6 extends this to prefixed
+  S3 object-store URIs and rejects unsupported `https://` / `file://` schemes,
+  unsafe `..` segments, and source/cycle/filename mismatches; wrong bucket/prefix
+  validation remains limited to paths where repository object-store prefix
+  context is available.
 - [x] 2.6 Preserve monitoring/pipeline API compatibility: existing response
   envelopes and field names remain stable, while any new repair metadata is
   additive and bounded.
@@ -27,13 +31,19 @@
 
 - [x] 3.1 Public API / CLI / script entry: run focused monitoring/pipeline API or
   contract tests proving response envelopes remain stable when repaired stage
-  metadata is present.
+  metadata is present. Phase 6 evidence includes a scheduler pass/operator path
+  assertion that repaired metadata is carried in candidate/model-run/submission
+  evidence, plus a monitoring API contract test proving `/pipeline/status` and
+  `/pipeline/stages` keep stable envelopes and do not report the repaired stale
+  source-cycle failure as active.
 - [x] 3.2 Schema / field names and provenance: assert repair evidence contains
   original failed job id, repairing retry job id, repaired stage, repair status,
   and manifest binding fields when available.
 - [x] 3.3 Concurrency / shared state / ordering: cover a stale manual retry
   marker or older non-succeeded retry after the original failure; it must not
-  supersede the active failure.
+  supersede the active failure. Phase 6 adds mixed ordering coverage where an
+  older repaired source-cycle failure remains annotated while a later separate
+  unrepaired source-cycle failure stays active.
 - [x] 3.4 Resource limits / discovery: cover bounded/truncated job or event
   history without unbounded scans.
 - [x] 3.5 Legacy compatibility: rerun existing array task retry supersession and
@@ -58,13 +68,17 @@
 - [x] 4.1 Add regression for `download_source_cycle` permanently_failed followed
   by successful linked manual retry and `forecast_cycle.status=raw_complete`:
   scheduler/candidate evidence proceeds and marks old failure repaired, with
-  `manifest_uri` matching the repaired source/cycle.
+  `manifest_uri` matching the repaired source/cycle. Phase 6 includes prefixed
+  S3 manifest URI coverage for
+  `s3://nhms-prod/qhh/raw/gfs/2026050100/manifest.json`.
 - [x] 4.2 Add negative regression where a successful unrelated job does not
   supersede the failed stage.
 - [x] 4.3 Add negative regression where a stale manual retry marker or
   non-succeeded retry is newer than the failure but must not repair it.
 - [x] 4.4 Add negative regression where `forecast_cycle.manifest_uri` is missing
-  or mismatched, so the old failure remains active.
+  or mismatched, so the old failure remains active. Phase 6 adds unsupported
+  scheme (`https://`, `file://`), unsafe path, wrong source/cycle, and wrong
+  filename regressions.
 - [x] 4.5 Re-run existing array task retry supersession coverage to prove no
   regression.
 - [x] 4.6 Re-run focused non-source/manual retry compatibility coverage if helper

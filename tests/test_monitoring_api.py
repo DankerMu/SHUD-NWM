@@ -300,6 +300,95 @@ def test_pipeline_stages_latest_succeeded_retry_replaces_stale_partial_failure()
         assert [result["job_id"] for result in parse["basin_results"]] == ["job_parse_retry_succeeded"]
 
 
+def test_pipeline_status_and_stages_keep_repaired_source_cycle_metadata_out_of_public_envelope() -> None:
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        base_time = _cycle_time()
+        _insert_cycle(store, cycle_time=cycle_time, current_state="raw_complete")
+        _create_job(
+            store,
+            job_id="job_cycle_gfs_2026050100_download_failed",
+            run_id="cycle_gfs_2026050100",
+            cycle_id=cycle_id,
+            job_type="download_source_cycle",
+            slurm_job_id="6101",
+            model_id=None,
+            stage="download",
+            status="permanently_failed",
+            submitted_at=base_time,
+            started_at=base_time,
+            finished_at=base_time + timedelta(minutes=10),
+            error_code="SOURCE_CYCLE_UNAVAILABLE",
+        )
+        _create_job(
+            store,
+            job_id="job_cycle_gfs_2026050100_retry_active",
+            run_id="cycle_gfs_2026050100",
+            cycle_id=cycle_id,
+            job_type="download_source_cycle",
+            slurm_job_id="6102",
+            model_id=None,
+            stage="download",
+            status="succeeded",
+            submitted_at=base_time + timedelta(minutes=20),
+            started_at=base_time + timedelta(minutes=20),
+            finished_at=base_time + timedelta(minutes=35),
+        )
+        with _client(store) as client:
+            status_response = client.get(
+                "/api/v1/pipeline/status",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+            stages_response = client.get(
+                "/api/v1/pipeline/stages",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert status_response.status_code == 200
+        status_body = status_response.json()
+        assert set(status_body) == {"request_id", "status", "data"}
+        assert set(status_body["data"]) == {
+            "cycle_id",
+            "source",
+            "cycle_time",
+            "current_state",
+            "started_at",
+            "updated_at",
+            "job_counts",
+        }
+        assert status_body["data"]["current_state"] == "raw_complete"
+        assert status_body["data"]["job_counts"] == {"succeeded": 1, "failed": 1, "running": 0, "pending": 0}
+
+        assert stages_response.status_code == 200
+        stages_body = stages_response.json()
+        assert set(stages_body) == {"request_id", "status", "data"}
+        download = next(stage for stage in stages_body["data"] if stage["stage"] == "download")
+        assert set(download) == {
+            "stage",
+            "display_status",
+            "status",
+            "duration_seconds",
+            "basin_progress",
+            "basin_results_limit",
+            "basin_results_total",
+            "basin_results_returned",
+            "basin_results_truncated",
+            "basin_results",
+        }
+        assert download["display_status"] == "succeeded"
+        assert download["status"] == "succeeded"
+        assert download["basin_progress"] == {"completed": 1, "total": 1, "failed": 0}
+        assert download["basin_results_total"] == 1
+        assert [result["job_id"] for result in download["basin_results"]] == [
+            "job_cycle_gfs_2026050100_retry_active"
+        ]
+        serialized = json.dumps(stages_body, sort_keys=True)
+        assert "repaired_stage_evidence" not in serialized
+        assert "repair_status" not in serialized
+        assert "SOURCE_CYCLE_UNAVAILABLE" not in serialized
+
+
 def test_pipeline_stages_recovered_retry_keeps_separate_sibling_failure() -> None:
     with _store() as store:
         cycle_time = _cycle_time()

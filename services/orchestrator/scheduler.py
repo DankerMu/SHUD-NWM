@@ -2556,25 +2556,23 @@ class ProductionScheduler:
                 ):
                     skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                     continue
-                state_decision = (
-                    _candidate_state_decision(
-                        candidate,
-                        _call_candidate_state_provider(
-                            state_provider,
-                            source_id=discovery.source_id,
-                            cycle_time=discovery.cycle_time,
-                            model_id=model.model_id,
-                            run_id=candidate.run_id,
-                            forcing_version_id=candidate.forcing_version_id,
-                            candidate_id=candidate.candidate_id,
-                            retry_limit=self.config.retry_limit,
-                            job_limit=self.config.candidate_state_job_limit,
-                            event_limit=self.config.candidate_state_event_limit,
-                        ),
+                raw_candidate_state = (
+                    _call_candidate_state_provider(
+                        state_provider,
+                        source_id=discovery.source_id,
+                        cycle_time=discovery.cycle_time,
+                        model_id=model.model_id,
+                        run_id=candidate.run_id,
+                        forcing_version_id=candidate.forcing_version_id,
+                        candidate_id=candidate.candidate_id,
+                        retry_limit=self.config.retry_limit,
+                        job_limit=self.config.candidate_state_job_limit,
+                        event_limit=self.config.candidate_state_event_limit,
                     )
                     if callable(state_provider)
                     else None
                 )
+                state_decision = _candidate_state_decision(candidate, raw_candidate_state)
                 if state_decision is not None and _candidate_state_has_identity_mismatch(state_decision.evidence):
                     blocked.append(
                         _blocked_candidate(
@@ -2671,25 +2669,20 @@ class ProductionScheduler:
                             }
                             slurm_status_sync_evidence.append(slurm_state_sync)
                             if synced_updates:
-                                state_decision = (
-                                    _candidate_state_decision(
-                                        candidate,
-                                        _call_candidate_state_provider(
-                                            state_provider,
-                                            source_id=discovery.source_id,
-                                            cycle_time=discovery.cycle_time,
-                                            model_id=model.model_id,
-                                            run_id=candidate.run_id,
-                                            forcing_version_id=candidate.forcing_version_id,
-                                            candidate_id=candidate.candidate_id,
-                                            retry_limit=self.config.retry_limit,
-                                            job_limit=self.config.candidate_state_job_limit,
-                                            event_limit=self.config.candidate_state_event_limit,
-                                        ),
+                                if callable(state_provider):
+                                    raw_candidate_state = _call_candidate_state_provider(
+                                        state_provider,
+                                        source_id=discovery.source_id,
+                                        cycle_time=discovery.cycle_time,
+                                        model_id=model.model_id,
+                                        run_id=candidate.run_id,
+                                        forcing_version_id=candidate.forcing_version_id,
+                                        candidate_id=candidate.candidate_id,
+                                        retry_limit=self.config.retry_limit,
+                                        job_limit=self.config.candidate_state_job_limit,
+                                        event_limit=self.config.candidate_state_event_limit,
                                     )
-                                    if callable(state_provider)
-                                    else state_decision
-                                )
+                                    state_decision = _candidate_state_decision(candidate, raw_candidate_state)
                                 if state_decision is not None:
                                     state_decision = CandidateStateDecision(
                                         action=state_decision.action,
@@ -2729,9 +2722,16 @@ class ProductionScheduler:
                                 if state_decision is not None and state_decision.action == "retry":
                                     candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                                 elif state_decision is None:
+                                    state_evidence = {"slurm_state_sync": slurm_state_sync}
+                                    repaired_state_evidence = _candidate_repaired_state_audit_evidence(
+                                        candidate,
+                                        raw_candidate_state,
+                                    )
+                                    if repaired_state_evidence is not None:
+                                        state_evidence.update(repaired_state_evidence)
                                     candidate = _candidate_with_state_evidence(
                                         candidate,
-                                        {"slurm_state_sync": slurm_state_sync},
+                                        state_evidence,
                                     )
                             if active_slurm_jobs:
                                 skip_evidence = dict(state_decision.evidence if state_decision is not None else {})
@@ -2830,6 +2830,10 @@ class ProductionScheduler:
                     # restart_stage evidence here would divert the chain to
                     # restart from parse with no forcing/forecast to parse.
                     candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
+                if state_decision is None:
+                    repaired_state_evidence = _candidate_repaired_state_audit_evidence(candidate, raw_candidate_state)
+                    if repaired_state_evidence is not None:
+                        candidate = _candidate_with_state_evidence(candidate, repaired_state_evidence)
                 if has_active_orchestration is None:
                     has_active_orchestration = bool(
                         callable(active_orchestration_provider)
@@ -2899,25 +2903,20 @@ class ProductionScheduler:
                         }
                         slurm_status_sync_evidence.append(slurm_state_sync)
                         if synced_updates:
-                            state_decision = (
-                                _candidate_state_decision(
-                                    candidate,
-                                    _call_candidate_state_provider(
-                                        state_provider,
-                                        source_id=discovery.source_id,
-                                        cycle_time=discovery.cycle_time,
-                                        model_id=model.model_id,
-                                        run_id=candidate.run_id,
-                                        forcing_version_id=candidate.forcing_version_id,
-                                        candidate_id=candidate.candidate_id,
-                                        retry_limit=self.config.retry_limit,
-                                        job_limit=self.config.candidate_state_job_limit,
-                                        event_limit=self.config.candidate_state_event_limit,
-                                    ),
+                            if callable(state_provider):
+                                raw_candidate_state = _call_candidate_state_provider(
+                                    state_provider,
+                                    source_id=discovery.source_id,
+                                    cycle_time=discovery.cycle_time,
+                                    model_id=model.model_id,
+                                    run_id=candidate.run_id,
+                                    forcing_version_id=candidate.forcing_version_id,
+                                    candidate_id=candidate.candidate_id,
+                                    retry_limit=self.config.retry_limit,
+                                    job_limit=self.config.candidate_state_job_limit,
+                                    event_limit=self.config.candidate_state_event_limit,
                                 )
-                                if callable(state_provider)
-                                else state_decision
-                            )
+                                state_decision = _candidate_state_decision(candidate, raw_candidate_state)
                             if state_decision is not None:
                                 state_decision = CandidateStateDecision(
                                     action=state_decision.action,
@@ -2957,10 +2956,14 @@ class ProductionScheduler:
                             if state_decision is not None and state_decision.action == "retry":
                                 candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                             elif state_decision is None:
-                                candidate = _candidate_with_state_evidence(
+                                state_evidence = {"slurm_state_sync": slurm_state_sync}
+                                repaired_state_evidence = _candidate_repaired_state_audit_evidence(
                                     candidate,
-                                    {"slurm_state_sync": slurm_state_sync},
+                                    raw_candidate_state,
                                 )
+                                if repaired_state_evidence is not None:
+                                    state_evidence.update(repaired_state_evidence)
+                                candidate = _candidate_with_state_evidence(candidate, state_evidence)
                     elif not allow_slurm_status_sync:
                         skipped.append(
                             {
@@ -4157,6 +4160,18 @@ def _candidate_state_decision(
         )
 
     return None
+
+
+def _candidate_repaired_state_audit_evidence(
+    candidate: SchedulerCandidate,
+    raw_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if raw_state is None:
+        return None
+    state = _bounded_candidate_state(raw_state)
+    if not isinstance(state.get("repaired_stage_evidence"), Mapping):
+        return None
+    return {"candidate_state": _candidate_state_evidence(candidate, state)}
 
 
 def _state_has_only_unsubmitted_auto_retry_placeholders(state: Mapping[str, Any]) -> bool:
