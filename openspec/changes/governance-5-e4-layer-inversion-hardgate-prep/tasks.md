@@ -16,10 +16,11 @@
 
 ## 3. Production Closure Boundary Fix
 
-- [ ] 3.1 For #419, remove `apps.api.*` imports from `services/production_closure/readonly_db_validation.py`.
-- [ ] 3.2 Replace the existing readonly validation API-probe exception with an API-owned adapter or injected requester; do not move FastAPI application construction or API route modules into `packages/common`.
-- [ ] 3.3 Run focused readonly validation and production-closure tests.
-- [ ] 3.4 Update `docs/governance/ROLE_BOUNDARY.md` so it no longer documents a stale exception after the code boundary changes.
+- [x] 3.1 For #419, remove `apps.api.*` imports from `services/production_closure/readonly_db_validation.py`.
+- [x] 3.2 For #419, replace the existing readonly validation API-probe exception with an API-owned adapter or injected requester; do not move FastAPI application construction or API route modules into `packages/common`.
+- [x] 3.3 For #419, preserve route smoke and retry/cancel manual-action evidence behavior, including readonly display env, bounded database URL, operator headers, and no write-dependency construction.
+- [x] 3.4 For #419, run focused readonly validation and production-closure tests.
+- [x] 3.5 For #419, update `docs/governance/ROLE_BOUNDARY.md` so it no longer documents a stale service-layer exception after the code boundary changes.
 
 ## 4. Enforcement Prep
 
@@ -50,3 +51,12 @@
 - [x] 7.4 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` and confirm no `services/tiles/mvt.py` `apps-api-layer-inversion` finding remains.
 - [x] 7.5 Run `uv run --no-sync ruff check services/tiles/mvt.py apps/api/routes/flood_alerts.py tests/test_flood_alerts_api.py`.
 - [x] 7.6 Run `openspec validate governance-5-e4-layer-inversion-hardgate-prep --strict --no-interactive`.
+
+## 8. Issue #419 Verification
+
+- [x] 8.1 Run `rg -n "from apps\\.api|import apps\\.api|apps\\.api\\." services/production_closure/readonly_db_validation.py` and confirm no matches.
+- [x] 8.2 Run `uv run --no-sync pytest -q tests/test_readonly_db_validation.py`.
+- [x] 8.3 Run `uv run --no-sync pytest -q tests/test_role_boundary_static.py tests/test_entropy_audit_script.py`.
+- [x] 8.4 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` and confirm zero `apps-api-layer-inversion` findings.
+- [x] 8.5 Run `uv run --no-sync ruff check services/production_closure/readonly_db_validation.py apps/api tests/test_readonly_db_validation.py`.
+- [x] 8.6 Run `openspec validate governance-5-e4-layer-inversion-hardgate-prep --strict --no-interactive`.
