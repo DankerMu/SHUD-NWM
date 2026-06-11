@@ -268,7 +268,8 @@ surfaces fails `tests/test_role_boundary_static.py`.
 
 API request handling remains in `apps/api/auth.py`: FastAPI `Request` parsing,
 request-state audit recording, `require_action`, `evaluate_request_action`,
-`auth_context_from_request`, and API error mapping stay API-owned. API route
-smoke-probe imports in `services/production_closure/readonly_db_validation.py`
-are outside #361 because they validate display/API route behavior rather than
-shared auth-policy evidence helpers.
+`auth_context_from_request`, and API error mapping stay API-owned. Readonly DB
+validation may exercise display route smoke and retry/cancel probes, but FastAPI
+app construction, `TestClient` ownership, and pipeline dependency overrides live
+behind the API-owned `apps/api/readonly_validation_probe.py` adapter instead of
+inside `services/production_closure/readonly_db_validation.py`.

@@ -1395,6 +1395,21 @@ def test_display_route_smoke_blocks_identity_bound_routes_when_strict_identity_m
     assert "/api/v1/jobs?limit=1" not in observed_paths
 
 
+def test_default_api_probe_adapter_uses_fixed_api_owned_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    imported_modules: list[str] = []
+    sentinel = object()
+
+    def fake_import_module(module_name: str) -> object:
+        imported_modules.append(module_name)
+        return sentinel
+
+    monkeypatch.setattr(readonly_db_validation.importlib, "import_module", fake_import_module)
+
+    assert readonly_db_validation._default_api_probe_adapter() is sentinel
+    assert imported_modules == [readonly_db_validation.DEFAULT_API_PROBE_ADAPTER_MODULE]
+    assert readonly_db_validation.DEFAULT_API_PROBE_ADAPTER_MODULE == "apps.api.readonly_validation_probe"
+
+
 def test_display_route_smoke_forces_safe_env_and_bounded_database_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

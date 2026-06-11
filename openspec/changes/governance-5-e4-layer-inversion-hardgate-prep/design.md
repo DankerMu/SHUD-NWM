@@ -249,3 +249,137 @@ Review focus:
   API routes.
 - Confirm HTTP status, error code, details, cache headers, and MVT response
   behavior remain covered by tests.
+
+## Issue #419 Fixture
+
+Fixture level: expanded
+Repair intensity: medium
+Project profile: NHMS
+
+Change surface:
+
+- `services/production_closure/readonly_db_validation.py` readonly DB boundary
+  validation, display route smoke, and display retry/cancel manual-action
+  probes.
+- API-owned adapter code that may construct FastAPI `TestClient` instances and
+  depend on `apps.api.main` / `apps.api.routes.pipeline`.
+- `docs/governance/ROLE_BOUNDARY.md` exception text for readonly validation
+  API smoke probes.
+- Focused readonly DB validation tests that cover route smoke environment,
+  retry/cancel fail-closed probes, and layer-inversion scan evidence.
+
+Must preserve:
+
+- `validate_readonly_db_boundary()` still emits the same evidence schema,
+  provenance, route smoke summaries, manual action probe records, redaction, and
+  simulated-vs-live PASS blocking semantics.
+- Display route smoke still runs with `NHMS_SERVICE_ROLE=display_readonly`,
+  bounded readonly `DATABASE_URL`, `PGOPTIONS` readonly/timeouts, and operator
+  headers.
+- Manual retry/cancel probes still prove `409
+  CONTROL_PLANE_MANUAL_ACTION_REQUIRED` without constructing pipeline store,
+  retry service, or Slurm gateway write dependencies.
+- `services/production_closure/readonly_db_validation.py` no longer imports
+  `apps.api.*`; API app construction and dependency overrides are owned by an
+  API-layer adapter.
+- #420 hard-gate enablement remains out of scope.
+
+Must add/change:
+
+- Replace the service-layer `apps.api.main` / `apps.api.routes` imports with an
+  injected or API-owned probe adapter boundary.
+- Update `ROLE_BOUNDARY.md` so it no longer documents the old
+  `readonly_db_validation.py` service-layer exception.
+- Preserve the existing public helper names where callers/tests already import
+  them, unless a compatibility wrapper is explicitly moved to API-owned code and
+  callers are updated.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - validation scripts and runbooks
+  call `validate_readonly_db_boundary()` and expect stable evidence output.
+- Config / project setup: selected - the probes deliberately set safe display
+  environment variables and bounded database connection settings.
+- File IO / path safety / overwrite: selected - readonly validation writes
+  authoritative evidence files and must not change evidence-root safety.
+- Schema / columns / units / field names: selected - evidence JSON fields are a
+  contract consumed by two-node evidence closure.
+- Auth / permissions / secrets: selected - operator headers, readonly DB URL
+  redaction, no-write dependency overrides, and readonly permission probes are
+  security-sensitive.
+- Concurrency / shared state / ordering: not selected - no scheduler/state
+  transition behavior changes.
+- Resource limits / large input / discovery: not selected - no evidence traversal
+  or bounded-read logic is intentionally changed.
+- Legacy compatibility / examples: selected - existing tests import route/manual
+  probe helpers and should continue to pass or be updated deliberately.
+- Error handling / rollback / partial outputs: selected - unexpected probe
+  failures must still become structured evidence rather than uncaught crashes.
+- Release / packaging / dependency compatibility: not selected - no dependency or
+  packaging change.
+- Documentation / migration notes: selected - role-boundary exception text must
+  match the implemented boundary.
+
+Domain packs:
+
+- PostGIS / TimescaleDB domain behavior: selected - readonly DB permission probes
+  and transaction readonly posture must remain unchanged.
+- Published NHMS artifacts / display identity: selected - display route smoke
+  identity evidence must remain compatible with two-node closure.
+- Slurm production lifecycle / mock-vs-real parity: selected - display retry and
+  cancel probes must continue to prove fail-closed behavior without reaching
+  Slurm gateway dependencies.
+- Run manifest / QC provenance: selected - readonly DB evidence provenance must
+  still distinguish live from simulated/injected components.
+- Geospatial / CRS / basin geometry: not selected - no tile geometry behavior.
+- Hydro-met time series / forcing windows: not selected - no forcing behavior.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver behavior.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider behavior.
+
+Boundary-surface checklist:
+
+- Shared/service root: `services/production_closure/readonly_db_validation.py`
+  must not import `apps.api.*`.
+- API-owned adapter: may import `apps.api.main`, `apps.api.routes.pipeline`, and
+  `fastapi.testclient`.
+- Public entrypoints: `scripts/validate_readonly_db_boundary.py` and
+  `validate_readonly_db_boundary()` behavior must remain stable.
+- Evidence boundary: `summary.json`, `role.json`, `route_smoke.json`, and
+  `permission_probes.json` remain the authoritative files and retain redaction.
+- Failure boundary: API probe failures and forbidden write-dependency
+  construction remain structured `FAIL`/`BLOCKED` evidence.
+
+Required evidence:
+
+- Focused import proof:
+  `rg -n "from apps\\.api|import apps\\.api|apps\\.api\\." services/production_closure/readonly_db_validation.py`
+  returns no matches.
+- Focused readonly tests:
+  `uv run --no-sync pytest -q tests/test_readonly_db_validation.py`.
+- Role/static and audit tests:
+  `uv run --no-sync pytest -q tests/test_role_boundary_static.py tests/test_entropy_audit_script.py`.
+- Entropy audit:
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`
+  shows zero `apps-api-layer-inversion` findings.
+- Static quality:
+  `uv run --no-sync ruff check services/production_closure/readonly_db_validation.py apps/api tests/test_readonly_db_validation.py`.
+- OpenSpec validation:
+  `openspec validate governance-5-e4-layer-inversion-hardgate-prep --strict --no-interactive`.
+
+Non-goals:
+
+- No broad production-closure refactor.
+- No API endpoint retirement, OpenAPI contraction, or frontend/node-27 work.
+- No CI hard-gate enablement; #420 owns enforcement semantics after the baseline
+  is clean.
+
+Review focus:
+
+- Confirm `readonly_db_validation.py` has zero `apps.api.*` imports and no
+  hidden service-to-API construction.
+- Confirm live validation still uses real API route smoke/manual-action probes by
+  default rather than silently downgrading to simulated or skipped evidence.
+- Confirm injected test components still mark provenance as simulated and cannot
+  produce live PASS evidence.
+- Confirm role-boundary docs no longer preserve a stale exception.
