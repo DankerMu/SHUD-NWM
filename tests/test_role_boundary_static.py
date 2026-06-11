@@ -36,13 +36,10 @@ PRODUCTION_ORCHESTRATOR_ROOT = REPO_ROOT / "services/orchestrator"
 
 API_IMPORT_SCAN_ROOTS = (
     REPO_ROOT / "packages/common",
-    REPO_ROOT / "services/orchestrator",
+    REPO_ROOT / "services",
     REPO_ROOT / "workers",
 )
-API_IMPORT_SCAN_FILES = (
-    REPO_ROOT / "services/slurm_gateway/models.py",
-    REPO_ROOT / "services/production_closure/ops_validation.py",
-)
+API_IMPORT_SCAN_FILES: tuple[Path, ...] = ()
 
 GATEWAY_FRAMEWORK_ROUTE_PATHS = frozenset(
     {
@@ -194,11 +191,11 @@ def test_production_orchestrator_source_scan_is_recursive(tmp_path: Path) -> Non
     assert sources == {"scheduler.py", "submission/driver.py"}
 
 
-def test_shared_worker_orchestrator_api_imports_are_hard_gated_after_361() -> None:
+def test_non_api_runtime_sources_do_not_import_apps_api_layer() -> None:
     assert _observed_apps_api_imports() == frozenset()
 
 
-def test_api_import_scan_includes_documented_shared_contract_files() -> None:
+def test_api_import_scan_includes_layer_inversion_runtime_surfaces() -> None:
     relative_sources = {
         path.relative_to(REPO_ROOT).as_posix()
         for path in _python_sources(API_IMPORT_SCAN_ROOTS, API_IMPORT_SCAN_FILES)
@@ -206,6 +203,8 @@ def test_api_import_scan_includes_documented_shared_contract_files() -> None:
 
     assert "services/slurm_gateway/models.py" in relative_sources
     assert "services/production_closure/ops_validation.py" in relative_sources
+    assert "services/tiles/mvt.py" in relative_sources
+    assert "services/production_closure/readonly_db_validation.py" in relative_sources
 
 
 def test_apps_api_import_normalization_covers_parent_and_wildcard_forms() -> None:

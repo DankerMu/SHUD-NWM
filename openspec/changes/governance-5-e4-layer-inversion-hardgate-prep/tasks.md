@@ -24,18 +24,18 @@
 
 ## 4. Enforcement Prep
 
-- [ ] 4.1 For #420 after #418/#419, extend static or entropy tests to prove `apps-api-layer-inversion` is zero for current code.
-- [ ] 4.2 Confirm `apps-api-layer-inversion` remains a standalone role-boundary finding family and is not merged into API retirement or display cleanup.
-- [ ] 4.3 Update entropy budget docs to state that layer inversion is a future hard-gate candidate only after baseline cleanup.
-- [ ] 4.4 Keep `.github/workflows/governance.yml` report-only; do not enable hard-gate mode.
+- [x] 4.1 For #420 after #418/#419, extend static or entropy tests to prove `apps-api-layer-inversion` is zero for current code.
+- [x] 4.2 Confirm `apps-api-layer-inversion` remains a standalone role-boundary finding family and is not merged into API retirement or display cleanup.
+- [x] 4.3 Update entropy budget docs to state that layer inversion is a future hard-gate candidate only after baseline cleanup.
+- [x] 4.4 Keep `.github/workflows/governance.yml` report-only; do not enable hard-gate mode.
 
 ## 5. Verification
 
-- [ ] 5.1 Run `uv run --no-sync pytest -q tests/test_role_boundary_static.py tests/test_entropy_audit_script.py`.
-- [ ] 5.2 Run focused backend tests for tile routes and readonly validation, including `uv run --no-sync pytest -q tests/test_flood_alerts_api.py tests/test_readonly_db_validation.py` when those test files exist or the repository's current equivalents otherwise.
-- [ ] 5.3 Run `uv run --no-sync ruff check .`.
-- [ ] 5.4 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` and confirm `apps-api-layer-inversion` is zero.
-- [ ] 5.5 Run `openspec validate governance-5-e4-layer-inversion-hardgate-prep --strict --no-interactive`.
+- [x] 5.1 Run `uv run --no-sync pytest -q tests/test_role_boundary_static.py tests/test_entropy_audit_script.py`.
+- [x] 5.2 Run focused backend tests for tile routes and readonly validation, including `uv run --no-sync pytest -q tests/test_flood_alerts_api.py tests/test_readonly_db_validation.py` when those test files exist or the repository's current equivalents otherwise.
+- [x] 5.3 Run `uv run --no-sync ruff check .`.
+- [x] 5.4 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json` and confirm `apps-api-layer-inversion` is zero.
+- [x] 5.5 Run `openspec validate governance-5-e4-layer-inversion-hardgate-prep --strict --no-interactive`.
 
 ## 6. Issue #417 Verification
 

@@ -22,6 +22,13 @@ create or update `.entropy-baseline/latest.json`. The Governance Audit workflow
 remains report-only and must not pass `--mode hard-gate` unless a later
 maintainer-approved enablement change does so explicitly.
 
+`apps-api-layer-inversion` is included in `executed_check_families` so the
+audit continues to detect non-API runtime imports from `apps.api.*`. After
+cleanup in #418/#419, the live repository is expected to report zero findings
+for that check. It is a future hard-gate candidate only after the zero baseline
+is maintained by tests; it is not part of the current prepared gated check list
+and the Governance Audit CI job remains report-only.
+
 ## Report-Only JSON Shape
 
 ```json
@@ -300,6 +307,11 @@ JSON output remains parseable when hard-gate mode exits non-zero.
 `hard_gate_failing_count` counts finding records where `gate_eligible` is
 `true`; it does not count every finding in a gated check family. Report-only
 mode omits the `hard_gate_*` fields.
+
+`apps-api-layer-inversion` is intentionally absent from the example
+`hard_gate_gated_check_ids` list. A synthetic layer inversion remains an
+unallowlisted, budget-counted role-boundary finding, but it is not
+`gate_eligible` until a future maintainer-approved hard-gate enablement change.
 
 ## Field Notes
 
