@@ -235,6 +235,48 @@ def test_entropy_audit_hard_gate_json_passes_with_no_gated_findings(tmp_path: Pa
     assert stale_finding["gate_eligible"] is False
 
 
+def test_entropy_audit_hard_gate_json_reports_tracked_retired_path_as_report_only(
+    tmp_path: Path,
+) -> None:
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write(tmp_path / "apps" / "web" / "README.md", "retired placeholder returned\n")
+    subprocess.run(["git", "add", "apps/web/README.md"], cwd=tmp_path, check=True)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "governance" / "audit_repo_entropy.py"),
+            "--format",
+            "json",
+            "--mode",
+            "hard-gate",
+        ],
+        cwd=tmp_path,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    report = json.loads(result.stdout)
+    metadata = report["metadata"]
+
+    assert result.returncode == 0
+    assert not (tmp_path / ".entropy-baseline" / "latest.json").exists()
+    assert metadata["mode"] == "hard-gate"
+    assert metadata["hard_gate_status"] == "pass"
+    assert metadata["hard_gate_failing_count"] == 0
+    assert "placeholder-path-exists" not in metadata["hard_gate_gated_check_ids"]
+
+    findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "placeholder-path-exists"
+    ]
+    assert len(findings) == 1
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+    assert findings[0]["evidence_path"] == "apps/web/README.md"
+    assert findings[0]["axis"] == "structure"
+
+
 def test_entropy_audit_hard_gate_markdown_includes_status_and_report_sections(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
 
@@ -679,6 +721,47 @@ def test_completed_governance_2_openspec_retired_path_tokens_are_allowlisted_wit
     assert _findings_by_check(tmp_path, "placeholder-path-exists") == []
 
 
+def test_governance_5_e1_fixture_retired_path_tokens_are_allowlisted_without_budget_count(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path
+        / "openspec"
+        / "changes"
+        / "governance-5-e1-entropy-baseline-burndown"
+        / "tasks.md",
+        "Fixture evidence keeps apps/web and workers/sbatch_templates as retired path examples.\n",
+    )
+    _write(tmp_path / "docs" / "active.md", "Current docs still mention services/tile-publisher.\n")
+
+    findings = {
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "placeholder-path-token")
+    }
+
+    governed = findings[
+        "openspec/changes/governance-5-e1-entropy-baseline-burndown/tasks.md"
+    ]
+    assert (
+        governed["allowlist_reason"]
+        == "governed Governance-5 E1 fixture evidence documents retired placeholder paths"
+    )
+    assert governed["allowlist_key"] == (
+        "placeholder-path-token:governed-governance-5-e1-fixture-evidence-documents-retired-placeholder-paths"
+    )
+    assert governed["allowlist_state"] == "allowlisted"
+    assert governed["budget_counted"] is False
+    assert governed["gate_eligible"] is False
+
+    active_doc = findings["docs/active.md"]
+    assert active_doc["allowlist_reason"] is None
+    assert active_doc["allowlist_key"] is None
+    assert active_doc["allowlist_state"] == "unallowlisted"
+    assert active_doc["budget_counted"] is True
+    assert active_doc["gate_eligible"] is False
+    assert _findings_by_check(tmp_path, "placeholder-path-exists") == []
+
+
 def test_active_doc_retired_path_tokens_remain_budget_counted(
     tmp_path: Path,
 ) -> None:
@@ -718,6 +801,37 @@ def test_tracked_apps_web_file_emits_retired_path_return_finding(
     assert finding["allowlist_state"] == "unallowlisted"
     assert finding["budget_counted"] is True
     assert finding["gate_eligible"] is False
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    summary_counts = metadata["summary_counts"]
+    assert isinstance(summary_counts, dict)
+    assert summary_counts["by_check_id"]["placeholder-path-exists"] == 1
+
+
+@pytest.mark.parametrize("retired_prefix", audit_repo_entropy.RETIRED_ACTIVE_TREE_PREFIXES)
+def test_tracked_file_under_each_retired_prefix_emits_retired_path_return_finding(
+    tmp_path: Path,
+    retired_prefix: str,
+) -> None:
+    _init_git(tmp_path)
+    tracked_file = f"{retired_prefix}/README.md"
+    _write(tmp_path / tracked_file, "tracked retired path returned\n")
+    subprocess.run(["git", "add", tracked_file], cwd=tmp_path, check=True)
+
+    report = audit_repo_entropy.build_report(tmp_path)
+    findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "placeholder-path-exists"
+    ]
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == tracked_file
+    assert findings[0]["description"] == (
+        f"Tracked file `{tracked_file}` returned under retired active-tree prefix "
+        f"`{retired_prefix}`."
+    )
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     summary_counts = metadata["summary_counts"]
@@ -1123,6 +1237,16 @@ def _findings_by_check(root: Path, check_id: str) -> list[dict[str, object]]:
         for finding in audit_repo_entropy.build_report(root)["findings"]
         if finding["check_id"] == check_id
     ]
+
+
+def _assert_unallowlisted_budget_counted_report_only_finding(
+    finding: dict[str, object],
+) -> None:
+    assert finding["allowlist_reason"] is None
+    assert finding["allowlist_key"] is None
+    assert finding["allowlist_state"] == "unallowlisted"
+    assert finding["budget_counted"] is True
+    assert finding["gate_eligible"] is False
 
 
 def _write(path: Path, text: str) -> None:

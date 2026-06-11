@@ -1599,6 +1599,8 @@ def _placeholder_path_allowlist_reason(relative_path: str) -> str | None:
         return "governed archived evidence documents retired placeholder paths"
     if relative_path.startswith("openspec/changes/governance-2-legacy-dead-code-retirement/"):
         return "governed completed OpenSpec evidence documents retired placeholder paths"
+    if relative_path.startswith("openspec/changes/governance-5-e1-entropy-baseline-burndown/"):
+        return "governed Governance-5 E1 fixture evidence documents retired placeholder paths"
     return None
 
 
