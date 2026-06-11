@@ -148,6 +148,81 @@ Boundary-surface checklist:
 - Producer/consumer evidence boundaries: tests and docs must consume the same field names as emitted JSON.
 - Unchanged downstream consumers: report-only CI workflow and existing heatmap/high-spread report consumers.
 
+### #402 tracked retired-path guard slice
+
+Fixture level: expanded
+Repair intensity: high
+
+Change surface:
+
+- `scripts/governance/audit_repo_entropy.py` retired active-tree path guard.
+- `tests/test_entropy_audit_script.py` focused temporary-repository tests.
+- Minimal docs only if required to explain the guard.
+
+Must preserve:
+
+- Historical text references in docs, archived files, governance inventories, and completed OpenSpec evidence remain governed evidence, not active-tree reintroduction.
+- Existing `placeholder-path-token` text-reference semantics remain compatible with #401 allowlist/budget fields.
+- Default report mode remains report-only.
+- No CI hard-gate enablement.
+- No deletion of already retired paths.
+- No baseline writes.
+
+Must add/change:
+
+- Add a tracked-file guard based on `git ls-files`, not `Path.exists()` alone.
+- Detect tracked files under retired active-tree path prefixes: `apps/web`, hyphenated worker placeholders, `workers/sbatch_templates`, and `services/tile-publisher`.
+- Emit a governance finding or equivalent guard result when a retired active-tree path returns as a tracked file, including force-added ignored files.
+- Keep historical text references separate from tracked path reintroduction findings.
+
+Risk packs considered for #402:
+
+- Public API / CLI / script entry: selected - the audit report gains or refines a finding family through the existing CLI.
+- Config / project setup: selected - behavior depends on git metadata and must work in temp repos as well as the main repo.
+- File IO / path safety / overwrite: selected - the guard reads repository metadata and must not follow arbitrary filesystem state as truth.
+- Schema / columns / units / field names: selected - new or refined finding records must preserve #401 fields and summaries.
+- Auth / permissions / secrets: not selected - no credential surface.
+- Concurrency / shared state / ordering: not selected - local report construction is single-process.
+- Resource limits / large input / discovery: selected - tracked path detection should use bounded `git ls-files` output and scoped prefixes.
+- Legacy compatibility / examples: selected - retired path text evidence must not be confused with tracked path return.
+- Error handling / rollback / partial outputs: selected - missing or unavailable git metadata must fail report-only without crashing and without false tracked-path positives.
+- Release / packaging / dependency compatibility: not selected - no dependencies or packaging changes.
+- Documentation / migration notes: not selected - #402 should not change user-facing documentation unless implementation discovers an existing statement that would become false; any docs refresh remains #403.
+- NHMS domain packs: not selected - no hydro-met, geospatial, SHUD, Slurm runtime, provider, manifest, or published artifact behavior changes.
+
+Invariant Matrix:
+
+- Governing invariant: only tracked files under retired active-tree prefixes count as returned retired paths; textual historical evidence remains governed evidence.
+- Source-of-truth identity/contract: `git ls-files` tracked path strings matched against exact retired path prefixes, plus finding fields from #401.
+- Producers: `_git_tracked_paths`, `_check_placeholder_paths` or a dedicated retired-path guard helper, `FindingSpec`, `_finding_record`.
+- Validators/preflight: temporary git repository tests that add tracked retired path files and historical text references.
+- Storage/cache/query: no writes; git index is read-only input.
+- Public routes/entrypoints: `audit_repo_entropy.py --format json|markdown --mode report|hard-gate`.
+- Frontend/downstream consumers: governance audit report, entropy budget docs, future #403 report example.
+- Failure paths/rollback/stale state: missing git metadata or non-git temp roots do not crash the audit; no false positive for untracked filesystem-only retired paths.
+- Evidence/audit/readiness: focused pytest, JSON/Markdown audit runs, OpenSpec validation, no baseline write.
+- Regression rows:
+  - Tracked `apps/web/README.md` -> retired path return finding with #401 normalized fields and budget/gate semantics.
+  - Force-added ignored tracked retired path under a hyphenated worker prefix -> same finding behavior.
+  - `docs/archived/**` or completed Governance-2 OpenSpec text mentioning retired paths -> no tracked-path-return finding.
+  - Untracked filesystem-only retired path in temp repo -> no tracked-path-return finding from the tracked guard.
+  - Non-git or unavailable-git metadata root -> audit completes report-only with no tracked-path-return false positives.
+  - Normal active underscore worker/package paths -> no retired-path-return finding.
+
+Non-goals for #402:
+
+- No node-27/frontend old page retirement, route handoff, Playwright migration, or M15 visual lane changes.
+- No docs/report example refresh beyond keeping the fixture truthful; #403 owns the report example and entropy-budget documentation.
+
+Boundary-surface checklist:
+
+- Shared helper roots: `_git_tracked_paths`, retired path prefix matcher, finding record normalization.
+- Public entrypoints: JSON/Markdown report and hard-gate mode.
+- Read surfaces: git index, repository text scan, temp repo fixtures.
+- Write/delete/overwrite surfaces: none.
+- Producer/consumer evidence boundaries: tests must distinguish path-return findings from placeholder text-token findings.
+- Unchanged downstream consumers: #401 summary counts and report-only CI behavior.
+
 ## Decisions
 
 ### D1. Use finding-level semantics instead of check-family gates

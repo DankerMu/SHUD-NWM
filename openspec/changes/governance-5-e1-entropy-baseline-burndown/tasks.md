@@ -5,8 +5,9 @@ compact documentation/governance slice and must not change audit script logic,
 runtime code, CI workflows, or node-27 frontend implementation files.
 
 Issue #401 owns task group 2 and the shared verification rows needed for schema,
-hard-gate, JSON/Markdown, and baseline non-write behavior. #402 owns task group
-3, and #403 owns task group 4 after #401/#402 land.
+hard-gate, JSON/Markdown, and baseline non-write behavior. Issue #402 owns task
+group 3 and tracked retired-path guard verification. #403 owns task group 4
+after #401/#402 land.
 
 ## 1. Baseline Triage Contract
 
@@ -24,9 +25,26 @@ hard-gate, JSON/Markdown, and baseline non-write behavior. #402 owns task group
 
 ## 3. Retired Path Return Guard
 
-- [ ] 3.1 Add a tracked-file guard for retired active-tree paths: `apps/web`, hyphenated worker placeholders, `workers/sbatch_templates`, and `services/tile-publisher`.
-- [ ] 3.2 Distinguish tracked retired path reintroduction from historical text references in archived docs or governance inventories.
-- [ ] 3.3 Add focused tests proving a temporary reintroduced retired path is reported or fails the guard.
+- [x] 3.1 Add a tracked-file guard for retired active-tree paths: `apps/web`, hyphenated worker placeholders, `workers/sbatch_templates`, and `services/tile-publisher`.
+- [x] 3.2 Distinguish tracked retired path reintroduction from historical text references in archived docs or governance inventories.
+- [x] 3.3 Add focused tests proving a temporary reintroduced retired path is reported or fails the guard.
+- [x] 3.4 Add focused tests proving untracked filesystem-only retired paths are not treated as tracked reintroductions.
+- [x] 3.5 Add focused tests proving tracked-path discovery is scoped to the retired prefixes and does not flag normal active underscore worker/package paths.
+- [x] 3.6 Add focused tests proving missing or unavailable git metadata does not crash report generation and does not create tracked-path-return false positives.
+
+Expected #402 test inputs and outputs:
+
+- Tracked `apps/web/README.md` in a temporary git repo -> one retired-path-return finding with #401 normalized fields.
+- Force-added ignored `workers/shud-runtime/README.md` or equivalent hyphenated retired worker file -> one retired-path-return finding with #401 normalized fields.
+- `docs/archived/**` or completed Governance-2 OpenSpec text containing retired path names -> only governed text-reference/placeholder semantics, no retired-path-return finding.
+- Untracked filesystem-only `apps/web/README.md` -> no retired-path-return finding.
+- Active underscore paths such as `workers/shud_runtime/__init__.py` -> no retired-path-return finding.
+- Non-git or unavailable-git metadata root -> report construction succeeds in report mode and emits no retired-path-return false positive.
+
+#402 non-goals:
+
+- No node-27/frontend old page retirement, URL handoff, Playwright mocked-spec migration, M15 visual lane changes, or frontend implementation files.
+- No CI hard-gate enablement, baseline writes, retired path deletion, or Governance-5 #403 report-example refresh.
 
 ## 4. Documentation And Report Example
 
@@ -44,4 +62,8 @@ hard-gate, JSON/Markdown, and baseline non-write behavior. #402 owns task group
 - [x] 5.6 For #401, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`.
 - [x] 5.7 For #401, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` and confirm JSON remains parseable, hard-gate counts only gate-eligible findings, and `.entropy-baseline/latest.json` is not written.
 - [x] 5.8 For #401, confirm `.github/workflows/governance.yml` does not use `--mode hard-gate`.
-- [x] 5.9 Run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.
+- [x] 5.9 For #402, run `uv run --no-sync pytest -q tests/test_entropy_audit_script.py`.
+- [x] 5.10 For #402, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`.
+- [x] 5.11 For #402, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`.
+- [x] 5.12 For #402, run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` and confirm JSON remains parseable, tracked retired-path findings have #401 normalized fields, and `.entropy-baseline/latest.json` is not written.
+- [x] 5.13 Run `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive`.
