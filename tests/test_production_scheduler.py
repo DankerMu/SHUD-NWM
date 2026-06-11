@@ -1317,12 +1317,12 @@ def test_completed_duplicate_is_skipped_before_not_ready_canonical_gate(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("status", "reason", "classifier", "retryable"),
+    ("status", "reason", "classifier", "retryable", "expected_cycle_status_candidate"),
     [
-        ("unavailable", "source_cycle_unavailable", "unavailable", True),
-        ("forbidden", "source_cycle_forbidden", "forbidden", False),
-        ("stale", "source_cycle_stale", "stale", True),
-        ("policy_blocked", "source_cycle_policy_blocked", "policy_blocked", False),
+        ("unavailable", "source_cycle_unavailable", "unavailable", True, "unavailable"),
+        ("forbidden", "source_cycle_forbidden", "forbidden", False, "unavailable"),
+        ("stale", "source_cycle_stale", "stale", True, "unavailable"),
+        ("policy_blocked", "source_cycle_policy_blocked", "policy_blocked", False, "unavailable"),
     ],
 )
 def test_source_blocker_preserves_adapter_classifier_and_redacts_probe_credentials(
@@ -1331,6 +1331,7 @@ def test_source_blocker_preserves_adapter_classifier_and_redacts_probe_credentia
     reason: str,
     classifier: str,
     retryable: bool,
+    expected_cycle_status_candidate: str,
 ) -> None:
     signed_probe = "https://provider.example.test/file?token=super-secret&X-Amz-Signature=secret-signature"
     scheduler = ProductionScheduler(
@@ -1362,6 +1363,9 @@ def test_source_blocker_preserves_adapter_classifier_and_redacts_probe_credentia
 
     result = scheduler.run_once()
 
+    source_cycle = result.evidence["source_cycles"][0]
+    assert source_cycle["status"] == status
+    assert source_cycle["cycle_status_candidate"] == expected_cycle_status_candidate
     blocked = result.evidence["blocked_candidates"][0]
     state = blocked["state_evidence"]
     assert blocked["reason"] == reason
@@ -5943,6 +5947,193 @@ def test_candidate_state_source_unavailable_is_retryable_enum_safe_evidence(tmp_
     assert result.evidence["source_cycles"][0]["db_cycle_status_written"] is None
 
 
+def test_candidate_state_ifs_probe_failed_stays_retryable_and_redacted(tmp_path: Path) -> None:
+    signed_probe = (
+        "ecmwf-opendata://user:password@aws/ifs/2026060800/"
+        "ifs.t00z.f000.2t.grib2?token=super-secret&X-Amz-Signature=secret-signature"
+    )
+    attempted_sources = [
+        {
+            "source": source,
+            "uri": signed_probe.replace("@aws/", f"@{source}/"),
+            "status": "probe_failed",
+            "error_class": "NetworkDownloadError",
+            "error_message": (
+                f"DNS failed for {source}: {signed_probe.replace('@aws/', f'@{source}/')} "
+                "access_key=secret-access-key"
+            ),
+        }
+        for source in ("aws", "azure", "google", "ecmwf")
+    ]
+    config = _config(tmp_path, now=_dt("2026-06-08T06:00:00Z"), sources=("IFS",))
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "IFS": FakeAdapter(
+                "IFS",
+                [
+                    (
+                        "2026-06-08T00:00:00Z",
+                        False,
+                        {
+                            "status": "probe_failed",
+                            "reason": "source_cycle_probe_failed",
+                            "classifier": "network_error",
+                            "retryable": True,
+                            "probe_uri": signed_probe,
+                            "evidence": {
+                                "probe": {"uri": signed_probe, "source": "aws"},
+                                "attempted_sources": attempted_sources,
+                            },
+                        },
+                    )
+                ],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    source_cycle = result.evidence["source_cycles"][0]
+    assert source_cycle["status"] == "probe_failed"
+    assert source_cycle["reason"] == "source_cycle_probe_failed"
+    assert source_cycle["classifier"] == "network_error"
+    assert source_cycle["retryable"] is True
+    assert source_cycle["cycle_status_candidate"] == "probe_failed"
+    assert source_cycle["db_cycle_status_written"] is None
+    attempts = source_cycle["discovery_evidence"]["attempted_sources"]
+    assert [attempt["source"] for attempt in attempts] == ["aws", "azure", "google", "ecmwf"]
+    assert {attempt["status"] for attempt in attempts} == {"probe_failed"}
+    assert {attempt["error_class"] for attempt in attempts} == {"NetworkDownloadError"}
+    assert all("DNS failed" in attempt["error_message"] for attempt in attempts)
+
+    blocked = result.evidence["blocked_candidates"][0]
+    state = blocked["state_evidence"]
+    assert blocked["reason"] == "source_cycle_probe_failed"
+    assert state["decision"] == "blocked_retryable"
+    assert state["failure"]["classifier"] == "network_error"
+    assert state["failure"]["status"] == "probe_failed"
+    assert state["failure"]["reason_code"] == "SOURCE_CYCLE_PROBE_FAILED"
+    assert state["failure"]["retryable"] is True
+    assert state["failure"]["permanent"] is False
+    assert state["retry_policy"]["automatic_retry_allowed"] is True
+    assert state["storage"]["met_forecast_cycle_status_written"] is None
+    assert state["retry_policy"]["unsupported_db_enum_written"] is False
+    rendered = json.dumps(result.evidence)
+    assert "super-secret" not in rendered
+    assert "secret-signature" not in rendered
+    assert "password" not in rendered
+    assert "secret-access-key" not in rendered
+
+
+def test_probe_failed_cycle_does_not_consume_source_budget_or_rewrite_as_unavailable(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-06-08T12:00:00Z"), sources=("IFS",), max_cycles_per_source=1)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "IFS": FakeAdapter(
+                "IFS",
+                [
+                    (
+                        "2026-06-08T06:00:00Z",
+                        False,
+                        {
+                            "status": "probe_failed",
+                            "reason": "source_cycle_probe_failed",
+                            "classifier": "network_error",
+                            "retryable": True,
+                            "evidence": {
+                                "attempted_sources": [
+                                    {
+                                        "source": "aws",
+                                        "uri": "ecmwf-opendata://aws/ifs/2026060806/ifs.t06z.f000.2t.grib2",
+                                        "status": "probe_failed",
+                                        "error_class": "NetworkDownloadError",
+                                        "error_message": "temporary failure in name resolution",
+                                    }
+                                ]
+                            },
+                        },
+                    ),
+                    ("2026-06-08T00:00:00Z", True),
+                ],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    selected = next(item for item in result.evidence["source_cycles"] if item["cycle_id"] == "ifs_2026060800")
+    deferred = next(item for item in result.evidence["source_cycles"] if item["cycle_id"] == "ifs_2026060806")
+    assert selected["cycle_id"] == "ifs_2026060800"
+    assert result.evidence["candidates"][0]["cycle_id"] == "ifs_2026060800"
+    assert deferred["status"] == "probe_failed"
+    assert deferred["reason"] == "source_cycle_probe_failed"
+    assert deferred["classifier"] == "network_error"
+    assert deferred["selection_status"] == "not_selected"
+    assert deferred["selection_reason"] == "source_cycle_probe_failed_does_not_consume_source_budget"
+
+
+def test_rate_limited_cycle_does_not_consume_source_budget_or_rewrite_as_unavailable(tmp_path: Path) -> None:
+    config = _config(tmp_path, now=_dt("2026-06-08T12:00:00Z"), sources=("IFS",), max_cycles_per_source=1)
+    attempted_sources = [
+        {
+            "source": "aws",
+            "uri": "ecmwf-opendata://aws/ifs/2026060806/ifs.t06z.f000.2t.grib2",
+            "status": "rate_limited",
+            "error_class": "RateLimitedSourceError",
+            "error_message": "source mirror returned 429 Too Many Requests",
+        }
+    ]
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "IFS": FakeAdapter(
+                "IFS",
+                [
+                    (
+                        "2026-06-08T06:00:00Z",
+                        False,
+                        {
+                            "status": "rate_limited",
+                            "reason": "source_cycle_rate_limited",
+                            "classifier": "rate_limited",
+                            "retryable": True,
+                            "evidence": {
+                                "attempted_sources": attempted_sources,
+                                "attempted_source_count": 1,
+                                "emitted_attempt_count": 1,
+                                "attempted_source_limit": 8,
+                                "omitted_attempt_count": 0,
+                            },
+                        },
+                    ),
+                    ("2026-06-08T00:00:00Z", True),
+                ],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    selected = next(item for item in result.evidence["source_cycles"] if item["cycle_id"] == "ifs_2026060800")
+    deferred = next(item for item in result.evidence["source_cycles"] if item["cycle_id"] == "ifs_2026060806")
+    assert selected["cycle_id"] == "ifs_2026060800"
+    assert result.evidence["candidates"][0]["cycle_id"] == "ifs_2026060800"
+    assert deferred["status"] == "rate_limited"
+    assert deferred["reason"] == "source_cycle_rate_limited"
+    assert deferred["classifier"] == "rate_limited"
+    assert deferred["retryable"] is True
+    assert deferred["cycle_status_candidate"] == "rate_limited"
+    assert deferred["db_cycle_status_written"] is None
+    assert deferred["selection_status"] == "not_selected"
+    assert deferred["selection_reason"] == "source_cycle_rate_limited_does_not_consume_source_budget"
+    assert deferred["discovery_evidence"]["attempted_sources"] == attempted_sources
+
+
 @pytest.mark.parametrize("error_code", ["NODE_FAILURE", "OUT_OF_MEMORY"])
 def test_candidate_state_transient_runtime_failure_retries_failed_scope_with_reuse_evidence(
     tmp_path: Path,
@@ -7524,6 +7715,158 @@ def test_backfill_skips_unavailable_gap_and_selects_oldest_available_for_warm_st
     assert audit["unavailable_gap_count"] == 1
     assert audit["selected_count"] == 1
     assert audit["deferred_count"] == 1
+
+
+def test_backfill_probe_failed_gap_keeps_retryable_evidence_and_does_not_consume_budget(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-06-08T12:00:00Z"),
+        sources=("IFS",),
+        backfill_enabled=True,
+        max_cycles_per_source=8,
+    )
+    attempted_sources = [
+        {
+            "source": "aws",
+            "uri": "ecmwf-opendata://aws/ifs/2026060800/ifs.t00z.f000.2t.grib2",
+            "status": "probe_failed",
+            "error_class": "NetworkDownloadError",
+            "error_message": "temporary failure in name resolution",
+        }
+    ]
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "IFS": FakeAdapter(
+                "IFS",
+                [
+                    (
+                        "2026-06-08T00:00:00Z",
+                        False,
+                        {
+                            "status": "probe_failed",
+                            "reason": "source_cycle_probe_failed",
+                            "classifier": "network_error",
+                            "retryable": True,
+                            "evidence": {
+                                "attempted_sources": attempted_sources,
+                                "attempted_source_count": 1,
+                                "emitted_attempt_count": 1,
+                                "attempted_source_limit": 8,
+                                "omitted_attempt_count": 0,
+                            },
+                        },
+                    ),
+                    ("2026-06-08T06:00:00Z", True),
+                ],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    selected = next(
+        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060806"
+    )
+    probe_failed = next(
+        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060800"
+    )
+    assert selected["cycle_id"] == "ifs_2026060806"
+    assert result.evidence["candidates"][0]["cycle_id"] == "ifs_2026060806"
+    assert probe_failed["status"] == "probe_failed"
+    assert probe_failed["reason"] == "source_cycle_probe_failed"
+    assert probe_failed["classifier"] == "network_error"
+    assert probe_failed["retryable"] is True
+    assert probe_failed["cycle_status_candidate"] == "probe_failed"
+    assert probe_failed["db_cycle_status_written"] is None
+    assert probe_failed["selection_status"] == "not_selected"
+    assert probe_failed["selection_reason"] == "source_cycle_probe_failed_does_not_consume_source_budget"
+    assert probe_failed["discovery_evidence"]["attempted_sources"] == attempted_sources
+    assert probe_failed["discovery_evidence"]["attempted_source_count"] == 1
+    audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "IFS")
+    assert audit["gap_count"] == 2
+    assert audit["available_gap_count"] == 1
+    assert audit["unavailable_gap_count"] == 1
+    assert audit["selected_count"] == 1
+
+
+def test_backfill_rate_limited_gap_keeps_retryable_evidence_and_does_not_consume_budget(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-06-08T12:00:00Z"),
+        sources=("IFS",),
+        backfill_enabled=True,
+        max_cycles_per_source=8,
+    )
+    attempted_sources = [
+        {
+            "source": "aws",
+            "uri": "ecmwf-opendata://aws/ifs/2026060800/ifs.t00z.f000.2t.grib2",
+            "status": "rate_limited",
+            "error_class": "RateLimitedSourceError",
+            "error_message": "source mirror returned 429 Too Many Requests",
+        }
+    ]
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "IFS": FakeAdapter(
+                "IFS",
+                [
+                    (
+                        "2026-06-08T00:00:00Z",
+                        False,
+                        {
+                            "status": "rate_limited",
+                            "reason": "source_cycle_rate_limited",
+                            "classifier": "rate_limited",
+                            "retryable": True,
+                            "evidence": {
+                                "attempted_sources": attempted_sources,
+                                "attempted_source_count": 1,
+                                "emitted_attempt_count": 1,
+                                "attempted_source_limit": 8,
+                                "omitted_attempt_count": 0,
+                            },
+                        },
+                    ),
+                    ("2026-06-08T06:00:00Z", True),
+                ],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    selected = next(
+        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060806"
+    )
+    rate_limited = next(
+        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060800"
+    )
+    assert selected["cycle_id"] == "ifs_2026060806"
+    assert result.evidence["candidates"][0]["cycle_id"] == "ifs_2026060806"
+    assert rate_limited["status"] == "rate_limited"
+    assert rate_limited["reason"] == "source_cycle_rate_limited"
+    assert rate_limited["classifier"] == "rate_limited"
+    assert rate_limited["retryable"] is True
+    assert rate_limited["cycle_status_candidate"] == "rate_limited"
+    assert rate_limited["db_cycle_status_written"] is None
+    assert rate_limited["selection_status"] == "not_selected"
+    assert rate_limited["selection_reason"] == "source_cycle_rate_limited_does_not_consume_source_budget"
+    assert rate_limited["discovery_evidence"]["attempted_sources"] == attempted_sources
+    assert rate_limited["discovery_evidence"]["attempted_source_count"] == 1
+    audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "IFS")
+    assert audit["gap_count"] == 2
+    assert audit["available_gap_count"] == 1
+    assert audit["unavailable_gap_count"] == 1
+    assert audit["selected_count"] == 1
 
 
 def test_manual_retry_marker_override_helper_never_overrides_active_blocker() -> None:

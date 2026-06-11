@@ -25,6 +25,7 @@ IFSAdapter = ifs_module.IFSAdapter
 IFSAdapterConfig = ifs_module.IFSAdapterConfig
 CdoMissingError = ifs_module.CdoMissingError
 CdoClipError = ifs_module.CdoClipError
+NetworkDownloadError = ifs_module.NetworkDownloadError
 
 BBOX_ENV_VARS = (
     "NHMS_DOWNLOAD_BBOX_SOUTH",
@@ -331,6 +332,19 @@ def test_ifs_url_exists_false_when_file_unavailable(tmp_path: Path) -> None:
     adapter._client_for_source = lambda _source: _MissingClient()  # type: ignore[method-assign]
     url = adapter.remote_url("2026050100", forecast_hour=0, variable="2t")
     assert adapter._url_exists(url) is False
+
+
+def test_ifs_url_exists_raises_network_probe_failure(tmp_path: Path) -> None:
+    class _NetworkFailingClient:
+        def retrieve(self, **_kwargs: Any) -> None:
+            raise OSError("temporary failure in name resolution")
+
+    adapter = _ifs_adapter(tmp_path)
+    adapter._client_for_source = lambda _source: _NetworkFailingClient()  # type: ignore[method-assign]
+    url = adapter.remote_url("2026050100", forecast_hour=0, variable="2t")
+
+    with pytest.raises(NetworkDownloadError):
+        adapter._url_exists(url)
 
 
 def test_ifs_real_download_fails_loud_when_cdo_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -46,7 +46,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUN_ROOT = ROOT / ".nhms-runs" / "qhh-continuous"
 MODEL_ID = "basins_qhh_shud"
 TERMINAL_SUCCESS = {"frequency_done", "published", "already_done"}
-RETRYABLE_STATE = {"failed", "unavailable"}
+KNOWN_RETRYABLE_DOWNLOAD_STATE = {"probe_failed", "rate_limited", "unavailable"}
+RETRYABLE_STATE = {"failed", *KNOWN_RETRYABLE_DOWNLOAD_STATE}
 ACTIVE_STATE = {"submitted", "running"}
 SLURM_TERMINAL_SUCCESS = {"COMPLETED"}
 SLURM_TERMINAL_FAILURE = {
@@ -295,6 +296,22 @@ def _run_cycle(candidate: CandidateCycle, *, run_root: Path, state_file: Path) -
             _write_state(state_file, {**result, "finished_at": _now_iso()})
         return result
 
+    typed_state = _known_retryable_download_state(candidate, state)
+    if typed_state is not None:
+        result = {
+            "source_id": candidate.source_id,
+            "cycle_time": candidate.token,
+            "run_id": candidate.run_id,
+            "status": typed_state["status"],
+            "returncode": completed.returncode,
+            "elapsed_seconds": elapsed_seconds,
+        }
+        for key in ("reason", "classifier", "retryable"):
+            if key in typed_state:
+                result[key] = typed_state[key]
+        _write_state(state_file, {**state, **result, "finished_at": _now_iso()})
+        return result
+
     result = {
         "source_id": candidate.source_id,
         "cycle_time": candidate.token,
@@ -305,6 +322,18 @@ def _run_cycle(candidate: CandidateCycle, *, run_root: Path, state_file: Path) -
     }
     _write_state(state_file, {**result, "finished_at": _now_iso()})
     return result
+
+
+def _known_retryable_download_state(candidate: CandidateCycle, state: Mapping[str, Any]) -> dict[str, Any] | None:
+    status = str(state.get("status") or "")
+    if status not in KNOWN_RETRYABLE_DOWNLOAD_STATE:
+        return None
+    if state.get("source_id") != candidate.source_id or state.get("cycle_time") != candidate.token:
+        return None
+    retryable = state.get("retryable")
+    if isinstance(retryable, str) and retryable.strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    return dict(state)
 
 
 def _submit_slurm_cycle(

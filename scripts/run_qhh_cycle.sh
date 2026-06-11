@@ -257,6 +257,42 @@ print(status)
 PY
 }
 
+last_json_field() {
+  local path="$1"
+  local field="$2"
+  uv run python - "$path" "$field" <<'PY'
+import json
+import sys
+
+path, field = sys.argv[1:3]
+payload = {}
+for line in open(path, encoding="utf-8"):
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        parsed = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if isinstance(parsed, dict):
+        payload = parsed
+
+value = payload
+for part in field.split("."):
+    if not isinstance(value, dict):
+        value = None
+        break
+    value = value.get(part)
+
+if value is None:
+    print("")
+elif isinstance(value, bool):
+    print("true" if value else "false")
+else:
+    print(str(value))
+PY
+}
+
 prepare_database_url() {
   if [[ -n "${DATABASE_URL:-}" ]]; then
     export DATABASE_URL
@@ -410,9 +446,13 @@ if [[ "$FORCING_DONE" == "1" || "$CANONICAL_DONE" == "1" ]]; then
   json_status "$CYCLE_ROOT/download.stdout.json" "already_done" "raw download already complete" \
     "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME"
 else
+  DOWNLOAD_EXIT=0
   if [[ "$SOURCE_ID" == "IFS" ]]; then
     log "downloading IFS cycle $CYCLE_TIME"
+    set +e
     uv run nhms-ifs download --cycle-time "$CYCLE_TIME" | tee "$CYCLE_ROOT/download.stdout.json"
+    DOWNLOAD_EXIT="${PIPESTATUS[0]}"
+    set -e
   else
     log "downloading GFS cycle $CYCLE_TIME for forecast hours $GFS_FORECAST_START_HOUR-$GFS_FORECAST_END_HOUR"
     uv run nhms-gfs download --source-id "$SOURCE_ID" --cycle-time "$CYCLE_TIME" | tee "$CYCLE_ROOT/download.stdout.json"
@@ -424,6 +464,20 @@ else
     json_status "$STATE_FILE" "unavailable" "source cycle is not available" \
       "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME" "run_id=$RUN_ID"
     exit 0
+  fi
+  if [[ "$DOWNLOAD_STATUS" == "probe_failed" || "$DOWNLOAD_STATUS" == "rate_limited" ]]; then
+    DOWNLOAD_REASON="$(last_json_field "$CYCLE_ROOT/download.stdout.json" reason)"
+    DOWNLOAD_CLASSIFIER="$(last_json_field "$CYCLE_ROOT/download.stdout.json" classifier)"
+    DOWNLOAD_RETRYABLE="$(last_json_field "$CYCLE_ROOT/download.stdout.json" retryable)"
+    log "$SOURCE_ID cycle $CYCLE_TIME $DOWNLOAD_STATUS; downstream stages skipped"
+    json_status "$STATE_FILE" "$DOWNLOAD_STATUS" "${DOWNLOAD_REASON:-source cycle is retryable but blocked}" \
+      "source_id=$SOURCE_ID" "cycle_time=$CYCLE_TIME" "run_id=$RUN_ID" \
+      "classifier=${DOWNLOAD_CLASSIFIER:-$DOWNLOAD_STATUS}" "retryable=${DOWNLOAD_RETRYABLE:-true}"
+    exit 0
+  fi
+  if (( DOWNLOAD_EXIT != 0 )); then
+    log "$SOURCE_ID cycle $CYCLE_TIME download failed with exit $DOWNLOAD_EXIT"
+    exit "$DOWNLOAD_EXIT"
   fi
 fi
 

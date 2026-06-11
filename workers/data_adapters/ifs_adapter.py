@@ -61,6 +61,8 @@ IFS_FALLBACK_SOURCES: tuple[str, ...] = ("aws", "azure", "google", "ecmwf")
 IFS_TERMINAL_FALLBACK_SOURCE = "ecmwf"
 IFS_DEFAULT_FORECAST_RESOLUTION_SEGMENTS: tuple[tuple[int, int], ...] = ((144, 3), (360, 6))
 CDO_CLIP_TIMEOUT_SECONDS = 300
+IFS_DISCOVERY_ATTEMPT_LIMIT = 8
+IFS_DISCOVERY_TEXT_LIMIT = 512
 
 # Process-local per-source rate-limit cooldown table: source -> clock() epoch until
 # which the source must be skipped. Not persisted across processes (future work).
@@ -380,6 +382,7 @@ class IFSAdapter(DataSourceAdapter):
                 reason = availability["reason"]
                 classifier = availability["classifier"]
                 retryable = availability["retryable"]
+                evidence = self._discovery_evidence(remote_url, availability)
 
                 discovery = CycleDiscovery(
                     cycle_id=cycle_id,
@@ -392,17 +395,7 @@ class IFSAdapter(DataSourceAdapter):
                     classifier=classifier,
                     retryable=retryable,
                     probe_uri=self._safe_text(remote_url),
-                    evidence={
-                        "source": self.config.source_id,
-                        "probe": {
-                            "uri": self._safe_text(remote_url),
-                            "forecast_hour": 0,
-                            "variable": self.config.variables[0],
-                            "preferred_source": self.config.preferred_source,
-                            "source": availability["source"],
-                        },
-                        "attempted_sources": availability["attempted_sources"],
-                    },
+                    evidence=evidence,
                 )
                 discoveries.append(discovery)
 
@@ -424,15 +417,19 @@ class IFSAdapter(DataSourceAdapter):
         return discoveries
 
     def _discover_cycle_availability(self, cycle_time: datetime) -> dict[str, Any]:
-        attempted_sources: list[str] = []
+        attempted_sources: list[dict[str, Any]] = []
         first_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0])
         last_url = first_url
+        last_source = self.config.preferred_source
+        last_probe_failed_url: str | None = None
+        last_probe_failed_source: str | None = None
         for source in self.config.sources():
             remote_url = self.remote_url(cycle_time, forecast_hour=0, variable=self.config.variables[0], source=source)
             last_url = remote_url
-            attempted_sources.append(source)
+            last_source = source
             try:
                 if self.availability_checker(remote_url):
+                    attempted_sources.append(self._probe_attempt(source, remote_url, status="discovered"))
                     return {
                         "available": True,
                         "status": "discovered",
@@ -440,15 +437,17 @@ class IFSAdapter(DataSourceAdapter):
                         "classifier": None,
                         "retryable": None,
                         "probe_uri": remote_url,
-                        "source": source,
+                        "source": self._safe_source_label(source),
                         "attempted_sources": attempted_sources,
                     }
-            except ForbiddenSourceError:
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="unavailable"))
+            except ForbiddenSourceError as error:
                 LOGGER.warning(
                     "IFS availability check was forbidden for %s",
                     self._safe_text(remote_url),
                     exc_info=True,
                 )
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="forbidden", error=error))
                 return {
                     "available": False,
                     "status": "forbidden",
@@ -456,12 +455,58 @@ class IFSAdapter(DataSourceAdapter):
                     "classifier": "forbidden",
                     "retryable": False,
                     "probe_uri": remote_url,
-                    "source": source,
+                    "source": self._safe_source_label(source),
                     "attempted_sources": attempted_sources,
                 }
-            except Exception:
-                LOGGER.warning("Failed to check IFS availability for %s", self._safe_text(remote_url), exc_info=True)
+            except FileUnavailableError as error:
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="unavailable", error=error))
                 continue
+            except RateLimitedError as error:
+                LOGGER.warning("IFS availability check was rate limited for %s", self._safe_text(remote_url))
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="rate_limited", error=error))
+                continue
+            except IFSAdapterError as error:
+                LOGGER.warning("IFS availability probe failed for %s", self._safe_text(remote_url), exc_info=True)
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="probe_failed", error=error))
+                last_probe_failed_url = remote_url
+                last_probe_failed_source = source
+                continue
+            except (URLError, TimeoutError, OSError) as error:
+                LOGGER.warning("IFS availability probe failed for %s", self._safe_text(remote_url), exc_info=True)
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="probe_failed", error=error))
+                last_probe_failed_url = remote_url
+                last_probe_failed_source = source
+                continue
+            except Exception as error:
+                LOGGER.warning("Failed to check IFS availability for %s", self._safe_text(remote_url), exc_info=True)
+                attempted_sources.append(self._probe_attempt(source, remote_url, status="probe_failed", error=error))
+                last_probe_failed_url = remote_url
+                last_probe_failed_source = source
+                continue
+
+        if any(attempt.get("status") == "probe_failed" for attempt in attempted_sources):
+            return {
+                "available": False,
+                "status": "probe_failed",
+                "reason": "source_cycle_probe_failed",
+                "classifier": "network_error",
+                "retryable": True,
+                "probe_uri": last_probe_failed_url or last_url,
+                "source": self._safe_source_label(last_probe_failed_source or last_source),
+                "attempted_sources": attempted_sources,
+            }
+
+        if any(attempt.get("status") == "rate_limited" for attempt in attempted_sources):
+            return {
+                "available": False,
+                "status": "rate_limited",
+                "reason": "source_cycle_rate_limited",
+                "classifier": "rate_limited",
+                "retryable": True,
+                "probe_uri": last_url,
+                "source": self._safe_source_label(last_source),
+                "attempted_sources": attempted_sources,
+            }
 
         return {
             "available": False,
@@ -470,8 +515,69 @@ class IFSAdapter(DataSourceAdapter):
             "classifier": "unavailable",
             "retryable": True,
             "probe_uri": last_url,
-            "source": attempted_sources[-1] if attempted_sources else self.config.preferred_source,
+            "source": self._safe_source_label(last_source),
             "attempted_sources": attempted_sources,
+        }
+
+    def _probe_attempt(
+        self,
+        source: str,
+        remote_url: str,
+        *,
+        status: str,
+        error: BaseException | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "source": self._safe_source_label(source),
+            "uri": self._bounded_safe_text(remote_url),
+            "status": status,
+            "error_class": type(error).__name__ if error is not None else None,
+            "error_message": self._bounded_safe_text(str(error)) if error is not None else None,
+        }
+
+    def _discovery_evidence(self, remote_url: object, availability: Mapping[str, Any]) -> dict[str, Any]:
+        attempts = self._bounded_attempted_sources(availability.get("attempted_sources"))
+        return {
+            "source": self.config.source_id,
+            "probe": {
+                "uri": self._bounded_safe_text(remote_url),
+                "forecast_hour": 0,
+                "variable": self.config.variables[0],
+                "preferred_source": self._safe_source_label(self.config.preferred_source),
+                "source": self._safe_source_label(str(availability.get("source") or "")),
+            },
+            "attempted_sources": attempts["items"],
+            "attempted_source_count": attempts["total_attempted_count"],
+            "emitted_attempt_count": attempts["emitted_attempt_count"],
+            "attempted_source_limit": attempts["emitted_attempt_limit"],
+            "omitted_attempt_count": attempts["omitted_attempt_count"],
+        }
+
+    def _bounded_attempted_sources(self, raw_attempts: object) -> dict[str, Any]:
+        attempts = raw_attempts if isinstance(raw_attempts, list) else []
+        total_count = len(attempts)
+        emitted_attempts: list[dict[str, Any]] = []
+        for raw_attempt in attempts[:IFS_DISCOVERY_ATTEMPT_LIMIT]:
+            attempt = raw_attempt if isinstance(raw_attempt, Mapping) else {}
+            emitted_attempts.append(
+                {
+                    "source": self._safe_source_label(str(attempt.get("source") or "")),
+                    "uri": self._bounded_safe_text(attempt.get("uri") or ""),
+                    "status": self._bounded_safe_text(attempt.get("status") or ""),
+                    "error_class": self._bounded_safe_text(attempt.get("error_class") or "")
+                    if attempt.get("error_class") is not None
+                    else None,
+                    "error_message": self._bounded_safe_text(attempt.get("error_message") or "")
+                    if attempt.get("error_message") is not None
+                    else None,
+                }
+            )
+        return {
+            "items": emitted_attempts,
+            "total_attempted_count": total_count,
+            "emitted_attempt_count": len(emitted_attempts),
+            "emitted_attempt_limit": IFS_DISCOVERY_ATTEMPT_LIMIT,
+            "omitted_attempt_count": max(total_count - len(emitted_attempts), 0),
         }
 
     def build_manifest(
@@ -1268,14 +1374,11 @@ class IFSAdapter(DataSourceAdapter):
             return True
         except FileUnavailableError:
             return False
-        except RateLimitedError:
-            LOGGER.warning("IFS availability check was rate limited for %s", self._safe_text(remote_url))
-            return False
         except ForbiddenSourceError:
             raise
         except IFSAdapterError:
             LOGGER.warning("IFS availability check failed for %s", self._safe_text(remote_url), exc_info=True)
-            return False
+            raise
 
     def _client_for_source(self, source: str) -> Any:
         try:
@@ -1389,6 +1492,26 @@ class IFSAdapter(DataSourceAdapter):
 
     def _safe_text(self, value: object) -> str:
         return str(redact_payload(str(value)))
+
+    def _bounded_safe_text(self, value: object, *, limit: int = IFS_DISCOVERY_TEXT_LIMIT) -> str:
+        safe = self._safe_text(value)
+        if len(safe) <= limit:
+            return safe
+        omitted = len(safe) - limit
+        while True:
+            suffix = f"...[truncated {omitted} chars]"
+            prefix_length = max(limit - len(suffix), 0)
+            adjusted_omitted = len(safe) - prefix_length
+            if adjusted_omitted == omitted:
+                return f"{safe[:prefix_length]}{suffix}" if prefix_length else suffix[-limit:]
+            omitted = adjusted_omitted
+
+    def _safe_source_label(self, source: str) -> str:
+        safe_url = self._safe_text(f"ecmwf-opendata://{source}/")
+        parsed = urlparse(safe_url)
+        if parsed.netloc:
+            return parsed.netloc
+        return self._safe_text(source)
 
     def _source_object_entry_identities(
         self,

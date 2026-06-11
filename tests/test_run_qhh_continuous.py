@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 import signal
 import subprocess
+import sys
 from argparse import Namespace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -632,3 +635,221 @@ def test_run_pass_resubmits_deadline_slurm_job(tmp_path: Path, monkeypatch: pyte
 
     assert submissions == ["submitted"]
     assert summary["results"][0]["slurm_job_id"] == "6000"
+
+
+def test_local_runner_preserves_typed_probe_failed_state_on_nonzero_cycle_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = runner.CandidateCycle("IFS", datetime(2026, 6, 8, 0, tzinfo=UTC))
+    state_file = runner._state_file(tmp_path / "state", candidate)
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        assert command[-1].endswith("run_qhh_cycle.sh")
+        runner._write_state(
+            state_file,
+            {
+                "status": "probe_failed",
+                "reason": "source_cycle_probe_failed",
+                "classifier": "network_error",
+                "retryable": True,
+                "source_id": "IFS",
+                "cycle_time": "2026060800",
+                "run_id": candidate.run_id,
+            },
+        )
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    result = runner._run_cycle(candidate, run_root=tmp_path, state_file=state_file)
+    state = runner._read_json(state_file)
+
+    assert result["status"] == "probe_failed"
+    assert result["reason"] == "source_cycle_probe_failed"
+    assert result["classifier"] == "network_error"
+    assert result["retryable"] is True
+    assert result["returncode"] == 1
+    assert state["status"] == "probe_failed"
+    assert state["reason"] == "source_cycle_probe_failed"
+    assert state["classifier"] == "network_error"
+    assert state["retryable"] is True
+    assert state["finished_at"]
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "classifier"),
+    [
+        ("probe_failed", "source_cycle_probe_failed", "network_error"),
+        ("rate_limited", "source_cycle_rate_limited", "rate_limited"),
+    ],
+)
+def test_run_qhh_cycle_exits_zero_and_preserves_typed_ifs_download_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    reason: str,
+    classifier: str,
+) -> None:
+    run_root = tmp_path / "run-root"
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    uv_stub = stub_bin / "uv"
+    command_log = tmp_path / "uv-commands.jsonl"
+    cycle_token = "2026060800"
+    run_id = "fcst_ifs_2026060800_basins_qhh_shud"
+    uv_stub.write_text(
+        f"#!{sys.executable}\n"
+        "import json\n"
+        "import os\n"
+        "import subprocess\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "\n"
+        "args = sys.argv[1:]\n"
+        "log_path = Path(os.environ['UV_STUB_COMMAND_LOG'])\n"
+        "with log_path.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(args) + '\\n')\n"
+        "if args[:2] != ['run', 'python']:\n"
+        "    if args[:3] == ['run', 'nhms-model', 'discover-basins']:\n"
+        "        output = Path(args[args.index('--output') + 1])\n"
+        "        output.parent.mkdir(parents=True, exist_ok=True)\n"
+        "        output.write_text('{\"basins\": []}\\n', encoding='utf-8')\n"
+        "        print('{\"status\":\"ok\",\"command\":\"discover-basins\"}')\n"
+        "        raise SystemExit(0)\n"
+        "    if args[:3] == ['run', 'nhms-model', 'publish-basins']:\n"
+        "        output = Path(args[args.index('--output') + 1])\n"
+        "        output.parent.mkdir(parents=True, exist_ok=True)\n"
+        "        output.write_text(\n"
+        "            '{\"model_package_uri\":\"s3://nhms/qhh/package\",\"package_checksum\":\"stub\"}\\n',\n"
+        "            encoding='utf-8',\n"
+        "        )\n"
+        "        print('{\"status\":\"ok\",\"command\":\"publish-basins\"}')\n"
+        "        raise SystemExit(0)\n"
+        "    if args[:3] == ['run', 'nhms-model', 'import-basins-registry']:\n"
+        "        output = Path(args[args.index('--output') + 1])\n"
+        "        output.parent.mkdir(parents=True, exist_ok=True)\n"
+        "        output.write_text('{\"status\":\"ok\"}\\n', encoding='utf-8')\n"
+        "        print('{\"status\":\"ok\",\"command\":\"import-basins-registry\"}')\n"
+        "        raise SystemExit(0)\n"
+        "    if args[:3] == ['run', 'nhms-ifs', 'download']:\n"
+        "        print(json.dumps({\n"
+        "            'status': os.environ['IFS_DOWNLOAD_STATUS'],\n"
+        "            'reason': os.environ['IFS_DOWNLOAD_REASON'],\n"
+        "            'classifier': os.environ['IFS_DOWNLOAD_CLASSIFIER'],\n"
+        "            'retryable': True,\n"
+        "            'source_id': 'IFS',\n"
+        "            'cycle_time': os.environ['QHH_CYCLE_TIME'],\n"
+        "            'files': 0,\n"
+        "            'total_bytes_written': 0,\n"
+        "        }, sort_keys=True))\n"
+        "        raise SystemExit(9)\n"
+        "    print(json.dumps({'status': 'unexpected_command', 'args': args}), file=sys.stderr)\n"
+        "    raise SystemExit(17)\n"
+        "\n"
+        "script_index = 2\n"
+        "script_args = args[script_index:]\n"
+        "if script_args and script_args[0] == '-':\n"
+        "    code = sys.stdin.read()\n"
+        "    if 'normalize_source_id' in code:\n"
+        "        source = script_args[1]\n"
+        "        print('IFS' if source.lower() == 'ifs' else source.lower())\n"
+        "        raise SystemExit(0)\n"
+        "    if 'print(sys.argv[1].lower())' in code:\n"
+        "        print(script_args[1].lower())\n"
+        "        raise SystemExit(0)\n"
+        "    if 'psycopg2.connect' in code:\n"
+        "        if 'SELECT status FROM hydro.hydro_run' in code:\n"
+        "            print('')\n"
+        "        elif 'SELECT model_package_uri, resource_profile' in code:\n"
+        "            print('1')\n"
+        "        elif 'SELECT 1 FROM met.canonical_met_product' in code:\n"
+        "            print('0')\n"
+        "        elif 'SELECT 1 FROM met.forcing_version' in code:\n"
+        "            print('0')\n"
+        "        raise SystemExit(0)\n"
+        "    raise SystemExit(subprocess.run([sys.executable, *script_args], input=code, text=True).returncode)\n"
+        "script = script_args[0]\n"
+        "if script.endswith('apply_smoke_migrations.py'):\n"
+        "    print('{\"status\":\"ok\",\"command\":\"apply_smoke_migrations\"}')\n"
+        "elif script.endswith('seed_qhh_forcing_stations.py'):\n"
+        "    print('{\"status\":\"ok\",\"command\":\"seed_qhh_forcing_stations\"}')\n"
+        "elif script.endswith('seed_qhh_shud_output_segments.py'):\n"
+        "    print('{\"status\":\"ok\",\"command\":\"seed_qhh_shud_output_segments\"}')\n"
+        "else:\n"
+        "    print(json.dumps({'status': 'unexpected_python_script', 'args': args}), file=sys.stderr)\n"
+        "    raise SystemExit(18)\n"
+        "\n",
+        encoding="utf-8",
+    )
+    uv_stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("UV_STUB_COMMAND_LOG", str(command_log))
+    monkeypatch.setenv("IFS_DOWNLOAD_STATUS", status)
+    monkeypatch.setenv("IFS_DOWNLOAD_REASON", reason)
+    monkeypatch.setenv("IFS_DOWNLOAD_CLASSIFIER", classifier)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "DATABASE_URL": "postgresql://nhms:secret@db.example/nhms",
+            "NHMS_BASINS_ROOT": str(tmp_path / "Basins"),
+            "OBJECT_STORE_PREFIX": "s3://nhms",
+            "OBJECT_STORE_ROOT": str(run_root / "object-store"),
+            "QHH_AUTO_START_PG": "0",
+            "QHH_CYCLE_TIME": cycle_token,
+            "QHH_IFS_FORECAST_END_HOUR": "9",
+            "QHH_IFS_FORECAST_START_HOUR": "3",
+            "QHH_MODEL_OUTPUT_INTERVAL": "10",
+            "QHH_RUN_ID": run_id,
+            "QHH_RUN_ROOT": str(run_root),
+            "QHH_SKIP_COMPLETED": "1",
+            "QHH_SOURCE_ID": "IFS",
+            "QHH_USE_SMOKE_MIGRATIONS": "1",
+        }
+    )
+
+    completed = subprocess.run(
+        [str(runner.ROOT / "scripts" / "run_qhh_cycle.sh")],
+        cwd=runner.ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    state_file = run_root / "state" / "cycles" / "ifs" / f"{cycle_token}.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    commands = [
+        json.loads(line)
+        for line in command_log.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert completed.returncode == 0, completed.stderr
+    assert state["status"] == status
+    assert state["reason"] == reason
+    assert state["classifier"] == classifier
+    assert state["retryable"] == "true"
+    assert state["source_id"] == "IFS"
+    assert state["cycle_time"] == cycle_token
+    assert state["run_id"] == run_id
+    assert any(command[:3] == ["run", "nhms-ifs", "download"] for command in commands)
+    assert not any(command[:2] == ["run", "nhms-canonical"] for command in commands)
+    assert not any(command[:2] == ["run", "nhms-forcing"] for command in commands)
+    assert not any(command[:2] == ["run", "nhms-shud-runtime"] for command in commands)
+    assert not any(command[:2] == ["run", "nhms-parse"] for command in commands)
+    assert "downstream stages skipped" in completed.stdout
+
+
+def test_probe_failed_state_is_known_retryable_and_not_skipped_when_retry_enabled() -> None:
+    state = {
+        "status": "probe_failed",
+        "reason": "source_cycle_probe_failed",
+        "classifier": "network_error",
+        "retryable": True,
+        "source_id": "gfs",
+        "cycle_time": "2026052106",
+    }
+
+    assert runner._skip_reason(_candidate(), state, executor="local") is None
