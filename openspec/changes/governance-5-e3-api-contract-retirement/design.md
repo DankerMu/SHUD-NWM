@@ -120,3 +120,63 @@ Review focus:
 - Consumer matrix does not miss generated types, tests, docs, or frontend display/bootstrap users.
 - Status labels do not confuse active compatibility with dead code.
 - Follow-up issues map backend, node-27 frontend, OpenAPI/type sync, and removal/defer decisions without doing them in this slice.
+
+### #412 API replacement and deprecation policy slice
+
+Fixture level: expanded
+
+Project profile: NHMS
+
+Change surface:
+
+- Deprecation and compatibility policy document for #411 inventory candidates.
+- E3 OpenSpec task/evidence rows only.
+
+Must preserve:
+
+- No endpoint deletion, deprecation headers, response metadata, OpenAPI contraction, generated type regeneration, frontend/node-27 implementation, backend migration, runtime code, tests, or CI changes.
+- #411 inventory remains the candidate source of truth.
+- Current active contracts remain active until migration evidence exists.
+
+Must add/change:
+
+- For every #411 candidate, record a policy decision: retain compatibility, migrate consumers first, docs-only cleanup, or explicit deferral.
+- Define migration order and rollback expectations for current consumers.
+- Decide whether deprecation metadata is appropriate now, later, or never.
+- Produce follow-up-ready guidance for #413 backend consumers, #414 node-27 frontend consumers, #415 OpenAPI/type/docs sync, and #416 removal/defer decision.
+
+Risk packs considered for #412:
+
+- Public API / CLI / script entry: selected - policy governs public HTTP contracts even though this slice does not change them.
+- Config / project setup: not selected - no runtime config changes.
+- File IO / path safety / overwrite: not selected - docs-only change.
+- Schema / columns / units / field names: selected - policy constrains future route/query/response/OpenAPI changes.
+- Auth / permissions / secrets: not selected - no auth or credential surface.
+- Concurrency / shared state / ordering: not selected - no runtime state transition.
+- Resource limits / large input / discovery: selected - policy must not overclaim repository inventory as external-consumer proof.
+- Legacy compatibility / examples: selected - core policy surface.
+- Error handling / rollback / partial outputs: selected - policy defines rollback and compatibility expectations.
+- Release / packaging / dependency compatibility: not selected - no package/dependency changes.
+- Documentation / migration notes: selected - issue output is a governance policy document.
+- Published NHMS artifacts / display identity: selected - latest-product policy protects display/bootstrap identity.
+- Other NHMS domain packs: not selected - no hydro-met computation, geospatial, SHUD, Slurm, provider, or DB runtime behavior changes.
+
+Required #412 evidence:
+
+- Policy document covers all #411 candidate rows.
+- Policy document states no current endpoint is deprecated or removal-ready in #412.
+- Policy document maps follow-up responsibilities to #413/#414/#415/#416 and defines rollback expectations.
+- OpenSpec validation and Markdown lint pass.
+
+Non-goals for #412:
+
+- No implementation migration.
+- No API, OpenAPI, generated type, frontend, backend runtime, test, CI, or live-receipt changes.
+- No external user inventory beyond noting the unresolved external-consumer risk.
+
+Review focus:
+
+- Every #411 candidate has a concrete policy decision and follow-up issue.
+- Deprecation metadata timing is conservative and does not mark active contracts deprecated prematurely.
+- Rollback guidance is actionable for later implementation issues.
+- Policy does not require node-27/frontend work on this node.
