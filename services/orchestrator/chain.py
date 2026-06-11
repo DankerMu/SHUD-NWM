@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
+from urllib.parse import urlparse
 
 import httpx
 
@@ -70,6 +71,8 @@ TERMINAL_JOB_STATUSES = {
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running"}
 COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "frequency_done", "published", "complete"}
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
+FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+RAW_MANIFEST_READY_CYCLE_STATUSES = {"raw_complete", "canonical_ready", "forcing_ready", "complete", "published"}
 ANALYSIS_SOURCE_ID = "ERA5"
 ANALYSIS_SCENARIO_ID = "analysis_true_field"
 # ERA5 reanalysis is published with a multi-day production delay; the analysis
@@ -5162,6 +5165,17 @@ class PsycopgOrchestratorRepository:
         )
         if hydro_run is None and not jobs and forcing_version is None and forecast_cycle is None:
             return None
+        source_cycle_download_state = _source_cycle_download_repair_state(
+            jobs,
+            events,
+            forecast_cycle=forecast_cycle,
+            source_id=source_id,
+            cycle_time=cycle_time,
+            cycle_id=cycle_id,
+            cycle_run_id=cycle_run_id,
+        )
+        if source_cycle_download_state.get("annotated_jobs"):
+            jobs = list(source_cycle_download_state["annotated_jobs"])
         candidate_jobs = [job for job in jobs if _job_belongs_to_candidate(job, run_id=run_id, model_id=model_id)]
         failed_task = _candidate_failed_task_from_events(
             events,
@@ -5178,9 +5192,10 @@ class PsycopgOrchestratorRepository:
             and latest_job.get("model_id") in (None, "")
         )
         latest_status = str(latest_job.get("status") or "")
+        latest_job_repaired = _pipeline_job_is_repaired_stage_evidence(latest_job)
         latest_failed_job = (
             latest_job
-            if latest_status in {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+            if latest_status in FAILED_PIPELINE_STATUSES and not latest_job_repaired
             else {}
         )
         latest_shared_cycle_success = bool(
@@ -5189,7 +5204,8 @@ class PsycopgOrchestratorRepository:
         )
         latest_shared_cycle_failure = bool(
             latest_shared_cycle_aggregate
-            and latest_status in {"failed", "submission_failed", "partially_failed", "permanently_failed"}
+            and latest_status in FAILED_PIPELINE_STATUSES
+            and not latest_job_repaired
             and failed_task is None
         )
         exposed_latest_job = {} if latest_shared_cycle_success or latest_shared_cycle_failure else latest_job
@@ -5203,8 +5219,24 @@ class PsycopgOrchestratorRepository:
         elif latest_shared_cycle_success or latest_shared_cycle_failure:
             pipeline_status = None
             latest_failed_job = {}
+        active_source_cycle_failure = source_cycle_download_state.get("active_failure_job")
+        repaired_stage_evidence = source_cycle_download_state.get("repaired_stage_evidence")
+        if failed_task is None and not candidate_jobs and isinstance(active_source_cycle_failure, Mapping):
+            latest_failed_job = dict(active_source_cycle_failure)
+            exposed_latest_job = latest_failed_job
+            pipeline_status = latest_failed_job.get("status")
+            latest_shared_cycle_failure = False
+        elif failed_task is None and not candidate_jobs and isinstance(repaired_stage_evidence, Mapping):
+            latest_failed_job = {}
+            exposed_latest_job = {}
+            pipeline_status = None
+            latest_shared_cycle_failure = False
+            latest_shared_cycle_success = False
         successful_siblings = _successful_sibling_task_count(events, model_id=model_id)
-        return {
+        retry_count_jobs = relevant_jobs
+        if not retry_count_jobs:
+            retry_count_jobs = list(source_cycle_download_state.get("retry_count_jobs") or [])
+        state = {
             "candidate_id": candidate_id,
             "run_id": run_id,
             "forcing_version_id": forcing_version_id,
@@ -5238,12 +5270,15 @@ class PsycopgOrchestratorRepository:
             "error_message": (failed_task or {}).get("error_message")
             or latest_failed_job.get("error_message")
             or exposed_latest_job.get("error_message"),
-            "retry_count": max((int(job.get("retry_count") or 0) for job in relevant_jobs), default=0),
+            "retry_count": max((int(job.get("retry_count") or 0) for job in retry_count_jobs), default=0),
             "successful_sibling_outputs_reused": successful_siblings > 0,
             "successful_sibling_task_count": successful_siblings,
             "shared_cycle_aggregate": latest_shared_cycle_aggregate,
             "shared_cycle_ambiguous_failure": latest_shared_cycle_failure,
         }
+        if isinstance(repaired_stage_evidence, Mapping):
+            state["repaired_stage_evidence"] = dict(repaired_stage_evidence)
+        return state
 
     def active_slurm_jobs(
         self,
@@ -6143,6 +6178,297 @@ def _status_from_gateway_job(job: Mapping[str, Any]) -> str:
     value = getattr(status, "value", status)
     normalized = str(value)
     return "pending" if normalized == "submitted" else normalized
+
+
+def _source_cycle_download_repair_state(
+    jobs: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
+    *,
+    forecast_cycle: Mapping[str, Any] | None,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+    cycle_run_id: str,
+) -> dict[str, Any]:
+    source_cycle_jobs = [
+        dict(job)
+        for job in jobs
+        if _is_source_cycle_download_job(job, cycle_id=cycle_id, cycle_run_id=cycle_run_id)
+    ]
+    if not source_cycle_jobs:
+        return {}
+
+    failed_jobs = [
+        job
+        for job in source_cycle_jobs
+        if str(job.get("status") or "") in FAILED_PIPELINE_STATUSES
+    ]
+    if not failed_jobs:
+        return {"retry_count_jobs": source_cycle_jobs}
+
+    manifest_binding = _source_cycle_raw_manifest_binding(
+        forecast_cycle,
+        source_id=source_id,
+        cycle_time=cycle_time,
+        cycle_id=cycle_id,
+    )
+    repaired_by_failed_job_id: dict[str, dict[str, Any]] = {}
+    if manifest_binding is not None:
+        for failed_job in failed_jobs:
+            repair = _linked_successful_source_cycle_retry(
+                failed_job,
+                source_cycle_jobs,
+                events,
+                cycle_id=cycle_id,
+                cycle_run_id=cycle_run_id,
+            )
+            if repair is not None:
+                repaired_by_failed_job_id[str(failed_job["job_id"])] = {
+                    "failed_job": failed_job,
+                    "retry_job": repair["retry_job"],
+                    "event": repair["event"],
+                    "manifest_binding": manifest_binding,
+                }
+
+    unrepaired_failed_jobs = [
+        job
+        for job in failed_jobs
+        if str(job.get("job_id") or "") not in repaired_by_failed_job_id
+    ]
+    annotated_jobs = _annotated_source_cycle_repair_jobs(jobs, repaired_by_failed_job_id)
+    payload: dict[str, Any] = {"retry_count_jobs": source_cycle_jobs}
+    if annotated_jobs is not None:
+        payload["annotated_jobs"] = annotated_jobs
+    if unrepaired_failed_jobs:
+        payload["active_failure_job"] = max(unrepaired_failed_jobs, key=_pipeline_job_truth_sort_key)
+        return payload
+    latest_repair = max(
+        repaired_by_failed_job_id.values(),
+        key=lambda item: _pipeline_job_truth_sort_key(item["retry_job"]),
+    )
+    payload["repaired_stage_evidence"] = _source_cycle_repaired_stage_evidence(
+        latest_repair["failed_job"],
+        latest_repair["retry_job"],
+        latest_repair["event"],
+        latest_repair["manifest_binding"],
+        source_id=source_id,
+        cycle_time=cycle_time,
+        cycle_id=cycle_id,
+    )
+    return payload
+
+
+def _is_source_cycle_download_job(
+    job: Mapping[str, Any],
+    *,
+    cycle_id: str,
+    cycle_run_id: str,
+) -> bool:
+    if str(job.get("cycle_id") or "") != cycle_id:
+        return False
+    if str(job.get("run_id") or "") != cycle_run_id:
+        return False
+    if job.get("model_id") not in (None, ""):
+        return False
+    return _job_has_source_cycle_download_stage(job)
+
+
+def _job_has_source_cycle_download_stage(job: Mapping[str, Any]) -> bool:
+    stage = str(job.get("stage") or "")
+    job_type = str(job.get("job_type") or "")
+    return job_type == "download_source_cycle" or stage in {"download", "download_source_cycle", "download_gfs"}
+
+
+def _source_cycle_raw_manifest_binding(
+    forecast_cycle: Mapping[str, Any] | None,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+) -> dict[str, Any] | None:
+    if not isinstance(forecast_cycle, Mapping):
+        return None
+    status = str(forecast_cycle.get("status") or "")
+    if status not in RAW_MANIFEST_READY_CYCLE_STATUSES:
+        return None
+    manifest_uri = forecast_cycle.get("manifest_uri")
+    if manifest_uri in (None, ""):
+        return None
+    if not _raw_manifest_uri_matches_source_cycle(
+        str(manifest_uri),
+        source_id=source_id,
+        cycle_time=cycle_time,
+    ):
+        return None
+    return {
+        "manifest_uri": str(manifest_uri),
+        "forecast_cycle_status": status,
+        "source_id": normalize_source_id(source_id),
+        "cycle_id": cycle_id,
+        "cycle_time": _format_time(cycle_time),
+    }
+
+
+def _raw_manifest_uri_matches_source_cycle(
+    manifest_uri: str,
+    *,
+    source_id: str,
+    cycle_time: datetime,
+) -> bool:
+    value = manifest_uri.strip()
+    if not value:
+        return False
+    parsed = urlparse(value)
+    path = parsed.path.lstrip("/") if parsed.scheme else value
+    parts = [part for part in path.split("/") if part]
+    if len(parts) != 4:
+        return False
+    raw, source, cycle, filename = parts
+    return (
+        raw == "raw"
+        and source.lower() == normalize_source_id(source_id).lower()
+        and cycle == format_cycle_time(cycle_time)
+        and filename == "manifest.json"
+    )
+
+
+def _linked_successful_source_cycle_retry(
+    failed_job: Mapping[str, Any],
+    source_cycle_jobs: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
+    *,
+    cycle_id: str,
+    cycle_run_id: str,
+) -> dict[str, Any] | None:
+    failed_job_id = str(failed_job.get("job_id") or "")
+    if not failed_job_id:
+        return None
+    jobs_by_id = {
+        str(job.get("job_id")): job
+        for job in source_cycle_jobs
+        if job.get("job_id") not in (None, "")
+    }
+    repairs: list[dict[str, Any]] = []
+    for event in events:
+        details = event.get("details")
+        if event.get("event_type") not in {"retry", "manual_retry"} or not isinstance(details, Mapping):
+            continue
+        if details.get("trigger") != "manual" and details.get("manual_retry_marker") is not True:
+            continue
+        previous_job_id = details.get("previous_job_id") or details.get("failed_job_id")
+        if str(previous_job_id or "") != failed_job_id:
+            continue
+        retry_job_id = (
+            event.get("entity_id")
+            or details.get("retry_job_id")
+            or details.get("new_job_id")
+            or details.get("job_id")
+            or details.get("pipeline_job_id")
+        )
+        retry_job = jobs_by_id.get(str(retry_job_id or ""))
+        if retry_job is None:
+            continue
+        if not _source_cycle_retry_job_repairs_failure(
+            retry_job,
+            failed_job,
+            cycle_id=cycle_id,
+            cycle_run_id=cycle_run_id,
+        ):
+            continue
+        repairs.append({"retry_job": dict(retry_job), "event": dict(event)})
+    if not repairs:
+        return None
+    return max(repairs, key=lambda item: _pipeline_job_truth_sort_key(item["retry_job"]))
+
+
+def _source_cycle_retry_job_repairs_failure(
+    retry_job: Mapping[str, Any],
+    failed_job: Mapping[str, Any],
+    *,
+    cycle_id: str,
+    cycle_run_id: str,
+) -> bool:
+    if str(retry_job.get("status") or "") not in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+        return False
+    if not _is_source_cycle_download_job(retry_job, cycle_id=cycle_id, cycle_run_id=cycle_run_id):
+        return False
+    failed_time = _source_cycle_stage_terminal_time(failed_job)
+    retry_time = _source_cycle_stage_terminal_time(retry_job)
+    if retry_time is not None and failed_time is not None and retry_time < failed_time:
+        return False
+    failed_attempt = _coerce_int(failed_job.get("retry_count"), default=0)
+    retry_attempt = _coerce_int(retry_job.get("retry_count"), default=failed_attempt)
+    return retry_attempt >= failed_attempt
+
+
+def _source_cycle_stage_terminal_time(job: Mapping[str, Any]) -> datetime | None:
+    for key in ("finished_at", "submitted_at", "started_at", "created_at"):
+        parsed = _parse_gateway_time(job.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _annotated_source_cycle_repair_jobs(
+    jobs: Sequence[Mapping[str, Any]],
+    repaired_by_failed_job_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]] | None:
+    if not repaired_by_failed_job_id:
+        return None
+    retry_job_ids = {
+        str(repair["retry_job"].get("job_id")): str(repair["failed_job"].get("job_id"))
+        for repair in repaired_by_failed_job_id.values()
+    }
+    annotated: list[dict[str, Any]] = []
+    changed = False
+    for job in jobs:
+        payload = dict(job)
+        job_id = str(payload.get("job_id") or "")
+        repair = repaired_by_failed_job_id.get(job_id)
+        if repair is not None:
+            retry_job_id = str(repair["retry_job"].get("job_id") or "")
+            payload["repair_status"] = "repaired"
+            payload["superseded_by_job_id"] = retry_job_id
+            payload["repaired_by_job_id"] = retry_job_id
+            payload["active_blocker"] = False
+            changed = True
+        elif job_id in retry_job_ids:
+            payload["repair_status"] = "repair_succeeded"
+            payload["repairs_job_id"] = retry_job_ids[job_id]
+            changed = True
+        annotated.append(payload)
+    return annotated if changed else None
+
+
+def _source_cycle_repaired_stage_evidence(
+    failed_job: Mapping[str, Any],
+    retry_job: Mapping[str, Any],
+    event: Mapping[str, Any],
+    manifest_binding: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_time: datetime,
+    cycle_id: str,
+) -> dict[str, Any]:
+    return {
+        "status": "repaired",
+        "repair_status": "repaired",
+        "stage": str(failed_job.get("stage") or retry_job.get("stage") or "download"),
+        "job_type": str(failed_job.get("job_type") or retry_job.get("job_type") or "download_source_cycle"),
+        "original_failed_job_id": failed_job.get("job_id"),
+        "repairing_retry_job_id": retry_job.get("job_id"),
+        "manual_retry_event_id": event.get("event_id"),
+        "manual_retry_marker": True,
+        "manifest_uri": manifest_binding.get("manifest_uri"),
+        "forecast_cycle_status": manifest_binding.get("forecast_cycle_status"),
+        "source_id": manifest_binding.get("source_id") or normalize_source_id(source_id),
+        "cycle_id": manifest_binding.get("cycle_id") or cycle_id,
+        "cycle_time": manifest_binding.get("cycle_time") or _format_time(cycle_time),
+    }
+
+
+def _pipeline_job_is_repaired_stage_evidence(job: Mapping[str, Any]) -> bool:
+    return job.get("repair_status") == "repaired" or job.get("active_blocker") is False
 
 
 def _job_belongs_to_candidate(job: Mapping[str, Any], *, run_id: str, model_id: str) -> bool:

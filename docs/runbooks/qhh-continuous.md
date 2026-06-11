@@ -364,6 +364,46 @@ LIMIT 20;
    存在后，再将旧 workspace-root raw bundle 作为证据归档或按保留策略清理。不要把旧 bundle
    复制到 object store 来制造成功状态。
 
+## stale source-cycle stage evidence
+
+如果 `download_source_cycle` 原始 job 仍是 `permanently_failed`，但后续手动 retry 已成功，且
+`met.forecast_cycle.status=raw_complete`、`manifest_uri=raw/<SOURCE>/<YYYYMMDDHH>/manifest.json`，调度器应把旧失败
+视作历史修复证据，而不是 active blocker。排障时先确认三类绑定：
+
+```sql
+SELECT job_id, run_id, cycle_id, job_type, stage, status, retry_count,
+       manual_retry_marker, error_code, updated_at
+FROM ops.pipeline_job
+WHERE cycle_id = '<source>_<YYYYMMDDHH>'
+  AND job_type = 'download_source_cycle'
+ORDER BY updated_at DESC;
+
+SELECT entity_id, event_type, details->>'previous_job_id' AS previous_job_id,
+       details->>'manual_retry_marker' AS manual_retry_marker, created_at
+FROM ops.pipeline_event
+WHERE entity_type = 'pipeline_job'
+  AND entity_id IN ('<retry_job_id>', '<failed_job_id>')
+ORDER BY created_at DESC;
+
+SELECT cycle_id, source_id, cycle_time, status, manifest_uri, error_code, error_message
+FROM met.forecast_cycle
+WHERE cycle_id = '<source>_<YYYYMMDDHH>';
+```
+
+只有“retry event 指向原始 failed job、retry job 自身 `status=succeeded`、forecast cycle 的 manifest URI
+匹配同一 source/cycle”同时成立，旧失败才会在 candidate evidence 中出现
+`repaired_stage_evidence.status=repaired`，且旧 job 行附带 `repair_status=repaired` /
+`superseded_by_job_id=<retry_job_id>`。如果 API 仍显示 active blocker，优先检查：
+
+- retry event 的 `previous_job_id` 是否指向原始 failed job，而不是无关 sibling job。
+- retry job 是否仍是 `pending`、`failed`、`submission_failed` 或 `permanently_failed`。
+- `met.forecast_cycle.manifest_uri` 是否缺失、指向错误 source/cycle，或 cycle status 未回到 raw-ready 状态。
+- candidate evidence 是否被 row limit 截断；必要时提高只读诊断查询 limit，不要直接修改历史 job/event 行。
+
+修复方式是通过既有 retry API 重新提交同一 `run_id`，让系统写入新的 retry job/event 和 manifest 证据；
+不要把旧 failed job 改成 `succeeded`，也不要删除 `permanently_failed` 行。旧失败需要保留用于审计，成功 retry
+负责 supersede 它。
+
 ## 2026-05-21 诊断实测结果
 
 已通过 qhh 诊断/复现入口按标准链路完成 GFS 与 IFS 两个起报周期：

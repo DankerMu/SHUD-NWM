@@ -4770,6 +4770,9 @@ def _candidate_state_evidence(candidate: SchedulerCandidate, state: Mapping[str,
             "retry_limit": _state_retry_limit(state),
         },
     }
+    repaired_stage = state.get("repaired_stage_evidence")
+    if isinstance(repaired_stage, Mapping):
+        evidence["repaired_stage_evidence"] = _evidence_safe(dict(repaired_stage))
     overflow = _state_overflow_evidence(state)
     if overflow:
         evidence["state_bounds"] = overflow
@@ -5299,6 +5302,11 @@ def _job_state_evidence(job: Mapping[str, Any]) -> dict[str, Any]:
             "error_code",
             "error_message",
             "log_uri",
+            "repair_status",
+            "superseded_by_job_id",
+            "repaired_by_job_id",
+            "repairs_job_id",
+            "active_blocker",
         )
         if key in job and job.get(key) is not None
     }

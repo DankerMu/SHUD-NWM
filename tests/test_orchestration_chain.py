@@ -4627,6 +4627,250 @@ def test_psycopg_candidate_state_later_retry_success_supersedes_older_failed_tas
     assert state["original_task_id"] is None
 
 
+class _SourceCycleRetrySupersessionRepository(PsycopgOrchestratorRepository):
+    def __init__(
+        self,
+        *,
+        jobs: Sequence[Mapping[str, Any]],
+        events: Sequence[Mapping[str, Any]],
+        forecast_cycle: Mapping[str, Any] | None,
+    ) -> None:
+        super().__init__("postgresql://example")
+        self._jobs = [dict(job) for job in jobs]
+        self._events = [dict(event) for event in events]
+        self._forecast_cycle = dict(forecast_cycle) if forecast_cycle is not None else None
+
+    def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:
+        del parameters
+        if "FROM met.forecast_cycle" in statement:
+            return dict(self._forecast_cycle) if self._forecast_cycle is not None else None
+        return None
+
+    def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+        del parameters
+        if "FROM ops.pipeline_event" in statement:
+            return [dict(event) for event in self._events]
+        if "FROM ops.pipeline_job" in statement:
+            return [dict(job) for job in self._jobs]
+        return []
+
+
+def _source_cycle_retry_state(
+    *,
+    jobs: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
+    manifest_uri: str | None = "raw/gfs/2026050100/manifest.json",
+    forecast_status: str = "raw_complete",
+) -> dict[str, Any]:
+    repository = _SourceCycleRetrySupersessionRepository(
+        jobs=jobs,
+        events=events,
+        forecast_cycle={
+            "cycle_id": "gfs_2026050100",
+            "source_id": "gfs",
+            "cycle_time": _dt("2026-05-01T00:00:00Z"),
+            "status": forecast_status,
+            "manifest_uri": manifest_uri,
+        },
+    )
+
+    state = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        model_id="model_b",
+        run_id="fcst_gfs_2026050100_model_b",
+        forcing_version_id="forc_gfs_2026050100_model_b",
+        candidate_id="gfs:2026-05-01T00:00:00Z:model_b:forecast_gfs_deterministic",
+        retry_limit=3,
+        job_limit=10,
+        event_limit=10,
+    )
+    assert state is not None
+    return state
+
+
+def _failed_source_cycle_download_job(**overrides: Any) -> dict[str, Any]:
+    payload = {
+        "job_id": "job_cycle_gfs_2026050100_download",
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": "gfs_2026050100",
+        "job_type": "download_source_cycle",
+        "slurm_job_id": "6101",
+        "model_id": None,
+        "status": "permanently_failed",
+        "stage": "download",
+        "retry_count": 1,
+        "error_code": "SLURM_JOB_FAILED",
+        "error_message": "download source cycle failed",
+        "submitted_at": "2026-05-01T00:00:00Z",
+        "finished_at": "2026-05-01T00:10:00Z",
+        # The stale failed row was touched after the repair; it must still not
+        # become the active blocker once a linked retry and manifest prove repair.
+        "updated_at": "2026-05-01T01:00:00Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _successful_source_cycle_retry_job(**overrides: Any) -> dict[str, Any]:
+    payload = {
+        "job_id": "job_cycle_gfs_2026050100_retry_active",
+        "run_id": "cycle_gfs_2026050100",
+        "cycle_id": "gfs_2026050100",
+        "job_type": "download_source_cycle",
+        "slurm_job_id": "6102",
+        "model_id": None,
+        "status": "succeeded",
+        "stage": "download",
+        "retry_count": 2,
+        "manual_retry_marker": True,
+        "submitted_at": "2026-05-01T00:20:00Z",
+        "finished_at": "2026-05-01T00:35:00Z",
+        "updated_at": "2026-05-01T00:35:00Z",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _manual_retry_event(**overrides: Any) -> dict[str, Any]:
+    details = {
+        "trigger": "manual",
+        "manual_retry_marker": True,
+        "retry_count": 2,
+        "previous_job_id": "job_cycle_gfs_2026050100_download",
+        "stage": "download",
+        "job_type": "download_source_cycle",
+    }
+    details.update(overrides.pop("details", {}))
+    payload = {
+        "event_id": 20,
+        "entity_type": "pipeline_job",
+        "entity_id": "job_cycle_gfs_2026050100_retry_active",
+        "event_type": "retry",
+        "status_from": "permanently_failed",
+        "status_to": "pending",
+        "created_at": "2026-05-01T00:20:00Z",
+        "details": details,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_psycopg_candidate_state_source_cycle_retry_success_repairs_stale_failed_download() -> None:
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+        ],
+        events=[_manual_retry_event()],
+    )
+
+    assert state["pipeline_status"] is None
+    assert state["failed_stage"] is None
+    assert state["error_code"] is None
+    assert state["stage"] is None
+    assert state["repaired_stage_evidence"] == {
+        "status": "repaired",
+        "repair_status": "repaired",
+        "stage": "download",
+        "job_type": "download_source_cycle",
+        "original_failed_job_id": "job_cycle_gfs_2026050100_download",
+        "repairing_retry_job_id": "job_cycle_gfs_2026050100_retry_active",
+        "manual_retry_event_id": 20,
+        "manual_retry_marker": True,
+        "manifest_uri": "raw/gfs/2026050100/manifest.json",
+        "forecast_cycle_status": "raw_complete",
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026050100",
+        "cycle_time": "2026-05-01T00:00:00Z",
+    }
+    failed_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026050100_download")
+    retry_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026050100_retry_active")
+    assert failed_job["status"] == "permanently_failed"
+    assert retry_job["status"] == "succeeded"
+
+
+def test_psycopg_candidate_state_unrelated_success_does_not_repair_source_cycle_failure() -> None:
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(
+                job_id="job_cycle_gfs_2026050100_publish",
+                job_type="publish_results",
+                stage="publish",
+                retry_count=0,
+                manual_retry_marker=False,
+            ),
+        ],
+        events=[],
+    )
+
+    assert state["pipeline_status"] == "permanently_failed"
+    assert state["failed_stage"] == "download"
+    assert state["error_code"] == "SLURM_JOB_FAILED"
+    assert "repaired_stage_evidence" not in state
+
+
+def test_psycopg_candidate_state_unlinked_source_cycle_success_does_not_repair_failure() -> None:
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+        ],
+        events=[
+            _manual_retry_event(
+                details={"previous_job_id": "job_cycle_gfs_2026050100_other_failed"},
+            )
+        ],
+    )
+
+    assert state["pipeline_status"] == "permanently_failed"
+    assert state["failed_stage"] == "download"
+    assert state["error_code"] == "SLURM_JOB_FAILED"
+    assert "repaired_stage_evidence" not in state
+
+
+@pytest.mark.parametrize("retry_status", ["pending", "failed"])
+def test_psycopg_candidate_state_stale_or_non_succeeded_retry_does_not_repair_source_cycle_failure(
+    retry_status: str,
+) -> None:
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(status=retry_status),
+        ],
+        events=[
+            _manual_retry_event(created_at="2026-05-01T00:01:00Z")
+            if retry_status == "pending"
+            else _manual_retry_event()
+        ],
+    )
+
+    assert state["pipeline_status"] == "permanently_failed"
+    assert state["failed_stage"] == "download"
+    assert state["error_code"] == "SLURM_JOB_FAILED"
+    assert "repaired_stage_evidence" not in state
+
+
+@pytest.mark.parametrize("manifest_uri", [None, "raw/gfs/2026050106/manifest.json", "raw/ifs/2026050100/manifest.json"])
+def test_psycopg_candidate_state_missing_or_mismatched_manifest_leaves_source_cycle_failure_active(
+    manifest_uri: str | None,
+) -> None:
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+        ],
+        events=[_manual_retry_event()],
+        manifest_uri=manifest_uri,
+    )
+
+    assert state["pipeline_status"] == "permanently_failed"
+    assert state["failed_stage"] == "download"
+    assert state["error_code"] == "SLURM_JOB_FAILED"
+    assert "repaired_stage_evidence" not in state
+
+
 def test_psycopg_candidate_state_bounds_nested_task_results_before_state_decision() -> None:
     class CapturingRepository(PsycopgOrchestratorRepository):
         def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any] | None:

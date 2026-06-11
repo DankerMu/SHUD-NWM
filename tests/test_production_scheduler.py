@@ -2285,6 +2285,58 @@ def test_non_authoritative_task_results_do_not_populate_retry_task_identity() ->
     assert scheduler_module._candidate_state_is_candidate_scoped_retry(decision) is False
 
 
+def test_candidate_state_evidence_preserves_repaired_stage_metadata_additively() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        "pipeline_jobs": [
+            {
+                "job_id": "job_cycle_gfs_2026052106_download",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "permanently_failed",
+                "repair_status": "repaired",
+                "superseded_by_job_id": "job_cycle_gfs_2026052106_retry_active",
+                "active_blocker": False,
+            },
+            {
+                "job_id": "job_cycle_gfs_2026052106_retry_active",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "succeeded",
+                "repair_status": "repair_succeeded",
+                "repairs_job_id": "job_cycle_gfs_2026052106_download",
+            },
+        ],
+        "repaired_stage_evidence": {
+            "status": "repaired",
+            "repair_status": "repaired",
+            "stage": "download",
+            "job_type": "download_source_cycle",
+            "original_failed_job_id": "job_cycle_gfs_2026052106_download",
+            "repairing_retry_job_id": "job_cycle_gfs_2026052106_retry_active",
+            "manifest_uri": "raw/gfs/2026052106/manifest.json",
+            "forecast_cycle_status": "raw_complete",
+        },
+    }
+
+    evidence = scheduler_module._candidate_state_evidence(candidate, state)
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is None
+    assert evidence["repaired_stage_evidence"]["status"] == "repaired"
+    assert evidence["repaired_stage_evidence"]["original_failed_job_id"] == "job_cycle_gfs_2026052106_download"
+    assert evidence["pipeline_jobs"][0]["repair_status"] == "repaired"
+    assert evidence["pipeline_jobs"][0]["active_blocker"] is False
+    assert evidence["pipeline_jobs"][1]["repairs_job_id"] == "job_cycle_gfs_2026052106_download"
+
+
 def test_non_authoritative_task_results_do_not_bypass_active_cycle_duplicate_block(
     tmp_path: Path,
 ) -> None:
