@@ -44,6 +44,15 @@ CHECK_FAMILIES = (
     "tracked-generated-artifact",
     "apps-api-layer-inversion",
 )
+RETIRED_ACTIVE_TREE_PREFIXES = (
+    "apps/web",
+    "workers/forcing-producer",
+    "workers/shud-runtime",
+    "workers/output-parser",
+    "workers/flood-frequency",
+    "workers/sbatch_templates",
+    "services/tile-publisher",
+)
 HARD_GATE_CHECK_IDS = (
     "agent-artifact-ignore-policy",
     "agent-artifact-ownership-policy",
@@ -679,15 +688,7 @@ def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
 
 
 def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
-    placeholder_patterns = (
-        "apps/web",
-        "workers/forcing-producer",
-        "workers/shud-runtime",
-        "workers/output-parser",
-        "workers/flood-frequency",
-        "workers/sbatch_templates",
-        "services/tile-publisher",
-    )
+    placeholder_patterns = RETIRED_ACTIVE_TREE_PREFIXES
     findings: list[FindingSpec] = []
     for path in _iter_text_files(root, [root / "docs", root / "openspec", root / "services", root / "infra"]):
         rel = _rel(root, path)
@@ -716,25 +717,46 @@ def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
                     ),
                 )
             )
-    for placeholder in placeholder_patterns:
-        if (root / placeholder).exists():
-            findings.append(
-                FindingSpec(
-                    check_id="placeholder-path-exists",
-                    title="Retired placeholder path exists in repository",
-                    axis="structure",
-                    governance_face="legacy/dead-code",
-                    role="shared_contract",
-                    evidence_path=placeholder,
-                    severity="medium",
-                    priority="P2",
-                    owner_area="repo structure",
-                    module=_module_for_path(root, root / placeholder),
-                    description=f"Retired placeholder path `{placeholder}` exists in the active tree.",
-                    recommendation="Remove the placeholder path or document why it is intentionally retained.",
-                )
-            )
+    findings.extend(_check_tracked_retired_paths(root))
     return findings
+
+
+def _check_tracked_retired_paths(root: Path) -> list[FindingSpec]:
+    findings: list[FindingSpec] = []
+    for tracked_path in _git_tracked_paths(root, RETIRED_ACTIVE_TREE_PREFIXES):
+        retired_prefix = _retired_active_tree_prefix_for(tracked_path)
+        if retired_prefix is None:
+            continue
+        findings.append(
+            FindingSpec(
+                check_id="placeholder-path-exists",
+                title="Tracked retired path returned to active tree",
+                axis="structure",
+                governance_face="legacy/dead-code",
+                role="shared_contract",
+                evidence_path=tracked_path,
+                severity="medium",
+                priority="P2",
+                owner_area="repo structure",
+                module=_module_for_relative(tracked_path),
+                description=(
+                    f"Tracked file `{tracked_path}` returned under retired active-tree prefix "
+                    f"`{retired_prefix}`."
+                ),
+                recommendation=(
+                    "Remove the tracked retired path or move the implementation to the canonical active "
+                    "underscore/package path."
+                ),
+            )
+        )
+    return findings
+
+
+def _retired_active_tree_prefix_for(relative_path: str) -> str | None:
+    for prefix in RETIRED_ACTIVE_TREE_PREFIXES:
+        if relative_path == prefix or relative_path.startswith(f"{prefix}/"):
+            return prefix
+    return None
 
 
 def _check_makefile_toolchain(root: Path) -> list[FindingSpec]:
@@ -1663,10 +1685,14 @@ def _file_sha256(path: Path, max_bytes: int) -> str:
     return digest.hexdigest()
 
 
-def _git_tracked_paths(root: Path) -> list[str]:
+def _git_tracked_paths(root: Path, pathspecs: Iterable[str] = ()) -> list[str]:
+    command = ["git", "ls-files"]
+    scoped_pathspecs = list(pathspecs)
+    if scoped_pathspecs:
+        command.extend(["--", *scoped_pathspecs])
     try:
         result = subprocess.run(
-            ["git", "ls-files"],
+            command,
             cwd=root,
             check=True,
             text=True,

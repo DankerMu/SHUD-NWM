@@ -637,6 +637,7 @@ def test_archived_retired_path_tokens_are_allowlisted_without_budget_count(
     inventory = findings["docs/governance/LEGACY_DEAD_CODE_INVENTORY.md"]
     assert inventory["allowlist_key"] == "placeholder-path-token:governance-retired-placeholder-inventory"
     assert inventory["budget_counted"] is False
+    assert _findings_by_check(tmp_path, "placeholder-path-exists") == []
 
 
 def test_completed_governance_2_openspec_retired_path_tokens_are_allowlisted_without_budget_count(
@@ -675,6 +676,7 @@ def test_completed_governance_2_openspec_retired_path_tokens_are_allowlisted_wit
     assert active_doc["allowlist_state"] == "unallowlisted"
     assert active_doc["budget_counted"] is True
     assert active_doc["gate_eligible"] is False
+    assert _findings_by_check(tmp_path, "placeholder-path-exists") == []
 
 
 def test_active_doc_retired_path_tokens_remain_budget_counted(
@@ -691,6 +693,123 @@ def test_active_doc_retired_path_tokens_remain_budget_counted(
     assert findings[0]["allowlist_state"] == "unallowlisted"
     assert findings[0]["budget_counted"] is True
     assert findings[0]["gate_eligible"] is False
+
+
+def test_tracked_apps_web_file_emits_retired_path_return_finding(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / "apps" / "web" / "README.md", "retired placeholder returned\n")
+    subprocess.run(["git", "add", "apps/web/README.md"], cwd=tmp_path, check=True)
+
+    report = audit_repo_entropy.build_report(tmp_path)
+    findings = [
+        finding
+        for finding in report["findings"]
+        if finding["check_id"] == "placeholder-path-exists"
+    ]
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["title"] == "Tracked retired path returned to active tree"
+    assert finding["evidence_path"] == "apps/web/README.md"
+    assert finding["allowlist_reason"] is None
+    assert finding["allowlist_key"] is None
+    assert finding["allowlist_state"] == "unallowlisted"
+    assert finding["budget_counted"] is True
+    assert finding["gate_eligible"] is False
+    metadata = report["metadata"]
+    assert isinstance(metadata, dict)
+    summary_counts = metadata["summary_counts"]
+    assert isinstance(summary_counts, dict)
+    assert summary_counts["by_check_id"]["placeholder-path-exists"] == 1
+
+
+def test_force_added_ignored_retired_worker_path_emits_retired_path_return_finding(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / ".gitignore", "workers/\n")
+    _write(tmp_path / "workers" / "shud-runtime" / "README.md", "ignored but tracked\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-f", "workers/shud-runtime/README.md"], cwd=tmp_path, check=True)
+
+    findings = _findings_by_check(tmp_path, "placeholder-path-exists")
+
+    assert len(findings) == 1
+    assert findings[0]["evidence_path"] == "workers/shud-runtime/README.md"
+    assert findings[0]["allowlist_state"] == "unallowlisted"
+    assert findings[0]["budget_counted"] is True
+    assert findings[0]["gate_eligible"] is False
+
+
+def test_untracked_filesystem_retired_path_does_not_emit_retired_path_return_finding(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / "apps" / "web" / "README.md", "untracked retired placeholder\n")
+
+    assert _findings_by_check(tmp_path, "placeholder-path-exists") == []
+
+
+def test_active_underscore_paths_do_not_emit_retired_path_return_finding(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / "workers" / "shud_runtime" / "__init__.py", "\n")
+    _write(tmp_path / "workers" / "output_parser" / "__init__.py", "\n")
+    _write(tmp_path / "services" / "tile_publisher" / "__init__.py", "\n")
+    subprocess.run(
+        [
+            "git",
+            "add",
+            "workers/shud_runtime/__init__.py",
+            "workers/output_parser/__init__.py",
+            "services/tile_publisher/__init__.py",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    assert _findings_by_check(tmp_path, "placeholder-path-exists") == []
+
+
+def test_non_git_root_does_not_emit_retired_path_return_false_positive(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "apps" / "web" / "README.md", "filesystem-only retired placeholder\n")
+
+    report = audit_repo_entropy.build_report(tmp_path)
+
+    assert not any(
+        finding["check_id"] == "placeholder-path-exists"
+        for finding in report["findings"]
+    )
+
+
+def test_unavailable_git_metadata_does_not_crash_or_emit_retired_path_return_false_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / "apps" / "web" / "README.md", "tracked but git unavailable\n")
+    subprocess.run(["git", "add", "apps/web/README.md"], cwd=tmp_path, check=True)
+    real_run = subprocess.run
+
+    def unavailable_git_ls_files(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        command = args[0] if args else kwargs.get("args")
+        if isinstance(command, list) and command[:2] == ["git", "ls-files"]:
+            raise OSError("git metadata unavailable")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(audit_repo_entropy.subprocess, "run", unavailable_git_ls_files)
+
+    report = audit_repo_entropy.build_report(tmp_path)
+
+    assert not any(
+        finding["check_id"] == "placeholder-path-exists"
+        for finding in report["findings"]
+    )
 
 
 def test_slurm_gateway_route_leakage_finds_direct_business_route_decorators_and_path_literals(
@@ -852,10 +971,7 @@ def test_agent_artifact_ownership_skips_doc_status_symlink_to_outside_file(
         ),
         (
             ("placeholder-path-token", "placeholder-path-exists"),
-            lambda root: (
-                _write(root / "docs/active.md", "Still mentions apps/web.\n"),
-                _write(root / "apps/web/README.md", "retired placeholder\n"),
-            ),
+            lambda root: _setup_placeholder_path_drift(root),
         ),
         (
             ("makefile-toolchain-discipline",),
@@ -1019,8 +1135,15 @@ def _setup_agent_artifact_drift(root: Path) -> None:
     _write(root / ".gitignore", "# intentionally incomplete\n")
     _write(root / ".dockerignore", "# intentionally incomplete\n")
     _write(root / "artifacts/leaked.txt", "generated\n")
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    _init_git(root)
     subprocess.run(["git", "add", "artifacts/leaked.txt"], cwd=root, check=True)
+
+
+def _setup_placeholder_path_drift(root: Path) -> None:
+    _init_git(root)
+    _write(root / "docs" / "active.md", "Still mentions apps/web.\n")
+    _write(root / "apps" / "web" / "README.md", "retired placeholder\n")
+    subprocess.run(["git", "add", "apps/web/README.md"], cwd=root, check=True)
 
 
 def _setup_clean_hard_gate_fixture(root: Path) -> None:
@@ -1076,9 +1199,13 @@ def _setup_clean_hard_gate_fixture(root: Path) -> None:
         apps/frontend/artifacts
         """,
     )
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    _init_git(root)
 
 
 def _track_generated_artifact(root: Path) -> None:
     _write(root / "artifacts" / "leaked.txt", "generated\n")
     subprocess.run(["git", "add", "-f", "artifacts/leaked.txt"], cwd=root, check=True)
+
+
+def _init_git(root: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
