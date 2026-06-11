@@ -186,6 +186,17 @@ def test_slurm_sbatch_cleans_filtered_env_file_after_sourcing() -> None:
     assert script.index('source "$QHH_SLURM_ENV_FILE"') < script.index('exec "$ROOT_DIR/scripts/run_qhh_cycle.sh"')
 
 
+def test_run_qhh_cycle_preserves_ifs_probe_failed_json_before_set_e_exit() -> None:
+    script = Path("scripts/run_qhh_cycle.sh").read_text(encoding="utf-8")
+
+    assert 'uv run nhms-ifs download --cycle-time "$CYCLE_TIME" | tee "$CYCLE_ROOT/download.stdout.json"' in script
+    assert 'DOWNLOAD_EXIT="${PIPESTATUS[0]}"' in script
+    assert 'if [[ "$DOWNLOAD_STATUS" == "probe_failed" || "$DOWNLOAD_STATUS" == "rate_limited" ]]; then' in script
+    assert 'json_status "$STATE_FILE" "$DOWNLOAD_STATUS"' in script
+    assert '"classifier=${DOWNLOAD_CLASSIFIER:-$DOWNLOAD_STATUS}"' in script
+    assert 'exit 0' in script[script.index('if [[ "$DOWNLOAD_STATUS" == "probe_failed"') :]
+
+
 def test_qhh_manifest_rejects_forcing_package_checksum_mismatch(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
     manifest_uri = "forcing/gfs/2026050700/basin_v1/demo_model/forcing_package.json"

@@ -7659,6 +7659,82 @@ def test_backfill_skips_unavailable_gap_and_selects_oldest_available_for_warm_st
     assert audit["deferred_count"] == 1
 
 
+def test_backfill_probe_failed_gap_keeps_retryable_evidence_and_does_not_consume_budget(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-06-08T12:00:00Z"),
+        sources=("IFS",),
+        backfill_enabled=True,
+        max_cycles_per_source=8,
+    )
+    attempted_sources = [
+        {
+            "source": "aws",
+            "uri": "ecmwf-opendata://aws/ifs/2026060800/ifs.t00z.f000.2t.grib2",
+            "status": "probe_failed",
+            "error_class": "NetworkDownloadError",
+            "error_message": "temporary failure in name resolution",
+        }
+    ]
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "IFS": FakeAdapter(
+                "IFS",
+                [
+                    (
+                        "2026-06-08T00:00:00Z",
+                        False,
+                        {
+                            "status": "probe_failed",
+                            "reason": "source_cycle_probe_failed",
+                            "classifier": "network_error",
+                            "retryable": True,
+                            "evidence": {
+                                "attempted_sources": attempted_sources,
+                                "attempted_source_count": 1,
+                                "emitted_attempt_count": 1,
+                                "attempted_source_limit": 8,
+                                "omitted_attempt_count": 0,
+                            },
+                        },
+                    ),
+                    ("2026-06-08T06:00:00Z", True),
+                ],
+            )
+        },
+    )
+
+    result = scheduler.run_once()
+
+    selected = next(
+        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060806"
+    )
+    probe_failed = next(
+        item for item in result.evidence["source_cycles"] if item.get("cycle_id") == "ifs_2026060800"
+    )
+    assert selected["cycle_id"] == "ifs_2026060806"
+    assert result.evidence["candidates"][0]["cycle_id"] == "ifs_2026060806"
+    assert probe_failed["status"] == "probe_failed"
+    assert probe_failed["reason"] == "source_cycle_probe_failed"
+    assert probe_failed["classifier"] == "network_error"
+    assert probe_failed["retryable"] is True
+    assert probe_failed["cycle_status_candidate"] == "probe_failed"
+    assert probe_failed["db_cycle_status_written"] is None
+    assert probe_failed["selection_status"] == "not_selected"
+    assert probe_failed["selection_reason"] == "source_cycle_probe_failed_does_not_consume_source_budget"
+    assert probe_failed["discovery_evidence"]["attempted_sources"] == attempted_sources
+    assert probe_failed["discovery_evidence"]["attempted_source_count"] == 1
+    audit = next(item for item in result.evidence["backfill"]["audit"] if item["source_id"] == "IFS")
+    assert audit["gap_count"] == 2
+    assert audit["available_gap_count"] == 1
+    assert audit["unavailable_gap_count"] == 1
+    assert audit["selected_count"] == 1
+
+
 def test_manual_retry_marker_override_helper_never_overrides_active_blocker() -> None:
     assert (
         scheduler_module._manual_retry_marker_overrides_blocker(

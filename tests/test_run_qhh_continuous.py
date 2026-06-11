@@ -632,3 +632,56 @@ def test_run_pass_resubmits_deadline_slurm_job(tmp_path: Path, monkeypatch: pyte
 
     assert submissions == ["submitted"]
     assert summary["results"][0]["slurm_job_id"] == "6000"
+
+
+def test_local_runner_preserves_typed_probe_failed_state_on_nonzero_cycle_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = runner.CandidateCycle("IFS", datetime(2026, 6, 8, 0, tzinfo=UTC))
+    state_file = runner._state_file(tmp_path / "state", candidate)
+
+    def fake_run(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        assert command[-1].endswith("run_qhh_cycle.sh")
+        runner._write_state(
+            state_file,
+            {
+                "status": "probe_failed",
+                "reason": "source_cycle_probe_failed",
+                "classifier": "network_error",
+                "retryable": True,
+                "source_id": "IFS",
+                "cycle_time": "2026060800",
+                "run_id": candidate.run_id,
+            },
+        )
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    result = runner._run_cycle(candidate, run_root=tmp_path, state_file=state_file)
+    state = runner._read_json(state_file)
+
+    assert result["status"] == "probe_failed"
+    assert result["reason"] == "source_cycle_probe_failed"
+    assert result["classifier"] == "network_error"
+    assert result["retryable"] is True
+    assert result["returncode"] == 1
+    assert state["status"] == "probe_failed"
+    assert state["reason"] == "source_cycle_probe_failed"
+    assert state["classifier"] == "network_error"
+    assert state["retryable"] is True
+    assert state["finished_at"]
+
+
+def test_probe_failed_state_is_known_retryable_and_not_skipped_when_retry_enabled() -> None:
+    state = {
+        "status": "probe_failed",
+        "reason": "source_cycle_probe_failed",
+        "classifier": "network_error",
+        "retryable": True,
+        "source_id": "gfs",
+        "cycle_time": "2026052106",
+    }
+
+    assert runner._skip_reason(_candidate(), state, executor="local") is None

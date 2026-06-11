@@ -240,9 +240,63 @@ def test_discover_cycles_all_ifs_mirrors_dns_failure_is_probe_failed(tmp_path: P
     assert [attempt["source"] for attempt in attempts] == ["aws", "azure", "google", "ecmwf"]
     assert {attempt["status"] for attempt in attempts} == {"probe_failed"}
     assert {attempt["error_class"] for attempt in attempts} == {"NetworkDownloadError"}
+    assert all(set(attempt) == {"source", "uri", "status", "error_class", "error_message"} for attempt in attempts)
+    assert discovery.evidence["attempted_source_count"] == 4
+    assert discovery.evidence["emitted_attempt_count"] == 4
+    assert discovery.evidence["omitted_attempt_count"] == 0
+    assert all(attempt["uri"] for attempt in attempts)
+    assert all(attempt["error_message"] for attempt in attempts)
     rendered = json.dumps(discovery.as_dict())
     assert "super-secret" not in rendered
     assert "secret-signature" not in rendered
+
+
+def test_discover_cycles_sanitizes_probe_source_labels_and_bounds_attempt_evidence(tmp_path: Path) -> None:
+    unsafe_sources = tuple(f"mirror-{index}?token=super-secret-{index}" for index in range(12))
+    long_detail = "x" * 2000
+
+    def checker(url: str) -> bool:
+        raise NetworkDownloadError(
+            f"DNS failed for {url}?signature=secret-signature access_key=secret-access-key {long_detail}"
+        )
+
+    config = IFSAdapterConfig(
+        workspace_root=tmp_path,
+        preferred_source=unsafe_sources[0],
+        fallback_sources=unsafe_sources,
+        max_retries=1,
+        retry_backoff_seconds=(0,),
+        max_wait_seconds=0,
+        poll_interval_seconds=0,
+    )
+    adapter = IFSAdapter(
+        config=config,
+        repository=FakeMetRepository(),
+        object_store=LocalObjectStore(tmp_path),
+        availability_checker=checker,
+        sleeper=lambda _seconds: None,
+    )
+
+    discovery = next(cycle for cycle in adapter.discover_cycles("2026-06-08") if cycle.cycle_hour == 0)
+
+    probe = discovery.evidence["probe"]
+    attempts = discovery.evidence["attempted_sources"]
+    assert discovery.status == "probe_failed"
+    assert probe["preferred_source"] == "mirror-0"
+    assert probe["source"] == "mirror-11"
+    assert discovery.evidence["attempted_source_count"] == 12
+    assert discovery.evidence["emitted_attempt_count"] == 8
+    assert discovery.evidence["attempted_source_limit"] == 8
+    assert discovery.evidence["omitted_attempt_count"] == 4
+    assert [attempt["source"] for attempt in attempts] == [f"mirror-{index}" for index in range(8)]
+    assert {attempt["status"] for attempt in attempts} == {"probe_failed"}
+    assert all(set(attempt) == {"source", "uri", "status", "error_class", "error_message"} for attempt in attempts)
+    assert all(len(attempt["error_message"]) <= 512 for attempt in attempts)
+    assert all("truncated" in attempt["error_message"] for attempt in attempts)
+    rendered = json.dumps(discovery.as_dict())
+    assert "super-secret" not in rendered
+    assert "secret-signature" not in rendered
+    assert "secret-access-key" not in rendered
 
 
 def test_discover_cycles_all_ifs_mirrors_unpublished_stays_unavailable(tmp_path: Path) -> None:
@@ -284,6 +338,8 @@ def test_discover_cycles_all_ifs_mirrors_rate_limited_is_not_network_error(tmp_p
     assert [attempt["source"] for attempt in attempts] == ["aws", "azure", "google", "ecmwf"]
     assert {attempt["status"] for attempt in attempts} == {"rate_limited"}
     assert {attempt["error_class"] for attempt in attempts} == {"RateLimitedError"}
+    assert discovery.evidence["attempted_source_count"] == 4
+    assert discovery.evidence["omitted_attempt_count"] == 0
 
 
 def test_discover_cycles_mixed_unpublished_and_dns_failure_is_probe_failed(tmp_path: Path) -> None:
@@ -454,6 +510,88 @@ def test_ifs_cli_probe_failure_payload_preserves_redacted_attempted_mirrors(
         "google",
         "ecmwf",
     ]
+    rendered = json.dumps(payload)
+    assert "super-secret" not in rendered
+    assert "secret-signature" not in rendered
+    assert "password" not in rendered
+    assert "secret-access-key" not in rendered
+
+
+def test_ifs_public_cli_probe_failure_exits_nonzero_with_single_bounded_json_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cycle_time = parse_cycle_time("2026060800")
+    attempted = [
+        {
+            "source": f"{source}?token=super-secret",
+            "uri": (
+                f"ecmwf-opendata://user:password@{source}/ifs/2026060800/"
+                "ifs.t00z.f000.2t.grib2?token=super-secret&X-Amz-Signature=secret-signature"
+            ),
+            "status": "probe_failed",
+            "error_class": "NetworkDownloadError",
+            "error_message": (
+                "temporary failure in name resolution "
+                f"{source} "
+                + "x" * 2000
+                + " access_key=secret-access-key"
+            ),
+        }
+        for source in ("aws", "azure", "google", "ecmwf", "extra-a", "extra-b", "extra-c", "extra-d", "extra-e")
+    ]
+
+    class ProbeFailedIFSAdapter:
+        @classmethod
+        def from_env(cls) -> "ProbeFailedIFSAdapter":
+            return cls()
+
+        def discover_cycles(self, _cycle_date: object) -> list[CycleDiscovery]:
+            return [
+                CycleDiscovery(
+                    cycle_id="ifs_2026060800",
+                    source_id="IFS",
+                    cycle_time=cycle_time,
+                    cycle_hour=0,
+                    available=False,
+                    status="probe_failed",
+                    reason="source_cycle_probe_failed",
+                    classifier="network_error",
+                    retryable=True,
+                    evidence={"attempted_sources": attempted},
+                )
+            ]
+
+    monkeypatch.setattr(cli_module, "IFSAdapter", ProbeFailedIFSAdapter)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_module.ifs_main(["download", "--cycle-time", "2026060800"])
+
+    captured = capsys.readouterr()
+    stdout_lines = [line for line in captured.out.splitlines() if line.strip()]
+    assert exc_info.value.code == 1
+    assert len(stdout_lines) == 1
+    payload = json.loads(stdout_lines[0])
+    assert payload["status"] == "probe_failed"
+    assert payload["reason"] == "source_cycle_probe_failed"
+    assert payload["classifier"] == "network_error"
+    assert payload["retryable"] is True
+    assert payload["files"] == 0
+    assert payload["total_bytes_written"] == 0
+    evidence = payload["evidence"]
+    attempts = evidence["attempted_sources"]
+    assert evidence["attempted_source_count"] == 9
+    assert evidence["emitted_attempt_count"] == 8
+    assert evidence["attempted_source_limit"] == 8
+    assert evidence["omitted_attempt_count"] == 1
+    assert len(attempts) == 8
+    assert all(attempt["source"] for attempt in attempts)
+    assert all(attempt["uri"] for attempt in attempts)
+    assert {attempt["status"] for attempt in attempts} == {"probe_failed"}
+    assert {attempt["error_class"] for attempt in attempts} == {"NetworkDownloadError"}
+    assert all(attempt["error_message"] for attempt in attempts)
+    assert all(set(attempt) == {"source", "uri", "status", "error_class", "error_message"} for attempt in attempts)
+    assert all(len(attempt["error_message"]) <= 512 for attempt in attempts)
     rendered = json.dumps(payload)
     assert "super-secret" not in rendered
     assert "secret-signature" not in rendered

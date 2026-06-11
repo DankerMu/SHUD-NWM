@@ -29,7 +29,19 @@ AND `status=probe_failed`
 AND `reason=source_cycle_probe_failed`
 AND `classifier=network_error`
 AND `retryable=true`
-AND evidence includes each attempted mirror with redacted URI, source, concrete error class, and redacted error message.
+AND evidence includes bounded attempted mirrors with redacted URI, source, concrete error class, and redacted error message
+AND evidence reports the total attempted count and omitted attempted count when configured sources exceed the emitted evidence limit.
+
+#### Scenario: All mirrors are rate limited
+
+WHEN every configured IFS mirror probe is rate limited
+AND no configured mirror confirms the object exists
+THEN the returned discovery has `available=false`
+AND `status=rate_limited`
+AND `reason=source_cycle_rate_limited`
+AND `classifier=rate_limited`
+AND `retryable=true`
+AND evidence includes bounded redacted attempted mirror evidence.
 
 #### Scenario: Mixed not-found and network failures
 
@@ -74,3 +86,17 @@ AND operator-facing evidence includes the attempted mirrors and concrete redacte
 
 WHEN attempted mirror evidence contains URLs or error messages
 THEN credentials, tokens, signed URL query values, and private secrets MUST be redacted before being emitted in adapter discovery, CLI JSON, scheduler evidence, or runbook examples.
+
+#### Scenario: Evidence bounding
+
+WHEN attempted mirror evidence contains many configured fallback sources or long exception strings
+THEN adapter discovery and CLI JSON MUST emit only bounded redacted attempt entries
+AND MUST preserve operator fields `source`, `uri`, `status`, `error_class`, and `error_message` for emitted attempts
+AND MUST include total and omitted attempt counts.
+
+#### Scenario: QHH diagnostic runner preserves typed probe state
+
+WHEN the QHH diagnostic single-cycle script invokes `nhms-ifs download --cycle-time <cycle>`
+AND the CLI emits `status=probe_failed` or `status=rate_limited` with non-zero exit
+THEN the diagnostic state file records the typed retryable status, reason, classifier, retryable flag, source, cycle, and run identity
+AND the diagnostic continuous runner MUST NOT overwrite that typed state as a generic failed cycle.

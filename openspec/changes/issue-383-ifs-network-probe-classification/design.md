@@ -13,7 +13,8 @@ Issue #383 is a production automation bug in the IFS provider boundary. `IFSAdap
 Goals:
 - Preserve the distinction between source object absence and compute-node network/probe failure.
 - Return the stable retryable classification `status=probe_failed`, `reason=source_cycle_probe_failed`, `classifier=network_error`, and `retryable=true` for DNS/network/timeout probe failures.
-- Include redacted attempted mirror evidence and concrete error class/message in adapter/CLI/scheduler evidence.
+- Include bounded, redacted attempted mirror evidence and concrete error class/message in adapter/CLI/scheduler evidence.
+- Keep `status=rate_limited`, `reason=source_cycle_rate_limited`, `classifier=rate_limited`, and `retryable=true` as an intentional public producer state for all-mirror rate limits.
 - Preserve current behavior for genuine 404/unpublished cycles, forbidden sources, and successful discovery.
 
 Non-Goals:
@@ -31,11 +32,17 @@ Non-Goals:
 2. Keep 404/unpublished as `status=unavailable` with `reason=source_cycle_unavailable`.
    - Rationale: existing scheduler/runbook semantics rely on unavailable source-cycle latency being non-fatal but visible.
 
-3. Attach attempted mirror details with redacted URI/source/error fields.
+3. Attach attempted mirror details with redacted URI/source/error fields and bounded length/count.
    - Rationale: operators need to distinguish "every mirror DNS failed" from "one mirror 404 then another succeeded" without leaking credentials or signed URLs.
 
 4. Treat network/probe failures as retryable scheduler evidence.
    - Rationale: compute-node DNS or transient connectivity failures should remain retryable and must not be mistaken for a terminal manual-only source absence.
+
+5. Treat all-mirror rate limiting as a retryable public state instead of remapping it to network failure or unavailable.
+   - Rationale: 429/503/SlowDown has different operator remediation and retry semantics than provider object absence or compute-node DNS failure.
+
+6. Preserve typed IFS download blocker state in QHH diagnostic scripts.
+   - Rationale: the diagnostic runner is not the production scheduler, but its operator evidence must not contradict CLI evidence by overwriting `probe_failed` or `rate_limited` with generic `failed`.
 
 ## Risk Packs Considered
 
@@ -65,7 +72,7 @@ Domain packs:
 
 Governing invariant: IFS source-cycle discovery MUST report provider object absence and compute-node network/probe failure as distinct, retryable evidence states across adapter, CLI, scheduler evidence, and runbook guidance.
 
-Source-of-truth identity/contract: `source_id=IFS`, `cycle_time`, probe forecast hour `0`, configured mirror/source list, `status`, `reason`, `classifier`, `retryable`, redacted `attempted_sources` evidence.
+Source-of-truth identity/contract: `source_id=IFS`, `cycle_time`, probe forecast hour `0`, configured mirror/source list, `status`, `reason`, `classifier`, `retryable`, bounded redacted `attempted_sources` evidence, total attempted count, and omitted attempt count.
 
 Surfaces:
 - Producers: `workers/data_adapters/ifs_adapter.py::_discover_cycle_availability`, `_url_exists`, and related probe helpers.
@@ -80,10 +87,13 @@ Regression rows:
 - Successful mirror probe for `IFS 2026060800 f000` -> `available=true`, `status=discovered`, existing forecast-cycle upsert behavior preserved.
 - All mirrors return 404/unpublished -> `available=false`, `status=unavailable`, `reason=source_cycle_unavailable`, `classifier=unavailable`, no forecast-cycle upsert.
 - All mirrors raise DNS/network/timeout errors -> `available=false`, `status=probe_failed`, `reason=source_cycle_probe_failed`, `classifier=network_error`, `retryable=true`, attempted mirror evidence includes redacted error class/message.
+- All mirrors are rate limited -> `available=false`, `status=rate_limited`, `reason=source_cycle_rate_limited`, `classifier=rate_limited`, `retryable=true`, attempted mirror evidence includes bounded redacted rate-limit error class/message.
 - Mixed provider 404 plus network failures with no successful mirror -> network/probe failure is not collapsed to source unavailable when network failure prevents reliable source-cycle determination.
+- Many configured fallback sources or long exception strings -> adapter and CLI evidence remains bounded, redacted, and includes total/omitted attempt counts.
 - Forbidden source probe -> existing `status=forbidden`, `retryable=false` behavior preserved.
 - CLI consumer of probe failure -> JSON contains `status=probe_failed`, `reason=source_cycle_probe_failed`, `classifier=network_error`, `retryable=true`, `files=0`, `total_bytes_written=0`, and redacted attempted mirrors.
 - Scheduler consumer of probe failure -> evidence remains retryable and carries attempted mirrors/error cause without secrets, and genuine unavailable cycles still use the existing source-latency path.
+- QHH diagnostic consumer of IFS blocker CLI state -> `run_qhh_cycle.sh` records typed `probe_failed`/`rate_limited` state and exits successfully after skipping downstream, and `run_qhh_continuous.py` preserves typed state instead of rewriting it as generic `failed`.
 
 ## Boundary-Surface Checklist
 
