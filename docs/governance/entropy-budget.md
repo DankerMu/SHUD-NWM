@@ -15,8 +15,10 @@ Source-of-truth order:
    legacy/dead-code status and active counterparts.
 4. `docs/governance/DOC_STATUS.md` defines document authority and tracked
    agent/artifact ownership.
-5. The active OpenSpec change
-   `openspec/changes/governance-4-entropy-automation` defines rollout scope.
+5. The active OpenSpec changes
+   `openspec/changes/governance-4-entropy-automation` and
+   `openspec/changes/governance-5-e1-entropy-baseline-burndown` define rollout
+   scope.
 
 When this page disagrees with the script schema, role boundary inventory,
 legacy/dead-code inventory, document status authority, or active OpenSpec
@@ -63,6 +65,7 @@ before converting stable invariants into enforcement.
 | Report-only local audit | Governance-4A/#371 and Governance-4B/#372 | Existing findings may be present. The budget is visibility and schema stability, not pass/fail cleanup. | Run JSON/Markdown reports locally, document the schema, and use findings to open targeted follow-up work. | No CI job, no failing gate, no baseline write, no scripted cleanup. |
 | Non-blocking CI report | Governance-4C/#373 | CI may publish findings without failing PRs for known baseline state. | Add a workflow/job that emits or uploads the report and records known findings for review. | No hard fail for known baseline findings; no silent `.entropy-baseline/latest.json` creation. |
 | Disabled hard gate | Governance-4D/#374 | Only the prepared, explicit invariant list is eligible for fail conditions, and only when a maintainer invokes hard-gate mode. | Run `--mode hard-gate` locally or in temporary fixtures to prove future enforcement semantics. | No CI hard-gate enablement; no broad fail-on-finding behavior; no baseline write. |
+| Baseline burn-down semantics | Governance-5 E1/#400-#403 | Findings are split into total findings, budget-counted findings, and gate-eligible findings. Historical, archived, delegated, and false-positive evidence can stay visible without consuming the cleanup budget. | Use normalized finding fields and summary counters to measure cleanup, document owner issues, and guard retired active-tree paths from returning. | No audit logic changes in #403; no CI hard-gate enablement; no baseline write; no example treated as a committed baseline. |
 
 Governance-4C is active as a non-blocking report workflow. Governance-4D
 prepares an explicit hard-gate mode, but CI remains report-only until a later
@@ -73,6 +76,58 @@ Governance-5 E1 triage is tracked in
 report counts, high-spread family dispositions, owner issues/changes, and
 the #400-specific non-goals before later automation work changes the report
 semantics.
+
+## Finding Semantics
+
+Each JSON finding carries both human-readable evidence and machine-readable
+budget fields:
+
+| Field | Meaning |
+|---|---|
+| `allowlist_reason` | Human-readable explanation for accepted evidence. It remains present for compatibility and may be `null`. |
+| `allowlist_key` | Stable normalized key derived from the check ID and equivalent allowlist wording. It is `null` when the finding is not allowlisted. |
+| `allowlist_state` | `allowlisted` when `allowlist_key` is present; otherwise `unallowlisted`. |
+| `budget_counted` | `true` for unallowlisted active drift that consumes the Governance-5 cleanup budget. Allowlisted historical, archived, delegated, false-positive, or report-only evidence is `false`. |
+| `gate_eligible` | `true` only when the finding is budget-counted and its `check_id` belongs to the prepared hard-gate check set. Hard-gate mode counts this field at finding level. |
+
+`allowlist_key` is the automation identity. `allowlist_reason` is explanatory
+text for maintainers and reports. Equivalent wording for the same accepted
+evidence should normalize to the same key instead of creating separate budget
+categories.
+
+## Summary Counters
+
+The report separates three counts that must not be used interchangeably:
+
+| Count | Source | Meaning |
+|---|---|---|
+| Total findings | `metadata.finding_count` | Every emitted governance signal, including active drift, historical evidence, archived records, delegated checks, and false positives. This is useful for scan coverage, not for burn-down success. |
+| Budget-counted findings | `metadata.budget_counted_count` and `summary_counts.by_budget_count.budget_counted` | Unallowlisted active drift that consumes the cleanup budget. These findings should map to owner issues or an explicit later disposition. |
+| Gate-eligible findings | `metadata.gate_eligible_count` and `summary_counts.by_gate_eligibility.gate_eligible` | Budget-counted findings that explicit hard-gate mode would count as failures. This is a subset of budget-counted findings. |
+
+`metadata.summary_counts` also groups findings by `check_id`, priority, role,
+allowlist state, gate eligibility, and budget count. Those counters are for
+reporting and trend review. They do not enable CI failure by themselves.
+
+## Retired Active-Tree Paths
+
+Governance-5 E1 distinguishes tracked path reintroduction from text evidence:
+
+- A tracked file under a retired active-tree prefix is a path finding. The audit
+  checks git-tracked path identity for configured retired web-app, hyphenated
+  worker, sbatch-template, and tile-publisher placeholder prefixes. If such a
+  file returns to the active tree, the report emits a
+  `placeholder-path-exists` finding.
+- Historical, archive, inventory, and completed OpenSpec text that mentions a
+  retired path remains text evidence. These references are reported through
+  `placeholder-path-token` semantics and may be allowlisted with a governed
+  reason when they are retained for auditability.
+- Untracked filesystem-only files are not path reintroduction evidence for this
+  guard. The source of truth is `git ls-files`, including force-added ignored
+  files.
+
+This distinction prevents active retired paths from silently returning while
+preserving governed historical/archive/OpenSpec evidence.
 
 ## Baseline Write Policy
 

@@ -223,6 +223,62 @@ Boundary-surface checklist:
 - Producer/consumer evidence boundaries: tests must distinguish path-return findings from placeholder text-token findings.
 - Unchanged downstream consumers: #401 summary counts and report-only CI behavior.
 
+### #403 entropy budget docs and report example slice
+
+Fixture level: compact
+
+Change surface:
+
+- `docs/governance/entropy-budget.md`
+- `docs/governance/entropy-report.example.md`
+- E1 OpenSpec task checkboxes/evidence rows only.
+
+Must preserve:
+
+- No audit logic changes.
+- No CI workflow changes and no hard-gate enablement.
+- No `.entropy-baseline/latest.json` creation or update.
+- No runtime, frontend, node-27, API, or layer-inversion changes.
+- Report examples remain representative schema examples, not a committed baseline.
+
+Must add/change:
+
+- Document the #401 normalized finding fields: `allowlist_state`, `allowlist_key`, `budget_counted`, and `gate_eligible`.
+- Document the #401 summary counters and the distinction between total findings, budget-counted findings, and gate-eligible findings.
+- Document the #402 tracked retired-path semantics: tracked retired active-tree files are separate from governed text evidence; the guard uses git-tracked path identity.
+- Refresh `entropy-report.example.md` so sample metadata, findings, and hard-gate notes match the live JSON schema.
+- Verify `.github/workflows/governance.yml` remains report-only and does not pass `--mode hard-gate`.
+
+Risk packs considered for #403:
+
+- Public API / CLI / script entry: selected - docs describe the report CLI contract and hard-gate mode.
+- Config / project setup: selected - docs must not imply CI hard-gate enablement.
+- File IO / path safety / overwrite: selected - docs must keep baseline write policy explicit.
+- Schema / columns / units / field names: selected - report example must match live JSON field names.
+- Auth / permissions / secrets: not selected - no credential surface.
+- Concurrency / shared state / ordering: not selected - docs-only change.
+- Resource limits / large input / discovery: selected - docs describe scan byte limits and skipped path families.
+- Legacy compatibility / examples: selected - docs must distinguish governed historical evidence from active drift.
+- Error handling / rollback / partial outputs: selected - docs must state hard-gate JSON remains parseable and baseline is not written.
+- Release / packaging / dependency compatibility: not selected - no dependency/package change.
+- Documentation / migration notes: selected - this issue is documentation refresh.
+- NHMS domain packs: not selected - no hydro-met, geospatial, SHUD, Slurm runtime, provider, manifest, or published artifact behavior changes.
+
+Required #403 evidence:
+
+- Live JSON report command succeeds and exposes documented metadata, `summary_counts`, finding fields, `module_heatmap`, and `high_spread_patterns`.
+- Markdown report command succeeds and includes budget-counted, gate-eligible, heatmap, high-spread, and prioritized cleanup sections.
+- Explicit hard-gate JSON command remains parseable, may exit non-zero, counts only gate-eligible findings, and does not write `.entropy-baseline/latest.json`.
+- `rg -- '--mode hard-gate' .github/workflows/governance.yml` returns no matches.
+- `openspec validate governance-5-e1-entropy-baseline-burndown --strict --no-interactive` passes.
+
+Non-goals for #403:
+
+- No changes to `scripts/governance/audit_repo_entropy.py`.
+- No refresh of unrelated governance docs.
+- No frontend/node-27 cleanup and no API/layer-inversion work.
+- No CI workflow changes, committed baseline file, or example-as-baseline behavior.
+
 ## Decisions
 
 ### D1. Use finding-level semantics instead of check-family gates
