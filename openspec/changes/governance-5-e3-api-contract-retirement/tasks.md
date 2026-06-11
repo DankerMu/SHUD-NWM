@@ -35,9 +35,18 @@ Expected #412 policy outputs:
 
 ## 3. Consumer Migration
 
-- [ ] 3.1 Migrate backend consumers if inventory finds backend code depending on a candidate compatibility endpoint.
+- [x] 3.1 For #413, confirm backend/internal consumers of #411 removal-candidate endpoints, and migrate backend consumers if such consumers exist.
 - [ ] 3.2 On node-27, migrate frontend consumers if display bootstrap or display stores depend on a candidate compatibility endpoint.
 - [ ] 3.3 Keep old endpoint behavior available until all current consumers pass against replacement routes.
+- [x] 3.4 For #413, if no backend removal-candidate consumers exist, record evidence and explicitly defer backend migration as not needed.
+
+Expected #413 backend outputs:
+
+- Backend/internal search covers `apps/api`, `packages/common`, `services`, `workers`, `tests`, and `scripts`.
+- Active contract test coverage for `/api/v1/mvp/qhh/latest-product` and canonical `forecast-series` is preserved and not treated as dead code.
+- Docs-only shorthand `forecast-series` references are not treated as backend runtime consumers unless a real route/code consumer is found.
+- If no backend removal-candidate consumer exists, #413 closes with evidence rather than code migration.
+- If backend code migration is required, focused backend tests are updated and API behavior stays backward compatible.
 
 ## 4. Contract Update
 
@@ -56,3 +65,7 @@ Expected #412 policy outputs:
 - [x] 5.7 For #412, run `openspec validate governance-5-e3-api-contract-retirement --strict --no-interactive`.
 - [x] 5.8 For #412, run markdown lint over changed governance docs.
 - [x] 5.9 For #412, confirm `git status --short --untracked-files=all` is limited to governance policy docs and E3 OpenSpec evidence.
+- [x] 5.10 For #413, run backend/internal repository searches covering #411 candidate endpoints and shorthand forms.
+- [x] 5.11 For #413, run `openspec validate governance-5-e3-api-contract-retirement --strict --no-interactive`.
+- [x] 5.12 For #413, run backend tests if backend code changes; otherwise run markdown lint over changed governance docs and confirm no runtime code changed.
+- [x] 5.13 For #413, confirm `git status --short --untracked-files=all` is limited to backend evidence/docs/OpenSpec and any deliberate backend/test files.

@@ -180,3 +180,64 @@ Review focus:
 - Deprecation metadata timing is conservative and does not mark active contracts deprecated prematurely.
 - Rollback guidance is actionable for later implementation issues.
 - Policy does not require node-27/frontend work on this node.
+
+### #413 backend consumer migration/evidence slice
+
+Fixture level: expanded
+
+Project profile: NHMS
+
+Change surface:
+
+- Backend/internal consumer evidence for #411 candidates under the #412 policy.
+- Backend docs/OpenSpec evidence, and only if required by evidence, narrowly scoped backend consumer code/tests.
+
+Must preserve:
+
+- No frontend/node-27 implementation.
+- No OpenAPI contraction, generated type regeneration, endpoint deletion, deprecation headers, response metadata, CI workflow changes, or live receipts.
+- Active runtime routes remain backward compatible.
+- #412 policy remains authoritative: no current endpoint is deprecated or removal-ready.
+
+Must add/change:
+
+- Confirm whether backend/internal code consumes any #411 removal-candidate endpoint.
+- If backend removal-candidate consumers exist, migrate them according to #412 and add focused backend tests.
+- If no backend removal-candidate consumers exist, record evidence and explicitly defer backend migration as not needed in #413.
+- Document any remaining backend/test compatibility dependency on active contracts.
+
+Risk packs considered for #413:
+
+- Public API / CLI / script entry: selected - backend evidence protects public HTTP contract migration order.
+- Config / project setup: not selected - no config changes.
+- File IO / path safety / overwrite: not selected - no file IO behavior changes expected.
+- Schema / columns / units / field names: selected - route/query/response identifiers must remain compatible.
+- Auth / permissions / secrets: not selected - no auth/secret change.
+- Concurrency / shared state / ordering: not selected - no runtime state transition change expected.
+- Resource limits / large input / discovery: selected - evidence must search backend/internal/test surfaces without overclaiming external consumers.
+- Legacy compatibility / examples: selected - issue decides whether backend migration is needed for compatibility candidates.
+- Error handling / rollback / partial outputs: selected - any backend migration would need rollback evidence; no-migration evidence must preserve compatibility.
+- Release / packaging / dependency compatibility: not selected - no dependency/package change.
+- Documentation / migration notes: selected - if no migration is needed, close with evidence.
+- Published NHMS artifacts / display identity: selected - latest-product strict identity must not be weakened by any backend change.
+- Other NHMS domain packs: not selected - no hydro-met computation, geospatial, SHUD, Slurm, provider, or DB runtime behavior changes unless implementation evidence proves otherwise.
+
+Required #413 evidence:
+
+- Backend/internal search covers `apps/api`, `packages/common`, `services`, `workers`, `tests`, `scripts`, and governance docs for #411 candidate endpoints and shorthand forms.
+- Evidence distinguishes active-contract tests from backend consumers that block removal.
+- If no backend removal-candidate consumers exist, document that no code migration was performed and why.
+- Relevant backend tests pass when code changes occur; if no code changes occur, OpenSpec validation and markdown lint are sufficient.
+
+Non-goals for #413:
+
+- No frontend/node-27 migration; #414 owns it.
+- No OpenAPI/type/docs sync; #415 owns it.
+- No removal/defer final decision; #416 owns it.
+- No external consumer inventory beyond preserving the #412 unknown-external-consumer warning.
+
+Review focus:
+
+- No active compatibility endpoint is treated as dead code or removal-ready.
+- Backend evidence is broad enough to justify migration-not-needed if no backend removal-candidate consumer exists.
+- Any code changes, if present, stay backend-only and preserve existing API behavior.
