@@ -2,8 +2,13 @@
 
 - [x] 1.1 Identify linked successful manual retry jobs for a failed logical
   cycle stage using durable retry provenance and stage/run/cycle identity.
+  Phase 6 round 2 extends source-cycle provenance transitively across bounded
+  manual retry chains so a latest successful retry repairs failed ancestors in
+  the same source/cycle/run/stage/job_type chain.
 - [x] 1.2 Treat older failed source-cycle stage evidence as repaired/superseded
-  when a linked retry succeeded and source-cycle readiness is restored.
+  when a linked retry succeeded and source-cycle readiness is restored. Repaired
+  failed rows remain in evidence but are excluded from active scheduler
+  blocker/failure decisions.
 - [x] 1.3 Keep unrelated successful jobs from masking unrepaired failures.
 - [x] 1.4 Preserve existing partial array retry supersession semantics.
 
@@ -15,7 +20,10 @@
   failures as active blockers.
 - [x] 2.3 Ensure unrepaired failures still emit stable failed candidate evidence.
 - [x] 2.4 Keep evidence reads bounded by existing job/event limits and mark
-  truncation when applicable.
+  truncation when applicable. Phase 6 round 2 treats truncated source-cycle
+  repair windows with matching ready manifests as inconclusive rather than
+  complete negative proof, and does not promote unresolved rows from that
+  truncated repair window to active source-cycle blockers.
 - [x] 2.5 Require repaired source-cycle evidence to agree with
   `forecast_cycle.manifest_uri`; a missing or mismatched manifest URI must not
   turn a stale failure into repaired evidence. Phase 6 extends this to prefixed
@@ -43,9 +51,12 @@
   marker or older non-succeeded retry after the original failure; it must not
   supersede the active failure. Phase 6 adds mixed ordering coverage where an
   older repaired source-cycle failure remains annotated while a later separate
-  unrepaired source-cycle failure stays active.
+  unrepaired source-cycle failure stays active. Phase 6 round 2 adds equal truth
+  timestamp coverage using terminal time, retry count, created_at, and job id
+  as deterministic tie-breakers.
 - [x] 3.4 Resource limits / discovery: cover bounded/truncated job or event
-  history without unbounded scans.
+  history without unbounded scans. Phase 6 round 2 covers truncated source-cycle
+  repair proof as explicit inconclusive bounded evidence.
 - [x] 3.5 Legacy compatibility: rerun existing array task retry supersession and
   non-source retry tests without changing their behavior.
 - [x] 3.6 Error handling / partial outputs: cover unrepaired failure and
@@ -70,11 +81,16 @@
   scheduler/candidate evidence proceeds and marks old failure repaired, with
   `manifest_uri` matching the repaired source/cycle. Phase 6 includes prefixed
   S3 manifest URI coverage for
-  `s3://nhms-prod/qhh/raw/gfs/2026050100/manifest.json`.
+  `s3://nhms-prod/qhh/raw/gfs/2026050100/manifest.json`. Phase 6 round 2 adds
+  scheduler coverage where repaired source-cycle failed rows plus the actual
+  manual retry event do not trigger `manual_retry_requested`.
 - [x] 4.2 Add negative regression where a successful unrelated job does not
   supersede the failed stage.
 - [x] 4.3 Add negative regression where a stale manual retry marker or
-  non-succeeded retry is newer than the failure but must not repair it.
+  non-succeeded retry is newer than the failure but must not repair it. Phase 6
+  round 2 adds positive multihop retry-chain coverage proving original and
+  intermediate failed retry ancestors are historical after the latest successful
+  retry.
 - [x] 4.4 Add negative regression where `forecast_cycle.manifest_uri` is missing
   or mismatched, so the old failure remains active. Phase 6 adds unsupported
   scheme (`https://`, `file://`), unsafe path, wrong source/cycle, and wrong

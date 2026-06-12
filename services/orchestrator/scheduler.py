@@ -4286,10 +4286,10 @@ def _call_active_slurm_jobs_provider(
 def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     validation = evidence.get("production_identity_validation")
     if not isinstance(validation, Mapping):
-        return _candidate_scoped_shared_cycle_aggregate_state(state, evidence)
+        return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(state, evidence))
     legacy_sources = {str(source) for source in validation.get("legacy_non_authoritative", [])}
     if not legacy_sources:
-        return _candidate_scoped_shared_cycle_aggregate_state(state, evidence)
+        return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(state, evidence))
     filtered = dict(state)
     if "candidate_state" in legacy_sources:
         _strip_top_level_candidate_state_decision_fields(filtered)
@@ -4324,7 +4324,14 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
         _strip_top_level_pipeline_decision_fields(filtered)
     if filtered.get("pipeline_events") == [] and not filtered.get("pipeline_jobs"):
         _strip_top_level_pipeline_decision_fields(filtered)
-    return _candidate_scoped_shared_cycle_aggregate_state(filtered, evidence)
+    return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(filtered, evidence))
+
+
+def _repaired_stage_decision_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    filtered = dict(state)
+    if _state_has_only_repaired_pipeline_failure_signal(filtered):
+        _strip_top_level_pipeline_decision_fields(filtered)
+    return filtered
 
 
 def _candidate_scoped_shared_cycle_aggregate_state(
@@ -4382,6 +4389,8 @@ def _shared_cycle_aggregate_has_candidate_failure(
     state: Mapping[str, Any],
 ) -> bool:
     for job in _state_jobs(state):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if status not in FAILED_PIPELINE_STATUSES and job.get("error_code") in (None, ""):
             continue
@@ -4672,6 +4681,8 @@ def _terminal_hydro_truth_supersedes_failure(state: Mapping[str, Any]) -> bool:
 def _latest_failure_truth_timestamp(state: Mapping[str, Any]) -> datetime | None:
     timestamps: list[datetime] = []
     for job in _state_jobs(state):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if status not in FAILED_PIPELINE_STATUSES and not job.get("error_code"):
             continue
@@ -4788,6 +4799,9 @@ def _candidate_state_evidence(candidate: SchedulerCandidate, state: Mapping[str,
     repaired_stage = state.get("repaired_stage_evidence")
     if isinstance(repaired_stage, Mapping):
         evidence["repaired_stage_evidence"] = _evidence_safe(dict(repaired_stage))
+    source_cycle_repair = state.get("source_cycle_repair_evidence")
+    if isinstance(source_cycle_repair, Mapping):
+        evidence["source_cycle_repair_evidence"] = _evidence_safe(dict(source_cycle_repair))
     overflow = _state_overflow_evidence(state)
     if overflow:
         evidence["state_bounds"] = overflow
@@ -5321,6 +5335,7 @@ def _job_state_evidence(job: Mapping[str, Any]) -> dict[str, Any]:
             "superseded_by_job_id",
             "repaired_by_job_id",
             "repairs_job_id",
+            "repairs_job_ids",
             "active_blocker",
         )
         if key in job and job.get(key) is not None
@@ -5378,6 +5393,8 @@ def _state_active_jobs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _manual_retry_requested(state: Mapping[str, Any]) -> bool:
     marker = _latest_manual_retry_marker(state)
     if marker is None:
+        return False
+    if _manual_retry_marker_repairs_historical_failure(state, marker):
         return False
     blocker = _latest_manual_retry_blocker(state)
     if blocker is None:
@@ -5469,6 +5486,33 @@ def _latest_manual_retry_marker(state: Mapping[str, Any]) -> dict[str, Any] | No
     return max(markers, key=_state_truth_sort_key)
 
 
+def _manual_retry_marker_repairs_historical_failure(
+    state: Mapping[str, Any],
+    marker: Mapping[str, Any],
+) -> bool:
+    previous_job_id = marker.get("previous_job_id")
+    if previous_job_id in (None, ""):
+        return False
+    previous_job_id_text = str(previous_job_id)
+    for job in _state_jobs(state):
+        if str(job.get("job_id") or job.get("pipeline_job_id") or "") == previous_job_id_text:
+            if not _pipeline_job_is_repaired_stage_evidence(job):
+                return False
+            marker_entity_id = marker.get("entity_id")
+            repairing_retry_job_id = job.get("repaired_by_job_id") or job.get("superseded_by_job_id")
+            return marker_entity_id in (None, "") or repairing_retry_job_id in (None, "") or str(
+                marker_entity_id
+            ) == str(repairing_retry_job_id)
+    repaired_stage = state.get("repaired_stage_evidence")
+    if not isinstance(repaired_stage, Mapping):
+        return False
+    if str(repaired_stage.get("original_failed_job_id") or "") != previous_job_id_text:
+        return False
+    marker_entity_id = marker.get("entity_id")
+    repairing_retry_job_id = repaired_stage.get("repairing_retry_job_id")
+    return marker_entity_id in (None, "") or str(marker_entity_id) == str(repairing_retry_job_id)
+
+
 def _latest_manual_retry_blocker(state: Mapping[str, Any]) -> dict[str, Any] | None:
     blockers: list[dict[str, Any]] = []
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
@@ -5499,6 +5543,8 @@ def _latest_manual_retry_blocker(state: Mapping[str, Any]) -> dict[str, Any] | N
             )
         )
     for order, job in enumerate(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if not _manual_retry_blocking_pipeline_status(status):
             continue
@@ -5737,6 +5783,8 @@ def _failed_stage(state: Mapping[str, Any]) -> str | None:
         if value not in (None, ""):
             return str(value)
     for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         status = str(job.get("status") or "")
         if status in FAILED_PIPELINE_STATUSES and job.get("stage") not in (None, ""):
             return str(job["stage"])
@@ -5811,6 +5859,8 @@ def _state_error_code(state: Mapping[str, Any]) -> str | None:
             if value not in (None, ""):
                 return str(value)
     for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         value = job.get("error_code") or job.get("reason_code")
         if value not in (None, ""):
             return str(value)
@@ -5835,6 +5885,8 @@ def _state_error_message(state: Mapping[str, Any]) -> str | None:
             if value not in (None, ""):
                 return str(_evidence_safe(str(value)))
     for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         value = job.get("error_message")
         if value not in (None, ""):
             return str(_evidence_safe(str(value)))
@@ -5874,6 +5926,8 @@ def _state_task_identity(state: Mapping[str, Any]) -> dict[str, Any]:
                 identity["slurm_job_id"] = task.get("slurm_job_id")
             return _evidence_safe(identity)
     for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         for key in ("array_task_id", "stage", "job_id", "slurm_job_id"):
             value = job.get(key)
             if value not in (None, ""):
@@ -6266,6 +6320,8 @@ def _latest_failed_job_for_stage(state: Mapping[str, Any], stage_name: str) -> M
     normalized_stage = _canonical_downstream_stage(stage_name) or stage_name
     matches: list[Mapping[str, Any]] = []
     for job in _state_jobs(state):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         stage = str(job.get("stage") or job.get("job_type") or "")
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if stage in {normalized_stage, stage_name} and status in FAILED_PIPELINE_STATUSES:
@@ -6363,6 +6419,8 @@ def _permanent_failure_evidence(
 
 
 def _state_has_failure_signal(state: Mapping[str, Any]) -> bool:
+    if _state_has_only_repaired_pipeline_failure_signal(state):
+        return False
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
     hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
     if pipeline_status in FAILED_PIPELINE_STATUSES or hydro_status in {"failed", "permanently_failed"}:
@@ -6379,6 +6437,61 @@ def _state_has_failure_signal(state: Mapping[str, Any]) -> bool:
     if _failed_stage(state) is not None and _state_error_code(state) not in (None, ""):
         return True
     return False
+
+
+def _pipeline_job_is_repaired_stage_evidence(job: Mapping[str, Any]) -> bool:
+    return job.get("repair_status") == "repaired" or job.get("active_blocker") is False
+
+
+def _state_has_only_repaired_pipeline_failure_signal(state: Mapping[str, Any]) -> bool:
+    jobs = _state_jobs(state)
+    if not jobs:
+        return False
+    active_failure_jobs = [
+        job
+        for job in jobs
+        if not _pipeline_job_is_repaired_stage_evidence(job)
+        and (
+            str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+            in FAILED_PIPELINE_STATUSES
+            or job.get("error_code") not in (None, "")
+            or job.get("reason_code") not in (None, "")
+        )
+    ]
+    if active_failure_jobs:
+        return False
+    active_failure_events = [
+        event
+        for event in _state_events(state)
+        if not _event_is_manual_retry_marker(event) and _event_has_failure_signal(event)
+    ]
+    if active_failure_events:
+        return False
+    repaired_failure_jobs = [
+        job
+        for job in jobs
+        if _pipeline_job_is_repaired_stage_evidence(job)
+        and (
+            str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+            in FAILED_PIPELINE_STATUSES
+            or job.get("error_code") not in (None, "")
+            or job.get("reason_code") not in (None, "")
+        )
+    ]
+    return bool(repaired_failure_jobs)
+
+
+def _event_has_failure_signal(event: Mapping[str, Any]) -> bool:
+    details = event.get("details")
+    details_mapping = details if isinstance(details, Mapping) else {}
+    status = str(
+        event.get("status_to")
+        or details_mapping.get("status_to")
+        or details_mapping.get("status")
+        or details_mapping.get("state")
+        or ""
+    )
+    return status in FAILED_PIPELINE_STATUSES or details_mapping.get("error_code") not in (None, "")
 
 
 def _cancelled_state_evidence(

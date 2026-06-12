@@ -5047,7 +5047,10 @@ class PsycopgOrchestratorRepository:
                   )
             ORDER BY
                 COALESCE(updated_at, finished_at, submitted_at, started_at, created_at) DESC NULLS LAST,
-                created_at DESC
+                COALESCE(finished_at, submitted_at, started_at, created_at) DESC NULLS LAST,
+                retry_count DESC NULLS LAST,
+                created_at DESC,
+                job_id DESC
             LIMIT %s
             """,
             (
@@ -5173,6 +5176,8 @@ class PsycopgOrchestratorRepository:
             cycle_time=cycle_time,
             cycle_id=cycle_id,
             cycle_run_id=cycle_run_id,
+            jobs_truncated=jobs_truncated,
+            events_truncated=events_truncated,
         )
         if source_cycle_download_state.get("annotated_jobs"):
             jobs = list(source_cycle_download_state["annotated_jobs"])
@@ -5278,6 +5283,9 @@ class PsycopgOrchestratorRepository:
         }
         if isinstance(repaired_stage_evidence, Mapping):
             state["repaired_stage_evidence"] = dict(repaired_stage_evidence)
+        source_cycle_repair_evidence = _source_cycle_repair_evidence(source_cycle_download_state)
+        if source_cycle_repair_evidence:
+            state["source_cycle_repair_evidence"] = source_cycle_repair_evidence
         return state
 
     def active_slurm_jobs(
@@ -6189,6 +6197,8 @@ def _source_cycle_download_repair_state(
     cycle_time: datetime,
     cycle_id: str,
     cycle_run_id: str,
+    jobs_truncated: bool = False,
+    events_truncated: bool = False,
 ) -> dict[str, Any]:
     source_cycle_jobs = [
         dict(job)
@@ -6240,11 +6250,25 @@ def _source_cycle_download_repair_state(
     if annotated_jobs is not None:
         payload["annotated_jobs"] = annotated_jobs
     if unrepaired_failed_jobs:
+        if manifest_binding is not None and (jobs_truncated or events_truncated):
+            payload["repair_evidence_status"] = "inconclusive_truncated"
+            payload["repair_evidence_truncated"] = True
+            payload["repair_evidence_reason"] = "source_cycle_repair_window_truncated"
+            payload["repair_evidence_unresolved_failed_job_ids"] = [
+                str(job.get("job_id"))
+                for job in sorted(unrepaired_failed_jobs, key=_pipeline_job_truth_sort_key)
+                if job.get("job_id") not in (None, "")
+            ]
+            return payload
         payload["active_failure_job"] = max(unrepaired_failed_jobs, key=_pipeline_job_truth_sort_key)
         return payload
     latest_repair = max(
         repaired_by_failed_job_id.values(),
-        key=lambda item: _pipeline_job_truth_sort_key(item["retry_job"]),
+        key=lambda item: (
+            _pipeline_job_truth_sort_key(item["retry_job"]),
+            _source_cycle_original_failure_sort_key(item["failed_job"]),
+            str(item["failed_job"].get("job_id") or ""),
+        ),
     )
     payload["repaired_stage_evidence"] = _source_cycle_repaired_stage_evidence(
         latest_repair["failed_job"],
@@ -6381,15 +6405,13 @@ def _linked_successful_source_cycle_retry(
         for job in source_cycle_jobs
         if job.get("job_id") not in (None, "")
     }
+    ancestor_ids_by_retry_job_id, events_by_retry_job_id = _source_cycle_retry_provenance(events)
     repairs: list[dict[str, Any]] = []
     for event in events:
         details = event.get("details")
         if event.get("event_type") not in {"retry", "manual_retry"} or not isinstance(details, Mapping):
             continue
         if details.get("trigger") != "manual" and details.get("manual_retry_marker") is not True:
-            continue
-        previous_job_id = details.get("previous_job_id") or details.get("failed_job_id")
-        if str(previous_job_id or "") != failed_job_id:
             continue
         retry_job_id = (
             event.get("entity_id")
@@ -6398,8 +6420,17 @@ def _linked_successful_source_cycle_retry(
             or details.get("job_id")
             or details.get("pipeline_job_id")
         )
-        retry_job = jobs_by_id.get(str(retry_job_id or ""))
+        retry_job_id_text = str(retry_job_id or "")
+        if not retry_job_id_text:
+            continue
+        retry_job = jobs_by_id.get(retry_job_id_text)
         if retry_job is None:
+            continue
+        if failed_job_id not in _bounded_retry_ancestor_ids(
+            retry_job_id_text,
+            ancestor_ids_by_retry_job_id,
+            max_depth=max(len(events_by_retry_job_id), 1),
+        ):
             continue
         if not _source_cycle_retry_job_repairs_failure(
             retry_job,
@@ -6408,10 +6439,60 @@ def _linked_successful_source_cycle_retry(
             cycle_run_id=cycle_run_id,
         ):
             continue
-        repairs.append({"retry_job": dict(retry_job), "event": dict(event)})
+        repair_event = events_by_retry_job_id.get(retry_job_id_text, event)
+        repairs.append({"retry_job": dict(retry_job), "event": dict(repair_event)})
     if not repairs:
         return None
     return max(repairs, key=lambda item: _pipeline_job_truth_sort_key(item["retry_job"]))
+
+
+def _source_cycle_retry_provenance(
+    events: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, set[str]], dict[str, Mapping[str, Any]]]:
+    ancestor_ids_by_retry_job_id: dict[str, set[str]] = {}
+    events_by_retry_job_id: dict[str, Mapping[str, Any]] = {}
+    for event in events:
+        details = event.get("details")
+        if event.get("event_type") not in {"retry", "manual_retry"} or not isinstance(details, Mapping):
+            continue
+        if details.get("trigger") != "manual" and details.get("manual_retry_marker") is not True:
+            continue
+        previous_job_id = details.get("previous_job_id") or details.get("failed_job_id")
+        retry_job_id = (
+            event.get("entity_id")
+            or details.get("retry_job_id")
+            or details.get("new_job_id")
+            or details.get("job_id")
+            or details.get("pipeline_job_id")
+        )
+        previous_job_id_text = str(previous_job_id or "")
+        retry_job_id_text = str(retry_job_id or "")
+        if not previous_job_id_text or not retry_job_id_text:
+            continue
+        ancestor_ids_by_retry_job_id.setdefault(retry_job_id_text, set()).add(previous_job_id_text)
+        existing_event = events_by_retry_job_id.get(retry_job_id_text)
+        if existing_event is None or _event_truth_sort_key(event) >= _event_truth_sort_key(existing_event):
+            events_by_retry_job_id[retry_job_id_text] = event
+    return ancestor_ids_by_retry_job_id, events_by_retry_job_id
+
+
+def _bounded_retry_ancestor_ids(
+    retry_job_id: str,
+    ancestor_ids_by_retry_job_id: Mapping[str, set[str]],
+    *,
+    max_depth: int,
+) -> set[str]:
+    ancestors: set[str] = set()
+    stack = list(ancestor_ids_by_retry_job_id.get(retry_job_id, set()))
+    depth = 0
+    while stack and depth < max_depth:
+        depth += 1
+        current_id = stack.pop()
+        if current_id in ancestors:
+            continue
+        ancestors.add(current_id)
+        stack.extend(ancestor_ids_by_retry_job_id.get(current_id, set()) - ancestors)
+    return ancestors
 
 
 def _source_cycle_retry_job_repairs_failure(
@@ -6448,10 +6529,16 @@ def _annotated_source_cycle_repair_jobs(
 ) -> list[dict[str, Any]] | None:
     if not repaired_by_failed_job_id:
         return None
-    retry_job_ids = {
-        str(repair["retry_job"].get("job_id")): str(repair["failed_job"].get("job_id"))
-        for repair in repaired_by_failed_job_id.values()
-    }
+    repaired_failed_ids_by_retry_job_id: dict[str, list[str]] = {}
+    for repair in sorted(
+        repaired_by_failed_job_id.values(),
+        key=lambda item: _source_cycle_original_failure_sort_key(item["failed_job"]),
+        reverse=True,
+    ):
+        retry_job_id = str(repair["retry_job"].get("job_id") or "")
+        failed_job_id = str(repair["failed_job"].get("job_id") or "")
+        if retry_job_id and failed_job_id:
+            repaired_failed_ids_by_retry_job_id.setdefault(retry_job_id, []).append(failed_job_id)
     annotated: list[dict[str, Any]] = []
     changed = False
     for job in jobs:
@@ -6465,9 +6552,10 @@ def _annotated_source_cycle_repair_jobs(
             payload["repaired_by_job_id"] = retry_job_id
             payload["active_blocker"] = False
             changed = True
-        elif job_id in retry_job_ids:
+        elif job_id in repaired_failed_ids_by_retry_job_id:
             payload["repair_status"] = "repair_succeeded"
-            payload["repairs_job_id"] = retry_job_ids[job_id]
+            payload["repairs_job_id"] = repaired_failed_ids_by_retry_job_id[job_id][0]
+            payload["repairs_job_ids"] = repaired_failed_ids_by_retry_job_id[job_id]
             changed = True
         annotated.append(payload)
     return annotated if changed else None
@@ -6518,8 +6606,49 @@ def _first_pipeline_truth_timestamp(job: Mapping[str, Any]) -> Any:
     return None
 
 
-def _pipeline_job_truth_sort_key(job: Mapping[str, Any]) -> datetime:
-    return _datetime_sort_key(_first_pipeline_truth_timestamp(job))
+def _pipeline_job_truth_sort_key(job: Mapping[str, Any]) -> tuple[datetime, datetime, int, datetime, str]:
+    return (
+        _datetime_sort_key(_first_pipeline_truth_timestamp(job)),
+        _source_cycle_stage_terminal_time(job) or datetime.min.replace(tzinfo=UTC),
+        _coerce_int(job.get("retry_count"), default=0),
+        _datetime_sort_key(job.get("created_at")),
+        str(job.get("job_id") or ""),
+    )
+
+
+def _source_cycle_original_failure_sort_key(job: Mapping[str, Any]) -> tuple[int, datetime, datetime, datetime]:
+    return (
+        -_coerce_int(job.get("retry_count"), default=0),
+        _inverse_datetime_sort_key(_source_cycle_stage_terminal_time(job) or datetime.min.replace(tzinfo=UTC)),
+        _inverse_datetime_sort_key(_datetime_sort_key(job.get("created_at"))),
+        _inverse_datetime_sort_key(_pipeline_job_truth_sort_key(job)[0]),
+    )
+
+
+def _inverse_datetime_sort_key(value: datetime) -> datetime:
+    return datetime.max.replace(tzinfo=UTC) - (value - datetime.min.replace(tzinfo=UTC))
+
+
+def _event_truth_sort_key(event: Mapping[str, Any]) -> tuple[datetime, int]:
+    return (
+        _datetime_sort_key(event.get("created_at")),
+        _numeric_sort_key(event.get("event_id")),
+    )
+
+
+def _source_cycle_repair_evidence(source_cycle_download_state: Mapping[str, Any]) -> dict[str, Any] | None:
+    status = source_cycle_download_state.get("repair_evidence_status")
+    if status in (None, ""):
+        return None
+    payload = {
+        "status": status,
+        "truncated": bool(source_cycle_download_state.get("repair_evidence_truncated")),
+        "reason": source_cycle_download_state.get("repair_evidence_reason"),
+        "unresolved_failed_job_ids": list(
+            source_cycle_download_state.get("repair_evidence_unresolved_failed_job_ids") or []
+        ),
+    }
+    return {key: value for key, value in payload.items() if value not in (None, "", [])}
 
 
 def _datetime_sort_key(value: Any) -> datetime:

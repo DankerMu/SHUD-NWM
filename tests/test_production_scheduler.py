@@ -2337,6 +2337,86 @@ def test_candidate_state_evidence_preserves_repaired_stage_metadata_additively()
     assert evidence["pipeline_jobs"][1]["repairs_job_id"] == "job_cycle_gfs_2026052106_download"
 
 
+def test_candidate_state_decision_ignores_repaired_source_cycle_failure_with_retry_event() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        "pipeline_status": None,
+        "failed_stage": None,
+        "error_code": None,
+        "retry_count": 0,
+        "retry_limit": 3,
+        "pipeline_jobs": [
+            {
+                "job_id": "job_cycle_gfs_2026052106_download",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "permanently_failed",
+                "error_code": "NODE_FAILURE",
+                "retry_count": 0,
+                "updated_at": "2026-05-21T06:10:00Z",
+                "repair_status": "repaired",
+                "superseded_by_job_id": "job_cycle_gfs_2026052106_retry_active",
+                "repaired_by_job_id": "job_cycle_gfs_2026052106_retry_active",
+                "active_blocker": False,
+            },
+            {
+                "job_id": "job_cycle_gfs_2026052106_retry_active",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "succeeded",
+                "retry_count": 1,
+                "updated_at": "2026-05-21T06:30:00Z",
+                "repair_status": "repair_succeeded",
+                "repairs_job_id": "job_cycle_gfs_2026052106_download",
+            },
+        ],
+        "pipeline_events": [
+            {
+                "event_id": 501,
+                "event_type": "retry",
+                "run_id": "cycle_gfs_2026052106",
+                "entity_id": "job_cycle_gfs_2026052106_retry_active",
+                "created_at": "2026-05-21T06:20:00Z",
+                "details": {
+                    "trigger": "manual",
+                    "manual_retry_marker": True,
+                    "previous_job_id": "job_cycle_gfs_2026052106_download",
+                    "retry_job_id": "job_cycle_gfs_2026052106_retry_active",
+                    "retry_count": 1,
+                    "prior_failure_reason": "NODE_FAILURE",
+                },
+            }
+        ],
+        "repaired_stage_evidence": {
+            "status": "repaired",
+            "repair_status": "repaired",
+            "stage": "download",
+            "job_type": "download_source_cycle",
+            "original_failed_job_id": "job_cycle_gfs_2026052106_download",
+            "repairing_retry_job_id": "job_cycle_gfs_2026052106_retry_active",
+            "manual_retry_event_id": 501,
+            "manual_retry_marker": True,
+            "manifest_uri": "raw/gfs/2026052106/manifest.json",
+            "forecast_cycle_status": "raw_complete",
+        },
+    }
+
+    evidence = scheduler_module._candidate_state_evidence(candidate, state)
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is None
+    assert evidence["pipeline_jobs"][0]["repair_status"] == "repaired"
+    assert evidence["pipeline_events"][0]["event_id"] == 501
+    assert evidence["repaired_stage_evidence"]["manual_retry_event_id"] == 501
+
+
 def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_operators(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(
@@ -2368,6 +2448,23 @@ def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_o
             "pipeline_status": None,
             "failed_stage": None,
             "error_code": None,
+            "pipeline_events": [
+                {
+                    "event_id": 501,
+                    "event_type": "retry",
+                    "run_id": "cycle_gfs_2026052106",
+                    "entity_id": "job_cycle_gfs_2026052106_retry_active",
+                    "created_at": "2026-05-21T06:20:00Z",
+                    "details": {
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "previous_job_id": "job_cycle_gfs_2026052106_download",
+                        "retry_job_id": "job_cycle_gfs_2026052106_retry_active",
+                        "retry_count": 1,
+                        "prior_failure_reason": "NODE_FAILURE",
+                    },
+                }
+            ],
             "repaired_stage_evidence": {
                 "status": "repaired",
                 "repair_status": "repaired",
@@ -2411,6 +2508,7 @@ def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_o
         failed_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026052106_download")
         assert failed_job["repair_status"] == "repaired"
         assert failed_job["active_blocker"] is False
+        assert state["pipeline_events"][0]["event_id"] == 501
     assert result.evidence["blocked_candidates"] == []
     assert result.evidence["skipped_candidates"] == []
 
