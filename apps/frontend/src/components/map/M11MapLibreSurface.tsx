@@ -417,7 +417,7 @@ export function M11MapLibreSurface({
         {nationalRiverGeo && nationalRiverGeo.features.length > 0 ? (
           <M11NationalRiverPrimitive
             collection={nationalRiverGeo}
-            dimmed={Boolean(renderableOverlay)}
+            dimmed={Boolean(renderableOverlay) || basinRiverFeatureCollection.features.length > 0}
             satellite={state.basemap === 'satellite'}
           />
         ) : null}
@@ -628,6 +628,18 @@ function m11RegisteredOverlayPaint(layerId: string): LayerProps['paint'] {
   return dischargeTileLayerPaint()
 }
 
+// 按 value 插值的线宽再套一层 zoom 收缩：全国 zoom 下整流域河网只占几十像素，
+// 全宽会糊成实心色块；zoom4 收到 0.4×，zoom7 起恢复全宽。
+function zoomScaledValueWidth(valueStops: number[], lowZoomFactor: number) {
+  const widthAt = (scale: number) => [
+    'interpolate',
+    ['linear'],
+    ['coalesce', ['get', 'value'], 0],
+    ...valueStops.map((stop, index) => (index % 2 === 1 ? Math.round(stop * scale * 100) / 100 : stop)),
+  ]
+  return ['interpolate', ['linear'], ['zoom'], 4, widthAt(lowZoomFactor), 7, widthAt(1)] as unknown as number
+}
+
 function dischargeTileLayerPaint(): LayerProps['paint'] {
   return {
     // 颜色下限改可见中蓝（原 #E3F2FD 近白，浅底图上隐形）；低→高流量 蓝→红。
@@ -649,33 +661,20 @@ function dischargeTileLayerPaint(): LayerProps['paint'] {
       '#CB181D',
     ],
     // 最小线宽 1.2→2.2，干流更粗，浅底图上清晰可见。
-    'line-width': [
-      'interpolate',
-      ['linear'],
-      ['coalesce', ['get', 'value'], 0],
-      0,
-      2.2,
-      1000,
-      3,
-      5000,
-      4.2,
-      10000,
-      5.4,
-      50000,
-      7,
-    ],
+    'line-width': zoomScaledValueWidth([0, 2.2, 1000, 3, 5000, 4.2, 10000, 5.4, 50000, 7], 0.4),
     'line-opacity': ['case', ['has', 'value'], 0.95, 0.5],
   }
 }
 
 function waterLevelTileLayerPaint(): LayerProps['paint'] {
   return {
+    // 颜色下限改可见浅青（原 #E0F7FA 近白）；与 m11WaterLevelColor/图例同步。
     'line-color': [
       'interpolate',
       ['linear'],
       ['coalesce', ['get', 'value'], 0],
       0,
-      '#E0F7FA',
+      '#8FDCE8',
       0.5,
       '#80DEEA',
       1,
@@ -687,21 +686,7 @@ function waterLevelTileLayerPaint(): LayerProps['paint'] {
       8,
       '#D81B60',
     ],
-    'line-width': [
-      'interpolate',
-      ['linear'],
-      ['coalesce', ['get', 'value'], 0],
-      0,
-      2.2,
-      1,
-      3,
-      2,
-      3.8,
-      4,
-      5,
-      8,
-      6.2,
-    ],
+    'line-width': zoomScaledValueWidth([0, 2.2, 1, 3, 2, 3.8, 4, 5, 8, 6.2], 0.4),
     'line-opacity': ['case', ['has', 'value'], 0.95, 0.5],
   }
 }
@@ -773,7 +758,7 @@ function m11OverlayCasingPaint(layerId: string): LayerProps['paint'] {
   return {
     'line-color': '#FFFFFF',
     'line-opacity': 0.85,
-    'line-width': ['interpolate', ['linear'], ['coalesce', ['get', 'value'], 0], ...valueStops],
+    'line-width': zoomScaledValueWidth(valueStops, 0.4),
   }
 }
 
@@ -787,11 +772,15 @@ const M11_ROUND_LINE_LAYOUT = { 'line-cap': 'round', 'line-join': 'round' } as c
 
 // 常态河网底图 paint：按 Type(1..5,5=主干)深浅分级，线宽随 zoom×Type 增大，
 // 透明度按「zoom 越大、Type 越低越晚出现」实现分级常显——低 zoom 只见主干，放大渐显支流。
-// dimmed：彩色水文 MVT 叠加层激活时整体降透明，静态网退为衬底（同一河网两份几何
-// 叠画会出现毛边「双线」，视觉上只保留权威的彩色层）。
+// dimmed：彩色水文层（MVT 叠加 / 详情 GeoJSON 河段）激活时降透明衬底，消「双线」毛边；
+// 但只在 zoom≥6 渐进生效——全国 zoom 下彩色层只是细线，静态河网必须保持全可见（缩略显示）。
 // satellite：影像底图换浅青色系，深蓝在影像上不可读。
 export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; satellite: boolean }): LayerProps['paint'] {
-  const fade = dimmed ? 0.35 : 1
+  // 各 zoom 档独立 fade：3/5 不降（全国缩略），7 起衬底化。
+  const fadeAt = (zoomFade: number) => (dimmed ? zoomFade : 1)
+  const fade5 = fadeAt(0.85)
+  const fade7 = fadeAt(0.45)
+  const fade9 = fadeAt(0.35)
   return {
     'line-color': [
       'interpolate',
@@ -820,13 +809,13 @@ export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; 
       ['linear'],
       ['zoom'],
       3,
-      ['match', ['get', 'Type'], 5, 0.9 * fade, 4, 0.55 * fade, 0],
+      ['match', ['get', 'Type'], 5, 0.9, 4, 0.55, 0],
       5,
-      ['match', ['get', 'Type'], 5, 0.95 * fade, 4, 0.85 * fade, 3, 0.55 * fade, 0],
+      ['match', ['get', 'Type'], 5, 0.95 * fade5, 4, 0.85 * fade5, 3, 0.55 * fade5, 0],
       7,
-      ['match', ['get', 'Type'], 5, 1 * fade, 4, 0.95 * fade, 3, 0.85 * fade, 2, 0.6 * fade, 0],
+      ['match', ['get', 'Type'], 5, 1 * fade7, 4, 0.95 * fade7, 3, 0.85 * fade7, 2, 0.6 * fade7, 0],
       9,
-      0.9 * fade,
+      0.9 * fade9,
     ],
   }
 }

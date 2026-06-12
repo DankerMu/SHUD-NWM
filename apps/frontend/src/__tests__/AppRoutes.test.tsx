@@ -1135,7 +1135,7 @@ describe('App route state', () => {
     await waitFor(() => expect(window.location.search).toContain('validTime=2026-05-18T06%3A00%3A00.000Z'))
   })
 
-  it('threads overview basin bbox and registers the flood overlay through the route surface', async () => {
+  it('keeps the national overview camera and registers the flood overlay through the route surface', async () => {
     const tileFetch = vi.fn().mockImplementation(async () => geoJsonResponse({ type: 'FeatureCollection', features: [] }))
     vi.stubGlobal('fetch', tileFetch)
     useOverviewDataStore.setState({
@@ -1147,8 +1147,9 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
-    await waitFor(() => expect(m11FitBoundsCalls).toEqual([[[[100, 30], [105, 35]], { padding: 36, duration: 450 }]]))
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
+    // 全国总览不做相机 fit（全国系统保持中国全景，不收窄到测试流域 bbox）。
+    expect(m11FitBoundsCalls).toEqual([])
     expect(tileFetch).not.toHaveBeenCalledWith(expect.stringContaining('/api/v1/tiles/flood-return-period?'), expect.anything())
   })
 

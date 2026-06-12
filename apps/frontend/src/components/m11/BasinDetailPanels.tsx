@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import type { FeatureCollection } from 'geojson'
+
 import type { M11MapOverlayInteraction, M11MapPopupSlot } from '@/components/map/M11MapLibreSurface'
 import { M11RiverForecastPopup, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPopup'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
@@ -104,6 +106,11 @@ export function useBasinDetailMode({
     () => staticBasinBoundaryIndex(nationalGeo.domain).get(basinId)?.bbox ?? null,
     [basinId, nationalGeo.domain],
   )
+  // 本流域静态河网（shp 真实河道）：详情页秒显垫底，慢的可点击河段层加载完成后自动降透明衬底。
+  const basinRiverGeo = useMemo(() => {
+    const features = nationalGeo.river?.features.filter((feature) => feature.properties?.basin_id === basinId) ?? []
+    return features.length > 0 ? ({ type: 'FeatureCollection', features } as FeatureCollection) : null
+  }, [basinId, nationalGeo.river])
   const mapFitTo = useMemo(
     () => bboxToMapFit(detail?.bbox ?? staticFallbackBbox ?? (detail && !basinNotFoundReason ? BASIN_FALLBACK_EXTENT : null)),
     [basinNotFoundReason, detail, staticFallbackBbox],
@@ -242,6 +249,7 @@ export function useBasinDetailMode({
     basins: basinMapContext,
     visibleBasinIds: [basinId],
     basinSegments: currentBasinData?.segments ?? [],
+    nationalRiverGeo: basinRiverGeo,
     selectedSegmentId,
     selectedSegmentGeometry: selectedSegment?.geometry ?? null,
     stationFeatureCollection: stationLayer.featureCollection,

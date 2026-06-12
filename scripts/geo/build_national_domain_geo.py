@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Build the national static basin-domain outline GeoJSON from SHUD mesh shapefiles.
+
+Source : SHUD/input/<basin>/gis/domain.shp (projected triangle mesh, per-basin .prj)
+Output : apps/frontend/public/geo/national-basin-domain.geojson (WGS84 / EPSG:4326)
+
+The mesh is dissolved exactly: an edge shared by two triangles is interior, an
+edge used once is on the domain boundary. Boundary edges are chained into closed
+rings, then smoothed with Chaikin corner-cutting (the raw outline is a sawtooth
+of mesh edges). The result keeps full mesh-resolution detail (~thousands of
+vertices) instead of the previous ~200-vertex simplification, so the on-map
+boundary reads as a smooth basin outline.
+
+honest-display: smoothing only rounds mesh-edge corners (sub-edge-length
+deviation); no geometry is fabricated. Basins with missing shp are skipped
+with a warning rather than guessed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+import shapefile  # pyshp
+from pyproj import CRS, Transformer
+
+DEFAULT_BASINS = ("qhh", "heihe")
+# Snap projected metres so shared triangle vertices quantize to one node.
+NODE_SNAP_M = 1.0
+CHAIKIN_ITERATIONS = 2
+
+
+def _basin_id(name: str) -> str:
+    return f"basins_{name}"
+
+
+def _load_transformer(prj_path: Path) -> Transformer:
+    crs = CRS.from_wkt(prj_path.read_text().strip())
+    return Transformer.from_crs(crs, CRS.from_epsg(4326), always_xy=True)
+
+
+def _node_key(point: tuple[float, float]) -> tuple[int, int]:
+    return (round(point[0] / NODE_SNAP_M), round(point[1] / NODE_SNAP_M))
+
+
+def _polygon_rings(shape: shapefile.Shape) -> list[list[tuple[float, float]]]:
+    points = [(float(x), float(y)) for x, y in shape.points]
+    if not points:
+        return []
+    starts = list(shape.parts) or [0]
+    bounds = starts + [len(points)]
+    return [points[bounds[i] : bounds[i + 1]] for i in range(len(starts)) if bounds[i + 1] - bounds[i] >= 3]
+
+
+def _boundary_rings(shapes: list[shapefile.Shape]) -> list[list[tuple[float, float]]]:
+    """Dissolve mesh polygons: keep edges used exactly once, chain them into closed rings."""
+    edge_count: dict[tuple[tuple[int, int], tuple[int, int]], int] = defaultdict(int)
+    node_coord: dict[tuple[int, int], tuple[float, float]] = {}
+    for shape in shapes:
+        for ring in _polygon_rings(shape):
+            closed = ring if ring[0] == ring[-1] else [*ring, ring[0]]
+            for a, b in zip(closed, closed[1:]):
+                ka, kb = _node_key(a), _node_key(b)
+                if ka == kb:
+                    continue
+                node_coord.setdefault(ka, a)
+                node_coord.setdefault(kb, b)
+                edge_count[(ka, kb) if ka < kb else (kb, ka)] += 1
+
+    adjacency: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    for (ka, kb), count in edge_count.items():
+        if count == 1:
+            adjacency[ka].append(kb)
+            adjacency[kb].append(ka)
+
+    visited: set[frozenset[tuple[int, int]]] = set()
+    rings: list[list[tuple[float, float]]] = []
+    for start in list(adjacency):
+        for first in adjacency[start]:
+            if frozenset((start, first)) in visited:
+                continue
+            ring_keys = [start, first]
+            visited.add(frozenset((start, first)))
+            while ring_keys[-1] != start:
+                current = ring_keys[-1]
+                step = next(
+                    (n for n in adjacency[current] if frozenset((current, n)) not in visited),
+                    None,
+                )
+                if step is None:
+                    break  # open chain (non-manifold artefact): drop
+                visited.add(frozenset((current, step)))
+                ring_keys.append(step)
+            if ring_keys[-1] == start and len(ring_keys) >= 4:
+                rings.append([node_coord[k] for k in ring_keys[:-1]])
+    return rings
+
+
+def _signed_area(ring: list[tuple[float, float]]) -> float:
+    area = 0.0
+    for (x1, y1), (x2, y2) in zip(ring, ring[1:] + ring[:1]):
+        area += x1 * y2 - x2 * y1
+    return area / 2.0
+
+
+def _point_in_ring(point: tuple[float, float], ring: list[tuple[float, float]]) -> bool:
+    x, y = point
+    inside = False
+    for (x1, y1), (x2, y2) in zip(ring, ring[1:] + ring[:1]):
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
+
+
+def _chaikin_closed(ring: list[tuple[float, float]], iterations: int) -> list[tuple[float, float]]:
+    points = ring
+    for _ in range(iterations):
+        smoothed: list[tuple[float, float]] = []
+        for (x1, y1), (x2, y2) in zip(points, points[1:] + points[:1]):
+            smoothed.append((0.75 * x1 + 0.25 * x2, 0.75 * y1 + 0.25 * y2))
+            smoothed.append((0.25 * x1 + 0.75 * x2, 0.25 * y1 + 0.75 * y2))
+        points = smoothed
+    return points
+
+
+def _to_wgs84(ring: list[tuple[float, float]], transformer: Transformer, decimals: int) -> list[list[float]]:
+    out: list[list[float]] = []
+    prev: tuple[float, float] | None = None
+    for x, y in ring:
+        lon, lat = transformer.transform(x, y)
+        rounded = (round(lon, decimals), round(lat, decimals))
+        if rounded != prev:
+            out.append([rounded[0], rounded[1]])
+            prev = rounded
+    if out and out[0] != out[-1]:
+        out.append(list(out[0]))
+    return out
+
+
+def build_basin_feature(repo_root: Path, name: str, decimals: int) -> dict | None:
+    gis = repo_root / "SHUD" / "input" / name / "gis"
+    shp, prj = gis / "domain.shp", gis / "domain.prj"
+    if not shp.exists() or not prj.exists():
+        print(f"[skip] {name}: missing {shp.name}/{prj.name}", file=sys.stderr)
+        return None
+
+    transformer = _load_transformer(prj)
+    reader = shapefile.Reader(str(shp))
+    rings = _boundary_rings(reader.shapes())
+    if not rings:
+        print(f"[skip] {name}: no boundary rings dissolved", file=sys.stderr)
+        return None
+
+    rings.sort(key=lambda ring: abs(_signed_area(ring)), reverse=True)
+    outer = rings[0]
+    # Assemble outer + holes; rings outside the outer become extra polygons (rare islands).
+    polygons: list[list[list[tuple[float, float]]]] = [[outer]]
+    for ring in rings[1:]:
+        if _point_in_ring(ring[0], outer):
+            polygons[0].append(ring)
+        else:
+            polygons.append([ring])
+
+    coordinates: list[list[list[list[float]]]] = []
+    vertex_count = 0
+    for polygon in polygons:
+        wgs_rings: list[list[list[float]]] = []
+        for ring in polygon:
+            smoothed = _chaikin_closed(ring, CHAIKIN_ITERATIONS)
+            wgs = _to_wgs84(smoothed, transformer, decimals)
+            if len(wgs) >= 4:
+                wgs_rings.append(wgs)
+                vertex_count += len(wgs)
+        if wgs_rings:
+            coordinates.append(wgs_rings)
+
+    print(f"[ok]   {name}: {len(rings)} rings -> {len(coordinates)} polygons, {vertex_count} vertices")
+    return {
+        "type": "Feature",
+        "properties": {"basin_id": _basin_id(name)},
+        "geometry": {"type": "MultiPolygon", "coordinates": coordinates},
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--basins", default=",".join(DEFAULT_BASINS), help="comma-separated basin names under SHUD/input"
+    )
+    parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[2]))
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="output geojson (default apps/frontend/public/geo/national-basin-domain.geojson)",
+    )
+    parser.add_argument(
+        "--decimals", type=int, default=5, help="coordinate decimal places (~1 m at 5, plenty for a basemap)"
+    )
+    args = parser.parse_args()
+
+    repo_root = Path(args.repo_root).resolve()
+    out_path = Path(args.out) if args.out else repo_root / "apps/frontend/public/geo/national-basin-domain.geojson"
+
+    features = [
+        feature
+        for name in [b.strip() for b in args.basins.split(",") if b.strip()]
+        if (feature := build_basin_feature(repo_root, name, args.decimals)) is not None
+    ]
+    if not features:
+        print("[fail] no domain features generated", file=sys.stderr)
+        return 1
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps({"type": "FeatureCollection", "features": features}, separators=(",", ":")))
+    print(f"[write] {out_path} ({out_path.stat().st_size // 1024} KiB, {len(features)} features)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

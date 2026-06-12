@@ -1022,8 +1022,8 @@ describe('M11 visual foundation shell', () => {
         (feature) => feature.properties.layer_color,
       )
       if (layerId === 'water-level') {
-        expect(legendColors).toEqual(expect.arrayContaining(['#E0F7FA', '#D81B60']))
-        expect(fallbackLegendColors).toEqual(expect.arrayContaining(['#E0F7FA', '#D81B60']))
+        expect(legendColors).toEqual(expect.arrayContaining(['#8FDCE8', '#D81B60']))
+        expect(fallbackLegendColors).toEqual(expect.arrayContaining(['#8FDCE8', '#D81B60']))
         expect(legendColors).not.toEqual(m11FallbackLegends.discharge.map((entry) => entry.color))
       } else {
         expect(legendColors).toEqual(expect.arrayContaining([...new Set(featureColors)]))

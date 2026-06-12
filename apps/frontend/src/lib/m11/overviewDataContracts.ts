@@ -66,17 +66,17 @@ export const m11BasinRiverCollectionBudget = {
 } as const
 
 const m11RiverDischargeLegend: LayerLegendEntry[] = [
-  { label: '<500 m3/s', color: '#E3F2FD', max: 500 },
-  { label: '500-1000 m3/s', color: '#90CAF9', min: 500, max: 1000 },
-  { label: '1000-5000 m3/s', color: '#42A5F5', min: 1000, max: 5000 },
-  { label: '5000-10000 m3/s', color: '#1E88E5', min: 5000, max: 10000 },
-  { label: '10000-50000 m3/s', color: '#FF9800', min: 10000, max: 50000 },
-  { label: '>50000 m3/s', color: '#F44336', min: 50000 },
+  { label: '<500 m3/s', color: '#6BAED6', max: 500 },
+  { label: '500-1000 m3/s', color: '#3182BD', min: 500, max: 1000 },
+  { label: '1000-5000 m3/s', color: '#08519C', min: 1000, max: 5000 },
+  { label: '5000-10000 m3/s', color: '#08306B', min: 5000, max: 10000 },
+  { label: '10000-50000 m3/s', color: '#F16913', min: 10000, max: 50000 },
+  { label: '>50000 m3/s', color: '#CB181D', min: 50000 },
   { label: '无径流数据', color: m11DischargeColor(null) },
 ]
 
 const m11RiverWaterLevelLegend: LayerLegendEntry[] = [
-  { label: '<0.5 m', color: '#E0F7FA', max: 0.5 },
+  { label: '<0.5 m', color: '#8FDCE8', max: 0.5 },
   { label: '0.5-1 m', color: '#80DEEA', min: 0.5, max: 1 },
   { label: '1-2 m', color: '#26C6DA', min: 1, max: 2 },
   { label: '2-4 m', color: '#00897B', min: 2, max: 4 },
@@ -1268,24 +1268,26 @@ export function m11BasinRiverLayerColor(row: Pick<BasinSegmentRow, 'currentQ' | 
   return '#94A3B8'
 }
 
+// 色带与 MVT 瓦片 paint（dischargeTileLayerPaint）同一 ColorBrewer 蓝系：原低档近白
+// （#E3F2FD）在白色 casing 上隐形，整网呈「零碎拼布」；下限改可见中蓝，null 用沉静蓝灰。
 export function m11DischargeColor(value: number | null) {
-  if (value === null) return '#CBD5E1'
-  if (value >= 50_000) return '#F44336'
-  if (value >= 10_000) return '#FF9800'
-  if (value >= 5_000) return '#1E88E5'
-  if (value >= 1_000) return '#42A5F5'
-  if (value >= 500) return '#90CAF9'
-  return '#E3F2FD'
+  if (value === null) return '#94ADC7'
+  if (value >= 50_000) return '#CB181D'
+  if (value >= 10_000) return '#F16913'
+  if (value >= 5_000) return '#08306B'
+  if (value >= 1_000) return '#08519C'
+  if (value >= 500) return '#3182BD'
+  return '#6BAED6'
 }
 
 export function m11WaterLevelColor(value: number | null) {
-  if (value === null) return '#CBD5E1'
+  if (value === null) return '#94ADC7'
   if (value >= 8) return '#D81B60'
   if (value >= 4) return '#FDD835'
   if (value >= 2) return '#00897B'
   if (value >= 1) return '#26C6DA'
   if (value >= 0.5) return '#80DEEA'
-  return '#E0F7FA'
+  return '#8FDCE8'
 }
 
 export function m11ReturnPeriodColor(value: number | null) {
