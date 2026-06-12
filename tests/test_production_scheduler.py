@@ -2417,6 +2417,211 @@ def test_candidate_state_decision_ignores_repaired_source_cycle_failure_with_ret
     assert evidence["repaired_stage_evidence"]["manual_retry_event_id"] == 501
 
 
+def test_candidate_state_shared_source_cycle_failure_blocks_without_candidate_scoped_row(
+    tmp_path: Path,
+) -> None:
+    state = {
+        "shared_cycle_aggregate": True,
+        "pipeline_status": "permanently_failed",
+        "failed_stage": "download",
+        "error_code": "SLURM_JOB_FAILED",
+        "retry_count": 0,
+        "retry_limit": 3,
+        "pipeline_jobs": [
+            {
+                "job_id": "job_cycle_gfs_2026052106_download",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "permanently_failed",
+                "error_code": "SLURM_JOB_FAILED",
+                "retry_count": 0,
+                "updated_at": "2026-05-21T06:10:00Z",
+            }
+        ],
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    decision = scheduler_module._candidate_state_decision(_scheduler_candidate_fixture(), state)
+
+    assert decision is not None
+    assert decision.action in {"blocked", "retry"}
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["state_evidence"]["decision"] in {"permanent_failure", "retry_failed"}
+    assert blocked["state_evidence"]["pipeline_jobs"][0]["job_id"] == "job_cycle_gfs_2026052106_download"
+
+
+def test_candidate_state_inconclusive_truncated_evidence_is_preserved_on_proceed(
+    tmp_path: Path,
+) -> None:
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": None,
+            "failed_stage": None,
+            "error_code": None,
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_download",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "job_type": "download_source_cycle",
+                    "stage": "download",
+                    "status": "failed",
+                    "error_code": "NODE_FAILURE",
+                    "retry_count": 0,
+                    "updated_at": "2026-05-21T06:10:00Z",
+                }
+            ],
+            "source_cycle_repair_evidence": {
+                "status": "inconclusive_truncated",
+                "truncated": True,
+                "reason": "source_cycle_repair_window_truncated",
+                "unresolved_failed_job_ids": ["job_cycle_gfs_2026052106_download"],
+            },
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["skipped_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    candidate_state = result.evidence["candidates"][0]["state_evidence"]["candidate_state"]
+    submitted_state = orchestrator.calls[0]["basins"][0]["state_evidence"]["candidate_state"]
+    for state in (candidate_state, submitted_state):
+        assert "decision" not in state
+        assert state["source_cycle_repair_evidence"]["status"] == "inconclusive_truncated"
+        assert state["source_cycle_repair_evidence"]["unresolved_failed_job_ids"] == [
+            "job_cycle_gfs_2026052106_download"
+        ]
+        assert state["pipeline_jobs"][0]["job_id"] == "job_cycle_gfs_2026052106_download"
+
+
+def test_candidate_state_inconclusive_truncated_unresolved_job_does_not_drive_retry() -> None:
+    candidate = _scheduler_candidate_fixture()
+    state = {
+        "run_id": candidate.run_id,
+        "forcing_version_id": candidate.forcing_version_id,
+        "candidate_id": candidate.candidate_id,
+        "pipeline_status": None,
+        "failed_stage": None,
+        "error_code": None,
+        "pipeline_jobs": [
+            {
+                "job_id": "job_cycle_gfs_2026052106_download",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "failed",
+                "error_code": "NODE_FAILURE",
+                "retry_count": 0,
+                "updated_at": "2026-05-21T06:10:00Z",
+            }
+        ],
+        "source_cycle_repair_evidence": {
+            "status": "inconclusive_truncated",
+            "truncated": True,
+            "reason": "source_cycle_repair_window_truncated",
+            "unresolved_failed_job_ids": ["job_cycle_gfs_2026052106_download"],
+        },
+    }
+
+    evidence = scheduler_module._candidate_state_evidence(candidate, state)
+    decision_state = scheduler_module._candidate_state_decision_state(state, evidence)
+    decision = scheduler_module._candidate_state_decision(candidate, state)
+
+    assert decision is None
+    assert decision_state["pipeline_jobs"] == []
+    assert scheduler_module._state_has_failure_signal(decision_state) is False
+    assert evidence["source_cycle_repair_evidence"]["status"] == "inconclusive_truncated"
+    assert evidence["pipeline_jobs"][0]["job_id"] == "job_cycle_gfs_2026052106_download"
+
+
+def test_candidate_state_inconclusive_truncated_unresolved_job_does_not_drive_manual_retry(
+    tmp_path: Path,
+) -> None:
+    active_repository = FakeCandidateStateRepository(
+        {
+            "pipeline_status": None,
+            "failed_stage": None,
+            "error_code": None,
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_download",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": "gfs_2026052106",
+                    "job_type": "download_source_cycle",
+                    "stage": "download",
+                    "status": "failed",
+                    "error_code": "NODE_FAILURE",
+                    "retry_count": 0,
+                    "updated_at": "2026-05-21T06:10:00Z",
+                }
+            ],
+            "pipeline_events": [
+                {
+                    "event_id": 501,
+                    "event_type": "retry",
+                    "run_id": "cycle_gfs_2026052106",
+                    "entity_id": "job_cycle_gfs_2026052106_retry_active",
+                    "created_at": "2026-05-21T06:20:00Z",
+                    "details": {
+                        "trigger": "manual",
+                        "manual_retry_marker": True,
+                        "previous_job_id": "job_cycle_gfs_2026052106_download",
+                        "retry_job_id": "job_cycle_gfs_2026052106_retry_active",
+                        "retry_count": 1,
+                        "prior_failure_reason": "NODE_FAILURE",
+                    },
+                }
+            ],
+            "source_cycle_repair_evidence": {
+                "status": "inconclusive_truncated",
+                "truncated": True,
+                "reason": "source_cycle_repair_window_truncated",
+                "unresolved_failed_job_ids": ["job_cycle_gfs_2026052106_download"],
+            },
+        }
+    )
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=active_repository,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["submitted_count"] == 1
+    candidate_state = result.evidence["candidates"][0]["state_evidence"]["candidate_state"]
+    assert "decision" not in candidate_state
+    assert candidate_state["pipeline_events"][0]["event_id"] == 501
+    assert candidate_state["source_cycle_repair_evidence"]["status"] == "inconclusive_truncated"
+
+
 def test_scheduler_pass_candidate_evidence_carries_repaired_stage_metadata_for_operators(tmp_path: Path) -> None:
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False)
     active_repository = FakeCandidateStateRepository(

@@ -23,7 +23,10 @@
   truncation when applicable. Phase 6 round 2 treats truncated source-cycle
   repair windows with matching ready manifests as inconclusive rather than
   complete negative proof, and does not promote unresolved rows from that
-  truncated repair window to active source-cycle blockers.
+  truncated repair window to active source-cycle blockers. Phase 6 round 3
+  preserves that inconclusive evidence on scheduler proceed paths while
+  suppressing retry/manual-retry decisions from the listed unresolved historical
+  rows.
 - [x] 2.5 Require repaired source-cycle evidence to agree with
   `forecast_cycle.manifest_uri`; a missing or mismatched manifest URI must not
   turn a stale failure into repaired evidence. Phase 6 extends this to prefixed
@@ -56,7 +59,9 @@
   as deterministic tie-breakers.
 - [x] 3.4 Resource limits / discovery: cover bounded/truncated job or event
   history without unbounded scans. Phase 6 round 2 covers truncated source-cycle
-  repair proof as explicit inconclusive bounded evidence.
+  repair proof as explicit inconclusive bounded evidence. Phase 6 round 3 adds
+  scheduler no-event and manual-retry-event regressions proving unresolved
+  truncated rows stay historical decision evidence.
 - [x] 3.5 Legacy compatibility: rerun existing array task retry supersession and
   non-source retry tests without changing their behavior.
 - [x] 3.6 Error handling / partial outputs: cover unrepaired failure and
@@ -83,7 +88,9 @@
   S3 manifest URI coverage for
   `s3://nhms-prod/qhh/raw/gfs/2026050100/manifest.json`. Phase 6 round 2 adds
   scheduler coverage where repaired source-cycle failed rows plus the actual
-  manual retry event do not trigger `manual_retry_requested`.
+  manual retry event do not trigger `manual_retry_requested`. Phase 6 round 3
+  adds scheduler coverage for unrepaired shared source-cycle blockers that lack
+  candidate-scoped rows.
 - [x] 4.2 Add negative regression where a successful unrelated job does not
   supersede the failed stage.
 - [x] 4.3 Add negative regression where a stale manual retry marker or

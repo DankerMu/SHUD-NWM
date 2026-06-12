@@ -4169,7 +4169,10 @@ def _candidate_repaired_state_audit_evidence(
     if raw_state is None:
         return None
     state = _bounded_candidate_state(raw_state)
-    if not isinstance(state.get("repaired_stage_evidence"), Mapping):
+    if not isinstance(state.get("repaired_stage_evidence"), Mapping) and not isinstance(
+        state.get("source_cycle_repair_evidence"),
+        Mapping,
+    ):
         return None
     return {"candidate_state": _candidate_state_evidence(candidate, state)}
 
@@ -4286,13 +4289,15 @@ def _call_active_slurm_jobs_provider(
 def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     validation = evidence.get("production_identity_validation")
     if not isinstance(validation, Mapping):
-        return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(state, evidence))
+        return _candidate_state_filtered_decision_state(state, evidence)
     legacy_sources = {str(source) for source in validation.get("legacy_non_authoritative", [])}
     if not legacy_sources:
-        return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(state, evidence))
+        return _candidate_state_filtered_decision_state(state, evidence)
+    unresolved_source_cycle_job_ids = _inconclusive_source_cycle_unresolved_job_ids(state)
     filtered = dict(state)
     if "candidate_state" in legacy_sources:
         _strip_top_level_candidate_state_decision_fields(filtered)
+        _restore_top_level_source_cycle_download_blocker(filtered, state, evidence)
     for key in ("hydro_run", "forcing_version", "forecast_cycle", "published_manifest", "canonical_product"):
         if key in legacy_sources:
             filtered.pop(key, None)
@@ -4304,9 +4309,14 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
             _strip_top_level_pipeline_decision_fields(filtered)
     jobs = _state_jobs(state)
     if jobs:
-        filtered["pipeline_jobs"] = [
-            dict(job) for index, job in enumerate(jobs) if f"pipeline_jobs[{index}]" not in legacy_sources
-        ]
+        filtered["pipeline_jobs"] = []
+        for index, job in enumerate(jobs):
+            if _state_row_references_job_ids(job, unresolved_source_cycle_job_ids):
+                continue
+            source = f"pipeline_jobs[{index}]"
+            if source in legacy_sources and not _global_source_cycle_download_blocker_job(job, evidence):
+                continue
+            filtered["pipeline_jobs"].append(dict(job))
         filtered.pop("jobs", None)
     events = _state_events(state)
     if events:
@@ -4318,13 +4328,116 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
                 legacy_sources=legacy_sources,
             )
             for index, event in enumerate(events)
+            if not _state_event_references_job_ids(event, unresolved_source_cycle_job_ids)
         ]
         filtered.pop("events", None)
     if filtered.get("pipeline_jobs") == []:
         _strip_top_level_pipeline_decision_fields(filtered)
     if filtered.get("pipeline_events") == [] and not filtered.get("pipeline_jobs"):
         _strip_top_level_pipeline_decision_fields(filtered)
+    return _candidate_state_filtered_decision_state(filtered, evidence)
+
+
+def _candidate_state_filtered_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    filtered = _inconclusive_source_cycle_decision_state(state)
     return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(filtered, evidence))
+
+
+def _inconclusive_source_cycle_decision_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    unresolved_job_ids = _inconclusive_source_cycle_unresolved_job_ids(state)
+    if not unresolved_job_ids:
+        return dict(state)
+    filtered = dict(state)
+    job_rows = _state_jobs(state)
+    if job_rows:
+        filtered["pipeline_jobs"] = [
+            dict(job) for job in job_rows if not _state_row_references_job_ids(job, unresolved_job_ids)
+        ]
+        filtered.pop("jobs", None)
+    single_job = state.get("pipeline_job") or state.get("job")
+    if isinstance(single_job, Mapping) and _state_row_references_job_ids(single_job, unresolved_job_ids):
+        filtered.pop("pipeline_job", None)
+        filtered.pop("job", None)
+    elif not isinstance(single_job, Mapping) and _state_row_references_job_ids(state, unresolved_job_ids):
+        _strip_top_level_pipeline_decision_fields(filtered)
+    event_rows = _state_events(state)
+    if event_rows:
+        filtered["pipeline_events"] = [
+            dict(event)
+            for event in event_rows
+            if not _state_event_references_job_ids(event, unresolved_job_ids)
+        ]
+        filtered.pop("events", None)
+    return filtered
+
+
+def _inconclusive_source_cycle_unresolved_job_ids(state: Mapping[str, Any]) -> set[str]:
+    repair_evidence = state.get("source_cycle_repair_evidence")
+    if not isinstance(repair_evidence, Mapping):
+        return set()
+    if repair_evidence.get("status") != "inconclusive_truncated":
+        return set()
+    values = repair_evidence.get("unresolved_failed_job_ids")
+    if not isinstance(values, Sequence) or isinstance(values, str | bytes | bytearray):
+        return set()
+    return {str(value) for value in values if value not in (None, "")}
+
+
+def _state_row_references_job_ids(row: Mapping[str, Any], job_ids: set[str]) -> bool:
+    if not job_ids:
+        return False
+    for key in ("job_id", "pipeline_job_id", "entity_id", "previous_job_id", "failed_job_id"):
+        value = row.get(key)
+        if value not in (None, "") and str(value) in job_ids:
+            return True
+    return False
+
+
+def _state_event_references_job_ids(event: Mapping[str, Any], job_ids: set[str]) -> bool:
+    if _state_row_references_job_ids(event, job_ids):
+        return True
+    details = event.get("details")
+    return isinstance(details, Mapping) and _state_row_references_job_ids(details, job_ids)
+
+
+def _restore_top_level_source_cycle_download_blocker(
+    filtered: dict[str, Any],
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> None:
+    candidate_identity = evidence.get("candidate_identity")
+    if not isinstance(candidate_identity, Mapping):
+        return
+    expected = _candidate_identity_from_evidence(candidate_identity)
+    if not expected or not _top_level_source_cycle_download_blocker(expected, state):
+        return
+    for key in (
+        "pipeline_status",
+        "job_status",
+        "status",
+        "failed_stage",
+        "stage",
+        "job_type",
+        "error_code",
+        "reason_code",
+        "failure_reason",
+        "last_error",
+        "previous_error",
+        "error_message",
+        "message",
+        "retry_attempt",
+        "attempt",
+        "retry_count",
+        "retry_limit",
+        "max_retries",
+        "retryable",
+        "permanent",
+        "failure_classifier",
+        "classifier",
+        "shared_cycle_aggregate",
+    ):
+        if key in state:
+            filtered[key] = state[key]
 
 
 def _repaired_stage_decision_state(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -4350,6 +4463,28 @@ def _candidate_scoped_shared_cycle_aggregate_state(
     if _shared_cycle_aggregate_has_candidate_failure(expected, filtered):
         filtered["pipeline_events"] = _candidate_scoped_shared_cycle_events(expected, _state_events(filtered))
         filtered.pop("events", None)
+        return filtered
+    global_source_cycle_blockers = [
+        dict(job) for job in _state_jobs(filtered) if _global_source_cycle_download_blocker_job(job, evidence)
+    ]
+    top_level_source_cycle_blocker = _top_level_source_cycle_download_blocker(expected, filtered)
+    if global_source_cycle_blockers or top_level_source_cycle_blocker:
+        retained_jobs = [
+            dict(job)
+            for job in _state_jobs(filtered)
+            if _shared_cycle_row_is_candidate_scoped(expected, job)
+            or _global_source_cycle_download_blocker_job(job, evidence)
+        ]
+        if not top_level_source_cycle_blocker:
+            _strip_top_level_pipeline_decision_fields(filtered)
+        filtered["pipeline_jobs"] = retained_jobs
+        filtered.pop("jobs", None)
+        filtered["pipeline_events"] = _candidate_scoped_shared_cycle_events(expected, _state_events(filtered))
+        filtered.pop("events", None)
+        if filtered.get("pipeline_jobs") == []:
+            filtered.pop("pipeline_jobs", None)
+        if filtered.get("pipeline_events") == []:
+            filtered.pop("pipeline_events", None)
         return filtered
     _strip_top_level_pipeline_decision_fields(filtered)
     filtered["pipeline_jobs"] = [
@@ -4400,6 +4535,87 @@ def _shared_cycle_aggregate_has_candidate_failure(
         if _event_has_candidate_scoped_failure(expected, event):
             return True
     return False
+
+
+def _top_level_source_cycle_download_blocker(
+    expected: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> bool:
+    if state.get("shared_cycle_aggregate") is not True:
+        return False
+    if not _source_cycle_identity_matches_expected(expected, state):
+        return False
+    pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
+    if pipeline_status not in FAILED_PIPELINE_STATUSES and state.get("error_code") in (None, ""):
+        return False
+    stage = str(state.get("failed_stage") or state.get("stage") or "")
+    if stage not in {"download", "download_source_cycle"}:
+        return False
+    return any(
+        _global_source_cycle_download_blocker_job(job, {"candidate_identity": expected})
+        for job in _state_jobs(state)
+    )
+
+
+def _global_source_cycle_download_blocker_job(
+    job: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> bool:
+    if _pipeline_job_is_repaired_stage_evidence(job):
+        return False
+    status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+    if status not in FAILED_PIPELINE_STATUSES and job.get("error_code") in (None, ""):
+        return False
+    stage = str(job.get("stage") or job.get("job_type") or "")
+    if stage not in {"download", "download_source_cycle"}:
+        return False
+    candidate_identity = evidence.get("candidate_identity")
+    if not isinstance(candidate_identity, Mapping):
+        return False
+    expected = _candidate_identity_from_evidence(candidate_identity)
+    return bool(expected) and _source_cycle_identity_matches_expected(expected, job)
+
+
+def _source_cycle_identity_matches_expected(
+    expected: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> bool:
+    expected_values = _legacy_identity_values(expected)
+    row_values = _legacy_identity_values(row)
+    source = row_values.get("source")
+    expected_source = expected_values.get("source")
+    if source not in (None, "") and expected_source not in (None, "") and source != expected_source:
+        return False
+    cycle_time = row_values.get("cycle_time")
+    expected_cycle_time = expected_values.get("cycle_time")
+    if cycle_time not in (None, "") and expected_cycle_time not in (None, "") and cycle_time != expected_cycle_time:
+        return False
+    cycle_id = str(row.get("cycle_id") or "")
+    expected_source_id = str(expected.get("source_id") or expected.get("source") or "").lower()
+    expected_cycle_text = str(expected.get("cycle_time") or expected.get("cycle_time_utc") or "")
+    if cycle_id and expected_source_id and expected_cycle_text:
+        try:
+            expected_cycle_id = cycle_id_for(
+                expected_source_id,
+                datetime.fromisoformat(expected_cycle_text.replace("Z", "+00:00")),
+            )
+        except ValueError:
+            expected_cycle_id = ""
+        if expected_cycle_id and cycle_id.lower() != expected_cycle_id.lower():
+            return False
+    run_id = str(row.get("run_id") or "")
+    if run_id:
+        if _stage_cycle_run_matches_candidate(run_id, expected_values):
+            return True
+        if expected_source_id and expected_cycle_text:
+            try:
+                compact_cycle = format_cycle_time(expected_cycle_text)
+            except (TypeError, ValueError):
+                compact_cycle = ""
+            cycle_run_id = f"cycle_{expected_source_id}_{compact_cycle}" if compact_cycle else ""
+            if cycle_run_id and run_id != cycle_run_id:
+                return False
+    return any(row_values.get(key) not in (None, "") for key in ("source", "cycle_time")) or bool(cycle_id or run_id)
 
 
 def _candidate_scoped_shared_cycle_events(
