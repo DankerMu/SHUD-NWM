@@ -4891,6 +4891,73 @@ def test_psycopg_candidate_state_prefixed_s3_manifest_repairs_stale_failed_sourc
     assert failed_job["active_blocker"] is False
 
 
+def test_psycopg_candidate_state_failed_download_manifest_allows_linked_retry_repair() -> None:
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(),
+            _successful_source_cycle_retry_job(),
+        ],
+        events=[_manual_retry_event()],
+        manifest_uri="s3://nhms/raw/gfs/2026050100/manifest.json",
+        forecast_status="failed_download",
+    )
+
+    assert state["pipeline_status"] is None
+    assert state["failed_stage"] is None
+    assert state["error_code"] is None
+    assert state["repaired_stage_evidence"]["forecast_cycle_status"] == "failed_download"
+    assert state["repaired_stage_evidence"]["repairing_retry_job_id"] == (
+        "job_cycle_gfs_2026050100_retry_active"
+    )
+    failed_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026050100_download")
+    assert failed_job["repair_status"] == "repaired"
+    assert failed_job["active_blocker"] is False
+
+
+def test_find_existing_source_cycle_stage_prefers_successful_manual_retry_identity() -> None:
+    context = CycleOrchestrationContext(
+        source_id="IFS",
+        cycle_time=_dt("2026-06-09T12:00:00Z"),
+        cycle_id="ifs_2026060912",
+        run_id="cycle_ifs_2026060912",
+        all_basins=[],
+        active_basins=[],
+    )
+
+    selected = ForecastOrchestrator._find_existing_stage_job(
+        ForecastOrchestrator,
+        [
+            {
+                "job_id": "job_cycle_ifs_2026060912_download",
+                "run_id": "cycle_ifs_2026060912",
+                "cycle_id": "ifs_2026060912",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "permanently_failed",
+                "retry_count": 0,
+                "finished_at": "2026-06-10T12:08:32Z",
+                "created_at": "2026-06-10T04:03:46Z",
+            },
+            {
+                "job_id": "cycle_ifs_2026060912_retry_2",
+                "run_id": "cycle_ifs_2026060912",
+                "cycle_id": "ifs_2026060912",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "succeeded",
+                "retry_count": 2,
+                "updated_at": "2026-06-12T11:10:41Z",
+                "created_at": "2026-06-12T10:51:55Z",
+            },
+        ],
+        M3_STAGES[0],
+        context=context,
+    )
+
+    assert selected is not None
+    assert selected["job_id"] == "cycle_ifs_2026060912_retry_2"
+
+
 def test_psycopg_candidate_state_unrelated_success_does_not_repair_source_cycle_failure() -> None:
     state = _source_cycle_retry_state(
         jobs=[
