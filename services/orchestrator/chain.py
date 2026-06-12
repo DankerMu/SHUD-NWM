@@ -6378,7 +6378,7 @@ def _source_cycle_raw_manifest_binding(
     if not isinstance(forecast_cycle, Mapping):
         return None
     status = str(forecast_cycle.get("status") or "")
-    if status not in RAW_MANIFEST_READY_CYCLE_STATUSES:
+    if status not in RAW_MANIFEST_READY_CYCLE_STATUSES and status != "failed_download":
         return None
     manifest_uri = forecast_cycle.get("manifest_uri")
     if manifest_uri in (None, ""):
@@ -8049,16 +8049,25 @@ def _pipeline_retry_job_id(base_job_id: str, attempt: int) -> str:
 def _stage_job_sort_key(job: Mapping[str, Any], stage: StageDefinition) -> tuple[int, int, datetime, datetime]:
     job_id = str(job.get("job_id") or "")
     base_job_id = str(job_id).removesuffix("_retry_0")
-    attempt = 0
+    persisted_attempt = _coerce_int(job.get("retry_count"), default=-1)
+    attempt = persisted_attempt if persisted_attempt >= 0 else 0
     marker = "_retry_"
-    if marker in job_id:
+    if persisted_attempt < 0 and marker in job_id:
         try:
             attempt = int(job_id.rsplit(marker, maxsplit=1)[1])
         except ValueError:
             attempt = 0
         base_job_id = job_id.rsplit(marker, maxsplit=1)[0]
+    elif marker in job_id:
+        base_job_id = job_id.rsplit(marker, maxsplit=1)[0]
     expected_suffix = f"_{stage.stage}"
-    stage_match = 1 if base_job_id.endswith(expected_suffix) else 0
+    stage_match = (
+        1
+        if job.get("stage") == stage.stage
+        or job.get("job_type") == stage.job_type
+        or base_job_id.endswith(expected_suffix)
+        else 0
+    )
     terminal_time = _pipeline_job_terminal_time(job) or datetime.min.replace(tzinfo=UTC)
     created_time = _parse_gateway_time(job.get("created_at")) or datetime.min.replace(tzinfo=UTC)
     return stage_match, attempt, terminal_time, created_time
