@@ -25,6 +25,16 @@ interface ForecastChartProps {
    * 用于弹窗等已在外层 header 给出河段/起报/资料来源的场景，避免信息重复、更现代。
    */
   variant?: 'full' | 'compact'
+  /** dark：深色玻璃弹窗内的指挥舱主题（暗坐标系 + 渐变面积 + 辉光曲线）；默认 light 不变。 */
+  appearance?: 'light' | 'dark'
+}
+
+/** series.color(hex) → rgba，用于深色主题的面积渐变/辉光，保持与曲线同色相。 */
+function hexToRgba(hex: string, alpha: number): string {
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex)
+  if (!match) return `rgba(34, 211, 238, ${alpha})`
+  const value = Number.parseInt(match[1], 16)
+  return `rgba(${(value >> 16) & 0xff}, ${(value >> 8) & 0xff}, ${value & 0xff}, ${alpha})`
 }
 
 function timestampValue(time: string | number) {
@@ -53,15 +63,15 @@ function tooltipTimeLabel(value: number) {
   return `${year}-${month}-${day} ${hour}:${minute}`
 }
 
-function issueTimeMarkLineData(issueTimeMs: number, issueTimeLabel: string) {
+function issueTimeMarkLineData(issueTimeMs: number, issueTimeLabel: string, dark: boolean) {
   return {
     name: '起报时间',
     xAxis: issueTimeMs,
-    lineStyle: { color: '#64748b', type: 'dashed', width: 1.5 },
+    lineStyle: { color: dark ? '#94a3b8' : '#64748b', type: 'dashed', width: 1.5 },
     label: {
       formatter: '起报时间',
-      color: '#1f2937',
-      backgroundColor: '#ffffff',
+      color: dark ? '#e2e8f0' : '#1f2937',
+      backgroundColor: dark ? 'rgba(15, 23, 42, 0.85)' : '#ffffff',
       padding: [2, 4],
     },
     tooltip: {
@@ -71,15 +81,15 @@ function issueTimeMarkLineData(issueTimeMs: number, issueTimeLabel: string) {
   }
 }
 
-function ifsSixDayMarkLineData(endpointMs: number) {
+function ifsSixDayMarkLineData(endpointMs: number, dark: boolean) {
   return {
     name: 'IFS 6d',
     xAxis: endpointMs,
-    lineStyle: { color: '#2ca02c', type: 'dashed', width: 1.5 },
+    lineStyle: { color: dark ? '#34d399' : '#2ca02c', type: 'dashed', width: 1.5 },
     label: {
       formatter: 'IFS 6d',
-      color: '#166534',
-      backgroundColor: '#ffffff',
+      color: dark ? '#6ee7b7' : '#166534',
+      backgroundColor: dark ? 'rgba(15, 23, 42, 0.85)' : '#ffffff',
       padding: [2, 4],
       position: 'insideEndTop',
     },
@@ -99,20 +109,21 @@ function buildMarkLine(data: object[]) {
   }
 }
 
-function thresholdMarkLineData(data: ForecastData | null | undefined) {
+function thresholdMarkLineData(data: ForecastData | null | undefined, dark: boolean) {
   const thresholds = data?.frequencyThresholds
   if (!thresholds) return []
   return THRESHOLD_KEYS.flatMap((key) => {
     const value = Number(thresholds[key])
     if (!Number.isFinite(value)) return []
+    const color = dark && key === 'Q100' ? '#cbd5e1' : THRESHOLD_COLORS[key]
     return {
       name: key,
       yAxis: value,
-      lineStyle: { color: THRESHOLD_COLORS[key], type: 'dashed', width: 1.2 },
+      lineStyle: { color, type: 'dashed', width: 1.2 },
       label: {
         formatter: `${key} ${value.toFixed(0)}`,
-        color: THRESHOLD_COLORS[key],
-        backgroundColor: '#ffffff',
+        color,
+        backgroundColor: dark ? 'rgba(15, 23, 42, 0.85)' : '#ffffff',
         padding: [2, 4],
       },
     }
@@ -157,20 +168,29 @@ function tooltipFormatter(params: TooltipParam | TooltipParam[], unit?: string) 
   return lines.join('\n')
 }
 
-export function ForecastChart({ data, segmentName, variant = 'full' }: ForecastChartProps) {
+export function ForecastChart({ data, segmentName, variant = 'full', appearance = 'light' }: ForecastChartProps) {
   if (data?.pointBudgetStatus?.overBudget) {
     return (
-      <div className="grid min-h-72 place-items-center rounded-md border border-amber-300 bg-amber-50 p-4 text-center text-sm text-amber-950" role="status">
+      <div
+        className={
+          appearance === 'dark'
+            ? 'grid min-h-72 place-items-center rounded-lg border border-amber-400/30 bg-amber-400/10 p-4 text-center text-sm text-amber-100'
+            : 'grid min-h-72 place-items-center rounded-md border border-amber-300 bg-amber-50 p-4 text-center text-sm text-amber-950'
+        }
+        role="status"
+      >
         {forecastPointBudgetMessage(data.pointBudgetStatus)}
       </div>
     )
   }
 
-  return <ForecastChartInner data={data} segmentName={segmentName} variant={variant} />
+  return <ForecastChartInner data={data} segmentName={segmentName} variant={variant} appearance={appearance} />
 }
 
-function ForecastChartInner({ data, segmentName, variant = 'full' }: ForecastChartProps) {
+function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 'light' }: ForecastChartProps) {
   const compact = variant === 'compact'
+  const dark = appearance === 'dark'
+  const axisColor = dark ? '#94a3b8' : '#64748b'
   const normalizedSeries = useMemo(
     () => {
       let retainedPointCount = 0
@@ -206,7 +226,7 @@ function ForecastChartInner({ data, segmentName, variant = 'full' }: ForecastCha
     const issueTimeMs = data?.issueTime ? Date.parse(data.issueTime) : NaN
     const showIssueDivider =
       Number.isFinite(issueTimeMs) && normalizedSeries.some((series) => series.isAnalysis)
-    const thresholds = thresholdMarkLineData(data)
+    const thresholds = thresholdMarkLineData(data, dark)
 
     return {
       color: normalizedSeries.map((series) => series.color),
@@ -218,29 +238,43 @@ function ForecastChartInner({ data, segmentName, variant = 'full' }: ForecastCha
             data?.sourceAttribution ? `\n资料来源 ${data.sourceAttribution}` : ''
           }`,
           left: 0,
-          textStyle: { fontSize: 15, fontWeight: 650, color: '#1f2937' },
-          subtextStyle: { color: '#64748b', lineHeight: 18 },
+          textStyle: { fontSize: 15, fontWeight: 650, color: dark ? '#f1f5f9' : '#1f2937' },
+          subtextStyle: { color: axisColor, lineHeight: 18 },
         },
-      legend: compact ? undefined : { top: 48, left: 0, itemWidth: 18, itemHeight: 8, textStyle: { color: '#64748b' } },
+      legend: compact ? undefined : { top: 48, left: 0, itemWidth: 18, itemHeight: 8, textStyle: { color: axisColor } },
       grid: compact ? { left: 48, right: 16, top: 16, bottom: 28 } : { left: 52, right: 18, top: 98, bottom: 52 },
       tooltip: {
         trigger: 'axis',
         renderMode: 'richText',
         formatter: (params: TooltipParam | TooltipParam[]) => tooltipFormatter(params, data?.unit),
+        ...(dark
+          ? {
+            backgroundColor: 'rgba(8, 14, 32, 0.92)',
+            borderColor: 'rgba(34, 211, 238, 0.35)',
+            textStyle: { color: '#e2e8f0' },
+          }
+          : {}),
       },
       xAxis: {
         type: 'time',
         axisLabel: {
-          color: '#64748b',
+          color: axisColor,
           formatter: axisTimeLabel,
         },
+        ...(dark ? { axisLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.25)' } } } : {}),
       },
       yAxis: {
         type: 'value',
         name: '流量 (m³/s)',
         nameGap: 32,
         scale: true,
-        axisLabel: { color: '#64748b' },
+        axisLabel: { color: axisColor },
+        ...(dark
+          ? {
+            nameTextStyle: { color: axisColor },
+            splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.14)' } },
+          }
+          : {}),
       },
       series: normalizedSeries.map((series, index) => ({
         type: 'line',
@@ -248,24 +282,53 @@ function ForecastChartInner({ data, segmentName, variant = 'full' }: ForecastCha
         smooth: true,
         symbolSize: 6,
         data: series.data,
-        lineStyle: { width: 2.5, color: series.color, type: series.isIfs ? 'dashed' : 'solid' },
+        lineStyle: {
+          width: 2.5,
+          color: series.color,
+          type: series.isIfs ? 'dashed' : 'solid',
+          ...(dark ? { shadowBlur: 12, shadowColor: hexToRgba(series.color, 0.45), shadowOffsetY: 3 } : {}),
+        },
         itemStyle: { color: series.color },
+        ...(dark
+          ? {
+            showSymbol: false,
+            areaStyle: {
+              color: {
+                type: 'linear',
+                x: 0,
+                y: 0,
+                x2: 0,
+                y2: 1,
+                colorStops: [
+                  { offset: 0, color: hexToRgba(series.color, 0.28) },
+                  { offset: 1, color: hexToRgba(series.color, 0.02) },
+                ],
+              },
+            },
+          }
+          : {}),
         markLine: buildMarkLine([
           ...(index === 0 && showIssueDivider
-            ? [issueTimeMarkLineData(issueTimeMs, data?.issueTime ?? 'latest')]
+            ? [issueTimeMarkLineData(issueTimeMs, data?.issueTime ?? 'latest', dark)]
             : []),
           ...(index === 0 ? thresholds : []),
           ...(series.isIfs && series.sixDayEndpointMs !== null
-            ? [ifsSixDayMarkLineData(series.sixDayEndpointMs)]
+            ? [ifsSixDayMarkLineData(series.sixDayEndpointMs, dark)]
             : []),
         ]),
       })),
     }
-  }, [data, normalizedSeries, segmentName, compact])
+  }, [data, normalizedSeries, segmentName, compact, dark, axisColor])
 
   if (!data || normalizedSeries.length === 0) {
     return (
-      <div className="grid min-h-72 place-items-center rounded-md border border-dashed border-border p-4 text-center text-sm text-muted">
+      <div
+        className={
+          dark
+            ? 'grid min-h-72 place-items-center rounded-lg border border-dashed border-white/15 p-4 text-center text-sm text-slate-400'
+            : 'grid min-h-72 place-items-center rounded-md border border-dashed border-border p-4 text-center text-sm text-muted'
+        }
+      >
         暂无预报数据
       </div>
     )
@@ -277,7 +340,7 @@ function ForecastChartInner({ data, segmentName, variant = 'full' }: ForecastCha
       option={option}
       notMerge
       lazyUpdate
-      style={compact ? { height: 248, minHeight: 220, width: '100%' } : { height: 360, minHeight: 320, width: '100%' }}
+      style={compact ? { height: 264, minHeight: 232, width: '100%' } : { height: 360, minHeight: 320, width: '100%' }}
     />
   )
 }

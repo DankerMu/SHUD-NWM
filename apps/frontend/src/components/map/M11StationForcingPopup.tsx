@@ -168,7 +168,7 @@ function StationVariableSelector({
 }) {
   return (
     <div
-      className="flex flex-wrap items-center gap-1.5 border-b border-white/40 px-4 py-2"
+      className="flex flex-wrap items-center gap-1.5 border-b border-white/10 px-4 py-2"
       role="group"
       aria-label="代站变量选择"
       data-testid="m11-station-variable-selector"
@@ -180,10 +180,10 @@ function StationVariableSelector({
             key={variable}
             type="button"
             className={cn(
-              'cursor-pointer rounded border px-2 py-0.5 text-xs font-medium transition-colors',
+              'cursor-pointer rounded-md border px-2 py-0.5 text-xs font-medium transition-colors',
               active
-                ? 'border-primary-600 bg-primary-600/15 text-primary-700'
-                : 'border-white/50 bg-white/40 text-neutral-600 hover:bg-white/60',
+                ? 'border-cyan-400/50 bg-cyan-400/15 text-cyan-200'
+                : 'border-white/15 bg-white/5 text-slate-300 hover:bg-white/10',
             )}
             aria-pressed={active}
             data-testid={`m11-station-variable-toggle-${variable}`}
@@ -279,31 +279,31 @@ function StationVariableChart({
   const truncated = validation.seriesTruncated || validation.metadata.truncated
 
   return (
-    <div className="rounded-md border border-white/50 bg-white/40 p-2" data-testid={`m11-station-variable-${variable}-chart`}>
+    <div className="rounded-lg bg-white/[0.04] p-2 ring-1 ring-inset ring-white/10" data-testid={`m11-station-variable-${variable}-chart`}>
       <div className="flex flex-wrap items-start justify-between gap-1">
-        <div className="text-xs font-semibold text-neutral-900">
+        <div className="text-xs font-semibold text-slate-100">
           {variable} · {validation.unit}
         </div>
         <div className="flex flex-wrap gap-1 text-[11px]">
           {validation.nonOkFlags.length > 0 ? (
-            <span className="rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 text-neutral-900" data-testid={`m11-station-variable-${variable}-qc`}>
+            <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1.5 py-0.5 text-amber-200" data-testid={`m11-station-variable-${variable}-qc`}>
               QC {validation.nonOkFlags.join(', ')}{validation.nonOkFlagsCapped ? ', ...' : ''}
             </span>
           ) : null}
           {truncated ? (
-            <span className="rounded border border-danger/40 bg-danger/10 px-1.5 py-0.5 text-danger" data-testid={`m11-station-variable-${variable}-truncated`}>
+            <span className="rounded border border-red-400/40 bg-red-400/10 px-1.5 py-0.5 text-red-300" data-testid={`m11-station-variable-${variable}-truncated`}>
               truncated
             </span>
           ) : null}
           {validation.capped ? (
-            <span className="rounded border border-warning/50 bg-warning/10 px-1.5 py-0.5 text-neutral-900" data-testid={`m11-station-variable-${variable}-capped`}>
+            <span className="rounded border border-amber-400/40 bg-amber-400/10 px-1.5 py-0.5 text-amber-200" data-testid={`m11-station-variable-${variable}-capped`}>
               capped {validation.renderedPoints.length}/{validation.reportedPointCount}
             </span>
           ) : null}
         </div>
       </div>
       <StationVariableEcharts variable={variable} unit={validation.unit} points={validation.renderedPoints} />
-      <div className="mt-1 text-[11px] text-neutral-700" data-testid={`m11-station-variable-${variable}-metadata`}>
+      <div className="mt-1 text-[11px] text-slate-400" data-testid={`m11-station-variable-${variable}-metadata`}>
         returned {validation.metadata.returned_points} / limit {validation.metadata.limit}; rendered {validation.renderedPoints.length}; quality_flag {validation.qualitySummary}
       </div>
     </div>
@@ -321,21 +321,49 @@ function StationVariableEcharts({
 }) {
   const option = useMemo(
     () => ({
-      color: ['#0f8fbf'],
+      color: ['#22d3ee'],
       grid: { left: 44, right: 12, top: 10, bottom: 28 },
       tooltip: {
         trigger: 'axis',
         renderMode: 'richText',
+        backgroundColor: 'rgba(8, 14, 32, 0.92)',
+        borderColor: 'rgba(34, 211, 238, 0.35)',
+        textStyle: { color: '#e2e8f0' },
         valueFormatter: (value: number) => `${Number(value).toFixed(3)} ${unit}`,
       },
-      xAxis: { type: 'time', axisLabel: { color: '#64748b' } },
-      yAxis: { type: 'value', name: unit, axisLabel: { color: '#64748b' } },
+      xAxis: {
+        type: 'time',
+        axisLabel: { color: '#94a3b8' },
+        axisLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.25)' } },
+      },
+      yAxis: {
+        type: 'value',
+        name: unit,
+        axisLabel: { color: '#94a3b8' },
+        nameTextStyle: { color: '#94a3b8' },
+        splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.14)' } },
+      },
       series: [
         {
           type: 'line',
           name: variable,
           showSymbol: points.length <= 48,
           symbolSize: 4,
+          smooth: true,
+          lineStyle: { width: 2, shadowBlur: 8, shadowColor: 'rgba(34, 211, 238, 0.35)', shadowOffsetY: 2 },
+          areaStyle: {
+            color: {
+              type: 'linear',
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: 'rgba(34, 211, 238, 0.22)' },
+                { offset: 1, color: 'rgba(34, 211, 238, 0.02)' },
+              ],
+            },
+          },
           data: points.map((point) => [point.timestamp, point.value]),
         },
       ],
@@ -356,8 +384,8 @@ function VariableEmpty({
   children: React.ReactNode
 }) {
   return (
-    <div className="rounded-md border border-dashed border-white/50 bg-white/40 p-2 text-xs text-neutral-700" data-testid={testId}>
-      <div className="font-semibold text-neutral-900">{variable}</div>
+    <div className="rounded-lg border border-dashed border-white/15 bg-white/5 p-2 text-xs text-slate-300" data-testid={testId}>
+      <div className="font-semibold text-slate-100">{variable}</div>
       <div className="mt-1">{children}</div>
     </div>
   )

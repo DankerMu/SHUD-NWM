@@ -128,3 +128,31 @@ textarea {
   outline-offset: 2px;
   box-shadow: var(--focus-ring);
 }
+
+/* MapLibre popup 外壳交给内部玻璃面板：去白底/内边距/默认阴影，锚点 tip 染成深玻璃色与面板衔接。 */
+.maplibregl-popup-content {
+  background: transparent;
+  padding: 0;
+  border-radius: 16px;
+  box-shadow: none;
+}
+
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+  border-top-color: rgba(15, 23, 42, 0.78);
+}
+
+.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+  border-bottom-color: rgba(15, 23, 42, 0.78);
+}
+
+.maplibregl-popup-anchor-left .maplibregl-popup-tip {
+  border-right-color: rgba(15, 23, 42, 0.78);
+}
+
+.maplibregl-popup-anchor-right .maplibregl-popup-tip {
+  border-left-color: rgba(15, 23, 42, 0.78);
+}
