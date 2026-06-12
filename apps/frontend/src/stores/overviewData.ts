@@ -1067,6 +1067,8 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
 
     const load = (async () => {
       const partialErrors: string[] = []
+      // 投机预热 run-less 图层目录（同 loadBasinDetail：layers 慢端点不串行排在 runs 后）。
+      void fetchLayers(null).catch(() => undefined)
       const [basinsResult, modelsResult, runsResult, queueResult] = await Promise.allSettled([
         fetchBasins(),
         fetchModels(),
@@ -1203,6 +1205,11 @@ export const useOverviewDataStore = create<OverviewDataState>((set) => ({
 
     const load = (async () => {
       const partialErrors: string[] = []
+      // 投机预热 run-less 图层目录：layers 在只读副本上是慢端点（解析最新 run +
+      // 洪频质量聚合），串行排在 runs 之后会把首屏推迟十几秒。latestRun 缺失时
+      // 后续 fetchLayers(null) 直接命中前端 cached() 同 key，省去一次串行慢请求；
+      // latestRun 存在时该预热只多付一次幂等 GET（服务端 display TTL 缓存兜底）。
+      void fetchLayers(null).catch(() => undefined)
       const [basinsResult, versionsResult, runsResult] = await Promise.allSettled([
         fetchBasins(),
         fetchBasinVersions(basinId),

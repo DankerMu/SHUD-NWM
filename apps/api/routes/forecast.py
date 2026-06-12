@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request
 
+from apps.api.display_cache import display_catalog_cached
 from apps.api.errors import ApiError
 from packages.common.forecast_store import (
     QHH_BASIN_ID,
@@ -98,14 +99,24 @@ def list_runs(
 ) -> dict[str, Any]:
     capped_limit = min(limit, MAX_LIMIT)
     try:
-        page = store.list_runs(
-            basin_id=basin_id,
-            source=source,
-            cycle_time=cycle_time,
-            status=status,
-            flood_product_ready=flood_product_ready,
-            limit=capped_limit,
-            offset=offset,
+        # display 角色 TTL 缓存：flood_product_ready 过滤要对每个候选 run 聚合
+        # 61M+ 行洪频结果（只读副本上 ~12s），而目录数据节奏为小时级 cycle。
+        cache_key = (
+            f"runs:{basin_id}:{source}:{cycle_time.isoformat() if cycle_time else None}:"
+            f"{status}:{flood_product_ready}:{capped_limit}:{offset}"
+        )
+        page = display_catalog_cached(
+            request,
+            cache_key,
+            lambda: store.list_runs(
+                basin_id=basin_id,
+                source=source,
+                cycle_time=cycle_time,
+                status=status,
+                flood_product_ready=flood_product_ready,
+                limit=capped_limit,
+                offset=offset,
+            ),
         )
         return _ok(request, _paginated_payload(page))
     except ForecastStoreError as error:

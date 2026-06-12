@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from apps.api.display_cache import display_catalog_cached
 from apps.api.errors import ApiError
 from apps.api.routes.pipeline import _ok
 from services.tiles.mvt import (
@@ -389,37 +390,43 @@ def list_layers(
 ) -> dict[str, Any]:
     if run_id is not None:
         validate_identifier(run_id, "run_id")
-        run = _require_frequency_ready(session, run_id)
-    else:
-        # 目录默认 run 选最新 frequency-ready（不要求洪频完整）：discharge/water-level/river-network
-        # 仅需 frequency-ready 水文 run；洪频/预警可用性由 _annotate_flood_layer_quality 独立标注。
-        # 无洪频基线的流域（QHH/Heihe）因此仍能暴露 discharge，而非整目录空。
-        run = latest_frequency_ready_run(session)
-        if run is None:
-            return _ok(request, [])
-    resolved_run_id = str(run["run_id"]) if run else None
-    basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="layers")
-    source_version = _run_source_version(run) if run else None
-    river_network_source_version = (
-        _river_network_source_version(session, basin_version_id) if basin_version_id is not None else source_version
-    )
-    flood_product_quality = (
-        _flood_product_quality(session, resolved_run_id, status=_optional_str(run.get("status")))
-        if resolved_run_id is not None
-        else None
-    )
-    layers = _default_layer_catalog(
-        session,
-        run_id=resolved_run_id,
-        source_version=source_version,
-        river_network_source_version=river_network_source_version,
-        basin_version_id=basin_version_id,
-        river_network_version_id=river_network_version_id,
-        national=run_id is None,
-    )
-    if flood_product_quality is not None:
-        _annotate_flood_layer_quality(layers, flood_product_quality)
-    return _ok(request, [layer.model_dump() for layer in layers[offset : offset + limit]])
+
+    def _load() -> list[dict[str, Any]]:
+        if run_id is not None:
+            run = _require_frequency_ready(session, run_id)
+        else:
+            # 目录默认 run 选最新 frequency-ready（不要求洪频完整）：discharge/water-level/river-network
+            # 仅需 frequency-ready 水文 run；洪频/预警可用性由 _annotate_flood_layer_quality 独立标注。
+            # 无洪频基线的流域（QHH/Heihe）因此仍能暴露 discharge，而非整目录空。
+            run = latest_frequency_ready_run(session)
+            if run is None:
+                return []
+        resolved_run_id = str(run["run_id"]) if run else None
+        basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="layers")
+        source_version = _run_source_version(run) if run else None
+        river_network_source_version = (
+            _river_network_source_version(session, basin_version_id) if basin_version_id is not None else source_version
+        )
+        flood_product_quality = (
+            _flood_product_quality(session, resolved_run_id, status=_optional_str(run.get("status")))
+            if resolved_run_id is not None
+            else None
+        )
+        layers = _default_layer_catalog(
+            session,
+            run_id=resolved_run_id,
+            source_version=source_version,
+            river_network_source_version=river_network_source_version,
+            basin_version_id=basin_version_id,
+            river_network_version_id=river_network_version_id,
+            national=run_id is None,
+        )
+        if flood_product_quality is not None:
+            _annotate_flood_layer_quality(layers, flood_product_quality)
+        return [layer.model_dump() for layer in layers[offset : offset + limit]]
+
+    # display 角色 TTL 缓存：目录解析最新 run + 洪频质量聚合在只读副本上 ~14s。
+    return _ok(request, display_catalog_cached(request, f"layers:{run_id}:{limit}:{offset}", _load))
 
 
 @router.get("/api/v1/layers/{layer_id}/valid-times", response_model=LayerValidTimesResponse)
@@ -440,56 +447,66 @@ def list_layer_valid_times(
     session: Session = Depends(get_flood_alert_session),
 ) -> dict[str, Any]:
     validate_identifier(layer_id, "layer_id")
-    if run_id is None and layer_id == "discharge":
-        # National discharge: union of valid-times across every basin's latest
-        # frequency-ready run, matching the run-less catalog/tile template.
+    requested_run_id = run_id
+
+    def _load() -> dict[str, Any]:
+        run_id = requested_run_id
+        if run_id is None and layer_id == "discharge":
+            # National discharge: union of valid-times across every basin's latest
+            # frequency-ready run, matching the run-less catalog/tile template.
+            if duration is not None:
+                raise ApiError(
+                    status_code=422,
+                    code="VALIDATION_ERROR",
+                    message="Duration is only supported for flood return-period valid-time discovery.",
+                    details={"layer_id": layer_id, "duration": duration},
+                )
+            return national_discharge_valid_times(session).model_dump()
+        if run_id is not None:
+            validate_identifier(run_id, "run_id")
+            run = _require_frequency_ready(session, run_id)
+        else:
+            # 洪频/预警 valid-times 维持 latest_ready_run（要求洪频完整，无则空、不抛错）；
+            # discharge/water-level/river-network 用 frequency-ready 选择器，使无洪频流域也能发现有效时间。
+            if layer_id in {"flood-return-period", "warning-level"}:
+                run = latest_ready_run(session)
+            else:
+                run = latest_frequency_ready_run(session)
+            if run is None:
+                return _empty_valid_times().model_dump()
+            run_id = str(run["run_id"]) if run else None
+        basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id=layer_id)
         if duration is not None:
+            validate_identifier(duration, "duration")
+        if layer_id in {"flood-return-period", "warning-level"}:
+            if run_id is not None:
+                _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
+            resolved_duration = duration or DEFAULT_FLOOD_RETURN_PERIOD_DURATION
+            _validate_supported_flood_duration(resolved_duration)
+        elif duration is not None:
             raise ApiError(
                 status_code=422,
                 code="VALIDATION_ERROR",
                 message="Duration is only supported for flood return-period valid-time discovery.",
                 details={"layer_id": layer_id, "duration": duration},
             )
-        return _ok(request, national_discharge_valid_times(session).model_dump())
-    if run_id is not None:
-        validate_identifier(run_id, "run_id")
-        run = _require_frequency_ready(session, run_id)
-    else:
-        # 洪频/预警 valid-times 维持 latest_ready_run（要求洪频完整，无则空、不抛错）；
-        # discharge/water-level/river-network 用 frequency-ready 选择器，使无洪频流域也能发现有效时间。
-        if layer_id in {"flood-return-period", "warning-level"}:
-            run = latest_ready_run(session)
         else:
-            run = latest_frequency_ready_run(session)
-        if run is None:
-            return _ok(request, _empty_valid_times().model_dump())
-        run_id = str(run["run_id"]) if run else None
-    basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id=layer_id)
-    if duration is not None:
-        validate_identifier(duration, "duration")
-    if layer_id in {"flood-return-period", "warning-level"}:
-        if run_id is not None:
-            _require_flood_product_ready(session, run_id, status=_optional_str(run.get("status")))
-        resolved_duration = duration or DEFAULT_FLOOD_RETURN_PERIOD_DURATION
-        _validate_supported_flood_duration(resolved_duration)
-    elif duration is not None:
-        raise ApiError(
-            status_code=422,
-            code="VALIDATION_ERROR",
-            message="Duration is only supported for flood return-period valid-time discovery.",
-            details={"layer_id": layer_id, "duration": duration},
+            resolved_duration = DEFAULT_FLOOD_RETURN_PERIOD_DURATION
+        valid_time_sample = valid_times_for_layer(
+            session,
+            layer_id,
+            run_id=run_id,
+            basin_version_id=basin_version_id,
+            river_network_version_id=river_network_version_id,
+            duration=resolved_duration,
         )
-    else:
-        resolved_duration = DEFAULT_FLOOD_RETURN_PERIOD_DURATION
-    valid_time_sample = valid_times_for_layer(
-        session,
-        layer_id,
-        run_id=run_id,
-        basin_version_id=basin_version_id,
-        river_network_version_id=river_network_version_id,
-        duration=resolved_duration,
+        return valid_time_sample.model_dump()
+
+    # display 角色 TTL 缓存：valid-time 发现按 run/全国扫描洪频结果（只读副本上数秒级）。
+    return _ok(
+        request,
+        display_catalog_cached(request, f"valid-times:{layer_id}:{requested_run_id}:{duration}", _load),
     )
-    return _ok(request, valid_time_sample.model_dump())
 
 
 @router.get("/api/v1/flood-alerts/summary", response_model=dict[str, Any])
