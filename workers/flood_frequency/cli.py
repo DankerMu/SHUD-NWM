@@ -10,7 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from packages.common.auth_policy import PolicyDecision, cli_policy_decision_from_evidence, require_policy_evidence
-from packages.common.flood_quality import backfill_run_product_quality
+from packages.common.flood_quality import FloodRunProductQualityBackfillSummary, backfill_run_product_quality
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.frequency import FrequencyFitError, fit_curves
@@ -156,11 +156,20 @@ def _compute_return_period(run_id: str, quality_contract: dict[str, object] | No
 
 def _backfill_run_quality(run_ids: Sequence[str] | None = None) -> dict[str, object]:
     with _session_from_env() as session:
-        qualities = backfill_run_product_quality(session, run_ids)
+        result = backfill_run_product_quality(session, run_ids)
         session.commit()
+        if isinstance(result, FloodRunProductQualityBackfillSummary):
+            return {
+                "scope": "all_source_runs",
+                "refreshed_runs": result.refreshed_runs,
+                "orphan_quality_rows_deleted": result.orphan_quality_rows_deleted,
+                "run_ids_included": False,
+            }
         return {
-            "refreshed_runs": len(qualities),
-            "run_ids": [quality.run_id for quality in qualities],
+            "scope": "targeted_run_ids",
+            "refreshed_runs": len(result),
+            "run_ids": [quality.run_id for quality in result],
+            "run_ids_included": True,
         }
 
 

@@ -290,7 +290,12 @@ def test_argparse_backfill_run_quality_dispatches_multiple_run_ids(
 
     def fake_backfill(run_ids: list[str] | None = None) -> dict[str, object]:
         calls.append(run_ids)
-        return {"refreshed_runs": 2, "run_ids": list(run_ids or [])}
+        return {
+            "scope": "targeted_run_ids",
+            "refreshed_runs": 2,
+            "run_ids": list(run_ids or []),
+            "run_ids_included": True,
+        }
 
     monkeypatch.setattr(flood_cli, "_backfill_run_quality", fake_backfill)
 
@@ -301,7 +306,12 @@ def test_argparse_backfill_run_quality_dispatches_multiple_run_ids(
     output = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert calls == [["forecast_run_a", "forecast_run_b"]]
-    assert output == {"refreshed_runs": 2, "run_ids": ["forecast_run_a", "forecast_run_b"]}
+    assert output == {
+        "scope": "targeted_run_ids",
+        "refreshed_runs": 2,
+        "run_ids": ["forecast_run_a", "forecast_run_b"],
+        "run_ids_included": True,
+    }
 
 
 def test_click_backfill_run_quality_dispatches_multiple_run_ids(
@@ -313,7 +323,12 @@ def test_click_backfill_run_quality_dispatches_multiple_run_ids(
 
     def fake_backfill(run_ids: tuple[str, ...] | None = None) -> dict[str, object]:
         calls.append(run_ids)
-        return {"refreshed_runs": 2, "run_ids": list(run_ids or [])}
+        return {
+            "scope": "targeted_run_ids",
+            "refreshed_runs": 2,
+            "run_ids": list(run_ids or []),
+            "run_ids_included": True,
+        }
 
     monkeypatch.setattr(flood_cli, "_backfill_run_quality", fake_backfill)
 
@@ -327,7 +342,68 @@ def test_click_backfill_run_quality_dispatches_multiple_run_ids(
     output = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert calls == [("forecast_run_a", "forecast_run_b")]
-    assert output == {"refreshed_runs": 2, "run_ids": ["forecast_run_a", "forecast_run_b"]}
+    assert output == {
+        "scope": "targeted_run_ids",
+        "refreshed_runs": 2,
+        "run_ids": ["forecast_run_a", "forecast_run_b"],
+        "run_ids_included": True,
+    }
+
+
+def test_backfill_run_quality_default_output_is_summary_without_run_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        calls: list[list[str] | None] = []
+
+        def fake_backfill(_session: Session, run_ids: list[str] | None = None) -> object:
+            calls.append(run_ids)
+            return flood_cli.FloodRunProductQualityBackfillSummary(
+                refreshed_runs=5000,
+                orphan_quality_rows_deleted=3,
+            )
+
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "backfill_run_product_quality", fake_backfill)
+
+        output = flood_cli._backfill_run_quality()
+
+    assert calls == [None]
+    assert output == {
+        "scope": "all_source_runs",
+        "refreshed_runs": 5000,
+        "orphan_quality_rows_deleted": 3,
+        "run_ids_included": False,
+    }
+    assert "run_ids" not in output
+
+
+def test_backfill_run_quality_targeted_output_includes_explicit_run_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        calls: list[list[str] | None] = []
+
+        class Quality:
+            def __init__(self, run_id: str) -> None:
+                self.run_id = run_id
+
+        def fake_backfill(_session: Session, run_ids: list[str] | None = None) -> object:
+            calls.append(run_ids)
+            return [Quality(run_id) for run_id in run_ids or []]
+
+        monkeypatch.setattr(flood_cli, "_session_from_env", lambda: session)
+        monkeypatch.setattr(flood_cli, "backfill_run_product_quality", fake_backfill)
+
+        output = flood_cli._backfill_run_quality(["forecast_run_a", "forecast_run_b"])
+
+    assert calls == [["forecast_run_a", "forecast_run_b"]]
+    assert output == {
+        "scope": "targeted_run_ids",
+        "refreshed_runs": 2,
+        "run_ids": ["forecast_run_a", "forecast_run_b"],
+        "run_ids_included": True,
+    }
 
 
 def test_argparse_cli_supersede_without_policy_evidence_rejects_and_does_not_mutate(

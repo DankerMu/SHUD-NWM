@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import overload
 
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,6 +20,12 @@ class FloodRunProductQuality:
     max_return_period_rows: int
     max_warning_rows: int
     refreshed_at: datetime
+
+
+@dataclass(frozen=True)
+class FloodRunProductQualityBackfillSummary:
+    refreshed_runs: int
+    orphan_quality_rows_deleted: int
 
 
 def refresh_run_product_quality(session: Session, run_id: str) -> FloodRunProductQuality | None:
@@ -51,22 +58,39 @@ def refresh_run_product_quality_many(session: Session, run_ids: Sequence[str]) -
     return qualities
 
 
+@overload
+def backfill_run_product_quality(
+    session: Session,
+    run_ids: None = None,
+) -> FloodRunProductQualityBackfillSummary: ...
+
+
+@overload
+def backfill_run_product_quality(
+    session: Session,
+    run_ids: Sequence[str],
+) -> list[FloodRunProductQuality]: ...
+
+
 def backfill_run_product_quality(
     session: Session,
     run_ids: Sequence[str] | None = None,
-) -> list[FloodRunProductQuality]:
+) -> list[FloodRunProductQuality] | FloodRunProductQualityBackfillSummary:
     """Backfill materialized quality for existing source result rows.
 
-    ``run_ids=None`` discovers runs from ``flood.return_period_result`` and
-    refreshes exactly those runs. Supplying run ids also clears stale rows for
-    runs that no longer have source rows.
+    ``run_ids=None`` refreshes all source runs with one set-based statement and
+    returns only counts, so production backfills do not materialize every run id
+    in Python. Supplying run ids keeps targeted repair semantics and also clears
+    stale rows for runs that no longer have source rows.
     """
     if run_ids is not None:
         return refresh_run_product_quality_many(session, _dedupe_run_ids(run_ids))
-    target_run_ids = _source_run_ids(session)
-    qualities = refresh_run_product_quality_many(session, target_run_ids)
-    _delete_orphan_quality_rows(session)
-    return qualities
+    refreshed_runs = _upsert_all_quality_rows_from_source(session)
+    orphan_quality_rows_deleted = _delete_orphan_quality_rows(session)
+    return FloodRunProductQualityBackfillSummary(
+        refreshed_runs=refreshed_runs,
+        orphan_quality_rows_deleted=orphan_quality_rows_deleted,
+    )
 
 
 def clear_run_product_quality(session: Session, run_id: str) -> None:
@@ -118,17 +142,59 @@ def _quality_for_runs(session: Session, run_ids: Sequence[str]) -> list[FloodRun
     ]
 
 
-def _source_run_ids(session: Session) -> list[str]:
-    rows = session.execute(
+def _source_run_count(session: Session) -> int:
+    return int(
+        session.execute(
+            text(
+                """
+                SELECT COUNT(DISTINCT run_id)
+                FROM flood.return_period_result
+                """
+            )
+        ).scalar_one()
+        or 0
+    )
+
+
+def _upsert_all_quality_rows_from_source(session: Session) -> int:
+    columns = (
+        "run_id",
+        "result_rows",
+        "max_result_rows",
+        "return_period_rows",
+        "warning_rows",
+        "max_return_period_rows",
+        "max_warning_rows",
+        "refreshed_at",
+    )
+    update_columns = columns[1:]
+    excluded = "excluded" if _dialect_name(session) == "sqlite" else "EXCLUDED"
+    result = session.execute(
         text(
-            """
-            SELECT DISTINCT run_id
+            f"""
+            INSERT INTO flood.run_product_quality ({', '.join(columns)})
+            SELECT
+                run_id,
+                COUNT(*) AS result_rows,
+                SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) AS max_result_rows,
+                SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
+                SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows,
+                SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END)
+                    AS max_return_period_rows,
+                SUM(CASE WHEN max_over_window = true AND warning_level IS NOT NULL THEN 1 ELSE 0 END)
+                    AS max_warning_rows,
+                :refreshed_at AS refreshed_at
             FROM flood.return_period_result
-            ORDER BY run_id
+            WHERE 1 = 1
+            GROUP BY run_id
+            ON CONFLICT (run_id) DO UPDATE SET
+                {', '.join(f'{column} = {excluded}.{column}' for column in update_columns)}
             """
-        )
-    ).mappings()
-    return [str(row["run_id"]) for row in rows]
+        ),
+        {"refreshed_at": datetime.now(UTC)},
+    )
+    rowcount = _known_rowcount(result)
+    return rowcount if rowcount is not None else _source_run_count(session)
 
 
 def _upsert_quality_rows(session: Session, qualities: Sequence[FloodRunProductQuality]) -> None:
@@ -176,20 +242,27 @@ def _delete_quality_rows(session: Session, run_ids: Sequence[str]) -> None:
     )
 
 
-def _delete_orphan_quality_rows(session: Session) -> None:
+def _delete_orphan_quality_rows(session: Session) -> int:
     if not _table_exists(session, "flood", "run_product_quality"):
-        return
-    session.execute(
+        return 0
+    result = session.execute(
         text(
             """
-            DELETE FROM flood.run_product_quality
-            WHERE run_id NOT IN (
-                SELECT DISTINCT run_id
-                FROM flood.return_period_result
+            DELETE FROM flood.run_product_quality AS quality
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM flood.return_period_result AS source
+                WHERE source.run_id = quality.run_id
             )
             """
         )
     )
+    return _known_rowcount(result) or 0
+
+
+def _known_rowcount(result: object) -> int | None:
+    rowcount = getattr(result, "rowcount", None)
+    return rowcount if isinstance(rowcount, int) and rowcount >= 0 else None
 
 
 def _run_id_placeholders(run_ids: Sequence[str]) -> tuple[str, dict[str, str]]:

@@ -13,7 +13,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from packages.common.flood_quality import backfill_run_product_quality, refresh_run_product_quality
+from packages.common.flood_quality import (
+    FloodRunProductQualityBackfillSummary,
+    backfill_run_product_quality,
+    refresh_run_product_quality,
+)
 from workers.flood_frequency import return_period
 from workers.flood_frequency.frequency import check_sample_size
 from workers.flood_frequency.return_period import (
@@ -364,6 +368,103 @@ def test_run_product_quality_backfill_is_idempotent_and_overwrites_stale_counts(
     assert quality["max_warning_rows"] == 1
 
 
+def test_run_product_quality_default_backfill_is_set_based_and_summarized() -> None:
+    with _store() as session:
+        statements: list[str] = []
+
+        def capture_sql(
+            _conn: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            statements.append(" ".join(statement.split()))
+
+        bind = session.get_bind()
+        event.listen(bind, "before_cursor_execute", capture_sql)
+        try:
+            _insert_quality_source_row(session, run_id="forecast_run_a", max_over_window=True)
+            _insert_quality_source_row(
+                session,
+                run_id="forecast_run_a",
+                segment_id="seg_002",
+                valid_time=datetime(2026, 5, 1, 1),
+                return_period=None,
+                warning_level=None,
+                max_over_window=False,
+            )
+            _insert_quality_source_row(session, run_id="forecast_run_b", max_over_window=True)
+            session.execute(
+                text(
+                    """
+                    INSERT INTO flood.run_product_quality (
+                        run_id, result_rows, max_result_rows, return_period_rows, warning_rows,
+                        max_return_period_rows, max_warning_rows
+                    )
+                    VALUES ('orphan_run', 99, 99, 99, 99, 99, 99)
+                    """
+                )
+            )
+            session.commit()
+
+            summary = backfill_run_product_quality(session)
+            quality_rows = session.execute(
+                text(
+                    """
+                    SELECT
+                        run_id, result_rows, max_result_rows, return_period_rows, warning_rows,
+                        max_return_period_rows, max_warning_rows
+                    FROM flood.run_product_quality
+                    ORDER BY run_id
+                    """
+                )
+            ).mappings().all()
+        finally:
+            event.remove(bind, "before_cursor_execute", capture_sql)
+
+    assert isinstance(summary, FloodRunProductQualityBackfillSummary)
+    assert summary.refreshed_runs == 2
+    assert summary.orphan_quality_rows_deleted == 1
+    assert [dict(row) for row in quality_rows] == [
+        {
+            "run_id": "forecast_run_a",
+            "result_rows": 2,
+            "max_result_rows": 1,
+            "return_period_rows": 1,
+            "warning_rows": 1,
+            "max_return_period_rows": 1,
+            "max_warning_rows": 1,
+        },
+        {
+            "run_id": "forecast_run_b",
+            "result_rows": 1,
+            "max_result_rows": 1,
+            "return_period_rows": 1,
+            "warning_rows": 1,
+            "max_return_period_rows": 1,
+            "max_warning_rows": 1,
+        },
+    ]
+
+    upper_statements = [statement.upper() for statement in statements]
+    assert any(
+        "INSERT INTO FLOOD.RUN_PRODUCT_QUALITY" in statement
+        and "SELECT RUN_ID, COUNT(*) AS RESULT_ROWS" in statement
+        and "GROUP BY RUN_ID" in statement
+        and "ON CONFLICT (RUN_ID) DO UPDATE" in statement
+        for statement in upper_statements
+    )
+    assert any(
+        "DELETE FROM FLOOD.RUN_PRODUCT_QUALITY" in statement and "WHERE NOT EXISTS" in statement
+        for statement in upper_statements
+    )
+    assert all("SELECT DISTINCT RUN_ID" not in statement for statement in upper_statements)
+    assert all("FROM FLOOD.RETURN_PERIOD_RESULT WHERE RUN_ID IN" not in statement for statement in upper_statements)
+    assert all(" NOT IN " not in statement for statement in upper_statements)
+
+
 def test_run_product_quality_refresh_deletes_stale_row_when_source_rows_are_missing() -> None:
     with _store() as session:
         _insert_forecast_run(session, segment_values={"seg_001": [150.0]})
@@ -523,6 +624,49 @@ def _insert_stale_result_row(
             "valid_time": valid_time,
             "duration": duration,
             "q_value": q_value,
+            "cycle_time": datetime(2026, 5, 1),
+            "max_over_window": max_over_window,
+        },
+    )
+    session.commit()
+
+
+def _insert_quality_source_row(
+    session: Session,
+    *,
+    run_id: str,
+    segment_id: str = "seg_001",
+    valid_time: datetime = datetime(2026, 5, 1),
+    duration: str = "1h",
+    q_value: float = 150.0,
+    return_period: float | None = 10.0,
+    warning_level: str | None = "warning",
+    max_over_window: bool,
+) -> None:
+    session.execute(
+        text(
+            """
+            INSERT INTO flood.return_period_result (
+                run_id, scenario_id, basin_version_id, river_network_version_id,
+                model_id, river_segment_id, valid_time, duration, q_value, q_unit,
+                return_period, warning_level, source_id, cycle_time, max_over_window,
+                quality_flag
+            )
+            VALUES (
+                :run_id, 'scenario_v1', 'basin_v1', 'rnv_v1',
+                'model_v1', :segment_id, :valid_time, :duration, :q_value, 'm3/s',
+                :return_period, :warning_level, 'GFS', :cycle_time, :max_over_window, 'ok'
+            )
+            """
+        ),
+        {
+            "run_id": run_id,
+            "segment_id": segment_id,
+            "valid_time": valid_time,
+            "duration": duration,
+            "q_value": q_value,
+            "return_period": return_period,
+            "warning_level": warning_level,
             "cycle_time": datetime(2026, 5, 1),
             "max_over_window": max_over_window,
         },
