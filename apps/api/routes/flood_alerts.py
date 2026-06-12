@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
@@ -1138,6 +1139,45 @@ def river_network_mvt_tile(
     return _mvt_response(build_raw_tile_response(session, tile_input, data))
 
 
+@router.get(
+    "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
+    responses=MVT_ROUTE_RESPONSES,
+    response_class=Response,
+    operation_id="getMetStationTile",
+    summary="Get meteorological station vector tile",
+    description=(
+        "Canonical M16 Mapbox Vector Tile route for meteorological station points. "
+        "The vector source-layer is `met_stations` and features include `station_id`, "
+        "`basin_version_id`, `station_name`, `station_role`, and `active_flag`."
+    ),
+)
+def met_station_mvt_tile(
+    basin_version_id: str,
+    z: int,
+    x: int,
+    y: int,
+    session: Session = Depends(get_flood_alert_session),
+) -> Response:
+    validate_identifier(basin_version_id, "basin_version_id")
+    validate_xyz(z, x, y)
+    source_version = _station_source_version(session, basin_version_id)
+    tile_input = TileInput(
+        layer_id="met-stations",
+        source_id=basin_version_id,
+        source_version=source_version,
+        valid_time=None,
+        z=z,
+        x=x,
+        y=y,
+    )
+    cached = read_cached_tile_response(session, tile_input)
+    if cached is not None:
+        return _mvt_response(cached)
+    _require_live_postgis_mvt(session, "met-stations")
+    data = _fetch_station_mvt_tile_bytes(session, basin_version_id=basin_version_id, z=z, x=x, y=y)
+    return _mvt_response(build_raw_tile_response(session, tile_input, data))
+
+
 def _build_deterministic_tile_response_for_tests(
     session: Session,
     tile: TileInput,
@@ -1377,6 +1417,24 @@ def _fetch_river_network_mvt_tile_bytes(
     )
 
 
+def _fetch_station_mvt_tile_bytes(
+    session: Session,
+    *,
+    basin_version_id: str,
+    z: int,
+    x: int,
+    y: int,
+) -> bytes:
+    return _fetch_postgis_tile_bytes(
+        session,
+        "met-stations",
+        {"basin_version_id": basin_version_id},
+        z=z,
+        x=x,
+        y=y,
+    )
+
+
 def _river_network_source_version(session: Session, basin_version_id: str) -> str:
     rows = session.execute(
         text(
@@ -1400,6 +1458,114 @@ def _river_network_source_version(session: Session, basin_version_id: str) -> st
     joined = ",".join(versions)
     digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
     return f"river-network-set:{digest}:{joined}"
+
+
+def _station_source_version(session: Session, basin_version_id: str) -> str:
+    try:
+        if session.get_bind().dialect.name == "sqlite":
+            rows = (
+                session.execute(
+                    text(
+                        """
+                        SELECT station_id, basin_version_id, station_name, station_role,
+                               active_flag, geom, created_at
+                        FROM met.met_station
+                        WHERE basin_version_id = :basin_version_id
+                        ORDER BY station_id
+                        """
+                    ),
+                    {"basin_version_id": basin_version_id},
+                )
+                .mappings()
+                .all()
+            )
+            if not rows:
+                _raise_station_source_not_found(basin_version_id)
+            basis = [
+                {
+                    "station_id": row.get("station_id"),
+                    "basin_version_id": row.get("basin_version_id"),
+                    "station_name": row.get("station_name"),
+                    "station_role": row.get("station_role"),
+                    "active_flag": bool(row.get("active_flag")),
+                    "geom": row.get("geom"),
+                    "created_at": canonical_mvt_time(row.get("created_at")),
+                }
+                for row in rows
+            ]
+            digest = hashlib.sha256(
+                json.dumps(basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            ).hexdigest()[:16]
+            return f"met-stations:{digest}:{basin_version_id}:{len(rows)}"
+
+        row = (
+            session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS station_count,
+                           MIN(station_id) AS min_station_id,
+                           MAX(station_id) AS max_station_id,
+                           md5(
+                               COALESCE(
+                                   string_agg(
+                                       concat_ws(
+                                           '|',
+                                           station_id,
+                                           basin_version_id,
+                                           COALESCE(station_name, ''),
+                                           station_role,
+                                           active_flag::text,
+                                           COALESCE(
+                                               to_char(
+                                                   created_at AT TIME ZONE 'UTC',
+                                                   'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                                               ),
+                                               ''
+                                           ),
+                                           encode(ST_AsEWKB(geom), 'hex')
+                                       ),
+                                       E'\n'
+                                       ORDER BY station_id
+                                   ),
+                                   ''
+                               )
+                           ) AS inventory_hash
+                    FROM met.met_station
+                    WHERE basin_version_id = :basin_version_id
+                    """
+                ),
+                {"basin_version_id": basin_version_id},
+            )
+            .mappings()
+            .one()
+        )
+    except SQLAlchemyError as exc:
+        try:
+            session.rollback()
+        except SQLAlchemyError:
+            pass
+        raise ApiError(
+            status_code=424,
+            code="MVT_LIVE_POSTGIS_UNAVAILABLE",
+            message="Station MVT source inventory is unavailable for canonical .pbf tile generation.",
+            details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
+        ) from exc
+    station_count = int(row.get("station_count") or 0)
+    if station_count <= 0:
+        _raise_station_source_not_found(basin_version_id)
+    digest = str(row.get("inventory_hash") or "")
+    min_station_id = str(row.get("min_station_id") or "")
+    max_station_id = str(row.get("max_station_id") or "")
+    return f"met-stations:{digest[:16]}:{basin_version_id}:{station_count}:{min_station_id}:{max_station_id}"
+
+
+def _raise_station_source_not_found(basin_version_id: str) -> None:
+    raise ApiError(
+        status_code=404,
+        code="MVT_SOURCE_IDENTITY_NOT_FOUND",
+        message="Station MVT source identity was not found for the requested basin version.",
+        details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
+    )
 
 
 def _require_hydro_mvt_source_identity(

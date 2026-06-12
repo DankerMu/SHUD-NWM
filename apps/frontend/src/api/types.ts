@@ -381,6 +381,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get meteorological station vector tile
+         * @description Canonical M16 Mapbox Vector Tile route for meteorological station points scoped by basin version. The vector source-layer is `met_stations` and features include `station_id`, `basin_version_id`, `station_name`, `station_role`, and `active_flag`.
+         */
+        get: operations["getMetStationTile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf": {
         parameters: {
             query?: never;
@@ -2580,6 +2600,43 @@ export interface operations {
         };
     };
     getRiverNetworkTile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                basin_version_id: components["parameters"]["BasinVersionId"];
+                z: components["parameters"]["MvtTileZ"];
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                x: components["parameters"]["MvtTileX"];
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                y: components["parameters"]["MvtTileY"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw Mapbox vector tile */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-protobuf": string;
+                };
+            };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    getMetStationTile: {
         parameters: {
             query?: never;
             header?: never;

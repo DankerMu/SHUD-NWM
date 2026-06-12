@@ -938,6 +938,58 @@ paths:
           $ref: "#/components/responses/MvtLivePostgisUnavailable"
         "5XX":
           $ref: "#/components/responses/Error"
+  /api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf:
+    get:
+      operationId: getMetStationTile
+      summary: Get meteorological station vector tile
+      description: >
+        Canonical M16 Mapbox Vector Tile route for meteorological station
+        points scoped by basin version. The vector source-layer is
+        `met_stations` and features include `station_id`, `basin_version_id`,
+        `station_name`, `station_role`, and `active_flag`.
+      tags: [tiles]
+      parameters:
+        - $ref: "#/components/parameters/BasinVersionId"
+        - $ref: "#/components/parameters/MvtTileZ"
+        - $ref: "#/components/parameters/MvtTileX"
+        - $ref: "#/components/parameters/MvtTileY"
+      responses:
+        "200":
+          description: Raw Mapbox vector tile
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Tile-Layer-ID:
+              schema:
+                type: string
+            X-Tile-Checksum:
+              schema:
+                type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum: [hit, miss, bypass]
+            X-Tile-Cache-Key:
+              schema:
+                type: string
+            X-MVT-Schema-Version:
+              schema:
+                type: string
+          content:
+            application/x-protobuf:
+              schema:
+                type: string
+                format: binary
+        "4XX":
+          $ref: "#/components/responses/Error"
+        "424":
+          $ref: "#/components/responses/MvtLivePostgisUnavailable"
+        "5XX":
+          $ref: "#/components/responses/Error"
   /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf:
     get:
       operationId: getHydroTile

@@ -1573,6 +1573,22 @@ def test_display_control_plane_responses_have_no_static_runtime_drift() -> None:
         assert static_codes == runtime_codes, (path, status_code)
 
 
+def test_station_mvt_tile_static_runtime_contract() -> None:
+    static_spec = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8")
+    )
+    app.openapi_schema = None
+    runtime_spec = app.openapi()
+    path = "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf"
+
+    static_operation = static_spec["paths"][path]["get"]
+    runtime_operation = runtime_spec["paths"][path]["get"]
+    assert static_operation["operationId"] == runtime_operation["operationId"] == "getMetStationTile"
+    assert static_operation["responses"]["200"]["content"] == runtime_operation["responses"]["200"]["content"]
+    assert set(static_operation["responses"]["200"]["headers"]) == set(runtime_operation["responses"]["200"]["headers"])
+    assert static_operation["responses"]["424"] == runtime_operation["responses"]["424"]
+
+
 def test_job_log_error_codes_are_declared_in_static_and_runtime_contract() -> None:
     static_spec = yaml.safe_load(
         (Path(__file__).resolve().parents[1] / "openapi" / "nhms.v1.yaml").read_text(encoding="utf-8")
