@@ -1268,8 +1268,10 @@ describe('M11 visual foundation shell', () => {
       type: 'geojson',
     })
     expect(mapLayers.map((layer) => layer.id)).toEqual(
-      expect.arrayContaining(['m11-basin-fill', 'm11-basin-outline', 'm11-basin-label']),
+      expect.arrayContaining(['m11-basin-fill', 'm11-basin-outline']),
     )
+    // 流域名标注走 DOM Marker（天地图栅格 style 无 glyphs，symbol 文本层不可用）。
+    expect(screen.getByTestId('m11-basin-label')).toHaveTextContent('Yangtze Basin')
 
     mapSources.length = 0
     mapLayers.length = 0
