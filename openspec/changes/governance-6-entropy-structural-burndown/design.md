@@ -262,6 +262,136 @@ Non-goals:
 - No CI entropy hard-gate enablement.
 - No trend dashboard or baseline comparison UI.
 
+## G6-02 Maintainer-Only Entropy Baseline Writer Fixture
+
+Fixture level: expanded
+Repair intensity: high
+Project profile: NHMS
+
+Change surface:
+
+- New `scripts/governance/write_entropy_baseline.py` maintainer-only CLI.
+- `scripts/governance/audit_repo_entropy.py` as the report producer consumed by
+  the writer, without changing report modes into writers.
+- `.entropy-baseline/latest.json` and archived
+  `.entropy-baseline/<timestamp>.json` baseline artifacts.
+- `tests/test_entropy_audit_script.py` writer and report-only regression
+  coverage.
+
+Must preserve:
+
+- Normal JSON, Markdown, and hard-gate audit report commands remain report-only
+  and do not mutate `.entropy-baseline/latest.json`.
+- The existing tracked baseline schema remains usable for future comparison:
+  branch, commit, summary metrics, module heatmap, high-spread patterns, and
+  cleanup priorities stay machine-readable.
+- Existing `.entropy-baseline/latest.json` is archived before replacement
+  rather than overwritten without a recoverable copy.
+
+Must add/change:
+
+- A maintainer-only baseline writer command that explicitly writes
+  `.entropy-baseline/latest.json` when invoked.
+- Replacement behavior that archives a pre-existing latest snapshot under a
+  timestamped `.entropy-baseline/<timestamp>.json` path before writing a new
+  latest snapshot.
+- Tests proving explicit write, archive-before-replace, report-only separation,
+  and parseable generated baseline content.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - `write_entropy_baseline.py` is a
+  new maintainer-facing command with observable exit/output behavior.
+- File IO / path safety / overwrite: selected - this issue intentionally writes
+  and archives baseline files and must avoid accidental overwrite/loss.
+- Schema / columns / units / field names: selected - baseline JSON fields must
+  preserve the comparison contract.
+- Error handling / rollback / partial outputs: selected - failed archive/write
+  paths must not silently destroy the old latest baseline.
+- Legacy compatibility / examples: selected - existing report-only tests and
+  current tracked baseline consumers must remain compatible.
+- Resource limits / large input / discovery: selected - the writer must not
+  introduce unbounded extra reads beyond the existing audit report generation
+  and bounded baseline file operations.
+- Config / project setup: not selected - no new dependency or environment
+  setup.
+- Auth / permissions / secrets: not selected - maintainer-only means explicit
+  local invocation, not credential or authorization integration.
+- Concurrency / shared state / ordering: selected - archive-before-replace
+  ordering is a shared-state transition even without multi-process locking.
+- Release / packaging / dependency compatibility: not selected - no package or
+  dependency change.
+- Documentation / migration notes: not selected - issue scope is helper and
+  tests; PR evidence covers usage.
+
+Domain risk packs:
+
+- Run manifest / QC provenance: not selected - baseline JSON is governance
+  provenance, not NHMS run manifest/QC evidence.
+- Published NHMS artifacts / display identity: not selected - no model/display
+  artifact publication.
+- Other NHMS domain packs: not selected - no geospatial, time-series,
+  numerical, PostGIS, Slurm, or provider behavior changes.
+
+Invariant Matrix:
+
+- Governing invariant: only an explicit `write_entropy_baseline.py` maintainer
+  invocation may create, archive, or replace entropy baselines; all normal audit
+  report commands remain read-only.
+- Source-of-truth identity/contract: `.entropy-baseline/latest.json` and
+  archived `.entropy-baseline/<timestamp>.json` bytes plus baseline JSON fields
+  `version`, `timestamp`, `repo`, `branch`, `commit`, `summary`, `modules`,
+  `high_spread_patterns`, and `cleanup_priorities`.
+- Producers: `write_entropy_baseline.py` consuming
+  `audit_repo_entropy.build_report`; no producer role for
+  `audit_repo_entropy.py` report modes.
+- Validators/preflight: writer argument parsing, baseline directory/path
+  resolution, existing latest detection, archive path construction, and JSON
+  serialization validation.
+- Storage/cache/query: `.entropy-baseline/` directory, `latest.json`, and
+  timestamped archive files.
+- Public routes/entrypoints: `python scripts/governance/write_entropy_baseline.py`
+  plus unchanged `audit_repo_entropy.py --format json|markdown|--mode
+  hard-gate`.
+- Frontend/downstream consumers: future trend comparison tooling and governance
+  tests reading baseline fields.
+- Failure paths/rollback/stale state: archive-before-replace ordering; failures
+  must not leave the previous latest silently lost.
+- Evidence/audit/readiness: `tests/test_entropy_audit_script.py`, focused
+  writer CLI tests in temporary repos, report-only regression tests, and manual
+  writer invocation on a temporary baseline root.
+- Regression rows:
+  - No existing latest + explicit writer invocation -> creates
+    `.entropy-baseline/latest.json` with required comparison fields and no
+    archive.
+  - Existing latest + explicit writer invocation -> archives old bytes under
+    `.entropy-baseline/<timestamp>.json` before writing new latest.
+  - Existing latest + JSON/Markdown/hard-gate audit report commands -> no
+    baseline mutation, covered by G6-01 regression.
+  - Invalid or blocked archive/write path -> stable non-zero failure without
+    silently deleting the old latest baseline.
+
+Boundary-surface checklist:
+
+- Shared helper roots: `audit_repo_entropy.build_report` is reused but remains
+  report-only.
+- Public entrypoints: new writer CLI and existing audit CLI.
+- Write/delete/overwrite surfaces: `.entropy-baseline/latest.json` and
+  timestamped archive files only.
+- Staging/publish/rollback surfaces: archive-before-replace ordering for
+  explicit baseline replacement.
+- Producer/consumer evidence boundaries: generated baseline fields must bind to
+  the same audit report snapshot.
+- Unchanged downstream consumers: existing report JSON/Markdown tests and
+  G6-01 baseline immutability tests.
+
+Non-goals:
+
+- No automatic baseline writes from `audit_repo_entropy.py`.
+- No CI entropy hard-gate enablement.
+- No trend dashboard or baseline comparison UI.
+- No credential/auth integration for maintainer-only local invocation.
+
 ## Open Questions
 
 - Whether legacy display redirect aliases should ever be retired. This change

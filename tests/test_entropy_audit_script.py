@@ -10,12 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.governance import audit_repo_entropy
+from scripts.governance import audit_repo_entropy, write_entropy_baseline
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_DIR = REPO_ROOT / ".entropy-baseline"
 BASELINE = REPO_ROOT / ".entropy-baseline" / "latest.json"
 AUDIT_SCRIPT = REPO_ROOT / "scripts" / "governance" / "audit_repo_entropy.py"
+BASELINE_WRITER_SCRIPT = REPO_ROOT / "scripts" / "governance" / "write_entropy_baseline.py"
 
 
 def test_entropy_audit_json_schema_is_stable() -> None:
@@ -189,6 +190,120 @@ def test_entropy_audit_hard_gate_json_preserves_repository_baseline_and_parseabl
     assert metadata["hard_gate_gated_check_ids"] == sorted(audit_repo_entropy.HARD_GATE_CHECK_IDS)
     assert metadata["hard_gate_failing_count"] == metadata["gate_eligible_count"]
     assert _entropy_baseline_snapshot() == before
+
+
+def test_entropy_baseline_writer_creates_latest_with_required_fields_and_no_archive(tmp_path: Path) -> None:
+    result = _run_entropy_baseline_writer_cli(tmp_path)
+    payload = json.loads(result.stdout)
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+
+    assert result.returncode == 0
+    assert payload == {
+        "archive_path": None,
+        "baseline_path": ".entropy-baseline/latest.json",
+        "baseline_written": True,
+    }
+    assert latest.exists()
+    assert _baseline_archive_files(baseline_dir) == []
+
+    baseline = json.loads(latest.read_text(encoding="utf-8"))
+    _assert_required_baseline_fields(baseline)
+    assert baseline["summary"]["overall_trend"] == "baseline"
+    assert baseline["summary"]["governance_finding_count"] >= 1
+    assert isinstance(baseline["modules"], dict)
+    assert isinstance(baseline["high_spread_patterns"], list)
+    assert isinstance(baseline["cleanup_priorities"], list)
+
+
+def test_entropy_baseline_writer_archives_previous_latest_bytes_exactly_once(
+    tmp_path: Path,
+) -> None:
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    previous_bytes = b'{\n  "previous": true\n}\n'
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+
+    result = _run_entropy_baseline_writer_cli(tmp_path)
+
+    assert result.returncode == 0
+    assert latest.read_bytes() != previous_bytes
+    archives = _baseline_archive_files(baseline_dir)
+    assert len(archives) == 1
+    assert archives[0].read_bytes() == previous_bytes
+    assert json.loads(result.stdout)["archive_path"] == f".entropy-baseline/{archives[0].name}"
+
+    new_baseline = json.loads(latest.read_text(encoding="utf-8"))
+    _assert_required_baseline_fields(new_baseline)
+
+
+def test_entropy_baseline_writer_bounds_file_write_surface(tmp_path: Path) -> None:
+    _write(tmp_path / "docs" / "active.md", "Current docs still mention /hydro-met.\n")
+    _write(tmp_path / "apps" / "frontend" / "e2e" / "mocked.spec.ts", "await page.goto('/')\n")
+    before = _relative_files(tmp_path)
+    before_bytes = _file_bytes_by_relative_path(tmp_path)
+
+    result = _run_entropy_baseline_writer_cli(tmp_path)
+
+    assert result.returncode == 0
+    created = _relative_files(tmp_path) - before
+    assert created == {".entropy-baseline/latest.json"}
+    for path, content in before_bytes.items():
+        assert (tmp_path / path).read_bytes() == content
+
+    second_before = _relative_files(tmp_path)
+    second_before_bytes = _file_bytes_by_relative_path(tmp_path)
+    second_result = _run_entropy_baseline_writer_cli(tmp_path)
+
+    assert second_result.returncode == 0
+    second_created = _relative_files(tmp_path) - second_before
+    assert len(second_created) == 1
+    archive = next(iter(second_created))
+    assert archive.startswith(".entropy-baseline/")
+    assert archive.endswith(".json")
+    assert archive != ".entropy-baseline/latest.json"
+    assert ".entropy-baseline/.latest.json.tmp" not in _relative_files(tmp_path)
+    assert (tmp_path / archive).read_bytes() == second_before_bytes[".entropy-baseline/latest.json"]
+    for path, content in second_before_bytes.items():
+        if path != ".entropy-baseline/latest.json":
+            assert (tmp_path / path).read_bytes() == content
+
+
+def test_entropy_baseline_writer_failure_preserves_existing_latest_bytes(tmp_path: Path) -> None:
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    (baseline_dir / ".latest.json.tmp").write_text("blocked temp path\n", encoding="utf-8")
+
+    result = _run_entropy_baseline_writer_cli(tmp_path, check=False)
+
+    assert result.returncode == 1
+    assert "ERROR: entropy baseline write failed: unable to write temporary latest baseline" in result.stderr
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert (baseline_dir / ".latest.json.tmp").read_text(encoding="utf-8") == "blocked temp path\n"
+
+
+def test_entropy_baseline_writer_avoids_archive_timestamp_collisions(tmp_path: Path) -> None:
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    previous_bytes = b'{"previous": true}\n'
+    existing_archive_bytes = b'{"already": "archived"}\n'
+    timestamp = write_entropy_baseline.datetime(2026, 6, 12, 16, 2, 45, tzinfo=write_entropy_baseline.UTC)
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    existing_archive = baseline_dir / "2026-06-12T160245Z.json"
+    existing_archive.write_bytes(existing_archive_bytes)
+
+    result = write_entropy_baseline.write_entropy_baseline(tmp_path, now=timestamp)
+
+    assert result.archive_path == baseline_dir / "2026-06-12T160245Z-01.json"
+    assert existing_archive.read_bytes() == existing_archive_bytes
+    assert result.archive_path.read_bytes() == previous_bytes
+    assert latest.read_bytes() == result.baseline_bytes
 
 
 def test_entropy_audit_hard_gate_json_failure_is_parseable_and_counts_only_gated_findings(
@@ -1330,6 +1445,22 @@ def _run_entropy_audit_cli(
     )
 
 
+def _run_entropy_baseline_writer_cli(
+    repo_root: Path,
+    *args: str,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(BASELINE_WRITER_SCRIPT), "--repo-root", str(repo_root), *args],
+        cwd=REPO_ROOT,
+        check=check,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+
+
 def _entropy_baseline_snapshot() -> dict[str, object]:
     assert BASELINE.exists(), "repository entropy baseline fixture must exist"
     latest_stat = BASELINE.stat()
@@ -1363,6 +1494,73 @@ def _assert_unallowlisted_budget_counted_report_only_finding(
     assert finding["allowlist_state"] == "unallowlisted"
     assert finding["budget_counted"] is True
     assert finding["gate_eligible"] is False
+
+
+def _assert_required_baseline_fields(baseline: dict[str, object]) -> None:
+    assert {
+        "version",
+        "timestamp",
+        "repo",
+        "branch",
+        "commit",
+        "summary",
+        "metadata",
+        "modules",
+        "high_spread_patterns",
+        "cleanup_priorities",
+    } <= set(baseline)
+    assert baseline["version"] == 1
+    assert isinstance(baseline["timestamp"], str)
+    assert isinstance(baseline["repo"], str)
+    assert isinstance(baseline["branch"], str)
+    assert isinstance(baseline["commit"], str)
+    summary = baseline["summary"]
+    assert isinstance(summary, dict)
+    assert {
+        "total_source_files",
+        "total_test_files",
+        "total_instruction_files",
+        "total_modules",
+        "modules_with_high_entropy",
+        "overall_trend",
+        "governance_finding_count",
+        "budget_counted_count",
+        "gate_eligible_count",
+        "check_family_count",
+    } <= set(summary)
+    for field in (
+        "total_source_files",
+        "total_test_files",
+        "total_instruction_files",
+        "total_modules",
+        "modules_with_high_entropy",
+        "governance_finding_count",
+        "budget_counted_count",
+        "gate_eligible_count",
+        "check_family_count",
+    ):
+        assert isinstance(summary[field], int)
+        assert summary[field] >= 0
+    modules = baseline["modules"]
+    assert isinstance(modules, dict)
+    for row in modules.values():
+        assert isinstance(row, dict)
+        assert isinstance(row["file_count"], int)
+        assert row["file_count"] >= 0
+
+
+def _baseline_archive_files(baseline_dir: Path) -> list[Path]:
+    if not baseline_dir.exists():
+        return []
+    return sorted(path for path in baseline_dir.glob("*.json") if path.name != "latest.json")
+
+
+def _relative_files(root: Path) -> set[str]:
+    return {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+
+
+def _file_bytes_by_relative_path(root: Path) -> dict[str, bytes]:
+    return {path: (root / path).read_bytes() for path in _relative_files(root)}
 
 
 def _write(path: Path, text: str) -> None:
