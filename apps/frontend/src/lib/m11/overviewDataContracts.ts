@@ -66,13 +66,13 @@ export const m11BasinRiverCollectionBudget = {
 } as const
 
 const m11RiverDischargeLegend: LayerLegendEntry[] = [
-  { label: '<1 m3/s', color: '#C6DBEF', max: 1 },
-  { label: '1-10 m3/s', color: '#9ECAE1', min: 1, max: 10 },
-  { label: '10-100 m3/s', color: '#6BAED6', min: 10, max: 100 },
-  { label: '100-1000 m3/s', color: '#4292C6', min: 100, max: 1000 },
-  { label: '1000-10000 m3/s', color: '#2171B5', min: 1000, max: 10000 },
-  { label: '10000-50000 m3/s', color: '#08519C', min: 10000, max: 50000 },
-  { label: '>50000 m3/s', color: '#CB181D', min: 50000 },
+  { label: '<0.1 m3/s', color: '#C6DBEF', max: 0.1 },
+  { label: '0.1-1 m3/s', color: '#9ECAE1', min: 0.1, max: 1 },
+  { label: '1-10 m3/s', color: '#6BAED6', min: 1, max: 10 },
+  { label: '10-100 m3/s', color: '#4292C6', min: 10, max: 100 },
+  { label: '100-1000 m3/s', color: '#2171B5', min: 100, max: 1000 },
+  { label: '1000-10000 m3/s', color: '#08519C', min: 1000, max: 10000 },
+  { label: '>10000 m3/s', color: '#CB181D', min: 10000 },
   { label: '无径流数据', color: m11DischargeColor(null) },
 ]
 
@@ -1269,17 +1269,17 @@ export function m11BasinRiverLayerColor(row: Pick<BasinSegmentRow, 'currentQ' | 
   return '#94A3B8'
 }
 
-// 色带与 MVT 瓦片 paint（dischargeTileLayerPaint）同源（ColorBrewer 蓝系、log 阶分桶）：
-// 线性 0-50000 档在山区小流域（流量普遍 <500）只落最低一桶 → 全网统一蓝无梯度；
-// log 阶让 1/10/100/1000 m3/s 各有可辨级差，大江大河仍映射深蓝→红。null 用沉静蓝灰。
+// 色带与 MVT 瓦片 paint（dischargeTileLayerPaint）同源（ColorBrewer 蓝系、log 阶分桶）。
+// 桶界按实测分布定（近 2 日 q_down 分位 p50≈0.0003 / p90≈1.6 / max≈307 m3/s）：
+// 线性桶或高锚 log 桶都会让山区小流域整网落最低一桶 → 统一蓝无梯度。null 用沉静蓝灰。
 export function m11DischargeColor(value: number | null) {
   if (value === null) return '#94ADC7'
-  if (value >= 50_000) return '#CB181D'
-  if (value >= 10_000) return '#08519C'
-  if (value >= 1_000) return '#2171B5'
-  if (value >= 100) return '#4292C6'
-  if (value >= 10) return '#6BAED6'
-  if (value >= 1) return '#9ECAE1'
+  if (value >= 10_000) return '#CB181D'
+  if (value >= 1_000) return '#08519C'
+  if (value >= 100) return '#2171B5'
+  if (value >= 10) return '#4292C6'
+  if (value >= 1) return '#6BAED6'
+  if (value >= 0.1) return '#9ECAE1'
   return '#C6DBEF'
 }
 

@@ -631,11 +631,16 @@ function m11RegisteredOverlayPaint(layerId: string): LayerProps['paint'] {
 
 // 按 value 插值的线宽再套一层 zoom 收缩：全国 zoom 下整流域河网只占几十像素，
 // 全宽会糊成实心色块；zoom4 收到 0.4×，zoom7 起恢复全宽。
-function zoomScaledValueWidth(valueStops: number[], lowZoomFactor: number) {
+// logDomain：流量值跨 6 个数量级（实测 p50≈0.0003、max≈300 m3/s），线性域无层次，
+// 线宽与色带统一走 log10(max(value, 0.01)) 域。
+function zoomScaledValueWidth(valueStops: number[], lowZoomFactor: number, logDomain = false) {
+  const input = logDomain
+    ? ['log10', ['max', ['coalesce', ['get', 'value'], 0], 0.01]]
+    : ['coalesce', ['get', 'value'], 0]
   const widthAt = (scale: number) => [
     'interpolate',
     ['linear'],
-    ['coalesce', ['get', 'value'], 0],
+    input,
     ...valueStops.map((stop, index) => (index % 2 === 1 ? Math.round(stop * scale * 100) / 100 : stop)),
   ]
   return ['interpolate', ['linear'], ['zoom'], 4, widthAt(lowZoomFactor), 7, widthAt(1)] as unknown as number
@@ -643,28 +648,33 @@ function zoomScaledValueWidth(valueStops: number[], lowZoomFactor: number) {
 
 function dischargeTileLayerPaint(): LayerProps['paint'] {
   return {
-    // log10 域插值的流量色带（与 m11DischargeColor/图例同源）：线性 0-50000 档在
-    // 山区小流域（流量普遍 <500）只落进最低一桶，全网呈统一蓝；log 阶让 1/10/100/
-    // 1000 m3/s 各有可辨梯度，大江大河依旧映射到深蓝→暖色。
+    // log10 域插值的流量色带（与 m11DischargeColor/图例同源）。锚点按实测分布定
+    // （近 2 日 q_down 分位：p50≈0.0003 / p75≈0.09 / p90≈1.6 / max≈307 m3/s）：
+    // 线性域或高锚 log 域都会让山区小流域整体落进最低一桶、全网统一蓝；
+    // 0.01→10000 跨 6 个数量级的 log 阶让支流→干流呈现浅蓝→深蓝→红的真实梯度。
     'line-color': [
       'interpolate',
       ['linear'],
-      ['log10', ['max', ['coalesce', ['get', 'value'], 0], 0.1]],
-      0,
+      ['log10', ['max', ['coalesce', ['get', 'value'], 0], 0.01]],
+      -2,
       '#C6DBEF',
-      1,
+      -1,
       '#9ECAE1',
-      2,
+      0,
       '#6BAED6',
-      3,
+      1,
+      '#4292C6',
+      2,
       '#2171B5',
-      4,
+      3,
       '#08519C',
+      4,
+      '#08306B',
       4.7,
       '#CB181D',
     ],
     // 线宽同走 log 域：小溪细、干流粗，视觉层级与流量量级一致。
-    'line-width': zoomScaledValueWidth([0, 2, 100, 2.8, 1000, 3.6, 10000, 5, 50000, 7], 0.4),
+    'line-width': zoomScaledValueWidth([-2, 1.8, 0, 2.4, 2, 3.4, 4, 5, 4.7, 7], 0.4, true),
     'line-opacity': ['case', ['has', 'value'], 0.95, 0.5],
   }
 }
