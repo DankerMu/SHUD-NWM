@@ -39,6 +39,8 @@ V1_SOURCE_MODULE_ROOTS = frozenset(
     }
 )
 V1_FRONTEND_EXCLUDED_PARTS = frozenset({"artifacts", "e2e"})
+V1_SUMMARY_EXCLUDED_ROOTS = frozenset({".agents", ".codex", "docs", "openapi"})
+V1_SUMMARY_ROOT_DOCUMENT_SUFFIXES = frozenset({".md", ".rst", ".txt"})
 
 STRUCTURAL_HOTSPOT_MODULES: dict[str, dict[str, object]] = {
     "services/orchestrator": {
@@ -112,6 +114,7 @@ class BaselineFileInventory:
     relative_paths: tuple[str, ...]
     file_fingerprints: tuple[tuple[str, int, int, int], ...]
     total_source_files: int
+    v1_summary_source_files: int
     total_test_files: int
     total_instruction_files: int
     module_file_counts: dict[str, int]
@@ -173,7 +176,7 @@ def write_entropy_baseline(repo_root: Path, *, now: datetime | None = None) -> B
         file_inventory=file_inventory,
         snapshot=before_snapshot,
     )
-    after_snapshot = _snapshot_identity(root)
+    after_snapshot = _snapshot_identity(root, file_inventory=file_inventory)
     if after_snapshot != before_snapshot:
         raise BaselineWriteError("repository snapshot changed during baseline generation")
     baseline_bytes = (json.dumps(baseline, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -346,7 +349,7 @@ def _baseline_summary(
 ) -> dict[str, object]:
     modules = _baseline_modules(module_heatmap, file_inventory)
     return {
-        "total_source_files": file_inventory.total_source_files,
+        "total_source_files": file_inventory.v1_summary_source_files,
         "total_test_files": file_inventory.total_test_files,
         "total_instruction_files": file_inventory.total_instruction_files,
         "total_modules": len(modules),
@@ -431,6 +434,7 @@ def _merge_module_overlay(row: dict[str, object], overlay: dict[str, object]) ->
 
 def _baseline_file_inventory(root: Path) -> BaselineFileInventory:
     source_count = 0
+    v1_summary_source_count = 0
     test_count = 0
     instruction_count = 0
     module_file_counts: dict[str, int] = {}
@@ -455,11 +459,14 @@ def _baseline_file_inventory(root: Path) -> BaselineFileInventory:
             continue
 
         source_count += 1
+        if _baseline_path_is_v1_summary_source_counted(relative_path):
+            v1_summary_source_count += 1
 
     return BaselineFileInventory(
         relative_paths=tuple(inventory_paths),
         file_fingerprints=tuple(file_fingerprints),
         total_source_files=source_count,
+        v1_summary_source_files=v1_summary_source_count,
         total_test_files=test_count,
         total_instruction_files=instruction_count,
         module_file_counts=dict(sorted(module_file_counts.items())),
@@ -566,6 +573,21 @@ def _baseline_path_is_v1_source_counted(relative_path: str) -> bool:
         if "config" in path.name:
             return False
     return True
+
+
+def _baseline_path_is_v1_summary_source_counted(relative_path: str) -> bool:
+    path = Path(relative_path)
+    parts = path.parts
+    if not parts:
+        return False
+    if parts[0] in V1_SUMMARY_EXCLUDED_ROOTS:
+        return False
+    if len(parts) == 1 and path.suffix in V1_SUMMARY_ROOT_DOCUMENT_SUFFIXES:
+        return False
+    return (
+        not _baseline_path_is_instruction(relative_path)
+        and not _baseline_path_is_test(relative_path)
+    )
 
 
 def _baseline_high_spread_patterns(
@@ -756,7 +778,7 @@ def _snapshot_identity(
         repo=_git_remote_url(root),
         branch=_git_branch(root),
         commit=_git_commit(root),
-        report_file_fingerprints=tuple(_snapshot_file_fingerprints(root)),
+        report_file_fingerprints=tuple(_snapshot_file_fingerprints(root, file_inventory=inventory)),
         inventory_paths=inventory.relative_paths,
         inventory_file_fingerprints=inventory.file_fingerprints,
     )
@@ -770,7 +792,7 @@ def _snapshot_file_fingerprints(
     if file_inventory is not None:
         relative_paths = file_inventory.relative_paths
     else:
-        relative_paths = tuple(_fallback_inventory_relative_paths(root))
+        relative_paths = tuple(_baseline_inventory_relative_paths(root))
     return _baseline_file_fingerprints(root, list(relative_paths))
 
 

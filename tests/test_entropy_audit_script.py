@@ -224,8 +224,17 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert isinstance(modules, dict)
     inventory = write_entropy_baseline._baseline_file_inventory(REPO_ROOT)
     emitted_module_file_count_sum = _emitted_module_file_count_sum(modules)
-    assert baseline["summary"]["total_source_files"] == inventory.total_source_files
+    assert baseline["summary"]["total_source_files"] == inventory.v1_summary_source_files
+    assert inventory.v1_summary_source_files > 700
+    assert inventory.total_source_files > inventory.v1_summary_source_files
     assert baseline["summary"]["total_source_files"] > emitted_module_file_count_sum
+    assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("docs/runbooks/live.md")
+    assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted(
+        "openspec/changes/example/spec.md"
+    )
+    assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("openapi/nhms.v1.yaml")
+    assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("README.md")
+    assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted("services/api/main.py")
     assert modules["apps/frontend"]["file_count"] == 120
     assert modules["services/production_closure"]["file_count"] == 10
     assert modules["services/slurm_gateway"]["file_count"] == 11
@@ -299,6 +308,143 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
             "axis": "behavior/context",
         },
     ]
+
+
+def test_entropy_baseline_writer_v1_summary_source_count_excludes_context_families(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write(tmp_path / "services" / "api" / "main.py", "def main() -> None:\n    pass\n")
+    _write(tmp_path / "apps" / "frontend" / "src" / "App.tsx", "export const App = () => null;\n")
+    _write(tmp_path / "packages" / "common" / "model.py", "VALUE = 1\n")
+    _write(tmp_path / "scripts" / "tool.py", "VALUE = 1\n")
+    _write(tmp_path / "services" / "api" / "test_main.py", "def test_main() -> None:\n    pass\n")
+    _write(tmp_path / "AGENTS.md", "Instructions.\n")
+    _write(tmp_path / "docs" / "runbooks" / "live.md", "Current docs mention /hydro-met.\n")
+    _write(tmp_path / "openspec" / "changes" / "example" / "design.md", "OpenSpec context.\n")
+    _write(tmp_path / "openapi" / "nhms.v1.yaml", "openapi: 3.1.0\n")
+    _write(tmp_path / "README.md", "Repository docs.\n")
+
+    tracked_paths = [
+        "services/api/main.py",
+        "apps/frontend/src/App.tsx",
+        "packages/common/model.py",
+        "scripts/tool.py",
+        "services/api/test_main.py",
+        "AGENTS.md",
+        "docs/runbooks/live.md",
+        "openspec/changes/example/design.md",
+        "openapi/nhms.v1.yaml",
+        "README.md",
+    ]
+    monkeypatch.setattr(
+        write_entropy_baseline.audit_repo_entropy,
+        "_git_tracked_paths",
+        lambda _root, pathspecs=(): tracked_paths,
+    )
+
+    report = {
+        "metadata": {
+            "schema_version": "governance-4a.entropy-report.v1",
+            "generated_at": "2026-06-12T00:00:00+00:00",
+            "mode": "report-only",
+            "finding_count": 0,
+            "budget_counted_count": 0,
+            "gate_eligible_count": 0,
+            "check_family_count": 0,
+            "summary_counts": {},
+            "skipped_path_families": [],
+        },
+        "module_heatmap": [
+            {
+                "module": "services/api",
+                "structure": "low",
+                "semantics": "low",
+                "behavior": "low",
+                "context": "low",
+                "protocol": "low",
+                "control": "low",
+                "priority": "P3",
+                "finding_count": 0,
+            },
+            {
+                "module": "apps/frontend",
+                "structure": "low",
+                "semantics": "low",
+                "behavior": "low",
+                "context": "low",
+                "protocol": "low",
+                "control": "low",
+                "priority": "P3",
+                "finding_count": 0,
+            },
+            {
+                "module": "docs/runbooks",
+                "structure": "low",
+                "semantics": "low",
+                "behavior": "low",
+                "context": "low",
+                "protocol": "low",
+                "control": "low",
+                "priority": "P3",
+                "finding_count": 0,
+            },
+            {
+                "module": "openspec/example",
+                "structure": "low",
+                "semantics": "low",
+                "behavior": "low",
+                "context": "low",
+                "protocol": "low",
+                "control": "low",
+                "priority": "P3",
+                "finding_count": 0,
+            },
+            {
+                "module": "openapi",
+                "structure": "low",
+                "semantics": "low",
+                "behavior": "low",
+                "context": "low",
+                "protocol": "low",
+                "control": "low",
+                "priority": "P3",
+                "finding_count": 0,
+            },
+            {
+                "module": "README.md",
+                "structure": "low",
+                "semantics": "low",
+                "behavior": "low",
+                "context": "low",
+                "protocol": "low",
+                "control": "low",
+                "priority": "P3",
+                "finding_count": 0,
+            },
+        ],
+        "findings": [],
+        "high_spread_patterns": [],
+    }
+    inventory = write_entropy_baseline._baseline_file_inventory(tmp_path)
+    baseline = write_entropy_baseline.build_baseline_snapshot(
+        tmp_path,
+        report,
+        file_inventory=inventory,
+    )
+
+    modules = baseline["modules"]
+    assert baseline["version"] == 1
+    assert inventory.total_source_files == 8
+    assert inventory.v1_summary_source_files == 5
+    assert baseline["summary"]["total_source_files"] == 5
+    assert baseline["summary"]["total_source_files"] != _emitted_module_file_count_sum(modules)
+    assert baseline["summary"]["total_test_files"] == 1
+    assert baseline["summary"]["total_instruction_files"] == 1
+    assert modules["docs/runbooks"]["file_count"] == 0
+    assert modules["openspec/example"]["file_count"] == 0
+    assert modules["openapi"]["file_count"] == 0
+    assert modules["README.md"]["file_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -494,6 +640,42 @@ def test_entropy_baseline_writer_rejects_oversized_inventory_before_temp_write(
     assert not (baseline_dir / ".latest.json.tmp").exists()
 
 
+def test_entropy_baseline_writer_snapshot_identity_does_not_walk_huge_fallback_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write(tmp_path / "services" / "api" / "main.py", "VALUE = 1\n")
+
+    monkeypatch.setattr(
+        write_entropy_baseline.audit_repo_entropy,
+        "_git_tracked_paths",
+        lambda _root, pathspecs=(): ["services/api/main.py"],
+    )
+
+    inventory = write_entropy_baseline._baseline_file_inventory(tmp_path)
+    assert inventory.relative_paths == ("services/api/main.py",)
+
+    fallback_calls = 0
+
+    def huge_fallback_paths(_root: Path) -> list[str]:
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return [
+            f"generated/fallback_{index}.py"
+            for index in range(write_entropy_baseline.MAX_BASELINE_INVENTORY_FILES + 1)
+        ]
+
+    monkeypatch.setattr(write_entropy_baseline, "_fallback_inventory_relative_paths", huge_fallback_paths)
+
+    result = write_entropy_baseline.write_entropy_baseline(tmp_path)
+    baseline = json.loads(result.baseline_path.read_text(encoding="utf-8"))
+
+    assert fallback_calls == 0
+    assert inventory.total_source_files == 1
+    assert baseline["summary"]["total_source_files"] == 1
+    assert _baseline_archive_files(tmp_path / ".entropy-baseline") == []
+
+
 def test_entropy_baseline_writer_archive_failure_cleans_temp_and_preserves_latest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -585,7 +767,8 @@ def test_entropy_baseline_writer_fallback_inventory_skips_entropy_baseline(
     baseline = json.loads(result.baseline_path.read_text(encoding="utf-8"))
 
     assert ".entropy-baseline/latest.json" not in result.baseline_bytes.decode("utf-8")
-    assert baseline["summary"]["total_source_files"] == 1
+    assert inventory.total_source_files == 1
+    assert baseline["summary"]["total_source_files"] == 0
 
 
 def test_entropy_audit_hard_gate_json_failure_is_parseable_and_counts_only_gated_findings(
