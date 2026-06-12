@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { forwardRef, useEffect, useImperativeHandle, type ReactNode } from 'react'
+import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom'
@@ -9,7 +9,6 @@ import App, { LegacyRedirect } from '@/App'
 import { client } from '@/api/client'
 import { contextHandoff } from '@/pages/OverviewPage'
 import { useAuthStore } from '@/stores/auth'
-import { useFloodAlertStore } from '@/stores/floodAlert'
 import { useForecastStore, type ForecastSegmentInfo } from '@/stores/forecast'
 import { useModelAssetsStore, type ModelAsset, type ModelAssetPage } from '@/stores/modelAssets'
 import { useMonitoringStore } from '@/stores/monitoring'
@@ -19,7 +18,6 @@ import { serializeM11QueryState, type M11QueryState } from '@/lib/m11/queryState
 
 const m11FitBoundsCalls: Array<unknown[]> = []
 const m11FlyToCalls: Array<unknown> = []
-const floodAlertMapProps: Array<Record<string, unknown>> = []
 
 function geoJsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
@@ -52,29 +50,6 @@ const driftedDisplayRuntimeConfig = {
   queue_depth_mode: 'slurm_gateway',
   display_readonly: false,
 } as const
-
-vi.mock('@/components/map/MapView', () => ({
-  MapView: ({
-    onBasinContextLoaded,
-    onSegmentSelect,
-  }: {
-    onBasinContextLoaded?: (context: { basinId: string; basinVersionId: string } | null) => void
-    onSegmentSelect?: (segment: ForecastSegmentInfo) => void
-  }) => {
-    useEffect(() => {
-      onBasinContextLoaded?.({ basinId: 'basin-demo', basinVersionId: 'bv-001' })
-    }, [onBasinContextLoaded])
-    return (
-      <button
-        type="button"
-        aria-label="河网地图"
-        onClick={() => onSegmentSelect?.({ segmentId: 'seg-010', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-v1' })}
-      >
-        mock map
-      </button>
-    )
-  },
-}))
 
 vi.mock('@/api/client', () => ({
   client: {
@@ -209,13 +184,6 @@ vi.mock('@/components/forecast/ForecastPanel', () => ({
       {error ? <div>{error}</div> : null}
     </aside>
   ),
-}))
-
-vi.mock('@/components/flood/FloodAlertMap', () => ({
-  FloodAlertMap: (props: Record<string, unknown>) => {
-    floodAlertMapProps.push(props)
-    return <div>mock flood map</div>
-  },
 }))
 
 vi.mock('@/components/charts/QueueDonut', () => ({
@@ -997,29 +965,8 @@ beforeEach(() => {
   vi.clearAllMocks()
   m11FitBoundsCalls.length = 0
   m11FlyToCalls.length = 0
-  floodAlertMapProps.length = 0
   overviewAsync.mockResolvedValue(undefined)
   useAuthStore.setState({ role: 'viewer' })
-  useFloodAlertStore.setState({
-    selectedRunId: null,
-    latestRun: null,
-    selectedAlertLevel: null,
-    selectedValidTime: null,
-    topLimit: 20,
-    basinId: '',
-    validTimes: [],
-    summaryData: null,
-    rankingData: null,
-    loading: false,
-    summaryLoading: false,
-    rankingLoading: false,
-    timelineLoading: false,
-    error: null,
-    empty: false,
-    fetchLatestFrequencyDoneRun: noopAsync,
-    fetchSummary: noopAsync,
-    fetchRanking: noopAsync,
-  })
   useForecastStore.setState(
     {
       ...useForecastStore.getInitialState(),
