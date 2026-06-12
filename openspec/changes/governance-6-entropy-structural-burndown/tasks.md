@@ -13,12 +13,12 @@ separate PR boundaries.
 - [x] 1.2 Write `.entropy-baseline/latest.json` after explicit maintainer
   request, including branch, commit, summary counts, module heatmap, high-spread
   patterns, and cleanup priorities.
-- [ ] 1.3 Verify normal JSON/Markdown/hard-gate report commands do not modify
+- [x] 1.3 Verify normal JSON/Markdown/hard-gate report commands do not modify
   `.entropy-baseline/latest.json`.
-- [ ] 1.4 Add `scripts/governance/write_entropy_baseline.py` as the
+- [x] 1.4 Add `scripts/governance/write_entropy_baseline.py` as the
   maintainer-only baseline write helper; it consumes audit JSON output or runs
   the audit internally without making report modes mutate the baseline.
-- [ ] 1.5 Verify an explicit baseline replacement through
+- [x] 1.5 Verify an explicit baseline replacement through
   `scripts/governance/write_entropy_baseline.py` archives an existing
   `.entropy-baseline/latest.json` before writing a new latest snapshot.
 

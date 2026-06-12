@@ -216,6 +216,96 @@ def test_entropy_baseline_writer_creates_latest_with_required_fields_and_no_arch
     assert isinstance(baseline["cleanup_priorities"], list)
 
 
+def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo() -> None:
+    report = audit_repo_entropy.build_report(REPO_ROOT)
+    baseline = write_entropy_baseline.build_baseline_snapshot(REPO_ROOT, report)
+
+    modules = baseline["modules"]
+    assert isinstance(modules, dict)
+    orchestrator = modules["services/orchestrator"]
+    assert isinstance(orchestrator, dict)
+    assert orchestrator["file_count"] == 12
+    assert orchestrator["finding_count"] == 0
+    assert orchestrator["priority"] == "P1"
+    assert orchestrator["structure"] == {
+        "score": "high",
+        "hotspots": ["services/orchestrator/scheduler.py", "services/orchestrator/chain.py"],
+    }
+    assert baseline["summary"]["modules_with_high_entropy"] >= 2
+
+    patterns = {
+        pattern["description"]: pattern
+        for pattern in baseline["high_spread_patterns"]
+        if isinstance(pattern, dict)
+    }
+    assert patterns["stale-display-route-token"]["axis"] == "docs alignment"
+    assert patterns["stale-display-route-token"]["spread_risk"] == "high"
+    assert patterns["placeholder-path-token"]["axis"] == "legacy/dead-code"
+    assert patterns["placeholder-path-token"]["spread_risk"] == "high"
+    assert patterns["orchestrator mixed responsibilities in scheduler.py and chain.py"] == {
+        "description": "orchestrator mixed responsibilities in scheduler.py and chain.py",
+        "occurrences": 2,
+        "files": ["services/orchestrator/scheduler.py", "services/orchestrator/chain.py"],
+        "axis": "structure,behavior",
+        "spread_risk": "high",
+        "top_priority": "P1",
+        "top_severity": "high",
+    }
+
+    cleanup_priorities = baseline["cleanup_priorities"]
+    assert cleanup_priorities == [
+        {
+            "target": "Align current display runbooks with M26 single-map route authority",
+            "impact": "high",
+            "effort": "low",
+            "axis": "context",
+        },
+        {
+            "target": "Resolve gate-eligible broad E2E API mocks and DOC_STATUS artifact ownership term",
+            "impact": "high",
+            "effort": "low",
+            "axis": "protocol/control",
+        },
+        {
+            "target": (
+                "Stage large decomposition of services/orchestrator/scheduler.py and "
+                "services/orchestrator/chain.py"
+            ),
+            "impact": "high",
+            "effort": "high",
+            "axis": "structure/behavior",
+        },
+        {
+            "target": "Keep mocked Playwright regression separated from live display evidence",
+            "impact": "medium",
+            "effort": "medium",
+            "axis": "behavior/context",
+        },
+    ]
+
+
+def test_entropy_baseline_writer_redacts_remote_url_userinfo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        write_entropy_baseline,
+        "_git_output",
+        lambda _root, *args: (
+            "https://user:ghp_secret-token@example.com/org/repo.git"
+            if args == ("config", "--get", "remote.origin.url")
+            else "unknown"
+        ),
+    )
+
+    result = write_entropy_baseline.write_entropy_baseline(tmp_path)
+    baseline = json.loads(result.baseline_path.read_text(encoding="utf-8"))
+
+    assert baseline["repo"] == "https://example.com/org/repo.git"
+    assert "ghp_secret-token" not in result.baseline_bytes.decode("utf-8")
+    assert "user:" not in result.baseline_bytes.decode("utf-8")
+
+
 def test_entropy_baseline_writer_archives_previous_latest_bytes_exactly_once(
     tmp_path: Path,
 ) -> None:
@@ -287,6 +377,102 @@ def test_entropy_baseline_writer_failure_preserves_existing_latest_bytes(tmp_pat
     assert (baseline_dir / ".latest.json.tmp").read_text(encoding="utf-8") == "blocked temp path\n"
 
 
+def test_entropy_baseline_writer_fails_before_writing_when_snapshot_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write(tmp_path / "docs" / "active.md", "Current docs still mention /hydro-met.\n")
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    real_build_report = write_entropy_baseline.audit_repo_entropy.build_report
+
+    def mutating_build_report(repo_root: Path, *, mode: audit_repo_entropy.AuditMode = "report") -> dict[str, object]:
+        report = real_build_report(repo_root, mode=mode)
+        _write(tmp_path / "docs" / "active.md", "Current docs still mention /hydro-met.\nmutated\n")
+        return report
+
+    monkeypatch.setattr(write_entropy_baseline.audit_repo_entropy, "build_report", mutating_build_report)
+
+    with pytest.raises(
+        write_entropy_baseline.BaselineWriteError,
+        match="repository snapshot changed during baseline generation",
+    ):
+        write_entropy_baseline.write_entropy_baseline(tmp_path)
+
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
+def test_entropy_baseline_writer_rejects_oversized_latest_before_temp_write(tmp_path: Path) -> None:
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    previous_bytes = b"x" * (write_entropy_baseline.MAX_ARCHIVED_LATEST_BYTES + 1)
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+
+    result = _run_entropy_baseline_writer_cli(tmp_path, check=False)
+
+    assert result.returncode == 1
+    assert "existing latest baseline exceeds archive size limit" in result.stderr
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
+def test_entropy_baseline_writer_archive_failure_cleans_temp_and_preserves_latest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+
+    def failing_copy(_source_path: Path, destination_path: Path) -> None:
+        destination_path.write_bytes(b"partial archive\n")
+        raise OSError("archive fsync failed")
+
+    monkeypatch.setattr(write_entropy_baseline, "_bounded_copy_file", failing_copy)
+
+    with pytest.raises(write_entropy_baseline.BaselineWriteError, match="unable to archive existing latest baseline"):
+        write_entropy_baseline.write_entropy_baseline(tmp_path)
+
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
+def test_entropy_baseline_writer_replace_failure_rolls_back_archive_and_preserves_latest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    real_replace = os.replace
+
+    def failing_replace(source: object, destination: object) -> None:
+        if Path(source).name == ".latest.json.tmp" and Path(destination).name == "latest.json":
+            raise OSError("replace failed")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(write_entropy_baseline.os, "replace", failing_replace)
+
+    with pytest.raises(write_entropy_baseline.BaselineWriteError, match="unable to replace latest baseline"):
+        write_entropy_baseline.write_entropy_baseline(tmp_path)
+
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
 def test_entropy_baseline_writer_avoids_archive_timestamp_collisions(tmp_path: Path) -> None:
     baseline_dir = tmp_path / ".entropy-baseline"
     latest = baseline_dir / "latest.json"
@@ -304,6 +490,31 @@ def test_entropy_baseline_writer_avoids_archive_timestamp_collisions(tmp_path: P
     assert existing_archive.read_bytes() == existing_archive_bytes
     assert result.archive_path.read_bytes() == previous_bytes
     assert latest.read_bytes() == result.baseline_bytes
+
+
+def test_entropy_baseline_writer_fallback_inventory_skips_entropy_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write(tmp_path / "docs" / "active.md", "Current docs still mention /hydro-met.\n")
+    _write(tmp_path / ".entropy-baseline" / "latest.json", '{"legacy": true}\n')
+    _write(tmp_path / ".entropy-baseline" / "2026-06-12T160245Z.json", '{"archive": true}\n')
+
+    monkeypatch.setattr(
+        write_entropy_baseline.audit_repo_entropy,
+        "_git_tracked_paths",
+        lambda _root, pathspecs=(): [],
+    )
+
+    inventory = write_entropy_baseline._baseline_file_inventory(tmp_path)
+    assert all(not path.startswith(".entropy-baseline/") for path in inventory.relative_paths)
+    assert ".entropy-baseline/latest.json" not in inventory.relative_paths
+
+    result = write_entropy_baseline.write_entropy_baseline(tmp_path)
+    baseline = json.loads(result.baseline_path.read_text(encoding="utf-8"))
+
+    assert ".entropy-baseline/latest.json" not in result.baseline_bytes.decode("utf-8")
+    assert baseline["summary"]["total_source_files"] == 1
 
 
 def test_entropy_audit_hard_gate_json_failure_is_parseable_and_counts_only_gated_findings(
