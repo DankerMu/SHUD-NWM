@@ -3315,10 +3315,10 @@ def _qhh_latest_query_indexes() -> list[dict[str, Any]]:
             "columns": ["basin_id", "basin_version_id"],
         },
         {
-            "table": "flood.return_period_result",
-            "index": "return_period_result_run_quality_idx",
-            "status": "covered_by_lateral_run_quality_index",
-            "columns": ["run_id", "max_over_window", "return_period", "warning_level"],
+            "table": "flood.run_product_quality",
+            "index": "run_product_quality_pkey",
+            "status": "covered_by_run_quality_materialization",
+            "columns": ["run_id"],
         },
         {
             "table": "hydro.river_timeseries",
@@ -3569,55 +3569,61 @@ def _flood_product_quality_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _flood_product_quality_join(alias: str) -> str:
     return f"""
-                LEFT JOIN LATERAL (
-                    SELECT
-                           CASE
-                               WHEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END) > 0
-                               THEN true
-                               WHEN COUNT(*) > 0
-                               THEN false
-                               ELSE NULL
-                           END AS quality_max_over_window,
-                           CASE
-                               WHEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END) > 0
-                               THEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END)
-                               ELSE COUNT(*)
-                           END AS result_rows,
-                           SUM(CASE
-                               WHEN fpr.max_over_window = true AND fpr.return_period IS NOT NULL THEN 1
-                               ELSE 0
-                           END) AS return_period_rows,
-                           CASE
-                               WHEN SUM(CASE WHEN fpr.max_over_window = true THEN 1 ELSE 0 END) > 0
-                               THEN SUM(
-                                   CASE
-                                       WHEN fpr.max_over_window = true AND fpr.warning_level IS NOT NULL THEN 1
-                                       ELSE 0
-                                   END
-                               )
-                               ELSE SUM(CASE WHEN fpr.warning_level IS NOT NULL THEN 1 ELSE 0 END)
-                           END AS warning_rows
-                    FROM flood.return_period_result fpr
-                    WHERE fpr.run_id = h.run_id
-                ) {alias} ON true
+                LEFT JOIN flood.run_product_quality {alias}
+                  ON {alias}.run_id = h.run_id
     """
 
 
 def _flood_product_quality_select(alias: str) -> str:
     return f"""
-                    COALESCE({alias}.quality_max_over_window, NULL) AS flood_quality_max_over_window,
-                    COALESCE({alias}.result_rows, 0) AS flood_result_rows,
-                    COALESCE({alias}.return_period_rows, 0) AS flood_return_period_rows,
-                    COALESCE({alias}.warning_rows, 0) AS flood_warning_rows
+                    CASE
+                        WHEN {alias}.run_id IS NULL THEN NULL
+                        WHEN {alias}.max_result_rows > 0 THEN true
+                        WHEN {alias}.result_rows > 0 THEN false
+                        ELSE NULL
+                    END AS flood_quality_max_over_window,
+                    COALESCE(
+                        CASE
+                            WHEN {alias}.max_result_rows > 0 THEN {alias}.max_result_rows
+                            ELSE {alias}.result_rows
+                        END,
+                        0
+                    ) AS flood_result_rows,
+                    COALESCE({alias}.max_return_period_rows, 0) AS flood_return_period_rows,
+                    COALESCE(
+                        CASE
+                            WHEN {alias}.max_result_rows > 0 THEN {alias}.max_warning_rows
+                            ELSE {alias}.warning_rows
+                        END,
+                        0
+                    ) AS flood_warning_rows
     """
 
 
 def _flood_product_ready_sql(alias: str) -> str:
     return f"""
-            COALESCE({alias}.result_rows, 0) > 0
-            AND COALESCE({alias}.return_period_rows, 0) > 0
-            AND COALESCE({alias}.return_period_rows, 0) = COALESCE({alias}.result_rows, 0)
-            AND COALESCE({alias}.warning_rows, 0) = COALESCE({alias}.return_period_rows, 0)
+            COALESCE(
+                CASE
+                    WHEN {alias}.max_result_rows > 0 THEN {alias}.max_result_rows
+                    ELSE {alias}.result_rows
+                END,
+                0
+            ) > 0
+            AND COALESCE({alias}.max_return_period_rows, 0) > 0
+            AND COALESCE({alias}.max_return_period_rows, 0) = COALESCE(
+                CASE
+                    WHEN {alias}.max_result_rows > 0 THEN {alias}.max_result_rows
+                    ELSE {alias}.result_rows
+                END,
+                0
+            )
+            AND COALESCE(
+                CASE
+                    WHEN {alias}.max_result_rows > 0 THEN {alias}.max_warning_rows
+                    ELSE {alias}.warning_rows
+                END,
+                0
+            ) = COALESCE({alias}.max_return_period_rows, 0)
     """
 
 

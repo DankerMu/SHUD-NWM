@@ -1956,22 +1956,30 @@ def _flood_product_quality(session: Session, run_id: str, *, status: str | None 
 
 
 def _flood_product_quality_counts(session: Session, run_id: str, *, max_over_window: bool | None) -> Any:
-    max_window_filter = "" if max_over_window is None else "AND max_over_window = :max_over_window"
-    params: dict[str, Any] = {"run_id": run_id}
-    if max_over_window is not None:
-        params["max_over_window"] = max_over_window
-    return session.execute(
+    row = session.execute(
         text(
-            f"""
-            SELECT COUNT(*) AS result_rows,
-                   SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
-                   SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows
-            FROM flood.return_period_result
+            """
+            SELECT
+                CASE WHEN :max_over_window IS TRUE THEN max_result_rows ELSE result_rows END AS result_rows,
+                CASE WHEN :max_over_window IS TRUE THEN max_return_period_rows ELSE return_period_rows END
+                    AS return_period_rows,
+                CASE WHEN :max_over_window IS TRUE THEN max_warning_rows ELSE warning_rows END AS warning_rows
+            FROM flood.run_product_quality
             WHERE run_id = :run_id
-              {max_window_filter}
             """
         ),
-        params,
+        {"run_id": run_id, "max_over_window": max_over_window},
+    ).mappings().first()
+    if row is not None:
+        return row
+    return session.execute(
+        text(
+            """
+            SELECT 0 AS result_rows,
+                   0 AS return_period_rows,
+                   0 AS warning_rows
+            """
+        ),
     ).mappings().one()
 
 

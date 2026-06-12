@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -343,6 +345,143 @@ def test_latest_ready_run_skips_degraded_frequency_products() -> None:
 
     assert latest is not None
     assert latest["run_id"] == RUN_ID
+
+
+def test_flood_product_quality_uses_all_row_fallback_when_no_peak_rows() -> None:
+    run_id = "zz_no_peak_layer_quality"
+    valid_time = datetime(2026, 5, 5, tzinfo=UTC)
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                    start_time, end_time, status, run_manifest_uri
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
+                    'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "cycle_time": valid_time,
+                "start_time": valid_time,
+                "end_time": valid_time + timedelta(hours=1),
+            },
+        )
+        _insert_result(
+            session,
+            "seg_001",
+            "basin_v1",
+            "rnv_v1",
+            valid_time,
+            100.0,
+            2.0,
+            "normal",
+            False,
+            run_id=run_id,
+        )
+
+        quality = flood_alert_routes._flood_product_quality(session, run_id, status="frequency_done")
+
+    assert quality["quality_state"] == "ready"
+    assert quality["max_over_window"] is None
+    assert quality["result_rows"] == 1
+    assert quality["return_period_rows"] == 1
+    assert quality["warning_rows"] == 1
+
+
+def test_layer_quality_and_latest_ready_sql_use_materialized_quality_without_result_aggregation() -> None:
+    route_source = Path(flood_alert_routes.__file__).read_text(encoding="utf-8")
+    quality_source = route_source[
+        route_source.index("def _flood_product_quality_counts") : route_source.index(
+            "def _annotate_flood_layer_quality"
+        )
+    ]
+    mvt_source = Path(inspect.getsourcefile(flood_alert_routes.latest_ready_run) or "").read_text(
+        encoding="utf-8"
+    )
+    latest_source = mvt_source[
+        mvt_source.index("def latest_ready_run") : mvt_source.index("def latest_frequency_ready_run")
+    ]
+    valid_time_source = mvt_source[
+        mvt_source.index("def valid_times_for_layer") : mvt_source.index("def _valid_time_discovery")
+    ]
+
+    assert "FROM flood.run_product_quality" in quality_source
+    assert "flood.return_period_result" not in quality_source
+    assert "COUNT(*)" not in quality_source
+    assert "SUM(" not in quality_source
+    assert "JOIN flood.run_product_quality" in latest_source
+    assert "FROM flood.return_period_result" not in latest_source
+    assert "GROUP BY run_id" not in latest_source
+    assert "COUNT(*)" not in latest_source
+    assert "SUM(" not in latest_source
+    assert "FROM flood.return_period_result" in valid_time_source
+    assert "WHERE run_id = :run_id" in valid_time_source
+    assert "GROUP BY" not in valid_time_source
+
+
+def test_latest_ready_run_uses_materialized_quality_and_no_peak_fallback() -> None:
+    run_id = "zz_no_peak_latest_ready"
+    valid_time = datetime(2026, 5, 5, tzinfo=UTC)
+    with _store() as session:
+        session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed'"))
+        session.execute(
+            text(
+                """
+                INSERT INTO hydro.hydro_run (
+                    run_id, run_type, scenario_id, model_id, basin_version_id, source_id, cycle_time,
+                    start_time, end_time, status, run_manifest_uri
+                )
+                VALUES (
+                    :run_id, 'forecast', 'forecast_gfs_deterministic', 'model_1', 'basin_v1',
+                    'GFS', :cycle_time, :start_time, :end_time, 'frequency_done', 'object://manifest'
+                )
+                """
+            ),
+            {
+                "run_id": run_id,
+                "cycle_time": valid_time,
+                "start_time": valid_time,
+                "end_time": valid_time + timedelta(hours=1),
+            },
+        )
+        _insert_result(
+            session,
+            "seg_001",
+            "basin_v1",
+            "rnv_v1",
+            valid_time,
+            100.0,
+            2.0,
+            "normal",
+            False,
+            run_id=run_id,
+        )
+        session.commit()
+
+        latest = flood_alert_routes.latest_ready_run(session)
+
+    assert latest is not None
+    assert latest["run_id"] == run_id
+
+
+def test_missing_run_quality_row_fails_closed_for_flood_product_gate() -> None:
+    with _store() as session:
+        session.execute(
+            text("DELETE FROM flood.run_product_quality WHERE run_id = :run_id"),
+            {"run_id": RUN_ID},
+        )
+        session.commit()
+
+        quality = flood_alert_routes._flood_product_quality(session, RUN_ID, status="frequency_done")
+
+    assert quality["quality_state"] == "unavailable"
+    assert quality["unavailable_products"] == ["return_period_result"]
+    assert quality["result_rows"] == 0
 
 
 def test_ranking_pagination_basin_filter_and_valid_time() -> None:
@@ -3671,6 +3810,7 @@ def test_run_scoped_mvt_rejects_sibling_only_source_identity_before_cache_or_liv
                 "severe",
                 False,
             )
+            _refresh_run_quality(session, RUN_ID)
         session.commit()
         monkeypatch.setattr(
             flood_alert_routes,
@@ -4237,6 +4377,7 @@ def test_layer_catalog_unscoped_frequency_ready_without_flood_product_still_expo
         session.execute(text("UPDATE hydro.hydro_run SET status = 'parsed' WHERE run_id != :rid"), rid)
         session.execute(text("UPDATE hydro.hydro_run SET status = 'frequency_done' WHERE run_id = :rid"), rid)
         session.execute(text("DELETE FROM flood.return_period_result WHERE run_id = :rid"), rid)
+        _refresh_run_quality(session, RUN_ID)
         session.commit()
         app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
         try:
@@ -5773,6 +5914,23 @@ def _create_tables(connection: Any) -> None:
     connection.execute(
         text(
             """
+            CREATE TABLE flood.run_product_quality (
+                run_id TEXT PRIMARY KEY,
+                result_rows INTEGER NOT NULL DEFAULT 0,
+                max_result_rows INTEGER NOT NULL DEFAULT 0,
+                return_period_rows INTEGER NOT NULL DEFAULT 0,
+                warning_rows INTEGER NOT NULL DEFAULT 0,
+                max_return_period_rows INTEGER NOT NULL DEFAULT 0,
+                max_warning_rows INTEGER NOT NULL DEFAULT 0,
+                refreshed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
             CREATE TABLE flood.flood_frequency_curve (
                 curve_id TEXT PRIMARY KEY,
                 model_id TEXT NOT NULL,
@@ -6484,6 +6642,65 @@ def _insert_result(
             "max_over_window": max_over_window,
             "quality_flag": quality_flag,
             "duration": duration,
+        },
+    )
+    _refresh_run_quality(connection, run_id)
+
+
+def _refresh_run_quality(connection: Any, run_id: str) -> None:
+    row = connection.execute(
+        text(
+            """
+            SELECT
+                COUNT(*) AS result_rows,
+                SUM(CASE WHEN max_over_window = 1 THEN 1 ELSE 0 END) AS max_result_rows,
+                SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
+                SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows,
+                SUM(CASE WHEN max_over_window = 1 AND return_period IS NOT NULL THEN 1 ELSE 0 END)
+                    AS max_return_period_rows,
+                SUM(CASE WHEN max_over_window = 1 AND warning_level IS NOT NULL THEN 1 ELSE 0 END)
+                    AS max_warning_rows
+            FROM flood.return_period_result
+            WHERE run_id = :run_id
+            """
+        ),
+        {"run_id": run_id},
+    ).mappings().one()
+    if int(row["result_rows"] or 0) <= 0:
+        connection.execute(
+            text("DELETE FROM flood.run_product_quality WHERE run_id = :run_id"),
+            {"run_id": run_id},
+        )
+        return
+    connection.execute(
+        text(
+            """
+            INSERT INTO flood.run_product_quality (
+                run_id, result_rows, max_result_rows, return_period_rows, warning_rows,
+                max_return_period_rows, max_warning_rows, refreshed_at
+            )
+            VALUES (
+                :run_id, :result_rows, :max_result_rows, :return_period_rows, :warning_rows,
+                :max_return_period_rows, :max_warning_rows, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT (run_id) DO UPDATE SET
+                result_rows = excluded.result_rows,
+                max_result_rows = excluded.max_result_rows,
+                return_period_rows = excluded.return_period_rows,
+                warning_rows = excluded.warning_rows,
+                max_return_period_rows = excluded.max_return_period_rows,
+                max_warning_rows = excluded.max_warning_rows,
+                refreshed_at = excluded.refreshed_at
+            """
+        ),
+        {
+            "run_id": run_id,
+            "result_rows": int(row["result_rows"] or 0),
+            "max_result_rows": int(row["max_result_rows"] or 0),
+            "return_period_rows": int(row["return_period_rows"] or 0),
+            "warning_rows": int(row["warning_rows"] or 0),
+            "max_return_period_rows": int(row["max_return_period_rows"] or 0),
+            "max_warning_rows": int(row["max_warning_rows"] or 0),
         },
     )
 

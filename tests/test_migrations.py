@@ -37,6 +37,7 @@ EXPECTED_MIGRATIONS = [
     "000031_search_discovery_return_period_performance.sql",
     "000032_source_specific_state_snapshot.sql",
     "000033_station_mvt_active_source_index.sql",
+    "000034_return_period_run_quality_materialization.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -62,6 +63,7 @@ EXPECTED_TABLES = {
     "hydro.river_timeseries",
     "flood.flood_frequency_curve",
     "flood.return_period_result",
+    "flood.run_product_quality",
     "map.tile_layer",
     "map.tile_cache",
     "ops.pipeline_job",
@@ -516,20 +518,22 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     for index_name in (
         "hydro_run_qhh_latest_candidate_idx",
         "basin_version_qhh_latest_lookup_idx",
-        "return_period_result_run_quality_idx",
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
         "river_timeseries_qhh_latest_window_idx",
     ):
         assert index_name in index_evidence_source
+    assert "run_product_quality_pkey" in index_evidence_source
 
     assert "LOWER(h.source_id) = LOWER(%s)" in query_source
     assert "h.run_type = 'forecast'" in query_source
     assert "h.status IN ('parsed', 'frequency_done', 'published')" in query_source
     assert "h.status NOT IN ('parsed', 'frequency_done', 'published')" in query_source
     assert "h.cycle_time IS NOT NULL" in query_source
-    assert "LEFT JOIN LATERAL" in flood_quality_join_source
-    assert "WHERE fpr.run_id = h.run_id" in flood_quality_join_source
+    assert "LEFT JOIN flood.run_product_quality" in flood_quality_join_source
+    assert "ON {alias}.run_id = h.run_id" in flood_quality_join_source
+    assert "LEFT JOIN LATERAL" not in flood_quality_join_source
+    assert "flood.return_period_result" not in flood_quality_join_source
     assert "GROUP BY run_id" not in flood_quality_join_source
     assert "QHH_LATEST_SEARCH_LIMIT" in query_source
     assert "QHH_LATEST_CONTEXT_LIMIT" in query_source
@@ -627,6 +631,47 @@ def test_station_mvt_active_source_index_migration_is_forward_upgrade_safe() -> 
     assert "ON met.met_station (basin_version_id, station_id)" in active_station_index
     assert "WHERE active_flag = true" in active_station_index
     assert "USING GIN" not in active_station_index
+
+
+def test_return_period_run_quality_materialization_migration_adds_table_and_violation_indexes() -> None:
+    migration_sql = dict(_migration_sql())
+    migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    migration = migration_sql["000034_return_period_run_quality_materialization.sql"]
+
+    assert migration_names.index("000033_station_mvt_active_source_index.sql") < migration_names.index(
+        "000034_return_period_run_quality_materialization.sql"
+    )
+    assert "CREATE TABLE IF NOT EXISTS flood.run_product_quality" in migration
+    assert "run_id TEXT PRIMARY KEY REFERENCES hydro.hydro_run(run_id) ON DELETE CASCADE" in migration
+    for column in (
+        "result_rows BIGINT NOT NULL DEFAULT 0",
+        "max_result_rows BIGINT NOT NULL DEFAULT 0",
+        "return_period_rows BIGINT NOT NULL DEFAULT 0",
+        "warning_rows BIGINT NOT NULL DEFAULT 0",
+        "max_return_period_rows BIGINT NOT NULL DEFAULT 0",
+        "max_warning_rows BIGINT NOT NULL DEFAULT 0",
+        "refreshed_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+    ):
+        assert column in migration
+
+    assert _index_columns_by_name(migration, "return_period_result_null_return_period_run_idx") == ("run_id",)
+    assert _index_columns_by_name(migration, "return_period_result_null_warning_level_run_idx") == ("run_id",)
+    assert "WHERE return_period IS NULL" in _index_sql_by_name(
+        migration,
+        "return_period_result_null_return_period_run_idx",
+    )
+    assert "WHERE warning_level IS NULL" in _index_sql_by_name(
+        migration,
+        "return_period_result_null_warning_level_run_idx",
+    )
+    assert "CREATE INDEX CONCURRENTLY" not in _index_sql_by_name(
+        migration,
+        "return_period_result_null_return_period_run_idx",
+    )
+    assert "CREATE INDEX CONCURRENTLY" not in _index_sql_by_name(
+        migration,
+        "return_period_result_null_warning_level_run_idx",
+    )
 
 
 def test_ops_strict_identity_index_migration_is_forward_upgrade_safe() -> None:

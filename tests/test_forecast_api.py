@@ -20,6 +20,7 @@ from packages.common.forecast_store import (
     ForecastStoreError,
     PsycopgForecastStore,
     _flood_product_quality_from_row,
+    _flood_product_quality_select,
     _forecast_response_from_rows,
     _PsycopgTransaction,
     _qhh_latest_candidate_response,
@@ -1645,7 +1646,7 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
     assert {item["index"] for item in response["quality"]["query_indexes"]} == {
         "hydro_run_qhh_latest_candidate_idx",
         "basin_version_qhh_latest_lookup_idx",
-        "return_period_result_run_quality_idx",
+        "run_product_quality_pkey",
         "river_timeseries_qhh_latest_window_idx",
         "forcing_station_timeseries_qhh_latest_window_idx",
         "interp_weight_qhh_latest_membership_idx",
@@ -3194,7 +3195,10 @@ def test_list_runs_marks_and_filters_flood_product_readiness() -> None:
 
     ready_sql = store.cursor.executions[0][0]
     assert "h.status IN ('frequency_done', 'published')" in ready_sql
-    assert "return_period_result" in ready_sql
+    assert "flood.run_product_quality" in ready_sql
+    assert "return_period_result" not in ready_sql
+    assert "LEFT JOIN LATERAL" not in ready_sql
+    assert "GROUP BY" not in ready_sql
     assert ready_page["items"][0]["product_quality"]["flood_return_period"]["quality_state"] == "ready"
     qualities = {
         item["run_id"]: item["product_quality"]["flood_return_period"]
@@ -3203,6 +3207,44 @@ def test_list_runs_marks_and_filters_flood_product_readiness() -> None:
     assert qualities["run_ready"]["quality_state"] == "ready"
     assert qualities["run_warning_unavailable"]["quality_state"] == "unavailable"
     assert qualities["run_warning_unavailable"]["unavailable_products"] == ["warning_thresholds"]
+
+
+def test_forecast_store_materialized_quality_select_preserves_compatibility_formulas() -> None:
+    quality_select = _flood_product_quality_select("fpq")
+
+    assert "WHEN fpq.max_result_rows > 0 THEN fpq.max_result_rows" in quality_select
+    assert "ELSE fpq.result_rows" in quality_select
+    assert "COALESCE(fpq.max_return_period_rows, 0) AS flood_return_period_rows" in quality_select
+    assert "WHEN fpq.max_result_rows > 0 THEN fpq.max_warning_rows" in quality_select
+    assert "ELSE fpq.warning_rows" in quality_select
+
+
+def test_get_run_uses_materialized_flood_quality_without_result_aggregation() -> None:
+    store = SqlCaptureForecastStore(
+        [
+            [
+                {
+                    "run_id": "run_ready",
+                    "status": "frequency_done",
+                    "cycle_time": _dt("2026-05-07T00:00:00Z"),
+                    "created_at": _dt("2026-05-07T01:00:00Z"),
+                    "flood_quality_max_over_window": True,
+                    "flood_result_rows": 2,
+                    "flood_return_period_rows": 2,
+                    "flood_warning_rows": 2,
+                }
+            ]
+        ]
+    )
+
+    response = store.get_run("run_ready")
+
+    sql = store.cursor.executions[0][0]
+    assert response["product_quality"]["flood_return_period"]["quality_state"] == "ready"
+    assert "flood.run_product_quality" in sql
+    assert "return_period_result" not in sql
+    assert "LEFT JOIN LATERAL" not in sql
+    assert "GROUP BY" not in sql
 
 
 @pytest.mark.asyncio
