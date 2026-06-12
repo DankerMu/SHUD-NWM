@@ -340,7 +340,7 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
       option={option}
       notMerge
       lazyUpdate
-      style={compact ? { height: 264, minHeight: 232, width: '100%' } : { height: 360, minHeight: 320, width: '100%' }}
+      style={compact ? { height: 240, minHeight: 216, width: '100%' } : { height: 360, minHeight: 320, width: '100%' }}
     />
   )
 }

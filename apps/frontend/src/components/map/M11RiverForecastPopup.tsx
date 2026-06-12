@@ -209,7 +209,7 @@ function RiverForecastBody({
   const peakTime = peakFlow != null ? validation.renderedPoints[peakIndex]?.timestamp ?? null : null
 
   return (
-    <div className="space-y-3 px-4 pb-4 pt-3" data-testid="m11-river-popup-loaded">
+    <div className="space-y-2.5 px-4 pb-3.5 pt-2.5" data-testid="m11-river-popup-loaded">
       <div className="flex items-center justify-between gap-2">
         <span
           className="inline-flex items-center rounded-full bg-cyan-400/10 px-2.5 py-0.5 text-[11px] font-medium tracking-wide text-cyan-200 ring-1 ring-inset ring-cyan-400/25"
@@ -248,7 +248,7 @@ function RiverForecastKpiStrip({
   const peakClock = peakTime ? formatPeakClock(peakTime) : null
   return (
     <div className="grid grid-cols-2 gap-2.5" data-testid="m11-river-popup-kpi">
-      <div className="rounded-xl bg-white/[0.04] px-3.5 py-2.5 ring-1 ring-inset ring-white/10">
+      <div className="rounded-xl bg-white/[0.04] px-3.5 py-2 ring-1 ring-inset ring-white/10">
         <div className="text-[10px] uppercase tracking-[0.12em] text-slate-400">当前流量</div>
         <div className="mt-1 flex items-baseline gap-1.5">
           <span className="text-xl font-semibold tabular-nums text-slate-50" data-testid="m11-river-popup-kpi-current">
@@ -257,7 +257,7 @@ function RiverForecastKpiStrip({
           <span className="text-[10px] text-slate-400">{unit}</span>
         </div>
       </div>
-      <div className="rounded-xl bg-cyan-400/[0.08] px-3.5 py-2.5 ring-1 ring-inset ring-cyan-400/25">
+      <div className="rounded-xl bg-cyan-400/[0.08] px-3.5 py-2 ring-1 ring-inset ring-cyan-400/25">
         <div className="flex items-center justify-between">
           <span className="text-[10px] uppercase tracking-[0.12em] text-cyan-300/90">峰值流量</span>
           {peakClock ? <span className="text-[10px] tabular-nums text-cyan-300/70">{peakClock}</span> : null}
