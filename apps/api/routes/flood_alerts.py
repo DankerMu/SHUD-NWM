@@ -1462,83 +1462,54 @@ def _river_network_source_version(session: Session, basin_version_id: str) -> st
 
 def _station_source_version(session: Session, basin_version_id: str) -> str:
     try:
+        limit = FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT
+        row_limit = limit + 1
         if session.get_bind().dialect.name == "sqlite":
             rows = (
                 session.execute(
                     text(
                         """
-                        SELECT station_id, basin_version_id, station_name, station_role,
+                        SELECT station_id,
+                               basin_version_id,
+                               COALESCE(station_name, '') AS station_name,
+                               station_role,
                                active_flag, geom, created_at
                         FROM met.met_station
                         WHERE basin_version_id = :basin_version_id
+                          AND active_flag = 1
                         ORDER BY station_id
+                        LIMIT :limit
                         """
                     ),
-                    {"basin_version_id": basin_version_id},
+                    {"basin_version_id": basin_version_id, "limit": row_limit},
                 )
                 .mappings()
                 .all()
             )
-            if not rows:
-                _raise_station_source_not_found(basin_version_id)
-            basis = [
-                {
-                    "station_id": row.get("station_id"),
-                    "basin_version_id": row.get("basin_version_id"),
-                    "station_name": row.get("station_name"),
-                    "station_role": row.get("station_role"),
-                    "active_flag": bool(row.get("active_flag")),
-                    "geom": row.get("geom"),
-                    "created_at": canonical_mvt_time(row.get("created_at")),
-                }
-                for row in rows
-            ]
-            digest = hashlib.sha256(
-                json.dumps(basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-            ).hexdigest()[:16]
-            return f"met-stations:{digest}:{basin_version_id}:{len(rows)}"
-
-        row = (
-            session.execute(
-                text(
-                    """
-                    SELECT COUNT(*) AS station_count,
-                           MIN(station_id) AS min_station_id,
-                           MAX(station_id) AS max_station_id,
-                           md5(
-                               COALESCE(
-                                   string_agg(
-                                       concat_ws(
-                                           '|',
-                                           station_id,
-                                           basin_version_id,
-                                           COALESCE(station_name, ''),
-                                           station_role,
-                                           active_flag::text,
-                                           COALESCE(
-                                               to_char(
-                                                   created_at AT TIME ZONE 'UTC',
-                                                   'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
-                                               ),
-                                               ''
-                                           ),
-                                           encode(ST_AsEWKB(geom), 'hex')
-                                       ),
-                                       E'\n'
-                                       ORDER BY station_id
-                                   ),
-                                   ''
-                               )
-                           ) AS inventory_hash
-                    FROM met.met_station
-                    WHERE basin_version_id = :basin_version_id
-                    """
-                ),
-                {"basin_version_id": basin_version_id},
+        else:
+            rows = (
+                session.execute(
+                    text(
+                        """
+                        SELECT station_id,
+                               basin_version_id,
+                               COALESCE(station_name, '') AS station_name,
+                               station_role,
+                               active_flag,
+                               encode(ST_AsEWKB(geom), 'hex') AS geom,
+                               created_at
+                        FROM met.met_station
+                        WHERE basin_version_id = :basin_version_id
+                          AND active_flag = true
+                        ORDER BY station_id
+                        LIMIT :limit
+                        """
+                    ),
+                    {"basin_version_id": basin_version_id, "limit": row_limit},
+                )
+                .mappings()
+                .all()
             )
-            .mappings()
-            .one()
-        )
     except SQLAlchemyError as exc:
         try:
             session.rollback()
@@ -1550,14 +1521,63 @@ def _station_source_version(session: Session, basin_version_id: str) -> str:
             message="Station MVT source inventory is unavailable for canonical .pbf tile generation.",
             details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
         ) from exc
-    station_count = int(row.get("station_count") or 0)
-    if station_count <= 0:
-        _raise_station_source_not_found(basin_version_id)
-    digest = str(row.get("inventory_hash") or "")
-    min_station_id = str(row.get("min_station_id") or "")
-    max_station_id = str(row.get("max_station_id") or "")
-    return f"met-stations:{digest[:16]}:{basin_version_id}:{station_count}:{min_station_id}:{max_station_id}"
 
+    if not rows:
+        _raise_station_source_not_found(basin_version_id)
+    if len(rows) > FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT:
+        _raise_station_source_budget_exceeded(basin_version_id, observed_count=len(rows))
+
+    basis = {
+        "columns": [
+            "station_id",
+            "basin_version_id",
+            "station_name",
+            "station_role",
+            "active_flag",
+            "geom",
+            "created_at",
+        ],
+        "rows": [
+            [
+                row.get("station_id"),
+                row.get("basin_version_id"),
+                row.get("station_name"),
+                row.get("station_role"),
+                _station_active_flag(row.get("active_flag")),
+                row.get("geom"),
+                canonical_mvt_time(row.get("created_at")),
+            ]
+            for row in rows
+        ],
+    }
+    digest = hashlib.sha256(
+        json.dumps(basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    station_count = len(rows)
+    min_station_id = str(rows[0].get("station_id") or "")
+    max_station_id = str(rows[-1].get("station_id") or "")
+    return f"met-stations:{digest}:{basin_version_id}:{station_count}:{min_station_id}:{max_station_id}"
+
+
+def _station_active_flag(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "t", "true", "yes"}
+    return bool(value)
+
+
+def _raise_station_source_budget_exceeded(basin_version_id: str, *, observed_count: int) -> None:
+    raise ApiError(
+        status_code=413,
+        code="MVT_TILE_BUDGET_EXCEEDED",
+        message="Station MVT source inventory exceeded the configured feature budget.",
+        details={
+            "layer_id": "met-stations",
+            "basin_version_id": basin_version_id,
+            "limit_type": "source_inventory",
+            "feature_count": observed_count,
+            "max_features": FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT,
+        },
+    )
 
 def _raise_station_source_not_found(basin_version_id: str) -> None:
     raise ApiError(

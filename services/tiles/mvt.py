@@ -523,6 +523,7 @@ def postgis_tile_sql(layer: str) -> str:
                    ms.geom
             FROM met.met_station ms
             WHERE ms.basin_version_id = :basin_version_id
+              AND ms.active_flag = true
         """
     else:
         raise ValueError(f"Unsupported tile layer: {layer}")
