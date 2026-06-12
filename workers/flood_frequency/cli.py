@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from packages.common.auth_policy import PolicyDecision, cli_policy_decision_from_evidence, require_policy_evidence
+from packages.common.flood_quality import FloodRunProductQualityBackfillSummary, backfill_run_product_quality
 from packages.common.manifest_index import ManifestValidationError, load_manifest_entry, resolve_task_id
 from workers.flood_frequency.config import HindcastConfig
 from workers.flood_frequency.frequency import FrequencyFitError, fit_curves
@@ -150,6 +151,25 @@ def _compute_return_period(run_id: str, quality_contract: dict[str, object] | No
             "quality_state": result.quality_state,
             "unavailable_products": list(result.unavailable_products),
             "residual_blockers": list(result.residual_blockers),
+        }
+
+
+def _backfill_run_quality(run_ids: Sequence[str] | None = None) -> dict[str, object]:
+    with _session_from_env() as session:
+        result = backfill_run_product_quality(session, run_ids)
+        session.commit()
+        if isinstance(result, FloodRunProductQualityBackfillSummary):
+            return {
+                "scope": "all_source_runs",
+                "refreshed_runs": result.refreshed_runs,
+                "orphan_quality_rows_deleted": result.orphan_quality_rows_deleted,
+                "run_ids_included": False,
+            }
+        return {
+            "scope": "targeted_run_ids",
+            "refreshed_runs": len(result),
+            "run_ids": [quality.run_id for quality in result],
+            "run_ids_included": True,
         }
 
 
@@ -450,6 +470,23 @@ def _click_main(argv: Sequence[str] | None = None) -> int:
             click.echo(f"{code}: {message}", err=True)
             raise SystemExit(1) from error
 
+    @cli.command("backfill-run-quality")
+    @click.option("--run-id", multiple=True)
+    def backfill_run_quality_command(run_id: tuple[str, ...]) -> None:
+        try:
+            click.echo(
+                json.dumps(
+                    _backfill_run_quality(run_id or None),
+                    sort_keys=True,
+                    default=str,
+                )
+            )
+        except (HindcastError, ReturnPeriodError) as error:
+            message = getattr(error, "message", str(error))
+            code = getattr(error, "error_code", "RUN_QUALITY_BACKFILL_ERROR")
+            click.echo(f"{code}: {message}", err=True)
+            raise SystemExit(1) from error
+
     cli.main(args=list(argv) if argv is not None else None, standalone_mode=True)
     return 0
 
@@ -488,6 +525,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
     compute_parser.add_argument("--run-id")
     compute_parser.add_argument("--manifest-index")
     compute_parser.add_argument("--task-id", type=int, default=None)
+
+    backfill_parser = subparsers.add_parser("backfill-run-quality")
+    backfill_parser.add_argument("--run-id", action="append", default=[])
 
     args = parser.parse_args(argv)
     try:
@@ -547,6 +587,9 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
                     default=str,
                 )
             )
+            return 0
+        if args.command == "backfill-run-quality":
+            print(json.dumps(_backfill_run_quality(args.run_id or None), default=str))
             return 0
     except (ManifestValidationError, HindcastError, FrequencyFitError, ReturnPeriodError) as error:
         message = getattr(error, "message", str(error))

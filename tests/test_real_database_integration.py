@@ -20,6 +20,7 @@ from tests.integration_helpers import (
     VALID_TIME_1,
     VALID_TIME_2,
     apply_migrations_from_zero,
+    backfill_integration_run_product_quality,
     seed_issue_126_data,
     set_integration_env,
     sqlalchemy_engine,
@@ -386,6 +387,7 @@ def test_real_return_period_repair_migration_replaces_old_key_idempotently(
                 {"run_id": FORECAST_RUN_ID, "valid_time": VALID_TIME_2},
             ).mappings().one()["count"]
             assert versioned_count == 2
+        backfill_integration_run_product_quality(integration_database_url, [FORECAST_RUN_ID])
     finally:
         engine.dispose()
 

@@ -995,19 +995,7 @@ def latest_ready_run(session: Session) -> Mapping[str, Any] | None:
                    mi.river_network_version_id
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
-            JOIN (
-                SELECT run_id,
-                       SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END) AS max_result_rows,
-                       SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END)
-                           AS max_return_period_rows,
-                       SUM(CASE WHEN max_over_window = true AND warning_level IS NOT NULL THEN 1 ELSE 0 END)
-                           AS max_warning_rows,
-                       COUNT(*) AS result_rows,
-                       SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) AS return_period_rows,
-                       SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END) AS warning_rows
-                FROM flood.return_period_result
-                GROUP BY run_id
-            ) product_quality ON product_quality.run_id = h.run_id
+            JOIN flood.run_product_quality product_quality ON product_quality.run_id = h.run_id
             WHERE h.status IN ('frequency_done', 'published')
               AND CASE
                     WHEN product_quality.max_result_rows > 0 THEN product_quality.max_result_rows

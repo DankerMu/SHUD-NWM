@@ -11,7 +11,11 @@ from packages.common.forecast_store import (
     PsycopgForecastStore,
     _qhh_latest_candidate_response,
 )
-from tests.integration_helpers import apply_migrations_from_zero, psycopg_connection
+from tests.integration_helpers import (
+    apply_migrations_from_zero,
+    backfill_integration_run_product_quality,
+    psycopg_connection,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -266,6 +270,7 @@ def _seed_run(
 
 def _clear(connection: Any) -> None:
     with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM flood.run_product_quality WHERE run_id LIKE %s", (f"{_PREFIX}%",))
         cursor.execute("DELETE FROM flood.return_period_result WHERE run_id LIKE %s", (f"{_PREFIX}%",))
         cursor.execute("DELETE FROM hydro.river_timeseries WHERE run_id LIKE %s", (f"{_PREFIX}%",))
         cursor.execute("DELETE FROM hydro.hydro_run WHERE run_id LIKE %s", (f"{_PREFIX}%",))
@@ -301,7 +306,8 @@ def test_return_period_status_ready_when_non_null_peak_rows_exist(integration_da
     apply_migrations_from_zero(integration_database_url)
     with psycopg_connection(integration_database_url) as connection:
         _clear(connection)
-        _seed_run(connection, basin_id=_BASIN_PEAK, with_peak_return_period=True)
+        run_id = _seed_run(connection, basin_id=_BASIN_PEAK, with_peak_return_period=True)
+    backfill_integration_run_product_quality(integration_database_url, [run_id])
 
     store = PsycopgForecastStore(integration_database_url)
     try:
@@ -323,7 +329,8 @@ def test_return_period_status_unavailable_does_not_block_ready(integration_datab
         _clear(connection)
         # Only non-peak rows (max_over_window=false, return_period NULL): the join
         # yields zero non-null peak rows.
-        _seed_run(connection, basin_id=_BASIN_NONPEAK, with_peak_return_period=False)
+        run_id = _seed_run(connection, basin_id=_BASIN_NONPEAK, with_peak_return_period=False)
+    backfill_integration_run_product_quality(integration_database_url, [run_id])
 
     store = PsycopgForecastStore(integration_database_url)
     try:
@@ -350,12 +357,13 @@ def test_return_period_status_ignores_non_peak_non_null_rows(integration_databas
         _clear(connection)
         # Caliber guard: non-peak timestep rows with return_period values are
         # not product rows and must not make the supplemental status ready.
-        _seed_run(
+        run_id = _seed_run(
             connection,
             basin_id=_BASIN_NONPEAK_NONNULL,
             with_peak_return_period=False,
             nonpeak_return_period=2,
         )
+    backfill_integration_run_product_quality(integration_database_url, [run_id])
 
     store = PsycopgForecastStore(integration_database_url)
     try:

@@ -12,6 +12,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from packages.common.flood_quality import clear_run_product_quality, refresh_run_product_quality
 from workers.data_adapters.base import cycle_id_for
 
 RETURN_PERIODS: tuple[int, ...] = (2, 5, 10, 20, 50, 100)
@@ -280,6 +281,7 @@ def compute_return_periods(
         db_session.rollback()
         error_code = getattr(error, "error_code", "RETURN_PERIOD_FAILED")
         error_message = getattr(error, "message", str(error))
+        clear_run_product_quality(db_session, run_id)
         _record_frequency_failure(db_session, run_id, str(error_code), str(error_message), started_at)
         db_session.commit()
         LOGGER.warning("Return-period computation failed for run_id=%s: %s", run_id, error_message)
@@ -404,6 +406,7 @@ def _compute_return_periods(
     tile_blockers = unavailable_products - {"frequency_curves"}
     if not tile_blockers and any(curve is not None for curve in curves.values()):
         register_flood_tile_layer(run_id, db_session)
+    refresh_run_product_quality(db_session, run_id)
     return ReturnPeriodComputationStats(
         total_segments=len(segment_ids),
         with_curve=sum(1 for curve in curves.values() if curve is not None),
