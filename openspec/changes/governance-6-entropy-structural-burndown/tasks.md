@@ -216,6 +216,22 @@ separate PR boundaries.
 - Acceptance: audit report commands leave `.entropy-baseline/latest.json`
   unchanged, stdout remains parseable, and entropy audit tests cover JSON,
   Markdown, and hard-gate report-only behavior.
+- Fixture evidence:
+  - Existing `.entropy-baseline/latest.json` + JSON report command:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python
+    scripts/governance/audit_repo_entropy.py --format json` -> parseable JSON,
+    `metadata.baseline_written == false`, and unchanged baseline bytes.
+  - Existing `.entropy-baseline/latest.json` + Markdown report command:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python
+    scripts/governance/audit_repo_entropy.py --format markdown` -> Markdown
+    contains audit sections and unchanged baseline bytes.
+  - Existing `.entropy-baseline/latest.json` + hard-gate JSON command:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python
+    scripts/governance/audit_repo_entropy.py --mode hard-gate --format json`
+    -> stdout parseable as JSON, hard-gate metadata present, and unchanged
+    baseline bytes even when the command returns non-zero.
+  - Focused automated test: `uv run --no-sync pytest -q
+    tests/test_entropy_audit_script.py`.
 
 ### G6-02 Maintainer-only entropy baseline writer
 

@@ -163,6 +163,105 @@ candidate selection or stage submission.
 - Final epic closure evidence includes a last cross-review with no P0/P1
   findings before the Governance-6 epic is closed.
 
+## G6-01 Entropy Baseline Report-Only Fixture
+
+Fixture level: expanded
+Repair intensity: medium
+Project profile: NHMS
+
+Change surface:
+
+- `scripts/governance/audit_repo_entropy.py` CLI report entrypoint.
+- `.entropy-baseline/latest.json` as the persisted baseline artifact.
+- `tests/test_entropy_audit_script.py` CLI/report-only regression coverage.
+
+Must preserve:
+
+- Normal JSON and Markdown audit commands are report-only and keep
+  `metadata.baseline_written` false.
+- Explicit hard-gate mode still prints parseable stdout even when it exits
+  non-zero.
+- Existing `.entropy-baseline/latest.json` bytes are not created, replaced,
+  archived, rewritten, reformatted, or touched by report commands.
+
+Must add/change:
+
+- Test evidence that JSON, Markdown, and hard-gate report commands leave the
+  existing repository baseline byte-for-byte unchanged.
+- Test evidence that hard-gate JSON stdout remains parseable while preserving
+  report-only baseline semantics.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - `audit_repo_entropy.py` CLI modes
+  and exit codes are the public boundary for governance automation.
+- File IO / path safety / overwrite: selected - the invariant is no incidental
+  write to `.entropy-baseline/latest.json`.
+- Schema / columns / units / field names: selected - JSON metadata fields
+  `baseline_written`, `baseline_path`, `baseline_exists`, and hard-gate fields
+  must remain stable.
+- Error handling / rollback / partial outputs: selected - hard-gate failure
+  exits non-zero but stdout remains parseable and no baseline side effects
+  occur.
+- Legacy compatibility / examples: selected - existing report tests and
+  downstream governance consumers must keep current JSON/Markdown shape.
+- Config / project setup: not selected - no dependency or environment setup
+  change.
+- Auth / permissions / secrets: not selected - no credentials or permission
+  boundary.
+- Concurrency / shared state / ordering: not selected - no concurrent writer is
+  introduced in G6-01.
+- Resource limits / large input / discovery: not selected - no scan breadth or
+  parser limit change.
+- Release / packaging / dependency compatibility: not selected - no package or
+  dependency change.
+- Documentation / migration notes: not selected - issue scope is executable
+  verification, not docs wording.
+
+Domain risk packs:
+
+- Run manifest / QC provenance: not selected - baseline report metadata is
+  governance provenance, not NHMS run manifest/QC evidence.
+- Published NHMS artifacts / display identity: not selected - no published
+  model/display artifact identity changes.
+- Other NHMS domain packs: not selected - no geospatial, time-series,
+  numerical, PostGIS, Slurm, or provider behavior changes.
+
+Invariant Matrix:
+
+- Governing invariant: audit report commands may observe
+  `.entropy-baseline/latest.json` but only the future maintainer-only writer may
+  create, replace, archive, or modify it.
+- Source-of-truth identity/contract: `.entropy-baseline/latest.json` byte
+  content and JSON report metadata fields `baseline_path`,
+  `baseline_exists`, and `baseline_written`.
+- Producers: none for G6-01 - baseline production belongs to G6-02.
+- Validators/preflight: `audit_repo_entropy.build_report`,
+  `audit_repo_entropy._metadata`, CLI argument parsing in
+  `audit_repo_entropy.main`.
+- Storage/cache/query: `.entropy-baseline/latest.json` is read-observed only.
+- Public routes/entrypoints: `python scripts/governance/audit_repo_entropy.py
+  --format json|markdown` and `--mode hard-gate --format json`.
+- Frontend/downstream consumers: governance tests and future CI automation that
+  parse JSON stdout.
+- Failure paths/rollback/stale state: hard-gate failure exit still emits JSON
+  stdout and does not write, archive, or roll back baseline files.
+- Evidence/audit/readiness: `tests/test_entropy_audit_script.py` and manual
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ...` commands.
+- Regression rows:
+  - Existing baseline + JSON report command -> parseable JSON with
+    `baseline_written=false` and unchanged baseline bytes.
+  - Existing baseline + Markdown report command -> Markdown report sections and
+    unchanged baseline bytes.
+  - Existing baseline + hard-gate JSON command -> parseable JSON stdout,
+    expected hard-gate exit code, and unchanged baseline bytes.
+
+Non-goals:
+
+- No `scripts/governance/write_entropy_baseline.py` implementation in G6-01.
+- No CI entropy hard-gate enablement.
+- No trend dashboard or baseline comparison UI.
+
 ## Open Questions
 
 - Whether legacy display redirect aliases should ever be retired. This change
