@@ -66,12 +66,11 @@ export const m11BasinRiverCollectionBudget = {
 } as const
 
 const m11RiverDischargeLegend: LayerLegendEntry[] = [
-  { label: '<0.1 m3/s', color: '#C6DBEF', max: 0.1 },
-  { label: '0.1-1 m3/s', color: '#9ECAE1', min: 0.1, max: 1 },
-  { label: '1-10 m3/s', color: '#6BAED6', min: 1, max: 10 },
-  { label: '10-100 m3/s', color: '#4292C6', min: 10, max: 100 },
-  { label: '100-1000 m3/s', color: '#2171B5', min: 100, max: 1000 },
-  { label: '1000-10000 m3/s', color: '#08519C', min: 1000, max: 10000 },
+  { label: '<1 m3/s', color: '#7FB8DC', max: 1 },
+  { label: '1-10 m3/s', color: '#4292C6', min: 1, max: 10 },
+  { label: '10-100 m3/s', color: '#2171B5', min: 10, max: 100 },
+  { label: '100-1000 m3/s', color: '#08519C', min: 100, max: 1000 },
+  { label: '1000-10000 m3/s', color: '#08306B', min: 1000, max: 10000 },
   { label: '>10000 m3/s', color: '#CB181D', min: 10000 },
   { label: '无径流数据', color: m11DischargeColor(null) },
 ]
@@ -1275,12 +1274,11 @@ export function m11BasinRiverLayerColor(row: Pick<BasinSegmentRow, 'currentQ' | 
 export function m11DischargeColor(value: number | null) {
   if (value === null) return '#94ADC7'
   if (value >= 10_000) return '#CB181D'
-  if (value >= 1_000) return '#08519C'
-  if (value >= 100) return '#2171B5'
-  if (value >= 10) return '#4292C6'
-  if (value >= 1) return '#6BAED6'
-  if (value >= 0.1) return '#9ECAE1'
-  return '#C6DBEF'
+  if (value >= 1_000) return '#08306B'
+  if (value >= 100) return '#08519C'
+  if (value >= 10) return '#2171B5'
+  if (value >= 1) return '#4292C6'
+  return '#7FB8DC'
 }
 
 export function m11WaterLevelColor(value: number | null) {
