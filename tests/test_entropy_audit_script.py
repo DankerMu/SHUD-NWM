@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -12,7 +13,9 @@ import pytest
 from scripts.governance import audit_repo_entropy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+BASELINE_DIR = REPO_ROOT / ".entropy-baseline"
 BASELINE = REPO_ROOT / ".entropy-baseline" / "latest.json"
+AUDIT_SCRIPT = REPO_ROOT / "scripts" / "governance" / "audit_repo_entropy.py"
 
 
 def test_entropy_audit_json_schema_is_stable() -> None:
@@ -142,33 +145,50 @@ def test_entropy_audit_current_repo_has_zero_apps_api_layer_inversion_findings()
     assert summary_counts["by_check_id"].get("apps-api-layer-inversion", 0) == 0
 
 
-def test_entropy_audit_cli_outputs_json_and_markdown_without_writing_baseline() -> None:
-    before_exists = BASELINE.exists()
-    before_content = BASELINE.read_bytes() if before_exists else None
+def test_entropy_audit_json_report_preserves_repository_baseline() -> None:
+    before = _entropy_baseline_snapshot()
 
-    json_result = subprocess.run(
-        [sys.executable, "scripts/governance/audit_repo_entropy.py", "--format", "json"],
-        cwd=REPO_ROOT,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-    report = json.loads(json_result.stdout)
-    assert report["metadata"]["baseline_written"] is False
+    result = _run_entropy_audit_cli("--format", "json")
+    report = json.loads(result.stdout)
+    metadata = report["metadata"]
 
-    markdown_result = subprocess.run(
-        [sys.executable, "scripts/governance/audit_repo_entropy.py", "--format", "markdown"],
-        cwd=REPO_ROOT,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
-    assert "## Entropy Heatmap" in markdown_result.stdout
-    assert "## Prioritized Cleanup Targets" in markdown_result.stdout
+    assert result.returncode == 0
+    assert metadata["mode"] == "report-only"
+    assert metadata["baseline_path"] == ".entropy-baseline/latest.json"
+    assert metadata["baseline_exists"] is True
+    assert metadata["baseline_written"] is False
+    assert _entropy_baseline_snapshot() == before
 
-    assert BASELINE.exists() is before_exists
-    if before_exists:
-        assert BASELINE.read_bytes() == before_content
+
+def test_entropy_audit_markdown_report_preserves_repository_baseline() -> None:
+    before = _entropy_baseline_snapshot()
+
+    result = _run_entropy_audit_cli("--format", "markdown")
+
+    assert result.returncode == 0
+    assert "- Baseline path: `.entropy-baseline/latest.json`" in result.stdout
+    assert "- Baseline written: `false`" in result.stdout
+    assert "## Entropy Heatmap" in result.stdout
+    assert "## Prioritized Cleanup Targets" in result.stdout
+    assert _entropy_baseline_snapshot() == before
+
+
+def test_entropy_audit_hard_gate_json_preserves_repository_baseline_and_parseable_stdout() -> None:
+    before = _entropy_baseline_snapshot()
+
+    result = _run_entropy_audit_cli("--mode", "hard-gate", "--format", "json", check=False)
+    report = json.loads(result.stdout)
+    metadata = report["metadata"]
+
+    assert result.returncode == (1 if metadata["hard_gate_failing_count"] else 0)
+    assert metadata["mode"] == "hard-gate"
+    assert metadata["baseline_path"] == ".entropy-baseline/latest.json"
+    assert metadata["baseline_exists"] is True
+    assert metadata["baseline_written"] is False
+    assert metadata["hard_gate_status"] in {"pass", "fail"}
+    assert metadata["hard_gate_gated_check_ids"] == sorted(audit_repo_entropy.HARD_GATE_CHECK_IDS)
+    assert metadata["hard_gate_failing_count"] == metadata["gate_eligible_count"]
+    assert _entropy_baseline_snapshot() == before
 
 
 def test_entropy_audit_hard_gate_json_failure_is_parseable_and_counts_only_gated_findings(
@@ -1295,6 +1315,44 @@ def _findings_by_check(root: Path, check_id: str) -> list[dict[str, object]]:
         for finding in audit_repo_entropy.build_report(root)["findings"]
         if finding["check_id"] == check_id
     ]
+
+
+def _run_entropy_audit_cli(
+    *args: str,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(AUDIT_SCRIPT), *args],
+        cwd=REPO_ROOT,
+        check=check,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+
+def _entropy_baseline_snapshot() -> dict[str, object]:
+    assert BASELINE.exists(), "repository entropy baseline fixture must exist"
+    latest_stat = BASELINE.stat()
+    return {
+        "latest_bytes": BASELINE.read_bytes(),
+        "latest_stat": _stable_file_stat(latest_stat),
+        "directory_entries": sorted(
+            path.relative_to(BASELINE_DIR).as_posix()
+            for path in BASELINE_DIR.rglob("*")
+            if path.is_file()
+        ),
+    }
+
+
+def _stable_file_stat(path_stat: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        path_stat.st_dev,
+        path_stat.st_ino,
+        path_stat.st_mode,
+        path_stat.st_size,
+        path_stat.st_mtime_ns,
+        path_stat.st_ctime_ns,
+    )
 
 
 def _assert_unallowlisted_budget_counted_report_only_finding(
