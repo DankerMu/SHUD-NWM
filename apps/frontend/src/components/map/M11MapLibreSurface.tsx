@@ -652,25 +652,23 @@ function dischargeTileLayerPaint(): LayerProps['paint'] {
     // （近 2 日 q_down 分位：p50≈0.0003 / p75≈0.09 / p90≈1.6 / max≈307 m3/s）：
     // 线性域或高锚 log 域都会让山区小流域整体落进最低一桶、全网统一蓝；
     // 0.01→10000 跨 6 个数量级的 log 阶让支流→干流呈现浅蓝→深蓝→红的真实梯度。
+    // 低端不走近白浅色（99% 河段值 <2，浅色在浅底图上整网隐形）：从可见中浅蓝
+    // 起步，深浅只表达量级、不牺牲存在感。
     'line-color': [
       'interpolate',
       ['linear'],
       ['log10', ['max', ['coalesce', ['get', 'value'], 0], 0.01]],
       -2,
-      '#C6DBEF',
-      -1,
-      '#9ECAE1',
+      '#7FB8DC',
       0,
-      '#6BAED6',
-      1,
       '#4292C6',
-      2,
+      1,
       '#2171B5',
-      3,
+      2,
       '#08519C',
-      4,
+      3,
       '#08306B',
-      4.7,
+      4,
       '#CB181D',
     ],
     // 线宽同走 log 域：小溪细、干流粗，视觉层级与流量量级一致。
@@ -767,11 +765,13 @@ function M11OverlayPrimitive({
 // 浅底图上清晰可辨且不像深色道路（弃用早期深色 casing）。
 function m11OverlayCasingPaint(layerId: string): LayerProps['paint'] {
   const isWaterLevel = layerId === 'water-level'
-  const valueStops = isWaterLevel ? [0, 3.4, 1, 4, 2, 5, 4, 6.2, 8, 7.4] : [0, 3.6, 1000, 4.2, 5000, 5.4, 10000, 6.6, 50000, 8.2]
+  // discharge 主线走 log 域：casing 必须同域贴主线（约 +1.2px），线性域下白晕恒比
+  // 低流量主线宽一倍，会把彩色稀释成淡白。
+  const valueStops = isWaterLevel ? [0, 3.4, 1, 4, 2, 5, 4, 6.2, 8, 7.4] : [-2, 3, 0, 3.6, 2, 4.6, 4, 6.2, 4.7, 8.2]
   return {
     'line-color': '#FFFFFF',
     'line-opacity': 0.85,
-    'line-width': zoomScaledValueWidth(valueStops, 0.4),
+    'line-width': zoomScaledValueWidth(valueStops, 0.4, !isWaterLevel),
   }
 }
 
