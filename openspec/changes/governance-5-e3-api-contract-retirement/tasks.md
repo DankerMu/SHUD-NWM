@@ -57,9 +57,9 @@ Expected #414 frontend outputs:
 
 ## 4. Contract Update
 
-- [ ] 4.1 Update `openapi/nhms.v1.yaml` only after replacement and consumer migration evidence exists.
-- [ ] 4.2 Regenerate and verify frontend API types in the same implementation slice as OpenAPI contraction.
-- [ ] 4.3 Update validation docs and API runbooks to reflect active vs deprecated route status.
+- [ ] 4.1 Update `openapi/nhms.v1.yaml` only after replacement and consumer migration evidence exists. (#416: removal gate not satisfied; no OpenAPI contraction is performed.)
+- [ ] 4.2 Regenerate and verify frontend API types in the same implementation slice as OpenAPI contraction. (#416: not applicable because no OpenAPI contraction or generated type removal is performed.)
+- [ ] 4.3 Update validation docs and API runbooks to reflect active vs deprecated route status. (#416: no runtime/API runbook status change; final explicit-deferral status is recorded in `docs/governance/API_CONTRACT_REMOVAL_DEFERRAL.md`.)
 - [x] 4.4 For #415, confirm #413/#414 evidence records no backend/frontend removal-candidate migration and no replacement endpoint; preserve active OpenAPI paths and generated type entries unless drift is found. (#415: #413/#414 evidence records no migration and no replacement; OpenAPI/types preserved unchanged.)
 - [x] 4.5 For #415, synchronize stale docs-only shorthand `forecast-series` references to the canonical basin-version route or mark them as historical draft examples without adding runtime deprecation metadata. (#415: canonical wording updated in module/frontend docs; appendix v0.2 snippet marked historical.)
 - [x] 4.6 For #415, record an OpenAPI/generated-type synchronization evidence artifact that states whether OpenAPI/types changed, whether types were regenerated, and why no endpoint is deprecated, removed, or contracted. (#415: `docs/governance/API_CONTRACT_OPENAPI_TYPE_SYNC_EVIDENCE.md`.)
@@ -72,6 +72,37 @@ Expected #415 contract-sync outputs:
 - Docs-only shorthand `forecast-series` references are either replaced with the canonical route or explicitly labelled historical draft examples.
 - #416 receives enough evidence to close as explicit deferral unless a later change produces real removal readiness.
 - The evidence artifact records the rollback baseline: if docs/OpenAPI/type synchronization creates ambiguity, restore the active OpenAPI/generated type entries and canonical docs wording.
+
+## 6. Removal Or Explicit Deferral Decision
+
+- [x] 6.1 For #416, confirm #415 evidence proves removal-ready status before removing any endpoint implementation, OpenAPI path, generated type entry, or test coverage. (#416: gate is not satisfied; no endpoint implementation, OpenAPI path, generated type entry, or test coverage is removed.)
+- [x] 6.2 For #416, if the removal gate is not satisfied, record explicit deferral for each active runtime candidate and preserve compatibility. (#416: `docs/governance/API_CONTRACT_REMOVAL_DEFERRAL.md` records explicit deferral for `latest-product` and canonical `forecast-series`; compatibility preserved.)
+- [x] 6.3 For #416, record the final docs-only shorthand `forecast-series` disposition after #415: no runtime endpoint existed; stale docs were canonicalized or marked historical. (#416: closed as docs cleanup/historical retention; no runtime endpoint existed or was removed.)
+- [x] 6.4 For #416, document what future evidence would be required to reopen removal for active runtime contracts. (#416: future evidence and rollback baseline recorded in `docs/governance/API_CONTRACT_REMOVAL_DEFERRAL.md`.)
+
+Expected #416 outputs:
+
+- `GET /api/v1/mvp/qhh/latest-product` is either removed only with repository no-consumer evidence, synchronized OpenAPI/generated types, passing compatibility checks, and external-consumer treatment/notice evidence, or explicitly deferred. Current #415 evidence points to explicit deferral.
+- `GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series` is either removed only with replacement evidence, repository no-consumer evidence, synchronized OpenAPI/generated types, passing compatibility checks, and external-consumer treatment/notice evidence, or explicitly deferred. Current #415 evidence points to explicit deferral.
+- Docs-only shorthand `forecast-series` forms are closed as documentation cleanup/historical-retention, not runtime endpoint removal.
+- No active endpoint is marked deprecated or removal-ready solely because repository docs were cleaned up.
+
+Expected #416 search register:
+
+- `rg -n '@router\.get\("(/mvp/qhh/latest-product|/basin-versions/\{basin_version_id\}/river-segments/\{segment_id\}/forecast-series)' apps/api/routes/forecast.py`
+  -> both active route implementations remain.
+- `rg -n '^  /api/v1/(mvp/qhh/latest-product|basin-versions/\{basin_version_id\}/river-segments/\{segment_id\}/forecast-series):|operationId: getQhhLatestProduct|operationId: getRiverSegmentForecastSeries' openapi/nhms.v1.yaml`
+  -> both active static OpenAPI paths/operations remain.
+- `rg -n '"/api/v1/(mvp/qhh/latest-product|basin-versions/\{basin_version_id\}/river-segments/\{segment_id\}/forecast-series)"|getQhhLatestProduct|getRiverSegmentForecastSeries' apps/frontend/src/api/types.ts`
+  -> both generated type paths/operations remain.
+- `rg -n -U "client\\.GET\\(\\s*['\"]/api/v1/(mvp/qhh/latest-product|basin-versions/\\{basin_version_id\\}/river-segments/\\{segment_id\\}/forecast-series)['\"]" apps/frontend/src`
+  -> active frontend generated-client usage remains for both route families.
+- `rg -n '/api/v1/mvp/qhh/latest-product|/api/v1/basin-versions/.*/forecast-series|/api/v1/basin-versions/\{basin_version_id\}/river-segments/\{segment_id\}/forecast-series' tests/test_api_contract.py tests/test_openapi_drift.py`
+  -> active backend contract and OpenAPI drift coverage remains.
+- `rg -n 'deprecated: true|Deprecation|deprecation header|X-Deprecated|Sunset' openapi/nhms.v1.yaml apps/frontend/src/api/types.ts docs/governance/API_CONTRACT_*.md`
+  -> no active-candidate deprecation marker is introduced; governance docs may mention deprecation policy only as rationale.
+- `git status --short --untracked-files=all`
+  -> only deliberate #416 docs/OpenSpec/deferral evidence files change before staging; no API route implementation, OpenAPI path, generated frontend type, frontend runtime, or CI workflow files change.
 
 ## 5. Verification
 
@@ -96,3 +127,8 @@ Expected #415 contract-sync outputs:
 - [x] 5.19 For #415, run `uv run --no-sync pytest -q tests/test_api_contract.py tests/test_openapi_drift.py`. (#415: 81 passed, 8 warnings.)
 - [x] 5.20 For #415, run `cd apps/frontend && corepack pnpm run check:api-types`; also run `cd apps/frontend && corepack pnpm build` if OpenAPI or generated frontend types change. (#415: check:api-types green; build not required because OpenAPI/generated types did not change.)
 - [x] 5.21 For #415, confirm `git status --short --untracked-files=all` is limited to docs/OpenSpec/OpenAPI/type-sync evidence and any deliberate static OpenAPI/generated type files; no API route implementation or frontend runtime files change. (#415: changed files are docs/governance evidence, docs wording, and E3 OpenSpec tasks/fixture evidence; no route implementation or frontend runtime file changed.)
+- [x] 5.22 For #416, run repository searches covering active route implementations, static OpenAPI, generated frontend types, backend tests, frontend generated-client usage, and deprecation markers for the #411 candidates. (#416: active route/OpenAPI/type/frontend/test consumers remain; no OpenAPI/type deprecation marker found; governance docs contain policy rationale only.)
+- [x] 5.23 For #416, run `openspec validate governance-5-e3-api-contract-retirement --strict --no-interactive`. (#416: valid.)
+- [x] 5.24 For #416, run `uv run --no-sync pytest -q tests/test_api_contract.py tests/test_openapi_drift.py`. (#416: 81 passed, 8 warnings.)
+- [x] 5.25 For #416, run `cd apps/frontend && corepack pnpm run check:api-types`. (#416: green; generated type diff check passed.)
+- [x] 5.26 For #416, confirm `git status --short --untracked-files=all` is limited to docs/OpenSpec/deferral evidence and no API route implementation, OpenAPI path, generated frontend type, frontend runtime, or CI workflow files changed unless removal gates are explicitly satisfied. (#416: changed files are `docs/governance/API_CONTRACT_REMOVAL_DEFERRAL.md`, E3 `design.md`, and E3 `tasks.md`; no runtime/OpenAPI/type/frontend/CI files changed.)
