@@ -7,7 +7,7 @@ import { M11_POPUP_SOURCES } from '@/components/map/useHydroMetPopupProduct'
 
 // 弹窗玻璃质感外壳：深蓝玻璃 + 强 backdrop-blur + 细描边 + 大圆角 + 深投影（指挥舱风格）。
 export const M11_POPUP_GLASS =
-  'rounded-2xl border border-white/10 bg-slate-900/80 text-slate-100 shadow-[0_24px_64px_-16px_rgba(2,8,28,0.65)] ring-1 ring-white/10 backdrop-blur-2xl supports-[backdrop-filter]:bg-slate-900/65'
+  'rounded-2xl border border-white/10 bg-slate-950/90 text-slate-100 shadow-[0_24px_64px_-16px_rgba(2,8,28,0.65)] ring-1 ring-white/10 backdrop-blur-2xl supports-[backdrop-filter]:bg-slate-950/75'
 
 // 起报时间显示：ISO → 「MM-DD HH:mm UTC」，下拉更易读；option value 仍用原始 ISO。
 function formatIssueTime(iso: string): string {
@@ -111,7 +111,7 @@ export function M11PopupSourceControls({
           <select
             aria-label="起报时间选择"
             data-testid="m11-popup-issue-time"
-            className="h-7 min-w-0 max-w-[12rem] flex-1 cursor-pointer rounded-md border border-white/15 bg-white/5 px-1.5 font-mono text-[11px] text-slate-100 transition-colors [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:outline-none"
+            className="h-7 min-w-0 max-w-[12rem] flex-1 cursor-pointer appearance-none rounded-md border border-white/15 bg-white/10 px-2 font-mono text-[11px] text-slate-100 transition-colors [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:outline-none"
             value={issueTime ?? issueTimes[0]}
             onChange={(event) => onIssueTimeChange?.(event.target.value)}
             disabled={!onIssueTimeChange}

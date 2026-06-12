@@ -260,6 +260,8 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
         axisLabel: {
           color: axisColor,
           formatter: axisTimeLabel,
+          hideOverlap: true,
+          ...(compact ? { fontSize: 10 } : {}),
         },
         ...(dark ? { axisLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.25)' } } } : {}),
       },
