@@ -425,6 +425,7 @@ def test_mvt_tile_z_openapi_maximum_matches_runtime_contract() -> None:
     fastapi_spec: dict[str, Any] = app.openapi()
     mvt_paths = (
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
     )
@@ -451,6 +452,7 @@ def test_mvt_tile_xy_openapi_bounds_match_runtime_contract() -> None:
     fastapi_spec: dict[str, Any] = app.openapi()
     mvt_paths = (
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
     )
@@ -540,6 +542,7 @@ def test_mvt_pbf_response_contract_matches_runtime_and_static_openapi() -> None:
     fastapi_spec: dict[str, Any] = app.openapi()
     mvt_paths = (
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
     )
@@ -578,6 +581,7 @@ def test_mvt_pbf_error_responses_match_runtime_and_static_openapi() -> None:
     runtime_spec: dict[str, Any] = app.openapi()
     mvt_paths = (
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/flood-return-period/{run_id}/{duration}/{valid_time}/{z}/{x}/{y}.pbf",
     )
@@ -601,6 +605,34 @@ def test_mvt_pbf_error_responses_match_runtime_and_static_openapi() -> None:
         assert set(runtime_responses) == expected_response_keys
         for key in ("4XX", "424", "5XX"):
             assert runtime_responses[key] == static_responses[key]
+
+
+def test_station_mvt_openapi_contract_matches_runtime_and_static_spec() -> None:
+    static_spec = _openapi_spec()
+    app.openapi_schema = None
+    runtime_spec: dict[str, Any] = app.openapi()
+    path = "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf"
+
+    for spec in (static_spec, runtime_spec):
+        operation = spec["paths"][path]["get"]
+        assert operation["operationId"] == "getMetStationTile"
+        assert "met_stations" in operation["description"]
+        assert "`station_id`" in operation["description"]
+        assert "`active_flag`" in operation["description"]
+        basin_param = _operation_parameter(spec, path, "get", "path", "basin_version_id")
+        assert basin_param["required"] is True
+        assert basin_param["schema"]["type"] == "string"
+        assert set(operation["responses"]["200"]["headers"]) >= {
+            "X-Tile-Layer-ID",
+            "X-Tile-Checksum",
+            "X-Tile-Cache",
+            "X-Tile-Cache-Key",
+            "X-MVT-Schema-Version",
+        }
+        assert operation["responses"]["200"]["content"]["application/x-protobuf"]["schema"] == {
+            "type": "string",
+            "format": "binary",
+        }
 
 
 def test_layer_valid_times_openapi_documents_bounded_envelope() -> None:

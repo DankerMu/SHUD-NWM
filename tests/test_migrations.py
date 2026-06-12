@@ -36,6 +36,7 @@ EXPECTED_MIGRATIONS = [
     "000030_qhh_latest_display_parsed_status_index.sql",
     "000031_search_discovery_return_period_performance.sql",
     "000032_source_specific_state_snapshot.sql",
+    "000033_station_mvt_active_source_index.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -599,8 +600,33 @@ def test_search_discovery_performance_migration_adds_trgm_and_quality_indexes() 
     assert migration.count("USING GIN") == 5
     assert "gin_trgm_ops" in migration
     assert "WHERE active_flag = true" in migration
+    assert "met_station_active_basin_station_idx" not in migration
     assert "ON hydro.hydro_run (basin_version_id, status)" in migration
     assert "ON flood.return_period_result (run_id, max_over_window, return_period, warning_level)" in migration
+
+
+def test_station_mvt_active_source_index_migration_is_forward_upgrade_safe() -> None:
+    migration_sql = dict(_migration_sql())
+    migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    migration = migration_sql["000033_station_mvt_active_source_index.sql"]
+
+    assert migration_names.index("000032_source_specific_state_snapshot.sql") < migration_names.index(
+        "000033_station_mvt_active_source_index.sql"
+    )
+    assert "met_station_active_basin_station_idx" not in migration_sql[
+        "000031_search_discovery_return_period_performance.sql"
+    ]
+    assert _index_columns_by_name(migration, "met_station_active_basin_station_idx") == (
+        "basin_version_id",
+        "station_id",
+    )
+    active_station_index = _index_sql_by_name(migration, "met_station_active_basin_station_idx")
+    assert active_station_index.startswith(
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS met_station_active_basin_station_idx"
+    )
+    assert "ON met.met_station (basin_version_id, station_id)" in active_station_index
+    assert "WHERE active_flag = true" in active_station_index
+    assert "USING GIN" not in active_station_index
 
 
 def test_ops_strict_identity_index_migration_is_forward_upgrade_safe() -> None:
@@ -744,6 +770,13 @@ def _index_columns_by_name(migration: str, index_name: str) -> tuple[str, ...]:
                 break
     assert end > start
     return tuple(re.sub(r"\s+", " ", column).strip() for column in _split_index_columns(migration[start + 1 : end]))
+
+
+def _index_sql_by_name(migration: str, index_name: str) -> str:
+    match = re.search(rf"CREATE INDEX(?: CONCURRENTLY)? IF NOT EXISTS {index_name}\b", migration)
+    assert match is not None
+    end = migration.index(";", match.start())
+    return re.sub(r"\s+", " ", migration[match.start() : end]).strip()
 
 
 def _split_index_columns(columns_sql: str) -> list[str]:

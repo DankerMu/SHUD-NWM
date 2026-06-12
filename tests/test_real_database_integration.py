@@ -139,6 +139,7 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
                 "river_segment_segment_name_trgm_idx",
                 "met_station_id_trgm_idx",
                 "met_station_name_trgm_idx",
+                "met_station_active_basin_station_idx",
                 "hydro_run_display_product_basin_status_idx",
                 "return_period_result_run_quality_idx",
             } <= indexes

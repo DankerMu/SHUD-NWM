@@ -1140,6 +1140,114 @@ def test_flood_mvt_live_postgis_returns_raw_bytes_and_binds_requested_xyz(monkey
     assert response.headers["x-tile-cache"] == "bypass"
 
 
+def test_station_mvt_live_postgis_disabled_returns_stable_unavailable_error() -> None:
+    with _client() as client:
+        response = client.get("/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf")
+
+    assert response.status_code == 424
+    assert not response.headers["content-type"].startswith("application/x-protobuf")
+    body = response.json()
+    assert body["error"]["code"] == "MVT_LIVE_POSTGIS_UNAVAILABLE"
+    assert body["error"]["details"]["layer_id"] == "met-stations"
+
+
+def test_station_mvt_invalid_identifier_and_xyz_fail_before_station_source_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_source_lookup(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("station source lookup should not run after validation failure")
+
+    monkeypatch.setattr(flood_alert_routes, "_station_source_version", fail_source_lookup)
+    with _client() as client:
+        invalid_id = client.get("/api/v1/tiles/met-stations/bad%20id/6/12/24.pbf")
+        invalid_xyz = client.get("/api/v1/tiles/met-stations/basin_v1/0/1/0.pbf")
+
+    assert invalid_id.status_code == 422
+    assert invalid_id.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert invalid_xyz.status_code == 422
+    assert invalid_xyz.json()["error"]["code"] == "TILE_XYZ_INVALID"
+
+
+def test_station_mvt_live_postgis_returns_raw_bytes_and_binds_requested_basin_xyz(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class FakeRowResult:
+        def __init__(self, row: dict[str, Any] | None, rows: list[dict[str, Any]] | None = None) -> None:
+            self.row = row
+            self.rows = rows if rows is not None else ([row] if row is not None else [])
+
+        def mappings(self) -> FakeRowResult:
+            return self
+
+        def first(self) -> dict[str, Any] | None:
+            return self.row
+
+        def all(self) -> list[dict[str, Any]]:
+            return self.rows
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> FakeRowResult:
+            sql = str(statement)
+            if "FROM met.met_station" in sql and "ST_AsMVT" not in sql:
+                assert parameters["basin_version_id"] == "basin_v1"
+                assert parameters["limit"] == flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1
+                assert "AND active_flag = true" in re.sub(r"\s+", " ", sql)
+                assert "concat_ws" not in sql
+                return FakeRowResult(
+                    None,
+                    [
+                        {
+                            "station_id": "station_001",
+                            "basin_version_id": "basin_v1",
+                            "station_name": "Station 001",
+                            "station_role": "forcing_proxy",
+                            "active_flag": True,
+                            "geom": "01010000208A1100000000000000805B400000000000003E40",
+                            "created_at": datetime(2026, 5, 3, tzinfo=UTC),
+                        },
+                        {
+                            "station_id": "station_002",
+                            "basin_version_id": "basin_v1",
+                            "station_name": "Station 002",
+                            "station_role": "forcing_grid",
+                            "active_flag": True,
+                            "geom": "01010000208A1100000000000000C05B400000000000003F40",
+                            "created_at": datetime(2026, 5, 3, tzinfo=UTC),
+                        },
+                    ],
+                )
+            if "ST_TileEnvelope(:z, :x, :y)" in sql:
+                assert parameters["basin_version_id"] == "basin_v1"
+                assert (parameters["z"], parameters["x"], parameters["y"]) == (6, 12, 24)
+                return FakeRowResult({"tile": b"station-live-tile", "source_identity_count": 1})
+            if "information_schema.tables" in sql:
+                return FakeRowResult(None)
+            raise AssertionError(f"Unexpected SQL in station live PostGIS tile test: {sql}")
+
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: FakeSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf")
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-protobuf")
+    assert response.headers["x-tile-layer-id"] == "met-stations"
+    assert response.headers["x-tile-cache"] == "bypass"
+    assert response.content == b"station-live-tile"
+
+
 def test_live_mvt_cache_identity_preserves_valid_time_variants(monkeypatch: pytest.MonkeyPatch) -> None:
     with _store() as session:
         monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
@@ -1395,6 +1503,20 @@ def test_flood_mvt_cache_identity_preserves_duration_variants(monkeypatch: pytes
             "_fetch_river_network_mvt_tile_bytes",
             [("river-network", "river_network", None)],
         ),
+        (
+            "/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="met-stations",
+                source_id="basin_v1",
+                source_version="met-stations-source-v1",
+                valid_time=None,
+                z=6,
+                x=12,
+                y=24,
+            ),
+            "_fetch_station_mvt_tile_bytes",
+            [("met-stations", "meteorological_station", None)],
+        ),
     ],
 )
 def test_live_mvt_route_cache_hit_skips_postgis_fetch(
@@ -1477,6 +1599,19 @@ def test_live_mvt_route_cache_hit_skips_postgis_fetch(
                 y=24,
             ),
             "river-network",
+        ),
+        (
+            "/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="met-stations",
+                source_id="basin_v1",
+                source_version="met-stations-source-v1",
+                valid_time=None,
+                z=6,
+                x=12,
+                y=24,
+            ),
+            "met-stations",
         ),
     ],
 )
@@ -1599,6 +1734,20 @@ def test_seeded_live_mvt_cache_hit_succeeds_with_live_postgis_disabled(
             "_fetch_river_network_mvt_tile_bytes",
             {"source_id": "wrong-source"},
         ),
+        (
+            "/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf",
+            flood_alert_routes.TileInput(
+                layer_id="met-stations",
+                source_id="basin_v1",
+                source_version="met-stations-source-v1",
+                valid_time=None,
+                z=6,
+                x=12,
+                y=24,
+            ),
+            "_fetch_station_mvt_tile_bytes",
+            {"source_version": "wrong-station-inventory"},
+        ),
     ],
 )
 def test_canonical_mvt_route_invalid_cache_rows_are_misses_without_serving_cached_pbf(
@@ -1671,6 +1820,18 @@ def test_canonical_mvt_route_invalid_cache_rows_are_misses_without_serving_cache
             ),
             "_fetch_river_network_mvt_tile_bytes",
         ),
+        (
+            flood_alert_routes.TileInput(
+                layer_id="met-stations",
+                source_id="basin_v1",
+                source_version="met-stations-source-v1",
+                valid_time=None,
+                z=6,
+                x=12,
+                y=24,
+            ),
+            "_fetch_station_mvt_tile_bytes",
+        ),
     ],
 )
 def test_canonical_mvt_cache_write_upserts_layer_row_then_second_request_hits(
@@ -1716,6 +1877,11 @@ def test_canonical_mvt_cache_write_upserts_layer_row_then_second_request_hits(
             "/api/v1/tiles/river-network/basin_v1/6/12/24.pbf",
             "_fetch_river_network_mvt_tile_bytes",
             "river-network",
+        ),
+        (
+            "/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf",
+            "_fetch_station_mvt_tile_bytes",
+            "met-stations",
         ),
     ],
 )
@@ -1824,6 +1990,229 @@ def test_river_network_cache_identity_changes_with_river_network_version_set(
     }
     assert {bytes(row["tile_data"]) for row in cache_rows} == {b"rnv-a", b"rnv-a-plus-b"}
     assert layer_source_version == ("basin_v1", RIVER_NETWORK_SOURCE_VERSION_V1_V2)
+
+
+def test_station_mvt_cache_identity_changes_when_station_inventory_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf"
+    with _store() as session:
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_fetch_station_mvt_tile_bytes",
+            lambda *_args, **_kwargs: b"station-tile-v1",
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                first = client.get(path)
+                first_key = first.headers["x-tile-cache-key"]
+
+                session.execute(
+                    text(
+                        """
+                        UPDATE met.met_station
+                        SET station_name = 'Station 001 renamed'
+                        WHERE station_id = 'station_001'
+                        """
+                    )
+                )
+                session.commit()
+                monkeypatch.setattr(
+                    flood_alert_routes,
+                    "_fetch_station_mvt_tile_bytes",
+                    lambda *_args, **_kwargs: b"station-tile-v2",
+                )
+                second = client.get(path)
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+        cache_rows = session.execute(
+            text(
+                """
+                SELECT cache_key, source_id, source_version, tile_data
+                FROM map.tile_cache
+                WHERE layer_id = 'met-stations'
+                ORDER BY created_at, cache_key
+                """
+            )
+        ).mappings().all()
+        layer_source_version = session.execute(
+            text("SELECT source_product_id, source_version FROM map.tile_layer WHERE layer_id = 'met-stations'")
+        ).one()
+
+    assert first.status_code == 200
+    assert first.headers["x-tile-cache"] == "miss"
+    assert first.content == b"station-tile-v1"
+    assert second.status_code == 200
+    assert second.headers["x-tile-cache"] == "miss"
+    assert second.content == b"station-tile-v2"
+    assert second.headers["x-tile-cache-key"] != first_key
+    assert [row["source_id"] for row in cache_rows] == ["basin_v1", "basin_v1"]
+    assert len({row["source_version"] for row in cache_rows}) == 2
+    assert {bytes(row["tile_data"]) for row in cache_rows} == {b"station-tile-v1", b"station-tile-v2"}
+    assert layer_source_version[0] == "basin_v1"
+    second_cache_row = next(row for row in cache_rows if row["cache_key"] == second.headers["x-tile-cache-key"])
+    assert layer_source_version[1] == second_cache_row["source_version"]
+
+
+def test_station_mvt_delimiter_collision_pair_changes_source_version_and_cache_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf"
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                UPDATE met.met_station
+                SET active_flag = CASE WHEN station_id = 'station_001' THEN 1 ELSE 0 END,
+                    station_name = CASE WHEN station_id = 'station_001' THEN 'A|B' ELSE station_name END,
+                    station_role = CASE WHEN station_id = 'station_001' THEN 'C' ELSE station_role END
+                WHERE basin_version_id = 'basin_v1'
+                """
+            )
+        )
+        session.commit()
+        first_source_version = flood_alert_routes._station_source_version(session, "basin_v1")
+
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_fetch_station_mvt_tile_bytes",
+            lambda *_args, **_kwargs: b"delimiter-collision-before",
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                first = client.get(path)
+                first_key = first.headers["x-tile-cache-key"]
+
+                session.execute(
+                    text(
+                        """
+                        UPDATE met.met_station
+                        SET station_name = 'A',
+                            station_role = 'B|C'
+                        WHERE station_id = 'station_001'
+                          AND basin_version_id = 'basin_v1'
+                        """
+                    )
+                )
+                session.commit()
+                second_source_version = flood_alert_routes._station_source_version(session, "basin_v1")
+                monkeypatch.setattr(
+                    flood_alert_routes,
+                    "_fetch_station_mvt_tile_bytes",
+                    lambda *_args, **_kwargs: b"delimiter-collision-after",
+                )
+                second = client.get(path)
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+        cache_rows = session.execute(
+            text(
+                """
+                SELECT cache_key, source_version, tile_data
+                FROM map.tile_cache
+                WHERE layer_id = 'met-stations'
+                ORDER BY created_at, cache_key
+                """
+            )
+        ).mappings().all()
+
+    assert first.status_code == 200
+    assert first.headers["x-tile-cache"] == "miss"
+    assert first.content == b"delimiter-collision-before"
+    assert second.status_code == 200
+    assert second.headers["x-tile-cache"] == "miss"
+    assert second.content == b"delimiter-collision-after"
+    assert first_source_version != second_source_version
+    assert first_source_version.endswith(":basin_v1:1:station_001:station_001")
+    assert second_source_version.endswith(":basin_v1:1:station_001:station_001")
+    assert second.headers["x-tile-cache-key"] != first_key
+    assert {row["source_version"] for row in cache_rows} == {first_source_version, second_source_version}
+    assert {bytes(row["tile_data"]) for row in cache_rows} == {
+        b"delimiter-collision-before",
+        b"delimiter-collision-after",
+    }
+
+
+def test_station_mvt_cache_identity_ignores_inactive_station_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf"
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                UPDATE met.met_station
+                SET active_flag = 0
+                WHERE station_id = 'station_002'
+                """
+            )
+        )
+        session.commit()
+        first_source_version = flood_alert_routes._station_source_version(session, "basin_v1")
+
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_fetch_station_mvt_tile_bytes",
+            lambda *_args, **_kwargs: b"active-only-station-tile",
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                first = client.get(path)
+                first_key = first.headers["x-tile-cache-key"]
+
+                session.execute(
+                    text(
+                        """
+                        UPDATE met.met_station
+                        SET station_name = 'Inactive renamed',
+                            geom = 'POINT(119 39)',
+                            created_at = :created_at
+                        WHERE station_id = 'station_002'
+                        """
+                    ),
+                    {"created_at": datetime(2026, 5, 4, tzinfo=UTC)},
+                )
+                session.commit()
+                second_source_version = flood_alert_routes._station_source_version(session, "basin_v1")
+
+                def fail_if_called(*_args: Any, **_kwargs: Any) -> bytes:
+                    raise AssertionError("inactive-only station changes should not miss the active cache key")
+
+                monkeypatch.setattr(flood_alert_routes, "_fetch_station_mvt_tile_bytes", fail_if_called)
+                second = client.get(path)
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+        cache_rows = session.execute(
+            text(
+                """
+                SELECT cache_key, source_version, tile_data
+                FROM map.tile_cache
+                WHERE layer_id = 'met-stations'
+                ORDER BY cache_key
+                """
+            )
+        ).mappings().all()
+
+    assert first_source_version.endswith(":basin_v1:1:station_001:station_001")
+    assert first_source_version == second_source_version
+    assert first.status_code == 200
+    assert first.headers["x-tile-cache"] == "miss"
+    assert first.content == b"active-only-station-tile"
+    assert second.status_code == 200
+    assert second.headers["x-tile-cache"] == "hit"
+    assert second.headers["x-tile-cache-key"] == first_key
+    assert second.content == b"active-only-station-tile"
+    assert len(cache_rows) == 1
+    assert cache_rows[0]["source_version"] == first_source_version
+    assert bytes(cache_rows[0]["tile_data"]) == b"active-only-station-tile"
 
 
 def test_flood_mvt_cache_identity_changes_when_run_updated_at_changes(
@@ -2326,6 +2715,178 @@ def test_live_mvt_missing_source_identity_returns_unavailable(monkeypatch: pytes
     assert body["error"]["details"]["layer_id"] == "discharge"
 
 
+def test_station_mvt_active_empty_source_identity_fails_before_cache_or_live_sql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        session.execute(text("UPDATE met.met_station SET active_flag = 0 WHERE basin_version_id = 'basin_v1'"))
+        session.commit()
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "read_cached_tile_response",
+            lambda *_args, **_kwargs: pytest.fail("cache lookup should not run for active-empty station source"),
+        )
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_fetch_station_mvt_tile_bytes",
+            lambda *_args, **_kwargs: pytest.fail("live SQL should not run for active-empty station source"),
+        )
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "postgis_tile_sql",
+            lambda *_args, **_kwargs: pytest.fail("tile SQL builder should not run for active-empty station source"),
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get("/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"]["code"] == "MVT_SOURCE_IDENTITY_NOT_FOUND"
+    assert body["error"]["details"] == {"layer_id": "met-stations", "basin_version_id": "basin_v1"}
+
+
+def test_station_mvt_source_inventory_over_limit_fails_before_cache_or_live_sql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        limit = 1
+        active_count = session.execute(
+            text(
+                """
+                SELECT COUNT(*) AS count
+                FROM met.met_station
+                WHERE basin_version_id = 'basin_v1'
+                  AND active_flag = 1
+                """
+            )
+        ).scalar_one()
+        assert active_count == limit + 1
+
+        monkeypatch.setattr(flood_alert_routes, "FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT", limit)
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "read_cached_tile_response",
+            lambda *_args, **_kwargs: pytest.fail("cache lookup should not run for over-limit station source"),
+        )
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_fetch_station_mvt_tile_bytes",
+            lambda *_args, **_kwargs: pytest.fail("live SQL should not run for over-limit station source"),
+        )
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "postgis_tile_sql",
+            lambda *_args, **_kwargs: pytest.fail("tile SQL builder should not run for over-limit station source"),
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get("/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "MVT_TILE_BUDGET_EXCEEDED"
+    assert body["error"]["details"]["layer_id"] == "met-stations"
+    assert body["error"]["details"]["basin_version_id"] == "basin_v1"
+    assert body["error"]["details"]["limit_type"] == "source_inventory"
+    assert body["error"]["details"]["feature_count"] == active_count
+    assert body["error"]["details"]["max_features"] == limit
+
+
+@pytest.mark.parametrize(
+    ("tile_row", "expected_status", "expected_code", "expected_details"),
+    [
+        (
+            {
+                "tile": None,
+                "source_identity_count": 1,
+                "feature_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1,
+                "coordinate_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES + 2,
+                "feature_coordinate_overflow_count": 0,
+                "feature_coordinate_count": 0,
+                "coordinate_dimension_overflow_count": 0,
+                "coordinate_dimension_count": 0,
+                "invalid_property_count": 0,
+                "invalid_properties": "",
+            },
+            413,
+            "MVT_TILE_BUDGET_EXCEEDED",
+            {
+                "feature_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1,
+                "coordinate_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_COLLECTION_MAX_COORDINATES + 2,
+            },
+        ),
+        (
+            {
+                "tile": b"must-not-return",
+                "source_identity_count": 1,
+                "feature_count": 1,
+                "coordinate_count": 10,
+                "feature_coordinate_overflow_count": 1,
+                "feature_coordinate_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES + 1,
+                "coordinate_dimension_overflow_count": 0,
+                "coordinate_dimension_count": 0,
+                "invalid_property_count": 0,
+                "invalid_properties": "",
+            },
+            413,
+            "MVT_TILE_BUDGET_EXCEEDED",
+            {
+                "limit_type": "feature_coordinates",
+                "coordinate_count": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_FEATURE_MAX_COORDINATES + 1,
+            },
+        ),
+        (
+            {
+                "tile": b"must-not-return",
+                "source_identity_count": 1,
+                "feature_count": 1,
+                "coordinate_count": 1,
+                "feature_coordinate_overflow_count": 0,
+                "feature_coordinate_count": 0,
+                "coordinate_dimension_overflow_count": 0,
+                "coordinate_dimension_count": 0,
+                "invalid_property_count": 2,
+                "invalid_properties": "station_id,active_flag",
+            },
+            500,
+            "MVT_PROPERTY_INVALID",
+            {"invalid_property_count": 2, "properties": ["station_id", "active_flag"]},
+        ),
+    ],
+)
+def test_station_mvt_budget_and_required_property_errors_include_station_layer_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tile_row: dict[str, Any],
+    expected_status: int,
+    expected_code: str,
+    expected_details: dict[str, Any],
+) -> None:
+    fake_session = _StationMvtFakePostgresSession(tile_row=tile_row)
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: fake_session
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf")
+    finally:
+        app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == expected_status
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-type"].split(";")[0] != flood_alert_routes.MVT_MEDIA_TYPE
+    body = response.json()
+    assert body["error"]["code"] == expected_code
+    assert body["error"]["details"]["layer_id"] == "met-stations"
+    for key, value in expected_details.items():
+        assert body["error"]["details"][key] == value
+
+
 def test_live_mvt_over_budget_stats_return_413_without_pbf(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeDialect:
         name = "postgresql"
@@ -2809,6 +3370,11 @@ def test_hydro_mvt_rejects_non_ready_run_even_when_matching_cache_row_exists(
             "_fetch_river_network_mvt_tile_bytes",
             "map.tile_cache",
         ),
+        (
+            "/api/v1/tiles/met-stations/basin_missing/6/12/24.pbf",
+            "_fetch_station_mvt_tile_bytes",
+            "map.tile_cache",
+        ),
     ],
 )
 def test_absent_mvt_source_identity_fails_before_cache_lookup_or_live_sql(
@@ -2916,6 +3482,107 @@ def test_mvt_source_identity_preflight_sql_uses_index_friendly_public_route_keys
     assert "ORDER BY river_network_version_id" in river_sql
     assert "core.model_instance" not in river_sql
     assert river_params == {"basin_version_id": "basin_missing"}
+
+
+def test_station_mvt_source_version_uses_active_bounded_structured_inventory() -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class CapturingRows:
+        def mappings(self) -> CapturingRows:
+            return self
+
+        def all(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "station_id": "station|001",
+                    "basin_version_id": "basin_v1",
+                    "station_name": "Name|With|Pipes",
+                    "station_role": "forcing_proxy",
+                    "active_flag": True,
+                    "geom": "EWKB|hex|text",
+                    "created_at": datetime(2026, 5, 3, tzinfo=UTC),
+                }
+            ]
+
+    class CapturingSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> CapturingRows:
+            self.calls.append((str(statement), parameters))
+            return CapturingRows()
+
+    session = CapturingSession()
+    source_version = flood_alert_routes._station_source_version(session, "basin_v1")
+    sql, params = session.calls[0]
+    normalized_sql = re.sub(r"\s+", " ", sql)
+
+    assert source_version.startswith("met-stations:")
+    assert source_version.endswith(":basin_v1:1:station|001:station|001")
+    assert "WHERE basin_version_id = :basin_version_id AND active_flag = true" in normalized_sql
+    assert "ORDER BY station_id LIMIT :limit" in normalized_sql
+    assert "encode(ST_AsEWKB(geom), 'hex')" in normalized_sql
+    assert "concat_ws" not in sql
+    assert "string_agg" not in sql
+    assert "md5" not in sql
+    assert params == {
+        "basin_version_id": "basin_v1",
+        "limit": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1,
+    }
+
+
+def test_station_mvt_source_version_rejects_unbounded_active_inventory_before_hashing() -> None:
+    class FakeDialect:
+        name = "postgresql"
+
+    class FakeBind:
+        dialect = FakeDialect()
+
+    class OverLimitRows:
+        def mappings(self) -> OverLimitRows:
+            return self
+
+        def all(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "station_id": f"station_{index:05d}",
+                    "basin_version_id": "basin_v1",
+                    "station_name": f"Station {index}",
+                    "station_role": "forcing_proxy",
+                    "active_flag": True,
+                    "geom": f"geom-{index}",
+                    "created_at": VALID_TIME_1,
+                }
+                for index in range(flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1)
+            ]
+
+    class FakeSession:
+        def get_bind(self) -> FakeBind:
+            return FakeBind()
+
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> OverLimitRows:
+            sql = str(statement)
+            assert "LIMIT :limit" in sql
+            assert parameters["limit"] == flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1
+            return OverLimitRows()
+
+    with pytest.raises(flood_alert_routes.ApiError) as exc_info:
+        flood_alert_routes._station_source_version(FakeSession(), "basin_v1")
+
+    exc = exc_info.value
+    assert exc.status_code == 413
+    assert exc.code == "MVT_TILE_BUDGET_EXCEEDED"
+    assert exc.details["layer_id"] == "met-stations"
+    assert exc.details["limit_type"] == "source_inventory"
+    assert exc.details["feature_count"] == flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1
+    assert exc.details["max_features"] == flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT
 
 
 @pytest.mark.parametrize(
@@ -4474,7 +5141,7 @@ def test_mvt_postgis_sql_shape_documents_tile_envelope_transform_and_encoding() 
 
 
 def test_mvt_postgis_sql_shape_simplifies_all_production_layers_before_encoding() -> None:
-    for layer in ("flood-return-period", "hydro", "river-network"):
+    for layer in ("flood-return-period", "hydro", "river-network", "met-stations"):
         statement = flood_alert_routes.postgis_tile_sql(layer)
         assert "eligible AS" in statement
         assert "simplified AS" in statement
@@ -4487,7 +5154,7 @@ def test_mvt_postgis_sql_shape_simplifies_all_production_layers_before_encoding(
 
 
 def test_mvt_postgis_sql_shape_short_circuits_tile_budgets_before_expensive_geometry_work() -> None:
-    for layer in ("flood-return-period", "hydro", "river-network"):
+    for layer in ("flood-return-period", "hydro", "river-network", "met-stations"):
         statement = flood_alert_routes.postgis_tile_sql(layer)
         budget_gate_index = statement.index("budget_gate AS")
         expensive_indexes = [
@@ -4507,7 +5174,7 @@ def test_mvt_postgis_sql_shape_short_circuits_tile_budgets_before_expensive_geom
 
 
 def test_mvt_postgis_sql_bounds_source_rows_before_reusable_aggregates() -> None:
-    for layer in ("flood-return-period", "hydro", "river-network"):
+    for layer in ("flood-return-period", "hydro", "river-network", "met-stations"):
         statement = flood_alert_routes.postgis_tile_sql(layer)
         sql = re.sub(r"\s+", " ", statement)
         bounded_cte = sql[sql.index("bounded_rows AS") : sql.index("source_stats AS")]
@@ -4557,6 +5224,35 @@ def test_mvt_postgis_sql_shape_projects_metadata_properties_and_bindable_casts()
     )
     assert "r.q_value AS value" in flood_alert_routes.postgis_tile_sql("flood-return-period")
     assert "ts.value" in flood_alert_routes.postgis_tile_sql("hydro")
+
+
+def test_station_mvt_postgis_sql_uses_station_inventory_source_layer_and_properties() -> None:
+    statement = flood_alert_routes.postgis_tile_sql("met-stations")
+    sql = re.sub(r"\s+", " ", statement)
+    source_cte = sql[sql.index("source_rows AS") : sql.index("bounded_rows AS")]
+    projected_columns = _mvt_tile_projection(sql)
+
+    assert "FROM met.met_station ms" in source_cte
+    assert "WHERE ms.basin_version_id = :basin_version_id" in source_cte
+    assert "AND ms.active_flag = true" in source_cte
+    assert "COALESCE(ms.station_name, '') AS station_name" in source_cte
+    assert "ST_AsMVTGeom" in statement
+    assert "ST_AsMVT(tile_rows, 'met_stations', 4096, 'mvt_geom')" in statement
+    assert "station_id IS NULL OR station_id::text = ''" in statement
+    assert "basin_version_id IS NULL OR basin_version_id::text = ''" in statement
+    assert "station_role IS NULL OR station_role::text = ''" in statement
+    assert "active_flag IS NULL" in statement
+    assert "ORDER BY station_id" in sql
+    assert projected_columns == (
+        "station_id",
+        "basin_version_id",
+        "station_name",
+        "station_role",
+        "active_flag",
+        "mvt_geom",
+    )
+    assert "properties_json" not in projected_columns
+    assert "elevation_m" not in projected_columns
 
 
 def test_mvt_postgis_sql_projects_source_time_identity_through_public_allowlist() -> None:
@@ -4728,6 +5424,14 @@ def test_mvt_postgis_sql_shape_encodes_only_public_property_allowlist() -> None:
             "valid_time",
             "mvt_geom",
         ),
+        "met-stations": (
+            "station_id",
+            "basin_version_id",
+            "station_name",
+            "station_role",
+            "active_flag",
+            "mvt_geom",
+        ),
     }
     forbidden_columns = {
         "properties_json",
@@ -4862,6 +5566,8 @@ def _seed_mvt_cache_row(session: Session, tile: flood_alert_routes.TileInput, da
 def _route_tile_source_version(session: Session, tile: flood_alert_routes.TileInput) -> str:
     if tile.layer_id == "river-network":
         return flood_alert_routes._river_network_source_version(session, tile.source_id)
+    if tile.layer_id == "met-stations":
+        return flood_alert_routes._station_source_version(session, tile.source_id)
     return flood_alert_routes._run_source_version(flood_alert_routes._require_run(session, tile.source_id))
 
 
@@ -4881,6 +5587,71 @@ def _with_route_source_version(session: Session, tile: flood_alert_routes.TileIn
     )
 
 
+class _StationMvtFakePostgresSession:
+    def __init__(self, *, tile_row: dict[str, Any]) -> None:
+        self.tile_row = tile_row
+
+    def get_bind(self) -> Any:
+        class FakeDialect:
+            name = "postgresql"
+
+        class FakeBind:
+            dialect = FakeDialect()
+
+        return FakeBind()
+
+    def execute(self, statement: Any, parameters: dict[str, Any]) -> Any:
+        sql = str(statement)
+        if "FROM met.met_station" in sql and "ST_AsMVT" not in sql:
+            assert parameters == {
+                "basin_version_id": "basin_v1",
+                "limit": flood_alert_routes.FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT + 1,
+            }
+            normalized_sql = re.sub(r"\s+", " ", sql)
+            assert "WHERE basin_version_id = :basin_version_id AND active_flag = true" in normalized_sql
+            assert "LIMIT :limit" in normalized_sql
+            return _FakeMvtResult(
+                None,
+                [
+                    {
+                        "station_id": "station_001",
+                        "basin_version_id": "basin_v1",
+                        "station_name": "Station 001",
+                        "station_role": "forcing_proxy",
+                        "active_flag": True,
+                        "geom": "01010000208A1100000000000000805B400000000000003E40",
+                        "created_at": VALID_TIME_1,
+                    }
+                ],
+            )
+        if "ST_TileEnvelope(:z, :x, :y)" in sql:
+            assert parameters["basin_version_id"] == "basin_v1"
+            assert (parameters["z"], parameters["x"], parameters["y"]) == (6, 12, 24)
+            assert "AND ms.active_flag = true" in re.sub(r"\s+", " ", sql)
+            return _FakeMvtResult(self.tile_row)
+        if "information_schema.tables" in sql:
+            return _FakeMvtResult(None)
+        raise AssertionError(f"Unexpected SQL in station MVT fake session: {sql}")
+
+    def rollback(self) -> None:
+        return None
+
+
+class _FakeMvtResult:
+    def __init__(self, row: dict[str, Any] | None, rows: list[dict[str, Any]] | None = None) -> None:
+        self.row = row
+        self.rows = rows if rows is not None else ([row] if row is not None else [])
+
+    def mappings(self) -> _FakeMvtResult:
+        return self
+
+    def first(self) -> dict[str, Any] | None:
+        return self.row
+
+    def all(self) -> list[dict[str, Any]]:
+        return self.rows
+
+
 def _attach_schemas(engine: Engine) -> None:
     @event.listens_for(engine, "connect")
     def _attach(dbapi_connection: Any, _connection_record: Any) -> None:
@@ -4889,6 +5660,7 @@ def _attach_schemas(engine: Engine) -> None:
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS hydro")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS flood")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS map")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS met")
 
 
 def _create_tables(connection: Any) -> None:
@@ -5077,6 +5849,23 @@ def _create_tables(connection: Any) -> None:
             """
         )
     )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE met.met_station (
+                station_id TEXT PRIMARY KEY,
+                basin_version_id TEXT NOT NULL,
+                station_name TEXT,
+                geom TEXT NOT NULL,
+                elevation_m REAL,
+                station_role TEXT NOT NULL DEFAULT 'forcing_proxy',
+                active_flag BOOLEAN NOT NULL DEFAULT 1,
+                properties_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
 
 
 def _seed_data(connection: Any) -> None:
@@ -5101,6 +5890,51 @@ def _seed_data(connection: Any) -> None:
             VALUES ('model_1', 'basin_v1', 'rnv_v1')
             """
         )
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO met.met_station (
+                station_id, basin_version_id, station_name, geom, elevation_m,
+                station_role, active_flag, properties_json, created_at
+            )
+            VALUES
+                (
+                    'station_001',
+                    'basin_v1',
+                    'Station 001',
+                    'POINT(110 30)',
+                    100.0,
+                    'forcing_proxy',
+                    1,
+                    '{}',
+                    :created_at
+                ),
+                (
+                    'station_002',
+                    'basin_v1',
+                    'Station 002',
+                    'POINT(111 31)',
+                    120.0,
+                    'forcing_grid',
+                    1,
+                    '{}',
+                    :created_at
+                ),
+                (
+                    'station_003',
+                    'basin_v2',
+                    'Station 003',
+                    'POINT(112 32)',
+                    80.0,
+                    'forcing_proxy',
+                    1,
+                    '{}',
+                    :created_at
+                )
+            """
+        ),
+        {"created_at": datetime(2026, 5, 3, tzinfo=UTC)},
     )
     for segment_id, rnv, lon, lat, name in [
         ("seg_001", "rnv_v1", 110.0, 30.0, "Segment 1"),

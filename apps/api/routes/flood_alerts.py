@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
@@ -1138,6 +1139,45 @@ def river_network_mvt_tile(
     return _mvt_response(build_raw_tile_response(session, tile_input, data))
 
 
+@router.get(
+    "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
+    responses=MVT_ROUTE_RESPONSES,
+    response_class=Response,
+    operation_id="getMetStationTile",
+    summary="Get meteorological station vector tile",
+    description=(
+        "Canonical M16 Mapbox Vector Tile route for meteorological station points. "
+        "The vector source-layer is `met_stations` and features include `station_id`, "
+        "`basin_version_id`, `station_name`, `station_role`, and `active_flag`."
+    ),
+)
+def met_station_mvt_tile(
+    basin_version_id: str,
+    z: int,
+    x: int,
+    y: int,
+    session: Session = Depends(get_flood_alert_session),
+) -> Response:
+    validate_identifier(basin_version_id, "basin_version_id")
+    validate_xyz(z, x, y)
+    source_version = _station_source_version(session, basin_version_id)
+    tile_input = TileInput(
+        layer_id="met-stations",
+        source_id=basin_version_id,
+        source_version=source_version,
+        valid_time=None,
+        z=z,
+        x=x,
+        y=y,
+    )
+    cached = read_cached_tile_response(session, tile_input)
+    if cached is not None:
+        return _mvt_response(cached)
+    _require_live_postgis_mvt(session, "met-stations")
+    data = _fetch_station_mvt_tile_bytes(session, basin_version_id=basin_version_id, z=z, x=x, y=y)
+    return _mvt_response(build_raw_tile_response(session, tile_input, data))
+
+
 def _build_deterministic_tile_response_for_tests(
     session: Session,
     tile: TileInput,
@@ -1377,6 +1417,24 @@ def _fetch_river_network_mvt_tile_bytes(
     )
 
 
+def _fetch_station_mvt_tile_bytes(
+    session: Session,
+    *,
+    basin_version_id: str,
+    z: int,
+    x: int,
+    y: int,
+) -> bytes:
+    return _fetch_postgis_tile_bytes(
+        session,
+        "met-stations",
+        {"basin_version_id": basin_version_id},
+        z=z,
+        x=x,
+        y=y,
+    )
+
+
 def _river_network_source_version(session: Session, basin_version_id: str) -> str:
     rows = session.execute(
         text(
@@ -1400,6 +1458,134 @@ def _river_network_source_version(session: Session, basin_version_id: str) -> st
     joined = ",".join(versions)
     digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
     return f"river-network-set:{digest}:{joined}"
+
+
+def _station_source_version(session: Session, basin_version_id: str) -> str:
+    try:
+        limit = FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT
+        row_limit = limit + 1
+        if session.get_bind().dialect.name == "sqlite":
+            rows = (
+                session.execute(
+                    text(
+                        """
+                        SELECT station_id,
+                               basin_version_id,
+                               COALESCE(station_name, '') AS station_name,
+                               station_role,
+                               active_flag, geom, created_at
+                        FROM met.met_station
+                        WHERE basin_version_id = :basin_version_id
+                          AND active_flag = 1
+                        ORDER BY station_id
+                        LIMIT :limit
+                        """
+                    ),
+                    {"basin_version_id": basin_version_id, "limit": row_limit},
+                )
+                .mappings()
+                .all()
+            )
+        else:
+            rows = (
+                session.execute(
+                    text(
+                        """
+                        SELECT station_id,
+                               basin_version_id,
+                               COALESCE(station_name, '') AS station_name,
+                               station_role,
+                               active_flag,
+                               encode(ST_AsEWKB(geom), 'hex') AS geom,
+                               created_at
+                        FROM met.met_station
+                        WHERE basin_version_id = :basin_version_id
+                          AND active_flag = true
+                        ORDER BY station_id
+                        LIMIT :limit
+                        """
+                    ),
+                    {"basin_version_id": basin_version_id, "limit": row_limit},
+                )
+                .mappings()
+                .all()
+            )
+    except SQLAlchemyError as exc:
+        try:
+            session.rollback()
+        except SQLAlchemyError:
+            pass
+        raise ApiError(
+            status_code=424,
+            code="MVT_LIVE_POSTGIS_UNAVAILABLE",
+            message="Station MVT source inventory is unavailable for canonical .pbf tile generation.",
+            details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
+        ) from exc
+
+    if not rows:
+        _raise_station_source_not_found(basin_version_id)
+    if len(rows) > FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT:
+        _raise_station_source_budget_exceeded(basin_version_id, observed_count=len(rows))
+
+    basis = {
+        "columns": [
+            "station_id",
+            "basin_version_id",
+            "station_name",
+            "station_role",
+            "active_flag",
+            "geom",
+            "created_at",
+        ],
+        "rows": [
+            [
+                row.get("station_id"),
+                row.get("basin_version_id"),
+                row.get("station_name"),
+                row.get("station_role"),
+                _station_active_flag(row.get("active_flag")),
+                row.get("geom"),
+                canonical_mvt_time(row.get("created_at")),
+            ]
+            for row in rows
+        ],
+    }
+    digest = hashlib.sha256(
+        json.dumps(basis, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    station_count = len(rows)
+    min_station_id = str(rows[0].get("station_id") or "")
+    max_station_id = str(rows[-1].get("station_id") or "")
+    return f"met-stations:{digest}:{basin_version_id}:{station_count}:{min_station_id}:{max_station_id}"
+
+
+def _station_active_flag(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "t", "true", "yes"}
+    return bool(value)
+
+
+def _raise_station_source_budget_exceeded(basin_version_id: str, *, observed_count: int) -> None:
+    raise ApiError(
+        status_code=413,
+        code="MVT_TILE_BUDGET_EXCEEDED",
+        message="Station MVT source inventory exceeded the configured feature budget.",
+        details={
+            "layer_id": "met-stations",
+            "basin_version_id": basin_version_id,
+            "limit_type": "source_inventory",
+            "feature_count": observed_count,
+            "max_features": FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT,
+        },
+    )
+
+def _raise_station_source_not_found(basin_version_id: str) -> None:
+    raise ApiError(
+        status_code=404,
+        code="MVT_SOURCE_IDENTITY_NOT_FOUND",
+        message="Station MVT source identity was not found for the requested basin version.",
+        details={"layer_id": "met-stations", "basin_version_id": basin_version_id},
+    )
 
 
 def _require_hydro_mvt_source_identity(
