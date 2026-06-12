@@ -2556,25 +2556,23 @@ class ProductionScheduler:
                 ):
                     skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                     continue
-                state_decision = (
-                    _candidate_state_decision(
-                        candidate,
-                        _call_candidate_state_provider(
-                            state_provider,
-                            source_id=discovery.source_id,
-                            cycle_time=discovery.cycle_time,
-                            model_id=model.model_id,
-                            run_id=candidate.run_id,
-                            forcing_version_id=candidate.forcing_version_id,
-                            candidate_id=candidate.candidate_id,
-                            retry_limit=self.config.retry_limit,
-                            job_limit=self.config.candidate_state_job_limit,
-                            event_limit=self.config.candidate_state_event_limit,
-                        ),
+                raw_candidate_state = (
+                    _call_candidate_state_provider(
+                        state_provider,
+                        source_id=discovery.source_id,
+                        cycle_time=discovery.cycle_time,
+                        model_id=model.model_id,
+                        run_id=candidate.run_id,
+                        forcing_version_id=candidate.forcing_version_id,
+                        candidate_id=candidate.candidate_id,
+                        retry_limit=self.config.retry_limit,
+                        job_limit=self.config.candidate_state_job_limit,
+                        event_limit=self.config.candidate_state_event_limit,
                     )
                     if callable(state_provider)
                     else None
                 )
+                state_decision = _candidate_state_decision(candidate, raw_candidate_state)
                 if state_decision is not None and _candidate_state_has_identity_mismatch(state_decision.evidence):
                     blocked.append(
                         _blocked_candidate(
@@ -2671,25 +2669,20 @@ class ProductionScheduler:
                             }
                             slurm_status_sync_evidence.append(slurm_state_sync)
                             if synced_updates:
-                                state_decision = (
-                                    _candidate_state_decision(
-                                        candidate,
-                                        _call_candidate_state_provider(
-                                            state_provider,
-                                            source_id=discovery.source_id,
-                                            cycle_time=discovery.cycle_time,
-                                            model_id=model.model_id,
-                                            run_id=candidate.run_id,
-                                            forcing_version_id=candidate.forcing_version_id,
-                                            candidate_id=candidate.candidate_id,
-                                            retry_limit=self.config.retry_limit,
-                                            job_limit=self.config.candidate_state_job_limit,
-                                            event_limit=self.config.candidate_state_event_limit,
-                                        ),
+                                if callable(state_provider):
+                                    raw_candidate_state = _call_candidate_state_provider(
+                                        state_provider,
+                                        source_id=discovery.source_id,
+                                        cycle_time=discovery.cycle_time,
+                                        model_id=model.model_id,
+                                        run_id=candidate.run_id,
+                                        forcing_version_id=candidate.forcing_version_id,
+                                        candidate_id=candidate.candidate_id,
+                                        retry_limit=self.config.retry_limit,
+                                        job_limit=self.config.candidate_state_job_limit,
+                                        event_limit=self.config.candidate_state_event_limit,
                                     )
-                                    if callable(state_provider)
-                                    else state_decision
-                                )
+                                    state_decision = _candidate_state_decision(candidate, raw_candidate_state)
                                 if state_decision is not None:
                                     state_decision = CandidateStateDecision(
                                         action=state_decision.action,
@@ -2729,9 +2722,16 @@ class ProductionScheduler:
                                 if state_decision is not None and state_decision.action == "retry":
                                     candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                                 elif state_decision is None:
+                                    state_evidence = {"slurm_state_sync": slurm_state_sync}
+                                    repaired_state_evidence = _candidate_repaired_state_audit_evidence(
+                                        candidate,
+                                        raw_candidate_state,
+                                    )
+                                    if repaired_state_evidence is not None:
+                                        state_evidence.update(repaired_state_evidence)
                                     candidate = _candidate_with_state_evidence(
                                         candidate,
-                                        {"slurm_state_sync": slurm_state_sync},
+                                        state_evidence,
                                     )
                             if active_slurm_jobs:
                                 skip_evidence = dict(state_decision.evidence if state_decision is not None else {})
@@ -2830,6 +2830,10 @@ class ProductionScheduler:
                     # restart_stage evidence here would divert the chain to
                     # restart from parse with no forcing/forecast to parse.
                     candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
+                if state_decision is None:
+                    repaired_state_evidence = _candidate_repaired_state_audit_evidence(candidate, raw_candidate_state)
+                    if repaired_state_evidence is not None:
+                        candidate = _candidate_with_state_evidence(candidate, repaired_state_evidence)
                 if has_active_orchestration is None:
                     has_active_orchestration = bool(
                         callable(active_orchestration_provider)
@@ -2899,25 +2903,20 @@ class ProductionScheduler:
                         }
                         slurm_status_sync_evidence.append(slurm_state_sync)
                         if synced_updates:
-                            state_decision = (
-                                _candidate_state_decision(
-                                    candidate,
-                                    _call_candidate_state_provider(
-                                        state_provider,
-                                        source_id=discovery.source_id,
-                                        cycle_time=discovery.cycle_time,
-                                        model_id=model.model_id,
-                                        run_id=candidate.run_id,
-                                        forcing_version_id=candidate.forcing_version_id,
-                                        candidate_id=candidate.candidate_id,
-                                        retry_limit=self.config.retry_limit,
-                                        job_limit=self.config.candidate_state_job_limit,
-                                        event_limit=self.config.candidate_state_event_limit,
-                                    ),
+                            if callable(state_provider):
+                                raw_candidate_state = _call_candidate_state_provider(
+                                    state_provider,
+                                    source_id=discovery.source_id,
+                                    cycle_time=discovery.cycle_time,
+                                    model_id=model.model_id,
+                                    run_id=candidate.run_id,
+                                    forcing_version_id=candidate.forcing_version_id,
+                                    candidate_id=candidate.candidate_id,
+                                    retry_limit=self.config.retry_limit,
+                                    job_limit=self.config.candidate_state_job_limit,
+                                    event_limit=self.config.candidate_state_event_limit,
                                 )
-                                if callable(state_provider)
-                                else state_decision
-                            )
+                                state_decision = _candidate_state_decision(candidate, raw_candidate_state)
                             if state_decision is not None:
                                 state_decision = CandidateStateDecision(
                                     action=state_decision.action,
@@ -2957,10 +2956,14 @@ class ProductionScheduler:
                             if state_decision is not None and state_decision.action == "retry":
                                 candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                             elif state_decision is None:
-                                candidate = _candidate_with_state_evidence(
+                                state_evidence = {"slurm_state_sync": slurm_state_sync}
+                                repaired_state_evidence = _candidate_repaired_state_audit_evidence(
                                     candidate,
-                                    {"slurm_state_sync": slurm_state_sync},
+                                    raw_candidate_state,
                                 )
+                                if repaired_state_evidence is not None:
+                                    state_evidence.update(repaired_state_evidence)
+                                candidate = _candidate_with_state_evidence(candidate, state_evidence)
                     elif not allow_slurm_status_sync:
                         skipped.append(
                             {
@@ -4159,6 +4162,21 @@ def _candidate_state_decision(
     return None
 
 
+def _candidate_repaired_state_audit_evidence(
+    candidate: SchedulerCandidate,
+    raw_state: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if raw_state is None:
+        return None
+    state = _bounded_candidate_state(raw_state)
+    if not isinstance(state.get("repaired_stage_evidence"), Mapping) and not isinstance(
+        state.get("source_cycle_repair_evidence"),
+        Mapping,
+    ):
+        return None
+    return {"candidate_state": _candidate_state_evidence(candidate, state)}
+
+
 def _state_has_only_unsubmitted_auto_retry_placeholders(state: Mapping[str, Any]) -> bool:
     jobs = _state_jobs(state)
     active_jobs = [
@@ -4271,13 +4289,15 @@ def _call_active_slurm_jobs_provider(
 def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     validation = evidence.get("production_identity_validation")
     if not isinstance(validation, Mapping):
-        return _candidate_scoped_shared_cycle_aggregate_state(state, evidence)
+        return _candidate_state_filtered_decision_state(state, evidence)
     legacy_sources = {str(source) for source in validation.get("legacy_non_authoritative", [])}
     if not legacy_sources:
-        return _candidate_scoped_shared_cycle_aggregate_state(state, evidence)
+        return _candidate_state_filtered_decision_state(state, evidence)
+    unresolved_source_cycle_job_ids = _inconclusive_source_cycle_unresolved_job_ids(state)
     filtered = dict(state)
     if "candidate_state" in legacy_sources:
         _strip_top_level_candidate_state_decision_fields(filtered)
+        _restore_top_level_source_cycle_download_blocker(filtered, state, evidence)
     for key in ("hydro_run", "forcing_version", "forecast_cycle", "published_manifest", "canonical_product"):
         if key in legacy_sources:
             filtered.pop(key, None)
@@ -4289,9 +4309,14 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
             _strip_top_level_pipeline_decision_fields(filtered)
     jobs = _state_jobs(state)
     if jobs:
-        filtered["pipeline_jobs"] = [
-            dict(job) for index, job in enumerate(jobs) if f"pipeline_jobs[{index}]" not in legacy_sources
-        ]
+        filtered["pipeline_jobs"] = []
+        for index, job in enumerate(jobs):
+            if _state_row_references_job_ids(job, unresolved_source_cycle_job_ids):
+                continue
+            source = f"pipeline_jobs[{index}]"
+            if source in legacy_sources and not _global_source_cycle_download_blocker_job(job, evidence):
+                continue
+            filtered["pipeline_jobs"].append(dict(job))
         filtered.pop("jobs", None)
     events = _state_events(state)
     if events:
@@ -4303,13 +4328,123 @@ def _candidate_state_decision_state(state: Mapping[str, Any], evidence: Mapping[
                 legacy_sources=legacy_sources,
             )
             for index, event in enumerate(events)
+            if not _state_event_references_job_ids(event, unresolved_source_cycle_job_ids)
         ]
         filtered.pop("events", None)
     if filtered.get("pipeline_jobs") == []:
         _strip_top_level_pipeline_decision_fields(filtered)
     if filtered.get("pipeline_events") == [] and not filtered.get("pipeline_jobs"):
         _strip_top_level_pipeline_decision_fields(filtered)
-    return _candidate_scoped_shared_cycle_aggregate_state(filtered, evidence)
+    return _candidate_state_filtered_decision_state(filtered, evidence)
+
+
+def _candidate_state_filtered_decision_state(state: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    filtered = _inconclusive_source_cycle_decision_state(state)
+    return _repaired_stage_decision_state(_candidate_scoped_shared_cycle_aggregate_state(filtered, evidence))
+
+
+def _inconclusive_source_cycle_decision_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    unresolved_job_ids = _inconclusive_source_cycle_unresolved_job_ids(state)
+    if not unresolved_job_ids:
+        return dict(state)
+    filtered = dict(state)
+    job_rows = _state_jobs(state)
+    if job_rows:
+        filtered["pipeline_jobs"] = [
+            dict(job) for job in job_rows if not _state_row_references_job_ids(job, unresolved_job_ids)
+        ]
+        filtered.pop("jobs", None)
+    single_job = state.get("pipeline_job") or state.get("job")
+    if isinstance(single_job, Mapping) and _state_row_references_job_ids(single_job, unresolved_job_ids):
+        filtered.pop("pipeline_job", None)
+        filtered.pop("job", None)
+    elif not isinstance(single_job, Mapping) and _state_row_references_job_ids(state, unresolved_job_ids):
+        _strip_top_level_pipeline_decision_fields(filtered)
+    event_rows = _state_events(state)
+    if event_rows:
+        filtered["pipeline_events"] = [
+            dict(event)
+            for event in event_rows
+            if not _state_event_references_job_ids(event, unresolved_job_ids)
+        ]
+        filtered.pop("events", None)
+    return filtered
+
+
+def _inconclusive_source_cycle_unresolved_job_ids(state: Mapping[str, Any]) -> set[str]:
+    repair_evidence = state.get("source_cycle_repair_evidence")
+    if not isinstance(repair_evidence, Mapping):
+        return set()
+    if repair_evidence.get("status") != "inconclusive_truncated":
+        return set()
+    values = repair_evidence.get("unresolved_failed_job_ids")
+    if not isinstance(values, Sequence) or isinstance(values, str | bytes | bytearray):
+        return set()
+    return {str(value) for value in values if value not in (None, "")}
+
+
+def _state_row_references_job_ids(row: Mapping[str, Any], job_ids: set[str]) -> bool:
+    if not job_ids:
+        return False
+    for key in ("job_id", "pipeline_job_id", "entity_id", "previous_job_id", "failed_job_id"):
+        value = row.get(key)
+        if value not in (None, "") and str(value) in job_ids:
+            return True
+    return False
+
+
+def _state_event_references_job_ids(event: Mapping[str, Any], job_ids: set[str]) -> bool:
+    if _state_row_references_job_ids(event, job_ids):
+        return True
+    details = event.get("details")
+    return isinstance(details, Mapping) and _state_row_references_job_ids(details, job_ids)
+
+
+def _restore_top_level_source_cycle_download_blocker(
+    filtered: dict[str, Any],
+    state: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> None:
+    candidate_identity = evidence.get("candidate_identity")
+    if not isinstance(candidate_identity, Mapping):
+        return
+    expected = _candidate_identity_from_evidence(candidate_identity)
+    if not expected or not _top_level_source_cycle_download_blocker(expected, state):
+        return
+    for key in (
+        "pipeline_status",
+        "job_status",
+        "status",
+        "failed_stage",
+        "stage",
+        "job_type",
+        "error_code",
+        "reason_code",
+        "failure_reason",
+        "last_error",
+        "previous_error",
+        "error_message",
+        "message",
+        "retry_attempt",
+        "attempt",
+        "retry_count",
+        "retry_limit",
+        "max_retries",
+        "retryable",
+        "permanent",
+        "failure_classifier",
+        "classifier",
+        "shared_cycle_aggregate",
+    ):
+        if key in state:
+            filtered[key] = state[key]
+
+
+def _repaired_stage_decision_state(state: Mapping[str, Any]) -> dict[str, Any]:
+    filtered = dict(state)
+    if _state_has_only_repaired_pipeline_failure_signal(filtered):
+        _strip_top_level_pipeline_decision_fields(filtered)
+    return filtered
 
 
 def _candidate_scoped_shared_cycle_aggregate_state(
@@ -4328,6 +4463,28 @@ def _candidate_scoped_shared_cycle_aggregate_state(
     if _shared_cycle_aggregate_has_candidate_failure(expected, filtered):
         filtered["pipeline_events"] = _candidate_scoped_shared_cycle_events(expected, _state_events(filtered))
         filtered.pop("events", None)
+        return filtered
+    global_source_cycle_blockers = [
+        dict(job) for job in _state_jobs(filtered) if _global_source_cycle_download_blocker_job(job, evidence)
+    ]
+    top_level_source_cycle_blocker = _top_level_source_cycle_download_blocker(expected, filtered)
+    if global_source_cycle_blockers or top_level_source_cycle_blocker:
+        retained_jobs = [
+            dict(job)
+            for job in _state_jobs(filtered)
+            if _shared_cycle_row_is_candidate_scoped(expected, job)
+            or _global_source_cycle_download_blocker_job(job, evidence)
+        ]
+        if not top_level_source_cycle_blocker:
+            _strip_top_level_pipeline_decision_fields(filtered)
+        filtered["pipeline_jobs"] = retained_jobs
+        filtered.pop("jobs", None)
+        filtered["pipeline_events"] = _candidate_scoped_shared_cycle_events(expected, _state_events(filtered))
+        filtered.pop("events", None)
+        if filtered.get("pipeline_jobs") == []:
+            filtered.pop("pipeline_jobs", None)
+        if filtered.get("pipeline_events") == []:
+            filtered.pop("pipeline_events", None)
         return filtered
     _strip_top_level_pipeline_decision_fields(filtered)
     filtered["pipeline_jobs"] = [
@@ -4367,6 +4524,8 @@ def _shared_cycle_aggregate_has_candidate_failure(
     state: Mapping[str, Any],
 ) -> bool:
     for job in _state_jobs(state):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if status not in FAILED_PIPELINE_STATUSES and job.get("error_code") in (None, ""):
             continue
@@ -4376,6 +4535,94 @@ def _shared_cycle_aggregate_has_candidate_failure(
         if _event_has_candidate_scoped_failure(expected, event):
             return True
     return False
+
+
+def _top_level_source_cycle_download_blocker(
+    expected: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> bool:
+    if state.get("shared_cycle_aggregate") is not True:
+        return False
+    if not _source_cycle_identity_matches_expected(expected, state):
+        return False
+    pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
+    if pipeline_status not in FAILED_PIPELINE_STATUSES and state.get("error_code") in (None, ""):
+        return False
+    stage = str(state.get("failed_stage") or state.get("stage") or "")
+    if not _is_source_cycle_download_stage(stage):
+        return False
+    jobs = _state_jobs(state)
+    if not jobs:
+        return True
+    return any(
+        _global_source_cycle_download_blocker_job(job, {"candidate_identity": expected})
+        for job in jobs
+    )
+
+
+def _global_source_cycle_download_blocker_job(
+    job: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> bool:
+    if _pipeline_job_is_repaired_stage_evidence(job):
+        return False
+    status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+    if status not in FAILED_PIPELINE_STATUSES and job.get("error_code") in (None, ""):
+        return False
+    stage = str(job.get("stage") or job.get("job_type") or "")
+    if not _is_source_cycle_download_stage(stage):
+        return False
+    candidate_identity = evidence.get("candidate_identity")
+    if not isinstance(candidate_identity, Mapping):
+        return False
+    expected = _candidate_identity_from_evidence(candidate_identity)
+    return bool(expected) and _source_cycle_identity_matches_expected(expected, job)
+
+
+def _is_source_cycle_download_stage(stage: str | None) -> bool:
+    return stage in {"download", "download_source_cycle", "download_gfs"}
+
+
+def _source_cycle_identity_matches_expected(
+    expected: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> bool:
+    expected_values = _legacy_identity_values(expected)
+    row_values = _legacy_identity_values(row)
+    source = row_values.get("source")
+    expected_source = expected_values.get("source")
+    if source not in (None, "") and expected_source not in (None, "") and source != expected_source:
+        return False
+    cycle_time = row_values.get("cycle_time")
+    expected_cycle_time = expected_values.get("cycle_time")
+    if cycle_time not in (None, "") and expected_cycle_time not in (None, "") and cycle_time != expected_cycle_time:
+        return False
+    cycle_id = str(row.get("cycle_id") or "")
+    expected_source_id = str(expected.get("source_id") or expected.get("source") or "").lower()
+    expected_cycle_text = str(expected.get("cycle_time") or expected.get("cycle_time_utc") or "")
+    if cycle_id and expected_source_id and expected_cycle_text:
+        try:
+            expected_cycle_id = cycle_id_for(
+                expected_source_id,
+                datetime.fromisoformat(expected_cycle_text.replace("Z", "+00:00")),
+            )
+        except ValueError:
+            expected_cycle_id = ""
+        if expected_cycle_id and cycle_id.lower() != expected_cycle_id.lower():
+            return False
+    run_id = str(row.get("run_id") or "")
+    if run_id:
+        if _stage_cycle_run_matches_candidate(run_id, expected_values):
+            return True
+        if expected_source_id and expected_cycle_text:
+            try:
+                compact_cycle = format_cycle_time(expected_cycle_text)
+            except (TypeError, ValueError):
+                compact_cycle = ""
+            cycle_run_id = f"cycle_{expected_source_id}_{compact_cycle}" if compact_cycle else ""
+            if cycle_run_id and run_id != cycle_run_id:
+                return False
+    return any(row_values.get(key) not in (None, "") for key in ("source", "cycle_time")) or bool(cycle_id or run_id)
 
 
 def _candidate_scoped_shared_cycle_events(
@@ -4657,6 +4904,8 @@ def _terminal_hydro_truth_supersedes_failure(state: Mapping[str, Any]) -> bool:
 def _latest_failure_truth_timestamp(state: Mapping[str, Any]) -> datetime | None:
     timestamps: list[datetime] = []
     for job in _state_jobs(state):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if status not in FAILED_PIPELINE_STATUSES and not job.get("error_code"):
             continue
@@ -4770,6 +5019,12 @@ def _candidate_state_evidence(candidate: SchedulerCandidate, state: Mapping[str,
             "retry_limit": _state_retry_limit(state),
         },
     }
+    repaired_stage = state.get("repaired_stage_evidence")
+    if isinstance(repaired_stage, Mapping):
+        evidence["repaired_stage_evidence"] = _evidence_safe(dict(repaired_stage))
+    source_cycle_repair = state.get("source_cycle_repair_evidence")
+    if isinstance(source_cycle_repair, Mapping):
+        evidence["source_cycle_repair_evidence"] = _evidence_safe(dict(source_cycle_repair))
     overflow = _state_overflow_evidence(state)
     if overflow:
         evidence["state_bounds"] = overflow
@@ -5299,6 +5554,12 @@ def _job_state_evidence(job: Mapping[str, Any]) -> dict[str, Any]:
             "error_code",
             "error_message",
             "log_uri",
+            "repair_status",
+            "superseded_by_job_id",
+            "repaired_by_job_id",
+            "repairs_job_id",
+            "repairs_job_ids",
+            "active_blocker",
         )
         if key in job and job.get(key) is not None
     }
@@ -5355,6 +5616,8 @@ def _state_active_jobs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _manual_retry_requested(state: Mapping[str, Any]) -> bool:
     marker = _latest_manual_retry_marker(state)
     if marker is None:
+        return False
+    if _manual_retry_marker_repairs_historical_failure(state, marker):
         return False
     blocker = _latest_manual_retry_blocker(state)
     if blocker is None:
@@ -5446,6 +5709,33 @@ def _latest_manual_retry_marker(state: Mapping[str, Any]) -> dict[str, Any] | No
     return max(markers, key=_state_truth_sort_key)
 
 
+def _manual_retry_marker_repairs_historical_failure(
+    state: Mapping[str, Any],
+    marker: Mapping[str, Any],
+) -> bool:
+    previous_job_id = marker.get("previous_job_id")
+    if previous_job_id in (None, ""):
+        return False
+    previous_job_id_text = str(previous_job_id)
+    for job in _state_jobs(state):
+        if str(job.get("job_id") or job.get("pipeline_job_id") or "") == previous_job_id_text:
+            if not _pipeline_job_is_repaired_stage_evidence(job):
+                return False
+            marker_entity_id = marker.get("entity_id")
+            repairing_retry_job_id = job.get("repaired_by_job_id") or job.get("superseded_by_job_id")
+            return marker_entity_id in (None, "") or repairing_retry_job_id in (None, "") or str(
+                marker_entity_id
+            ) == str(repairing_retry_job_id)
+    repaired_stage = state.get("repaired_stage_evidence")
+    if not isinstance(repaired_stage, Mapping):
+        return False
+    if str(repaired_stage.get("original_failed_job_id") or "") != previous_job_id_text:
+        return False
+    marker_entity_id = marker.get("entity_id")
+    repairing_retry_job_id = repaired_stage.get("repairing_retry_job_id")
+    return marker_entity_id in (None, "") or str(marker_entity_id) == str(repairing_retry_job_id)
+
+
 def _latest_manual_retry_blocker(state: Mapping[str, Any]) -> dict[str, Any] | None:
     blockers: list[dict[str, Any]] = []
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
@@ -5476,6 +5766,8 @@ def _latest_manual_retry_blocker(state: Mapping[str, Any]) -> dict[str, Any] | N
             )
         )
     for order, job in enumerate(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if not _manual_retry_blocking_pipeline_status(status):
             continue
@@ -5714,6 +6006,8 @@ def _failed_stage(state: Mapping[str, Any]) -> str | None:
         if value not in (None, ""):
             return str(value)
     for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         status = str(job.get("status") or "")
         if status in FAILED_PIPELINE_STATUSES and job.get("stage") not in (None, ""):
             return str(job["stage"])
@@ -5788,6 +6082,8 @@ def _state_error_code(state: Mapping[str, Any]) -> str | None:
             if value not in (None, ""):
                 return str(value)
     for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         value = job.get("error_code") or job.get("reason_code")
         if value not in (None, ""):
             return str(value)
@@ -5812,6 +6108,8 @@ def _state_error_message(state: Mapping[str, Any]) -> str | None:
             if value not in (None, ""):
                 return str(_evidence_safe(str(value)))
     for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         value = job.get("error_message")
         if value not in (None, ""):
             return str(_evidence_safe(str(value)))
@@ -5851,6 +6149,8 @@ def _state_task_identity(state: Mapping[str, Any]) -> dict[str, Any]:
                 identity["slurm_job_id"] = task.get("slurm_job_id")
             return _evidence_safe(identity)
     for job in reversed(_state_jobs(state)):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         for key in ("array_task_id", "stage", "job_id", "slurm_job_id"):
             value = job.get(key)
             if value not in (None, ""):
@@ -6088,7 +6388,7 @@ def _missing_raw_manifest_repair_evidence(
     if not _state_has_failure_signal(state):
         return None
     failed_stage = str(_failed_stage(state) or "")
-    if failed_stage in {"", "download"}:
+    if failed_stage == "" or _is_source_cycle_download_stage(failed_stage):
         return None
     manifest_uri = _forecast_cycle_manifest_uri(candidate, state)
     if manifest_uri in (None, ""):
@@ -6144,7 +6444,7 @@ def _repaired_raw_manifest_downstream_retry_evidence(
     if not _state_has_failure_signal(state):
         return None
     failed_stage = str(_failed_stage(state) or "")
-    if failed_stage in {"", "download"}:
+    if failed_stage == "" or _is_source_cycle_download_stage(failed_stage):
         return None
     manifest_uri = _forecast_cycle_manifest_uri(candidate, state)
     if manifest_uri in (None, ""):
@@ -6232,7 +6532,7 @@ def _latest_successful_download_stage(state: Mapping[str, Any]) -> Mapping[str, 
     for job in _state_jobs(state):
         stage = str(job.get("stage") or job.get("job_type") or "")
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
-        if stage in {"download", "download_source_cycle"} and status in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+        if _is_source_cycle_download_stage(stage) and status in TERMINAL_PIPELINE_SUCCESS_STATUSES:
             matches.append(job)
     if not matches:
         return None
@@ -6243,6 +6543,8 @@ def _latest_failed_job_for_stage(state: Mapping[str, Any], stage_name: str) -> M
     normalized_stage = _canonical_downstream_stage(stage_name) or stage_name
     matches: list[Mapping[str, Any]] = []
     for job in _state_jobs(state):
+        if _pipeline_job_is_repaired_stage_evidence(job):
+            continue
         stage = str(job.get("stage") or job.get("job_type") or "")
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
         if stage in {normalized_stage, stage_name} and status in FAILED_PIPELINE_STATUSES:
@@ -6340,6 +6642,8 @@ def _permanent_failure_evidence(
 
 
 def _state_has_failure_signal(state: Mapping[str, Any]) -> bool:
+    if _state_has_only_repaired_pipeline_failure_signal(state):
+        return False
     pipeline_status = _state_status(state, "pipeline_status", "job_status", "status")
     hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
     if pipeline_status in FAILED_PIPELINE_STATUSES or hydro_status in {"failed", "permanently_failed"}:
@@ -6356,6 +6660,61 @@ def _state_has_failure_signal(state: Mapping[str, Any]) -> bool:
     if _failed_stage(state) is not None and _state_error_code(state) not in (None, ""):
         return True
     return False
+
+
+def _pipeline_job_is_repaired_stage_evidence(job: Mapping[str, Any]) -> bool:
+    return job.get("repair_status") == "repaired" or job.get("active_blocker") is False
+
+
+def _state_has_only_repaired_pipeline_failure_signal(state: Mapping[str, Any]) -> bool:
+    jobs = _state_jobs(state)
+    if not jobs:
+        return False
+    active_failure_jobs = [
+        job
+        for job in jobs
+        if not _pipeline_job_is_repaired_stage_evidence(job)
+        and (
+            str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+            in FAILED_PIPELINE_STATUSES
+            or job.get("error_code") not in (None, "")
+            or job.get("reason_code") not in (None, "")
+        )
+    ]
+    if active_failure_jobs:
+        return False
+    active_failure_events = [
+        event
+        for event in _state_events(state)
+        if not _event_is_manual_retry_marker(event) and _event_has_failure_signal(event)
+    ]
+    if active_failure_events:
+        return False
+    repaired_failure_jobs = [
+        job
+        for job in jobs
+        if _pipeline_job_is_repaired_stage_evidence(job)
+        and (
+            str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
+            in FAILED_PIPELINE_STATUSES
+            or job.get("error_code") not in (None, "")
+            or job.get("reason_code") not in (None, "")
+        )
+    ]
+    return bool(repaired_failure_jobs)
+
+
+def _event_has_failure_signal(event: Mapping[str, Any]) -> bool:
+    details = event.get("details")
+    details_mapping = details if isinstance(details, Mapping) else {}
+    status = str(
+        event.get("status_to")
+        or details_mapping.get("status_to")
+        or details_mapping.get("status")
+        or details_mapping.get("state")
+        or ""
+    )
+    return status in FAILED_PIPELINE_STATUSES or details_mapping.get("error_code") not in (None, "")
 
 
 def _cancelled_state_evidence(
