@@ -64,8 +64,8 @@
 
 ## 5. Verification
 
-- [x] 5.1 Run `uv run --no-sync pytest -q tests/test_migrations.py tests/test_forecast_api.py tests/test_flood_alerts_api.py`.
-- [x] 5.2 Run `uv run --no-sync ruff check packages/common apps/api services workers tests/test_migrations.py tests/test_forecast_api.py tests/test_flood_alerts_api.py`.
+- [x] 5.1 Run `uv run --no-sync pytest -q tests/test_migrations.py tests/test_forecast_api.py tests/test_flood_alerts_api.py tests/test_return_period.py`.
+- [x] 5.2 Run `uv run --no-sync ruff check packages/common apps/api services workers tests/test_migrations.py tests/test_forecast_api.py tests/test_flood_alerts_api.py tests/test_return_period.py`.
 - [x] 5.3 Run `openspec validate perf-return-period-quality-materialization --strict --no-interactive`.
 - [x] 5.4 Capture node-22 migration/backfill receipt, quality row consistency,
   and EXPLAIN ANALYZE or equivalent optimized query-plan proof if live node-22
@@ -77,7 +77,7 @@
   not an acceptance criterion for this PR when local access is unavailable.
 - [ ] 5.6 Continue review-fix loops until the latest comprehensive review and
   final review report no P0/P1 findings.
-- [ ] 5.7 Record the backfill procedure and live-receipt follow-up status in PR
+- [x] 5.7 Record the backfill procedure and live-receipt follow-up status in PR
   evidence/work summary so operators know what remains environment-owned.
 
 ## 6. Non-Goals

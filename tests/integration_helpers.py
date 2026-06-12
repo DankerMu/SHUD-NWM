@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,7 +11,9 @@ import psycopg2
 from psycopg2.extras import Json, RealDictCursor, execute_values
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
+from packages.common.flood_quality import backfill_run_product_quality
 from packages.common.migrate import (
     MIGRATIONS_DIR,
     apply_migration,
@@ -50,6 +52,16 @@ def apply_migrations_from_zero(database_url: str) -> None:
 
 def sqlalchemy_engine(database_url: str) -> Engine:
     return create_engine(database_url, future=True)
+
+
+def backfill_integration_run_product_quality(database_url: str, run_ids: Sequence[str]) -> None:
+    engine = sqlalchemy_engine(database_url)
+    try:
+        with Session(engine) as session:
+            backfill_run_product_quality(session, run_ids)
+            session.commit()
+    finally:
+        engine.dispose()
 
 
 @contextmanager
@@ -527,6 +539,7 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                     ),
                 ],
             )
+    backfill_integration_run_product_quality(database_url, [FORECAST_RUN_ID])
 
 
 def _clear_issue_126_rows(connection: Any) -> None:
@@ -534,6 +547,10 @@ def _clear_issue_126_rows(connection: Any) -> None:
         cursor.execute("DELETE FROM ops.pipeline_job WHERE job_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM ops.pipeline_event WHERE entity_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
         cursor.execute("DELETE FROM ops.qc_result WHERE target_id LIKE %s", (f"{ISSUE_126_PREFIX}%",))
+        cursor.execute(
+            "DELETE FROM flood.run_product_quality WHERE run_id IN (%s, %s)",
+            (FORECAST_RUN_ID, HINDCAST_RUN_ID),
+        )
         cursor.execute(
             "DELETE FROM flood.return_period_result WHERE run_id IN (%s, %s)",
             (FORECAST_RUN_ID, HINDCAST_RUN_ID),

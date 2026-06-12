@@ -282,6 +282,54 @@ def test_argparse_cli_dry_run(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Ca
         assert output["skipped"] == 12
 
 
+def test_argparse_backfill_run_quality_dispatches_multiple_run_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[list[str] | None] = []
+
+    def fake_backfill(run_ids: list[str] | None = None) -> dict[str, object]:
+        calls.append(run_ids)
+        return {"refreshed_runs": 2, "run_ids": list(run_ids or [])}
+
+    monkeypatch.setattr(flood_cli, "_backfill_run_quality", fake_backfill)
+
+    exit_code = flood_cli._argparse_main(
+        ["backfill-run-quality", "--run-id", "forecast_run_a", "--run-id", "forecast_run_b"]
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert calls == [["forecast_run_a", "forecast_run_b"]]
+    assert output == {"refreshed_runs": 2, "run_ids": ["forecast_run_a", "forecast_run_b"]}
+
+
+def test_click_backfill_run_quality_dispatches_multiple_run_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pytest.importorskip("click")
+    calls: list[tuple[str, ...] | None] = []
+
+    def fake_backfill(run_ids: tuple[str, ...] | None = None) -> dict[str, object]:
+        calls.append(run_ids)
+        return {"refreshed_runs": 2, "run_ids": list(run_ids or [])}
+
+    monkeypatch.setattr(flood_cli, "_backfill_run_quality", fake_backfill)
+
+    try:
+        exit_code = flood_cli._click_main(
+            ["backfill-run-quality", "--run-id", "forecast_run_a", "--run-id", "forecast_run_b"]
+        )
+    except SystemExit as error:
+        exit_code = error.code if isinstance(error.code, int) else 1
+
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert calls == [("forecast_run_a", "forecast_run_b")]
+    assert output == {"refreshed_runs": 2, "run_ids": ["forecast_run_a", "forecast_run_b"]}
+
+
 def test_argparse_cli_supersede_without_policy_evidence_rejects_and_does_not_mutate(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
