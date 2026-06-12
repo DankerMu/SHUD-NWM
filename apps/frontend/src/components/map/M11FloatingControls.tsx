@@ -1,10 +1,10 @@
 import type { ReactNode } from 'react'
-import { ArrowLeft, CloudRain, Droplets, Layers, MapPin, Wrench } from 'lucide-react'
+import { ArrowLeft, CloudRain, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import { cn } from '@/lib/cn'
 import { getM11LayerLegend, type LayerLegendEntry, type LayerState } from '@/lib/m11/overviewDataContracts'
-import type { M11Layer, M11QueryPatch } from '@/lib/m11/queryState'
+import type { M11Basemap, M11Layer, M11QueryPatch } from '@/lib/m11/queryState'
 
 // 玻璃质感容器：半透明 + backdrop-blur + 细描边 + 圆角 + 阴影。统一浮层外观。
 const GLASS_PANEL =
@@ -75,6 +75,55 @@ export function M11FloatingLayerSwitcher({
   )
 }
 
+/** 浮层底图切换可选项：天地图 地形 / 卫星 / 矢量。 */
+export const m11FloatingBasemapOptions: Array<{ value: M11Basemap; label: string; icon: typeof MapIcon }> = [
+  { value: 'vector', label: '矢量', icon: MapIcon },
+  { value: 'satellite', label: '卫星', icon: Satellite },
+  { value: 'terrain', label: '地形', icon: Mountain },
+]
+
+/**
+ * 浮层底图切换器（玻璃分段控件，浮在地图右上角缩放控件左侧）。
+ * 写 queryState.basemap（URL 可分享）；三种底图均为天地图 WMTS（底图 + 中文注记）。
+ */
+export function M11FloatingBasemapSwitcher({
+  basemap,
+  onQueryChange,
+}: {
+  basemap: M11Basemap
+  onQueryChange?: (patch: M11QueryPatch) => void
+}) {
+  return (
+    <div
+      className={cn('absolute right-16 top-4 z-[120] flex items-center gap-0.5 p-1', GLASS_PANEL)}
+      role="group"
+      aria-label="底图切换"
+      data-testid="m11-floating-basemap-switcher"
+    >
+      {m11FloatingBasemapOptions.map((option) => {
+        const Icon = option.icon
+        const selected = basemap === option.value
+        return (
+          <button
+            key={option.value}
+            type="button"
+            className={cn(
+              'flex h-8 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors',
+              selected ? 'bg-primary-600 text-white shadow-sm' : 'text-neutral-700 hover:bg-white/70',
+            )}
+            aria-pressed={selected}
+            aria-label={`${option.label}底图`}
+            onClick={() => onQueryChange?.({ basemap: option.value })}
+          >
+            <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+            {option.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 /** 浮层图例当前 active layer 的图例条目（复用 layers API 图例，回退到合同图例）。 */
 export function resolveM11FloatingLegend(layer: M11Layer, layers: LayerState[]): LayerLegendEntry[] {
   const activeLayer = layers.find((entry) => entry.layerId === layer)
@@ -89,13 +138,6 @@ function legendTitle(layer: M11Layer) {
   if (layer === 'met-stations') return '气象代站图例'
   if (layer === 'met-raster') return '气象栅格图例'
   return '径流量图例'
-}
-
-function formatLegendRange(min: number | null | undefined, max: number | null | undefined) {
-  if ((min === undefined || min === null) && (max === undefined || max === null)) return ''
-  if (min === undefined || min === null) return `<${max}`
-  if (max === undefined || max === null) return `>=${min}`
-  return `${min}-${max}`
 }
 
 /**
@@ -124,12 +166,10 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
       {entries.length > 0 ? (
         <div className="space-y-1" data-testid="m11-floating-legend-entries">
           {entries.map((entry) => (
-            <div key={`${entry.label}-${entry.color}`} className="flex items-center justify-between gap-3 text-xs text-neutral-700">
-              <span className="flex min-w-0 items-center gap-2">
-                <span className="h-3 w-7 rounded-sm" style={{ backgroundColor: entry.color }} aria-hidden="true" />
-                <span className="truncate">{entry.label}</span>
-              </span>
-              <span className="font-mono text-neutral-500">{formatLegendRange(entry.min, entry.max)}</span>
+            // label 已自带数值区间（如「500-1000 m3/s」），不再重复渲染右侧数字列。
+            <div key={`${entry.label}-${entry.color}`} className="flex items-center gap-2 text-xs text-neutral-700">
+              <span className="h-3 w-7 shrink-0 rounded-sm" style={{ backgroundColor: entry.color }} aria-hidden="true" />
+              <span className="truncate">{entry.label}</span>
             </div>
           ))}
         </div>

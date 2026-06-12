@@ -14,7 +14,9 @@ import {
   type M11QueryPatch,
   type M11QueryState,
 } from '@/lib/m11/queryState'
+import { staticBasinBoundaryIndex, withStaticBasinBoundaries } from '@/lib/m11/staticBasinFallback'
 import { resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
+import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { basinSnapshotMatchesQuery, basinSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
 
@@ -96,13 +98,22 @@ export function useBasinDetailMode({
   const basinDisplayName = detail?.displayName || basinId
   const selectedSegment = currentBasinData?.selectedSegment
   const selectedSegmentId = selectedSegment?.riverSegmentId ?? null
+  // 服务端 bbox/boundary 缺失（mesh 碎片被预算拒绝）时回落静态 domain 轮廓，恢复相机 fit + 边界。
+  const nationalGeo = useNationalBasinGeo(true)
+  const staticFallbackBbox = useMemo(
+    () => staticBasinBoundaryIndex(nationalGeo.domain).get(basinId)?.bbox ?? null,
+    [basinId, nationalGeo.domain],
+  )
   const mapFitTo = useMemo(
-    () => bboxToMapFit(detail?.bbox ?? (detail && !basinNotFoundReason ? BASIN_FALLBACK_EXTENT : null)),
-    [basinNotFoundReason, detail],
+    () => bboxToMapFit(detail?.bbox ?? staticFallbackBbox ?? (detail && !basinNotFoundReason ? BASIN_FALLBACK_EXTENT : null)),
+    [basinNotFoundReason, detail, staticFallbackBbox],
   )
   const basinMapContext = useMemo(
-    () => (detail && !basinNotFoundReason ? [basinDetailToOverviewBasin(detail)] : []),
-    [basinNotFoundReason, detail],
+    () =>
+      detail && !basinNotFoundReason
+        ? withStaticBasinBoundaries([basinDetailToOverviewBasin(detail)], nationalGeo.domain)
+        : [],
+    [basinNotFoundReason, detail, nationalGeo.domain],
   )
 
   const resolvedSource = concreteSource(sourceSelection?.resolvedSource)
@@ -221,9 +232,10 @@ export function useBasinDetailMode({
   return {
     mapLabel: '流域钻取地图',
     mapTitle: `${basinDisplayName} 流域钻取`,
-    mapMeta: detail?.bbox
-      ? '地图已按流域 bbox 定位；点击河段查看 q_down 流量预报，点击代站查看六要素 forcing。'
-      : '当前流域缺少 bbox，地图使用中国范围兜底视域；点击河段/代站查看详情弹窗。',
+    mapMeta:
+      detail?.bbox || staticFallbackBbox
+        ? '地图已按流域 bbox 定位；点击河段查看 q_down 流量预报，点击代站查看六要素 forcing。'
+        : '当前流域缺少 bbox，地图使用中国范围兜底视域；点击河段/代站查看详情弹窗。',
     layers,
     sourceSelection,
     fitTo: mapFitTo,
