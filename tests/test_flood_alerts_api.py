@@ -2057,6 +2057,87 @@ def test_station_mvt_cache_identity_changes_when_station_inventory_changes(
     assert layer_source_version[1] == second_cache_row["source_version"]
 
 
+def test_station_mvt_delimiter_collision_pair_changes_source_version_and_cache_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf"
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                UPDATE met.met_station
+                SET active_flag = CASE WHEN station_id = 'station_001' THEN 1 ELSE 0 END,
+                    station_name = CASE WHEN station_id = 'station_001' THEN 'A|B' ELSE station_name END,
+                    station_role = CASE WHEN station_id = 'station_001' THEN 'C' ELSE station_role END
+                WHERE basin_version_id = 'basin_v1'
+                """
+            )
+        )
+        session.commit()
+        first_source_version = flood_alert_routes._station_source_version(session, "basin_v1")
+
+        monkeypatch.setattr(flood_alert_routes, "_mvt_live_postgis_enabled", lambda _session: True)
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_fetch_station_mvt_tile_bytes",
+            lambda *_args, **_kwargs: b"delimiter-collision-before",
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                first = client.get(path)
+                first_key = first.headers["x-tile-cache-key"]
+
+                session.execute(
+                    text(
+                        """
+                        UPDATE met.met_station
+                        SET station_name = 'A',
+                            station_role = 'B|C'
+                        WHERE station_id = 'station_001'
+                          AND basin_version_id = 'basin_v1'
+                        """
+                    )
+                )
+                session.commit()
+                second_source_version = flood_alert_routes._station_source_version(session, "basin_v1")
+                monkeypatch.setattr(
+                    flood_alert_routes,
+                    "_fetch_station_mvt_tile_bytes",
+                    lambda *_args, **_kwargs: b"delimiter-collision-after",
+                )
+                second = client.get(path)
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+        cache_rows = session.execute(
+            text(
+                """
+                SELECT cache_key, source_version, tile_data
+                FROM map.tile_cache
+                WHERE layer_id = 'met-stations'
+                ORDER BY created_at, cache_key
+                """
+            )
+        ).mappings().all()
+
+    assert first.status_code == 200
+    assert first.headers["x-tile-cache"] == "miss"
+    assert first.content == b"delimiter-collision-before"
+    assert second.status_code == 200
+    assert second.headers["x-tile-cache"] == "miss"
+    assert second.content == b"delimiter-collision-after"
+    assert first_source_version != second_source_version
+    assert first_source_version.endswith(":basin_v1:1:station_001:station_001")
+    assert second_source_version.endswith(":basin_v1:1:station_001:station_001")
+    assert second.headers["x-tile-cache-key"] != first_key
+    assert {row["source_version"] for row in cache_rows} == {first_source_version, second_source_version}
+    assert {bytes(row["tile_data"]) for row in cache_rows} == {
+        b"delimiter-collision-before",
+        b"delimiter-collision-after",
+    }
+
+
 def test_station_mvt_cache_identity_ignores_inactive_station_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2666,6 +2747,56 @@ def test_station_mvt_active_empty_source_identity_fails_before_cache_or_live_sql
     body = response.json()
     assert body["error"]["code"] == "MVT_SOURCE_IDENTITY_NOT_FOUND"
     assert body["error"]["details"] == {"layer_id": "met-stations", "basin_version_id": "basin_v1"}
+
+
+def test_station_mvt_source_inventory_over_limit_fails_before_cache_or_live_sql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        limit = 1
+        active_count = session.execute(
+            text(
+                """
+                SELECT COUNT(*) AS count
+                FROM met.met_station
+                WHERE basin_version_id = 'basin_v1'
+                  AND active_flag = 1
+                """
+            )
+        ).scalar_one()
+        assert active_count == limit + 1
+
+        monkeypatch.setattr(flood_alert_routes, "FLOOD_RETURN_PERIOD_MAP_MAX_LIMIT", limit)
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "read_cached_tile_response",
+            lambda *_args, **_kwargs: pytest.fail("cache lookup should not run for over-limit station source"),
+        )
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "_fetch_station_mvt_tile_bytes",
+            lambda *_args, **_kwargs: pytest.fail("live SQL should not run for over-limit station source"),
+        )
+        monkeypatch.setattr(
+            flood_alert_routes,
+            "postgis_tile_sql",
+            lambda *_args, **_kwargs: pytest.fail("tile SQL builder should not run for over-limit station source"),
+        )
+        app.dependency_overrides[flood_alert_routes.get_flood_alert_session] = lambda: session
+        try:
+            with TestClient(app) as client:
+                response = client.get("/api/v1/tiles/met-stations/basin_v1/6/12/24.pbf")
+        finally:
+            app.dependency_overrides.pop(flood_alert_routes.get_flood_alert_session, None)
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "MVT_TILE_BUDGET_EXCEEDED"
+    assert body["error"]["details"]["layer_id"] == "met-stations"
+    assert body["error"]["details"]["basin_version_id"] == "basin_v1"
+    assert body["error"]["details"]["limit_type"] == "source_inventory"
+    assert body["error"]["details"]["feature_count"] == active_count
+    assert body["error"]["details"]["max_features"] == limit
 
 
 @pytest.mark.parametrize(
