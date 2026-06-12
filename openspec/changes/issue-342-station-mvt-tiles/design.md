@@ -19,7 +19,7 @@ Goals:
 Non-goals:
 - No frontend or node-27 consumer migration in this PR.
 - No station clustering, styling, or MapLibre source changes.
-- No database schema migration or station seeding changes.
+- No station table schema migration or station seeding changes.
 - No promise that local sqlite tests produce real MVT bytes; PostGIS live tile retrieval remains a node-22/live-DB oracle.
 
 ## Decisions
@@ -40,6 +40,11 @@ Non-goals:
    - Use `ST_AsMVTGeom` on station point geometry.
    - Enforce feature budgets and required property checks before returning bytes.
    - Empty identity must return the same stable `MVT_LIVE_POSTGIS_UNAVAILABLE` family as existing canonical MVT routes.
+
+5. Add a forward active-station source index for production boundedness.
+   - Migration `000033_station_mvt_active_source_index.sql` adds `met_station_active_basin_station_idx` on `(basin_version_id, station_id) WHERE active_flag = true`.
+   - The index matches the station source-version preflight query shape: basin-scoped active rows ordered by `station_id` with `LIMIT max_features + 1`.
+   - This is an index-only forward migration; it does not change station table columns, seed data, or frontend behavior.
 
 ## Risks / Trade-offs
 
@@ -82,6 +87,7 @@ Surfaces:
 - Producers: `services/tiles/mvt.py::postgis_tile_sql`, station source-version helper.
 - Validators/preflight: `validate_identifier`, `validate_xyz`, `_require_live_postgis_mvt`.
 - Storage/cache/query: `map.tile_cache`, `map.tile_layer`, `met.met_station` reads.
+- Production boundedness: `met_station_active_basin_station_idx` on active basin/station source lookup.
 - Public routes/entrypoints: `/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf`.
 - Frontend/downstream consumers: OpenAPI/generated consumers only; frontend migration out of scope.
 - Failure paths/rollback/stale state: missing live gate, invalid XYZ, missing station identity/table, over-budget tile, invalid required property.

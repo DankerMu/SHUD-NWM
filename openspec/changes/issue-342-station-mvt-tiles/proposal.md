@@ -25,4 +25,5 @@ The current station display path relies on list/GeoJSON-style station payloads t
 - `apps/api/routes/flood_alerts.py` and runtime OpenAPI patching in `apps/api/main.py`
 - `openapi/nhms.v1.yaml`
 - API/MVT tests under `tests/`
-- No database migration, frontend implementation, or node-27 live validation in this PR.
+- Forward index migration `db/migrations/000033_station_mvt_active_source_index.sql` for bounded active station source identity.
+- No station table schema/seed changes, frontend implementation, or node-27 live validation in this PR.
