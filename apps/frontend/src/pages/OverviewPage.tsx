@@ -10,6 +10,7 @@ import {
 } from '@/components/map/M11MapLibreSurface'
 import {
   M11BackToOverviewButton,
+  M11FloatingBasemapSwitcher,
   M11FloatingLayerSwitcher,
   M11FloatingLegend,
   M11FloatingNotice,
@@ -28,6 +29,7 @@ import {
   parseM11QueryState,
   serializeM11QueryState,
 } from '@/lib/m11/queryState'
+import { withStaticBasinBoundaries } from '@/lib/m11/staticBasinFallback'
 import { resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
@@ -144,6 +146,7 @@ function M11FullscreenMap({
         onOverlayClick={onOverlayClick}
       />
       <M11FloatingLayerSwitcher layer={state.layer} onQueryChange={onQueryChange} />
+      <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
       <M11MapInfoCard title={infoTitle} meta={infoMeta} />
       <M11OpsLink visible={opsVisible} />
       {state.layer === 'met-raster' ? <M11MetRasterNotice /> : null}
@@ -248,7 +251,15 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     onQueryChange({ validTime: correctedValidTime })
   }, [onQueryChange, loading, metadataLayers, overviewMetadataMatchesQuery, state])
 
-  const basins = currentOverview?.basins ?? []
+  // 常态河网底图（basin shp 静态化）：全国总览常激活，秒显河流、不等慢的总览接口。
+  const nationalGeo = useNationalBasinGeo(true)
+
+  // DB 内 basin geom 是 mesh 碎片、被客户端预算拒绝时，用静态 domain 轮廓回填边界/bbox，
+  // 恢复边界渲染、点击钻取与相机 fit（honest：静态文件缺失则维持原状）。
+  const basins = useMemo(
+    () => withStaticBasinBoundaries(currentOverview?.basins ?? [], nationalGeo.domain),
+    [currentOverview?.basins, nationalGeo.domain],
+  )
   const summary = currentOverview?.summary
   const sourceSelection = summary?.sourceSelection ?? null
   const resolvedSource = sourceSelection?.resolvedSource ?? null
@@ -324,9 +335,6 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     resolvedSource: sourceSelection?.resolvedSource ?? null,
     cycle: state.cycle,
   })
-
-  // 常态河网底图（basin shp 静态化）：全国总览常激活，秒显河流、不等慢的总览接口。
-  const nationalGeo = useNationalBasinGeo(true)
 
   const boundaryCount = basins.filter((basin) => basin.boundary).length
   const emptyBasinReason =

@@ -9,6 +9,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from apps.api.auth import audit_record, evaluate_request_action
 from apps.api.errors import error_response, register_error_handlers
@@ -297,6 +298,9 @@ def create_app(env: Mapping[str, str] | None = None) -> FastAPI:
 
     register_error_handlers(api)
     api.middleware("http")(protected_mutation_auth_guard)
+    # 传输层 gzip：河段 GeoJSON / 静态河网 / 前端 dist 资产以 MB 计，明文传输是显示端
+    # 首屏与全河段加载慢的主因之一（实测 842KB GeoJSON gzip 后 ~150KB）。
+    api.add_middleware(GZipMiddleware, minimum_size=1024)
 
     api.include_router(models_router)
     api.include_router(forecast_router)

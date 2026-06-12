@@ -407,7 +407,11 @@ export function M11MapLibreSurface({
         <NavigationControl position="top-right" visualizePitch />
         <ScaleControl position="bottom-left" unit="metric" />
         {nationalRiverGeo && nationalRiverGeo.features.length > 0 ? (
-          <M11NationalRiverPrimitive collection={nationalRiverGeo} />
+          <M11NationalRiverPrimitive
+            collection={nationalRiverGeo}
+            dimmed={Boolean(renderableOverlay)}
+            satellite={state.basemap === 'satellite'}
+          />
         ) : null}
         {basinFeatureCollection.features.length > 0 ? <M11BasinPrimitive collection={basinFeatureCollection} /> : null}
         {basinRiverFeatureCollection.features.length > 0 ? (
@@ -768,39 +772,63 @@ const M11_OVERLAY_HIT_PAINT: LayerProps['paint'] = {
 }
 const M11_ROUND_LINE_LAYOUT = { 'line-cap': 'round', 'line-join': 'round' } as const
 
-// 常态河网底图 paint：蓝色按 Type(1..5,5=主干)深浅，线宽随 zoom×Type 增大，
+// 常态河网底图 paint：按 Type(1..5,5=主干)深浅分级，线宽随 zoom×Type 增大，
 // 透明度按「zoom 越大、Type 越低越晚出现」实现分级常显——低 zoom 只见主干，放大渐显支流。
-const M11_NATIONAL_RIVER_COLOR: LayerProps['paint'] = {
-  'line-color': ['interpolate', ['linear'], ['get', 'Type'], 1, '#9cc7e8', 3, '#3f88c5', 5, '#14487f'],
-  'line-width': [
-    'interpolate',
-    ['linear'],
-    ['zoom'],
-    3,
-    ['interpolate', ['linear'], ['get', 'Type'], 1, 0.3, 5, 1.4],
-    7,
-    ['interpolate', ['linear'], ['get', 'Type'], 1, 0.8, 5, 2.6],
-    12,
-    ['interpolate', ['linear'], ['get', 'Type'], 1, 1.6, 5, 4.5],
-  ],
-  'line-opacity': [
-    'interpolate',
-    ['linear'],
-    ['zoom'],
-    3,
-    ['match', ['get', 'Type'], 5, 0.9, 4, 0.55, 0],
-    5,
-    ['match', ['get', 'Type'], 5, 0.95, 4, 0.85, 3, 0.55, 0],
-    7,
-    ['match', ['get', 'Type'], 5, 1, 4, 0.95, 3, 0.85, 2, 0.6, 0],
-    9,
-    0.9,
-  ],
+// dimmed：彩色水文 MVT 叠加层激活时整体降透明，静态网退为衬底（同一河网两份几何
+// 叠画会出现毛边「双线」，视觉上只保留权威的彩色层）。
+// satellite：影像底图换浅青色系，深蓝在影像上不可读。
+export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; satellite: boolean }): LayerProps['paint'] {
+  const fade = dimmed ? 0.35 : 1
+  return {
+    'line-color': [
+      'interpolate',
+      ['linear'],
+      ['get', 'Type'],
+      1,
+      satellite ? '#9fe0ff' : '#9cc7e8',
+      3,
+      satellite ? '#5fc3f2' : '#3f88c5',
+      5,
+      satellite ? '#2196d8' : '#14487f',
+    ],
+    'line-width': [
+      'interpolate',
+      ['linear'],
+      ['zoom'],
+      3,
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.3, 5, 1.4],
+      7,
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.8, 5, 2.6],
+      12,
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 1.6, 5, 4.5],
+    ],
+    'line-opacity': [
+      'interpolate',
+      ['linear'],
+      ['zoom'],
+      3,
+      ['match', ['get', 'Type'], 5, 0.9 * fade, 4, 0.55 * fade, 0],
+      5,
+      ['match', ['get', 'Type'], 5, 0.95 * fade, 4, 0.85 * fade, 3, 0.55 * fade, 0],
+      7,
+      ['match', ['get', 'Type'], 5, 1 * fade, 4, 0.95 * fade, 3, 0.85 * fade, 2, 0.6 * fade, 0],
+      9,
+      0.9 * fade,
+    ],
+  }
 }
 
 // 全国静态河网（basin shp 溶出）作为常态底图：秒显、不依赖 discharge run/接口；
 // 流量 MVT 叠加在其上着色。honest：无文件 → 不渲染（OverviewPage 不传即可）。
-function M11NationalRiverPrimitive({ collection }: { collection: FeatureCollection }) {
+function M11NationalRiverPrimitive({
+  collection,
+  dimmed,
+  satellite,
+}: {
+  collection: FeatureCollection
+  dimmed: boolean
+  satellite: boolean
+}) {
   return (
     <Source id="m11-national-river-source" type="geojson" data={collection}>
       <Layer
@@ -808,7 +836,7 @@ function M11NationalRiverPrimitive({ collection }: { collection: FeatureCollecti
         type="line"
         source="m11-national-river-source"
         layout={M11_ROUND_LINE_LAYOUT}
-        paint={M11_NATIONAL_RIVER_COLOR}
+        paint={m11NationalRiverPaint({ dimmed, satellite })}
       />
     </Source>
   )
@@ -867,20 +895,34 @@ function M11BasinRiverPrimitive({
 }) {
   return (
     <Source id="m11-basin-river-source" type="geojson" data={collection.sourceData} promoteId="river_segment_id">
+      {/* 白色光晕衬底：彩色河网在任意底图上都有干净描边，弱化与底图水系的细微错位感。 */}
+      <Layer
+        id="m11-basin-river-casing"
+        type="line"
+        source="m11-basin-river-source"
+        layout={M11_ROUND_LINE_LAYOUT}
+        paint={{
+          'line-color': '#FFFFFF',
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 2.6, 9, 3.8, 12, 5.2],
+          'line-opacity': 0.8,
+        }}
+      />
       <Layer
         id="m11-basin-river-line"
         type="line"
         source="m11-basin-river-source"
+        layout={M11_ROUND_LINE_LAYOUT}
         paint={{
           'line-color': ['get', 'layer_color'],
-          'line-width': 2.6,
-          'line-opacity': 0.82,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 6, 1.6, 9, 2.6, 12, 3.6],
+          'line-opacity': 0.92,
         }}
       />
       <Layer
         id="m11-basin-river-hover-halo"
         type="line"
         source="m11-basin-river-source"
+        layout={M11_ROUND_LINE_LAYOUT}
         filter={segmentFilter(hoveredSegmentId)}
         paint={{
           'line-color': '#FFFFFF',
@@ -892,6 +934,7 @@ function M11BasinRiverPrimitive({
         id="m11-basin-river-selected-halo"
         type="line"
         source="m11-basin-river-source"
+        layout={M11_ROUND_LINE_LAYOUT}
         filter={segmentFilter(selectedSegmentId)}
         paint={{
           'line-color': '#FFFFFF',
@@ -903,6 +946,7 @@ function M11BasinRiverPrimitive({
         id="m11-basin-river-hover-line"
         type="line"
         source="m11-basin-river-source"
+        layout={M11_ROUND_LINE_LAYOUT}
         filter={segmentFilter(hoveredSegmentId)}
         paint={{
           'line-color': ['get', 'layer_color'],
@@ -914,6 +958,7 @@ function M11BasinRiverPrimitive({
         id="m11-basin-river-selected-line"
         type="line"
         source="m11-basin-river-source"
+        layout={M11_ROUND_LINE_LAYOUT}
         filter={segmentFilter(selectedSegmentId)}
         paint={{
           'line-color': '#F97316',

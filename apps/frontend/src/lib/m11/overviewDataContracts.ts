@@ -57,10 +57,12 @@ export const m11SelectedSegmentGeometryBudget = {
   maxSerializedBytes: 250_000,
 } as const
 
+// 按真实流域校准（qhh 全河网 1839 段 / ~77k 坐标 / ~1.8MB 序列化）：预算需容纳单流域
+// 全河段渲染，同时仍拦截病态超大 payload。MapLibre 对该量级 GeoJSON 渲染无压力。
 export const m11BasinRiverCollectionBudget = {
-  maxFeatures: 2_000,
-  maxCoordinates: 50_000,
-  maxSerializedBytes: 1_000_000,
+  maxFeatures: 5_000,
+  maxCoordinates: 250_000,
+  maxSerializedBytes: 6_000_000,
 } as const
 
 const m11RiverDischargeLegend: LayerLegendEntry[] = [

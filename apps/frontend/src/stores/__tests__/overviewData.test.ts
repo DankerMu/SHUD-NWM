@@ -3150,6 +3150,101 @@ describe('useOverviewDataStore', () => {
     })
   })
 
+  it('pages through every river-segment page (full network) even when no segment is requested', async () => {
+    const noSegmentQuery = { ...query, segmentId: null }
+    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } }
+      calls.push({ path, query: options?.params?.query })
+
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') {
+        const offset = Number(options?.params?.query?.offset ?? 0)
+        return success({
+          ...featureCollection,
+          total: 3,
+          feature_total: 3,
+          limit: 1,
+          offset,
+          features: [
+            {
+              ...featureCollection.features[0],
+              properties: {
+                ...featureCollection.features[0].properties,
+                river_segment_id: `full-river-${offset}`,
+                segment_id: `full-display-${offset}`,
+              },
+            },
+          ],
+        }) as never
+      }
+      if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', noSegmentQuery)
+
+    expect(
+      calls
+        .filter((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments')
+        .map((call) => call.query?.offset),
+    ).toEqual([0, 1, 2])
+    expect(snapshot.segments).toHaveLength(3)
+    expect(snapshot.detail.partialErrors).not.toEqual(expect.arrayContaining([expect.stringContaining('river segments')]))
+  })
+
+  it('halves the page limit and retries when the server rejects a page with the GeoJSON budget (413)', async () => {
+    const noSegmentQuery = { ...query, segmentId: null }
+    const budgetError = {
+      data: undefined,
+      error: {
+        status: 'error',
+        error: {
+          code: 'RIVER_SEGMENT_GEOJSON_BUDGET_EXCEEDED',
+          message: 'River segment GeoJSON payload budget exceeded; request fewer segments or a more specific river network.',
+        },
+      },
+    }
+    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+
+    vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
+      const path = String(args[0])
+      const options = args[1] as { params?: { query?: Record<string, unknown> } }
+      calls.push({ path, query: options?.params?.query })
+
+      if (path === '/api/v1/basins') return success([basin]) as never
+      if (path === '/api/v1/basins/{basin_id}/versions') return success([basinVersion]) as never
+      if (path === '/api/v1/runs') return success({ items: [run], total: 1, limit: 20, offset: 0 }) as never
+      if (path === '/api/v1/layers') return success([]) as never
+      if (path === '/api/v1/models') return success({ items: [model], total: 1, limit: 200, offset: 0 }) as never
+      if (path === '/api/v1/basin-versions/{basin_version_id}/river-segments') {
+        const limit = Number(options?.params?.query?.limit ?? 0)
+        if (limit > 250) return budgetError as never
+        return success({ ...featureCollection, total: 1, feature_total: 1, limit: 1, offset: 0 }) as never
+      }
+      if (path === '/api/v1/flood-alerts/ranking') return success(ranking) as never
+      if (path === '/api/v1/layers/{layer_id}/valid-times') return success([]) as never
+      throw new Error(`Unexpected GET ${path}`)
+    })
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', noSegmentQuery)
+
+    expect(
+      calls
+        .filter((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments')
+        .map((call) => call.query?.limit),
+    ).toEqual([500, 250])
+    expect(snapshot.segments).toHaveLength(1)
+    expect(snapshot.detail.partialErrors).not.toEqual(expect.arrayContaining([expect.stringContaining('river segments')]))
+  })
+
   it('scopes partial river collections and direct selected detail to the active run model network', async () => {
     const cappedQuery = { ...query, segmentId: 'selected-only-in-detail' }
     const siblingModel = {
@@ -3370,7 +3465,7 @@ describe('useOverviewDataStore', () => {
     expect(JSON.stringify(calls)).not.toContain('yangtze_rivnet_active')
   })
 
-  it('loads only the first river-segment page for default basin detail without a requested segment', async () => {
+  it('pages default basin detail up to the client cap and reports a partial network honestly', async () => {
     const defaultQuery = { ...query, segmentId: null }
     const largeFirstPage = {
       ...featureCollection,
@@ -3441,11 +3536,12 @@ describe('useOverviewDataStore', () => {
 
     const snapshot = await useOverviewDataStore.getState().loadBasinDetail('yangtze', defaultQuery)
 
+    // 全河段语义：无 segmentId 也持续翻页取齐河网，直到 MAX_PAGES 上限。
     expect(
       calls
         .filter((call) => call.path === '/api/v1/basin-versions/{basin_version_id}/river-segments')
         .map((call) => call.query?.offset),
-    ).toEqual([0])
+    ).toEqual([0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000])
     expect(snapshot.detail.segmentCount).toBe(20_000)
     expect(snapshot.segments[0].riverSegmentId).toBe('seg-123')
     expect(snapshot.selectedSegment).toMatchObject({
@@ -3455,7 +3551,11 @@ describe('useOverviewDataStore', () => {
       lineageStatus: 'available',
     })
     expect(snapshot.detail.partialErrors).not.toEqual(expect.arrayContaining([expect.stringContaining('river segments: Stopped')]))
-    expect(useOverviewDataStore.getState().basinError).toBeNull()
+    // cap 截断的河网要诚实标注 partial（partialErrors[0] 同步上浮为 basinError 通知）。
+    expect(snapshot.detail.partialErrors).toEqual(
+      expect.arrayContaining([expect.stringContaining('the map river network is partial')]),
+    )
+    expect(useOverviewDataStore.getState().basinError).toContain('the map river network is partial')
   })
 
   it('does not issue selected-segment detail requests for an invalid query segment when row zero exists', async () => {

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   M11BackToOverviewButton,
+  M11FloatingBasemapSwitcher,
   M11FloatingLayerSwitcher,
   M11FloatingLegend,
   M11OpsLink,
@@ -54,6 +55,28 @@ describe('M11FloatingLayerSwitcher', () => {
     expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-raster' })
     await user.click(screen.getByRole('button', { name: /气象代站/ }))
     expect(onQueryChange).toHaveBeenCalledWith({ layer: 'met-stations' })
+  })
+})
+
+describe('M11FloatingBasemapSwitcher', () => {
+  it('offers vector/satellite/terrain basemaps and dispatches basemap changes', async () => {
+    const onQueryChange = vi.fn()
+    const user = userEvent.setup()
+    render(<M11FloatingBasemapSwitcher basemap="vector" onQueryChange={onQueryChange} />)
+
+    expect(screen.getByTestId('m11-floating-basemap-switcher')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '矢量底图', pressed: true })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '卫星底图' }))
+    expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'satellite' })
+    await user.click(screen.getByRole('button', { name: '地形底图' }))
+    expect(onQueryChange).toHaveBeenCalledWith({ basemap: 'terrain' })
+  })
+
+  it('marks the active basemap as pressed', () => {
+    render(<M11FloatingBasemapSwitcher basemap="satellite" />)
+    expect(screen.getByRole('button', { name: '卫星底图', pressed: true })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '矢量底图', pressed: false })).toBeInTheDocument()
   })
 })
 
