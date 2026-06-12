@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Map, {
   Layer,
+  Marker,
   NavigationControl,
   Popup,
   ScaleControl,
@@ -368,7 +369,14 @@ export function M11MapLibreSurface({
   )
 
   const handleMapError = useCallback((event: { error?: { message?: string } }) => {
-    setMapSourceError(event.error?.message ?? '地图源加载失败，受影响图层暂不可用。')
+    const message = event.error?.message ?? ''
+    // 天地图栅格 style 无 glyphs：symbol 文本层（如代站 cluster 计数）的 style 校验错误
+    // 只影响该层文字渲染，不影响其它图层——降级为 console 警告，不弹错误横幅。
+    if (message.includes('glyphs')) {
+      console.warn('[m11-map] symbol text layer skipped (no glyphs in raster basemap style):', message)
+      return
+    }
+    setMapSourceError(message || '地图源加载失败，受影响图层暂不可用。')
   }, [])
 
   return (
@@ -413,7 +421,12 @@ export function M11MapLibreSurface({
             satellite={state.basemap === 'satellite'}
           />
         ) : null}
-        {basinFeatureCollection.features.length > 0 ? <M11BasinPrimitive collection={basinFeatureCollection} /> : null}
+        {basinFeatureCollection.features.length > 0 ? (
+          <>
+            <M11BasinPrimitive collection={basinFeatureCollection} />
+            <M11BasinLabelMarkers collection={basinFeatureCollection} />
+          </>
+        ) : null}
         {basinRiverFeatureCollection.features.length > 0 ? (
           <M11BasinRiverPrimitive
             collection={basinRiverFeatureCollection}
@@ -864,24 +877,56 @@ function M11BasinPrimitive({ collection }: { collection: BasinFeatureCollection 
           'line-opacity': 0.72,
         }}
       />
-      <Layer
-        id="m11-basin-label"
-        type="symbol"
-        source="m11-basin-boundaries-source"
-        layout={{
-          'text-field': ['get', 'basin_name'],
-          'text-size': 12,
-          'text-anchor': 'center',
-          'text-allow-overlap': false,
-        }}
-        paint={{
-          'text-color': '#0A1929',
-          'text-halo-color': '#FFFFFF',
-          'text-halo-width': 1,
-        }}
-      />
     </Source>
   )
+}
+
+/**
+ * 流域名 DOM 标注（玻璃 chip）。不用 symbol+text-field：天地图栅格 style 无 glyphs
+ * 字体源，symbol 文本层永远无法渲染且会上抛 style 错误；DOM Marker 零字体依赖、
+ * 样式可控。pointer-events 关闭，避免挡住边界 fill 的点击钻取。
+ */
+function M11BasinLabelMarkers({ collection }: { collection: BasinFeatureCollection }) {
+  return (
+    <>
+      {collection.features.map((feature) => {
+        const anchor = multiPolygonAnchor(feature.geometry)
+        if (!anchor) return null
+        return (
+          <Marker key={feature.properties.basin_id} longitude={anchor[0]} latitude={anchor[1]} anchor="center">
+            <span
+              className="pointer-events-none select-none rounded-full border border-white/60 bg-white/80 px-2.5 py-0.5 text-xs font-semibold text-primary-700 shadow-sm backdrop-blur-sm"
+              data-testid="m11-basin-label"
+              data-basin-id={feature.properties.basin_id}
+            >
+              {feature.properties.basin_name}
+            </span>
+          </Marker>
+        )
+      })}
+    </>
+  )
+}
+
+// 最大外环的顶点平均作为标注锚点（凹形流域下比 bbox 中心更不容易飘出边界）。
+function multiPolygonAnchor(geometry: BasinFeature['geometry']): [number, number] | null {
+  let largestRing: number[][] | null = null
+  for (const polygon of geometry?.coordinates ?? []) {
+    const ring = (polygon as unknown as number[][][])[0]
+    if (Array.isArray(ring) && (!largestRing || ring.length > largestRing.length)) largestRing = ring
+  }
+  if (!largestRing || largestRing.length === 0) return null
+  let sumLon = 0
+  let sumLat = 0
+  let count = 0
+  for (const position of largestRing) {
+    const [lon, lat] = position
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue
+    sumLon += lon
+    sumLat += lat
+    count += 1
+  }
+  return count > 0 ? [sumLon / count, sumLat / count] : null
 }
 
 function M11BasinRiverPrimitive({
