@@ -24,6 +24,21 @@ ARCHIVE_COLLISION_LIMIT = 1000
 TEMP_LATEST_NAME = ".latest.json.tmp"
 MAX_ARCHIVED_LATEST_BYTES = 2_097_152
 COPY_CHUNK_BYTES = 1_048_576
+MAX_BASELINE_INVENTORY_FILES = 50_000
+V1_SOURCE_MODULE_ROOTS = frozenset(
+    {
+        "apps",
+        "config",
+        "db",
+        "infra",
+        "packages",
+        "schemas",
+        "scripts",
+        "services",
+        "workers",
+    }
+)
+V1_FRONTEND_EXCLUDED_PARTS = frozenset({"artifacts", "e2e"})
 
 STRUCTURAL_HOTSPOT_MODULES: dict[str, dict[str, object]] = {
     "services/orchestrator": {
@@ -425,6 +440,9 @@ def _baseline_file_inventory(root: Path) -> BaselineFileInventory:
     for relative_path in inventory_paths:
         if _baseline_path_is_file_count_skipped(relative_path):
             continue
+        if _baseline_path_is_v1_source_counted(relative_path):
+            module = audit_repo_entropy._module_for_relative(relative_path)  # noqa: SLF001
+            module_file_counts[module] = module_file_counts.get(module, 0) + 1
         path = root / relative_path
         if audit_repo_entropy._repo_text_rejection_reason(root, path) is not None:  # noqa: SLF001
             continue
@@ -437,8 +455,6 @@ def _baseline_file_inventory(root: Path) -> BaselineFileInventory:
             continue
 
         source_count += 1
-        module = audit_repo_entropy._module_for_relative(relative_path)  # noqa: SLF001
-        module_file_counts[module] = module_file_counts.get(module, 0) + 1
 
     return BaselineFileInventory(
         relative_paths=tuple(inventory_paths),
@@ -453,9 +469,9 @@ def _baseline_file_inventory(root: Path) -> BaselineFileInventory:
 def _baseline_inventory_relative_paths(root: Path) -> list[str]:
     tracked_paths = audit_repo_entropy._git_tracked_paths(root)  # noqa: SLF001
     if tracked_paths:
-        return _filter_baseline_inventory_paths(tracked_paths)
+        return _bounded_baseline_inventory_paths(_filter_baseline_inventory_paths(tracked_paths))
 
-    return _fallback_inventory_relative_paths(root)
+    return _bounded_baseline_inventory_paths(_fallback_inventory_relative_paths(root))
 
 
 def _fallback_inventory_relative_paths(root: Path) -> list[str]:
@@ -493,6 +509,15 @@ def _filter_baseline_inventory_paths(relative_paths: object) -> list[str]:
     return sorted(filtered)
 
 
+def _bounded_baseline_inventory_paths(relative_paths: list[str]) -> list[str]:
+    if len(relative_paths) > MAX_BASELINE_INVENTORY_FILES:
+        raise BaselineWriteError(
+            f"baseline inventory file count {len(relative_paths)} exceeds limit "
+            f"{MAX_BASELINE_INVENTORY_FILES}"
+        )
+    return relative_paths
+
+
 def _baseline_file_fingerprints(
     root: Path,
     relative_paths: list[str],
@@ -526,6 +551,21 @@ def _baseline_path_is_test(relative_path: str) -> bool:
         or ".test." in name
         or ".spec." in name
     )
+
+
+def _baseline_path_is_v1_source_counted(relative_path: str) -> bool:
+    path = Path(relative_path)
+    parts = path.parts
+    if not parts:
+        return False
+    if parts[0] not in V1_SOURCE_MODULE_ROOTS:
+        return False
+    if parts[:2] == ("apps", "frontend"):
+        if V1_FRONTEND_EXCLUDED_PARTS & set(parts):
+            return False
+        if "config" in path.name:
+            return False
+    return True
 
 
 def _baseline_high_spread_patterns(
@@ -753,15 +793,31 @@ def _git_output(root: Path, *args: str) -> str:
 
 def _redact_remote_url(remote: str) -> str:
     if "://" not in remote:
-        return remote
+        return _redact_scp_like_remote(remote)
     try:
         parts = urlsplit(remote)
     except ValueError:
-        return remote
-    if not parts.netloc or "@" not in parts.netloc:
-        return remote
-    host = parts.netloc.rsplit("@", 1)[1]
-    return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+        return "unknown"
+    if not parts.scheme or not parts.netloc:
+        return "unknown"
+    host = parts.netloc.rsplit("@", 1)[-1]
+    if not host:
+        return "unknown"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _redact_scp_like_remote(remote: str) -> str:
+    if any(separator in remote for separator in ("?", "#")):
+        return "unknown"
+    host_and_path = remote.rsplit("@", 1)[-1]
+    if ":" not in host_and_path:
+        return "unknown"
+    host, path = host_and_path.split(":", 1)
+    if not host or not path:
+        return "unknown"
+    if any(separator in host for separator in ("/", "\\")):
+        return "unknown"
+    return f"{host}:{path}"
 
 
 def _dict_value(data: dict[str, object], key: str) -> dict[str, object]:

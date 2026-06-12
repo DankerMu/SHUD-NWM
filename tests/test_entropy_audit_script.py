@@ -222,6 +222,23 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
 
     modules = baseline["modules"]
     assert isinstance(modules, dict)
+    inventory = write_entropy_baseline._baseline_file_inventory(REPO_ROOT)
+    emitted_module_file_count_sum = _emitted_module_file_count_sum(modules)
+    assert baseline["summary"]["total_source_files"] == inventory.total_source_files
+    assert baseline["summary"]["total_source_files"] > emitted_module_file_count_sum
+    assert modules["apps/frontend"]["file_count"] == 120
+    assert modules["services/production_closure"]["file_count"] == 10
+    assert modules["services/slurm_gateway"]["file_count"] == 11
+    for zero_count_module in (
+        "docs/governance",
+        "docs/runbooks",
+        "openapi",
+        "openspec/m21-qhh-hydro-met-ops-mvp",
+        "progress.md",
+    ):
+        assert zero_count_module in modules
+        assert modules[zero_count_module]["file_count"] == 0
+
     orchestrator = modules["services/orchestrator"]
     assert isinstance(orchestrator, dict)
     assert orchestrator["file_count"] == 12
@@ -284,26 +301,52 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     ]
 
 
-def test_entropy_baseline_writer_redacts_remote_url_userinfo(
+@pytest.mark.parametrize(
+    ("remote_url", "expected_repo", "blocked_fragments"),
+    (
+        (
+            "https://example.com/org/repo.git?access_token=ghp_secret-query",
+            "https://example.com/org/repo.git",
+            ("access_token", "ghp_secret-query", "?"),
+        ),
+        (
+            "https://example.com/org/repo.git#ghp_secret-fragment",
+            "https://example.com/org/repo.git",
+            ("ghp_secret-fragment", "#"),
+        ),
+        (
+            "https://user:ghp_secret-userinfo@example.com/org/repo.git?token=ghp_secret-query#ghp_secret-fragment",
+            "https://example.com/org/repo.git",
+            ("user:", "ghp_secret-userinfo", "token=", "ghp_secret-query", "ghp_secret-fragment", "?", "#"),
+        ),
+        (
+            "git@github.com:org/repo.git",
+            "github.com:org/repo.git",
+            ("git@",),
+        ),
+    ),
+)
+def test_entropy_baseline_writer_redacts_remote_url_secret_material(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    remote_url: str,
+    expected_repo: str,
+    blocked_fragments: tuple[str, ...],
 ) -> None:
     monkeypatch.setattr(
         write_entropy_baseline,
         "_git_output",
-        lambda _root, *args: (
-            "https://user:ghp_secret-token@example.com/org/repo.git"
-            if args == ("config", "--get", "remote.origin.url")
-            else "unknown"
-        ),
+        lambda _root, *args: remote_url if args == ("config", "--get", "remote.origin.url") else "unknown",
     )
 
     result = write_entropy_baseline.write_entropy_baseline(tmp_path)
     baseline = json.loads(result.baseline_path.read_text(encoding="utf-8"))
+    baseline_text = result.baseline_bytes.decode("utf-8")
 
-    assert baseline["repo"] == "https://example.com/org/repo.git"
-    assert "ghp_secret-token" not in result.baseline_bytes.decode("utf-8")
-    assert "user:" not in result.baseline_bytes.decode("utf-8")
+    assert baseline["repo"] == expected_repo
+    for fragment in blocked_fragments:
+        assert fragment not in baseline["repo"]
+        assert fragment not in baseline_text
 
 
 def test_entropy_baseline_writer_archives_previous_latest_bytes_exactly_once(
@@ -418,6 +461,34 @@ def test_entropy_baseline_writer_rejects_oversized_latest_before_temp_write(tmp_
 
     assert result.returncode == 1
     assert "existing latest baseline exceeds archive size limit" in result.stderr
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
+def test_entropy_baseline_writer_rejects_oversized_inventory_before_temp_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    tracked_paths = [
+        f"apps/api/generated_{index}.py"
+        for index in range(write_entropy_baseline.MAX_BASELINE_INVENTORY_FILES + 1)
+    ]
+
+    monkeypatch.setattr(
+        write_entropy_baseline.audit_repo_entropy,
+        "_git_tracked_paths",
+        lambda _root, pathspecs=(): tracked_paths,
+    )
+
+    with pytest.raises(write_entropy_baseline.BaselineWriteError, match="baseline inventory file count"):
+        write_entropy_baseline.write_entropy_baseline(tmp_path)
+
     assert latest.read_bytes() == previous_bytes
     assert _baseline_archive_files(baseline_dir) == []
     assert not (baseline_dir / ".latest.json.tmp").exists()
@@ -1758,6 +1829,14 @@ def _assert_required_baseline_fields(baseline: dict[str, object]) -> None:
         assert isinstance(row, dict)
         assert isinstance(row["file_count"], int)
         assert row["file_count"] >= 0
+
+
+def _emitted_module_file_count_sum(modules: dict[str, object]) -> int:
+    total = 0
+    for row in modules.values():
+        assert isinstance(row, dict)
+        total += int(row["file_count"])
+    return total
 
 
 def _baseline_archive_files(baseline_dir: Path) -> list[Path]:
