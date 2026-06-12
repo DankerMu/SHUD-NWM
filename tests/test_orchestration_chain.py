@@ -5022,6 +5022,59 @@ def test_psycopg_candidate_state_repaired_source_cycle_then_later_unrepaired_fai
     assert "repair_status" not in later_failed_job
 
 
+def test_psycopg_candidate_state_truncated_repair_window_keeps_latest_unrepaired_failure_active() -> None:
+    later_failed_job_id = "job_cycle_gfs_2026050100_download_retry_3"
+    state = _source_cycle_retry_state(
+        jobs=[
+            _failed_source_cycle_download_job(
+                job_id=later_failed_job_id,
+                slurm_job_id="6103",
+                status="permanently_failed",
+                retry_count=3,
+                error_code="LATER_UNREPAIRED",
+                error_message="later source cycle retry failed",
+                submitted_at="2026-05-01T01:50:00Z",
+                finished_at="2026-05-01T02:00:00Z",
+                updated_at="2026-05-01T02:00:00Z",
+            ),
+            _successful_source_cycle_retry_job(),
+            _failed_source_cycle_download_job(),
+            _failed_source_cycle_download_job(
+                job_id="job_cycle_gfs_2026050100_omitted_old_failure",
+                slurm_job_id="6099",
+                retry_count=0,
+                error_code="OMITTED_OLD_FAILURE",
+                submitted_at="2026-04-30T23:30:00Z",
+                finished_at="2026-04-30T23:40:00Z",
+                updated_at="2026-04-30T23:40:00Z",
+            ),
+        ],
+        events=[_manual_retry_event()],
+        job_limit=3,
+    )
+
+    assert state["state_truncated"] is True
+    assert state["pipeline_status"] == "permanently_failed"
+    assert state["failed_stage"] == "download"
+    assert state["error_code"] == "LATER_UNREPAIRED"
+    assert state["pipeline_truth_timestamp"] == "2026-05-01T02:00:00Z"
+    assert "source_cycle_repair_evidence" not in state
+    assert "repaired_stage_evidence" not in state
+    older_failed_job = next(
+        job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026050100_download"
+    )
+    successful_retry_job = next(
+        job for job in state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026050100_retry_active"
+    )
+    later_failed_job = next(job for job in state["pipeline_jobs"] if job["job_id"] == later_failed_job_id)
+    assert older_failed_job["repair_status"] == "repaired"
+    assert older_failed_job["repaired_by_job_id"] == "job_cycle_gfs_2026050100_retry_active"
+    assert older_failed_job["active_blocker"] is False
+    assert successful_retry_job["repair_status"] == "repair_succeeded"
+    assert successful_retry_job["repairs_job_id"] == "job_cycle_gfs_2026050100_download"
+    assert "repair_status" not in later_failed_job
+
+
 def test_psycopg_candidate_state_equal_truth_timestamp_selects_later_source_cycle_failure() -> None:
     older_failed_job_id = "job_cycle_gfs_2026050100_download_retry_2"
     later_failed_job_id = "job_cycle_gfs_2026050100_download_retry_3"
@@ -5061,11 +5114,20 @@ def test_psycopg_candidate_state_equal_truth_timestamp_selects_later_source_cycl
 def test_psycopg_candidate_state_truncated_source_cycle_repair_window_is_inconclusive() -> None:
     state = _source_cycle_retry_state(
         jobs=[
-            _failed_source_cycle_download_job(),
             _successful_source_cycle_retry_job(),
+            _failed_source_cycle_download_job(),
+            _failed_source_cycle_download_job(
+                job_id="job_cycle_gfs_2026050100_omitted_old_failure",
+                slurm_job_id="6099",
+                retry_count=0,
+                error_code="OMITTED_OLD_FAILURE",
+                submitted_at="2026-04-30T23:30:00Z",
+                finished_at="2026-04-30T23:40:00Z",
+                updated_at="2026-04-30T23:40:00Z",
+            ),
         ],
-        events=[_manual_retry_event()],
-        job_limit=1,
+        events=[],
+        job_limit=2,
         event_limit=10,
     )
 

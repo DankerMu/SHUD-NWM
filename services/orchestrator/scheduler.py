@@ -4549,11 +4549,14 @@ def _top_level_source_cycle_download_blocker(
     if pipeline_status not in FAILED_PIPELINE_STATUSES and state.get("error_code") in (None, ""):
         return False
     stage = str(state.get("failed_stage") or state.get("stage") or "")
-    if stage not in {"download", "download_source_cycle"}:
+    if not _is_source_cycle_download_stage(stage):
         return False
+    jobs = _state_jobs(state)
+    if not jobs:
+        return True
     return any(
         _global_source_cycle_download_blocker_job(job, {"candidate_identity": expected})
-        for job in _state_jobs(state)
+        for job in jobs
     )
 
 
@@ -4567,13 +4570,17 @@ def _global_source_cycle_download_blocker_job(
     if status not in FAILED_PIPELINE_STATUSES and job.get("error_code") in (None, ""):
         return False
     stage = str(job.get("stage") or job.get("job_type") or "")
-    if stage not in {"download", "download_source_cycle"}:
+    if not _is_source_cycle_download_stage(stage):
         return False
     candidate_identity = evidence.get("candidate_identity")
     if not isinstance(candidate_identity, Mapping):
         return False
     expected = _candidate_identity_from_evidence(candidate_identity)
     return bool(expected) and _source_cycle_identity_matches_expected(expected, job)
+
+
+def _is_source_cycle_download_stage(stage: str | None) -> bool:
+    return stage in {"download", "download_source_cycle", "download_gfs"}
 
 
 def _source_cycle_identity_matches_expected(
@@ -6381,7 +6388,7 @@ def _missing_raw_manifest_repair_evidence(
     if not _state_has_failure_signal(state):
         return None
     failed_stage = str(_failed_stage(state) or "")
-    if failed_stage in {"", "download"}:
+    if failed_stage == "" or _is_source_cycle_download_stage(failed_stage):
         return None
     manifest_uri = _forecast_cycle_manifest_uri(candidate, state)
     if manifest_uri in (None, ""):
@@ -6437,7 +6444,7 @@ def _repaired_raw_manifest_downstream_retry_evidence(
     if not _state_has_failure_signal(state):
         return None
     failed_stage = str(_failed_stage(state) or "")
-    if failed_stage in {"", "download"}:
+    if failed_stage == "" or _is_source_cycle_download_stage(failed_stage):
         return None
     manifest_uri = _forecast_cycle_manifest_uri(candidate, state)
     if manifest_uri in (None, ""):
@@ -6525,7 +6532,7 @@ def _latest_successful_download_stage(state: Mapping[str, Any]) -> Mapping[str, 
     for job in _state_jobs(state):
         stage = str(job.get("stage") or job.get("job_type") or "")
         status = str(job.get("status") or job.get("pipeline_status") or job.get("job_status") or "")
-        if stage in {"download", "download_source_cycle"} and status in TERMINAL_PIPELINE_SUCCESS_STATUSES:
+        if _is_source_cycle_download_stage(stage) and status in TERMINAL_PIPELINE_SUCCESS_STATUSES:
             matches.append(job)
     if not matches:
         return None

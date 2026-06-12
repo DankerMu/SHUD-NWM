@@ -2462,6 +2462,90 @@ def test_candidate_state_shared_source_cycle_failure_blocks_without_candidate_sc
     assert blocked["state_evidence"]["pipeline_jobs"][0]["job_id"] == "job_cycle_gfs_2026052106_download"
 
 
+def test_candidate_state_truncated_latest_source_cycle_failure_blocks_scheduler(
+    tmp_path: Path,
+) -> None:
+    state = {
+        "shared_cycle_aggregate": True,
+        "state_truncated": True,
+        "pipeline_jobs_total": 4,
+        "pipeline_status": "permanently_failed",
+        "failed_stage": "download",
+        "error_code": "LATER_UNREPAIRED",
+        "retry_count": 3,
+        "retry_limit": 3,
+        "pipeline_jobs": [
+            {
+                "job_id": "job_cycle_gfs_2026052106_download",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "permanently_failed",
+                "error_code": "NODE_FAILURE",
+                "retry_count": 1,
+                "updated_at": "2026-05-21T07:00:00Z",
+                "repair_status": "repaired",
+                "superseded_by_job_id": "job_cycle_gfs_2026052106_retry_active",
+                "repaired_by_job_id": "job_cycle_gfs_2026052106_retry_active",
+                "active_blocker": False,
+            },
+            {
+                "job_id": "job_cycle_gfs_2026052106_retry_active",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "succeeded",
+                "retry_count": 2,
+                "updated_at": "2026-05-21T06:35:00Z",
+                "repair_status": "repair_succeeded",
+                "repairs_job_id": "job_cycle_gfs_2026052106_download",
+            },
+            {
+                "job_id": "job_cycle_gfs_2026052106_retry_3",
+                "run_id": "cycle_gfs_2026052106",
+                "cycle_id": "gfs_2026052106",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "permanently_failed",
+                "error_code": "LATER_UNREPAIRED",
+                "retry_count": 3,
+                "updated_at": "2026-05-21T08:00:00Z",
+            },
+        ],
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    decision = scheduler_module._candidate_state_decision(_scheduler_candidate_fixture(), state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    blocked = result.evidence["blocked_candidates"][0]
+    candidate_state = blocked["state_evidence"]
+    assert blocked["reason"] == "permanent_failure_guard"
+    assert candidate_state["decision"] == "permanent_failure"
+    assert candidate_state["stage"] == "download"
+    assert candidate_state["failure"]["reason_code"] == "LATER_UNREPAIRED"
+    assert "source_cycle_repair_evidence" not in candidate_state
+    repaired_job = next(job for job in candidate_state["pipeline_jobs"] if job["repair_status"] == "repaired")
+    latest_failed_job = next(
+        job for job in candidate_state["pipeline_jobs"] if job["job_id"] == "job_cycle_gfs_2026052106_retry_3"
+    )
+    assert repaired_job["active_blocker"] is False
+    assert latest_failed_job["error_code"] == "LATER_UNREPAIRED"
+
+
 def test_candidate_state_inconclusive_truncated_evidence_is_preserved_on_proceed(
     tmp_path: Path,
 ) -> None:
@@ -2908,6 +2992,41 @@ def test_top_level_legacy_candidate_state_with_old_same_candidate_proof_can_skip
     assert result.evidence["counts"]["submitted_count"] == 0
     assert skipped["reason"] == "terminal_hydro_success"
     assert "candidate_state" not in validation["legacy_non_authoritative"]
+
+
+def test_top_level_download_gfs_source_cycle_blocker_without_row_does_not_submit(
+    tmp_path: Path,
+) -> None:
+    state = {
+        "shared_cycle_aggregate": True,
+        "source": "gfs",
+        "cycle_time": "2026-05-21T06:00:00Z",
+        "pipeline_status": "permanently_failed",
+        "failed_stage": "download_gfs",
+        "job_type": "download",
+        "error_code": "SLURM_JOB_FAILED",
+        "retry_count": 3,
+        "retry_limit": 3,
+    }
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"), dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository(state),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    decision = scheduler_module._candidate_state_decision(_scheduler_candidate_fixture(), state)
+
+    assert decision is not None
+    assert decision.action == "blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    blocked = result.evidence["blocked_candidates"][0]
+    assert blocked["reason"] == "permanent_failure_guard"
+    assert blocked["state_evidence"]["stage"] == "download_gfs"
 
 
 def test_scheduler_candidate_state_correlation_mismatch_still_blocks_when_expected_and_actual_present(

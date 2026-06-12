@@ -6251,14 +6251,23 @@ def _source_cycle_download_repair_state(
         payload["annotated_jobs"] = annotated_jobs
     if unrepaired_failed_jobs:
         if manifest_binding is not None and (jobs_truncated or events_truncated):
-            payload["repair_evidence_status"] = "inconclusive_truncated"
-            payload["repair_evidence_truncated"] = True
-            payload["repair_evidence_reason"] = "source_cycle_repair_window_truncated"
-            payload["repair_evidence_unresolved_failed_job_ids"] = [
-                str(job.get("job_id"))
-                for job in sorted(unrepaired_failed_jobs, key=_pipeline_job_truth_sort_key)
-                if job.get("job_id") not in (None, "")
-            ]
+            active_failure_job, inconclusive_failed_jobs = _source_cycle_truncated_failure_resolution(
+                unrepaired_failed_jobs,
+                source_cycle_jobs,
+                cycle_id=cycle_id,
+                cycle_run_id=cycle_run_id,
+            )
+            if inconclusive_failed_jobs:
+                payload["repair_evidence_status"] = "inconclusive_truncated"
+                payload["repair_evidence_truncated"] = True
+                payload["repair_evidence_reason"] = "source_cycle_repair_window_truncated"
+                payload["repair_evidence_unresolved_failed_job_ids"] = [
+                    str(job.get("job_id"))
+                    for job in sorted(inconclusive_failed_jobs, key=_pipeline_job_truth_sort_key)
+                    if job.get("job_id") not in (None, "")
+                ]
+            if active_failure_job is not None:
+                payload["active_failure_job"] = active_failure_job
             return payload
         payload["active_failure_job"] = max(unrepaired_failed_jobs, key=_pipeline_job_truth_sort_key)
         return payload
@@ -6280,6 +6289,62 @@ def _source_cycle_download_repair_state(
         cycle_id=cycle_id,
     )
     return payload
+
+
+def _source_cycle_truncated_failure_resolution(
+    unrepaired_failed_jobs: Sequence[Mapping[str, Any]],
+    source_cycle_jobs: Sequence[Mapping[str, Any]],
+    *,
+    cycle_id: str,
+    cycle_run_id: str,
+) -> tuple[dict[str, Any] | None, list[Mapping[str, Any]]]:
+    repair_candidate_by_failed_job_id = {
+        str(job.get("job_id"))
+        for job in unrepaired_failed_jobs
+        if job.get("job_id") not in (None, "")
+        and _source_cycle_failed_job_has_later_repair_candidate(
+            job,
+            source_cycle_jobs,
+            cycle_id=cycle_id,
+            cycle_run_id=cycle_run_id,
+        )
+    }
+    active_candidates = [
+        job
+        for job in unrepaired_failed_jobs
+        if str(job.get("job_id") or "") not in repair_candidate_by_failed_job_id
+    ]
+    active_failure_job = (
+        dict(max(active_candidates, key=_pipeline_job_truth_sort_key)) if active_candidates else None
+    )
+    active_failure_job_id = str(active_failure_job.get("job_id") or "") if active_failure_job else ""
+    inconclusive_failed_jobs = [
+        job
+        for job in unrepaired_failed_jobs
+        if str(job.get("job_id") or "") != active_failure_job_id
+        and str(job.get("job_id") or "") in repair_candidate_by_failed_job_id
+    ]
+    return active_failure_job, inconclusive_failed_jobs
+
+
+def _source_cycle_failed_job_has_later_repair_candidate(
+    failed_job: Mapping[str, Any],
+    source_cycle_jobs: Sequence[Mapping[str, Any]],
+    *,
+    cycle_id: str,
+    cycle_run_id: str,
+) -> bool:
+    for retry_job in source_cycle_jobs:
+        if str(retry_job.get("job_id") or "") == str(failed_job.get("job_id") or ""):
+            continue
+        if _source_cycle_retry_job_repairs_failure(
+            retry_job,
+            failed_job,
+            cycle_id=cycle_id,
+            cycle_run_id=cycle_run_id,
+        ):
+            return True
+    return False
 
 
 def _is_source_cycle_download_job(
