@@ -4958,6 +4958,50 @@ def test_find_existing_source_cycle_stage_prefers_successful_manual_retry_identi
     assert selected["job_id"] == "cycle_ifs_2026060912_retry_2"
 
 
+def test_find_existing_source_cycle_stage_prefers_retry_active_by_persisted_retry_count() -> None:
+    context = CycleOrchestrationContext(
+        source_id="IFS",
+        cycle_time=_dt("2026-06-09T12:00:00Z"),
+        cycle_id="ifs_2026060912",
+        run_id="cycle_ifs_2026060912",
+        all_basins=[],
+        active_basins=[],
+    )
+
+    selected = ForecastOrchestrator._find_existing_stage_job(
+        ForecastOrchestrator,
+        [
+            {
+                "job_id": "job_cycle_ifs_2026060912_download_retry_3",
+                "run_id": "cycle_ifs_2026060912",
+                "cycle_id": "ifs_2026060912",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "permanently_failed",
+                "retry_count": 3,
+                "finished_at": "2026-06-12T10:40:00Z",
+                "created_at": "2026-06-12T10:00:00Z",
+            },
+            {
+                "job_id": "cycle_ifs_2026060912_retry_active",
+                "run_id": "cycle_ifs_2026060912",
+                "cycle_id": "ifs_2026060912",
+                "job_type": "download_source_cycle",
+                "stage": "download",
+                "status": "succeeded",
+                "retry_count": 4,
+                "updated_at": "2026-06-12T11:10:41Z",
+                "created_at": "2026-06-12T10:51:55Z",
+            },
+        ],
+        M3_STAGES[0],
+        context=context,
+    )
+
+    assert selected is not None
+    assert selected["job_id"] == "cycle_ifs_2026060912_retry_active"
+
+
 def test_psycopg_candidate_state_unrelated_success_does_not_repair_source_cycle_failure() -> None:
     state = _source_cycle_retry_state(
         jobs=[
