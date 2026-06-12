@@ -42,7 +42,15 @@
 - [ ] clean → merge gate
 
 ## 候选/裁决账本
-（待评审）
+- C1 [rev432-complete, minor] `components/map/RiverLayer.tsx` 疑似级联漏删 →
+  **CONFIRMED（orchestrator 裁决）**：`git show 1710375^:.../MapView.tsx` 证实被删 MapView
+  L20-23 import + L387 渲染 RiverLayer，且 parent commit 中 RiverLayer 唯一引用者就是 MapView
+  （其余为同名 `m11BasinRiverLayerColor` 假阳性）。删 MapView 后 RiverLayer 零 live 引用 →
+  与 FloodReturnPeriodLayer 同类级联。**补删** `RiverLayer.tsx`（无独立测试、不 import 本地模块、
+  导出常量零外部消费者，级联终止）。复验：tsc 0 / test 510 / orphan 终扫零悬空。
+- C2 [rev432-tests] CLEAN — 仅删死机制，单图 flood-return-period 断言完整，覆盖无损。
+- C3 [rev432-scope] CLEAN — FloodReturnPeriodLayer 级联 JUSTIFIED，meteorology/MapView 删除无回归，无越权。
 
 ## 决策
-- D1: FloodReturnPeriodLayer 级联删除（超 #432 字面清单），显式 flag 待 review/用户确认；trivial revert 可回退。
+- D1: FloodReturnPeriodLayer 级联删除（超 #432 字面清单），显式 flag；3 评审一致 JUSTIFIED；trivial revert 可回退。
+- D2: RiverLayer.tsx 级联补删（review 发现，CONFIRMED）——MapView 唯一子组件，同属删除的旧地图栈。
