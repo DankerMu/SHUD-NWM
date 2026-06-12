@@ -180,14 +180,15 @@ export const m11MapStyleUrls: Record<M11Basemap, string> = {
   vector: 'm11://basemaps/vector',
 }
 
+// 天地图（Tianditu）WMTS 栅格底图。key 由 VITE_TIANDITU_KEY 覆盖，缺省用部署 key。
+// 每种底图叠「底图 + 中文注记」两层；t0..t7 子域由 MapLibre 在 tiles 数组间轮询负载均衡。
+const TIANDITU_KEY = (import.meta.env.VITE_TIANDITU_KEY as string | undefined) ?? '25475cca5080dc60cb126b94fd6358d3'
+const TIANDITU_ATTRIBUTION = '© 天地图'
+
 const m11MapStyles: Record<M11Basemap, MapStyle> = {
-  terrain: rasterStyle('m11-terrain', ['https://a.tile.opentopomap.org/{z}/{x}/{y}.png'], '© OpenTopoMap contributors'),
-  satellite: rasterStyle(
-    'm11-satellite',
-    ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
-    'Tiles © Esri',
-  ),
-  vector: rasterStyle('m11-vector', ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], '© OpenStreetMap contributors'),
+  terrain: tiandituStyle('ter', 'cta'),
+  satellite: tiandituStyle('img', 'cia'),
+  vector: tiandituStyle('vec', 'cva'),
 }
 
 export function M11MapLibreSurface({
@@ -1240,18 +1241,24 @@ function m11SelectedLayerUnavailableReason(
   return '当前图层缺少可用地图源，地图不会注册叠加层。'
 }
 
-function rasterStyle(id: string, tiles: string[], attribution: string): MapStyle {
+function tiandituTiles(layer: string): string[] {
+  return ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7'].map(
+    (sub) => `https://${sub}.tianditu.gov.cn/DataServer?T=${layer}_w&x={x}&y={y}&l={z}&tk=${TIANDITU_KEY}`,
+  )
+}
+
+// base = 底图图层码（vec/img/ter），annotation = 对应中文注记码（cva/cia/cta）。
+function tiandituStyle(base: string, annotation: string): MapStyle {
   return {
     version: 8,
     sources: {
-      [id]: {
-        type: 'raster',
-        tiles,
-        tileSize: 256,
-        attribution,
-      },
+      [`${base}-base`]: { type: 'raster', tiles: tiandituTiles(base), tileSize: 256, attribution: TIANDITU_ATTRIBUTION },
+      [`${annotation}-anno`]: { type: 'raster', tiles: tiandituTiles(annotation), tileSize: 256, attribution: TIANDITU_ATTRIBUTION },
     },
-    layers: [{ id, type: 'raster', source: id }],
+    layers: [
+      { id: `${base}-base`, type: 'raster', source: `${base}-base` },
+      { id: `${annotation}-anno`, type: 'raster', source: `${annotation}-anno` },
+    ],
   }
 }
 
