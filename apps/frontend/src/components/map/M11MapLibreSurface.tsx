@@ -442,11 +442,11 @@ export function M11MapLibreSurface({
         {showStationLayer && stationFeatureCollection ? (
           <M11StationClusterPrimitive collection={stationFeatureCollection} />
         ) : null}
+        {/* popup anchor 不指定 → maplibre 按可用空间自动选边，高弹窗在视口边缘不被裁切。 */}
         {popup ? (
           <Popup
             longitude={popup.longitude}
             latitude={popup.latitude}
-            anchor="bottom"
             closeOnClick={false}
             onClose={popup.onClose}
             maxWidth="none"
