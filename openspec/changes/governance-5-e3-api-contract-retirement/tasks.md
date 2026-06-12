@@ -60,6 +60,18 @@ Expected #414 frontend outputs:
 - [ ] 4.1 Update `openapi/nhms.v1.yaml` only after replacement and consumer migration evidence exists.
 - [ ] 4.2 Regenerate and verify frontend API types in the same implementation slice as OpenAPI contraction.
 - [ ] 4.3 Update validation docs and API runbooks to reflect active vs deprecated route status.
+- [x] 4.4 For #415, confirm #413/#414 evidence records no backend/frontend removal-candidate migration and no replacement endpoint; preserve active OpenAPI paths and generated type entries unless drift is found. (#415: #413/#414 evidence records no migration and no replacement; OpenAPI/types preserved unchanged.)
+- [x] 4.5 For #415, synchronize stale docs-only shorthand `forecast-series` references to the canonical basin-version route or mark them as historical draft examples without adding runtime deprecation metadata. (#415: canonical wording updated in module/frontend docs; appendix v0.2 snippet marked historical.)
+- [x] 4.6 For #415, record an OpenAPI/generated-type synchronization evidence artifact that states whether OpenAPI/types changed, whether types were regenerated, and why no endpoint is deprecated, removed, or contracted. (#415: `docs/governance/API_CONTRACT_OPENAPI_TYPE_SYNC_EVIDENCE.md`.)
+
+Expected #415 contract-sync outputs:
+
+- `/api/v1/mvp/qhh/latest-product` remains present in static OpenAPI and generated frontend types as an active compatibility route.
+- `/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series` remains present in static OpenAPI and generated frontend types as the canonical active route.
+- No OpenAPI `deprecated: true`, deprecation response header, response metadata, or generated deprecation marker is introduced for the #411 active runtime candidates.
+- Docs-only shorthand `forecast-series` references are either replaced with the canonical route or explicitly labelled historical draft examples.
+- #416 receives enough evidence to close as explicit deferral unless a later change produces real removal readiness.
+- The evidence artifact records the rollback baseline: if docs/OpenAPI/type synchronization creates ambiguity, restore the active OpenAPI/generated type entries and canonical docs wording.
 
 ## 5. Verification
 
@@ -79,3 +91,8 @@ Expected #414 frontend outputs:
 - [x] 5.14 For #414, run frontend/display repository searches covering generated client usage, stores/bootstrap consumers, and generated types for the #411 candidate endpoints and shorthand forms.
 - [x] 5.15 For #414, run `cd apps/frontend && corepack pnpm run check:api-types && corepack pnpm build` (local + node-27 receipt) and confirm green with no endpoint deleted and no generated-type regeneration. (Local: check:api-types green, build ✓. node-27 receipt @e4d70eb: check:api-types green, build ✓ 16.57s.)
 - [x] 5.16 For #414, confirm `git status --short --untracked-files=all` is limited to frontend consumer evidence/docs/OpenSpec (no `apps/frontend/src` runtime change). (e4d70eb --stat: only API_CONTRACT_FRONTEND_CONSUMER_EVIDENCE.md, issue-414-worklog.md, tasks.md.)
+- [x] 5.17 For #415, run repository searches covering static OpenAPI, generated frontend types, stale docs-only shorthand references, backend tests, and frontend generated-client usage for the #411 candidates. (#415: active OpenAPI/type paths retained; target docs-only shorthand cleaned or marked historical; backend tests and frontend generated-client usage remain active.)
+- [x] 5.18 For #415, run `openspec validate governance-5-e3-api-contract-retirement --strict --no-interactive`. (#415: valid.)
+- [x] 5.19 For #415, run `uv run --no-sync pytest -q tests/test_api_contract.py tests/test_openapi_drift.py`. (#415: 81 passed, 8 warnings.)
+- [x] 5.20 For #415, run `cd apps/frontend && corepack pnpm run check:api-types`; also run `cd apps/frontend && corepack pnpm build` if OpenAPI or generated frontend types change. (#415: check:api-types green; build not required because OpenAPI/generated types did not change.)
+- [x] 5.21 For #415, confirm `git status --short --untracked-files=all` is limited to docs/OpenSpec/OpenAPI/type-sync evidence and any deliberate static OpenAPI/generated type files; no API route implementation or frontend runtime files change. (#415: changed files are docs/governance evidence, docs wording, and E3 OpenSpec tasks/fixture evidence; no route implementation or frontend runtime file changed.)

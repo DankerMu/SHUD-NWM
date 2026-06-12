@@ -678,7 +678,7 @@ interface ManagementState {
 
 - 河段按重现期等级着色，配色同 9.2 节。
 - hover 高亮河段并 tooltip 显示河段名、Q、T 值。
-- click 打开右侧详情面板，请求 `/river-segments/{segment_id}/forecast-series`，展示预报曲线及重现期阈值线。
+- click 打开右侧详情面板，通过 generated client 请求 canonical route `/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series`，携带 `basin_version_id` 与河段上下文，展示预报曲线及重现期阈值线。
 
 ### 13.6 时间控制
 

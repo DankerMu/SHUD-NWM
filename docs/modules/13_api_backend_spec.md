@@ -62,7 +62,7 @@
 
 - `/api/v1/basins`
 - `/api/v1/layers`
-- `/api/v1/river-segments/{id}/forecast-series`
+- `/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series`
 - `/api/v1/met/stations/{id}/series`
 - `/api/v1/runs`
 

@@ -241,3 +241,66 @@ Review focus:
 - No active compatibility endpoint is treated as dead code or removal-ready.
 - Backend evidence is broad enough to justify migration-not-needed if no backend removal-candidate consumer exists.
 - Any code changes, if present, stay backend-only and preserve existing API behavior.
+
+### #415 OpenAPI/generated-type/docs synchronization slice
+
+Fixture level: expanded
+
+Project profile: NHMS
+
+Change surface:
+
+- Static OpenAPI contract, generated frontend type contract, API/OpenAPI drift tests, and docs/runbook wording for #411 candidates.
+- E3 OpenSpec task/evidence rows and a compact synchronization evidence artifact.
+
+Must preserve:
+
+- No endpoint deletion, route implementation removal, response-shape change, deprecation headers, response metadata, DB migration, CI workflow change, or frontend runtime migration.
+- `/api/v1/mvp/qhh/latest-product` remains an active compatibility contract.
+- `/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series` remains the canonical active forecast-series contract.
+- No OpenAPI contraction or generated type regeneration that removes or marks active contracts unless #413/#414 prove a replacement migration. Current evidence proves explicit deferral instead; drift-only regeneration may happen only if it preserves the active paths.
+
+Must add/change:
+
+- Confirm #413 and #414 are closed and that both recorded no backend/frontend removal-candidate migration.
+- Verify OpenAPI and generated frontend types are already synchronized for the active retained contracts, or regenerate types only if drift is found and the regenerated output preserves the active paths.
+- Align stale docs-only shorthand `forecast-series` references to the canonical basin-version path or mark them as historical draft examples.
+- Record #415 evidence explaining why active runtime OpenAPI entries and generated types are preserved unchanged.
+
+Risk packs considered for #415:
+
+- Public API / CLI / script entry: selected - OpenAPI paths are public HTTP contracts and must not be contracted without migration evidence.
+- Config / project setup: not selected - no runtime config or deployment setup changes.
+- File IO / path safety / overwrite: not selected - docs/OpenAPI/type files only, no runtime file IO behavior.
+- Schema / columns / units / field names: selected - route/query/response identifiers and generated type paths must remain synchronized.
+- Auth / permissions / secrets: not selected - no auth or credential surface.
+- Concurrency / shared state / ordering: not selected - no runtime state transition.
+- Resource limits / large input / discovery: selected - repository search must cover docs/OpenAPI/generated types without overclaiming external consumers.
+- Legacy compatibility / examples: selected - #415 protects active compatibility routes from premature deprecation/removal.
+- Error handling / rollback / partial outputs: selected - rollback is to restore active contract wording/types if docs sync creates ambiguity.
+- Release / packaging / dependency compatibility: selected - generated frontend types and contract checks are package/build artifacts.
+- Documentation / migration notes: selected - stale docs-only shorthand references are synchronized here.
+- Published NHMS artifacts / display identity: selected - latest-product strict identity wording must remain intact for display/bootstrap evidence.
+- Other NHMS domain packs: not selected - no hydro-met computation, geospatial, SHUD, Slurm, provider, or DB runtime behavior changes.
+
+Required #415 evidence:
+
+- `openspec validate governance-5-e3-api-contract-retirement --strict --no-interactive`.
+- `uv run --no-sync pytest -q tests/test_api_contract.py tests/test_openapi_drift.py`.
+- `cd apps/frontend && corepack pnpm run check:api-types`; run frontend build if generated types change.
+- Repository searches prove no static OpenAPI/generated type contraction is needed and stale docs-only shorthand references are handled.
+- Evidence artifact states whether OpenAPI/types changed, whether frontend types were regenerated, and why no route is deprecated or removed.
+
+Non-goals for #415:
+
+- No endpoint implementation removal; #416 owns final removal or explicit deferral.
+- No node-27 frontend runtime migration; #414 already closed with explicit deferral.
+- No external consumer inventory beyond preserving the #412 unknown-external-consumer warning.
+- No live API/node-27 receipt requirement unless generated frontend/runtime behavior changes.
+
+Review focus:
+
+- The PR does not mark active routes deprecated or remove them from OpenAPI/types.
+- Docs-only shorthand cleanup does not imply a runtime route exists or was deprecated.
+- Generated frontend types are synchronized with static OpenAPI when OpenAPI changes.
+- #416 has enough evidence to decide explicit deferral versus future removal.
