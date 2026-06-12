@@ -20,7 +20,7 @@ import {
 } from '@/components/map/M11FloatingControls'
 import { mapFeatureStringProperty, popupAnchorFromInteraction, useBasinDetailMode } from '@/components/m11/BasinDetailPanels'
 import { M11RiverForecastPopup, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPopup'
-import type { LayerState, M11Bbox, OverviewBasin } from '@/lib/m11/overviewDataContracts'
+import type { LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import {
   defaultM11QueryState,
   type M11QueryPatch,
@@ -175,6 +175,7 @@ function BasinDetailMode({
       basins={detail.basins}
       visibleBasinIds={detail.visibleBasinIds}
       basinSegments={detail.basinSegments}
+      nationalRiverGeo={detail.nationalRiverGeo}
       selectedSegmentId={detail.selectedSegmentId}
       selectedSegmentGeometry={detail.selectedSegmentGeometry}
       stationFeatureCollection={detail.stationFeatureCollection}
@@ -268,7 +269,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? overview?.basinVersionToBasinId ?? {}
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
   const visibleBasinSet = useMemo(() => new Set(visibleBasinIdList), [visibleBasinIdList])
-  const mapFitTo = useMemo(() => bboxToMapFit(unionBasinBbox(basins)), [basins])
+  // 全国总览不做相机 fit：这是全国系统，保持中国全景（CHINA_VIEW_STATE）；
+  // fit 到流域并集会把视野错误地收窄到测试流域（qhh/heihe）区域。
 
   // 全国点河段的就地流量弹窗（segment 身份 + 经纬度锚点 + 反查到的 basinId）。
   const [riverPopup, setRiverPopup] = useState<{ segment: M11RiverPopupSegment; lngLat: [number, number]; basinId: string | null } | null>(null)
@@ -356,7 +358,6 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       nationalRiverGeo={nationalGeo.river}
       stationFeatureCollection={stationLayer.featureCollection}
       popup={riverForecastPopup}
-      fitTo={mapFitTo}
       mapLabel="全国总览地图"
       infoTitle="全国水文总览"
       infoMeta={`全国范围 73E-135E / 18N-53N；点击河段查看 q_down 流量预报曲线，点击流域边界进入流域详情。已接入 ${boundaryCount}/${basins.length} 个流域边界。`}
@@ -374,31 +375,6 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       ) : null}
     </M11FullscreenMap>
   )
-}
-
-function bboxToMapFit(bbox: M11Bbox | null | undefined): M11MapCameraFit | null {
-  if (!bbox) return null
-  return {
-    bounds: [
-      [bbox.minLon, bbox.minLat],
-      [bbox.maxLon, bbox.maxLat],
-    ],
-    padding: 36,
-  }
-}
-
-function unionBasinBbox(basins: OverviewBasin[]) {
-  return basins.reduce<M11Bbox | null>((bbox, basin) => {
-    if (!basin.bbox) return bbox
-    return bbox
-      ? {
-          minLon: Math.min(bbox.minLon, basin.bbox.minLon),
-          minLat: Math.min(bbox.minLat, basin.bbox.minLat),
-          maxLon: Math.max(bbox.maxLon, basin.bbox.maxLon),
-          maxLat: Math.max(bbox.maxLat, basin.bbox.maxLat),
-        }
-      : basin.bbox
-  }, null)
 }
 
 // 进入流域分析的 query patch：写 basinId（就地切详情），携带 basinVersionId/segmentId 上下文。

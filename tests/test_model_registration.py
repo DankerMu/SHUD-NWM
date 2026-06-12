@@ -1270,6 +1270,8 @@ async def test_list_river_segments_returns_backend_geojson(fake_store: FakeModel
 
     assert fake_store is not None
     assert response.status_code == 200
+    # 版本键控的静态几何目录：必须可被浏览器缓存（display 刷新免重拉分页 GeoJSON）。
+    assert response.headers["Cache-Control"] == "public, max-age=3600"
     payload = response.json()["data"]
     assert payload["type"] == "FeatureCollection"
     expected_properties = {

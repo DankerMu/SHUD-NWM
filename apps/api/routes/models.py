@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from apps.api.auth import PolicyDecision, require_action
@@ -424,6 +424,7 @@ def create_river_network(
 )
 def list_river_segments(
     request: Request,
+    response: Response,
     basin_version_id: str,
     river_network_version_id: str | None = None,
     search: str | None = Query(
@@ -470,6 +471,9 @@ def list_river_segments(
             max_bytes=RIVER_SEGMENT_COLLECTION_MAX_SERIALIZED_BYTES,
             scope="collection",
         )
+        # 河段几何目录按 (basin_version_id, river_network_version_id) 版本键控、内容不可变；
+        # 浏览器缓存可让前端刷新免重拉 ~3.4MB 分页 GeoJSON（display 首屏主要耗时）。
+        response.headers["Cache-Control"] = "public, max-age=3600"
         return _ok(
             request,
             data,
@@ -490,6 +494,7 @@ def list_river_segments(
 )
 def get_river_segment(
     request: Request,
+    response: Response,
     basin_version_id: str,
     segment_id: str,
     river_network_version_id: str = Query(..., min_length=1),
@@ -506,6 +511,8 @@ def get_river_segment(
             max_bytes=RIVER_SEGMENT_DETAIL_MAX_SERIALIZED_BYTES,
             scope="detail",
         )
+        # 与 list 端点同理：版本键控静态几何，浏览器可缓存。
+        response.headers["Cache-Control"] = "public, max-age=3600"
         return _ok(
             request,
             data,

@@ -871,7 +871,53 @@ async function fetchRiverSegments(
   let offset = (firstPage.offset ?? 0) + (firstPage.limit || firstPage.features.length || RIVER_SEGMENT_PAGE_LIMIT)
   let pages = 1
 
-  // 全量翻页取齐整个河网（地图需要全河段，不再只为找 segmentId 才翻页）；
+  // 剩余页并行取齐（首屏提速）：首页已给出 feature_total 与实际页宽 stride，
+  // 逐页串行等待会把 qhh（4 页 × ~850KB）的河网首显时间翻倍以上。
+  // 某页因 413 减半短返会在 stride 网格上留缺口 → 丢弃其后的并行结果，
+  // 交给下方串行循环按真实 offset 诚实补齐（保持原分页语义与上限保护）。
+  const stride = firstPage.limit || firstPage.features.length || RIVER_SEGMENT_PAGE_LIMIT
+  const plannedOffsets: number[] = []
+  if (stride > 0) {
+    let plannedOffset = offset
+    let plannedCount = features.length
+    while (
+      plannedCount < Math.min(reportedFeatureTotal, RIVER_SEGMENT_MAX_ITEMS) &&
+      plannedOffset < reportedTotal &&
+      pages + plannedOffsets.length < RIVER_SEGMENT_MAX_PAGES
+    ) {
+      plannedOffsets.push(plannedOffset)
+      plannedOffset += stride
+      plannedCount += stride
+    }
+  }
+  if (plannedOffsets.length > 0) {
+    const parallelPages = await Promise.all(
+      plannedOffsets.map((pageOffset) =>
+        fetchRiverSegmentsPageAdaptive(basinVersionId, riverNetworkVersionId, stride, pageOffset),
+      ),
+    )
+    for (const nextPage of parallelPages) {
+      pages += 1
+      const remaining = RIVER_SEGMENT_MAX_ITEMS - features.length
+      features.push(...nextPage.features.slice(0, remaining))
+      reportedTotal = nextPage.total ?? nextPage.feature_total ?? reportedTotal
+      reportedFeatureTotal = nextPage.feature_total ?? reportedFeatureTotal
+      collection = {
+        ...nextPage,
+        features,
+        total: reportedTotal,
+        feature_total: nextPage.feature_total ?? reportedTotal,
+        limit: features.length,
+        offset: 0,
+      }
+      const fetched = nextPage.limit || nextPage.features.length || stride
+      offset += Math.max(fetched, 0)
+      // 该页实取宽 ≠ stride（413 减半短返等）：其后并行页的 offset 网格失准，丢弃并交串行兜底。
+      if (fetched !== stride) break
+    }
+  }
+
+  // 串行兜底循环：并行批未覆盖/出现缺口时按真实 offset 取齐整个河网；
   // MAX_PAGES / MAX_ITEMS 上限保护客户端。
   while (
     features.length < Math.min(reportedFeatureTotal, RIVER_SEGMENT_MAX_ITEMS) &&
