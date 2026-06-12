@@ -159,6 +159,7 @@ Risk packs considered for #412:
 - Release / packaging / dependency compatibility: not selected - no package/dependency changes.
 - Documentation / migration notes: selected - issue output is a governance policy document.
 - Published NHMS artifacts / display identity: selected - latest-product policy protects display/bootstrap identity.
+- PostGIS / TimescaleDB domain behavior: not selected - no DB query, migration, hypertable, or PostGIS behavior changes.
 - Other NHMS domain packs: not selected - no hydro-met computation, geospatial, SHUD, Slurm, provider, or DB runtime behavior changes.
 
 Required #412 evidence:
@@ -304,3 +305,66 @@ Review focus:
 - Docs-only shorthand cleanup does not imply a runtime route exists or was deprecated.
 - Generated frontend types are synchronized with static OpenAPI when OpenAPI changes.
 - #416 has enough evidence to decide explicit deferral versus future removal.
+
+### #416 removal or explicit-deferral decision slice
+
+Fixture level: expanded
+
+Project profile: NHMS
+
+Change surface:
+
+- Final Governance-5 E3 decision evidence for endpoint removal versus explicit deferral.
+- E3 OpenSpec task/evidence rows and optional governance deferral artifact.
+
+Must preserve:
+
+- No endpoint deletion, route implementation removal, OpenAPI contraction, generated type removal, response-shape change, deprecation headers, response metadata, DB migration, CI workflow change, or frontend runtime migration unless #415 proves no current consumer remains and #412 permits removal.
+- Current evidence does not meet that removal gate: #412 selected no replacement, #413/#414 closed as no migration, #415 preserved OpenAPI/types, repository consumers remain, and external consumers are unknown.
+- Active runtime contracts remain compatible:
+  - `/api/v1/mvp/qhh/latest-product`
+  - `/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series`
+
+Must add/change:
+
+- Record the final #416 decision for every #411 candidate: remove only if all gates pass; otherwise explicitly defer.
+- For the current evidence state, mark both active runtime candidates as explicit deferral and keep them active.
+- Record that docs-only shorthand `forecast-series` cleanup/historical-retention has been handled by #415 and does not correspond to a runtime endpoint removal.
+- Update E3 tasks so the epic can distinguish "deferred by policy" from "forgotten cleanup".
+
+Risk packs considered for #416:
+
+- Public API / CLI / script entry: selected - public HTTP contracts are the removal/defer surface.
+- Config / project setup: not selected - no runtime config or deployment setup changes.
+- File IO / path safety / overwrite: not selected - docs/evidence only.
+- Schema / columns / units / field names: selected - route/query/response/OpenAPI/type identifiers must remain stable when deferring.
+- Auth / permissions / secrets: not selected - no auth/credential surface.
+- Concurrency / shared state / ordering: not selected - no runtime state transition.
+- Resource limits / large input / discovery: selected - no-consumer evidence must not overclaim repository searches or unknown external consumers.
+- Legacy compatibility / examples: selected - active compatibility contracts are intentionally retained.
+- Error handling / rollback / partial outputs: selected - rollback for a mistaken removal decision is to preserve active routes; no partial runtime contraction is allowed.
+- Release / packaging / dependency compatibility: selected - OpenAPI/generated type compatibility must remain intact.
+- Documentation / migration notes: selected - final deferral rationale is the deliverable.
+- Published NHMS artifacts / display identity: selected - latest-product strict identity remains a display evidence dependency.
+- Other NHMS domain packs: not selected - no hydro-met computation, geospatial, SHUD, Slurm, provider, or DB runtime behavior changes.
+
+Required #416 evidence:
+
+- `openspec validate governance-5-e3-api-contract-retirement --strict --no-interactive`.
+- `uv run --no-sync pytest -q tests/test_api_contract.py tests/test_openapi_drift.py`.
+- `cd apps/frontend && corepack pnpm run check:api-types`.
+- Executable searches with expected hits/non-hits proving retained route implementations, retained active OpenAPI/generated type entries, active frontend/backend test consumers, no active-candidate deprecation marker, no route implementation removal, and limited `git status`.
+- Final deferral artifact or updated governance docs stating why each candidate is removed or deferred and what future evidence would reopen removal.
+
+Non-goals for #416:
+
+- No frontend/node-27 migration.
+- No external consumer inventory beyond explicitly recording that unknown external consumers block removal readiness.
+- No new replacement endpoint design.
+- No live API/node-27 receipt requirement unless runtime/API/type behavior changes.
+
+Review focus:
+
+- No active runtime endpoint is removed or marked deprecated without satisfying #412/#415 gates.
+- The final decision covers every #411 candidate and does not leave docs-only shorthand cleanup ambiguous.
+- #398 can be closed or updated based on explicit issue evidence rather than inferred cleanup state.
