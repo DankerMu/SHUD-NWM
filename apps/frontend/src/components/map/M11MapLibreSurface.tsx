@@ -432,6 +432,7 @@ export function M11MapLibreSurface({
             collection={basinRiverFeatureCollection}
             selectedSegmentId={selectedSegmentId}
             hoveredSegmentId={hoveredRiverSegmentId}
+            subdued={Boolean(renderableOverlay)}
           />
         ) : null}
         {renderableOverlay ? <M11OverlayPrimitive overlay={renderableOverlay} data={overlayData} /> : null}
@@ -642,26 +643,28 @@ function zoomScaledValueWidth(valueStops: number[], lowZoomFactor: number) {
 
 function dischargeTileLayerPaint(): LayerProps['paint'] {
   return {
-    // 颜色下限改可见中蓝（原 #E3F2FD 近白，浅底图上隐形）；低→高流量 蓝→红。
+    // log10 域插值的流量色带（与 m11DischargeColor/图例同源）：线性 0-50000 档在
+    // 山区小流域（流量普遍 <500）只落进最低一桶，全网呈统一蓝；log 阶让 1/10/100/
+    // 1000 m3/s 各有可辨梯度，大江大河依旧映射到深蓝→暖色。
     'line-color': [
       'interpolate',
       ['linear'],
-      ['coalesce', ['get', 'value'], 0],
+      ['log10', ['max', ['coalesce', ['get', 'value'], 0], 0.1]],
       0,
+      '#C6DBEF',
+      1,
+      '#9ECAE1',
+      2,
       '#6BAED6',
-      500,
-      '#3182BD',
-      1000,
+      3,
+      '#2171B5',
+      4,
       '#08519C',
-      5000,
-      '#08306B',
-      10000,
-      '#F16913',
-      50000,
+      4.7,
       '#CB181D',
     ],
-    // 最小线宽 1.2→2.2，干流更粗，浅底图上清晰可见。
-    'line-width': zoomScaledValueWidth([0, 2.2, 1000, 3, 5000, 4.2, 10000, 5.4, 50000, 7], 0.4),
+    // 线宽同走 log 域：小溪细、干流粗，视觉层级与流量量级一致。
+    'line-width': zoomScaledValueWidth([0, 2, 100, 2.8, 1000, 3.6, 10000, 5, 50000, 7], 0.4),
     'line-opacity': ['case', ['has', 'value'], 0.95, 0.5],
   }
 }
@@ -922,10 +925,13 @@ function M11BasinRiverPrimitive({
   collection,
   selectedSegmentId,
   hoveredSegmentId,
+  subdued = false,
 }: {
   collection: BasinRiverFeatureCollection
   selectedSegmentId?: string | null
   hoveredSegmentId?: string | null
+  /** 彩色 MVT 叠加激活时退衬底：流量色由权威 MVT 层纯净呈现，本层只保留点击/hover 热区。 */
+  subdued?: boolean
 }) {
   return (
     <Source id="m11-basin-river-source" type="geojson" data={collection.sourceData} promoteId="river_segment_id">
@@ -938,7 +944,7 @@ function M11BasinRiverPrimitive({
         paint={{
           'line-color': '#FFFFFF',
           'line-width': ['interpolate', ['linear'], ['zoom'], 6, 2.6, 9, 3.8, 12, 5.2],
-          'line-opacity': 0.8,
+          'line-opacity': subdued ? 0.25 : 0.8,
         }}
       />
       <Layer
@@ -949,7 +955,7 @@ function M11BasinRiverPrimitive({
         paint={{
           'line-color': ['get', 'layer_color'],
           'line-width': ['interpolate', ['linear'], ['zoom'], 6, 1.6, 9, 2.6, 12, 3.6],
-          'line-opacity': 0.92,
+          'line-opacity': subdued ? 0.18 : 0.92,
         }}
       />
       <Layer

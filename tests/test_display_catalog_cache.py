@@ -54,13 +54,33 @@ def test_keys_are_isolated() -> None:
     assert display_catalog_cached(request, "a", lambda: "stale-miss") == "va"
 
 
-def test_ttl_expiry_recomputes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stale_window_serves_stale_without_blocking(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 过期但未超 STALE_MAX：回 stale（刷新由预热线程负责），访客不阻塞在慢查询上。
     request = _request(display_readonly=True)
     clock = {"now": 1000.0}
     monkeypatch.setattr(display_cache.time, "monotonic", lambda: clock["now"])
     assert display_catalog_cached(request, "k", lambda: "first") == "first"
     clock["now"] += display_cache.DISPLAY_CATALOG_TTL_SECONDS + 1
+    assert display_catalog_cached(request, "k", lambda: "second") == "first"
+
+
+def test_stale_max_expiry_recomputes(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = _request(display_readonly=True)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(display_cache.time, "monotonic", lambda: clock["now"])
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+    clock["now"] += display_cache.DISPLAY_CATALOG_STALE_MAX_SECONDS + 1
     assert display_catalog_cached(request, "k", lambda: "second") == "second"
+
+
+def test_force_refresh_header_bypasses_cache() -> None:
+    request = _request(display_readonly=True)
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+    warm_request = _request(display_readonly=True)
+    warm_request.headers = {display_cache.DISPLAY_CACHE_FORCE_REFRESH_HEADER: "refresh"}
+    assert display_catalog_cached(warm_request, "k", lambda: "warmed") == "warmed"
+    # 预热写回后，普通请求命中新值。
+    assert display_catalog_cached(request, "k", lambda: "miss") == "warmed"
 
 
 def test_loader_errors_are_not_cached() -> None:

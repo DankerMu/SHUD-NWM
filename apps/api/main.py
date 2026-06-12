@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
 from apps.api.auth import audit_record, evaluate_request_action
+from apps.api.display_cache import start_display_catalog_warmer
 from apps.api.errors import error_response, register_error_handlers
 from apps.api.routes.best_available import router as best_available_router
 from apps.api.routes.data_sources import router as data_sources_router
@@ -111,6 +112,19 @@ class _PreBodyPolicyError:
         self.code = code
         self.message = message
         self.details = details
+
+
+class CacheControlStaticFiles(StaticFiles):
+    """StaticFiles + 固定 Cache-Control（Vite hash 资产可 immutable 永久缓存）。"""
+
+    def __init__(self, *args: Any, cache_control: str, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._cache_control = cache_control
+
+    def file_response(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = self._cache_control
+        return response
 
 
 async def _protected_mutation_policy(request: Any) -> tuple[str, str, str] | _PreBodyPolicyError | None:
@@ -316,6 +330,9 @@ def create_app(env: Mapping[str, str] | None = None) -> FastAPI:
 
     _register_static_and_health_routes(api)
     api.openapi = _custom_openapi_factory(api)
+    if runtime_config.display_readonly:
+        # 目录缓存自预热：保持热 key 常新，访客稳态不踩只读副本 12s 级慢查询。
+        start_display_catalog_warmer(api)
     return api
 
 
@@ -1807,7 +1824,12 @@ def _register_static_and_health_routes(api: FastAPI) -> None:
 
     api.mount(
         "/assets",
-        StaticFiles(directory=FRONTEND_DIST_DIR / "assets", check_dir=False),
+        # Vite 产物文件名带内容 hash：内容不变 URL 不变 → 可永久缓存（immutable）。
+        CacheControlStaticFiles(
+            directory=FRONTEND_DIST_DIR / "assets",
+            check_dir=False,
+            cache_control="public, max-age=31536000, immutable",
+        ),
         name="frontend-assets",
     )
 
@@ -1825,8 +1847,13 @@ def _register_static_and_health_routes(api: FastAPI) -> None:
             except ValueError:
                 candidate = None
             if candidate is not None and candidate.is_file():
-                return FileResponse(candidate)
-        return FileResponse(FRONTEND_INDEX)
+                # 非 hash 命名的静态文件（/geo/*.geojson、favicon）：短缓存 + 必须重验，
+                # 部署新文件后客户端最迟一次条件请求即拿到新版。
+                return FileResponse(candidate, headers={"Cache-Control": "no-cache"})
+        # index.html 绝不能被启发式缓存：旧 index 引用旧 hash bundle，会让用户在
+        # 部署后长期跑旧前端（实测导致总览相机/河网修复"看不到"）。no-cache 仍允许
+        # ETag/Last-Modified 条件请求 304，代价只是每次一个轻量 revalidate。
+        return FileResponse(FRONTEND_INDEX, headers={"Cache-Control": "no-cache"})
 
 
 def _ok(request: Request, data: Any) -> dict[str, Any]:
