@@ -57,6 +57,8 @@ interface M11MapSurfaceProps extends SharedControlProps {
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
+  loading?: boolean
+  boundaryLoading?: boolean
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
@@ -118,6 +120,8 @@ export function M11MapSurface({
   selectedSegmentGeometry = null,
   stationFeatureCollection = null,
   popup = null,
+  loading = false,
+  boundaryLoading = false,
   onQueryChange,
   fitTo,
   flyTo,
@@ -137,6 +141,8 @@ export function M11MapSurface({
         selectedSegmentGeometry={selectedSegmentGeometry}
         stationFeatureCollection={stationFeatureCollection}
         popup={popup}
+        loading={loading}
+        boundaryLoading={boundaryLoading}
         fitTo={fitTo}
         flyTo={flyTo}
         onOverlayHover={onOverlayHover}

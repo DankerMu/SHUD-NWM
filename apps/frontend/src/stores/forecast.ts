@@ -28,7 +28,7 @@ export interface ForecastSeries {
   role?: string
   isAnalysis: boolean
   label: string
-  color: '#2266cc' | '#ef7d22' | '#2ca02c'
+  color: '#2266cc' | '#ef7d22' | '#2ca02c' | '#34d399' | '#22d3ee'
   cycleTime?: string | null
   availableLeadHours?: number | null
   points: ForecastSeriesPoint[]

@@ -260,6 +260,11 @@ export function useBasinDetailMode({
     basinNotFoundReason,
     basinDisplayName,
     loading,
+    // 「流域数据尚未首次落定」单一信号：用 raw basinData（首个流域加载后恒非 null），仅深链/刷新直达
+    // 某流域 URL 的 frame-1 为真，驱动 surface 占位、避免闪 m11-map-unavailable；不用 currentBasinData
+    // ——那会在流域间切换的 settle 窗口误抑制诚实状态。
+    surfaceSettling: loading || !basinData,
+    boundaryLoading: nationalGeo.loading,
     error,
     stationStatusNote: stationLayer.statusNote,
   }

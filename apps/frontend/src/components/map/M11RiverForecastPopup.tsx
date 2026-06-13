@@ -191,7 +191,7 @@ function RiverForecastBody({
         source: validation.sourceId,
         isAnalysis: false,
         label: 'q_down river discharge',
-        color: validation.sourceId === 'IFS' ? '#2ca02c' : '#2266cc',
+        color: validation.sourceId === 'IFS' ? '#34d399' : '#22d3ee',
         cycleTime: validation.cycleTime,
         availableLeadHours: validation.series.availableLeadHours,
         points: validation.renderedPoints.map((point) => ({ time: point.timestamp, value: point.value })),
@@ -202,23 +202,23 @@ function RiverForecastBody({
   const leadHours = validation.series.availableLeadHours
   const horizonText = leadHours != null ? `预见期 ${leadHours}h` : '预见期'
 
-  const flowValues = validation.renderedPoints.map((point) => point.value).filter((value): value is number => value != null)
-  const currentFlow = flowValues.length > 0 ? flowValues[0] : null
-  const peakIndex = flowValues.reduce((best, value, index) => (value > flowValues[best] ? index : best), 0)
-  const peakFlow = flowValues.length > 0 ? flowValues[peakIndex] : null
-  const peakTime = peakFlow != null ? validation.renderedPoints[peakIndex]?.timestamp ?? null : null
+  const points = validation.renderedPoints.filter((point): point is typeof point & { value: number } => point.value != null)
+  const currentFlow = points.length > 0 ? points[0].value : null
+  const peak = points.length > 0 ? points.reduce((best, point) => (point.value > best.value ? point : best), points[0]) : null
+  const peakFlow = peak?.value ?? null
+  const peakTime = peak?.timestamp ?? null
 
   return (
-    <div className="space-y-2.5 px-4 pb-4 pt-2.5" data-testid="m11-river-popup-loaded">
+    <div className="max-h-[60vh] space-y-2.5 overflow-y-auto px-4 pb-3.5 pt-2.5" data-testid="m11-river-popup-loaded">
       <div className="flex items-center justify-between gap-2">
         <span
-          className="inline-flex items-center rounded-full bg-primary-50 px-2 py-0.5 text-[11px] font-medium tracking-wide text-primary-700"
+          className="inline-flex items-center rounded-full bg-cyan-400/10 px-2.5 py-0.5 text-[11px] font-medium tracking-wide text-cyan-200 ring-1 ring-inset ring-cyan-400/25"
           data-testid="m11-river-popup-variable"
         >
           流量 · q_down
         </span>
         <span
-          className={cn('text-[11px] tabular-nums', validation.horizonShorter ? 'font-medium text-warning' : 'text-neutral-500')}
+          className={cn('text-[11px] tabular-nums', validation.horizonShorter ? 'font-medium text-amber-300' : 'text-slate-400')}
           title={validation.horizonLabel}
           data-testid="m11-river-popup-horizon"
         >
@@ -227,12 +227,12 @@ function RiverForecastBody({
         </span>
       </div>
       <RiverForecastKpiStrip current={currentFlow} peak={peakFlow} peakTime={peakTime} unit={validation.unit} />
-      <ForecastChart data={forecastData} segmentName={segment.name} variant="compact" />
+      <ForecastChart data={forecastData} segmentName={segment.name} variant="compact" appearance="dark" />
     </div>
   )
 }
 
-/** KPI 条：当前/峰值流量，等宽数字 + 强调色，符合气象水文驾驶舱风格。仅展示真实渲染点导出的数值。 */
+/** KPI 条：当前/峰值流量，等宽数字 + 青色发光强调，深色指挥舱风格。仅展示真实渲染点导出的数值。 */
 function RiverForecastKpiStrip({
   current,
   peak,
@@ -241,40 +241,43 @@ function RiverForecastKpiStrip({
 }: {
   current: number | null
   peak: number | null
-  peakTime: string | null
+  peakTime: number | null
   unit: string
 }) {
   const formatFlow = (value: number | null) => (value == null ? '—' : value.toFixed(value >= 100 ? 0 : 1))
-  const peakClock = peakTime ? formatPeakClock(peakTime) : null
+  const peakClock = peakTime != null ? formatPeakClock(peakTime) : null
   return (
-    <div className="grid grid-cols-2 gap-2" data-testid="m11-river-popup-kpi">
-      <div className="rounded-lg border border-white/50 bg-white/50 px-3 py-2">
-        <div className="text-[10px] uppercase tracking-wide text-neutral-500">当前流量</div>
-        <div className="mt-0.5 flex items-baseline gap-1">
-          <span className="text-lg font-semibold tabular-nums text-neutral-900" data-testid="m11-river-popup-kpi-current">
+    <div className="grid grid-cols-2 gap-2.5" data-testid="m11-river-popup-kpi">
+      <div className="rounded-xl bg-white/[0.04] px-3.5 py-2 ring-1 ring-inset ring-white/10">
+        <div className="text-[10px] uppercase tracking-[0.12em] text-slate-400">当前流量</div>
+        <div className="mt-1 flex items-baseline gap-1.5">
+          <span className="text-xl font-semibold tabular-nums text-slate-50" data-testid="m11-river-popup-kpi-current">
             {formatFlow(current)}
           </span>
-          <span className="text-[10px] text-neutral-500">{unit}</span>
+          <span className="text-[10px] text-slate-400">{unit}</span>
         </div>
       </div>
-      <div className="rounded-lg border border-primary-200/60 bg-primary-50/60 px-3 py-2">
+      <div className="rounded-xl bg-cyan-400/[0.08] px-3.5 py-2 ring-1 ring-inset ring-cyan-400/25">
         <div className="flex items-center justify-between">
-          <span className="text-[10px] uppercase tracking-wide text-primary-700">峰值流量</span>
-          {peakClock ? <span className="text-[10px] tabular-nums text-primary-600/80">{peakClock}</span> : null}
+          <span className="text-[10px] uppercase tracking-[0.12em] text-cyan-300/90">峰值流量</span>
+          {peakClock ? <span className="text-[10px] tabular-nums text-cyan-300/70">{peakClock}</span> : null}
         </div>
-        <div className="mt-0.5 flex items-baseline gap-1">
-          <span className="text-lg font-semibold tabular-nums text-primary-800" data-testid="m11-river-popup-kpi-peak">
+        <div className="mt-1 flex items-baseline gap-1.5">
+          <span
+            className="text-xl font-semibold tabular-nums text-cyan-200 drop-shadow-[0_0_10px_rgba(34,211,238,0.35)]"
+            data-testid="m11-river-popup-kpi-peak"
+          >
             {formatFlow(peak)}
           </span>
-          <span className="text-[10px] text-primary-600/80">{unit}</span>
+          <span className="text-[10px] text-cyan-300/70">{unit}</span>
         </div>
       </div>
     </div>
   )
 }
 
-function formatPeakClock(iso: string): string {
-  const date = new Date(iso)
+function formatPeakClock(ms: number): string {
+  const date = new Date(ms)
   if (Number.isNaN(date.getTime())) return ''
   const mm = String(date.getUTCMonth() + 1).padStart(2, '0')
   const dd = String(date.getUTCDate()).padStart(2, '0')
