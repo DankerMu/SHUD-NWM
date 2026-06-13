@@ -2703,6 +2703,59 @@ def test_route_authority_normal_historical_heading_does_not_govern_blockquoted_c
     _assert_unallowlisted_budget_counted_report_only_finding(finding)
 
 
+def test_route_authority_normal_historical_heading_restores_after_intervening_blockquote(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        # Historical pre-M26 evidence
+        > preserved quoted note
+        Preserved /hydro-met receipt
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["line"] == 3
+    assert "/hydro-met" in str(finding["description"])
+    assert finding["allowlist_reason"] == "historical plan or pre-M26 display evidence"
+    assert finding["allowlist_key"] == "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+    assert finding["allowlist_state"] == "allowlisted"
+    assert finding["budget_counted"] is False
+    assert finding["gate_eligible"] is False
+
+
+def test_route_authority_blockquoted_historical_heading_expires_after_normal_heading(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        > # Historical pre-M26 evidence
+        > Frozen /hydro-met receipt
+        # Current operator procedure
+        > Current route link ?next=/forecast
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_line = {finding["line"]: finding for finding in findings}
+
+    assert set(by_line) == {2, 4}
+    historical = by_line[2]
+    assert "/hydro-met" in str(historical["description"])
+    assert historical["allowlist_key"] == "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+    assert historical["allowlist_state"] == "allowlisted"
+    assert historical["budget_counted"] is False
+
+    active = by_line[4]
+    assert "/forecast" in str(active["description"])
+    _assert_unallowlisted_budget_counted_report_only_finding(active)
+
+
 def test_route_authority_blockquoted_historical_table_does_not_merge_with_normal_current_table(
     tmp_path: Path,
 ) -> None:
