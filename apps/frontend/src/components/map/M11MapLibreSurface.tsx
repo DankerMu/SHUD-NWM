@@ -94,6 +94,8 @@ interface M11MapLibreSurfaceProps {
   basinSegments?: BasinSegmentRow[]
   /** 常态河网底图（来自 basin shp，WGS84，按 Type 分级）。null 则 honest 降级不画。 */
   nationalRiverGeo?: FeatureCollection | null
+  /** 已被动态 mesh 河网层覆盖的流域 id：这些流域的静态河流从 national 底图剔除，规避双线。 */
+  meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
@@ -203,6 +205,7 @@ export function M11MapLibreSurface({
   visibleBasinIds,
   basinSegments = [],
   nationalRiverGeo = null,
+  meshRiverBasinIds = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   stationFeatureCollection = null,
@@ -241,6 +244,20 @@ export function M11MapLibreSurface({
     [basins, visibleBasinIds],
   )
   const renderableOverlay = overlay && (overlay.source.type === 'vector' || overlayData) ? overlay : null
+  // 动态 mesh 河网层（详情 GeoJSON 河段 / 流量 MVT 线层）激活的流域，其静态河流要从 national 底图剔除，
+  // 避免「平滑静态线 + 阶梯 mesh 线」双线叠画；非线叠加层（如气象栅格）不触发剔除，保留诚实降级。
+  const overlayIsRiverLine = renderableOverlay?.layer.type === 'line'
+  const dynamicRiverActive = basinRiverFeatureCollection.features.length > 0 || overlayIsRiverLine
+  const renderedNationalRiver = useMemo<FeatureCollection | null>(() => {
+    if (!nationalRiverGeo || nationalRiverGeo.features.length === 0) return null
+    if (!dynamicRiverActive || meshRiverBasinIds.length === 0) return nationalRiverGeo
+    const excluded = new Set(meshRiverBasinIds)
+    const features = nationalRiverGeo.features.filter(
+      (feature: FeatureCollection['features'][number]) => !excluded.has(feature.properties?.basin_id as string),
+    )
+    if (features.length === nationalRiverGeo.features.length) return nationalRiverGeo
+    return features.length > 0 ? { ...nationalRiverGeo, features } : null
+  }, [nationalRiverGeo, dynamicRiverActive, meshRiverBasinIds])
   const selectedSegmentFeatureCollection = useMemo(
     () => buildSelectedSegmentFeatureCollection(selectedSegmentId, selectedSegmentGeometry),
     [selectedSegmentGeometry, selectedSegmentId],
@@ -405,7 +422,7 @@ export function M11MapLibreSurface({
       data-overlay-source-type={renderableOverlay?.source.type ?? ''}
       data-overlay-source-layer={renderableOverlay?.source.type === 'vector' ? renderableOverlay.source.sourceLayer : ''}
       data-met-station-feature-count={showStationLayer ? stationFeatureCollection?.features.length ?? 0 : 0}
-      data-national-river-feature-count={nationalRiverGeo?.features.length ?? 0}
+      data-national-river-feature-count={renderedNationalRiver?.features.length ?? 0}
     >
       <Map
         ref={mapRef}
@@ -420,9 +437,9 @@ export function M11MapLibreSurface({
       >
         <NavigationControl position="top-right" visualizePitch />
         <ScaleControl position="bottom-left" unit="metric" />
-        {nationalRiverGeo && nationalRiverGeo.features.length > 0 ? (
+        {renderedNationalRiver ? (
           <M11NationalRiverPrimitive
-            collection={nationalRiverGeo}
+            collection={renderedNationalRiver}
             dimmed={Boolean(renderableOverlay) || basinRiverFeatureCollection.features.length > 0}
             satellite={state.basemap === 'satellite'}
           />

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import {
@@ -63,10 +63,26 @@ export function OverviewPage() {
     navigate({ pathname: location.pathname, search: normalizedSearch ? `?${normalizedSearch}` : '' }, { replace: true })
   }, [location.pathname, navigate, needsQueryReplacement, normalizedSearch])
 
+  // 刷新/直达带 basinId 的 URL：仅首挂载剥离 basinId，落到全国总览主页；会话内点流域（挂载后写
+  // basinId）不受影响。剥离期间同步按总览渲染（绝不挂 BasinDetailMode），否则详情副作用会把 basinId
+  // 回写 URL、盖掉剥离形成竞态。闸门只认「首挂载是否带 basinId」，basinId 真正消失后即关闭。
+  const initialBasinStripRef = useRef(Boolean(state.basinId))
+  const strippingInitialBasin = initialBasinStripRef.current && Boolean(state.basinId)
+  useEffect(() => {
+    if (!initialBasinStripRef.current) return
+    if (!state.basinId) {
+      initialBasinStripRef.current = false
+      return
+    }
+    const next = serializeM11QueryState({ ...state, basinId: null })
+    navigate({ pathname: location.pathname, search: next ? `?${next}` : '' }, { replace: true })
+  }, [state, location.pathname, navigate])
+
   if (needsQueryReplacement) return null
 
-  return state.basinId ? (
-    <BasinDetailMode basinId={state.basinId} state={state} onQueryChange={handleQueryChange} />
+  const effectiveBasinId = strippingInitialBasin ? null : state.basinId
+  return effectiveBasinId ? (
+    <BasinDetailMode basinId={effectiveBasinId} state={state} onQueryChange={handleQueryChange} />
   ) : (
     <OverviewMode state={state} onQueryChange={handleQueryChange} />
   )
@@ -82,6 +98,7 @@ function M11FullscreenMap({
   visibleBasinIds,
   basinSegments,
   nationalRiverGeo,
+  meshRiverBasinIds,
   selectedSegmentId,
   selectedSegmentGeometry,
   stationFeatureCollection,
@@ -103,6 +120,7 @@ function M11FullscreenMap({
   visibleBasinIds?: string[]
   basinSegments?: import('@/lib/m11/overviewDataContracts').BasinSegmentRow[]
   nationalRiverGeo?: import('geojson').FeatureCollection | null
+  meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: import('@/api/types').components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
@@ -141,6 +159,7 @@ function M11FullscreenMap({
         visibleBasinIds={visibleBasinIds}
         basinSegments={basinSegments}
         nationalRiverGeo={nationalRiverGeo}
+        meshRiverBasinIds={meshRiverBasinIds}
         selectedSegmentId={selectedSegmentId}
         selectedSegmentGeometry={selectedSegmentGeometry}
         stationFeatureCollection={stationFeatureCollection}
@@ -182,6 +201,7 @@ function BasinDetailMode({
       visibleBasinIds={detail.visibleBasinIds}
       basinSegments={detail.basinSegments}
       nationalRiverGeo={detail.nationalRiverGeo}
+      meshRiverBasinIds={detail.meshRiverBasinIds}
       selectedSegmentId={detail.selectedSegmentId}
       selectedSegmentGeometry={detail.selectedSegmentGeometry}
       stationFeatureCollection={detail.stationFeatureCollection}
@@ -351,6 +371,12 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // query 已切但快照未匹配（如选 met-raster 图层）时误抑制诚实降级提示「未注册」。
   const surfaceSettling = loading || !overview
   const boundaryCount = basins.filter((basin) => basin.boundary).length
+  // 有已发布 run 的流域（latestForecastTime != null ⟺ 河段进了流量 MVT）的静态河流须剔除，规避双线；
+  // 无 run 的流域（如 heihe）不在 MVT 中，保留其静态河流。
+  const meshRiverBasinIds = useMemo(
+    () => basins.filter((basin) => basin.latestForecastTime != null).map((basin) => basin.basinId),
+    [basins],
+  )
   const emptyBasinReason =
     !surfaceSettling && basins.length === 0
       ? error ??
@@ -368,6 +394,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       basins={basins}
       visibleBasinIds={visibleBasinIdList}
       nationalRiverGeo={nationalGeo.river}
+      meshRiverBasinIds={meshRiverBasinIds}
       stationFeatureCollection={stationLayer.featureCollection}
       popup={riverForecastPopup}
       loading={surfaceSettling}

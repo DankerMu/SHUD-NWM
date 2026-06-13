@@ -53,6 +53,7 @@ interface M11MapSurfaceProps extends SharedControlProps {
   visibleBasinIds?: string[]
   basinSegments?: BasinSegmentRow[]
   nationalRiverGeo?: import('geojson').FeatureCollection | null
+  meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
@@ -116,6 +117,7 @@ export function M11MapSurface({
   visibleBasinIds,
   basinSegments = [],
   nationalRiverGeo = null,
+  meshRiverBasinIds = [],
   selectedSegmentId = null,
   selectedSegmentGeometry = null,
   stationFeatureCollection = null,
@@ -137,6 +139,7 @@ export function M11MapSurface({
         visibleBasinIds={visibleBasinIds}
         basinSegments={basinSegments}
         nationalRiverGeo={nationalRiverGeo}
+        meshRiverBasinIds={meshRiverBasinIds}
         selectedSegmentId={selectedSegmentId}
         selectedSegmentGeometry={selectedSegmentGeometry}
         stationFeatureCollection={stationFeatureCollection}
