@@ -2599,6 +2599,28 @@ def test_route_authority_inherited_current_heading_route_value_compatibility_wor
     _assert_unallowlisted_budget_counted_report_only_finding(finding)
 
 
+def test_route_authority_current_child_heading_route_value_is_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        # Current operator procedure
+
+        ## Deep links
+        BASE_URL=$BASE_URL/forecast
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["line"] == 4
+    assert "/forecast" in str(finding["description"])
+    _assert_unallowlisted_budget_counted_report_only_finding(finding)
+
+
 @pytest.mark.parametrize("route_value", ["--path=/forecast", "?next=/forecast"])
 def test_route_authority_inherited_current_parent_list_route_value_is_drift(
     tmp_path: Path,
@@ -2681,6 +2703,36 @@ def test_route_authority_blockquoted_historical_heading_does_not_govern_normal_c
     assert finding["line"] == 2
     assert "/forecast" in str(finding["description"])
     _assert_unallowlisted_budget_counted_report_only_finding(finding)
+
+
+def test_route_authority_independent_blockquote_does_not_inherit_stale_blockquote_heading(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        > # Historical pre-M26 evidence
+        > Frozen /hydro-met receipt
+
+        Current operator note outside quote.
+
+        > Current route link ?next=/forecast
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_line = {finding["line"]: finding for finding in findings}
+
+    assert set(by_line) == {2, 6}
+    historical = by_line[2]
+    assert "/hydro-met" in str(historical["description"])
+    assert historical["allowlist_key"] == "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+    assert historical["allowlist_state"] == "allowlisted"
+    assert historical["budget_counted"] is False
+
+    active = by_line[6]
+    assert "/forecast" in str(active["description"])
+    _assert_unallowlisted_budget_counted_report_only_finding(active)
 
 
 def test_route_authority_normal_historical_heading_does_not_govern_blockquoted_current_route_value(
