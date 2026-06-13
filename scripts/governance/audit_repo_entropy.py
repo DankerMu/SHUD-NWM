@@ -1688,7 +1688,7 @@ def _file_sha256(path: Path, max_bytes: int) -> str:
 
 
 def _git_tracked_paths(root: Path, pathspecs: Iterable[str] = ()) -> list[str]:
-    command = ["git", "ls-files"]
+    command = ["git", "ls-files", "-z"]
     scoped_pathspecs = list(pathspecs)
     if scoped_pathspecs:
         command.extend(["--", *scoped_pathspecs])
@@ -1697,13 +1697,12 @@ def _git_tracked_paths(root: Path, pathspecs: Iterable[str] = ()) -> list[str]:
             command,
             cwd=root,
             check=True,
-            text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
     except (OSError, subprocess.CalledProcessError):
         return []
-    return result.stdout.splitlines()
+    return [os.fsdecode(path) for path in result.stdout.split(b"\0") if path]
 
 
 if __name__ == "__main__":

@@ -116,7 +116,9 @@ class BaselineFileInventory:
     total_source_files: int
     v1_summary_source_files: int
     total_test_files: int
+    v1_summary_test_files: int
     total_instruction_files: int
+    v1_summary_instruction_files: int
     module_file_counts: dict[str, int]
 
 
@@ -350,8 +352,8 @@ def _baseline_summary(
     modules = _baseline_modules(module_heatmap, file_inventory)
     return {
         "total_source_files": file_inventory.v1_summary_source_files,
-        "total_test_files": file_inventory.total_test_files,
-        "total_instruction_files": file_inventory.total_instruction_files,
+        "total_test_files": file_inventory.v1_summary_test_files,
+        "total_instruction_files": file_inventory.v1_summary_instruction_files,
         "total_modules": len(modules),
         "modules_with_high_entropy": sum(
             1 for row in modules.values() if _module_row_has_high_entropy(row)
@@ -462,15 +464,62 @@ def _baseline_file_inventory(root: Path) -> BaselineFileInventory:
         if _baseline_path_is_v1_summary_source_counted(relative_path):
             v1_summary_source_count += 1
 
+    v1_summary_test_count, v1_summary_instruction_count = _baseline_v1_summary_sibling_counts(
+        root,
+        narrow_test_count=test_count,
+        narrow_instruction_count=instruction_count,
+    )
     return BaselineFileInventory(
         relative_paths=tuple(inventory_paths),
         file_fingerprints=tuple(file_fingerprints),
         total_source_files=source_count,
         v1_summary_source_files=v1_summary_source_count,
         total_test_files=test_count,
+        v1_summary_test_files=v1_summary_test_count,
         total_instruction_files=instruction_count,
+        v1_summary_instruction_files=v1_summary_instruction_count,
         module_file_counts=dict(sorted(module_file_counts.items())),
     )
+
+
+def _baseline_v1_summary_sibling_counts(
+    root: Path,
+    *,
+    narrow_test_count: int,
+    narrow_instruction_count: int,
+) -> tuple[int, int]:
+    previous_summary = _previous_v1_baseline_summary(root)
+    return (
+        _baseline_v1_summary_compatible_count(
+            previous_summary.get("total_test_files"),
+            narrow_test_count,
+        ),
+        _baseline_v1_summary_compatible_count(
+            previous_summary.get("total_instruction_files"),
+            narrow_instruction_count,
+        ),
+    )
+
+
+def _baseline_v1_summary_compatible_count(previous_count: object, narrow_count: int) -> int:
+    # The persisted v1 sibling counters predate the newer narrow text-inventory
+    # classifier. When an existing v1 baseline has this field, keep that v1 unit
+    # instead of writing the narrow count under the old field name.
+    if type(previous_count) is int:
+        return previous_count
+    return narrow_count
+
+
+def _previous_v1_baseline_summary(root: Path) -> dict[str, object]:
+    latest_path = root / BASELINE_DIR_NAME / LATEST_BASELINE_NAME
+    try:
+        baseline = json.loads(latest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(baseline, dict) or baseline.get("version") != 1:
+        return {}
+    summary = baseline.get("summary")
+    return summary if isinstance(summary, dict) else {}
 
 
 def _baseline_inventory_relative_paths(root: Path) -> list[str]:
