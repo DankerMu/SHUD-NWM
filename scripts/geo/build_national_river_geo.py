@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Build the national static river-network GeoJSON from each basin's SHUD shapefile.
 
-Source : SHUD/input/<basin>/gis/river.shp (projected CRS, per-basin .prj)
+Source : <basins-root>/<basin>/input/<basin>/gis/river.shp  (production layout)
+         or legacy <repo-root>/SHUD/input/<basin>/gis/river.shp when --basins-root
+         is unset; per-basin .prj carries the CRS (projected or geographic).
 Output : apps/frontend/public/geo/national-basin-river.geojson (WGS84 / EPSG:4326)
 
 The frontend renders this as an always-on basemap layer and uses the `Type` field
@@ -30,17 +32,21 @@ from pyproj import CRS, Transformer
 
 DEFAULT_BASINS = ("qhh", "heihe")
 MAX_TYPE = 5
-# Snap projected metres to ~1 m so shared river endpoints quantize to one node.
+# Quantize shared river endpoints to one node. Snap unit follows the source CRS:
+# projected -> metres; geographic (lon/lat degrees) -> ~1.1 m at 1e-5 deg.
 NODE_SNAP_M = 1.0
+GEOGRAPHIC_SNAP_DEG = 1e-5
 
 
 def _basin_id(name: str) -> str:
     return f"basins_{name}"
 
 
-def _load_transformer(prj_path: Path) -> Transformer:
+def _load_transformer(prj_path: Path) -> tuple[Transformer, float]:
     crs = CRS.from_wkt(prj_path.read_text().strip())
-    return Transformer.from_crs(crs, CRS.from_epsg(4326), always_xy=True)
+    transformer = Transformer.from_crs(crs, CRS.from_epsg(4326), always_xy=True)
+    snap = GEOGRAPHIC_SNAP_DEG if crs.is_geographic else NODE_SNAP_M
+    return transformer, snap
 
 
 def _type_field_index(reader: shapefile.Reader) -> int | None:
@@ -59,14 +65,14 @@ def _line_parts(shape: shapefile.Shape) -> list[list[tuple[float, float]]]:
     return [points[bounds[i] : bounds[i + 1]] for i in range(len(starts)) if bounds[i + 1] - bounds[i] >= 2]
 
 
-def _node_key(point: tuple[float, float]) -> tuple[int, int]:
-    return (round(point[0] / NODE_SNAP_M), round(point[1] / NODE_SNAP_M))
+def _node_key(point: tuple[float, float], snap: float) -> tuple[int, int]:
+    return (round(point[0] / snap), round(point[1] / snap))
 
 
-def _strahler_orders(segments: list[list[tuple[float, float]]]) -> list[int]:
+def _strahler_orders(segments: list[list[tuple[float, float]]], snap: float) -> list[int]:
     """Strahler order per segment using point order (first=upstream, last=downstream)."""
-    up_node = [_node_key(seg[0]) for seg in segments]
-    down_node = [_node_key(seg[-1]) for seg in segments]
+    up_node = [_node_key(seg[0], snap) for seg in segments]
+    down_node = [_node_key(seg[-1], snap) for seg in segments]
     incoming: dict[tuple[int, int], list[int]] = defaultdict(list)
     for i, node in enumerate(down_node):
         incoming[node].append(i)
@@ -103,14 +109,13 @@ def _round_coords(part: list[tuple[float, float]], transformer: Transformer, dec
     return out
 
 
-def build_basin_features(repo_root: Path, name: str, decimals: int) -> list[dict]:
-    gis = repo_root / "SHUD" / "input" / name / "gis"
+def build_basin_features(gis: Path, name: str, decimals: int) -> list[dict]:
     shp, prj = gis / "river.shp", gis / "river.prj"
     if not shp.exists() or not prj.exists():
-        print(f"[skip] {name}: missing {shp.name}/{prj.name}", file=sys.stderr)
+        print(f"[skip] {name}: missing {shp}/{prj.name}", file=sys.stderr)
         return []
 
-    transformer = _load_transformer(prj)
+    transformer, snap = _load_transformer(prj)
     reader = shapefile.Reader(str(shp))
     type_idx = _type_field_index(reader)
 
@@ -126,7 +131,7 @@ def build_basin_features(repo_root: Path, name: str, decimals: int) -> list[dict
         types = [max(1, min(MAX_TYPE, int(round(float(records[o].record[type_idx] or 1))))) for o in seg_owner]
         source = "shp:Type"
     else:
-        strahler = _strahler_orders(seg_parts)
+        strahler = _strahler_orders(seg_parts, snap)
         types = [max(1, min(MAX_TYPE, s)) for s in strahler]
         source = "strahler"
 
@@ -149,10 +154,14 @@ def build_basin_features(repo_root: Path, name: str, decimals: int) -> list[dict
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--basins", default=",".join(DEFAULT_BASINS), help="comma-separated basin names under SHUD/input"
-    )
+    parser.add_argument("--basins", default=",".join(DEFAULT_BASINS), help="comma-separated basin names")
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[2]))
+    parser.add_argument(
+        "--basins-root",
+        default=None,
+        help="production Basins root; per-basin gis resolved as <root>/<name>/input/<name>/gis. "
+        "If unset, legacy <repo-root>/SHUD/input/<name>/gis.",
+    )
     parser.add_argument(
         "--out",
         default=None,
@@ -164,11 +173,17 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
+    basins_root = Path(args.basins_root).resolve() if args.basins_root else None
     out_path = Path(args.out) if args.out else repo_root / "apps/frontend/public/geo/national-basin-river.geojson"
+
+    def gis_dir(name: str) -> Path:
+        if basins_root is not None:
+            return basins_root / name / "input" / name / "gis"
+        return repo_root / "SHUD" / "input" / name / "gis"
 
     features: list[dict] = []
     for name in [b.strip() for b in args.basins.split(",") if b.strip()]:
-        features.extend(build_basin_features(repo_root, name, args.decimals))
+        features.extend(build_basin_features(gis_dir(name), name, args.decimals))
 
     if not features:
         print("[fail] no river features generated", file=sys.stderr)
