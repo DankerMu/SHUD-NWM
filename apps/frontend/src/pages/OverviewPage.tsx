@@ -186,7 +186,7 @@ function BasinDetailMode({
       selectedSegmentGeometry={detail.selectedSegmentGeometry}
       stationFeatureCollection={detail.stationFeatureCollection}
       popup={detail.popup}
-      loading={detail.loading}
+      loading={detail.surfaceSettling}
       boundaryLoading={detail.boundaryLoading}
       fitTo={detail.fitTo}
       mapLabel={detail.mapLabel}
@@ -346,9 +346,13 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
     cycle: state.cycle,
   })
 
+  // 「总览数据尚未首次落定」单一信号：用 raw overview（首次成功加载后恒非 null），仅首挂载 frame-1
+  // 为真，统一驱动 surface 占位与浮层提示、消除空态/不可用闪一帧；不用 currentOverview——那会在
+  // query 已切但快照未匹配（如选 met-raster 图层）时误抑制诚实降级提示「未注册」。
+  const surfaceSettling = loading || !overview
   const boundaryCount = basins.filter((basin) => basin.boundary).length
   const emptyBasinReason =
-    !loading && basins.length === 0
+    !surfaceSettling && basins.length === 0
       ? error ??
         (summary?.totalBasins === 0
           ? '暂无可用流域数据'
@@ -366,7 +370,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       nationalRiverGeo={nationalGeo.river}
       stationFeatureCollection={stationLayer.featureCollection}
       popup={riverForecastPopup}
-      loading={loading || !overview}
+      loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}
       mapLabel="全国总览地图"
       infoTitle="全国水文总览"
@@ -378,7 +382,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       {state.layer === 'met-stations' && stationLayer.statusNote ? (
         // 代站图层的 honest 状态优先（全国总览未选流域时诚实提示「请选择流域」）。
         <M11FloatingNotice testId="m11-met-station-status">{stationLayer.statusNote}</M11FloatingNotice>
-      ) : loading ? (
+      ) : surfaceSettling ? (
         <M11FloatingNotice testId="m11-overview-loading">总览数据加载中</M11FloatingNotice>
       ) : emptyBasinReason ? (
         <M11FloatingNotice testId="m11-overview-empty">{emptyBasinReason}</M11FloatingNotice>

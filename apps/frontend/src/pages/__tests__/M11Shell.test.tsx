@@ -6,13 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 import {
+  createEmptyBasinDetail,
+  createEmptyOverviewSummary,
+  decideAggregationEndpoint,
   normalizeLayerStates,
   type BasinSegmentRow,
   type LayerState,
   type OverviewBasin,
+  type OverviewSummary,
   type SourceScenarioSelectionState,
 } from '@/lib/m11/overviewDataContracts'
-import { defaultM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
+import { defaultM11QueryState, parseM11QueryState, serializeM11QueryState, type M11QueryPatch, type M11QueryState } from '@/lib/m11/queryState'
 import {
   m11BasinRiverCollectionBudget,
   buildM11RegisteredOverlay,
@@ -32,7 +36,13 @@ import {
 } from '@/pages/m11/M11Controls'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { OverviewPage } from '@/pages/OverviewPage'
-import { useOverviewDataStore } from '@/stores/overviewData'
+import {
+  useOverviewDataStore,
+  type BasinDataSnapshot,
+  type M11BasinRequestScope,
+  type M11OverviewRequestScope,
+  type OverviewDataSnapshot,
+} from '@/stores/overviewData'
 import { useStationLayerDataStore } from '@/stores/stationLayerData'
 
 const mapSources: Array<Record<string, unknown>> = []
@@ -474,6 +484,65 @@ const sourceSelection: SourceScenarioSelectionState = {
 
 function geoJsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+}
+
+// 复刻 store 的 requestScope key 公式（overviewData.ts: requestScopeQueryKey / requestScopeDataKey），
+// 用于构造「与当前 query 真匹配」的 store 快照，让生产接线（loading || !currentOverview）真正被测到。
+function scopeQueryKey(query: M11QueryState) {
+  return serializeM11QueryState({ ...query, basinId: null, basemap: defaultM11QueryState.basemap, validTime: null })
+}
+function scopeDataKey(query: M11QueryState) {
+  return serializeM11QueryState({ ...query, basinId: null, basemap: defaultM11QueryState.basemap })
+}
+
+function matchedOverviewScope(query: M11QueryState): M11OverviewRequestScope {
+  return {
+    kind: 'overview',
+    queryKey: scopeQueryKey(query),
+    dataKey: scopeDataKey(query),
+    source: query.source,
+    layer: query.layer,
+    cycle: query.cycle,
+    validTime: query.validTime,
+    basemap: query.basemap,
+    basinVersionId: query.basinVersionId,
+    riverNetworkVersionId: query.riverNetworkVersionId,
+    segmentId: query.segmentId,
+    warningLevel: query.warningLevel,
+    q: query.q,
+  }
+}
+
+// query 已落定但结果为「matched-but-empty」（basins: []）的总览快照：诚实空态仍须显示。
+function matchedEmptyOverviewSnapshot(query: M11QueryState): OverviewDataSnapshot {
+  const summary: OverviewSummary = createEmptyOverviewSummary(query)
+  return {
+    requestScope: matchedOverviewScope(query),
+    basins: [],
+    summary,
+    layers: [],
+    aggregationDecision: decideAggregationEndpoint({
+      initialRequestCount: 1,
+      createsPerBasinNPlusOne: false,
+      missingRequiredFields: [],
+    }),
+    basinVersionToBasinId: {},
+  }
+}
+
+function matchedBasinScope(basinId: string, query: M11QueryState): M11BasinRequestScope {
+  const identityQuery = { ...query, warningLevel: null, q: null }
+  return { ...matchedOverviewScope(identityQuery), kind: 'basin-detail', basinId }
+}
+
+function matchedBasinSnapshot(basinId: string, query: M11QueryState): BasinDataSnapshot {
+  return {
+    requestScope: matchedBasinScope(basinId, query),
+    detail: createEmptyBasinDetail(basinId, query),
+    segments: [],
+    selectedSegment: null,
+    layers: [],
+  }
 }
 
 describe('M11 visual foundation shell', () => {
@@ -1338,6 +1407,72 @@ describe('M11 visual foundation shell', () => {
     // 全部 settle 后才诚实显示真·空态。
     rerender(<M11MapSurface state={state} layers={[]} basins={overviewBasins} visibleBasinIds={[]} />)
     expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('当前没有可见流域边界')
+  })
+
+  // 生产接线锚定：渲染真实 OverviewPage（总览/流域详情两种模式），证明
+  // loading || !currentOverview（及流域侧的 surfaceSettling）在 frame-1 抑制瞬态空态/不可用，
+  // 而 matched-but-empty 的诚实空态仍如实显示。叶子 harness（上一组）覆盖留存，此处只是补全。
+  it('suppresses overview frame-1 transient notices when store is unsettled (overview=null, loading=false)', () => {
+    window.history.pushState({}, '', '/?warningLevel=major')
+    // beforeEach 已置 overview=null / loading=false（首帧竞态原貌）。
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    // frame-1：数据未落定 → 不得闪任何不可用/空态
+    expect(screen.queryByTestId('m11-map-unavailable')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('m11-basin-layer-unavailable')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('m11-overview-empty')).not.toBeInTheDocument()
+    // 诚实改为"加载中"占位
+    expect(screen.getByTestId('m11-overview-loading')).toBeInTheDocument()
+  })
+
+  it('still shows honest overview empty notice when a query-matched snapshot has no basins', () => {
+    window.history.pushState({}, '', '/?warningLevel=major')
+    const query = parseM11QueryState(window.location.search)
+    useOverviewDataStore.setState({ overview: matchedEmptyOverviewSnapshot(query), loading: false })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    // 关键反回归：query 已匹配 → currentOverview 非空 → surfaceSettling=false → 诚实空态如实显示
+    expect(screen.getByTestId('m11-overview-empty')).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-overview-loading')).not.toBeInTheDocument()
+  })
+
+  it('suppresses basin-detail frame-1 map-unavailable on deep-link refresh (basinDetail=null, basinLoading=false)', () => {
+    window.history.pushState({}, '', '/?basinId=qhh')
+    // beforeEach 已置 basinDetail=null / basinLoading=false（深链直达某流域 URL 的首帧）。
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    expect(screen.getByTestId('m11-fullscreen-map')).toBeInTheDocument()
+    expect(screen.queryByTestId('m11-map-unavailable')).not.toBeInTheDocument()
+  })
+
+  it('reflects a query-matched basin snapshot through surfaceSettling once settled', () => {
+    window.history.pushState({}, '', '/?basinId=qhh')
+    const query = parseM11QueryState(window.location.search)
+    useOverviewDataStore.setState({ basinDetail: matchedBasinSnapshot('qhh', query), basinLoading: false })
+
+    render(
+      <BrowserRouter>
+        <OverviewPage />
+      </BrowserRouter>,
+    )
+
+    // 流域数据已落定（matched）→ surfaceSettling=false → 不再以 loading 抑制；地图外壳正常渲染。
+    expect(screen.getByTestId('m11-fullscreen-map')).toBeInTheDocument()
   })
 
   it('omits malformed selected segment geometry from MapLibre sources while showing selected unavailable state', () => {
