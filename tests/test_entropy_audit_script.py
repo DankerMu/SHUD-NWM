@@ -2387,6 +2387,155 @@ def test_route_authority_current_runbook_allowlist_contexts_are_distinct(
     assert all(finding["gate_eligible"] is False for finding in findings)
 
 
+def test_route_authority_current_runbook_mixed_active_and_redirect_contexts_are_distinct(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        "Open /forecast for current live browser proof; /hydro-met -> / redirect alias.\n",
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_token = _route_authority_findings_by_token(findings)
+
+    assert set(by_token) == {"/forecast", "/hydro-met"}
+    active = by_token["/forecast"]
+    redirect = by_token["/hydro-met"]
+    assert active["allowlist_state"] == "unallowlisted"
+    assert active["allowlist_key"] is None
+    assert active["budget_counted"] is True
+    assert active["gate_eligible"] is False
+    assert redirect["allowlist_state"] == "allowlisted"
+    assert redirect["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
+
+
+def test_route_authority_current_runbook_same_route_mixed_contexts_keep_active_finding(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        "/hydro-met -> / redirect alias; Open /hydro-met for current live browser proof.\n",
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    hydro_findings = [finding for finding in findings if "/hydro-met" in str(finding["description"])]
+
+    assert len(hydro_findings) == 2
+    assert {finding["allowlist_state"] for finding in hydro_findings} == {
+        "allowlisted",
+        "unallowlisted",
+    }
+    active = next(finding for finding in hydro_findings if finding["allowlist_state"] == "unallowlisted")
+    assert active["allowlist_key"] is None
+    assert active["budget_counted"] is True
+    assert active["gate_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Open /forecast for current live browser proof -> capture the receipt.",
+        "Open /forecast for current compatibility/deep-link browser proof.",
+    ],
+)
+def test_route_authority_current_runbook_active_line_with_unrelated_allowlist_words_is_drift(
+    tmp_path: Path,
+    line: str,
+) -> None:
+    _write(tmp_path / "docs" / "runbooks" / "current.md", f"{line}\n")
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert "/forecast" in str(finding["description"])
+    assert finding["allowlist_state"] == "unallowlisted"
+    assert finding["allowlist_key"] is None
+    assert finding["budget_counted"] is True
+    assert finding["gate_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    "context_line",
+    [
+        "Compatibility context keeps legacy deep links available.",
+        "Historical pre-M26 evidence used legacy display aliases.",
+    ],
+)
+def test_route_authority_current_runbook_adjacent_allowlist_context_does_not_allowlist_active_line(
+    tmp_path: Path,
+    context_line: str,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        f"{context_line}\nOpen /forecast.\n",
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert "/forecast" in str(finding["description"])
+    assert finding["allowlist_state"] == "unallowlisted"
+    assert finding["allowlist_key"] is None
+
+
+def test_route_authority_legacy_hydro_met_token_uses_route_boundaries(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        "Ignore foo/hydro-met and some/path/hydro-met in non-route path examples.\n",
+    )
+
+    assert _route_authority_findings(tmp_path) == []
+
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        "Open /hydro-met for current live browser proof.\n",
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert "/hydro-met" in str(finding["description"])
+    assert finding["allowlist_state"] == "unallowlisted"
+
+
+def test_route_authority_large_line_matches_route_tokens_without_prefix_scan_shape(
+    tmp_path: Path,
+) -> None:
+    tokens = ["/forecast", "/hydro-met", "/meteorology", "/flood-alerts"]
+    large_line = " ".join(f"Open {tokens[index % len(tokens)]} for current proof." for index in range(800))
+    _write(tmp_path / "docs" / "runbooks" / "current.md", f"{large_line}\n")
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == len(tokens)
+    assert set(_route_authority_findings_by_token(findings)) == set(tokens)
+
+
+def test_route_authority_current_repo_has_no_unallowlisted_findings_in_known_false_positive_paths() -> None:
+    guarded_paths = {
+        "apps/frontend/src/App.tsx",
+        "docs/runbooks/qhh-mvp-production-like-e2e-checklist.md",
+        "docs/runbooks/qhh-mvp-smoke-evidence.md",
+    }
+    findings = [
+        finding
+        for finding in audit_repo_entropy.build_report(REPO_ROOT)["findings"]
+        if finding["check_id"] == "stale-display-route-token"
+        and finding["allowlist_state"] == "unallowlisted"
+        and (
+            str(finding["evidence_path"]).startswith("apps/frontend/e2e/")
+            or finding["evidence_path"] in guarded_paths
+        )
+    ]
+
+    assert findings == []
+
+
 def test_route_authority_legacy_alias_coverage_includes_all_current_redirect_forms(
     tmp_path: Path,
 ) -> None:
