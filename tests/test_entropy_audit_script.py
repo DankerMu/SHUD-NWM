@@ -2502,6 +2502,36 @@ def test_route_authority_historical_banner_keeps_later_current_route_values_as_d
         assert finding["gate_eligible"] is False
 
 
+def test_route_authority_evidence_boundary_heading_allowlists_diagnostic_route_references(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        ## #214 evidence boundary
+
+        - `/hydro-met` browser proof 状态以 #214 evidence matrix 为准。
+        IFS deterministic `/forecast` browser smoke 标注 144h actual horizon.
+
+        ## Current operator procedure
+
+        Open /meteorology for current live browser proof.
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_token = _route_authority_findings_by_token(findings)
+
+    assert set(by_token) == {"/hydro-met", "/forecast", "/meteorology"}
+    for token in ("/hydro-met", "/forecast"):
+        assert by_token[token]["allowlist_key"] == (
+            "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+        )
+        assert by_token[token]["allowlist_state"] == "allowlisted"
+        assert by_token[token]["budget_counted"] is False
+    _assert_unallowlisted_budget_counted_report_only_finding(by_token["/meteorology"])
+
+
 @pytest.mark.parametrize(
     "line",
     [
@@ -2716,6 +2746,47 @@ def test_route_authority_markdown_table_list_and_wrapped_contexts_allowlist_gove
     )
     assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
     assert all(finding["budget_counted"] is False for finding in findings)
+
+
+@pytest.mark.parametrize(
+    "continuation",
+    [
+        "  all `replace` redirect to `/` with semantic query parameters.",
+        "  all old aliases redirect to `/` with semantic query parameters.",
+        "  全 `replace` 重定向到 `/` + 语义参数。",
+    ],
+)
+def test_route_authority_wrapped_list_redirect_continuation_allowlists_route_list(
+    tmp_path: Path,
+    continuation: str,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        f"""
+        - Legacy display routes:
+          (`/hydro-met`/`/overview`/`/forecast`/`/meteorology`)
+        {continuation}
+        - Open /flood-alerts for current live browser proof.
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_token = _route_authority_findings_by_token(findings)
+
+    assert set(by_token) == {
+        "/hydro-met",
+        "/overview",
+        "/forecast",
+        "/meteorology",
+        "/flood-alerts",
+    }
+    for token in ("/hydro-met", "/overview", "/forecast", "/meteorology"):
+        assert by_token[token]["allowlist_key"] == (
+            "stale-display-route-token:m26-route-consolidation-or-redirect"
+        )
+        assert by_token[token]["allowlist_state"] == "allowlisted"
+        assert by_token[token]["budget_counted"] is False
+    _assert_unallowlisted_budget_counted_report_only_finding(by_token["/flood-alerts"])
 
 
 def test_route_authority_top_level_sibling_list_context_does_not_allowlist_active_route(
@@ -3190,8 +3261,41 @@ def test_route_authority_m26_references_preserve_expected_allowlist_keys(
         "stale-display-route-token:m26-route-consolidation-or-redirect"
     )
     hydro_page = next(finding for finding in findings if "HydroMetPage" in str(finding["description"]))
-    assert hydro_page["allowlist_key"] == "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+    assert hydro_page["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
     assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
+
+
+def test_route_authority_current_repo_m26_route_evidence_preserves_m26_allowlist_key() -> None:
+    expected_rows = {
+        ("openspec/changes/m26-unified-map-display/proposal.md", 15, "HydroMetPage"),
+        ("openspec/changes/m26-unified-map-display/proposal.md", 39, "/hydro-met"),
+        ("openspec/changes/m26-unified-map-display/tasks.md", 12, "/hydro-met"),
+        ("openspec/changes/m26-unified-map-display/tasks.md", 49, "/hydro-met"),
+    }
+    findings = [
+        finding
+        for finding in _route_authority_findings(REPO_ROOT)
+        if (
+            finding["evidence_path"],
+            finding["line"],
+            _route_authority_token_from_finding(finding),
+        )
+        in expected_rows
+    ]
+
+    assert {
+        (
+            finding["evidence_path"],
+            finding["line"],
+            _route_authority_token_from_finding(finding),
+        )
+        for finding in findings
+    } == expected_rows
+    assert {finding["allowlist_key"] for finding in findings} == {
+        "stale-display-route-token:m26-route-consolidation-or-redirect"
+    }
+    assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
+    assert all(finding["budget_counted"] is False for finding in findings)
 
 
 def test_route_authority_large_line_matches_route_tokens_without_prefix_scan_shape(
@@ -3219,6 +3323,33 @@ def test_route_authority_large_line_matches_route_tokens_without_prefix_scan_sha
     assert call_count == len(tokens)
 
 
+def test_route_authority_duplicate_tokens_dedupe_before_expensive_context_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_count = 400
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        "Open " + " ".join("/forecast" for _index in range(token_count)) + " for current proof.\n",
+    )
+    redirect_span_call_count = 0
+    original_redirect_span = audit_repo_entropy._stale_route_mention_redirect_span
+
+    def counting_redirect_span(*args: object) -> str:
+        nonlocal redirect_span_call_count
+        redirect_span_call_count += 1
+        return original_redirect_span(*args)
+
+    monkeypatch.setattr(audit_repo_entropy, "_stale_route_mention_redirect_span", counting_redirect_span)
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert "/forecast" in str(findings[0]["description"])
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+    assert redirect_span_call_count == 1
+
+
 def test_route_authority_route_free_large_markdown_does_not_build_governing_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3244,20 +3375,16 @@ def test_route_authority_route_free_large_markdown_does_not_build_governing_cont
     assert call_count == 0
 
 
-def test_route_authority_current_repo_has_no_unallowlisted_findings_in_known_false_positive_paths() -> None:
-    guarded_paths = {
-        "apps/frontend/src/App.tsx",
-        "docs/runbooks/qhh-mvp-production-like-e2e-checklist.md",
-        "docs/runbooks/qhh-mvp-smoke-evidence.md",
-    }
+def test_route_authority_current_repo_has_no_unallowlisted_findings_in_current_docs() -> None:
+    guarded_entrypoints = {"README.md", "progress.md", "CLAUDE.md", "docs/governance/DOC_STATUS.md"}
     findings = [
         finding
-        for finding in audit_repo_entropy.build_report(REPO_ROOT)["findings"]
+        for finding in _route_authority_findings(REPO_ROOT)
         if finding["check_id"] == "stale-display-route-token"
         and finding["allowlist_state"] == "unallowlisted"
         and (
-            str(finding["evidence_path"]).startswith("apps/frontend/e2e/")
-            or finding["evidence_path"] in guarded_paths
+            str(finding["evidence_path"]).startswith("docs/runbooks/")
+            or finding["evidence_path"] in guarded_entrypoints
         )
     ]
 
@@ -3397,10 +3524,18 @@ def _route_authority_findings_by_token(
 ) -> dict[str, dict[str, object]]:
     by_token: dict[str, dict[str, object]] = {}
     for finding in findings:
-        description = str(finding["description"])
-        for match in audit_repo_entropy.LEGACY_DISPLAY_ROUTE_PATTERN.finditer(description):
-            by_token[match.group("token")] = finding
+        token = _route_authority_token_from_finding(finding)
+        if token is not None:
+            by_token[token] = finding
     return by_token
+
+
+def _route_authority_token_from_finding(finding: dict[str, object]) -> str | None:
+    description = str(finding["description"])
+    if "HydroMetPage" in description:
+        return "HydroMetPage"
+    match = audit_repo_entropy.LEGACY_DISPLAY_ROUTE_PATTERN.search(description)
+    return match.group("token") if match else None
 
 
 def _assert_forecast_active_and_hydro_redirect(findings: Iterable[dict[str, object]]) -> None:
