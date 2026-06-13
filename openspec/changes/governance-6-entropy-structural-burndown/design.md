@@ -98,6 +98,17 @@ Forecast-chain submission remains reserve-before-sbatch, lost reservation skips
 submission, array and non-array submissions carry idempotency comments, and the
 reservation binds only after a real Slurm job id is obtained.
 
+### D5a. Published artifact root is creatable by the control publish stage
+
+Runtime root preflight still blocks missing workspace, object-store, runtime,
+temporary, lock, and evidence roots before registry, adapter, active-repository,
+or submission work begins. The published artifact root is different: it is a
+control-node display mount populated by the local publish stage after Slurm work
+has produced artifacts in `object_store_root`. A missing
+`published_artifact_root` may therefore be reported as creatable
+(`allow_create=true`) instead of blocking the planning path, as long as dry-run
+planning remains non-mutating and does not create the directory.
+
 ### D6. Candidate-state compatibility is not simplified in stage one
 
 Legacy candidate-state rows, manual retry, active Slurm sync, permanent/cancel

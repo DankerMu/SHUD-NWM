@@ -111,7 +111,12 @@ separate PR boundaries.
   execution orchestration helpers that do not own lease or candidate-state
   semantics.
 - [ ] 9.2 Preserve `run_once` ordering and mutation fences.
-- [ ] 9.3 Verify with focused forcing and concurrent candidate tests.
+- [ ] 9.3 Preserve scheduler runtime-root preflight semantics: missing
+  `published_artifact_root` is a control publish-stage creatable root, while
+  missing workspace, object-store, runtime, temp, lock, and evidence roots still
+  block before registry, adapter, active-repository, or submission work.
+- [ ] 9.4 Verify with focused forcing, concurrent candidate, and runtime-root
+  preflight tests.
 
 ## 10. Scheduler Evidence Extraction
 
@@ -518,11 +523,11 @@ separate PR boundaries.
 - Ownership: `services/orchestrator/scheduler.py`,
   `services/orchestrator/scheduler_execution.py`, forcing/concurrency tests.
 - In Scope: Extract forcing production, candidate cohort grouping, concurrent
-  submit evidence, and execution orchestration helpers that do not own lease or
-  candidate-state semantics.
+  submit evidence, runtime-root preflight behavior, and execution orchestration
+  helpers that do not own lease or candidate-state semantics.
 - Out of Scope: Evidence serialization helper extraction and chain stage
   behavior.
-- Tasks: 9.1, 9.2, 9.3.
+- Tasks: 9.1, 9.2, 9.3, 9.4.
 - Dependencies: G6-12.
 - PR Boundary: Scheduler execution helpers only.
 - Required Reading: `specs/orchestrator-structural-burndown/spec.md`,
@@ -530,7 +535,10 @@ separate PR boundaries.
 - Verification: `uv run --no-sync pytest -q tests/test_production_scheduler.py`
   plus `uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`.
 - Acceptance: `run_once` ordering and mutation fences remain stable; focused
-  forcing/concurrent candidate tests pass.
+  forcing/concurrent candidate tests pass; missing `published_artifact_root` is
+  reported as creatable/non-blocking for the control publish stage while other
+  missing runtime roots still block before registry, adapter, active-repository,
+  or submission work.
 
 ### G6-14 Scheduler evidence extraction
 
