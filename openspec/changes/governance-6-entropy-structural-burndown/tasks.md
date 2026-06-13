@@ -13,12 +13,12 @@ separate PR boundaries.
 - [x] 1.2 Write `.entropy-baseline/latest.json` after explicit maintainer
   request, including branch, commit, summary counts, module heatmap, high-spread
   patterns, and cleanup priorities.
-- [ ] 1.3 Verify normal JSON/Markdown/hard-gate report commands do not modify
+- [x] 1.3 Verify normal JSON/Markdown/hard-gate report commands do not modify
   `.entropy-baseline/latest.json`.
-- [ ] 1.4 Add `scripts/governance/write_entropy_baseline.py` as the
+- [x] 1.4 Add `scripts/governance/write_entropy_baseline.py` as the
   maintainer-only baseline write helper; it consumes audit JSON output or runs
   the audit internally without making report modes mutate the baseline.
-- [ ] 1.5 Verify an explicit baseline replacement through
+- [x] 1.5 Verify an explicit baseline replacement through
   `scripts/governance/write_entropy_baseline.py` archives an existing
   `.entropy-baseline/latest.json` before writing a new latest snapshot.
 
@@ -253,6 +253,35 @@ separate PR boundaries.
   `.entropy-baseline/latest.json` only when explicitly run, archives a previous
   latest snapshot under `.entropy-baseline/<timestamp>.json`, and does not make
   JSON/Markdown/hard-gate audit report commands mutate the baseline.
+- Fixture evidence:
+  - No existing latest + explicit writer command:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python
+    scripts/governance/write_entropy_baseline.py --repo-root <tmp-repo>` ->
+    creates `<tmp-repo>/.entropy-baseline/latest.json`, exits zero, and writes
+    required comparison fields: branch, commit, summary metrics, modules,
+    high-spread patterns, and cleanup priorities.
+  - Existing latest + explicit writer command:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python
+    scripts/governance/write_entropy_baseline.py --repo-root <tmp-repo>` ->
+    preserves the previous latest bytes under exactly one timestamped archive
+    file before replacing latest.
+  - Existing latest + normal report commands:
+    `audit_repo_entropy.py --format json`, `--format markdown`, and `--mode
+    hard-gate --format json` -> no baseline mutation, preserving the G6-01
+    report-only tests.
+  - Resource/write-surface bound:
+    temp repo + explicit writer command -> writer obtains one audit snapshot and
+    only creates or replaces `.entropy-baseline/latest.json` plus at most one
+    timestamped archive; no files outside `.entropy-baseline/` are created by
+    the writer.
+  - Failure path: blocked archive or write path -> writer exits non-zero with a
+    stable error and does not silently delete the previous latest baseline.
+  - Focused automated test: `uv run --no-sync pytest -q
+    tests/test_entropy_audit_script.py`.
+  - Static check: `uv run --no-sync ruff check
+    scripts/governance/audit_repo_entropy.py
+    scripts/governance/write_entropy_baseline.py
+    tests/test_entropy_audit_script.py`.
 
 ### G6-03 Current route-authority runbooks
 
