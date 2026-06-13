@@ -140,19 +140,19 @@ textarea {
 .maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
 .maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
 .maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
-  border-top-color: rgba(15, 23, 42, 0.78);
+  border-top-color: rgba(2, 6, 23, 0.9);
 }
 
 .maplibregl-popup-anchor-top .maplibregl-popup-tip,
 .maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
 .maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
-  border-bottom-color: rgba(15, 23, 42, 0.78);
+  border-bottom-color: rgba(2, 6, 23, 0.9);
 }
 
 .maplibregl-popup-anchor-left .maplibregl-popup-tip {
-  border-right-color: rgba(15, 23, 42, 0.78);
+  border-right-color: rgba(2, 6, 23, 0.9);
 }
 
 .maplibregl-popup-anchor-right .maplibregl-popup-tip {
-  border-left-color: rgba(15, 23, 42, 0.78);
+  border-left-color: rgba(2, 6, 23, 0.9);
 }

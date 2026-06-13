@@ -31,9 +31,12 @@ interface ForecastChartProps {
 
 /** series.color(hex) → rgba，用于深色主题的面积渐变/辉光，保持与曲线同色相。 */
 function hexToRgba(hex: string, alpha: number): string {
-  const match = /^#?([0-9a-f]{6})$/i.exec(hex)
+  const match = /^#?([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(hex.trim())
   if (!match) return `rgba(34, 211, 238, ${alpha})`
-  const value = Number.parseInt(match[1], 16)
+  let digits = match[1]
+  if (digits.length === 3) digits = digits.split('').map((c) => c + c).join('')
+  if (digits.length === 8) digits = digits.slice(0, 6)
+  const value = Number.parseInt(digits, 16)
   return `rgba(${(value >> 16) & 0xff}, ${(value >> 8) & 0xff}, ${value & 0xff}, ${alpha})`
 }
 
