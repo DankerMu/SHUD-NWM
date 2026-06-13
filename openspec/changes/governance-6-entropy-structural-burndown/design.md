@@ -98,6 +98,17 @@ Forecast-chain submission remains reserve-before-sbatch, lost reservation skips
 submission, array and non-array submissions carry idempotency comments, and the
 reservation binds only after a real Slurm job id is obtained.
 
+### D5a. Published artifact root is creatable by the control publish stage
+
+Runtime root preflight still blocks missing workspace, object-store, runtime,
+temporary, lock, and evidence roots before registry, adapter, active-repository,
+or submission work begins. The published artifact root is different: it is a
+control-node display mount populated by the local publish stage after Slurm work
+has produced artifacts in `object_store_root`. A missing
+`published_artifact_root` may therefore be reported as creatable
+(`allow_create=true`) instead of blocking the planning path, as long as dry-run
+planning remains non-mutating and does not create the directory.
+
 ### D6. Candidate-state compatibility is not simplified in stage one
 
 Legacy candidate-state rows, manual retry, active Slurm sync, permanent/cancel
@@ -506,6 +517,151 @@ Non-goals:
 - No removal of legacy redirect aliases.
 - No node-27 timing metric acceptance; local node-27 access timing is excluded
   by maintainer instruction.
+
+## G6-04 Route-Authority Governance Grep Fixture
+
+Fixture level: expanded
+Repair intensity: medium
+Project profile: NHMS
+
+Mandatory expanded triggers:
+
+- Public CLI/report output: `audit_repo_entropy.py --format json|markdown` and
+  hard-gate summaries expose these findings to governance automation.
+- Finding schema fields: route findings depend on stable `check_id`,
+  `allowlist_reason`, `allowlist_key`, `budget_counted`, and `gate_eligible`
+  fields.
+- Bounded text resource discovery: the check scans repository text files and
+  must keep existing skip and byte-limit behavior.
+- Legacy compatibility/examples: legacy route aliases remain valid only in
+  redirect, compatibility, or historical contexts.
+
+Change surface:
+
+- `scripts/governance/audit_repo_entropy.py` route-authority audit detection,
+  classification, allowlist-key generation, and report fields.
+- `tests/test_entropy_audit_script.py` focused route-authority regression
+  coverage.
+
+Must preserve:
+
+- `stale-display-route-token` remains report-only: unallowlisted route drift is
+  budget-counted but not hard-gate eligible.
+- Existing stale `/hydro-met` and `HydroMetPage` findings, allowlist keys,
+  module assignment, JSON/Markdown report shape, and baseline report-only
+  behavior remain compatible for current tests.
+- M26 route authority from `docs/governance/DOC_STATUS.md` and
+  `apps/frontend/src/App.tsx`: `/` is active display, `/ops` is active
+  operational display, and legacy aliases remain compatibility redirects.
+
+Downstream compatibility axes:
+
+- JSON and Markdown report consumers still receive the same finding family and
+  stable finding fields.
+- Hard-gate summaries still exclude `stale-display-route-token` from
+  `HARD_GATE_CHECK_IDS`.
+- Existing allowlist keys for historical/pre-M26 evidence, redirect evidence,
+  milestone summaries, frontend redirect tests, and HydroMetPage provenance
+  remain compatible.
+- Baseline/report-only behavior remains unchanged; the audit observes files but
+  does not write `.entropy-baseline/latest.json`.
+- `docs/governance/DOC_STATUS.md` and `apps/frontend/src/App.tsx` remain the
+  route-authority sources; issue #460's "six legacy forms" acceptance wording is
+  interpreted through those sources, so `/overview` is included.
+
+Must add/change:
+
+- Current docs/runbooks scans classify `/overview`, `/hydro-met`, `/forecast`,
+  `/meteorology`, `/flood-alerts`, `/basins/:id`, `/segments/:id`, and concrete
+  `/basins/<id>` / `/segments/<id>` mentions as one of: historical evidence,
+  redirect alias, compatibility context, or drift.
+- Active-looking current-runbook usage outside those allowlist classes is an
+  unallowlisted `stale-display-route-token` finding.
+- Tests cover every legacy route alias named by current route authority, not
+  only `/hydro-met`.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: selected - `audit_repo_entropy.py` report
+  output is consumed by governance automation and hard-gate summaries.
+- Config / project setup: not selected - no dependency or environment change.
+- File IO / path safety / overwrite: not selected - read-only repo scan; no
+  baseline or artifact writes.
+- Schema / columns / units / field names: selected - finding fields
+  `check_id`, `allowlist_reason`, `allowlist_key`, `budget_counted`, and
+  `gate_eligible` must stay stable.
+- Auth / permissions / secrets: not selected - no permission or secret surface.
+- Concurrency / shared state / ordering: not selected - no shared state
+  mutation.
+- Resource limits / large input / discovery: selected - route grep must use the
+  existing bounded text-file discovery semantics and avoid broad untracked or
+  ignored artifact scans.
+- Legacy compatibility / examples: selected - old aliases remain valid only as
+  redirect, compatibility, or historical evidence; historical docs must not be
+  recast as active drift.
+- Error handling / rollback / partial outputs: not selected - no new public
+  failure mode beyond existing report construction.
+- Release / packaging / dependency compatibility: not selected - no packaging
+  or dependency behavior change.
+- Documentation / migration notes: selected - audit classification is tied to
+  `DOC_STATUS.md` route authority and current runbook semantics.
+
+Domain risk packs:
+
+- Geospatial / CRS / basin geometry: not selected - route string
+  classification does not change basin geometry or CRS behavior.
+- Hydro-met time series / forcing windows: not selected - no forcing or
+  forecast-window data is read or produced.
+- SHUD numerical runtime / conservation / NaN: not selected - no solver runtime
+  behavior.
+- PostGIS / TimescaleDB domain behavior: not selected - no database schema or
+  query behavior.
+- Slurm production lifecycle / mock-vs-real parity: not selected - no scheduler,
+  Slurm gateway, or job lifecycle behavior.
+- External hydro-met providers / snapshot reproducibility: not selected - no
+  provider snapshot or external data integration.
+- Run manifest / QC provenance: not selected - no run manifest or QC schema.
+- Published NHMS artifacts / display identity: selected - audit classification
+  protects the current display identity `/` plus `/ops` from stale route drift.
+
+Required evidence:
+
+- Route-authority drift regression: temporary current runbook with an active
+  legacy alias instruction -> one unallowlisted `stale-display-route-token`
+  finding that is budget-counted and report-only.
+- Route-authority allowlist regressions: historical, redirect-alias, and
+  compatibility wording -> allowlisted findings with stable allowlist keys.
+- Legacy alias coverage regression: `/overview`, `/hydro-met`, `/forecast`,
+  `/meteorology`, `/flood-alerts`, `/basins/:id`, `/segments/:id`, concrete
+  `/basins/demo`, and concrete `/segments/demo` are all detected.
+- Resource discovery regression: ignored or skipped artifact paths containing a
+  legacy alias -> no route finding, proving the check stays within existing
+  bounded text discovery semantics.
+- Focused commands: `uv run --no-sync pytest -q tests/test_entropy_audit_script.py`
+  and `uv run --no-sync ruff check scripts/governance/audit_repo_entropy.py
+  tests/test_entropy_audit_script.py`.
+- `openspec validate governance-6-entropy-structural-burndown --strict
+  --no-interactive`.
+
+Non-goals:
+
+- No edits to current runbook prose outside test fixtures.
+- No frontend route behavior, redirect implementation, or Playwright profile
+  change.
+- No entropy baseline rewrite or hard-gate enablement.
+- No node-27 timing metric acceptance; local node-27 access timing is excluded
+  by maintainer instruction.
+
+Review focus:
+
+- Verify `/overview` is included because current `DOC_STATUS.md` and
+  `App.tsx` define it as a legacy redirect alias.
+- Verify active-looking current-runbook mentions are not accidentally
+  allowlisted by broad words in unrelated context.
+- Verify historical, redirect, and compatibility contexts produce distinct,
+  stable allowlist reasons/keys.
+- Verify scan scope stays aligned to existing tracked text discovery and does
+  not introduce unbounded artifact reads.
 
 ## Open Questions
 

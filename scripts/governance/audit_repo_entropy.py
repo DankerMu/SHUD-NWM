@@ -19,6 +19,7 @@ import shlex
 import stat
 import subprocess
 import sys
+from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -113,6 +114,52 @@ TEXT_EXTENSIONS = frozenset(
 MAX_SCANNED_TEXT_FILE_BYTES = 1_048_576
 MAX_ARTIFACT_FINGERPRINT_BYTES = 1_048_576
 HASH_CHUNK_BYTES = 1_048_576
+LEGACY_DISPLAY_ROUTE_TOKENS = ("/hydro-met", "HydroMetPage")
+LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN = (
+    r"(?P<token>"
+    r"/(?:overview|hydro-met|forecast|meteorology|flood-alerts)"
+    r"|/(?:basins|segments)/(?::[A-Za-z][A-Za-z0-9_-]*|[A-Za-z0-9][A-Za-z0-9_-]*)"
+    r")"
+    r"(?=$|[^A-Za-z0-9_/-])"
+)
+ROUTE_BASE_PLACEHOLDER_PATTERN = (
+    r"(?:"
+    r"\$[A-Za-z_][A-Za-z0-9_]*"
+    r"|\$\{[A-Za-z_][A-Za-z0-9_]*\}"
+    r"|<[A-Za-z][A-Za-z0-9_-]*>"
+    r")"
+)
+LEGACY_DISPLAY_ROUTE_PATTERN = re.compile(LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN)
+LEGACY_DISPLAY_ROUTE_BOUNDARY_PATTERN = re.compile(
+    r"(?:^|"
+    + ROUTE_BASE_PLACEHOLDER_PATTERN
+    + r"|[\s`'\"([{<|=?:&]|https?://[^/\s`'\"()<>{}]+)"
+    + LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN
+)
+ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN = re.compile(
+    r"(?:"
+    + ROUTE_BASE_PLACEHOLDER_PATTERN
+    + r"|--[A-Za-z][A-Za-z0-9_-]*="
+    r"|[?&][A-Za-z][A-Za-z0-9_-]*="
+    r"|[A-Za-z_][A-Za-z0-9_]*="
+    r")"
+    + LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN
+)
+HYDROMET_PAGE_IDENTIFIER_PATTERN = re.compile(r"(?<![A-Za-z0-9_])HydroMetPage(?![A-Za-z0-9_])")
+ROUTE_REDIRECT_TARGET_PATTERN = re.compile(r"(?:^|[\s`'\"([{<|])/(?:$|[\s`'\"()\]}>.,;:?|]|redirect|alias)")
+ROUTE_REDIRECT_WORD_PATTERN = re.compile(r"\b(?:redirects?|redirected)\b|legacyredirect|重定向", re.IGNORECASE)
+ROUTE_ACTIVE_CLAUSE_CONNECTOR_PATTERN = re.compile(
+    r"\b(?:and|then)\s+(?:open|visit|browse|navigate|use)\b|且打开",
+    re.IGNORECASE,
+)
+BROAD_E2E_API_MOCK_PATTERN = re.compile(
+    r"page\.route\s*\(\s*(?P<glob>(?P<quote>['\"])\*\*/api/v1/\*\*(?P=quote))",
+    re.MULTILINE,
+)
+MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
+MARKDOWN_LIST_ITEM_PATTERN = re.compile(r"^(?P<indent>\s*)(?:[-*+]|\d+[.)])\s+")
+MARKDOWN_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+")
+MARKDOWN_BLOCKQUOTE_PREFIX_PATTERN = re.compile(r"^\s{0,3}>\s?")
 
 FindingAxis = Literal["structure", "semantics", "behavior", "context", "protocol", "control"]
 AuditMode = Literal["report", "hard-gate"]
@@ -135,6 +182,302 @@ class FindingSpec:
     module: str
     allowlist_reason: str | None = None
     line: int | None = None
+
+
+@dataclass(frozen=True)
+class _StaleRouteClauseAnalysis:
+    route_valued_match_starts: tuple[int, ...]
+    route_valued_token_spans: frozenset[tuple[int, int]]
+    redirect_word_spans: tuple[tuple[int, int], ...]
+    active_instruction_context: bool
+    active_route_valued_context: bool
+
+
+@dataclass(frozen=True)
+class _StaleRouteMentionFacts:
+    clause_index: int
+    left: int
+    right: int
+    arrow_shape: str
+    route_valued: bool
+    redirect_local: bool
+    semantic_key: str
+
+
+@dataclass(frozen=True)
+class _StaleRouteLineContext:
+    line: str
+    clause_ranges: tuple[tuple[int, int], ...]
+    clause_starts: tuple[int, ...]
+    clause_texts: tuple[str, ...]
+    clause_has_per_mention_redirect_syntax: tuple[bool, ...]
+    clause_analyses: tuple[_StaleRouteClauseAnalysis, ...]
+    mention_facts: dict[tuple[int, int], _StaleRouteMentionFacts]
+    redirect_governing_texts: tuple[str, ...]
+    mention_governing_texts: tuple[str, ...]
+    governing_text: str
+    has_historical_route_authority_banner: bool
+    document_has_historical_route_authority_banner: bool
+
+
+@dataclass(frozen=True)
+class _StaleRouteMentionContext:
+    clause: str
+    explicit_redirect_text: str
+    redirect_text: str
+    governing_text: str
+    has_historical_route_authority_banner: bool
+    document_has_historical_route_authority_banner: bool
+
+
+@dataclass(frozen=True)
+class _StaleRouteStructuralContext:
+    governing_text: str
+    redirect_governing_text: str
+
+
+@dataclass(frozen=True)
+class _StaleRouteLineMatch:
+    line_no: int
+    line: str
+    token: str
+    token_start: int
+    token_end: int
+    context: _StaleRouteMentionContext
+
+
+_StaleRouteDuplicateKey = tuple[str, object, str, str, bool, bool]
+
+
+class _StaleRouteContextFactory:
+    def __init__(self, relative_path: str, lines: list[str]) -> None:
+        self._relative_path = relative_path
+        self._lines = lines
+        self._historical_banner_lines: frozenset[int] | None = None
+        self._section_headings: tuple[str | None, ...] | None = None
+        self._line_contexts: dict[int, _StaleRouteLineContext] = {}
+        self._structural_contexts: dict[int, _StaleRouteStructuralContext] = {}
+        self._list_item_bounds: dict[int, tuple[int, int]] = {}
+        self._line_list_starts: dict[int, int | None] = {}
+        self._list_item_contexts: dict[int, tuple[_StaleRouteStructuralContext, ...]] = {}
+        self._table_ranges: dict[int, tuple[int, int]] = {}
+        self._paragraph_ranges: dict[int, tuple[int, int, int]] = {}
+        self._paragraph_contexts: dict[tuple[int, int, int], _StaleRouteStructuralContext] = {}
+
+    def line_context(self, line_index: int) -> _StaleRouteLineContext:
+        line_context = self._line_contexts.get(line_index)
+        if line_context is None:
+            historical_banner_lines = self._get_historical_banner_lines()
+            line_context = _stale_route_line_context(
+                self._relative_path,
+                self._lines,
+                line_index,
+                self._get_section_headings(),
+                historical_banner_lines,
+                bool(historical_banner_lines),
+                structural_context=self._structural_context(line_index),
+            )
+            self._line_contexts[line_index] = line_context
+        return line_context
+
+    def _structural_context(self, line_index: int) -> _StaleRouteStructuralContext:
+        context = self._structural_contexts.get(line_index)
+        if context is None:
+            context = self._build_structural_context(line_index)
+            self._structural_contexts[line_index] = context
+        return context
+
+    def _build_structural_context(self, line_index: int) -> _StaleRouteStructuralContext:
+        if not _path_uses_markdown_route_context(self._relative_path):
+            return _StaleRouteStructuralContext(governing_text="", redirect_governing_text="")
+        lines = self._lines
+        section_headings = self._get_section_headings()
+        line = lines[line_index]
+        if _line_is_markdown_table_row(line):
+            start, end = self._table_range(line_index)
+            governing_text = _stale_route_table_governing_text_for_range(
+                lines,
+                line_index,
+                section_headings,
+                start,
+                end,
+            )
+            context = " ".join(_preceding_context_lines(lines, start, section_headings))
+            return _StaleRouteStructuralContext(
+                governing_text=governing_text,
+                redirect_governing_text=context,
+            )
+        list_start = self._line_list_start(line_index)
+        if list_start is not None:
+            return self._list_item_context(list_start, line_index)
+        start, end, blockquote_depth = self._paragraph_range(line_index)
+        cache_key = (start, end, blockquote_depth)
+        cached = self._paragraph_contexts.get(cache_key)
+        if cached is not None:
+            return cached
+        governing_text = _stale_route_paragraph_governing_text_for_range(
+            lines,
+            line_index,
+            section_headings,
+            start,
+            end,
+        )
+        context = _StaleRouteStructuralContext(
+            governing_text=governing_text,
+            redirect_governing_text=governing_text,
+        )
+        self._paragraph_contexts[cache_key] = context
+        return context
+
+    def _table_range(self, line_index: int) -> tuple[int, int]:
+        cached = self._table_ranges.get(line_index)
+        if cached is not None:
+            return cached
+        blockquote_depth = _markdown_blockquote_depth(self._lines[line_index])
+        start = line_index
+        while (
+            start > 0
+            and _markdown_blockquote_depth(self._lines[start - 1]) == blockquote_depth
+            and _line_is_markdown_table_row(self._lines[start - 1])
+        ):
+            start -= 1
+        end = line_index + 1
+        while (
+            end < len(self._lines)
+            and _markdown_blockquote_depth(self._lines[end]) == blockquote_depth
+            and _line_is_markdown_table_row(self._lines[end])
+        ):
+            end += 1
+        bounds = (start, end)
+        for index in range(start, end):
+            self._table_ranges[index] = bounds
+        return bounds
+
+    def _list_item_context(
+        self,
+        list_start: int,
+        line_index: int,
+    ) -> _StaleRouteStructuralContext:
+        cached = self._list_item_contexts.get(list_start)
+        if cached is None:
+            cached = self._build_list_item_contexts(list_start)
+            self._list_item_contexts[list_start] = cached
+        return cached[line_index - list_start]
+
+    def _build_list_item_contexts(self, list_start: int) -> tuple[_StaleRouteStructuralContext, ...]:
+        lines = self._lines
+        section_headings = self._get_section_headings()
+        list_indent = _list_item_indent_width(lines[list_start])
+        item_end = self._list_item_bounds_for_start(list_start, list_indent)[1]
+        parent_indexes = _parent_list_item_indexes(lines, list_start, list_indent)
+        heading = _section_heading_at(section_headings, list_start)
+        base_parts = [heading] if heading else []
+        base_parts.extend(lines[index].strip() for index in parent_indexes)
+        item_lines = [line.strip() for line in lines[list_start:item_end]]
+        governing_text = " ".join(part for part in (*base_parts, *item_lines) if part).strip()
+
+        following_redirect_texts = [""] * (item_end - list_start)
+        following_redirect_text = ""
+        for index in range(item_end - 1, list_start - 1, -1):
+            line = lines[index]
+            offset = index - list_start
+            following_redirect_texts[offset] = following_redirect_text
+            if _line_starts_markdown_list_item(line):
+                following_redirect_text = ""
+                continue
+            tokens = set(_normalized_reason_text(line).split())
+            if _line_has_redirect_alias_context(line, tokens):
+                stripped = line.strip()
+                following_redirect_text = (
+                    f"{stripped} {following_redirect_text}".strip()
+                    if following_redirect_text
+                    else stripped
+                )
+
+        contexts: list[_StaleRouteStructuralContext] = []
+        for offset, index in enumerate(range(list_start, item_end)):
+            redirect_parts = list(base_parts)
+            if index != list_start:
+                redirect_parts.append(lines[list_start].strip())
+            if following_redirect_texts[offset]:
+                redirect_parts.append(following_redirect_texts[offset])
+            contexts.append(
+                _StaleRouteStructuralContext(
+                    governing_text=governing_text,
+                    redirect_governing_text=" ".join(part for part in redirect_parts if part).strip(),
+                )
+            )
+        return tuple(contexts)
+
+    def _line_list_start(self, line_index: int) -> int | None:
+        cached = self._line_list_starts.get(line_index)
+        if cached is not None or line_index in self._line_list_starts:
+            return cached
+        if not _line_is_list_or_list_continuation(self._lines, line_index):
+            self._line_list_starts[line_index] = None
+            return None
+        list_start = _list_item_start_index(self._lines, line_index)
+        list_indent = _list_item_indent_width(self._lines[list_start])
+        item_start, item_end = self._list_item_bounds_for_start(list_start, list_indent)
+        for index in range(item_start, item_end):
+            self._line_list_starts[index] = list_start
+        return list_start
+
+    def _list_item_bounds_for_start(self, list_start: int, list_indent: int) -> tuple[int, int]:
+        cached = self._list_item_bounds.get(list_start)
+        if cached is not None:
+            return cached
+        bounds = (list_start, _list_item_end_index(self._lines, list_start, list_indent))
+        self._list_item_bounds[list_start] = bounds
+        return bounds
+
+    def _paragraph_range(self, line_index: int) -> tuple[int, int, int]:
+        cached = self._paragraph_ranges.get(line_index)
+        if cached is not None:
+            return cached
+        blockquote_depth = _markdown_blockquote_depth(self._lines[line_index])
+        start = line_index
+        while (
+            start > 0
+            and _markdown_blockquote_depth(self._lines[start - 1]) == blockquote_depth
+            and _line_continues_route_paragraph(self._lines[start - 1])
+        ):
+            if not _line_wraps_to_next(self._lines[start - 1]) and not _line_continues_previous(
+                self._lines[start]
+            ):
+                break
+            start -= 1
+        end = line_index + 1
+        while (
+            end < len(self._lines)
+            and _markdown_blockquote_depth(self._lines[end]) == blockquote_depth
+            and _line_continues_route_paragraph(self._lines[end])
+        ):
+            if not _line_wraps_to_next(self._lines[end - 1]) and not _line_continues_previous(self._lines[end]):
+                break
+            end += 1
+        bounds = (start, end, blockquote_depth)
+        for index in range(start, end):
+            self._paragraph_ranges[index] = bounds
+        return bounds
+
+    def _get_historical_banner_lines(self) -> frozenset[int]:
+        if self._historical_banner_lines is None:
+            self._historical_banner_lines = (
+                _historical_route_authority_banner_line_numbers(self._lines)
+                if self._relative_path.startswith("docs/runbooks/")
+                else frozenset()
+            )
+        return self._historical_banner_lines
+
+    def _get_section_headings(self) -> tuple[str | None, ...]:
+        if self._section_headings is None:
+            self._section_headings = (
+                _markdown_section_headings(self._lines)
+                if _path_uses_markdown_route_context(self._relative_path)
+                else ()
+            )
+        return self._section_headings
 
 
 def repo_root_from(start: Path | None = None) -> Path:
@@ -594,14 +937,13 @@ def _check_paused_workflows(root: Path) -> list[FindingSpec]:
 
 
 def _check_broad_e2e_mocks(root: Path) -> list[FindingSpec]:
-    token_patterns = ("page.route('**/api/v1/**'", 'page.route("**/api/v1/**"')
     findings: list[FindingSpec] = []
     for path in _iter_text_files(root, [root / "apps" / "frontend"]):
         rel = _rel(root, path)
         if not ("/e2e/" in rel or rel.endswith(".spec.ts") or _path_has_label(rel, {"live"})):
             continue
         text = _read_repo_text(root, path)
-        for line_no, line in _matching_lines(text, token_patterns):
+        for line_no in _broad_e2e_mock_line_numbers(text):
             classification = _classify_broad_e2e_mock_path(rel)
             findings.append(
                 FindingSpec(
@@ -625,6 +967,10 @@ def _check_broad_e2e_mocks(root: Path) -> list[FindingSpec]:
                 )
             )
     return findings
+
+
+def _broad_e2e_mock_line_numbers(text: str) -> list[int]:
+    return [text.count("\n", 0, match.start("glob")) + 1 for match in BROAD_E2E_API_MOCK_PATTERN.finditer(text)]
 
 
 def _classify_broad_e2e_mock_path(
@@ -653,16 +999,28 @@ def _classify_broad_e2e_mock_path(
 
 
 def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
-    tokens = ("/hydro-met", "HydroMetPage")
+    roots = [
+        root / "apps",
+        root / "docs",
+        root / "openspec",
+        root / "README.md",
+        root / "progress.md",
+        root / "CLAUDE.md",
+    ]
     findings: list[FindingSpec] = []
-    for path in _iter_text_files(root, [root / "apps", root / "docs", root / "openspec", root / "progress.md"]):
+    for path in _iter_text_files(root, roots):
         rel = _rel(root, path)
         if rel.startswith(("docs/archived/",)):
             continue
         text = _read_repo_text(root, path)
-        for line_no, line in _matching_lines(text, tokens):
-            token = next(token for token in tokens if token in line)
-            allowed_reason = _stale_route_allowlist_reason(rel, line)
+        lines = text.splitlines()
+        for match in _stale_route_line_matches(
+            rel,
+            lines,
+            include_legacy_tokens=_path_is_legacy_route_token_scope(rel),
+            include_expanded_aliases=_path_is_route_authority_expanded_scope(rel),
+        ):
+            allowed_reason = _stale_route_allowlist_reason(rel, lines, match.line_no, match.token, match.context)
             findings.append(
                 FindingSpec(
                     check_id="stale-display-route-token",
@@ -671,13 +1029,16 @@ def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
                     governance_face="docs alignment",
                     role="display_readonly",
                     evidence_path=rel,
-                    line=line_no,
+                    line=match.line_no,
                     severity="low" if allowed_reason else "medium",
                     priority="P3" if allowed_reason else "P2",
                     owner_area="frontend/docs",
                     module=_module_for_path(root, path),
                     allowlist_reason=allowed_reason,
-                    description=f"Reference to `{token}` remains after M26 single-map routing consolidation.",
+                    description=(
+                        f"Reference to legacy display route token `{match.token}` remains after M26 "
+                        "single-map routing consolidation."
+                    ),
                     recommendation=(
                         "Confirm whether the reference is historical/redirect evidence or should point to the "
                         "current single-map `/` display entrypoint."
@@ -685,6 +1046,97 @@ def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
                 )
             )
     return findings
+
+
+def _path_is_legacy_route_token_scope(relative_path: str) -> bool:
+    return (
+        relative_path.startswith(("apps/", "docs/", "openspec/"))
+        or relative_path == "progress.md"
+    )
+
+
+def _path_is_route_authority_expanded_scope(relative_path: str) -> bool:
+    return (
+        relative_path.startswith("docs/runbooks/")
+        or relative_path in {"README.md", "progress.md", "CLAUDE.md", "docs/governance/DOC_STATUS.md"}
+    )
+
+
+def _stale_route_line_matches(
+    relative_path: str,
+    lines: list[str],
+    *,
+    include_legacy_tokens: bool,
+    include_expanded_aliases: bool,
+) -> Iterable[_StaleRouteLineMatch]:
+    context_factory = _StaleRouteContextFactory(relative_path, lines)
+    for line_no, line in enumerate(lines, start=1):
+        emitted_spans: set[tuple[str, int, int]] = set()
+        emitted_contexts: set[_StaleRouteDuplicateKey] = set()
+        if include_legacy_tokens:
+            for match in HYDROMET_PAGE_IDENTIFIER_PATTERN.finditer(line):
+                token = match.group(0)
+                start = match.start()
+                end = match.end()
+                line_context = context_factory.line_context(line_no - 1)
+                duplicate_key = _stale_route_duplicate_key(line_context, token, start)
+                if duplicate_key in emitted_contexts:
+                    emitted_spans.add((token, start, end))
+                    continue
+                emitted_spans.add((token, start, end))
+                emitted_contexts.add(duplicate_key)
+                yield _StaleRouteLineMatch(
+                    line_no=line_no,
+                    line=line,
+                    token=token,
+                    token_start=start,
+                    token_end=end,
+                    context=_stale_route_mention_context(line_context, start, end),
+                )
+            for match in LEGACY_DISPLAY_ROUTE_BOUNDARY_PATTERN.finditer(line):
+                token = match.group("token")
+                start = match.start("token")
+                end = match.end("token")
+                if token != "/hydro-met" or (token, start, end) in emitted_spans:
+                    continue
+                line_context = context_factory.line_context(line_no - 1)
+                duplicate_key = _stale_route_duplicate_key(line_context, token, start)
+                if duplicate_key in emitted_contexts:
+                    emitted_spans.add((token, start, end))
+                    continue
+                emitted_spans.add((token, start, end))
+                emitted_contexts.add(duplicate_key)
+                yield _StaleRouteLineMatch(
+                    line_no=line_no,
+                    line=line,
+                    token=token,
+                    token_start=start,
+                    token_end=end,
+                    context=_stale_route_mention_context(line_context, start, end),
+                )
+        if not include_expanded_aliases:
+            continue
+        for match in LEGACY_DISPLAY_ROUTE_BOUNDARY_PATTERN.finditer(line):
+            token = match.group("token")
+            start = match.start("token")
+            end = match.end("token")
+            if (token, start, end) in emitted_spans:
+                continue
+            line_context = context_factory.line_context(line_no - 1)
+            duplicate_key = _stale_route_duplicate_key(line_context, token, start)
+            if duplicate_key in emitted_contexts:
+                emitted_spans.add((token, start, end))
+                continue
+            emitted_spans.add((token, start, end))
+            emitted_contexts.add(duplicate_key)
+            yield _StaleRouteLineMatch(
+                line_no=line_no,
+                line=line,
+                token=token,
+                token_start=start,
+                token_end=end,
+                context=_stale_route_mention_context(line_context, start, end),
+            )
 
 
 def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
@@ -1233,6 +1685,7 @@ def _dedupe_findings(findings: Iterable[FindingSpec]) -> list[FindingSpec]:
             finding.evidence_path,
             finding.line,
             finding.title,
+            finding.allowlist_reason,
             finding.description,
         )
         if key in seen:
@@ -1295,6 +1748,8 @@ def _allowlist_reason_key(check_id: str, reason: str) -> str:
             return "historical-milestone-summary"
         if "provenance" in tokens or "extraction" in tokens:
             return "library-extraction-provenance"
+        if "compatibility" in tokens or "compatible" in tokens:
+            return "legacy-route-compatibility-context"
         if "historical" in tokens or "pre" in tokens or "plans" in tokens:
             return "historical-plan-or-pre-m26-evidence"
         if "m26" in tokens or "redirect" in tokens:
@@ -1578,18 +2033,1452 @@ def _normalized_apps_api_import_modules(tree: ast.AST) -> frozenset[str]:
     return frozenset(modules)
 
 
-def _stale_route_allowlist_reason(relative_path: str, line: str) -> str | None:
-    if relative_path.startswith("openspec/changes/m26-") or "redirect" in line.lower():
+def _stale_route_allowlist_reason(
+    relative_path: str,
+    lines: list[str],
+    line_no: int,
+    token: str,
+    mention_context: _StaleRouteMentionContext,
+) -> str | None:
+    if relative_path.startswith("openspec/changes/m26-"):
         return "M26 route-consolidation evidence or redirect contract"
+    if token == "HydroMetPage":
+        if relative_path in {"progress.md"}:
+            return "current entrypoint summarizes historical milestone context"
+        if relative_path.startswith("apps/frontend/src/lib/hydroMet/"):
+            return "library extraction provenance comment"
+        if _hydromet_page_historical_context(mention_context.governing_text):
+            return "historical pre-M26 display evidence"
+    context_class = _stale_route_context_class(relative_path, mention_context)
+    if context_class == "redirect":
+        return "M26 route-consolidation redirect alias"
+    if context_class == "historical":
+        return "historical plan or pre-M26 display evidence"
+    if context_class == "active":
+        return None
+    if context_class == "compatibility":
+        return "legacy route compatibility context"
     if relative_path.startswith("docs/plans/") or relative_path.startswith("openspec/changes/m22-"):
         return "historical plan or pre-M26 display evidence"
     if relative_path in {"progress.md"}:
         return "current entrypoint summarizes historical milestone context"
-    if "__tests__" in relative_path and "/hydro-met" in line:
+    if "__tests__" in relative_path and token == "/hydro-met":
         return "frontend redirect regression test"
-    if relative_path.startswith("apps/frontend/src/lib/hydroMet/") and "HydroMetPage" in line:
-        return "library extraction provenance comment"
+    if _frontend_e2e_legacy_route_context_allowlist(relative_path, lines, line_no, token):
+        return "frontend redirect regression test"
     return None
+
+
+def _stale_route_line_contexts(relative_path: str, lines: list[str]) -> list[_StaleRouteLineContext]:
+    historical_banner_lines = (
+        _historical_route_authority_banner_line_numbers(lines)
+        if relative_path.startswith("docs/runbooks/")
+        else frozenset()
+    )
+    has_historical_route_authority_banner = bool(historical_banner_lines)
+    section_headings = _markdown_section_headings(lines) if _path_uses_markdown_route_context(relative_path) else ()
+    return [
+        _stale_route_line_context(
+            relative_path,
+            lines,
+            line_index,
+            section_headings,
+            historical_banner_lines,
+            has_historical_route_authority_banner,
+        )
+        for line_index in range(len(lines))
+    ]
+
+
+def _stale_route_line_context(
+    relative_path: str,
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    historical_banner_lines: frozenset[int],
+    has_historical_route_authority_banner: bool,
+    *,
+    structural_context: _StaleRouteStructuralContext | None = None,
+) -> _StaleRouteLineContext:
+    line = lines[line_index]
+    clause_ranges = tuple(_stale_route_clause_ranges(line))
+    clause_texts = tuple(line[start:end].strip() for start, end in clause_ranges)
+    clause_has_per_mention_redirect_syntax = tuple(
+        _clause_has_per_mention_redirect_syntax(line[start:end])
+        for start, end in clause_ranges
+    )
+    clause_analyses = tuple(_stale_route_clause_analysis(line, start, end) for start, end in clause_ranges)
+    mention_facts = _stale_route_mention_facts_by_span(
+        line,
+        clause_ranges,
+        tuple(start for start, _end in clause_ranges),
+        clause_analyses,
+    )
+    structural_context = structural_context or _stale_route_structural_context(
+        relative_path,
+        lines,
+        line_index,
+        section_headings,
+    )
+    governing_text = structural_context.governing_text
+    redirect_governing_texts = tuple(structural_context.redirect_governing_text for _clause_text in clause_texts)
+    mention_governing_texts = tuple(
+        _stale_route_governing_mention_text(clause_text, governing_text)
+        for clause_text in clause_texts
+    )
+    return _StaleRouteLineContext(
+        line=line,
+        clause_ranges=clause_ranges,
+        clause_starts=tuple(start for start, _end in clause_ranges),
+        clause_texts=clause_texts,
+        clause_has_per_mention_redirect_syntax=clause_has_per_mention_redirect_syntax,
+        clause_analyses=clause_analyses,
+        mention_facts=mention_facts,
+        redirect_governing_texts=redirect_governing_texts,
+        mention_governing_texts=mention_governing_texts,
+        governing_text=governing_text,
+        has_historical_route_authority_banner=(line_index + 1) in historical_banner_lines,
+        document_has_historical_route_authority_banner=has_historical_route_authority_banner,
+    )
+
+
+def _stale_route_clause_ranges(line: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for index, char in enumerate(line):
+        if char in "|,，;。；" or (char == "." and _period_is_sentence_boundary(line, index)):
+            ranges.append((start, index))
+            start = index + 1
+    if ranges:
+        ranges.append((start, len(line)))
+    else:
+        ranges = [(0, len(line))]
+    return _split_stale_route_active_clause_connectors(line, ranges)
+
+
+def _split_stale_route_active_clause_connectors(
+    line: str,
+    ranges: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    split_ranges: list[tuple[int, int]] = []
+    for start, end in ranges:
+        cursor = start
+        for match in ROUTE_ACTIVE_CLAUSE_CONNECTOR_PATTERN.finditer(line, start, end):
+            if not _stale_route_connector_splits_clause(line, start, end, match.start()):
+                continue
+            split_ranges.append((cursor, match.start()))
+            connector_text = line[match.start() : match.end()]
+            active_start = match.start()
+            if connector_text.lower().startswith(("and ", "then ")):
+                active_start = line.find(" ", match.start(), match.end()) + 1
+            cursor = active_start
+        split_ranges.append((cursor, end))
+    return split_ranges or [(0, len(line))]
+
+
+def _stale_route_connector_splits_clause(
+    line: str,
+    start: int,
+    end: int,
+    connector_start: int,
+) -> bool:
+    before = line[start:connector_start]
+    after = line[connector_start:end]
+    return bool(
+        LEGACY_DISPLAY_ROUTE_PATTERN.search(before)
+        and ROUTE_REDIRECT_WORD_PATTERN.search(before)
+        and LEGACY_DISPLAY_ROUTE_PATTERN.search(after)
+    )
+
+
+def _clause_has_per_mention_redirect_syntax(clause: str) -> bool:
+    return bool("->" in clause or "→" in clause)
+
+
+def _stale_route_clause_analysis(line: str, start: int, end: int) -> _StaleRouteClauseAnalysis:
+    route_valued_matches = tuple(ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.finditer(line, start, end))
+    clause_text = line[start:end].strip()
+    clause_tokens = frozenset(_normalized_reason_text(clause_text).split())
+    return _StaleRouteClauseAnalysis(
+        route_valued_match_starts=tuple(match.start() for match in route_valued_matches),
+        route_valued_token_spans=frozenset(
+            (match.start("token"), match.end("token")) for match in route_valued_matches
+        ),
+        redirect_word_spans=tuple(
+            (match.start(), match.end()) for match in ROUTE_REDIRECT_WORD_PATTERN.finditer(line, start, end)
+        ),
+        active_instruction_context=_line_has_active_route_instruction_context(clause_text),
+        active_route_valued_context=_line_has_active_route_valued_context(
+            clause_text,
+            set(clause_tokens),
+            redirect_text="",
+        ),
+    )
+
+
+def _stale_route_mention_facts_by_span(
+    line: str,
+    clause_ranges: tuple[tuple[int, int], ...],
+    clause_starts: tuple[int, ...],
+    clause_analyses: tuple[_StaleRouteClauseAnalysis, ...],
+) -> dict[tuple[int, int], _StaleRouteMentionFacts]:
+    facts: dict[tuple[int, int], _StaleRouteMentionFacts] = {}
+    for match in HYDROMET_PAGE_IDENTIFIER_PATTERN.finditer(line):
+        _record_stale_route_mention_facts(
+            facts,
+            line,
+            clause_ranges,
+            clause_starts,
+            clause_analyses,
+            match.start(),
+            match.end(),
+        )
+    for match in LEGACY_DISPLAY_ROUTE_BOUNDARY_PATTERN.finditer(line):
+        _record_stale_route_mention_facts(
+            facts,
+            line,
+            clause_ranges,
+            clause_starts,
+            clause_analyses,
+            match.start("token"),
+            match.end("token"),
+        )
+    return facts
+
+
+def _record_stale_route_mention_facts(
+    facts: dict[tuple[int, int], _StaleRouteMentionFacts],
+    line: str,
+    clause_ranges: tuple[tuple[int, int], ...],
+    clause_starts: tuple[int, ...],
+    clause_analyses: tuple[_StaleRouteClauseAnalysis, ...],
+    token_start: int,
+    token_end: int,
+) -> None:
+    key = (token_start, token_end)
+    if key in facts:
+        return
+    clause_index = max(0, bisect_right(clause_starts, token_start) - 1)
+    left, right = clause_ranges[clause_index]
+    arrow_shape = _route_arrow_shape_for_bounds(line, left, right, token_start, token_end)
+    if arrow_shape == "arrow-from-token":
+        left = max(left, token_start)
+    elif arrow_shape == "arrow-to-token":
+        right = min(right, token_end)
+    analysis = clause_analyses[clause_index]
+    route_valued = (token_start, token_end) in analysis.route_valued_token_spans
+    redirect_local = _stale_route_mention_has_redirect_syntax_from_analysis(
+        line,
+        left,
+        right,
+        token_start,
+        token_end,
+        analysis,
+        arrow_shape,
+        route_valued,
+    )
+    facts[key] = _StaleRouteMentionFacts(
+        clause_index=clause_index,
+        left=left,
+        right=right,
+        arrow_shape=arrow_shape,
+        route_valued=route_valued,
+        redirect_local=redirect_local,
+        semantic_key=_stale_route_precomputed_semantic_key(analysis, route_valued, redirect_local),
+    )
+
+
+def _stale_route_precomputed_semantic_key(
+    analysis: _StaleRouteClauseAnalysis,
+    route_valued: bool,
+    redirect_local: bool,
+) -> str:
+    if route_valued and analysis.active_route_valued_context:
+        return "active-local"
+    if redirect_local:
+        return "redirect-local"
+    if analysis.active_instruction_context or analysis.active_route_valued_context:
+        return "active-local"
+    return "context-local"
+
+
+def _stale_route_mention_facts(
+    line_context: _StaleRouteLineContext,
+    token_start: int,
+    token_end: int,
+) -> _StaleRouteMentionFacts:
+    facts = line_context.mention_facts.get((token_start, token_end))
+    if facts is not None:
+        return facts
+    clause_index = max(0, bisect_right(line_context.clause_starts, token_start) - 1)
+    left, right = line_context.clause_ranges[clause_index]
+    arrow_shape = _route_arrow_shape_for_bounds(line_context.line, left, right, token_start, token_end)
+    if arrow_shape == "arrow-from-token":
+        left = max(left, token_start)
+    elif arrow_shape == "arrow-to-token":
+        right = min(right, token_end)
+    analysis = line_context.clause_analyses[clause_index]
+    route_valued = (token_start, token_end) in analysis.route_valued_token_spans
+    redirect_local = _stale_route_mention_has_redirect_syntax_from_analysis(
+        line_context.line,
+        left,
+        right,
+        token_start,
+        token_end,
+        analysis,
+        arrow_shape,
+        route_valued,
+    )
+    return _StaleRouteMentionFacts(
+        clause_index=clause_index,
+        left=left,
+        right=right,
+        arrow_shape=arrow_shape,
+        route_valued=route_valued,
+        redirect_local=redirect_local,
+        semantic_key=_stale_route_precomputed_semantic_key(analysis, route_valued, redirect_local),
+    )
+
+
+def _stale_route_mention_context(
+    line_context: _StaleRouteLineContext,
+    token_start: int,
+    token_end: int,
+) -> _StaleRouteMentionContext:
+    facts = _stale_route_mention_facts(line_context, token_start, token_end)
+    clause_index = facts.clause_index
+    line = line_context.line
+    left, right = facts.left, facts.right
+
+    clause = line[left:right].strip()
+    explicit_redirect_text = _stale_route_mention_redirect_span_from_facts(
+        line_context,
+        facts,
+        token_start,
+        token_end,
+    )
+    redirect_text = _stale_route_join_redirect_text(
+        _stale_route_redirect_governing_text(line_context, clause_index),
+        explicit_redirect_text,
+    )
+    governing_text = line_context.mention_governing_texts[clause_index]
+    return _StaleRouteMentionContext(
+        clause=clause,
+        explicit_redirect_text=explicit_redirect_text,
+        redirect_text=redirect_text,
+        governing_text=governing_text,
+        has_historical_route_authority_banner=line_context.has_historical_route_authority_banner,
+        document_has_historical_route_authority_banner=line_context.document_has_historical_route_authority_banner,
+    )
+
+
+def _stale_route_duplicate_key(
+    line_context: _StaleRouteLineContext,
+    token: str,
+    token_start: int,
+) -> _StaleRouteDuplicateKey:
+    token_end = token_start + len(token)
+    facts = _stale_route_mention_facts(line_context, token_start, token_end)
+    clause_index = facts.clause_index
+    if line_context.clause_has_per_mention_redirect_syntax[clause_index]:
+        clause_key = (
+            line_context.clause_texts[clause_index],
+            facts.arrow_shape,
+        )
+    else:
+        clause_key = (
+            line_context.mention_governing_texts[clause_index],
+            facts.semantic_key,
+        )
+    return (
+        token,
+        clause_key,
+        line_context.mention_governing_texts[clause_index],
+        _stale_route_redirect_governing_text(line_context, clause_index),
+        line_context.has_historical_route_authority_banner,
+        line_context.document_has_historical_route_authority_banner,
+    )
+
+
+def _stale_route_mention_semantic_key(
+    line_context: _StaleRouteLineContext,
+    clause_index: int,
+    token_start: int,
+    token_end: int,
+) -> str:
+    facts = _stale_route_mention_facts(line_context, token_start, token_end)
+    if facts.clause_index != clause_index:
+        return "context-local"
+    return facts.semantic_key
+
+
+def _stale_route_mention_has_redirect_syntax(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+) -> bool:
+    arrow_shape = _route_arrow_shape_for_bounds(line, left, right, token_start, token_end)
+    analysis = _stale_route_clause_analysis(line, left, right)
+    token_is_route_valued = (token_start, token_end) in analysis.route_valued_token_spans
+    return _stale_route_mention_has_redirect_syntax_from_analysis(
+        line,
+        left,
+        right,
+        token_start,
+        token_end,
+        analysis,
+        arrow_shape,
+        token_is_route_valued,
+    )
+
+
+def _stale_route_mention_has_redirect_syntax_from_analysis(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+    analysis: _StaleRouteClauseAnalysis,
+    arrow_shape: str,
+    token_is_route_valued: bool,
+) -> bool:
+    if arrow_shape in {"arrow-from-token", "arrow-to-token"}:
+        return True
+    clause = line[left:right]
+    if "->" in clause or "→" in clause:
+        return False
+    word_start_limit = right
+    following_route_valued_starts = [
+        match_start for match_start in analysis.route_valued_match_starts if match_start >= token_end
+    ]
+    if following_route_valued_starts:
+        word_start_limit = min(following_route_valued_starts)
+    for word_start, word_end in analysis.redirect_word_spans:
+        if word_start >= word_start_limit:
+            continue
+        if token_end <= word_start:
+            segment = line[token_end:word_start]
+        elif token_start >= word_end:
+            if token_is_route_valued:
+                continue
+            segment = line[word_end:token_start]
+        else:
+            return True
+        if _route_redirect_connector_segment(segment):
+            return True
+    return False
+
+
+def _route_token_is_route_valued(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+) -> bool:
+    return (token_start, token_end) in _stale_route_clause_analysis(line, left, right).route_valued_token_spans
+
+
+def _route_arrow_shape_near_token(
+    line_context: _StaleRouteLineContext,
+    clause_index: int,
+    token_start: int,
+    token_end: int,
+) -> str:
+    left, right = line_context.clause_ranges[clause_index]
+    return _route_arrow_shape_for_bounds(line_context.line, left, right, token_start, token_end)
+
+
+def _route_arrow_shape_for_bounds(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+) -> str:
+    after = line[token_end : min(right, token_end + 16)].lstrip()
+    if after.startswith(("->", "→")):
+        return "arrow-from-token"
+    before = line[max(left, token_start - 16) : token_start].rstrip()
+    if before.endswith(("->", "→")):
+        return "arrow-to-token"
+    return "no-local-arrow"
+
+
+def _stale_route_mention_context_key(
+    line_context: _StaleRouteLineContext,
+    token_start: int,
+    token_end: int,
+) -> tuple[object, ...]:
+    clause_index = max(0, bisect_right(line_context.clause_starts, token_start) - 1)
+    line = line_context.line
+    left, right = _stale_route_mention_clause_bounds(line_context, clause_index, token_start, token_end)
+    arrow_from = _route_arrow_points_from_token(line, token_start, token_end)
+    arrow_to = _route_arrow_points_to_token(line, token_start)
+    clause_key: object = line_context.mention_governing_texts[clause_index]
+    if arrow_from or arrow_to:
+        clause_key = (left, right)
+    return (
+        clause_key,
+        line_context.mention_governing_texts[clause_index],
+        _stale_route_mention_redirect_text(line_context, clause_index, left, right, token_start, token_end),
+        line_context.has_historical_route_authority_banner,
+        line_context.document_has_historical_route_authority_banner,
+    )
+
+
+def _stale_route_mention_clause_bounds(
+    line_context: _StaleRouteLineContext,
+    clause_index: int,
+    token_start: int,
+    token_end: int,
+) -> tuple[int, int]:
+    facts = _stale_route_mention_facts(line_context, token_start, token_end)
+    if facts.clause_index != clause_index:
+        return line_context.clause_ranges[clause_index]
+    return facts.left, facts.right
+
+
+def _stale_route_mention_redirect_text(
+    line_context: _StaleRouteLineContext,
+    clause_index: int,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+) -> str:
+    return _stale_route_join_redirect_text(
+        _stale_route_redirect_governing_text(line_context, clause_index),
+        _stale_route_mention_redirect_span_from_facts(
+            line_context,
+            _stale_route_mention_facts(line_context, token_start, token_end),
+            token_start,
+            token_end,
+        ),
+    )
+
+
+def _stale_route_join_redirect_text(*parts: str) -> str:
+    return " ".join(part for part in parts if part).strip()
+
+
+def _stale_route_redirect_governing_text(
+    line_context: _StaleRouteLineContext,
+    clause_index: int,
+) -> str:
+    return line_context.redirect_governing_texts[clause_index]
+
+
+def _stale_route_mention_redirect_span(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+) -> str:
+    analysis = _stale_route_clause_analysis(line, left, right)
+    arrow_shape = _route_arrow_shape_for_bounds(line, left, right, token_start, token_end)
+    token_is_route_valued = (token_start, token_end) in analysis.route_valued_token_spans
+    return _stale_route_mention_redirect_span_from_analysis(
+        line,
+        left,
+        right,
+        token_start,
+        token_end,
+        analysis,
+        arrow_shape,
+        token_is_route_valued,
+    )
+
+
+def _stale_route_mention_redirect_span_from_facts(
+    line_context: _StaleRouteLineContext,
+    facts: _StaleRouteMentionFacts,
+    token_start: int,
+    token_end: int,
+) -> str:
+    analysis = line_context.clause_analyses[facts.clause_index]
+    return _stale_route_mention_redirect_span_from_analysis(
+        line_context.line,
+        facts.left,
+        facts.right,
+        token_start,
+        token_end,
+        analysis,
+        facts.arrow_shape,
+        facts.route_valued,
+    )
+
+
+def _stale_route_mention_redirect_span_from_analysis(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+    analysis: _StaleRouteClauseAnalysis,
+    arrow_shape: str,
+    token_is_route_valued: bool,
+) -> str:
+    if arrow_shape == "arrow-from-token":
+        return line[token_start:right].strip()
+    if arrow_shape == "arrow-to-token":
+        return line[left:token_end].strip()
+    clause = line[left:right]
+    if "->" in clause or "→" in clause:
+        return ""
+    span_right = word_start_limit = right
+    following_route_valued_starts = [
+        match_start for match_start in analysis.route_valued_match_starts if match_start >= token_end
+    ]
+    if following_route_valued_starts:
+        span_right = min(following_route_valued_starts)
+        word_start_limit = span_right
+    for word_start, word_end in analysis.redirect_word_spans:
+        if word_start >= word_start_limit:
+            continue
+        if token_end <= word_start:
+            segment = line[token_end:word_start]
+        elif token_start >= word_end:
+            if token_is_route_valued:
+                continue
+            segment = line[word_end:token_start]
+        else:
+            return line[left:span_right].strip()
+        if _route_redirect_connector_segment(segment):
+            return line[left:span_right].strip()
+    return ""
+
+
+def _route_redirect_connector_segment(segment: str) -> bool:
+    text = LEGACY_DISPLAY_ROUTE_PATTERN.sub(" ", segment)
+    tokens = set(_normalized_reason_text(text).split())
+    if not tokens:
+        return True
+    return tokens <= {
+        "alias",
+        "aliases",
+        "and",
+        "as",
+        "backward",
+        "backwards",
+        "belong",
+        "belongs",
+        "compatibility",
+        "compatible",
+        "deep",
+        "deeplink",
+        "deeplinks",
+        "element",
+        "from",
+        "keep",
+        "keeps",
+        "kept",
+        "legacy",
+        "legacyredirect",
+        "link",
+        "links",
+        "old",
+        "only",
+        "or",
+        "path",
+        "route",
+        "routes",
+        "to",
+    }
+
+
+def _stale_route_structural_context(
+    relative_path: str,
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+) -> _StaleRouteStructuralContext:
+    governing_text = _stale_route_governing_text(relative_path, lines, line_index, section_headings)
+    redirect_governing_text = _stale_route_redirect_governing_text_for_line(
+        lines,
+        line_index,
+        governing_text,
+        section_headings,
+    )
+    return _StaleRouteStructuralContext(
+        governing_text=governing_text,
+        redirect_governing_text=redirect_governing_text,
+    )
+
+
+def _stale_route_redirect_governing_texts(
+    lines: list[str],
+    line_index: int,
+    clause_texts: tuple[str, ...],
+    governing_text: str,
+    section_headings: tuple[str | None, ...],
+) -> tuple[str, ...]:
+    redirect_governing_text = _stale_route_redirect_governing_text_for_line(
+        lines,
+        line_index,
+        governing_text,
+        section_headings,
+    )
+    return tuple(redirect_governing_text for _clause_text in clause_texts)
+
+
+def _stale_route_redirect_governing_text_for_line(
+    lines: list[str],
+    line_index: int,
+    governing_text: str,
+    section_headings: tuple[str | None, ...],
+) -> str:
+    line = lines[line_index]
+    if _line_is_markdown_table_row(line):
+        blockquote_depth = _markdown_blockquote_depth(line)
+        table_start = line_index
+        while (
+            table_start > 0
+            and _markdown_blockquote_depth(lines[table_start - 1]) == blockquote_depth
+            and _line_is_markdown_table_row(lines[table_start - 1])
+        ):
+            table_start -= 1
+        return " ".join(_preceding_context_lines(lines, table_start, section_headings))
+    if _line_is_list_or_list_continuation(lines, line_index):
+        return _stale_route_list_redirect_governing_text(lines, line_index, section_headings)
+    return governing_text
+
+
+def _stale_route_list_redirect_governing_texts(
+    lines: list[str],
+    line_index: int,
+    clause_texts: tuple[str, ...],
+    section_headings: tuple[str | None, ...],
+) -> tuple[str, ...]:
+    context = _stale_route_list_redirect_governing_text(lines, line_index, section_headings)
+    return tuple(context for _clause_text in clause_texts)
+
+
+def _stale_route_list_redirect_governing_text(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+) -> str:
+    list_start = _list_item_start_index(lines, line_index)
+    list_indent = _list_item_indent_width(lines[list_start])
+    item_end = _list_item_end_index(lines, list_start, list_indent)
+    return _stale_route_list_redirect_governing_text_for_range(
+        lines,
+        line_index,
+        section_headings,
+        list_start,
+        list_indent,
+        item_end,
+    )
+
+
+def _stale_route_list_redirect_governing_text_for_range(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    list_start: int,
+    list_indent: int,
+    item_end: int,
+) -> str:
+    parts = []
+    heading = _section_heading_at(section_headings, list_start)
+    if heading:
+        parts.append(heading)
+    parts.extend(lines[index].strip() for index in _parent_list_item_indexes(lines, list_start, list_indent))
+    if line_index != list_start:
+        parts.append(lines[list_start].strip())
+    parts.extend(
+        line.strip()
+        for line in _same_list_item_following_lines(lines, line_index, list_start, item_end)
+        if _line_has_redirect_alias_context(line, set(_normalized_reason_text(line).split()))
+    )
+    context = " ".join(part for part in parts if part).strip()
+    return context
+
+
+def _same_list_item_following_lines(
+    lines: list[str],
+    line_index: int,
+    list_start: int,
+    item_end: int,
+) -> list[str]:
+    following_lines = []
+    for index in range(line_index + 1, item_end):
+        if _line_starts_markdown_list_item(lines[index]):
+            break
+        following_lines.append(lines[index])
+    return following_lines
+
+
+def _stale_route_governing_mention_text(
+    clause_text: str,
+    governing_text: str,
+) -> str:
+    parts = [clause_text]
+    if governing_text:
+        parts.append(governing_text)
+    return " ".join(part for part in parts if part).strip()
+
+
+def _stale_route_governing_text(
+    relative_path: str,
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+) -> str:
+    if not _path_uses_markdown_route_context(relative_path):
+        return ""
+    line = lines[line_index]
+    if _line_is_markdown_table_row(line):
+        return _stale_route_table_governing_text(lines, line_index, section_headings)
+    if _line_is_list_or_list_continuation(lines, line_index):
+        return _stale_route_list_governing_text(lines, line_index, section_headings)
+    return _stale_route_paragraph_governing_text(lines, line_index, section_headings)
+
+
+def _path_uses_markdown_route_context(relative_path: str) -> bool:
+    return relative_path.endswith((".md", ".rst", ".txt"))
+
+
+def _markdown_section_headings(lines: list[str]) -> tuple[str | None, ...]:
+    headings: list[str | None] = []
+    current_headings_by_blockquote_depth: dict[int, str] = {}
+    previous_blockquote_depth = 0
+    for line in lines:
+        blockquote_depth = _markdown_blockquote_depth(line)
+        normalized = _markdown_context_line(line)
+        if blockquote_depth < previous_blockquote_depth:
+            current_headings_by_blockquote_depth = {
+                depth: heading
+                for depth, heading in current_headings_by_blockquote_depth.items()
+                if depth <= blockquote_depth
+            }
+        if MARKDOWN_HEADING_PATTERN.match(normalized):
+            current_headings_by_blockquote_depth = {
+                depth: heading
+                for depth, heading in current_headings_by_blockquote_depth.items()
+                if depth <= blockquote_depth
+            }
+            current_headings_by_blockquote_depth[blockquote_depth] = normalized.strip()
+        headings.append(current_headings_by_blockquote_depth.get(blockquote_depth))
+        previous_blockquote_depth = blockquote_depth
+    return tuple(headings)
+
+
+def _markdown_context_line(line: str) -> str:
+    previous = line
+    while True:
+        normalized = MARKDOWN_BLOCKQUOTE_PREFIX_PATTERN.sub("", previous)
+        if normalized == previous:
+            return normalized
+        previous = normalized
+
+
+def _markdown_blockquote_depth(line: str) -> int:
+    depth = 0
+    previous = line
+    while True:
+        normalized = MARKDOWN_BLOCKQUOTE_PREFIX_PATTERN.sub("", previous)
+        if normalized == previous:
+            return depth
+        depth += 1
+        previous = normalized
+
+
+def _markdown_context_stripped(line: str) -> str:
+    return _markdown_context_line(line).strip()
+
+
+def _line_starts_markdown_list_item(line: str) -> bool:
+    return bool(MARKDOWN_LIST_ITEM_PATTERN.match(_markdown_context_line(line)))
+
+
+def _line_starts_markdown_heading(line: str) -> bool:
+    return bool(MARKDOWN_HEADING_PATTERN.match(_markdown_context_line(line)))
+
+
+def _line_is_markdown_table_row(line: str) -> bool:
+    stripped = _markdown_context_stripped(line)
+    return stripped.startswith("|") and stripped.endswith("|") and "|" in stripped[1:-1]
+
+
+def _stale_route_table_governing_text(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+) -> str:
+    blockquote_depth = _markdown_blockquote_depth(lines[line_index])
+    start = line_index
+    while (
+        start > 0
+        and _markdown_blockquote_depth(lines[start - 1]) == blockquote_depth
+        and _line_is_markdown_table_row(lines[start - 1])
+    ):
+        start -= 1
+    end = line_index + 1
+    while (
+        end < len(lines)
+        and _markdown_blockquote_depth(lines[end]) == blockquote_depth
+        and _line_is_markdown_table_row(lines[end])
+    ):
+        end += 1
+
+    return _stale_route_table_governing_text_for_range(lines, line_index, section_headings, start, end)
+
+
+def _stale_route_table_governing_text_for_range(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    start: int,
+    end: int,
+) -> str:
+    parts = _preceding_context_lines(lines, start, section_headings)
+    row_indexes = [start]
+    if start + 1 < end and MARKDOWN_TABLE_SEPARATOR_PATTERN.match(_markdown_context_stripped(lines[start + 1])):
+        row_indexes.append(start + 1)
+    row_indexes.append(line_index)
+    for row_index in row_indexes:
+        if not MARKDOWN_TABLE_SEPARATOR_PATTERN.match(_markdown_context_stripped(lines[row_index])):
+            parts.append(lines[row_index].strip())
+    return " ".join(part for part in parts if part).strip()
+
+
+def _line_is_list_or_list_continuation(lines: list[str], line_index: int) -> bool:
+    line = lines[line_index]
+    normalized = _markdown_context_line(line)
+    if MARKDOWN_LIST_ITEM_PATTERN.match(normalized):
+        return True
+    if not normalized.startswith((" ", "\t")):
+        return False
+    blockquote_depth = _markdown_blockquote_depth(line)
+    cursor = line_index - 1
+    while cursor >= 0:
+        previous = lines[cursor]
+        if _markdown_blockquote_depth(previous) != blockquote_depth:
+            return False
+        previous_normalized = _markdown_context_line(previous)
+        if not previous_normalized.strip():
+            return False
+        if MARKDOWN_LIST_ITEM_PATTERN.match(previous_normalized):
+            return True
+        if not previous_normalized.startswith((" ", "\t")):
+            return False
+        cursor -= 1
+    return False
+
+
+def _stale_route_list_governing_text(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+) -> str:
+    list_start = _list_item_start_index(lines, line_index)
+    list_indent = _list_item_indent_width(lines[list_start])
+    item_end = _list_item_end_index(lines, list_start, list_indent)
+    return _stale_route_list_governing_text_for_range(
+        lines,
+        line_index,
+        section_headings,
+        list_start,
+        list_indent,
+        item_end,
+    )
+
+
+def _stale_route_list_governing_text_for_range(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    list_start: int,
+    list_indent: int,
+    item_end: int,
+) -> str:
+    parent_indexes = _parent_list_item_indexes(lines, list_start, list_indent)
+    heading = _section_heading_at(section_headings, list_start)
+    parts = [heading] if heading else []
+    parts.extend(lines[index].strip() for index in parent_indexes)
+    parts.extend(line.strip() for line in lines[list_start:item_end])
+    return " ".join(part for part in parts if part).strip()
+
+
+def _list_item_start_index(lines: list[str], line_index: int) -> int:
+    if _line_starts_markdown_list_item(lines[line_index]):
+        return line_index
+    blockquote_depth = _markdown_blockquote_depth(lines[line_index])
+    cursor = line_index - 1
+    while cursor >= 0:
+        line = lines[cursor]
+        if _markdown_blockquote_depth(line) != blockquote_depth:
+            break
+        normalized = _markdown_context_line(line)
+        if not normalized.strip() or MARKDOWN_HEADING_PATTERN.match(normalized):
+            break
+        if MARKDOWN_LIST_ITEM_PATTERN.match(normalized):
+            return cursor
+        if not normalized.startswith((" ", "\t")):
+            break
+        cursor -= 1
+    return line_index
+
+
+def _list_item_end_index(lines: list[str], start_index: int, item_indent: int) -> int:
+    blockquote_depth = _markdown_blockquote_depth(lines[start_index])
+    end = start_index + 1
+    while end < len(lines):
+        current = lines[end]
+        if _markdown_blockquote_depth(current) != blockquote_depth:
+            break
+        normalized = _markdown_context_line(current)
+        if not normalized.strip() or MARKDOWN_HEADING_PATTERN.match(normalized):
+            break
+        if MARKDOWN_LIST_ITEM_PATTERN.match(normalized):
+            indent = _list_item_indent_width(current)
+            if indent <= item_indent:
+                break
+            end += 1
+            continue
+        if normalized.startswith((" ", "\t")):
+            end += 1
+            continue
+        break
+    return end
+
+
+def _parent_list_item_indexes(lines: list[str], start_index: int, item_indent: int) -> list[int]:
+    parent_indexes: list[int] = []
+    cursor = start_index - 1
+    current_indent = item_indent
+    blockquote_depth = _markdown_blockquote_depth(lines[start_index])
+    while cursor >= 0:
+        line = lines[cursor]
+        if _markdown_blockquote_depth(line) != blockquote_depth:
+            break
+        normalized = _markdown_context_line(line)
+        if not normalized.strip() or MARKDOWN_HEADING_PATTERN.match(normalized):
+            break
+        if MARKDOWN_LIST_ITEM_PATTERN.match(normalized):
+            indent = _list_item_indent_width(line)
+            if indent < current_indent:
+                parent_indexes.append(cursor)
+                current_indent = indent
+            cursor -= 1
+            continue
+        if not normalized.startswith((" ", "\t")):
+            break
+        cursor -= 1
+    return list(reversed(parent_indexes))
+
+
+def _list_item_indent_width(line: str) -> int:
+    normalized = _markdown_context_line(line)
+    match = MARKDOWN_LIST_ITEM_PATTERN.match(normalized)
+    if not match:
+        return len(normalized) - len(normalized.lstrip(" \t"))
+    return _markdown_indent_width(match.group("indent"))
+
+
+def _markdown_indent_width(indent: str) -> int:
+    width = 0
+    for char in indent:
+        width += 4 if char == "\t" else 1
+    return width
+
+
+def _stale_route_paragraph_governing_text(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+) -> str:
+    blockquote_depth = _markdown_blockquote_depth(lines[line_index])
+    start = line_index
+    while (
+        start > 0
+        and _markdown_blockquote_depth(lines[start - 1]) == blockquote_depth
+        and _line_continues_route_paragraph(lines[start - 1])
+    ):
+        if not _line_wraps_to_next(lines[start - 1]) and not _line_continues_previous(lines[start]):
+            break
+        start -= 1
+    end = line_index + 1
+    while (
+        end < len(lines)
+        and _markdown_blockquote_depth(lines[end]) == blockquote_depth
+        and _line_continues_route_paragraph(lines[end])
+    ):
+        if not _line_wraps_to_next(lines[end - 1]) and not _line_continues_previous(lines[end]):
+            break
+        end += 1
+
+    return _stale_route_paragraph_governing_text_for_range(lines, line_index, section_headings, start, end)
+
+
+def _stale_route_paragraph_governing_text_for_range(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    start: int,
+    end: int,
+) -> str:
+    heading = _section_heading_at(section_headings, start)
+    if start == line_index and end == line_index + 1:
+        return heading or ""
+    parts = [heading] if heading else []
+    parts.extend(line.strip() for line in lines[start:end] if line.strip())
+    return " ".join(part for part in parts if part).strip()
+
+
+def _line_continues_route_paragraph(line: str) -> bool:
+    stripped = _markdown_context_stripped(line)
+    return bool(
+        stripped
+        and not _line_starts_markdown_heading(line)
+        and not _line_is_markdown_table_row(line)
+        and not MARKDOWN_TABLE_SEPARATOR_PATTERN.match(stripped)
+        and not _line_starts_markdown_list_item(line)
+    )
+
+
+def _line_wraps_to_next(line: str) -> bool:
+    stripped = line.rstrip()
+    if not stripped:
+        return False
+    return bool(
+        stripped.endswith(("/", "、", ",", "，", "(", "（", "->", "→"))
+        or stripped.endswith((" and", " or", " and/or"))
+        or (
+            stripped[-1].islower()
+            and not stripped.endswith((".", ":", ";", "。", "：", "；"))
+            and len(stripped) >= 88
+        )
+    )
+
+
+def _line_continues_previous(line: str) -> bool:
+    stripped = line.lstrip()
+    return bool(stripped.startswith(("/", "、", "，", ",", "and ", "or ", "compatibility ")))
+
+
+def _preceding_context_lines(
+    lines: list[str],
+    start_index: int,
+    section_headings: tuple[str | None, ...],
+) -> list[str]:
+    parts: list[str] = []
+    blockquote_depth = _markdown_blockquote_depth(lines[start_index]) if 0 <= start_index < len(lines) else 0
+    cursor = start_index - 1
+    while cursor >= 0 and len(parts) < 3:
+        line = lines[cursor]
+        if _markdown_blockquote_depth(line) != blockquote_depth:
+            break
+        stripped = _markdown_context_stripped(line)
+        if not stripped:
+            if parts:
+                break
+            cursor -= 1
+            continue
+        if _line_is_markdown_table_row(line) or MARKDOWN_TABLE_SEPARATOR_PATTERN.match(stripped):
+            break
+        parts.append(stripped)
+        if _line_starts_markdown_heading(line) or _line_starts_markdown_list_item(line):
+            break
+        cursor -= 1
+    if not any(MARKDOWN_HEADING_PATTERN.match(part) for part in parts):
+        heading = _section_heading_at(section_headings, start_index)
+        if heading:
+            parts.append(heading)
+    return list(reversed(parts))
+
+
+def _section_heading_at(section_headings: tuple[str | None, ...], line_index: int) -> str | None:
+    if not section_headings or line_index < 0:
+        return None
+    return section_headings[min(line_index, len(section_headings) - 1)]
+
+
+def _period_is_sentence_boundary(line: str, index: int) -> bool:
+    next_index = index + 1
+    return next_index >= len(line) or line[next_index].isspace()
+
+
+def _route_arrow_points_from_token(line: str, token_start: int, token_end: int) -> bool:
+    return line[token_end:].lstrip().startswith(("->", "→"))
+
+
+def _route_arrow_points_to_token(line: str, token_start: int) -> bool:
+    return line[:token_start].rstrip().endswith(("->", "→"))
+
+
+def _historical_route_authority_banner_line_numbers(lines: list[str]) -> frozenset[int]:
+    header_end = min(20, len(lines))
+    header_text = "\n".join(lines[:header_end]).lower()
+    if not _text_has_historical_marker(header_text) or not _text_has_route_authority_marker(header_text):
+        return frozenset()
+
+    banner_lines: set[int] = set()
+    for line_index, line in enumerate(lines[:header_end]):
+        if _text_has_historical_marker(line) or _text_has_route_authority_marker(line):
+            banner_lines.add(line_index + 1)
+            if line.startswith(">"):
+                cursor = line_index + 1
+                while cursor < header_end and lines[cursor].startswith(">"):
+                    banner_lines.add(cursor + 1)
+                    cursor += 1
+
+    for line_index, line in enumerate(lines):
+        if line_index >= header_end and _line_starts_new_current_section(line):
+            break
+        normalized = _normalized_reason_text(line)
+        tokens = set(normalized.split())
+        if _line_has_historical_context("", tokens):
+            banner_lines.add(line_index + 1)
+    return frozenset(banner_lines)
+
+
+def _line_starts_new_current_section(line: str) -> bool:
+    if not MARKDOWN_HEADING_PATTERN.match(line):
+        return False
+    normalized = _normalized_reason_text(line)
+    tokens = set(normalized.split())
+    return not bool(tokens & {"historical", "history", "superseded", "archive", "archived"})
+
+
+def _text_has_historical_marker(text: str) -> bool:
+    normalized = _normalized_reason_text(text)
+    tokens = set(normalized.split())
+    return bool(
+        tokens & {"historical", "history", "superseded"}
+        or "历史" in text
+        or "已被" in text
+    )
+
+
+def _text_has_route_authority_marker(text: str) -> bool:
+    text = text.lower()
+    return bool(
+        "current route authority" in text
+        or "route authority" in text
+        or "single-map" in text
+        or "single map" in text
+    )
+
+
+def _frontend_e2e_legacy_route_context_allowlist(
+    relative_path: str,
+    lines: list[str],
+    line_no: int,
+    token: str,
+) -> bool:
+    if token != "/hydro-met" or not relative_path.startswith("apps/frontend/e2e/"):
+        return False
+    line_index = line_no - 1
+    start = max(0, line_index - 2)
+    end = min(len(lines), line_index + 3)
+    context = _normalized_reason_text("\n".join(lines[start:end]))
+    tokens = set(context.split())
+    return "legacyredirect" in tokens or ("redirect" in tokens and bool(tokens & {"legacy", "m26"}))
+
+
+def _stale_route_context_class(
+    relative_path: str,
+    line: _StaleRouteMentionContext,
+) -> Literal[
+    "active",
+    "historical",
+    "redirect",
+    "compatibility",
+    "drift",
+]:
+    normalized = _normalized_reason_text(line.governing_text)
+    tokens = set(normalized.split())
+    explicit_redirect_tokens = set(_normalized_reason_text(line.explicit_redirect_text).split())
+    if _line_has_redirect_alias_context(line.explicit_redirect_text, explicit_redirect_tokens):
+        return "redirect"
+    has_active_route_context = _line_has_active_route_instruction_context(
+        line.clause
+    ) or _line_has_active_route_valued_context(
+        line.governing_text,
+        tokens,
+        redirect_text=line.explicit_redirect_text,
+        allow_evidence_boundary=True,
+    )
+    if _line_has_evidence_boundary_context(tokens) and has_active_route_context:
+        return "active"
+    if _line_has_historical_context(relative_path, tokens):
+        return "historical"
+    if (
+        line.document_has_historical_route_authority_banner
+        and not _line_has_current_route_governing_context(line.governing_text)
+    ):
+        return "historical"
+    if has_active_route_context:
+        return "active"
+    redirect_tokens = set(_normalized_reason_text(line.redirect_text).split())
+    if _line_has_redirect_alias_context(line.redirect_text, redirect_tokens):
+        return "redirect"
+    if _line_has_compatibility_context(tokens):
+        return "compatibility"
+    return "drift"
+
+
+def _line_has_redirect_alias_context(line: str, tokens: set[str]) -> bool:
+    return (
+        _line_has_route_redirect_arrow(line)
+        or "redirect" in tokens
+        or "redirects" in tokens
+        or "redirected" in tokens
+        or "legacyredirect" in tokens
+        or "重定向" in line
+    )
+
+
+def _line_has_route_redirect_arrow(line: str) -> bool:
+    for arrow in ("->", "→"):
+        if arrow not in line:
+            continue
+        left, right = line.split(arrow, maxsplit=1)
+        if LEGACY_DISPLAY_ROUTE_PATTERN.search(left) and ROUTE_REDIRECT_TARGET_PATTERN.search(right):
+            return True
+    return False
+
+
+def _line_has_active_route_instruction_context(line: str) -> bool:
+    normalized = _normalized_reason_text(line)
+    tokens = set(normalized.split())
+    if bool(tokens & {"open", "visit", "browse", "navigate"}) and bool(
+        tokens & {"proof", "evidence", "browser", "display", "route", "page"}
+    ):
+        return True
+    if "打开" in line and bool(tokens & {"proof", "evidence", "browser", "display", "route", "page"}):
+        return True
+    if "use" in tokens and bool(tokens & {"active", "current", "live"}) and bool(
+        tokens & {"display", "entrypoint", "page", "route"}
+    ):
+        return True
+    return _line_has_active_route_valued_context(line, tokens)
+
+
+def _line_has_current_route_governing_context(line: str) -> bool:
+    tokens = _normalized_reason_text(line).split()
+    current_markers = {"active", "current", "currently", "live"}
+    negation_markers = {"former", "formerly", "no", "non", "not", "previously", "without"}
+    evidence_boundary_markers = {
+        "blocked",
+        "blocker",
+        "blockers",
+        "deterministic",
+        "diagnostic",
+        "fail",
+        "failed",
+        "fixture",
+        "fixtures",
+        "mocked",
+        "skipped",
+    }
+    governing_markers = {
+        "browser",
+        "browse",
+        "current",
+        "display",
+        "entrypoint",
+        "navigate",
+        "open",
+        "operator",
+        "page",
+        "procedure",
+        "procedures",
+        "proof",
+        "route",
+        "use",
+        "visit",
+    }
+    token_set = set(tokens)
+    if evidence_boundary_markers & token_set:
+        return False
+    if _line_has_historical_context("", token_set):
+        return False
+    for index, token in enumerate(tokens):
+        if token not in current_markers:
+            continue
+        if set(tokens[max(0, index - 4) : index]) & negation_markers:
+            continue
+        return bool(governing_markers & token_set)
+    return False
+
+
+def _line_has_active_route_valued_context(
+    line: str,
+    tokens: set[str],
+    *,
+    redirect_text: str | None = None,
+    allow_evidence_boundary: bool = False,
+) -> bool:
+    if not ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.search(line):
+        return False
+    redirect_context = line if redirect_text is None else redirect_text
+    redirect_tokens = tokens if redirect_text is None else set(_normalized_reason_text(redirect_text).split())
+    if _line_has_redirect_alias_context(redirect_context, redirect_tokens) or _line_has_historical_context(
+        "",
+        tokens,
+        allow_evidence_boundary=allow_evidence_boundary,
+    ):
+        return False
+    if _line_has_compatibility_context(tokens) and not _line_has_current_route_governing_context(line):
+        return False
+    return True
+
+
+def _hydromet_page_historical_context(text: str) -> bool:
+    normalized = _normalized_reason_text(text)
+    tokens = set(normalized.split())
+    return bool(
+        tokens & {"delete", "deleted", "remove", "removed", "retire", "retired", "toy"}
+        or "已删" in text
+        or "删除" in text
+        or "玩具页" in text
+    )
+
+
+def _line_has_compatibility_context(tokens: set[str]) -> bool:
+    return bool(
+        tokens
+        & {
+            "compatibility",
+            "compatible",
+            "backward",
+            "backwards",
+            "deep",
+            "deeplink",
+            "deeplinks",
+            "links",
+            "bookmark",
+            "bookmarks",
+        }
+    )
+
+
+def _line_has_historical_context(
+    relative_path: str,
+    tokens: set[str],
+    *,
+    allow_evidence_boundary: bool = False,
+) -> bool:
+    if relative_path.startswith(("docs/plans/", "openspec/changes/m22-", "openspec/changes/m26-")):
+        return True
+    if tokens & {"superseded", "archive", "archived", "milestone"}:
+        return True
+    if _line_has_evidence_boundary_context(tokens) and not allow_evidence_boundary:
+        return True
+    if tokens & {"evidence", "pre"} and tokens & {"historical", "history", "m26"}:
+        return True
+    return False
+
+
+def _line_has_evidence_boundary_context(tokens: set[str]) -> bool:
+    return "evidence" in tokens and "boundary" in tokens
 
 
 def _placeholder_path_allowlist_reason(relative_path: str) -> str | None:

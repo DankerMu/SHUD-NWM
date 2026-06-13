@@ -34,9 +34,9 @@ separate PR boundaries.
   pre-M26 `/hydro-met` execution steps.
 - [ ] 2.5 Add or update the route-authority check in
   `scripts/governance/audit_repo_entropy.py` for current docs/runbooks,
-  covering `/hydro-met`, `/forecast`, `/meteorology`, `/flood-alerts`,
-  `/basins/:id`, and `/segments/:id` with explicit allowlist classes for
-  historical evidence, redirect aliases, and compatibility context.
+  covering `/overview`, `/hydro-met`, `/forecast`, `/meteorology`,
+  `/flood-alerts`, `/basins/:id`, and `/segments/:id` with explicit allowlist
+  classes for historical evidence, redirect aliases, and compatibility context.
 
 ## 3. Mocked/Live Evidence Boundary
 
@@ -111,7 +111,12 @@ separate PR boundaries.
   execution orchestration helpers that do not own lease or candidate-state
   semantics.
 - [ ] 9.2 Preserve `run_once` ordering and mutation fences.
-- [ ] 9.3 Verify with focused forcing and concurrent candidate tests.
+- [ ] 9.3 Preserve scheduler runtime-root preflight semantics: missing
+  `published_artifact_root` is a control publish-stage creatable root, while
+  missing workspace, object-store, runtime, temp, lock, and evidence roots still
+  block before registry, adapter, active-repository, or submission work.
+- [ ] 9.4 Verify with focused forcing, concurrent candidate, and runtime-root
+  preflight tests.
 
 ## 10. Scheduler Evidence Extraction
 
@@ -331,8 +336,42 @@ separate PR boundaries.
 - PR Boundary: Route-authority audit check and tests only.
 - Required Reading: `specs/evidence-boundary-hardening/spec.md`,
   `docs/governance/DOC_STATUS.md`, `apps/frontend/src/App.tsx`.
-- Acceptance: check covers all six legacy route forms and fails on active
-  current-runbook usage outside the allowlist classes.
+- Acceptance: check covers every current legacy redirect alias from
+  `DOC_STATUS.md`, including `/overview`, and fails on active current-runbook
+  usage outside the allowlist classes.
+- Fixture evidence:
+  - Route-authority drift test:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k route_authority`
+    with input `docs/runbooks/current.md: "Open /forecast for current live
+    browser proof."` -> exactly one route finding for `/forecast` with
+    `check_id=stale-display-route-token`, `allowlist_state=unallowlisted`,
+    `allowlist_key=null`, `budget_counted=true`, and `gate_eligible=false`.
+  - Route-authority allowlist test:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k route_authority`
+    with inputs `docs/runbooks/current.md: "/hydro-met -> / redirect alias"`,
+    `docs/runbooks/current.md: "Compatibility context keeps /meteorology deep
+    links"`, and `docs/runbooks/current.md: "Historical pre-M26 evidence used
+    /flood-alerts"` -> allowlisted findings with distinct
+    `allowlist_reason`/`allowlist_key` values for redirect, compatibility, and
+    historical classes.
+  - Legacy alias coverage test:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k route_authority`
+    with input lines containing `/overview`, `/hydro-met`, `/forecast`,
+    `/meteorology`, `/flood-alerts`, `/basins/:id`, `/segments/:id`,
+    `/basins/demo`, and `/segments/demo` -> every token is represented in
+    `stale-display-route-token` descriptions or evidence lines.
+  - Resource-discovery bound test:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k route_authority`
+    with input `artifacts/generated.md: "Open /overview"` -> no
+    `stale-display-route-token` finding for skipped artifact roots.
+  - Full focused audit test slice:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py` -> pass.
+  - Static check:
+    `uv run --no-sync ruff check scripts/governance/audit_repo_entropy.py tests/test_entropy_audit_script.py`
+    -> pass.
+  - OpenSpec validation:
+    `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
 
 ### G6-05 Frontend mocked/live spec classification
 
@@ -484,11 +523,11 @@ separate PR boundaries.
 - Ownership: `services/orchestrator/scheduler.py`,
   `services/orchestrator/scheduler_execution.py`, forcing/concurrency tests.
 - In Scope: Extract forcing production, candidate cohort grouping, concurrent
-  submit evidence, and execution orchestration helpers that do not own lease or
-  candidate-state semantics.
+  submit evidence, runtime-root preflight behavior, and execution orchestration
+  helpers that do not own lease or candidate-state semantics.
 - Out of Scope: Evidence serialization helper extraction and chain stage
   behavior.
-- Tasks: 9.1, 9.2, 9.3.
+- Tasks: 9.1, 9.2, 9.3, 9.4.
 - Dependencies: G6-12.
 - PR Boundary: Scheduler execution helpers only.
 - Required Reading: `specs/orchestrator-structural-burndown/spec.md`,
@@ -496,7 +535,10 @@ separate PR boundaries.
 - Verification: `uv run --no-sync pytest -q tests/test_production_scheduler.py`
   plus `uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`.
 - Acceptance: `run_once` ordering and mutation fences remain stable; focused
-  forcing/concurrent candidate tests pass.
+  forcing/concurrent candidate tests pass; missing `published_artifact_root` is
+  reported as creatable/non-blocking for the control publish stage while other
+  missing runtime roots still block before registry, adapter, active-repository,
+  or submission work.
 
 ### G6-14 Scheduler evidence extraction
 

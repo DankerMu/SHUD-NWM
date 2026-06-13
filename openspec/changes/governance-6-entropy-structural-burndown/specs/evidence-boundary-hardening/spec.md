@@ -3,9 +3,9 @@
 ### Requirement: Current runbooks follow M26 route authority
 
 Current runbooks SHALL describe `/` as the active display entrypoint and SHALL
-describe `/hydro-met`, `/forecast`, `/meteorology`, `/flood-alerts`,
-`/basins/:id`, and `/segments/:id` only as legacy redirect aliases,
-compatibility references, or historical evidence.
+describe `/overview`, `/hydro-met`, `/forecast`, `/meteorology`,
+`/flood-alerts`, `/basins/:id`, and `/segments/:id` only as legacy redirect
+aliases, compatibility references, or historical evidence.
 
 #### Scenario: two-node E2E plan defines browser proof
 - **WHEN** `docs/runbooks/two-node-production-e2e-plan.md` describes live
@@ -27,9 +27,10 @@ compatibility references, or historical evidence.
 
 #### Scenario: route-authority grep runs against current runbooks
 - **WHEN** route-authority validation scans current docs and runbooks
-- **THEN** references to `/hydro-met`, `/forecast`, `/meteorology`,
-  `/flood-alerts`, `/basins/:id`, and `/segments/:id` are each classified as
-  historical evidence, redirect alias checks, compatibility context, or drift
+- **THEN** references to `/overview`, `/hydro-met`, `/forecast`,
+  `/meteorology`, `/flood-alerts`, `/basins/:id`, and `/segments/:id` are each
+  classified as historical evidence, redirect alias checks, compatibility
+  context, or drift
 
 ### Requirement: Historical MVP runbooks are clearly marked
 

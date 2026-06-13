@@ -10746,7 +10746,6 @@ def test_explicit_workspace_submit_missing_allowed_roots_blocks_before_registry_
     [
         ("workspace_root", "SCHEDULER_ROOT_WORKSPACE_ROOT_NOT_FOUND"),
         ("object_store_root", "SCHEDULER_ROOT_OBJECT_STORE_ROOT_NOT_FOUND"),
-        ("published_root", "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_NOT_FOUND"),
         ("runtime_root", "SCHEDULER_ROOT_RUNTIME_ROOT_NOT_FOUND"),
         ("temp_root", "SCHEDULER_ROOT_TEMP_ROOT_NOT_FOUND"),
         ("lock_root", "SCHEDULER_ROOT_LOCK_ROOT_NOT_FOUND"),
@@ -10799,6 +10798,51 @@ def test_no_flag_invalid_env_roots_block_before_registry_adapter_or_submit(
         assert "artifact_path" not in payload
     else:
         assert Path(payload["artifact_path"]).is_file()
+
+
+def test_no_flag_missing_published_artifact_root_is_created_by_control_publish_stage(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    roots = _scheduler_env_roots(tmp_path)
+    _set_scheduler_root_env(monkeypatch, roots)
+    shutil.rmtree(roots["published_root"])
+    monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
+        lambda: FakeRegistry([_model("model_a", "basin_a")]),
+    )
+    adapter = FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._default_adapters",
+        lambda: {"gfs": adapter},
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._active_repository_from_env",
+        lambda: FakeActiveRepository(active=False),
+    )
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._now",
+        lambda config: config.now or _dt("2026-05-21T12:00:00Z"),
+    )
+
+    payload = _run_no_flag_plan()
+
+    assert payload["status"] == "planned"
+    published_check = payload["root_preflight"]["checks"]["published_artifact_root"]
+    assert payload["root_preflight"]["status"] == "ready"
+    assert payload["root_preflight"]["blockers"] == []
+    assert published_check["exists"] is False
+    assert published_check["allow_create"] is True
+    assert published_check["writable"] is True
+    assert "SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_NOT_FOUND" not in {
+        blocker["code"] for blocker in payload["root_preflight"]["blockers"]
+    }
+    assert payload["counts"]["submitted_count"] == 0
+    assert payload["execution_boundary"] == "planning_only"
+    assert payload["no_mutation_proof"] == _expected_no_mutation_proof()
+    assert adapter.download_calls == 0
+    assert not roots["published_root"].exists()
 
 
 @pytest.mark.parametrize(
