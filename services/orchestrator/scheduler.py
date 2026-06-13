@@ -10086,13 +10086,17 @@ def _scheduler_runtime_root_preflight(config: ProductionSchedulerConfig) -> dict
         ("lock_root", config._lock_root_preflight_path),
         ("evidence_root", config._evidence_root_preflight_path),
     ):
+        # The published artifact root is a control-node display mount. Compute
+        # stages write to object_store_root; the local publish stage creates and
+        # mirrors artifacts into this root after Slurm work completes.
+        allow_publish_root_create = field_name == "published_artifact_root"
         check, blocker = _scheduler_root_check(
             field_name,
             path,
             allowed_roots,
             required=True,
-            must_exist=True,
-            allow_create=False,
+            must_exist=not allow_publish_root_create,
+            allow_create=allow_publish_root_create,
             require_approved_root=enforce_approved_roots and field_name not in {"lock_root", "evidence_root"},
             require_under_workspace=field_name in {"lock_root", "evidence_root"},
             workspace_root=config._workspace_root_preflight_path.resolve(strict=False),

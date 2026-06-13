@@ -122,15 +122,24 @@ LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN = (
     r")"
     r"(?=$|[^A-Za-z0-9_/-])"
 )
+ROUTE_BASE_PLACEHOLDER_PATTERN = (
+    r"(?:"
+    r"\$[A-Za-z_][A-Za-z0-9_]*"
+    r"|\$\{[A-Za-z_][A-Za-z0-9_]*\}"
+    r"|<[A-Za-z][A-Za-z0-9_-]*>"
+    r")"
+)
 LEGACY_DISPLAY_ROUTE_PATTERN = re.compile(LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN)
 LEGACY_DISPLAY_ROUTE_BOUNDARY_PATTERN = re.compile(
-    r"(?:^|[\s`'\"([{<|=?:&]|\$[A-Za-z_][A-Za-z0-9_]*|https?://[^/\s`'\"()<>{}]+)"
+    r"(?:^|"
+    + ROUTE_BASE_PLACEHOLDER_PATTERN
+    + r"|[\s`'\"([{<|=?:&]|https?://[^/\s`'\"()<>{}]+)"
     + LEGACY_DISPLAY_ROUTE_TOKEN_PATTERN
 )
 ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN = re.compile(
     r"(?:"
-    r"\$[A-Za-z_][A-Za-z0-9_]*"
-    r"|--[A-Za-z][A-Za-z0-9_-]*="
+    + ROUTE_BASE_PLACEHOLDER_PATTERN
+    + r"|--[A-Za-z][A-Za-z0-9_-]*="
     r"|[?&][A-Za-z][A-Za-z0-9_-]*="
     r"|[A-Za-z_][A-Za-z0-9_]*="
     r")"
@@ -139,6 +148,10 @@ ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN = re.compile(
 HYDROMET_PAGE_IDENTIFIER_PATTERN = re.compile(r"(?<![A-Za-z0-9_])HydroMetPage(?![A-Za-z0-9_])")
 ROUTE_REDIRECT_TARGET_PATTERN = re.compile(r"(?:^|[\s`'\"([{<|])/(?:$|[\s`'\"()\]}>.,;:?|]|redirect|alias)")
 ROUTE_REDIRECT_WORD_PATTERN = re.compile(r"\b(?:redirects?|redirected)\b|legacyredirect|重定向", re.IGNORECASE)
+ROUTE_ACTIVE_CLAUSE_CONNECTOR_PATTERN = re.compile(
+    r"\b(?:and|then)\s+(?:open|visit|browse|navigate|use)\b|且打开",
+    re.IGNORECASE,
+)
 MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
 MARKDOWN_LIST_ITEM_PATTERN = re.compile(r"^(?P<indent>\s*)(?:[-*+]|\d+[.)])\s+")
 MARKDOWN_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+")
@@ -192,6 +205,12 @@ class _StaleRouteMentionContext:
 
 
 @dataclass(frozen=True)
+class _StaleRouteStructuralContext:
+    governing_text: str
+    redirect_governing_text: str
+
+
+@dataclass(frozen=True)
 class _StaleRouteLineMatch:
     line_no: int
     line: str
@@ -211,6 +230,12 @@ class _StaleRouteContextFactory:
         self._historical_banner_lines: frozenset[int] | None = None
         self._section_headings: tuple[str | None, ...] | None = None
         self._line_contexts: dict[int, _StaleRouteLineContext] = {}
+        self._structural_contexts: dict[int, _StaleRouteStructuralContext] = {}
+        self._list_item_bounds: dict[int, tuple[int, int]] = {}
+        self._line_list_starts: dict[int, int | None] = {}
+        self._list_item_contexts: dict[int, tuple[_StaleRouteStructuralContext, ...]] = {}
+        self._table_ranges: dict[int, tuple[int, int]] = {}
+        self._paragraph_ranges: dict[int, tuple[int, int]] = {}
 
     def line_context(self, line_index: int) -> _StaleRouteLineContext:
         line_context = self._line_contexts.get(line_index)
@@ -223,9 +248,167 @@ class _StaleRouteContextFactory:
                 self._get_section_headings(),
                 historical_banner_lines,
                 bool(historical_banner_lines),
+                structural_context=self._structural_context(line_index),
             )
             self._line_contexts[line_index] = line_context
         return line_context
+
+    def _structural_context(self, line_index: int) -> _StaleRouteStructuralContext:
+        context = self._structural_contexts.get(line_index)
+        if context is None:
+            context = self._build_structural_context(line_index)
+            self._structural_contexts[line_index] = context
+        return context
+
+    def _build_structural_context(self, line_index: int) -> _StaleRouteStructuralContext:
+        if not _path_uses_markdown_route_context(self._relative_path):
+            return _StaleRouteStructuralContext(governing_text="", redirect_governing_text="")
+        lines = self._lines
+        section_headings = self._get_section_headings()
+        line = lines[line_index]
+        if _line_is_markdown_table_row(line):
+            start, end = self._table_range(line_index)
+            governing_text = _stale_route_table_governing_text_for_range(
+                lines,
+                line_index,
+                section_headings,
+                start,
+                end,
+            )
+            context = " ".join(_preceding_context_lines(lines, start, section_headings))
+            return _StaleRouteStructuralContext(
+                governing_text=governing_text,
+                redirect_governing_text=context,
+            )
+        list_start = self._line_list_start(line_index)
+        if list_start is not None:
+            return self._list_item_context(list_start, line_index)
+        start, end = self._paragraph_range(line_index)
+        governing_text = _stale_route_paragraph_governing_text_for_range(
+            lines,
+            line_index,
+            section_headings,
+            start,
+            end,
+        )
+        return _StaleRouteStructuralContext(
+            governing_text=governing_text,
+            redirect_governing_text=governing_text,
+        )
+
+    def _table_range(self, line_index: int) -> tuple[int, int]:
+        cached = self._table_ranges.get(line_index)
+        if cached is not None:
+            return cached
+        start = line_index
+        while start > 0 and _line_is_markdown_table_row(self._lines[start - 1]):
+            start -= 1
+        end = line_index + 1
+        while end < len(self._lines) and _line_is_markdown_table_row(self._lines[end]):
+            end += 1
+        bounds = (start, end)
+        for index in range(start, end):
+            self._table_ranges[index] = bounds
+        return bounds
+
+    def _list_item_context(
+        self,
+        list_start: int,
+        line_index: int,
+    ) -> _StaleRouteStructuralContext:
+        cached = self._list_item_contexts.get(list_start)
+        if cached is None:
+            cached = self._build_list_item_contexts(list_start)
+            self._list_item_contexts[list_start] = cached
+        return cached[line_index - list_start]
+
+    def _build_list_item_contexts(self, list_start: int) -> tuple[_StaleRouteStructuralContext, ...]:
+        lines = self._lines
+        section_headings = self._get_section_headings()
+        list_indent = _list_item_indent_width(lines[list_start])
+        item_end = self._list_item_bounds_for_start(list_start, list_indent)[1]
+        parent_indexes = _parent_list_item_indexes(lines, list_start, list_indent)
+        heading = _section_heading_at(section_headings, list_start)
+        base_parts = [heading] if heading else []
+        base_parts.extend(lines[index].strip() for index in parent_indexes)
+        item_lines = [line.strip() for line in lines[list_start:item_end]]
+        governing_text = " ".join(part for part in (*base_parts, *item_lines) if part).strip()
+
+        following_redirect_texts = [""] * (item_end - list_start)
+        following_redirect_text = ""
+        for index in range(item_end - 1, list_start - 1, -1):
+            line = lines[index]
+            offset = index - list_start
+            following_redirect_texts[offset] = following_redirect_text
+            if _line_starts_markdown_list_item(line):
+                following_redirect_text = ""
+                continue
+            tokens = set(_normalized_reason_text(line).split())
+            if _line_has_redirect_alias_context(line, tokens):
+                stripped = line.strip()
+                following_redirect_text = (
+                    f"{stripped} {following_redirect_text}".strip()
+                    if following_redirect_text
+                    else stripped
+                )
+
+        contexts: list[_StaleRouteStructuralContext] = []
+        for offset, index in enumerate(range(list_start, item_end)):
+            redirect_parts = list(base_parts)
+            if index != list_start:
+                redirect_parts.append(lines[list_start].strip())
+            if following_redirect_texts[offset]:
+                redirect_parts.append(following_redirect_texts[offset])
+            contexts.append(
+                _StaleRouteStructuralContext(
+                    governing_text=governing_text,
+                    redirect_governing_text=" ".join(part for part in redirect_parts if part).strip(),
+                )
+            )
+        return tuple(contexts)
+
+    def _line_list_start(self, line_index: int) -> int | None:
+        cached = self._line_list_starts.get(line_index)
+        if cached is not None or line_index in self._line_list_starts:
+            return cached
+        if not _line_is_list_or_list_continuation(self._lines, line_index):
+            self._line_list_starts[line_index] = None
+            return None
+        list_start = _list_item_start_index(self._lines, line_index)
+        list_indent = _list_item_indent_width(self._lines[list_start])
+        item_start, item_end = self._list_item_bounds_for_start(list_start, list_indent)
+        for index in range(item_start, item_end):
+            self._line_list_starts[index] = list_start
+        return list_start
+
+    def _list_item_bounds_for_start(self, list_start: int, list_indent: int) -> tuple[int, int]:
+        cached = self._list_item_bounds.get(list_start)
+        if cached is not None:
+            return cached
+        bounds = (list_start, _list_item_end_index(self._lines, list_start, list_indent))
+        self._list_item_bounds[list_start] = bounds
+        return bounds
+
+    def _paragraph_range(self, line_index: int) -> tuple[int, int]:
+        cached = self._paragraph_ranges.get(line_index)
+        if cached is not None:
+            return cached
+        start = line_index
+        while start > 0 and _line_continues_route_paragraph(self._lines[start - 1]):
+            if not _line_wraps_to_next(self._lines[start - 1]) and not _line_continues_previous(
+                self._lines[start]
+            ):
+                break
+            start -= 1
+        end = line_index + 1
+        while end < len(self._lines) and _line_continues_route_paragraph(self._lines[end]):
+            if not _line_wraps_to_next(self._lines[end - 1]) and not _line_continues_previous(self._lines[end]):
+                break
+            end += 1
+        bounds = (start, end)
+        for index in range(start, end):
+            self._paragraph_ranges[index] = bounds
+        return bounds
 
     def _get_historical_banner_lines(self) -> frozenset[int]:
         if self._historical_banner_lines is None:
@@ -1860,6 +2043,8 @@ def _stale_route_line_context(
     section_headings: tuple[str | None, ...],
     historical_banner_lines: frozenset[int],
     has_historical_route_authority_banner: bool,
+    *,
+    structural_context: _StaleRouteStructuralContext | None = None,
 ) -> _StaleRouteLineContext:
     line = lines[line_index]
     clause_ranges = tuple(_stale_route_clause_ranges(line))
@@ -1868,14 +2053,14 @@ def _stale_route_line_context(
         _clause_has_per_mention_redirect_syntax(line[start:end])
         for start, end in clause_ranges
     )
-    governing_text = _stale_route_governing_text(relative_path, lines, line_index, section_headings)
-    redirect_governing_texts = _stale_route_redirect_governing_texts(
+    structural_context = structural_context or _stale_route_structural_context(
+        relative_path,
         lines,
         line_index,
-        clause_texts,
-        governing_text,
         section_headings,
     )
+    governing_text = structural_context.governing_text
+    redirect_governing_texts = tuple(structural_context.redirect_governing_text for _clause_text in clause_texts)
     mention_governing_texts = tuple(
         _stale_route_governing_mention_text(clause_text, governing_text)
         for clause_text in clause_texts
@@ -1901,8 +2086,46 @@ def _stale_route_clause_ranges(line: str) -> list[tuple[int, int]]:
         if char in "|,，;。；" or (char == "." and _period_is_sentence_boundary(line, index)):
             ranges.append((start, index))
             start = index + 1
-    ranges.append((start, len(line)))
-    return ranges or [(0, len(line))]
+    if ranges:
+        ranges.append((start, len(line)))
+    else:
+        ranges = [(0, len(line))]
+    return _split_stale_route_active_clause_connectors(line, ranges)
+
+
+def _split_stale_route_active_clause_connectors(
+    line: str,
+    ranges: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    split_ranges: list[tuple[int, int]] = []
+    for start, end in ranges:
+        cursor = start
+        for match in ROUTE_ACTIVE_CLAUSE_CONNECTOR_PATTERN.finditer(line, start, end):
+            if not _stale_route_connector_splits_clause(line, start, end, match.start()):
+                continue
+            split_ranges.append((cursor, match.start()))
+            connector_text = line[match.start() : match.end()]
+            active_start = match.start()
+            if connector_text.lower().startswith(("and ", "then ")):
+                active_start = line.find(" ", match.start(), match.end()) + 1
+            cursor = active_start
+        split_ranges.append((cursor, end))
+    return split_ranges or [(0, len(line))]
+
+
+def _stale_route_connector_splits_clause(
+    line: str,
+    start: int,
+    end: int,
+    connector_start: int,
+) -> bool:
+    before = line[start:connector_start]
+    after = line[connector_start:end]
+    return bool(
+        LEGACY_DISPLAY_ROUTE_PATTERN.search(before)
+        and ROUTE_REDIRECT_WORD_PATTERN.search(before)
+        and LEGACY_DISPLAY_ROUTE_PATTERN.search(after)
+    )
 
 
 def _clause_has_per_mention_redirect_syntax(clause: str) -> bool:
@@ -2102,6 +2325,25 @@ def _route_redirect_connector_segment(segment: str) -> bool:
     }
 
 
+def _stale_route_structural_context(
+    relative_path: str,
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+) -> _StaleRouteStructuralContext:
+    governing_text = _stale_route_governing_text(relative_path, lines, line_index, section_headings)
+    redirect_governing_text = _stale_route_redirect_governing_text_for_line(
+        lines,
+        line_index,
+        governing_text,
+        section_headings,
+    )
+    return _StaleRouteStructuralContext(
+        governing_text=governing_text,
+        redirect_governing_text=redirect_governing_text,
+    )
+
+
 def _stale_route_redirect_governing_texts(
     lines: list[str],
     line_index: int,
@@ -2109,16 +2351,30 @@ def _stale_route_redirect_governing_texts(
     governing_text: str,
     section_headings: tuple[str | None, ...],
 ) -> tuple[str, ...]:
+    redirect_governing_text = _stale_route_redirect_governing_text_for_line(
+        lines,
+        line_index,
+        governing_text,
+        section_headings,
+    )
+    return tuple(redirect_governing_text for _clause_text in clause_texts)
+
+
+def _stale_route_redirect_governing_text_for_line(
+    lines: list[str],
+    line_index: int,
+    governing_text: str,
+    section_headings: tuple[str | None, ...],
+) -> str:
     line = lines[line_index]
     if _line_is_markdown_table_row(line):
         table_start = line_index
         while table_start > 0 and _line_is_markdown_table_row(lines[table_start - 1]):
             table_start -= 1
-        context = " ".join(_preceding_context_lines(lines, table_start, section_headings))
-        return tuple(context for _clause_text in clause_texts)
+        return " ".join(_preceding_context_lines(lines, table_start, section_headings))
     if _line_is_list_or_list_continuation(lines, line_index):
-        return _stale_route_list_redirect_governing_texts(lines, line_index, clause_texts, section_headings)
-    return tuple(governing_text for _clause_text in clause_texts)
+        return _stale_route_list_redirect_governing_text(lines, line_index, section_headings)
+    return governing_text
 
 
 def _stale_route_list_redirect_governing_texts(
@@ -2127,8 +2383,36 @@ def _stale_route_list_redirect_governing_texts(
     clause_texts: tuple[str, ...],
     section_headings: tuple[str | None, ...],
 ) -> tuple[str, ...]:
+    context = _stale_route_list_redirect_governing_text(lines, line_index, section_headings)
+    return tuple(context for _clause_text in clause_texts)
+
+
+def _stale_route_list_redirect_governing_text(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+) -> str:
     list_start = _list_item_start_index(lines, line_index)
     list_indent = _list_item_indent_width(lines[list_start])
+    item_end = _list_item_end_index(lines, list_start, list_indent)
+    return _stale_route_list_redirect_governing_text_for_range(
+        lines,
+        line_index,
+        section_headings,
+        list_start,
+        list_indent,
+        item_end,
+    )
+
+
+def _stale_route_list_redirect_governing_text_for_range(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    list_start: int,
+    list_indent: int,
+    item_end: int,
+) -> str:
     parts = []
     heading = _section_heading_at(section_headings, list_start)
     if heading:
@@ -2138,20 +2422,19 @@ def _stale_route_list_redirect_governing_texts(
         parts.append(lines[list_start].strip())
     parts.extend(
         line.strip()
-        for line in _same_list_item_following_lines(lines, line_index, list_start, list_indent)
+        for line in _same_list_item_following_lines(lines, line_index, list_start, item_end)
         if _line_has_redirect_alias_context(line, set(_normalized_reason_text(line).split()))
     )
     context = " ".join(part for part in parts if part).strip()
-    return tuple(context for _clause_text in clause_texts)
+    return context
 
 
 def _same_list_item_following_lines(
     lines: list[str],
     line_index: int,
     list_start: int,
-    list_indent: int,
+    item_end: int,
 ) -> list[str]:
-    item_end = _list_item_end_index(lines, list_start, list_indent)
     following_lines = []
     for index in range(line_index + 1, item_end):
         if _line_starts_markdown_list_item(lines[index]):
@@ -2239,6 +2522,16 @@ def _stale_route_table_governing_text(
     while end < len(lines) and _line_is_markdown_table_row(lines[end]):
         end += 1
 
+    return _stale_route_table_governing_text_for_range(lines, line_index, section_headings, start, end)
+
+
+def _stale_route_table_governing_text_for_range(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    start: int,
+    end: int,
+) -> str:
     parts = _preceding_context_lines(lines, start, section_headings)
     row_indexes = [start]
     if start + 1 < end and MARKDOWN_TABLE_SEPARATOR_PATTERN.match(_markdown_context_stripped(lines[start + 1])):
@@ -2278,11 +2571,30 @@ def _stale_route_list_governing_text(
 ) -> str:
     list_start = _list_item_start_index(lines, line_index)
     list_indent = _list_item_indent_width(lines[list_start])
+    item_end = _list_item_end_index(lines, list_start, list_indent)
+    return _stale_route_list_governing_text_for_range(
+        lines,
+        line_index,
+        section_headings,
+        list_start,
+        list_indent,
+        item_end,
+    )
+
+
+def _stale_route_list_governing_text_for_range(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    list_start: int,
+    list_indent: int,
+    item_end: int,
+) -> str:
     parent_indexes = _parent_list_item_indexes(lines, list_start, list_indent)
     heading = _section_heading_at(section_headings, list_start)
     parts = [heading] if heading else []
     parts.extend(lines[index].strip() for index in parent_indexes)
-    parts.extend(line.strip() for line in lines[list_start : _list_item_end_index(lines, list_start, list_indent)])
+    parts.extend(line.strip() for line in lines[list_start:item_end])
     return " ".join(part for part in parts if part).strip()
 
 
@@ -2376,6 +2688,16 @@ def _stale_route_paragraph_governing_text(
             break
         end += 1
 
+    return _stale_route_paragraph_governing_text_for_range(lines, line_index, section_headings, start, end)
+
+
+def _stale_route_paragraph_governing_text_for_range(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    start: int,
+    end: int,
+) -> str:
     heading = _section_heading_at(section_headings, start)
     if start == line_index and end == line_index + 1:
         return heading or ""
@@ -2549,6 +2871,11 @@ def _stale_route_context_class(
         return "redirect"
     if _line_has_historical_context(relative_path, tokens):
         return "historical"
+    if (
+        line.document_has_historical_route_authority_banner
+        and not _line_has_current_route_governing_context(line.governing_text)
+    ):
+        return "historical"
     if _line_has_active_route_instruction_context(line.clause) or _line_has_active_route_valued_context(
         line.governing_text,
         tokens,
@@ -2560,11 +2887,6 @@ def _stale_route_context_class(
         return "redirect"
     if _line_has_compatibility_context(tokens):
         return "compatibility"
-    if (
-        line.document_has_historical_route_authority_banner
-        and not _line_has_current_route_governing_context(line.governing_text)
-    ):
-        return "historical"
     return "drift"
 
 
@@ -2595,6 +2917,8 @@ def _line_has_active_route_instruction_context(line: str) -> bool:
     if bool(tokens & {"open", "visit", "browse", "navigate"}) and bool(
         tokens & {"proof", "evidence", "browser", "display", "route", "page"}
     ):
+        return True
+    if "打开" in line and bool(tokens & {"proof", "evidence", "browser", "display", "route", "page"}):
         return True
     if "use" in tokens and bool(tokens & {"active", "current", "live"}) and bool(
         tokens & {"display", "entrypoint", "page", "route"}
