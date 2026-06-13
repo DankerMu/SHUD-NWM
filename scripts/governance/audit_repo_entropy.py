@@ -181,12 +181,34 @@ class FindingSpec:
 
 
 @dataclass(frozen=True)
+class _StaleRouteClauseAnalysis:
+    route_valued_match_starts: tuple[int, ...]
+    route_valued_token_spans: frozenset[tuple[int, int]]
+    redirect_word_spans: tuple[tuple[int, int], ...]
+    active_instruction_context: bool
+    active_route_valued_context: bool
+
+
+@dataclass(frozen=True)
+class _StaleRouteMentionFacts:
+    clause_index: int
+    left: int
+    right: int
+    arrow_shape: str
+    route_valued: bool
+    redirect_local: bool
+    semantic_key: str
+
+
+@dataclass(frozen=True)
 class _StaleRouteLineContext:
     line: str
     clause_ranges: tuple[tuple[int, int], ...]
     clause_starts: tuple[int, ...]
     clause_texts: tuple[str, ...]
     clause_has_per_mention_redirect_syntax: tuple[bool, ...]
+    clause_analyses: tuple[_StaleRouteClauseAnalysis, ...]
+    mention_facts: dict[tuple[int, int], _StaleRouteMentionFacts]
     redirect_governing_texts: tuple[str, ...]
     mention_governing_texts: tuple[str, ...]
     governing_text: str
@@ -235,8 +257,8 @@ class _StaleRouteContextFactory:
         self._line_list_starts: dict[int, int | None] = {}
         self._list_item_contexts: dict[int, tuple[_StaleRouteStructuralContext, ...]] = {}
         self._table_ranges: dict[int, tuple[int, int]] = {}
-        self._paragraph_ranges: dict[int, tuple[int, int]] = {}
-        self._paragraph_contexts: dict[tuple[int, int], _StaleRouteStructuralContext] = {}
+        self._paragraph_ranges: dict[int, tuple[int, int, int]] = {}
+        self._paragraph_contexts: dict[tuple[int, int, int], _StaleRouteStructuralContext] = {}
 
     def line_context(self, line_index: int) -> _StaleRouteLineContext:
         line_context = self._line_contexts.get(line_index)
@@ -284,8 +306,9 @@ class _StaleRouteContextFactory:
         list_start = self._line_list_start(line_index)
         if list_start is not None:
             return self._list_item_context(list_start, line_index)
-        start, end = self._paragraph_range(line_index)
-        cached = self._paragraph_contexts.get((start, end))
+        start, end, blockquote_depth = self._paragraph_range(line_index)
+        cache_key = (start, end, blockquote_depth)
+        cached = self._paragraph_contexts.get(cache_key)
         if cached is not None:
             return cached
         governing_text = _stale_route_paragraph_governing_text_for_range(
@@ -299,18 +322,27 @@ class _StaleRouteContextFactory:
             governing_text=governing_text,
             redirect_governing_text=governing_text,
         )
-        self._paragraph_contexts[(start, end)] = context
+        self._paragraph_contexts[cache_key] = context
         return context
 
     def _table_range(self, line_index: int) -> tuple[int, int]:
         cached = self._table_ranges.get(line_index)
         if cached is not None:
             return cached
+        blockquote_depth = _markdown_blockquote_depth(self._lines[line_index])
         start = line_index
-        while start > 0 and _line_is_markdown_table_row(self._lines[start - 1]):
+        while (
+            start > 0
+            and _markdown_blockquote_depth(self._lines[start - 1]) == blockquote_depth
+            and _line_is_markdown_table_row(self._lines[start - 1])
+        ):
             start -= 1
         end = line_index + 1
-        while end < len(self._lines) and _line_is_markdown_table_row(self._lines[end]):
+        while (
+            end < len(self._lines)
+            and _markdown_blockquote_depth(self._lines[end]) == blockquote_depth
+            and _line_is_markdown_table_row(self._lines[end])
+        ):
             end += 1
         bounds = (start, end)
         for index in range(start, end):
@@ -395,23 +427,32 @@ class _StaleRouteContextFactory:
         self._list_item_bounds[list_start] = bounds
         return bounds
 
-    def _paragraph_range(self, line_index: int) -> tuple[int, int]:
+    def _paragraph_range(self, line_index: int) -> tuple[int, int, int]:
         cached = self._paragraph_ranges.get(line_index)
         if cached is not None:
             return cached
+        blockquote_depth = _markdown_blockquote_depth(self._lines[line_index])
         start = line_index
-        while start > 0 and _line_continues_route_paragraph(self._lines[start - 1]):
+        while (
+            start > 0
+            and _markdown_blockquote_depth(self._lines[start - 1]) == blockquote_depth
+            and _line_continues_route_paragraph(self._lines[start - 1])
+        ):
             if not _line_wraps_to_next(self._lines[start - 1]) and not _line_continues_previous(
                 self._lines[start]
             ):
                 break
             start -= 1
         end = line_index + 1
-        while end < len(self._lines) and _line_continues_route_paragraph(self._lines[end]):
+        while (
+            end < len(self._lines)
+            and _markdown_blockquote_depth(self._lines[end]) == blockquote_depth
+            and _line_continues_route_paragraph(self._lines[end])
+        ):
             if not _line_wraps_to_next(self._lines[end - 1]) and not _line_continues_previous(self._lines[end]):
                 break
             end += 1
-        bounds = (start, end)
+        bounds = (start, end, blockquote_depth)
         for index in range(start, end):
             self._paragraph_ranges[index] = bounds
         return bounds
@@ -2059,6 +2100,13 @@ def _stale_route_line_context(
         _clause_has_per_mention_redirect_syntax(line[start:end])
         for start, end in clause_ranges
     )
+    clause_analyses = tuple(_stale_route_clause_analysis(line, start, end) for start, end in clause_ranges)
+    mention_facts = _stale_route_mention_facts_by_span(
+        line,
+        clause_ranges,
+        tuple(start for start, _end in clause_ranges),
+        clause_analyses,
+    )
     structural_context = structural_context or _stale_route_structural_context(
         relative_path,
         lines,
@@ -2077,6 +2125,8 @@ def _stale_route_line_context(
         clause_starts=tuple(start for start, _end in clause_ranges),
         clause_texts=clause_texts,
         clause_has_per_mention_redirect_syntax=clause_has_per_mention_redirect_syntax,
+        clause_analyses=clause_analyses,
+        mention_facts=mention_facts,
         redirect_governing_texts=redirect_governing_texts,
         mention_governing_texts=mention_governing_texts,
         governing_text=governing_text,
@@ -2138,17 +2188,168 @@ def _clause_has_per_mention_redirect_syntax(clause: str) -> bool:
     return bool("->" in clause or "→" in clause)
 
 
+def _stale_route_clause_analysis(line: str, start: int, end: int) -> _StaleRouteClauseAnalysis:
+    route_valued_matches = tuple(ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.finditer(line, start, end))
+    clause_text = line[start:end].strip()
+    clause_tokens = frozenset(_normalized_reason_text(clause_text).split())
+    return _StaleRouteClauseAnalysis(
+        route_valued_match_starts=tuple(match.start() for match in route_valued_matches),
+        route_valued_token_spans=frozenset(
+            (match.start("token"), match.end("token")) for match in route_valued_matches
+        ),
+        redirect_word_spans=tuple(
+            (match.start(), match.end()) for match in ROUTE_REDIRECT_WORD_PATTERN.finditer(line, start, end)
+        ),
+        active_instruction_context=_line_has_active_route_instruction_context(clause_text),
+        active_route_valued_context=_line_has_active_route_valued_context(
+            clause_text,
+            set(clause_tokens),
+            redirect_text="",
+        ),
+    )
+
+
+def _stale_route_mention_facts_by_span(
+    line: str,
+    clause_ranges: tuple[tuple[int, int], ...],
+    clause_starts: tuple[int, ...],
+    clause_analyses: tuple[_StaleRouteClauseAnalysis, ...],
+) -> dict[tuple[int, int], _StaleRouteMentionFacts]:
+    facts: dict[tuple[int, int], _StaleRouteMentionFacts] = {}
+    for match in HYDROMET_PAGE_IDENTIFIER_PATTERN.finditer(line):
+        _record_stale_route_mention_facts(
+            facts,
+            line,
+            clause_ranges,
+            clause_starts,
+            clause_analyses,
+            match.start(),
+            match.end(),
+        )
+    for match in LEGACY_DISPLAY_ROUTE_BOUNDARY_PATTERN.finditer(line):
+        _record_stale_route_mention_facts(
+            facts,
+            line,
+            clause_ranges,
+            clause_starts,
+            clause_analyses,
+            match.start("token"),
+            match.end("token"),
+        )
+    return facts
+
+
+def _record_stale_route_mention_facts(
+    facts: dict[tuple[int, int], _StaleRouteMentionFacts],
+    line: str,
+    clause_ranges: tuple[tuple[int, int], ...],
+    clause_starts: tuple[int, ...],
+    clause_analyses: tuple[_StaleRouteClauseAnalysis, ...],
+    token_start: int,
+    token_end: int,
+) -> None:
+    key = (token_start, token_end)
+    if key in facts:
+        return
+    clause_index = max(0, bisect_right(clause_starts, token_start) - 1)
+    left, right = clause_ranges[clause_index]
+    arrow_shape = _route_arrow_shape_for_bounds(line, left, right, token_start, token_end)
+    if arrow_shape == "arrow-from-token":
+        left = max(left, token_start)
+    elif arrow_shape == "arrow-to-token":
+        right = min(right, token_end)
+    analysis = clause_analyses[clause_index]
+    route_valued = (token_start, token_end) in analysis.route_valued_token_spans
+    redirect_local = _stale_route_mention_has_redirect_syntax_from_analysis(
+        line,
+        left,
+        right,
+        token_start,
+        token_end,
+        analysis,
+        arrow_shape,
+        route_valued,
+    )
+    facts[key] = _StaleRouteMentionFacts(
+        clause_index=clause_index,
+        left=left,
+        right=right,
+        arrow_shape=arrow_shape,
+        route_valued=route_valued,
+        redirect_local=redirect_local,
+        semantic_key=_stale_route_precomputed_semantic_key(analysis, route_valued, redirect_local),
+    )
+
+
+def _stale_route_precomputed_semantic_key(
+    analysis: _StaleRouteClauseAnalysis,
+    route_valued: bool,
+    redirect_local: bool,
+) -> str:
+    if route_valued and analysis.active_route_valued_context:
+        return "active-local"
+    if redirect_local:
+        return "redirect-local"
+    if analysis.active_instruction_context or analysis.active_route_valued_context:
+        return "active-local"
+    return "context-local"
+
+
+def _stale_route_mention_facts(
+    line_context: _StaleRouteLineContext,
+    token_start: int,
+    token_end: int,
+) -> _StaleRouteMentionFacts:
+    facts = line_context.mention_facts.get((token_start, token_end))
+    if facts is not None:
+        return facts
+    clause_index = max(0, bisect_right(line_context.clause_starts, token_start) - 1)
+    left, right = line_context.clause_ranges[clause_index]
+    arrow_shape = _route_arrow_shape_for_bounds(line_context.line, left, right, token_start, token_end)
+    if arrow_shape == "arrow-from-token":
+        left = max(left, token_start)
+    elif arrow_shape == "arrow-to-token":
+        right = min(right, token_end)
+    analysis = line_context.clause_analyses[clause_index]
+    route_valued = (token_start, token_end) in analysis.route_valued_token_spans
+    redirect_local = _stale_route_mention_has_redirect_syntax_from_analysis(
+        line_context.line,
+        left,
+        right,
+        token_start,
+        token_end,
+        analysis,
+        arrow_shape,
+        route_valued,
+    )
+    return _StaleRouteMentionFacts(
+        clause_index=clause_index,
+        left=left,
+        right=right,
+        arrow_shape=arrow_shape,
+        route_valued=route_valued,
+        redirect_local=redirect_local,
+        semantic_key=_stale_route_precomputed_semantic_key(analysis, route_valued, redirect_local),
+    )
+
+
 def _stale_route_mention_context(
     line_context: _StaleRouteLineContext,
     token_start: int,
     token_end: int,
 ) -> _StaleRouteMentionContext:
-    clause_index = max(0, bisect_right(line_context.clause_starts, token_start) - 1)
+    facts = _stale_route_mention_facts(line_context, token_start, token_end)
+    clause_index = facts.clause_index
     line = line_context.line
-    left, right = _stale_route_mention_clause_bounds(line_context, clause_index, token_start, token_end)
+    left, right = facts.left, facts.right
 
     clause = line[left:right].strip()
-    explicit_redirect_text = _stale_route_mention_redirect_span(line, left, right, token_start, token_end)
+    explicit_redirect_text = _stale_route_mention_redirect_span_from_facts(
+        line_context,
+        facts,
+        token_start,
+        token_end,
+    )
     redirect_text = _stale_route_join_redirect_text(
         _stale_route_redirect_governing_text(line_context, clause_index),
         explicit_redirect_text,
@@ -2169,17 +2370,18 @@ def _stale_route_duplicate_key(
     token: str,
     token_start: int,
 ) -> _StaleRouteDuplicateKey:
-    clause_index = max(0, bisect_right(line_context.clause_starts, token_start) - 1)
     token_end = token_start + len(token)
+    facts = _stale_route_mention_facts(line_context, token_start, token_end)
+    clause_index = facts.clause_index
     if line_context.clause_has_per_mention_redirect_syntax[clause_index]:
         clause_key = (
             line_context.clause_texts[clause_index],
-            _route_arrow_shape_near_token(line_context, clause_index, token_start, token_end),
+            facts.arrow_shape,
         )
     else:
         clause_key = (
             line_context.mention_governing_texts[clause_index],
-            _stale_route_mention_semantic_key(line_context, clause_index, token_start, token_end),
+            facts.semantic_key,
         )
     return (
         token,
@@ -2197,21 +2399,10 @@ def _stale_route_mention_semantic_key(
     token_start: int,
     token_end: int,
 ) -> str:
-    left, right = _stale_route_mention_clause_bounds(line_context, clause_index, token_start, token_end)
-    mention_text = line_context.line[left:right].strip()
-    mention_tokens = set(_normalized_reason_text(mention_text).split())
-    if _route_token_is_route_valued(line_context.line, left, right, token_start, token_end):
-        if _line_has_active_route_valued_context(mention_text, mention_tokens, redirect_text=""):
-            return "active-local"
-    if _stale_route_mention_has_redirect_syntax(line_context.line, left, right, token_start, token_end):
-        return "redirect-local"
-    if _line_has_active_route_instruction_context(mention_text) or _line_has_active_route_valued_context(
-        mention_text,
-        mention_tokens,
-        redirect_text="",
-    ):
-        return "active-local"
-    return "context-local"
+    facts = _stale_route_mention_facts(line_context, token_start, token_end)
+    if facts.clause_index != clause_index:
+        return "context-local"
+    return facts.semantic_key
 
 
 def _stale_route_mention_has_redirect_syntax(
@@ -2221,21 +2412,45 @@ def _stale_route_mention_has_redirect_syntax(
     token_start: int,
     token_end: int,
 ) -> bool:
-    if _route_arrow_points_from_token(line, token_start, token_end) or _route_arrow_points_to_token(line, token_start):
+    arrow_shape = _route_arrow_shape_for_bounds(line, left, right, token_start, token_end)
+    analysis = _stale_route_clause_analysis(line, left, right)
+    token_is_route_valued = (token_start, token_end) in analysis.route_valued_token_spans
+    return _stale_route_mention_has_redirect_syntax_from_analysis(
+        line,
+        left,
+        right,
+        token_start,
+        token_end,
+        analysis,
+        arrow_shape,
+        token_is_route_valued,
+    )
+
+
+def _stale_route_mention_has_redirect_syntax_from_analysis(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+    analysis: _StaleRouteClauseAnalysis,
+    arrow_shape: str,
+    token_is_route_valued: bool,
+) -> bool:
+    if arrow_shape in {"arrow-from-token", "arrow-to-token"}:
         return True
     clause = line[left:right]
     if "->" in clause or "→" in clause:
         return False
-    token_is_route_valued = _route_token_is_route_valued(line, left, right, token_start, token_end)
-    following_route_valued = ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.search(clause, token_end - left)
     word_start_limit = right
-    if following_route_valued is not None:
-        word_start_limit = left + following_route_valued.start()
-    for match in ROUTE_REDIRECT_WORD_PATTERN.finditer(clause):
-        word_start = left + match.start()
+    following_route_valued_starts = [
+        match_start for match_start in analysis.route_valued_match_starts if match_start >= token_end
+    ]
+    if following_route_valued_starts:
+        word_start_limit = min(following_route_valued_starts)
+    for word_start, word_end in analysis.redirect_word_spans:
         if word_start >= word_start_limit:
             continue
-        word_end = left + match.end()
         if token_end <= word_start:
             segment = line[token_end:word_start]
         elif token_start >= word_end:
@@ -2256,10 +2471,7 @@ def _route_token_is_route_valued(
     token_start: int,
     token_end: int,
 ) -> bool:
-    return any(
-        match.start("token") == token_start and match.end("token") == token_end
-        for match in ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.finditer(line, left, right)
-    )
+    return (token_start, token_end) in _stale_route_clause_analysis(line, left, right).route_valued_token_spans
 
 
 def _route_arrow_shape_near_token(
@@ -2269,10 +2481,20 @@ def _route_arrow_shape_near_token(
     token_end: int,
 ) -> str:
     left, right = line_context.clause_ranges[clause_index]
-    after = line_context.line[token_end : min(right, token_end + 16)].lstrip()
+    return _route_arrow_shape_for_bounds(line_context.line, left, right, token_start, token_end)
+
+
+def _route_arrow_shape_for_bounds(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+) -> str:
+    after = line[token_end : min(right, token_end + 16)].lstrip()
     if after.startswith(("->", "→")):
         return "arrow-from-token"
-    before = line_context.line[max(left, token_start - 16) : token_start].rstrip()
+    before = line[max(left, token_start - 16) : token_start].rstrip()
     if before.endswith(("->", "→")):
         return "arrow-to-token"
     return "no-local-arrow"
@@ -2306,13 +2528,10 @@ def _stale_route_mention_clause_bounds(
     token_start: int,
     token_end: int,
 ) -> tuple[int, int]:
-    left, right = line_context.clause_ranges[clause_index]
-    line = line_context.line
-    if _route_arrow_points_from_token(line, token_start, token_end):
-        left = max(left, token_start)
-    if _route_arrow_points_to_token(line, token_start):
-        right = min(right, token_end)
-    return left, right
+    facts = _stale_route_mention_facts(line_context, token_start, token_end)
+    if facts.clause_index != clause_index:
+        return line_context.clause_ranges[clause_index]
+    return facts.left, facts.right
 
 
 def _stale_route_mention_redirect_text(
@@ -2325,7 +2544,12 @@ def _stale_route_mention_redirect_text(
 ) -> str:
     return _stale_route_join_redirect_text(
         _stale_route_redirect_governing_text(line_context, clause_index),
-        _stale_route_mention_redirect_span(line_context.line, left, right, token_start, token_end),
+        _stale_route_mention_redirect_span_from_facts(
+            line_context,
+            _stale_route_mention_facts(line_context, token_start, token_end),
+            token_start,
+            token_end,
+        ),
     )
 
 
@@ -2347,24 +2571,67 @@ def _stale_route_mention_redirect_span(
     token_start: int,
     token_end: int,
 ) -> str:
-    if _route_arrow_points_from_token(line, token_start, token_end):
+    analysis = _stale_route_clause_analysis(line, left, right)
+    arrow_shape = _route_arrow_shape_for_bounds(line, left, right, token_start, token_end)
+    token_is_route_valued = (token_start, token_end) in analysis.route_valued_token_spans
+    return _stale_route_mention_redirect_span_from_analysis(
+        line,
+        left,
+        right,
+        token_start,
+        token_end,
+        analysis,
+        arrow_shape,
+        token_is_route_valued,
+    )
+
+
+def _stale_route_mention_redirect_span_from_facts(
+    line_context: _StaleRouteLineContext,
+    facts: _StaleRouteMentionFacts,
+    token_start: int,
+    token_end: int,
+) -> str:
+    analysis = line_context.clause_analyses[facts.clause_index]
+    return _stale_route_mention_redirect_span_from_analysis(
+        line_context.line,
+        facts.left,
+        facts.right,
+        token_start,
+        token_end,
+        analysis,
+        facts.arrow_shape,
+        facts.route_valued,
+    )
+
+
+def _stale_route_mention_redirect_span_from_analysis(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+    analysis: _StaleRouteClauseAnalysis,
+    arrow_shape: str,
+    token_is_route_valued: bool,
+) -> str:
+    if arrow_shape == "arrow-from-token":
         return line[token_start:right].strip()
-    if _route_arrow_points_to_token(line, token_start):
+    if arrow_shape == "arrow-to-token":
         return line[left:token_end].strip()
     clause = line[left:right]
     if "->" in clause or "→" in clause:
         return ""
-    token_is_route_valued = _route_token_is_route_valued(line, left, right, token_start, token_end)
-    following_route_valued = ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.search(clause, token_end - left)
     span_right = word_start_limit = right
-    if following_route_valued is not None:
-        span_right = left + following_route_valued.start()
+    following_route_valued_starts = [
+        match_start for match_start in analysis.route_valued_match_starts if match_start >= token_end
+    ]
+    if following_route_valued_starts:
+        span_right = min(following_route_valued_starts)
         word_start_limit = span_right
-    for match in ROUTE_REDIRECT_WORD_PATTERN.finditer(clause):
-        word_start = left + match.start()
+    for word_start, word_end in analysis.redirect_word_spans:
         if word_start >= word_start_limit:
             continue
-        word_end = left + match.end()
         if token_end <= word_start:
             segment = line[token_end:word_start]
         elif token_start >= word_end:
@@ -2459,8 +2726,13 @@ def _stale_route_redirect_governing_text_for_line(
 ) -> str:
     line = lines[line_index]
     if _line_is_markdown_table_row(line):
+        blockquote_depth = _markdown_blockquote_depth(line)
         table_start = line_index
-        while table_start > 0 and _line_is_markdown_table_row(lines[table_start - 1]):
+        while (
+            table_start > 0
+            and _markdown_blockquote_depth(lines[table_start - 1]) == blockquote_depth
+            and _line_is_markdown_table_row(lines[table_start - 1])
+        ):
             table_start -= 1
         return " ".join(_preceding_context_lines(lines, table_start, section_headings))
     if _line_is_list_or_list_continuation(lines, line_index):
@@ -2567,11 +2839,16 @@ def _path_uses_markdown_route_context(relative_path: str) -> bool:
 def _markdown_section_headings(lines: list[str]) -> tuple[str | None, ...]:
     headings: list[str | None] = []
     current_heading: str | None = None
+    previous_blockquote_depth: int | None = None
     for line in lines:
+        blockquote_depth = _markdown_blockquote_depth(line)
+        if previous_blockquote_depth is not None and blockquote_depth != previous_blockquote_depth:
+            current_heading = None
         normalized = _markdown_context_line(line)
         if MARKDOWN_HEADING_PATTERN.match(normalized):
             current_heading = normalized.strip()
         headings.append(current_heading)
+        previous_blockquote_depth = blockquote_depth
     return tuple(headings)
 
 
@@ -2581,6 +2858,17 @@ def _markdown_context_line(line: str) -> str:
         normalized = MARKDOWN_BLOCKQUOTE_PREFIX_PATTERN.sub("", previous)
         if normalized == previous:
             return normalized
+        previous = normalized
+
+
+def _markdown_blockquote_depth(line: str) -> int:
+    depth = 0
+    previous = line
+    while True:
+        normalized = MARKDOWN_BLOCKQUOTE_PREFIX_PATTERN.sub("", previous)
+        if normalized == previous:
+            return depth
+        depth += 1
         previous = normalized
 
 
@@ -2606,11 +2894,20 @@ def _stale_route_table_governing_text(
     line_index: int,
     section_headings: tuple[str | None, ...],
 ) -> str:
+    blockquote_depth = _markdown_blockquote_depth(lines[line_index])
     start = line_index
-    while start > 0 and _line_is_markdown_table_row(lines[start - 1]):
+    while (
+        start > 0
+        and _markdown_blockquote_depth(lines[start - 1]) == blockquote_depth
+        and _line_is_markdown_table_row(lines[start - 1])
+    ):
         start -= 1
     end = line_index + 1
-    while end < len(lines) and _line_is_markdown_table_row(lines[end]):
+    while (
+        end < len(lines)
+        and _markdown_blockquote_depth(lines[end]) == blockquote_depth
+        and _line_is_markdown_table_row(lines[end])
+    ):
         end += 1
 
     return _stale_route_table_governing_text_for_range(lines, line_index, section_headings, start, end)
@@ -2641,9 +2938,12 @@ def _line_is_list_or_list_continuation(lines: list[str], line_index: int) -> boo
         return True
     if not normalized.startswith((" ", "\t")):
         return False
+    blockquote_depth = _markdown_blockquote_depth(line)
     cursor = line_index - 1
     while cursor >= 0:
         previous = lines[cursor]
+        if _markdown_blockquote_depth(previous) != blockquote_depth:
+            return False
         previous_normalized = _markdown_context_line(previous)
         if not previous_normalized.strip():
             return False
@@ -2692,9 +2992,12 @@ def _stale_route_list_governing_text_for_range(
 def _list_item_start_index(lines: list[str], line_index: int) -> int:
     if _line_starts_markdown_list_item(lines[line_index]):
         return line_index
+    blockquote_depth = _markdown_blockquote_depth(lines[line_index])
     cursor = line_index - 1
     while cursor >= 0:
         line = lines[cursor]
+        if _markdown_blockquote_depth(line) != blockquote_depth:
+            break
         normalized = _markdown_context_line(line)
         if not normalized.strip() or MARKDOWN_HEADING_PATTERN.match(normalized):
             break
@@ -2707,9 +3010,12 @@ def _list_item_start_index(lines: list[str], line_index: int) -> int:
 
 
 def _list_item_end_index(lines: list[str], start_index: int, item_indent: int) -> int:
+    blockquote_depth = _markdown_blockquote_depth(lines[start_index])
     end = start_index + 1
     while end < len(lines):
         current = lines[end]
+        if _markdown_blockquote_depth(current) != blockquote_depth:
+            break
         normalized = _markdown_context_line(current)
         if not normalized.strip() or MARKDOWN_HEADING_PATTERN.match(normalized):
             break
@@ -2730,8 +3036,11 @@ def _parent_list_item_indexes(lines: list[str], start_index: int, item_indent: i
     parent_indexes: list[int] = []
     cursor = start_index - 1
     current_indent = item_indent
+    blockquote_depth = _markdown_blockquote_depth(lines[start_index])
     while cursor >= 0:
         line = lines[cursor]
+        if _markdown_blockquote_depth(line) != blockquote_depth:
+            break
         normalized = _markdown_context_line(line)
         if not normalized.strip() or MARKDOWN_HEADING_PATTERN.match(normalized):
             break
@@ -2768,13 +3077,22 @@ def _stale_route_paragraph_governing_text(
     line_index: int,
     section_headings: tuple[str | None, ...],
 ) -> str:
+    blockquote_depth = _markdown_blockquote_depth(lines[line_index])
     start = line_index
-    while start > 0 and _line_continues_route_paragraph(lines[start - 1]):
+    while (
+        start > 0
+        and _markdown_blockquote_depth(lines[start - 1]) == blockquote_depth
+        and _line_continues_route_paragraph(lines[start - 1])
+    ):
         if not _line_wraps_to_next(lines[start - 1]) and not _line_continues_previous(lines[start]):
             break
         start -= 1
     end = line_index + 1
-    while end < len(lines) and _line_continues_route_paragraph(lines[end]):
+    while (
+        end < len(lines)
+        and _markdown_blockquote_depth(lines[end]) == blockquote_depth
+        and _line_continues_route_paragraph(lines[end])
+    ):
         if not _line_wraps_to_next(lines[end - 1]) and not _line_continues_previous(lines[end]):
             break
         end += 1
@@ -2834,9 +3152,12 @@ def _preceding_context_lines(
     section_headings: tuple[str | None, ...],
 ) -> list[str]:
     parts: list[str] = []
+    blockquote_depth = _markdown_blockquote_depth(lines[start_index]) if 0 <= start_index < len(lines) else 0
     cursor = start_index - 1
     while cursor >= 0 and len(parts) < 3:
         line = lines[cursor]
+        if _markdown_blockquote_depth(line) != blockquote_depth:
+            break
         stripped = _markdown_context_stripped(line)
         if not stripped:
             if parts:
