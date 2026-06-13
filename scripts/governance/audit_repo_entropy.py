@@ -152,6 +152,10 @@ ROUTE_ACTIVE_CLAUSE_CONNECTOR_PATTERN = re.compile(
     r"\b(?:and|then)\s+(?:open|visit|browse|navigate|use)\b|且打开",
     re.IGNORECASE,
 )
+BROAD_E2E_API_MOCK_PATTERN = re.compile(
+    r"page\.route\s*\(\s*(?P<glob>(?P<quote>['\"])\*\*/api/v1/\*\*(?P=quote))",
+    re.MULTILINE,
+)
 MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
 MARKDOWN_LIST_ITEM_PATTERN = re.compile(r"^(?P<indent>\s*)(?:[-*+]|\d+[.)])\s+")
 MARKDOWN_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+")
@@ -933,14 +937,13 @@ def _check_paused_workflows(root: Path) -> list[FindingSpec]:
 
 
 def _check_broad_e2e_mocks(root: Path) -> list[FindingSpec]:
-    token_patterns = ("page.route('**/api/v1/**'", 'page.route("**/api/v1/**"')
     findings: list[FindingSpec] = []
     for path in _iter_text_files(root, [root / "apps" / "frontend"]):
         rel = _rel(root, path)
         if not ("/e2e/" in rel or rel.endswith(".spec.ts") or _path_has_label(rel, {"live"})):
             continue
         text = _read_repo_text(root, path)
-        for line_no, line in _matching_lines(text, token_patterns):
+        for line_no in _broad_e2e_mock_line_numbers(text):
             classification = _classify_broad_e2e_mock_path(rel)
             findings.append(
                 FindingSpec(
@@ -964,6 +967,10 @@ def _check_broad_e2e_mocks(root: Path) -> list[FindingSpec]:
                 )
             )
     return findings
+
+
+def _broad_e2e_mock_line_numbers(text: str) -> list[int]:
+    return [text.count("\n", 0, match.start("glob")) + 1 for match in BROAD_E2E_API_MOCK_PATTERN.finditer(text)]
 
 
 def _classify_broad_e2e_mock_path(
@@ -3290,6 +3297,16 @@ def _stale_route_context_class(
     explicit_redirect_tokens = set(_normalized_reason_text(line.explicit_redirect_text).split())
     if _line_has_redirect_alias_context(line.explicit_redirect_text, explicit_redirect_tokens):
         return "redirect"
+    has_active_route_context = _line_has_active_route_instruction_context(
+        line.clause
+    ) or _line_has_active_route_valued_context(
+        line.governing_text,
+        tokens,
+        redirect_text=line.explicit_redirect_text,
+        allow_evidence_boundary=True,
+    )
+    if _line_has_evidence_boundary_context(tokens) and has_active_route_context:
+        return "active"
     if _line_has_historical_context(relative_path, tokens):
         return "historical"
     if (
@@ -3297,11 +3314,7 @@ def _stale_route_context_class(
         and not _line_has_current_route_governing_context(line.governing_text)
     ):
         return "historical"
-    if _line_has_active_route_instruction_context(line.clause) or _line_has_active_route_valued_context(
-        line.governing_text,
-        tokens,
-        redirect_text=line.explicit_redirect_text,
-    ):
+    if has_active_route_context:
         return "active"
     redirect_tokens = set(_normalized_reason_text(line.redirect_text).split())
     if _line_has_redirect_alias_context(line.redirect_text, redirect_tokens):
@@ -3401,12 +3414,17 @@ def _line_has_active_route_valued_context(
     tokens: set[str],
     *,
     redirect_text: str | None = None,
+    allow_evidence_boundary: bool = False,
 ) -> bool:
     if not ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.search(line):
         return False
     redirect_context = line if redirect_text is None else redirect_text
     redirect_tokens = tokens if redirect_text is None else set(_normalized_reason_text(redirect_text).split())
-    if _line_has_redirect_alias_context(redirect_context, redirect_tokens) or _line_has_historical_context("", tokens):
+    if _line_has_redirect_alias_context(redirect_context, redirect_tokens) or _line_has_historical_context(
+        "",
+        tokens,
+        allow_evidence_boundary=allow_evidence_boundary,
+    ):
         return False
     if _line_has_compatibility_context(tokens) and not _line_has_current_route_governing_context(line):
         return False
@@ -3442,16 +3460,25 @@ def _line_has_compatibility_context(tokens: set[str]) -> bool:
     )
 
 
-def _line_has_historical_context(relative_path: str, tokens: set[str]) -> bool:
+def _line_has_historical_context(
+    relative_path: str,
+    tokens: set[str],
+    *,
+    allow_evidence_boundary: bool = False,
+) -> bool:
     if relative_path.startswith(("docs/plans/", "openspec/changes/m22-", "openspec/changes/m26-")):
         return True
     if tokens & {"superseded", "archive", "archived", "milestone"}:
         return True
-    if "evidence" in tokens and "boundary" in tokens:
+    if _line_has_evidence_boundary_context(tokens) and not allow_evidence_boundary:
         return True
     if tokens & {"evidence", "pre"} and tokens & {"historical", "history", "m26"}:
         return True
     return False
+
+
+def _line_has_evidence_boundary_context(tokens: set[str]) -> bool:
+    return "evidence" in tokens and "boundary" in tokens
 
 
 def _placeholder_path_allowlist_reason(relative_path: str) -> str | None:

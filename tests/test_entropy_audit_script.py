@@ -1578,6 +1578,74 @@ def test_broad_e2e_mock_classifies_live_label_as_high_and_mocked_e2e_as_medium(
     assert findings["apps/frontend/e2e/visual-preview.spec.ts"]["gate_eligible"] is False
 
 
+def test_broad_e2e_mock_detects_multiline_live_and_unallowlisted_registrations(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "apps" / "frontend" / "e2e" / "live.spec.ts",
+        """
+        await page.route(
+          '**/api/v1/**',
+          route => route.abort(),
+        )
+        """,
+    )
+    _write(
+        tmp_path / "apps" / "frontend" / "e2e" / "route-authority.spec.ts",
+        """
+        await page.route(
+          "**/api/v1/**",
+          route => route.abort(),
+        )
+        """,
+    )
+
+    findings = {
+        str(finding["evidence_path"]): finding
+        for finding in _findings_by_check(tmp_path, "broad-e2e-api-mock")
+    }
+
+    assert set(findings) == {
+        "apps/frontend/e2e/live.spec.ts",
+        "apps/frontend/e2e/route-authority.spec.ts",
+    }
+    assert findings["apps/frontend/e2e/live.spec.ts"]["severity"] == "high"
+    assert findings["apps/frontend/e2e/live.spec.ts"]["priority"] == "P1"
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(findings["apps/frontend/e2e/live.spec.ts"])
+    assert findings["apps/frontend/e2e/route-authority.spec.ts"]["severity"] == "medium"
+    assert findings["apps/frontend/e2e/route-authority.spec.ts"]["priority"] == "P2"
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(
+        findings["apps/frontend/e2e/route-authority.spec.ts"]
+    )
+
+
+def test_broad_e2e_mock_detects_multiline_mocked_preview_visual_allowlist(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "apps" / "frontend" / "e2e" / "mocked-preview-visual.spec.ts",
+        """
+        await page.route(
+          '**/api/v1/**',
+          route => route.abort(),
+        )
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "broad-e2e-api-mock")
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["evidence_path"] == "apps/frontend/e2e/mocked-preview-visual.spec.ts"
+    assert finding["severity"] == "medium"
+    assert finding["priority"] == "P2"
+    assert finding["allowlist_reason"] == "deterministic mocked/preview/visual e2e broad mock"
+    assert finding["allowlist_key"] == "broad-e2e-api-mock:deterministic-mocked-preview-visual"
+    assert finding["allowlist_state"] == "allowlisted"
+    assert finding["budget_counted"] is False
+    assert finding["gate_eligible"] is False
+
+
 def test_allowlist_key_normalizes_equivalent_broad_mock_wording() -> None:
     base = audit_repo_entropy.FindingSpec(
         check_id="broad-e2e-api-mock",
@@ -2554,6 +2622,42 @@ def test_route_authority_evidence_boundary_heading_allowlists_diagnostic_route_r
         assert by_token[token]["allowlist_state"] == "allowlisted"
         assert by_token[token]["budget_counted"] is False
     _assert_unallowlisted_budget_counted_report_only_finding(by_token["/meteorology"])
+
+
+def test_route_authority_evidence_boundary_active_instruction_is_report_only_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        ## #214 evidence boundary
+
+        - `/hydro-met` browser proof 状态以 #214 evidence matrix 为准。
+        Diagnostic `/meteorology` browser evidence remains frozen.
+        Open /forecast for current live browser proof.
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_token = _route_authority_findings_by_token(findings)
+
+    assert set(by_token) == {"/hydro-met", "/meteorology", "/forecast"}
+    for token in ("/hydro-met", "/meteorology"):
+        assert by_token[token]["allowlist_key"] == (
+            "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+        )
+        assert by_token[token]["allowlist_state"] == "allowlisted"
+        assert by_token[token]["budget_counted"] is False
+        assert by_token[token]["gate_eligible"] is False
+
+    active = by_token["/forecast"]
+    assert active["evidence_path"] == "docs/runbooks/current.md"
+    assert active["line"] == 5
+    assert active["allowlist_reason"] is None
+    assert active["allowlist_key"] is None
+    assert active["allowlist_state"] == "unallowlisted"
+    assert active["budget_counted"] is True
+    assert active["gate_eligible"] is False
 
 
 @pytest.mark.parametrize(
@@ -4048,6 +4152,16 @@ def _assert_unallowlisted_budget_counted_report_only_finding(
     assert finding["allowlist_state"] == "unallowlisted"
     assert finding["budget_counted"] is True
     assert finding["gate_eligible"] is False
+
+
+def _assert_unallowlisted_budget_counted_gate_eligible_finding(
+    finding: dict[str, object],
+) -> None:
+    assert finding["allowlist_reason"] is None
+    assert finding["allowlist_key"] is None
+    assert finding["allowlist_state"] == "unallowlisted"
+    assert finding["budget_counted"] is True
+    assert finding["gate_eligible"] is True
 
 
 def _assert_required_baseline_fields(baseline: dict[str, object]) -> None:
