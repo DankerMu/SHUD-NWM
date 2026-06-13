@@ -113,6 +113,14 @@ TEXT_EXTENSIONS = frozenset(
 MAX_SCANNED_TEXT_FILE_BYTES = 1_048_576
 MAX_ARTIFACT_FINGERPRINT_BYTES = 1_048_576
 HASH_CHUNK_BYTES = 1_048_576
+LEGACY_DISPLAY_ROUTE_TOKENS = ("/hydro-met", "HydroMetPage")
+LEGACY_DISPLAY_ROUTE_PATTERN = re.compile(
+    r"(?P<token>"
+    r"/(?:overview|hydro-met|forecast|meteorology|flood-alerts)"
+    r"|/(?:basins|segments)/(?::[A-Za-z][A-Za-z0-9_-]*|[A-Za-z0-9][A-Za-z0-9_-]*)"
+    r")"
+    r"(?=$|[^A-Za-z0-9_/-])"
+)
 
 FindingAxis = Literal["structure", "semantics", "behavior", "context", "protocol", "control"]
 AuditMode = Literal["report", "hard-gate"]
@@ -653,16 +661,27 @@ def _classify_broad_e2e_mock_path(
 
 
 def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
-    tokens = ("/hydro-met", "HydroMetPage")
+    roots = [
+        root / "apps",
+        root / "docs",
+        root / "openspec",
+        root / "README.md",
+        root / "progress.md",
+        root / "CLAUDE.md",
+    ]
     findings: list[FindingSpec] = []
-    for path in _iter_text_files(root, [root / "apps", root / "docs", root / "openspec", root / "progress.md"]):
+    for path in _iter_text_files(root, roots):
         rel = _rel(root, path)
         if rel.startswith(("docs/archived/",)):
             continue
         text = _read_repo_text(root, path)
-        for line_no, line in _matching_lines(text, tokens):
-            token = next(token for token in tokens if token in line)
-            allowed_reason = _stale_route_allowlist_reason(rel, line)
+        lines = text.splitlines()
+        for line_no, line, token in _stale_route_line_matches(
+            lines,
+            include_legacy_tokens=_path_is_legacy_route_token_scope(rel),
+            include_expanded_aliases=_path_is_route_authority_expanded_scope(rel),
+        ):
+            allowed_reason = _stale_route_allowlist_reason(rel, lines, line_no)
             findings.append(
                 FindingSpec(
                     check_id="stale-display-route-token",
@@ -677,7 +696,10 @@ def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
                     owner_area="frontend/docs",
                     module=_module_for_path(root, path),
                     allowlist_reason=allowed_reason,
-                    description=f"Reference to `{token}` remains after M26 single-map routing consolidation.",
+                    description=(
+                        f"Reference to legacy display route token `{token}` remains after M26 "
+                        "single-map routing consolidation."
+                    ),
                     recommendation=(
                         "Confirm whether the reference is historical/redirect evidence or should point to the "
                         "current single-map `/` display entrypoint."
@@ -685,6 +707,53 @@ def _check_stale_route_tokens(root: Path) -> list[FindingSpec]:
                 )
             )
     return findings
+
+
+def _path_is_legacy_route_token_scope(relative_path: str) -> bool:
+    return (
+        relative_path.startswith(("apps/", "docs/", "openspec/"))
+        or relative_path == "progress.md"
+    )
+
+
+def _path_is_route_authority_expanded_scope(relative_path: str) -> bool:
+    return (
+        relative_path.startswith("docs/runbooks/")
+        or relative_path in {"README.md", "progress.md", "CLAUDE.md"}
+    )
+
+
+def _stale_route_line_matches(
+    lines: list[str],
+    *,
+    include_legacy_tokens: bool,
+    include_expanded_aliases: bool,
+) -> Iterable[tuple[int, str, str]]:
+    for line_no, line in enumerate(lines, start=1):
+        emitted_tokens: set[str] = set()
+        if include_legacy_tokens and any(token in line for token in LEGACY_DISPLAY_ROUTE_TOKENS):
+            token = next(token for token in LEGACY_DISPLAY_ROUTE_TOKENS if token in line)
+            emitted_tokens.add(token)
+            yield line_no, line, token
+        if not include_expanded_aliases:
+            continue
+        for match in LEGACY_DISPLAY_ROUTE_PATTERN.finditer(line):
+            token = match.group("token")
+            if token in emitted_tokens:
+                continue
+            if _legacy_route_match_has_route_boundary(line, match.start()):
+                emitted_tokens.add(token)
+                yield line_no, line, token
+
+
+def _legacy_route_match_has_route_boundary(line: str, start: int) -> bool:
+    if start == 0:
+        return True
+    prefix = line[:start]
+    previous = line[start - 1]
+    if previous.isspace() or previous in "`'\"([{<|":
+        return True
+    return bool(re.search(r"https?://[^/\s`'\"()<>{}]+$", prefix))
 
 
 def _check_placeholder_paths(root: Path) -> list[FindingSpec]:
@@ -1295,6 +1364,8 @@ def _allowlist_reason_key(check_id: str, reason: str) -> str:
             return "historical-milestone-summary"
         if "provenance" in tokens or "extraction" in tokens:
             return "library-extraction-provenance"
+        if "compatibility" in tokens or "compatible" in tokens:
+            return "legacy-route-compatibility-context"
         if "historical" in tokens or "pre" in tokens or "plans" in tokens:
             return "historical-plan-or-pre-m26-evidence"
         if "m26" in tokens or "redirect" in tokens:
@@ -1578,18 +1649,131 @@ def _normalized_apps_api_import_modules(tree: ast.AST) -> frozenset[str]:
     return frozenset(modules)
 
 
-def _stale_route_allowlist_reason(relative_path: str, line: str) -> str | None:
-    if relative_path.startswith("openspec/changes/m26-") or "redirect" in line.lower():
-        return "M26 route-consolidation evidence or redirect contract"
+def _stale_route_allowlist_reason(relative_path: str, lines: list[str], line_no: int) -> str | None:
+    line = lines[line_no - 1]
+    if "HydroMetPage" in line:
+        if relative_path in {"progress.md"}:
+            return "current entrypoint summarizes historical milestone context"
+        if relative_path.startswith("openspec/changes/m26-"):
+            return "historical pre-M26 display evidence"
+        if relative_path.startswith("apps/frontend/src/lib/hydroMet/"):
+            return "library extraction provenance comment"
+    context_class = _stale_route_context_class(relative_path, line)
+    if context_class == "drift" and not _line_has_active_route_instruction_context(line):
+        context_class = _stale_route_context_class(
+            relative_path,
+            _stale_route_context_text(lines, line_no),
+        )
+    if context_class == "redirect":
+        return "M26 route-consolidation redirect alias"
+    if context_class == "compatibility":
+        return "legacy route compatibility context"
+    if context_class == "historical":
+        return "historical plan or pre-M26 display evidence"
+    if _runbook_has_historical_route_authority_banner(relative_path, lines):
+        return "historical plan or pre-M26 display evidence"
     if relative_path.startswith("docs/plans/") or relative_path.startswith("openspec/changes/m22-"):
         return "historical plan or pre-M26 display evidence"
     if relative_path in {"progress.md"}:
         return "current entrypoint summarizes historical milestone context"
     if "__tests__" in relative_path and "/hydro-met" in line:
         return "frontend redirect regression test"
-    if relative_path.startswith("apps/frontend/src/lib/hydroMet/") and "HydroMetPage" in line:
-        return "library extraction provenance comment"
     return None
+
+
+def _stale_route_context_text(lines: list[str], line_no: int) -> str:
+    line_index = line_no - 1
+    start = max(0, line_index - 6)
+    end = min(len(lines), line_index + 7)
+    return "\n".join(lines[start:end])
+
+
+def _runbook_has_historical_route_authority_banner(relative_path: str, lines: list[str]) -> bool:
+    if not relative_path.startswith("docs/runbooks/"):
+        return False
+    header_text = "\n".join(lines[:20]).lower()
+    normalized_header = _normalized_reason_text(header_text)
+    header_tokens = set(normalized_header.split())
+    has_historical_marker = bool(
+        header_tokens & {"historical", "history", "superseded"}
+        or "历史" in header_text
+        or "已被" in header_text
+    )
+    has_route_authority_marker = bool(
+        "m26" in header_tokens
+        or "current route authority" in header_text
+        or "single-map" in header_text
+        or "single map" in header_text
+    )
+    return has_historical_marker and has_route_authority_marker
+
+
+def _stale_route_context_class(relative_path: str, line: str) -> Literal[
+    "historical",
+    "redirect",
+    "compatibility",
+    "drift",
+]:
+    normalized = _normalized_reason_text(line)
+    tokens = set(normalized.split())
+    if _line_has_redirect_alias_context(line, tokens):
+        return "redirect"
+    if _line_has_compatibility_context(tokens):
+        return "compatibility"
+    if _line_has_historical_context(relative_path, tokens):
+        return "historical"
+    return "drift"
+
+
+def _line_has_redirect_alias_context(line: str, tokens: set[str]) -> bool:
+    return (
+        "->" in line
+        or "→" in line
+        or "redirect" in tokens
+        or "redirects" in tokens
+        or "redirected" in tokens
+        or "legacyredirect" in tokens
+        or "alias" in tokens
+        or "aliases" in tokens
+        or "重定向" in line
+    )
+
+
+def _line_has_active_route_instruction_context(line: str) -> bool:
+    normalized = _normalized_reason_text(line)
+    tokens = set(normalized.split())
+    return (
+        bool(tokens & {"open", "visit", "browse", "navigate", "current", "live"})
+        and bool(tokens & {"proof", "evidence", "browser", "display", "route", "page"})
+    )
+
+
+def _line_has_compatibility_context(tokens: set[str]) -> bool:
+    return bool(
+        tokens
+        & {
+            "compatibility",
+            "compatible",
+            "backward",
+            "backwards",
+            "deep",
+            "deeplink",
+            "deeplinks",
+            "links",
+            "bookmark",
+            "bookmarks",
+        }
+    )
+
+
+def _line_has_historical_context(relative_path: str, tokens: set[str]) -> bool:
+    if relative_path.startswith(("docs/plans/", "openspec/changes/m22-", "openspec/changes/m26-")):
+        return True
+    if tokens & {"superseded", "archive", "archived", "milestone"}:
+        return True
+    if tokens & {"evidence", "pre"} and tokens & {"historical", "history", "m26"}:
+        return True
+    return False
 
 
 def _placeholder_path_allowlist_reason(relative_path: str) -> str | None:
