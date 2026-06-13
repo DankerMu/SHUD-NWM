@@ -173,6 +173,7 @@ class _StaleRouteLineContext:
     clause_ranges: tuple[tuple[int, int], ...]
     clause_starts: tuple[int, ...]
     clause_texts: tuple[str, ...]
+    clause_has_per_mention_redirect_syntax: tuple[bool, ...]
     redirect_governing_texts: tuple[str, ...]
     mention_governing_texts: tuple[str, ...]
     governing_text: str
@@ -198,6 +199,9 @@ class _StaleRouteLineMatch:
     token_start: int
     token_end: int
     context: _StaleRouteMentionContext
+
+
+_StaleRouteDuplicateKey = tuple[str, object, str, str, bool, bool]
 
 
 class _StaleRouteContextFactory:
@@ -831,16 +835,19 @@ def _stale_route_line_matches(
     context_factory = _StaleRouteContextFactory(relative_path, lines)
     for line_no, line in enumerate(lines, start=1):
         emitted_spans: set[tuple[str, int, int]] = set()
-        emitted_contexts: set[tuple[str, tuple[object, ...]]] = set()
+        emitted_contexts: set[_StaleRouteDuplicateKey] = set()
         if include_legacy_tokens:
             for match in HYDROMET_PAGE_IDENTIFIER_PATTERN.finditer(line):
                 token = match.group(0)
                 start = match.start()
                 end = match.end()
                 line_context = context_factory.line_context(line_no - 1)
-                context_key = _stale_route_mention_context_key(line_context, start, end)
+                duplicate_key = _stale_route_duplicate_key(line_context, token, start)
+                if duplicate_key in emitted_contexts:
+                    emitted_spans.add((token, start, end))
+                    continue
                 emitted_spans.add((token, start, end))
-                emitted_contexts.add((token, context_key))
+                emitted_contexts.add(duplicate_key)
                 yield _StaleRouteLineMatch(
                     line_no=line_no,
                     line=line,
@@ -856,12 +863,12 @@ def _stale_route_line_matches(
                 if token != "/hydro-met" or (token, start, end) in emitted_spans:
                     continue
                 line_context = context_factory.line_context(line_no - 1)
-                context_key = _stale_route_mention_context_key(line_context, start, end)
-                if (token, context_key) in emitted_contexts:
+                duplicate_key = _stale_route_duplicate_key(line_context, token, start)
+                if duplicate_key in emitted_contexts:
                     emitted_spans.add((token, start, end))
                     continue
                 emitted_spans.add((token, start, end))
-                emitted_contexts.add((token, context_key))
+                emitted_contexts.add(duplicate_key)
                 yield _StaleRouteLineMatch(
                     line_no=line_no,
                     line=line,
@@ -879,12 +886,12 @@ def _stale_route_line_matches(
             if (token, start, end) in emitted_spans:
                 continue
             line_context = context_factory.line_context(line_no - 1)
-            context_key = _stale_route_mention_context_key(line_context, start, end)
-            if (token, context_key) in emitted_contexts:
+            duplicate_key = _stale_route_duplicate_key(line_context, token, start)
+            if duplicate_key in emitted_contexts:
                 emitted_spans.add((token, start, end))
                 continue
             emitted_spans.add((token, start, end))
-            emitted_contexts.add((token, context_key))
+            emitted_contexts.add(duplicate_key)
             yield _StaleRouteLineMatch(
                 line_no=line_no,
                 line=line,
@@ -1796,11 +1803,11 @@ def _stale_route_allowlist_reason(
     token: str,
     mention_context: _StaleRouteMentionContext,
 ) -> str | None:
+    if relative_path.startswith("openspec/changes/m26-"):
+        return "M26 route-consolidation evidence or redirect contract"
     if token == "HydroMetPage":
         if relative_path in {"progress.md"}:
             return "current entrypoint summarizes historical milestone context"
-        if relative_path.startswith("openspec/changes/m26-"):
-            return "historical pre-M26 display evidence"
         if relative_path.startswith("apps/frontend/src/lib/hydroMet/"):
             return "library extraction provenance comment"
         if _hydromet_page_historical_context(mention_context.governing_text):
@@ -1857,6 +1864,10 @@ def _stale_route_line_context(
     line = lines[line_index]
     clause_ranges = tuple(_stale_route_clause_ranges(line))
     clause_texts = tuple(line[start:end].strip() for start, end in clause_ranges)
+    clause_has_per_mention_redirect_syntax = tuple(
+        _clause_has_per_mention_redirect_syntax(line[start:end])
+        for start, end in clause_ranges
+    )
     governing_text = _stale_route_governing_text(relative_path, lines, line_index, section_headings)
     redirect_governing_texts = _stale_route_redirect_governing_texts(
         lines,
@@ -1874,6 +1885,7 @@ def _stale_route_line_context(
         clause_ranges=clause_ranges,
         clause_starts=tuple(start for start, _end in clause_ranges),
         clause_texts=clause_texts,
+        clause_has_per_mention_redirect_syntax=clause_has_per_mention_redirect_syntax,
         redirect_governing_texts=redirect_governing_texts,
         mention_governing_texts=mention_governing_texts,
         governing_text=governing_text,
@@ -1891,6 +1903,10 @@ def _stale_route_clause_ranges(line: str) -> list[tuple[int, int]]:
             start = index + 1
     ranges.append((start, len(line)))
     return ranges or [(0, len(line))]
+
+
+def _clause_has_per_mention_redirect_syntax(clause: str) -> bool:
+    return bool("->" in clause or "→" in clause)
 
 
 def _stale_route_mention_context(
@@ -1917,6 +1933,45 @@ def _stale_route_mention_context(
         has_historical_route_authority_banner=line_context.has_historical_route_authority_banner,
         document_has_historical_route_authority_banner=line_context.document_has_historical_route_authority_banner,
     )
+
+
+def _stale_route_duplicate_key(
+    line_context: _StaleRouteLineContext,
+    token: str,
+    token_start: int,
+) -> _StaleRouteDuplicateKey:
+    clause_index = max(0, bisect_right(line_context.clause_starts, token_start) - 1)
+    if line_context.clause_has_per_mention_redirect_syntax[clause_index]:
+        clause_key = (
+            line_context.clause_texts[clause_index],
+            _route_arrow_shape_near_token(line_context, clause_index, token_start, token_start + len(token)),
+        )
+    else:
+        clause_key = line_context.mention_governing_texts[clause_index]
+    return (
+        token,
+        clause_key,
+        line_context.mention_governing_texts[clause_index],
+        _stale_route_redirect_governing_text(line_context, clause_index),
+        line_context.has_historical_route_authority_banner,
+        line_context.document_has_historical_route_authority_banner,
+    )
+
+
+def _route_arrow_shape_near_token(
+    line_context: _StaleRouteLineContext,
+    clause_index: int,
+    token_start: int,
+    token_end: int,
+) -> str:
+    left, right = line_context.clause_ranges[clause_index]
+    after = line_context.line[token_end : min(right, token_end + 16)].lstrip()
+    if after.startswith(("->", "→")):
+        return "arrow-from-token"
+    before = line_context.line[max(left, token_start - 16) : token_start].rstrip()
+    if before.endswith(("->", "→")):
+        return "arrow-to-token"
+    return "no-local-arrow"
 
 
 def _stale_route_mention_context_key(
@@ -2081,8 +2136,28 @@ def _stale_route_list_redirect_governing_texts(
     parts.extend(lines[index].strip() for index in _parent_list_item_indexes(lines, list_start, list_indent))
     if line_index != list_start:
         parts.append(lines[list_start].strip())
+    parts.extend(
+        line.strip()
+        for line in _same_list_item_following_lines(lines, line_index, list_start, list_indent)
+        if _line_has_redirect_alias_context(line, set(_normalized_reason_text(line).split()))
+    )
     context = " ".join(part for part in parts if part).strip()
     return tuple(context for _clause_text in clause_texts)
+
+
+def _same_list_item_following_lines(
+    lines: list[str],
+    line_index: int,
+    list_start: int,
+    list_indent: int,
+) -> list[str]:
+    item_end = _list_item_end_index(lines, list_start, list_indent)
+    following_lines = []
+    for index in range(line_index + 1, item_end):
+        if _line_starts_markdown_list_item(lines[index]):
+            break
+        following_lines.append(lines[index])
+    return following_lines
 
 
 def _stale_route_governing_mention_text(
@@ -2626,6 +2701,8 @@ def _line_has_historical_context(relative_path: str, tokens: set[str]) -> bool:
     if relative_path.startswith(("docs/plans/", "openspec/changes/m22-", "openspec/changes/m26-")):
         return True
     if tokens & {"superseded", "archive", "archived", "milestone"}:
+        return True
+    if "evidence" in tokens and "boundary" in tokens:
         return True
     if tokens & {"evidence", "pre"} and tokens & {"historical", "history", "m26"}:
         return True
