@@ -202,14 +202,14 @@ function RiverForecastBody({
   const leadHours = validation.series.availableLeadHours
   const horizonText = leadHours != null ? `预见期 ${leadHours}h` : '预见期'
 
-  const flowValues = validation.renderedPoints.map((point) => point.value).filter((value): value is number => value != null)
-  const currentFlow = flowValues.length > 0 ? flowValues[0] : null
-  const peakIndex = flowValues.reduce((best, value, index) => (value > flowValues[best] ? index : best), 0)
-  const peakFlow = flowValues.length > 0 ? flowValues[peakIndex] : null
-  const peakTime = peakFlow != null ? validation.renderedPoints[peakIndex]?.timestamp ?? null : null
+  const points = validation.renderedPoints.filter((point): point is typeof point & { value: number } => point.value != null)
+  const currentFlow = points.length > 0 ? points[0].value : null
+  const peak = points.length > 0 ? points.reduce((best, point) => (point.value > best.value ? point : best), points[0]) : null
+  const peakFlow = peak?.value ?? null
+  const peakTime = peak?.timestamp ?? null
 
   return (
-    <div className="space-y-2.5 px-4 pb-3.5 pt-2.5" data-testid="m11-river-popup-loaded">
+    <div className="max-h-[60vh] space-y-2.5 overflow-y-auto px-4 pb-3.5 pt-2.5" data-testid="m11-river-popup-loaded">
       <div className="flex items-center justify-between gap-2">
         <span
           className="inline-flex items-center rounded-full bg-cyan-400/10 px-2.5 py-0.5 text-[11px] font-medium tracking-wide text-cyan-200 ring-1 ring-inset ring-cyan-400/25"
@@ -241,11 +241,11 @@ function RiverForecastKpiStrip({
 }: {
   current: number | null
   peak: number | null
-  peakTime: string | null
+  peakTime: number | null
   unit: string
 }) {
   const formatFlow = (value: number | null) => (value == null ? '—' : value.toFixed(value >= 100 ? 0 : 1))
-  const peakClock = peakTime ? formatPeakClock(peakTime) : null
+  const peakClock = peakTime != null ? formatPeakClock(peakTime) : null
   return (
     <div className="grid grid-cols-2 gap-2.5" data-testid="m11-river-popup-kpi">
       <div className="rounded-xl bg-white/[0.04] px-3.5 py-2 ring-1 ring-inset ring-white/10">
@@ -276,8 +276,8 @@ function RiverForecastKpiStrip({
   )
 }
 
-function formatPeakClock(iso: string): string {
-  const date = new Date(iso)
+function formatPeakClock(ms: number): string {
+  const date = new Date(ms)
   if (Number.isNaN(date.getTime())) return ''
   const mm = String(date.getUTCMonth() + 1).padStart(2, '0')
   const dd = String(date.getUTCDate()).padStart(2, '0')
