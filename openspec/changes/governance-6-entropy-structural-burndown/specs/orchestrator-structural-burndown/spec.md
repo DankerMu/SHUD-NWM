@@ -79,6 +79,19 @@ concurrent submission evidence, and scheduler pass mutation ordering.
 - **THEN** concurrent submit evidence, candidate ordering, and mutation fences
   remain the same as before extraction
 
+#### Scenario: published artifact root is absent during planning
+- **WHEN** runtime root preflight runs with a missing `published_artifact_root`
+  and all other required roots valid
+- **THEN** the preflight reports `published_artifact_root.allow_create=true`,
+  does not emit `SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_NOT_FOUND`, and dry-run
+  planning remains non-mutating without creating the directory
+
+#### Scenario: any other required runtime root is absent
+- **WHEN** runtime root preflight runs with a missing workspace, object-store,
+  runtime, temp, lock, or evidence root
+- **THEN** the scheduler reports the existing root blocker before registry,
+  adapter, active-repository, or submission work begins
+
 ### Requirement: Scheduler evidence extraction preserves reservation proof
 
 Scheduler evidence extraction SHALL preserve pass evidence assembly,
