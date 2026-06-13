@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ MAX_ARCHIVED_LATEST_BYTES = 2_097_152
 COPY_CHUNK_BYTES = 1_048_576
 MAX_BASELINE_INVENTORY_FILES = 50_000
 MAX_WORKTREE_STATUS_PATHS_IN_ERROR = 5
+GIT_STATUS_STREAM_CHUNK_BYTES = 8192
 V1_SOURCE_MODULE_ROOTS = frozenset(
     {
         "apps",
@@ -42,6 +44,34 @@ V1_SOURCE_MODULE_ROOTS = frozenset(
 V1_FRONTEND_EXCLUDED_PARTS = frozenset({"artifacts", "e2e"})
 V1_SUMMARY_EXCLUDED_ROOTS = frozenset({".agents", ".codex", "docs", "openapi"})
 V1_SUMMARY_ROOT_DOCUMENT_SUFFIXES = frozenset({".md", ".rst", ".txt"})
+REPORT_VISIBLE_IGNORED_ROOTS = (
+    (".github", "workflows"),
+    ("apps",),
+    ("docs",),
+    ("infra",),
+    ("openspec",),
+    ("packages",),
+    ("services",),
+    ("workers",),
+)
+REPORT_VISIBLE_IGNORED_FILES = frozenset(
+    {
+        ".dockerignore",
+        ".gitignore",
+        "Makefile",
+        "apps/frontend/src/api/types.ts",
+        "openapi/nhms.v1.yaml",
+        "progress.md",
+        "tests/test_openapi_drift.py",
+    }
+)
+REPORT_VISIBLE_IGNORED_EXISTENCE_FILES = frozenset(
+    {
+        "apps/frontend/src/api/types.ts",
+        "openapi/nhms.v1.yaml",
+        "tests/test_openapi_drift.py",
+    }
+)
 
 STRUCTURAL_HOTSPOT_MODULES: dict[str, dict[str, object]] = {
     "services/orchestrator": {
@@ -625,24 +655,7 @@ def _assert_report_visible_worktree_clean(root: Path) -> None:
     if _git_output(root, "rev-parse", "--is-inside-work-tree") != "true":
         return
 
-    try:
-        result = subprocess.run(
-            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-            cwd=root,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError as exc:
-        raise BaselineWriteError("unable to inspect git worktree status") from exc
-    if result.returncode != 0:
-        raise BaselineWriteError("unable to inspect git worktree status")
-
-    changed_paths = [
-        relative_path
-        for relative_path in _git_status_porcelain_z_paths(result.stdout)
-        if not _baseline_path_is_file_count_skipped(relative_path)
-    ]
+    changed_paths = _bounded_report_visible_worktree_paths(root)
     if not changed_paths:
         return
 
@@ -655,13 +668,100 @@ def _assert_report_visible_worktree_clean(root: Path) -> None:
     )
 
 
-def _git_status_porcelain_z_paths(output: bytes) -> list[str]:
-    records = output.split(b"\0")
+def _bounded_report_visible_worktree_paths(root: Path) -> list[str]:
+    max_paths = MAX_WORKTREE_STATUS_PATHS_IN_ERROR + 1
+    paths = _bounded_git_status_paths(root, max_paths=max_paths)
+    remaining = max_paths - len(paths)
+    if remaining <= 0:
+        return paths
+
+    seen = set(paths)
+    for relative_path in _bounded_ignored_report_visible_paths(root, max_paths=remaining):
+        if relative_path not in seen:
+            paths.append(relative_path)
+            seen.add(relative_path)
+        if len(paths) >= max_paths:
+            break
+    return paths
+
+
+def _bounded_git_status_paths(root: Path, *, max_paths: int) -> list[str]:
+    records = _iter_git_nul_records(
+        root,
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        failure_message="unable to inspect git worktree status",
+    )
+    try:
+        return _bounded_git_status_porcelain_z_paths(records, max_paths=max_paths)
+    finally:
+        records.close()
+
+
+def _bounded_ignored_report_visible_paths(root: Path, *, max_paths: int) -> list[str]:
+    pathspecs = _ignored_report_visible_pathspecs()
+    records = _iter_git_nul_records(
+        root,
+        ["git", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", *pathspecs],
+        failure_message="unable to inspect git ignored paths",
+    )
+    try:
+        return _bounded_git_ignored_report_visible_paths(root, records, max_paths=max_paths)
+    finally:
+        records.close()
+
+
+def _iter_git_nul_records(root: Path, command: list[str], *, failure_message: str) -> Iterator[bytes]:
+    try:
+        process = subprocess.Popen(  # noqa: S603
+            command,
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise BaselineWriteError(failure_message) from exc
+    if process.stdout is None:
+        process.kill()
+        process.wait()
+        raise BaselineWriteError(failure_message)
+
+    buffer = b""
+    completed = False
+    try:
+        while True:
+            chunk = process.stdout.read(GIT_STATUS_STREAM_CHUNK_BYTES)
+            if not chunk:
+                break
+            buffer += chunk
+            while True:
+                record, separator, remainder = buffer.partition(b"\0")
+                if not separator:
+                    break
+                buffer = remainder
+                yield record
+        if buffer:
+            yield buffer
+        completed = True
+    finally:
+        if completed:
+            returncode = process.wait()
+        else:
+            if process.poll() is None:
+                process.kill()
+            returncode = process.wait()
+        if completed and returncode != 0:
+            raise BaselineWriteError(failure_message)
+
+
+def _bounded_git_status_porcelain_z_paths(
+    records: Iterable[bytes],
+    *,
+    max_paths: int,
+) -> list[str]:
     paths: list[str] = []
-    index = 0
-    while index < len(records):
-        record = records[index]
-        index += 1
+    seen: set[str] = set()
+    iterator = iter(records)
+    for record in iterator:
         if not record:
             continue
         if len(record) < 4:
@@ -670,13 +770,71 @@ def _git_status_porcelain_z_paths(output: bytes) -> list[str]:
         status = record[:2]
         path_bytes = record[3:] if record[2:3] == b" " else record[2:]
         if path_bytes:
-            paths.append(os.fsdecode(path_bytes))
-        if (b"R" in status or b"C" in status) and index < len(records):
-            source_path = records[index]
-            index += 1
+            _append_bounded_status_path(paths, seen, os.fsdecode(path_bytes), max_paths)
+            if len(paths) >= max_paths:
+                return paths
+        if b"R" in status or b"C" in status:
+            source_path = next(iterator, b"")
             if source_path:
-                paths.append(os.fsdecode(source_path))
-    return sorted(set(paths))
+                _append_bounded_status_path(paths, seen, os.fsdecode(source_path), max_paths)
+                if len(paths) >= max_paths:
+                    return paths
+    return paths
+
+
+def _bounded_git_ignored_report_visible_paths(
+    root: Path,
+    records: Iterable[bytes],
+    *,
+    max_paths: int,
+) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        if not record:
+            continue
+        relative_path = os.fsdecode(record)
+        if not _ignored_path_can_affect_report(root, relative_path):
+            continue
+        _append_bounded_status_path(paths, seen, relative_path, max_paths)
+        if len(paths) >= max_paths:
+            return paths
+    return paths
+
+
+def _ignored_report_visible_pathspecs() -> list[str]:
+    roots = ["/".join(parts) for parts in REPORT_VISIBLE_IGNORED_ROOTS]
+    return sorted({*roots, *REPORT_VISIBLE_IGNORED_FILES})
+
+
+def _append_bounded_status_path(
+    paths: list[str],
+    seen: set[str],
+    relative_path: str,
+    max_paths: int,
+) -> None:
+    if len(paths) >= max_paths:
+        return
+    if relative_path in seen or _baseline_path_is_file_count_skipped(relative_path):
+        return
+    paths.append(relative_path)
+    seen.add(relative_path)
+
+
+def _ignored_path_can_affect_report(root: Path, relative_path: str) -> bool:
+    if _baseline_path_is_file_count_skipped(relative_path):
+        return False
+    path = root / relative_path
+    relative = Path(relative_path)
+    normalized = relative.as_posix()
+    if normalized in REPORT_VISIBLE_IGNORED_EXISTENCE_FILES:
+        return path.is_file()
+    if audit_repo_entropy._repo_text_rejection_reason(root, path) is not None:  # noqa: SLF001
+        return False
+
+    if normalized in REPORT_VISIBLE_IGNORED_FILES:
+        return True
+    return any(relative.parts[: len(root_parts)] == root_parts for root_parts in REPORT_VISIBLE_IGNORED_ROOTS)
 
 
 def _baseline_high_spread_patterns(

@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import pytest
@@ -753,6 +753,40 @@ def test_entropy_baseline_writer_rejects_untracked_report_visible_files_before_r
     assert not (baseline_dir / ".latest.json.tmp").exists()
 
 
+def test_entropy_baseline_writer_rejects_ignored_report_visible_files_before_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / ".gitignore", "docs/local.md\n")
+    _write(tmp_path / "docs" / "tracked.md", "Current docs are clean.\n")
+    _commit_all(tmp_path, "initial tracked docs")
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    _write(tmp_path / "docs" / "local.md", "Ignored local note still mentions /hydro-met.\n")
+
+    assert any(
+        finding["evidence_path"] == "docs/local.md"
+        for finding in audit_repo_entropy.build_report(tmp_path)["findings"]
+        if finding["check_id"] == "stale-display-route-token"
+    )
+
+    def unexpected_build_report(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("writer dirty preflight must run before report generation")
+
+    monkeypatch.setattr(write_entropy_baseline.audit_repo_entropy, "build_report", unexpected_build_report)
+
+    with pytest.raises(write_entropy_baseline.BaselineWriteError, match="dirty or untracked paths"):
+        write_entropy_baseline.write_entropy_baseline(tmp_path)
+
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
 def test_entropy_baseline_writer_rejects_dirty_tracked_report_visible_files_before_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -821,6 +855,67 @@ def test_entropy_baseline_writer_rejects_untracked_report_visible_files_created_
     assert latest.read_bytes() == previous_bytes
     assert _baseline_archive_files(baseline_dir) == []
     assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
+def test_entropy_baseline_writer_rejects_ignored_report_visible_files_created_during_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / ".gitignore", "docs/local.md\n")
+    _write(tmp_path / "docs" / "tracked.md", "Current docs are clean.\n")
+    _commit_all(tmp_path, "initial tracked docs")
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    real_build_report = write_entropy_baseline.audit_repo_entropy.build_report
+
+    def creating_ignored_build_report(
+        repo_root: Path,
+        *,
+        mode: audit_repo_entropy.AuditMode = "report",
+    ) -> dict[str, object]:
+        report = real_build_report(repo_root, mode=mode)
+        _write(tmp_path / "docs" / "local.md", "Ignored local note still mentions /hydro-met.\n")
+        return report
+
+    monkeypatch.setattr(
+        write_entropy_baseline.audit_repo_entropy,
+        "build_report",
+        creating_ignored_build_report,
+    )
+
+    with pytest.raises(write_entropy_baseline.BaselineWriteError, match="dirty or untracked paths"):
+        write_entropy_baseline.write_entropy_baseline(tmp_path)
+
+    assert any(
+        finding["evidence_path"] == "docs/local.md"
+        for finding in audit_repo_entropy.build_report(tmp_path)["findings"]
+        if finding["check_id"] == "stale-display-route-token"
+    )
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
+def test_entropy_baseline_writer_bounds_status_path_collection() -> None:
+    limit = write_entropy_baseline.MAX_WORKTREE_STATUS_PATHS_IN_ERROR + 1
+    yielded: list[int] = []
+
+    def status_records() -> Iterable[bytes]:
+        for index in range(100):
+            yielded.append(index)
+            yield f"?? docs/local-{index}.md".encode()
+
+    paths = write_entropy_baseline._bounded_git_status_porcelain_z_paths(
+        status_records(),
+        max_paths=limit,
+    )
+
+    assert paths == [f"docs/local-{index}.md" for index in range(limit)]
+    assert yielded == list(range(limit))
 
 
 def test_git_tracked_paths_preserves_non_ascii_path_identity(tmp_path: Path) -> None:
