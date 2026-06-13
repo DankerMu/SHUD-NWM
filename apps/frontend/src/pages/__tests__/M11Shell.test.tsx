@@ -1323,6 +1323,23 @@ describe('M11 visual foundation shell', () => {
     expect(mapLayers).toHaveLength(0)
   })
 
+  it('suppresses transient empty-state notices while data/boundaries are still loading (no refresh flash)', () => {
+    // 刷新加载竞态：basins 已到、边界几何未就绪 → features=0；加载态门控下不得闪空态提示。
+    const { rerender } = render(
+      <M11MapSurface state={state} layers={[]} basins={overviewBasins} visibleBasinIds={[]} loading />,
+    )
+    expect(screen.queryByTestId('m11-basin-layer-unavailable')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('m11-map-unavailable')).not.toBeInTheDocument()
+
+    // overview 已 settle 但静态边界几何仍在加载 → 仍抑制"边界未就绪"瞬态。
+    rerender(<M11MapSurface state={state} layers={[]} basins={overviewBasins} visibleBasinIds={[]} boundaryLoading />)
+    expect(screen.queryByTestId('m11-basin-layer-unavailable')).not.toBeInTheDocument()
+
+    // 全部 settle 后才诚实显示真·空态。
+    rerender(<M11MapSurface state={state} layers={[]} basins={overviewBasins} visibleBasinIds={[]} />)
+    expect(screen.getByTestId('m11-basin-layer-unavailable')).toHaveTextContent('当前没有可见流域边界')
+  })
+
   it('omits malformed selected segment geometry from MapLibre sources while showing selected unavailable state', () => {
     render(
       <M11MapSurface

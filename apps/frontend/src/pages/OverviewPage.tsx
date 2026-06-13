@@ -86,6 +86,8 @@ function M11FullscreenMap({
   selectedSegmentGeometry,
   stationFeatureCollection,
   popup,
+  loading,
+  boundaryLoading,
   fitTo,
   mapLabel,
   infoTitle,
@@ -105,6 +107,8 @@ function M11FullscreenMap({
   selectedSegmentGeometry?: import('@/api/types').components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
+  loading?: boolean
+  boundaryLoading?: boolean
   fitTo?: M11MapCameraFit | null
   mapLabel: string
   infoTitle: string
@@ -141,6 +145,8 @@ function M11FullscreenMap({
         selectedSegmentGeometry={selectedSegmentGeometry}
         stationFeatureCollection={stationFeatureCollection}
         popup={popup}
+        loading={loading}
+        boundaryLoading={boundaryLoading}
         fitTo={fitTo}
         onOverlayHover={onOverlayHover}
         onOverlayClick={onOverlayClick}
@@ -180,6 +186,8 @@ function BasinDetailMode({
       selectedSegmentGeometry={detail.selectedSegmentGeometry}
       stationFeatureCollection={detail.stationFeatureCollection}
       popup={detail.popup}
+      loading={detail.loading}
+      boundaryLoading={detail.boundaryLoading}
       fitTo={detail.fitTo}
       mapLabel={detail.mapLabel}
       infoTitle={detail.mapTitle}
@@ -358,6 +366,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       nationalRiverGeo={nationalGeo.river}
       stationFeatureCollection={stationLayer.featureCollection}
       popup={riverForecastPopup}
+      loading={loading}
+      boundaryLoading={nationalGeo.loading}
       mapLabel="全国总览地图"
       infoTitle="全国水文总览"
       infoMeta={`全国范围 73E-135E / 18N-53N；点击河段查看 q_down 流量预报曲线，点击流域边界进入流域详情。已接入 ${boundaryCount}/${basins.length} 个流域边界。`}

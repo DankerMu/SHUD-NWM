@@ -260,6 +260,7 @@ export function useBasinDetailMode({
     basinNotFoundReason,
     basinDisplayName,
     loading,
+    boundaryLoading: nationalGeo.loading,
     error,
     stationStatusNote: stationLayer.statusNote,
   }

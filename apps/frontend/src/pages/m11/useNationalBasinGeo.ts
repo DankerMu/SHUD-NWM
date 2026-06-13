@@ -8,6 +8,11 @@ export interface NationalBasinGeo {
   river: FeatureCollection | null
 }
 
+/** hook 返回：静态几何数据 + 加载态（供上层抑制"边界未就绪"瞬态空态，避免刷新闪烁）。 */
+export interface NationalBasinGeoState extends NationalBasinGeo {
+  loading: boolean
+}
+
 const EMPTY: NationalBasinGeo = { domain: null, river: null }
 
 // 模块级缓存：两份静态 GeoJSON 整个会话只取一次。
@@ -43,20 +48,27 @@ async function loadNationalBasinGeo(): Promise<NationalBasinGeo> {
  * 全国总览底图几何 hook。honest：取数失败/缺文件 → null，前端不画该底层（诚实降级）。
  * 仅在 active 时取数（其它图层/详情模式不需要）。
  */
-export function useNationalBasinGeo(active: boolean): NationalBasinGeo {
+export function useNationalBasinGeo(active: boolean): NationalBasinGeoState {
   const [geo, setGeo] = useState<NationalBasinGeo>(cached ?? EMPTY)
+  // active 且无缓存 → 首帧即 loading=true，覆盖"取数返回前"窗口；缓存命中/未激活则不 loading。
+  const [loading, setLoading] = useState<boolean>(() => active && !cached)
   useEffect(() => {
     if (!active || cached) {
       if (cached) setGeo(cached)
+      setLoading(false)
       return
     }
     let cancelled = false
+    setLoading(true)
     void loadNationalBasinGeo().then((next) => {
-      if (!cancelled) setGeo(next)
+      if (!cancelled) {
+        setGeo(next)
+        setLoading(false)
+      }
     })
     return () => {
       cancelled = true
     }
   }, [active])
-  return active ? geo : EMPTY
+  return active ? { ...geo, loading } : { ...EMPTY, loading: false }
 }

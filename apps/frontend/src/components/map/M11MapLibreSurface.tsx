@@ -98,6 +98,10 @@ interface M11MapLibreSurfaceProps {
   selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
+  /** 数据加载中（overview/basin 取数）：抑制叠加层/边界/河段"未就绪"类瞬态空态，避免刷新闪烁。 */
+  loading?: boolean
+  /** 静态底图几何加载中：额外抑制"流域边界未就绪"瞬态（静态边界回填晚于 overview 接口时）。 */
+  boundaryLoading?: boolean
   className?: string
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
@@ -203,6 +207,8 @@ export function M11MapLibreSurface({
   selectedSegmentGeometry = null,
   stationFeatureCollection = null,
   popup = null,
+  loading = false,
+  boundaryLoading = false,
   className,
   fitTo,
   flyTo,
@@ -456,7 +462,7 @@ export function M11MapLibreSurface({
         ) : null}
       </Map>
 
-      {basins.length > 0 && basinFeatureCollection.features.length === 0 ? (
+      {!loading && !boundaryLoading && basins.length > 0 && basinFeatureCollection.features.length === 0 ? (
         <div
           className="absolute left-1/2 -translate-x-1/2 top-20 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
           role="status"
@@ -468,7 +474,7 @@ export function M11MapLibreSurface({
         </div>
       ) : null}
 
-      {unavailableReason ? (
+      {!loading && unavailableReason ? (
         <div
           className="absolute left-1/2 -translate-x-1/2 top-20 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
           role="status"
@@ -478,7 +484,7 @@ export function M11MapLibreSurface({
         </div>
       ) : null}
 
-      {basinRiverFeatureCollection.unavailableReason ? (
+      {!loading && basinRiverFeatureCollection.unavailableReason ? (
         <div
           className="absolute left-1/2 -translate-x-1/2 top-32 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
           role="status"
@@ -492,7 +498,7 @@ export function M11MapLibreSurface({
         <M11RiverTooltip feature={basinRiverFeatureCollection.features.find((feature) => feature.properties.river_segment_id === hoveredRiverSegmentId || feature.properties.segment_id === hoveredRiverSegmentId) ?? null} />
       ) : null}
 
-      {selectedSegmentMapState === 'unavailable' ? (
+      {!loading && selectedSegmentMapState === 'unavailable' ? (
         <div
           className="absolute left-1/2 -translate-x-1/2 top-44 z-[90] max-w-[min(28rem,calc(100%-2.5rem))] rounded-md border border-warning/40 bg-white/95 px-3 py-2 text-sm text-neutral-800 shadow-md"
           role="status"
