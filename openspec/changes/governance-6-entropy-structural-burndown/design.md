@@ -392,6 +392,121 @@ Non-goals:
 - No trend dashboard or baseline comparison UI.
 - No credential/auth integration for maintainer-only local invocation.
 
+## G6-03 Current Route-Authority Runbooks Fixture
+
+Fixture level: expanded
+Repair intensity: medium
+Project profile: NHMS
+
+Change surface:
+
+- `docs/runbooks/two-node-production-e2e-plan.md`.
+- `docs/runbooks/two-node-deployment-overview.md`.
+- `docs/runbooks/node-27-bringup-checklist.md`.
+- Historical MVP runbooks under `docs/runbooks/` that keep pre-M26
+  `/hydro-met` browser steps.
+
+Must preserve:
+
+- Current node-27 read-only display and `/ops` operational evidence guidance.
+- Historical M21/MVP evidence value where old `/hydro-met` steps document past
+  receipts or known blockers.
+- M26 route authority from `docs/governance/DOC_STATUS.md`: `/` is the active
+  single-map display entrypoint; `/ops` remains active for operations; legacy
+  display aliases redirect or provide compatibility context only.
+
+Must add/change:
+
+- Current live browser proof in current runbooks uses `/` plus `/ops`.
+- `/hydro-met`, `/forecast`, `/meteorology`, `/flood-alerts`, `/basins/:id`,
+  `/segments/:id`, and `/overview` mentions in current runbooks are classified
+  as legacy redirect, compatibility, or historical context.
+- Old MVP runbooks that intentionally preserve pre-M26 `/hydro-met` evidence
+  contain a visible historical/superseded notice pointing to current M26 route
+  authority.
+
+Risk packs considered:
+
+- Public API / CLI / script entry: not selected - no runtime route, API, or CLI
+  behavior changes.
+- Config / project setup: not selected - no environment or dependency change.
+- File IO / path safety / overwrite: not selected - docs-only edits.
+- Schema / columns / units / field names: not selected - no data/schema fields.
+- Auth / permissions / secrets: not selected - no permission or secret surface.
+- Concurrency / shared state / ordering: not selected - no state transition.
+- Resource limits / large input / discovery: selected - route-authority grep
+  over current runbooks is the acceptance evidence.
+- Legacy compatibility / examples: selected - old route aliases and historical
+  MVP evidence must remain as redirect/historical context, not be deleted or
+  recast as active current pages.
+- Error handling / rollback / partial outputs: not selected - no executable
+  failure path.
+- Release / packaging / dependency compatibility: not selected - docs-only.
+- Documentation / migration notes: selected - this issue's implementation is
+  runbook migration to current route authority.
+
+Domain risk packs:
+
+- Published NHMS artifacts / display identity: selected - current browser proof
+  wording must bind display evidence to the active `/` entrypoint and `/ops`.
+- Run manifest / QC provenance: not selected - no run manifest or QC evidence
+  schema changes.
+- Other NHMS domain packs: not selected - no geospatial, time-series,
+  numerical, PostGIS, Slurm, provider, or SHUD runtime behavior changes.
+
+Required evidence:
+
+- Focused route-authority grep over `docs/runbooks/two-node-production-e2e-plan.md`,
+  `docs/runbooks/two-node-deployment-overview.md`, and
+  `docs/runbooks/node-27-bringup-checklist.md` shows old display aliases are
+  redirect, compatibility, or historical context rather than active live proof
+  instructions.
+- Focused banner check over `docs/runbooks/qhh-mvp-production-like-e2e-checklist.md`
+  and `docs/runbooks/qhh-mvp-smoke-evidence.md` shows a visible
+  historical/superseded notice pointing to M26 route authority.
+- Manual diff review confirms current browser proof uses `/` plus `/ops`, with
+  `/hydro-met -> /` only as legacy redirect smoke where retained.
+- `openspec validate governance-6-entropy-structural-burndown --strict
+  --no-interactive`.
+
+Invariant Matrix:
+
+- Governing invariant: current runbooks must name `/` plus `/ops` as the active
+  live browser proof surface, while legacy display aliases are only redirect,
+  compatibility, or historical evidence.
+- Source-of-truth identity/contract: `docs/governance/DOC_STATUS.md` M26
+  Display Route Authority and
+  `openspec/changes/governance-6-entropy-structural-burndown/specs/evidence-boundary-hardening/spec.md`.
+- Producers: docs-only edits in the owned runbooks.
+- Validators/preflight: route-authority grep over current runbooks and manual
+  banner/diff review.
+- Storage/cache/query: none - no runtime state or artifact storage changes.
+- Public routes/entrypoints: documentation mentions of `/`, `/ops`,
+  `/hydro-met`, `/forecast`, `/meteorology`, `/flood-alerts`, `/basins/:id`,
+  `/segments/:id`, and `/overview`; no route code changes.
+- Frontend/downstream consumers: operators and agents following current
+  runbooks for live display evidence.
+- Failure paths/rollback/stale state: stale active-looking legacy route
+  instructions must be converted to redirect/historical/compatibility wording,
+  not silently left as current proof.
+- Evidence/audit/readiness: issue diff, route-authority grep, historical banner
+  check, OpenSpec validation, and docs review.
+- Regression rows:
+  - Current runbook live browser proof -> uses `/` plus `/ops`.
+  - Current runbook old display alias mention -> classified as redirect,
+    compatibility, or historical context.
+  - Historical MVP runbook with preserved `/hydro-met` steps -> visible
+    historical/superseded notice points to current M26 route authority.
+  - Unchanged runtime route code -> no frontend/API behavior changes.
+
+Non-goals:
+
+- No frontend route code, Playwright implementation, audit parser, or
+  orchestrator changes.
+- No removal of legacy redirect aliases.
+- No node-27 timing metric acceptance; local node-27 access timing is excluded
+  by maintainer instruction.
+
 ## Open Questions
 
 - Whether legacy display redirect aliases should ever be retired. This change

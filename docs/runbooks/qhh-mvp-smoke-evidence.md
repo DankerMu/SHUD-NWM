@@ -1,5 +1,11 @@
 # QHH MVP smoke evidence freeze
 
+> **Historical / superseded by M26**：本文冻结 #214/M21 MVP smoke evidence，保留 pre-M26
+> `/hydro-met` mocked/deterministic browser 证据供审计。当前 route authority 以
+> `docs/governance/DOC_STATUS.md` 的 M26 single-map 为准：`/` 是 active display entrypoint，
+> `/ops` 是 active operational display path；`/hydro-met` 等旧展示路径只作为 legacy redirect /
+> compatibility / historical evidence，不得作为当前 live browser proof。
+
 最后更新：2026-05-26
 
 ## 结论

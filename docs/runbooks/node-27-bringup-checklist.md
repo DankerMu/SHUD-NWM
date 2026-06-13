@@ -10,8 +10,10 @@
 - **27 前端生产化的功能性开发走 m25 change**：`openspec/changes/m25-multibasin-frontend-production/`（多流域选择器、latest-product 去硬编码/basin_id、洪水重现期独立 `return_period_status`、/ops·/monitoring display 降级）；并行起点 issue #310/#311/#313/#317。本清单聚焦"上线 live receipt"，m25 聚焦"功能交付"，二者互补。
 - **m25 功能已交付（2026-06-07，#310–#317 已合并，#318 收尾）**：多流域展示（数据驱动选择器 +
   `basin_id` 参数化 + `has_display_product` 动态发现，**无硬编码白名单**）、`/ops`+`/monitoring` 按
-  `display_readonly` display 降级（`/meteorology` 门控保留）、return-period 诚实
-  `availability.return_period_status`（独立 supplemental，不进 blocking）均已落地并过本地/CI 校验。
+  `display_readonly` display 降级、return-period 诚实
+  `availability.return_period_status`（独立 supplemental，不进 blocking）均已落地并过本地/CI 校验；
+  当时 `/meteorology` 门控属于 pre-M26 页面语义，M26 后只作为 legacy redirect /
+  compatibility context，不是当前 active display proof。
   - **不改变本清单 C1–C4 的判定标准**：C1–C4 live receipt 仍须在 node-27 实机产出，是上线的实质；
     m25 交付的是"功能在代码层就绪"，不等于"已在 27 实机验证上线"。
   - 可扩展性（新流域零代码改动出现）已有真 DB 集成断言（`tests/test_real_basin_discovery_integration.py`），
@@ -45,7 +47,7 @@
 | 节点 | 角色 | 能力 |
 |---|---|---|
 | node-22 | `compute_control` | 调度/Slurm/SHUD/发布/retry-cancel（已业务化） |
-| node-27 | `display_readonly` | 只读消费 DB + published artifacts，`/hydro-met`+`/ops`；无 Slurm/Docker socket/控制面写 |
+| node-27 | `display_readonly` | 只读消费 DB + published artifacts，`/` 单页地图 + `/ops`；无 Slurm/Docker socket/控制面写 |
 
 published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm/published`。DB：27 用只读账号（如 `nhms_display_ro`）。
 
@@ -59,7 +61,7 @@ published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm
 - Slurm 路由按角色不挂载：`apps/api/main.py:310`；`GET /api/v1/runtime/config` capability flags：`main.py:283`
 - retry/cancel fail-closed `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`、queue-depth `503 CONTROL_PLANE_QUEUE_UNAVAILABLE`：`apps/api/routes/pipeline.py`
 - artifact log reader（`published://`/穿越/脱敏/tail）：`services/artifacts/reader.py`；compute 侧发 `published://logs/...`：`chain.py:4143`
-- latest-product / ops strict identity（拒 historical fallback、`PIPELINE_STRICT_IDENTITY_MISMATCH`）：`routes/forecast.py`、`routes/pipeline.py`、`forecast_store.py`
+- latest-product / ops strict identity（拒 historical fallback、`PIPELINE_STRICT_IDENTITY_MISMATCH`）：Python modules `apps.api.routes.forecast`、`apps.api.routes.pipeline`、`packages.common.forecast_store`
 - readonly DB 探测框架（sim/mock 跑通 + 防 mock 冒充 PASS）：`services/production_closure/readonly_db_validation.py`
 - 前端 readonly gating（隐藏控件、no control POST、strict 上下文、诊断复制、本地 notified 态）：`apps/frontend` monitoring + hydroMet
 
@@ -98,14 +100,14 @@ published 路径：22 写 `/ghdc/data/nwm/published`，27 只读 `/home/ghdc/nwm
 
 ### C3. cross-plane identity live（tasks 4.3 + §10.2/10.3）
 
-- [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：22 生产 → DB 状态 → published logs → `/api/v1/mvp/qhh/latest-product` → 27 `/hydro-met` + `/ops`，**拒 historical latest 冒充**。
+- [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：22 生产 → DB 状态 → published logs → `/api/v1/mvp/qhh/latest-product` → 27 `/` 单页地图 + `/ops`，**拒 historical latest 冒充**。
 - [ ] GFS + IFS 双源都过 strict latest/series/ops/logs/browser 才算 cross-plane `PASS`；单源为 `PARTIAL`。
 
 ### C4. 浏览器 e2e（tasks 6.8 + §10.4）
 
-> M26（EPIC #336）已对**新单页全屏地图**形态产 live browser receipt（重定向矩阵 / 全屏无导航 / QHH↔Heihe 同页 zoom / overlay 诚实未注册态 = live-PASS，见上「M26」节）；下列 `/hydro-met`/`/ops` 项的判定**改以单页地图 + `/ops` 为准**（`/hydro-met` 已重定向到 `/`）。#351 已闭合 #343 的 live MVT 开关/图层注册根因；④⑤ popup live 点击的 bbox/framing 与 WebGL 命中证据由 #389 补齐。
+> M26（EPIC #336）已对**新单页全屏地图**形态产 live browser receipt（重定向矩阵 / 全屏无导航 / QHH↔Heihe 同页 zoom / overlay 诚实未注册态 = live-PASS，见上「M26」节）；C4 判定**以 `/` 单页地图 + `/ops` 为准**，`/hydro-met -> /` 只作为旧别名重定向 smoke。#351 已闭合 #343 的 live MVT 开关/图层注册根因；④⑤ popup live 点击的 bbox/framing 与 WebGL 命中证据由 #389 补齐。
 
-- [ ] 真实浏览器对 27 backend 跑 `/hydro-met`（strict bootstrap）+ `/ops`（display 模式控件隐藏/禁用、无任何 retry·cancel·Slurm POST、queue-depth unavailable 态、诊断复制、人工 22 恢复指引）。
+- [ ] 真实浏览器对 27 backend 跑 `/` 单页地图（strict bootstrap）+ `/ops`（display 模式控件隐藏/禁用、无任何 retry·cancel·Slurm POST、queue-depth unavailable 态、诊断复制、人工 22 恢复指引）；如保留 `/hydro-met -> /`，只记录为 redirect smoke。
 - [ ] 证明 27 只展示 22 产生的 retry/cancel 结果，自身从不创建控制面 receipt。
 - [ ] 补 `e2e/monitoring.spec.ts` 的 `display_readonly` 浏览器场景（当前 e2e 无此场景）。
 

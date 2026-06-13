@@ -300,6 +300,23 @@ separate PR boundaries.
   `docs/governance/DOC_STATUS.md`.
 - Acceptance: route-authority grep finds no active-looking legacy display route
   instructions in current runbooks.
+- Fixture evidence:
+  - Current runbook route-authority grep:
+    `rg -n '/hydro-met|/overview|/forecast|/meteorology|/flood-alerts|/basins/:id|/segments/:id|/basins/|/segments/' docs/runbooks/two-node-production-e2e-plan.md docs/runbooks/two-node-deployment-overview.md docs/runbooks/node-27-bringup-checklist.md`
+    -> every hit is redirect, compatibility, or historical context; none is an
+    active current live-proof instruction.
+  - Current live proof wording check:
+    `rg -n 'live browser|browser proof|浏览器|/ops|single-map|单页|重定向|redirect' docs/runbooks/two-node-production-e2e-plan.md docs/runbooks/two-node-deployment-overview.md docs/runbooks/node-27-bringup-checklist.md`
+    -> current browser proof uses `/` plus `/ops`, with `/hydro-met -> /` only
+    as legacy redirect smoke where retained.
+  - Historical banner check:
+    `rg -n 'historical|superseded|历史|已被|M26|single-map|单页' docs/runbooks/qhh-mvp-production-like-e2e-checklist.md docs/runbooks/qhh-mvp-smoke-evidence.md`
+    -> old MVP `/hydro-met` evidence is visibly marked historical/superseded
+    in every edited historical runbook and points to current M26 route
+    authority.
+  - OpenSpec validation:
+    `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
 
 ### G6-04 Route-authority governance grep
 
