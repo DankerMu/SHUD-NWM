@@ -3219,8 +3219,20 @@ def test_route_authority_current_runbook_same_route_mixed_contexts_keep_active_f
             "/forecast redirects to / and Visit /forecast for current display proof.",
         ),
         (
+            "/forecast",
+            "/forecast redirects to / and current route link ?next=/forecast.",
+        ),
+        (
+            "/forecast",
+            "/forecast redirects to / and Current route link: ${BASE_URL}/forecast.",
+        ),
+        (
             "/hydro-met",
             "/hydro-met redirects to / and Open /hydro-met for current live browser proof.",
+        ),
+        (
+            "/hydro-met",
+            "/hydro-met redirects to / and --path=/hydro-met current display proof.",
         ),
         (
             "/forecast",
@@ -3451,6 +3463,72 @@ def test_route_authority_list_structural_context_is_cached_per_list_item(
     assert len(findings) == route_line_count
     assert all("/forecast" in str(finding["description"]) for finding in findings)
     assert list_item_end_call_count <= 2
+
+
+def test_route_authority_paragraph_structural_context_is_cached_per_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route_line_count = 60
+    route_lines = [
+        f"Open /forecast for current proof {index} and"
+        for index in range(route_line_count - 1)
+    ]
+    route_lines.append(f"Open /forecast for current proof {route_line_count - 1}.")
+    _write(tmp_path / "docs" / "runbooks" / "current.md", "\n".join(route_lines) + "\n")
+    paragraph_call_count = 0
+    original_paragraph_text = audit_repo_entropy._stale_route_paragraph_governing_text_for_range
+
+    def counting_paragraph_text(*args: object) -> str:
+        nonlocal paragraph_call_count
+        paragraph_call_count += 1
+        return original_paragraph_text(*args)
+
+    monkeypatch.setattr(
+        audit_repo_entropy,
+        "_stale_route_paragraph_governing_text_for_range",
+        counting_paragraph_text,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == route_line_count
+    assert all("/forecast" in str(finding["description"]) for finding in findings)
+    assert all(finding["allowlist_state"] == "unallowlisted" for finding in findings)
+    assert paragraph_call_count == 1
+
+
+def test_route_authority_blockquote_paragraph_structural_context_is_cached_per_range(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route_line_count = 60
+    route_lines = [
+        f"> Open /forecast for current proof {index} and"
+        for index in range(route_line_count - 1)
+    ]
+    route_lines.append(f"> Open /forecast for current proof {route_line_count - 1}.")
+    _write(tmp_path / "docs" / "runbooks" / "current.md", "\n".join(route_lines) + "\n")
+    paragraph_call_count = 0
+    original_paragraph_text = audit_repo_entropy._stale_route_paragraph_governing_text_for_range
+
+    def counting_paragraph_text(*args: object) -> str:
+        nonlocal paragraph_call_count
+        paragraph_call_count += 1
+        return original_paragraph_text(*args)
+
+    monkeypatch.setattr(
+        audit_repo_entropy,
+        "_stale_route_paragraph_governing_text_for_range",
+        counting_paragraph_text,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == route_line_count
+    assert all("/forecast" in str(finding["description"]) for finding in findings)
+    assert all(finding["allowlist_state"] == "unallowlisted" for finding in findings)
+    assert paragraph_call_count == 1
 
 
 def test_route_authority_route_free_large_markdown_does_not_build_governing_context(
