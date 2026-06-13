@@ -33,7 +33,7 @@ MOD = _load_module()
 def test_single_chain_stays_order_one() -> None:
     # A->B->C with no confluence: every segment is a first-order stream.
     segments = [[(0.0, 0.0), (100.0, 0.0)], [(100.0, 0.0), (200.0, 0.0)]]
-    assert MOD._strahler_orders(segments) == [1, 1]
+    assert MOD._strahler_orders(segments, MOD.NODE_SNAP_M) == [1, 1]
 
 
 def test_two_first_order_streams_merge_to_second_order() -> None:
@@ -43,7 +43,7 @@ def test_two_first_order_streams_merge_to_second_order() -> None:
         [(200.0, 0.0), (100.0, 100.0)],
         [(100.0, 100.0), (100.0, 200.0)],
     ]
-    orders = MOD._strahler_orders(segments)
+    orders = MOD._strahler_orders(segments, MOD.NODE_SNAP_M)
     assert orders[0] == 1 and orders[1] == 1
     assert orders[2] == 2
 
@@ -57,7 +57,7 @@ def test_unequal_tributary_keeps_higher_order() -> None:
         [(200.0, 150.0), (50.0, 150.0)],  # order 1 tributary
         [(50.0, 150.0), (50.0, 300.0)],  # 2 + 1 -> stays 2
     ]
-    orders = MOD._strahler_orders(segments)
+    orders = MOD._strahler_orders(segments, MOD.NODE_SNAP_M)
     assert orders[2] == 2
     assert orders[4] == 2
 
@@ -65,5 +65,20 @@ def test_unequal_tributary_keeps_higher_order() -> None:
 def test_quantization_cycle_does_not_hang() -> None:
     # A degenerate self-referential pair (cycle) must resolve, not recurse forever.
     segments = [[(0.0, 0.0), (10.0, 0.0)], [(10.0, 0.0), (0.0, 0.0)]]
-    orders = MOD._strahler_orders(segments)
+    orders = MOD._strahler_orders(segments, MOD.NODE_SNAP_M)
     assert all(order >= 1 for order in orders)
+
+
+def test_geographic_snap_confluence_at_degree_coords() -> None:
+    # CRS-aware snap: two order-1 streams sharing a lon/lat confluence raise the
+    # downstream to order 2 under the geographic snap (1e-5 deg). The projected
+    # 1.0 m snap would round whole degrees to one bucket and falsely fuse nodes.
+    node = (101.5, 38.2)
+    segments = [
+        [(101.0, 38.0), node],
+        [(102.0, 38.0), node],
+        [node, (101.5, 39.0)],
+    ]
+    orders = MOD._strahler_orders(segments, MOD.GEOGRAPHIC_SNAP_DEG)
+    assert orders[0] == 1 and orders[1] == 1
+    assert orders[2] == 2
