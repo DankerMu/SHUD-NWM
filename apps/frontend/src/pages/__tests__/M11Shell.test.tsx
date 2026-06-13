@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { forwardRef, useImperativeHandle, type ReactNode } from 'react'
 import { BrowserRouter } from 'react-router-dom'
@@ -672,6 +672,44 @@ describe('M11 visual foundation shell', () => {
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-national-river-feature-count', '0')
     expect(mapSources.find((source) => source.id === 'm11-national-river-source')).toBeUndefined()
     expect(mapLayers.find((layer) => layer.id === 'm11-national-river-line')).toBeUndefined()
+  })
+
+  // Bug-3：静态 national 河网与动态 mesh 河网层不得在同一流域上叠画双线。有动态线层（流量 MVT 线 /
+  // 详情 GeoJSON 河段）覆盖的流域，其静态河流从 national 底图剔除；无动态层覆盖的流域（如 heihe）保留。
+  it('excludes mesh-covered basins from the national river only when a dynamic river line is active', async () => {
+    const riverGeo = {
+      type: 'FeatureCollection' as const,
+      features: [
+        { type: 'Feature' as const, properties: { basin_id: 'basinA', Type: 5 }, geometry: { type: 'LineString' as const, coordinates: [[100, 37], [100.1, 37.1]] } },
+        { type: 'Feature' as const, properties: { basin_id: 'basinB', Type: 3 }, geometry: { type: 'LineString' as const, coordinates: [[99, 39], [99.1, 39.1]] } },
+      ],
+    }
+    const floodState = { ...state, layer: 'flood-return-period' as const, validTime: '2026-05-18T06:00:00.000Z' }
+    const layersWithFloodMvt = layers.map((layer) =>
+      layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
+    )
+
+    // 流量 MVT 线层激活 + basinA 已被 mesh 覆盖 → 仅渲染 basinB 的静态河流（basinA 剔除）。
+    const { rerender } = render(
+      <M11MapSurface state={floodState} layers={layersWithFloodMvt} nationalRiverGeo={riverGeo} meshRiverBasinIds={['basinA']} onQueryChange={vi.fn()} />,
+    )
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
+    expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-national-river-feature-count', '1')
+    const renderedRiver = mapSources.find((source) => source.id === 'm11-national-river-source')?.data as typeof riverGeo
+    expect(renderedRiver.features.map((feature) => feature.properties.basin_id)).toEqual(['basinB'])
+
+    // 无 mesh 覆盖（meshRiverBasinIds 空）→ 即便线层激活也保留全部静态河流（不剔除）。
+    rerender(
+      <M11MapSurface state={floodState} layers={layersWithFloodMvt} nationalRiverGeo={riverGeo} meshRiverBasinIds={[]} onQueryChange={vi.fn()} />,
+    )
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-national-river-feature-count', '2'))
+
+    // 无动态河网线层（met-stations 不注册 overlay）→ overlayIsRiverLine=false → 即便 meshRiverBasinIds 有值也不剔除，
+    // 保留全部静态河流（守住非线叠加层不误删的诚实降级语义）。
+    rerender(
+      <M11MapSurface state={{ ...state, layer: 'met-stations' }} layers={layers} nationalRiverGeo={riverGeo} meshRiverBasinIds={['basinA']} onQueryChange={vi.fn()} />,
+    )
+    await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-national-river-feature-count', '2'))
   })
 
   it('marks hydrology data layers renderable and keeps river network unavailable', () => {
@@ -1446,7 +1484,9 @@ describe('M11 visual foundation shell', () => {
     expect(screen.queryByTestId('m11-overview-loading')).not.toBeInTheDocument()
   })
 
-  it('suppresses basin-detail frame-1 map-unavailable on deep-link refresh (basinDetail=null, basinLoading=false)', () => {
+  // Bug-1 合同：刷新/直达带 basinId 的 URL → 首挂载剥离 basinId，落在全国总览主页（不进流域详情），
+  // 且 URL 不再携带 basinId；frame-1 不闪 m11-map-unavailable。
+  it('strips basinId on initial load and lands on the national overview (not basin detail)', async () => {
     window.history.pushState({}, '', '/?basinId=qhh')
     // beforeEach 已置 basinDetail=null / basinLoading=false（深链直达某流域 URL 的首帧）。
 
@@ -1456,14 +1496,23 @@ describe('M11 visual foundation shell', () => {
       </BrowserRouter>,
     )
 
-    expect(screen.getByTestId('m11-fullscreen-map')).toBeInTheDocument()
+    // 落总览：全屏地图 + 总览切换器在位；不进流域详情（无返回总览按钮 / 钻取地图）。
+    expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
+    expect(screen.getByLabelText('全国总览地图')).toBeInTheDocument()
+    expect(screen.queryByLabelText('流域钻取地图')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('m11-back-to-overview')).not.toBeInTheDocument()
+    // URL 已剥离 basinId；frame-1 不闪不可用横幅。
+    await waitFor(() => expect(window.location.search).not.toContain('basinId='))
     expect(screen.queryByTestId('m11-map-unavailable')).not.toBeInTheDocument()
   })
 
-  it('reflects a query-matched basin snapshot through surfaceSettling once settled', () => {
-    window.history.pushState({}, '', '/?basinId=qhh')
-    const query = parseM11QueryState(window.location.search)
+  // 会话内（挂载后）切到某 basinId → 仍正常进流域详情，且 query-matched 快照经 surfaceSettling 落定后渲染。
+  // 用一次会话内导航（pushState + popstate，BrowserRouter 监听 popstate）模拟"挂载后点流域"，不重新挂载，
+  // 故 Bug-1 一次性剥离闸门已置真、不再剥离。
+  it('reflects a query-matched basin snapshot through surfaceSettling for in-session navigation', async () => {
+    const query = parseM11QueryState('?basinId=qhh')
     useOverviewDataStore.setState({ basinDetail: matchedBasinSnapshot('qhh', query), basinLoading: false })
+    window.history.pushState({}, '', '/')
 
     render(
       <BrowserRouter>
@@ -1471,8 +1520,17 @@ describe('M11 visual foundation shell', () => {
       </BrowserRouter>,
     )
 
-    // 流域数据已落定（matched）→ surfaceSettling=false → 不再以 loading 抑制；地图外壳正常渲染。
+    // 首挂载落总览（无 basinId）。
+    expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
+
+    // 会话内切到 basinId（挂载后）→ 不再剥离 → 进流域详情；matched 快照 → surfaceSettling=false，外壳正常渲染。
+    await act(async () => {
+      window.history.pushState({}, '', '/?basinId=qhh')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
     expect(screen.getByTestId('m11-fullscreen-map')).toBeInTheDocument()
+    expect(window.location.search).toContain('basinId=qhh')
   })
 
   it('omits malformed selected segment geometry from MapLibre sources while showing selected unavailable state', () => {

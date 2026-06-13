@@ -106,11 +106,14 @@ export function useBasinDetailMode({
     () => staticBasinBoundaryIndex(nationalGeo.domain).get(basinId)?.bbox ?? null,
     [basinId, nationalGeo.domain],
   )
-  // 本流域静态河网（shp 真实河道）：详情页秒显垫底，慢的可点击河段层加载完成后自动降透明衬底。
+  // 本流域静态河网（shp 真实河道）：详情页秒显垫底；可点击 mesh 河段层加载后，该流域静态河流整段从底图
+  // 剔除（见下方 meshRiverBasinIds），规避平滑静态线 + 阶梯 mesh 线双线叠画，而非降透明并存。
   const basinRiverGeo = useMemo(() => {
     const features = nationalGeo.river?.features.filter((feature) => feature.properties?.basin_id === basinId) ?? []
     return features.length > 0 ? ({ type: 'FeatureCollection', features } as FeatureCollection) : null
   }, [basinId, nationalGeo.river])
+  // 稳定引用：basinId 不变则同一数组，避免每次渲染都让 surface 的 renderedNationalRiver memo 失效重算。
+  const meshRiverBasinIds = useMemo(() => (basinId ? [basinId] : []), [basinId])
   const mapFitTo = useMemo(
     () => bboxToMapFit(detail?.bbox ?? staticFallbackBbox ?? (detail && !basinNotFoundReason ? BASIN_FALLBACK_EXTENT : null)),
     [basinNotFoundReason, detail, staticFallbackBbox],
@@ -250,6 +253,7 @@ export function useBasinDetailMode({
     visibleBasinIds: [basinId],
     basinSegments: currentBasinData?.segments ?? [],
     nationalRiverGeo: basinRiverGeo,
+    meshRiverBasinIds,
     selectedSegmentId,
     selectedSegmentGeometry: selectedSegment?.geometry ?? null,
     stationFeatureCollection: stationLayer.featureCollection,
