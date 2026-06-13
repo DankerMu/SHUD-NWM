@@ -221,6 +221,12 @@ export function M11MapLibreSurface({
   const mapRef = useRef<MapRef | null>(null)
   const lastFitKeyRef = useRef<string | null>(null)
   const lastFlyKeyRef = useRef<string | null>(null)
+  // 总览↔详情切换会 remount 整棵地图子树，相机重置回 initialViewState。挂载时若已知 fitTo
+  // （从总览点入，静态 bbox 已缓存同步可得），直接用该 bounds 初始化，避免「先闪回全国再飞入」
+  // 的强制回初始视角（#1）；mount 后到达的 fitTo 仍由下方 effect 兜底。
+  const [initialViewState] = useState(() =>
+    fitTo ? { bounds: fitTo.bounds, fitBoundsOptions: { padding: fitTo.padding ?? 32 } } : CHINA_VIEW_STATE,
+  )
   const [mapSourceError, setMapSourceError] = useState<string | null>(null)
   const [overlayData, setOverlayData] = useState<FloodReturnPeriodFeatureCollection | null>(null)
   const [overlayUnavailableReason, setOverlayUnavailableReason] = useState<string | null>(null)
@@ -292,19 +298,21 @@ export function M11MapLibreSurface({
   }, [overlay])
 
   useEffect(() => {
-    if (!fitTo) return
+    const map = mapRef.current
+    if (!fitTo || !map) return
     const fitKey = mapFitKey(fitTo)
     if (fitKey === lastFitKeyRef.current) return
     lastFitKeyRef.current = fitKey
-    mapRef.current?.fitBounds(fitTo.bounds, { padding: fitTo.padding ?? 32, duration: 450 })
+    map.fitBounds(fitTo.bounds, { padding: fitTo.padding ?? 32, duration: 450 })
   }, [fitTo])
 
   useEffect(() => {
-    if (!flyTo) return
+    const map = mapRef.current
+    if (!flyTo || !map) return
     const flyKey = mapFlyKey(flyTo)
     if (flyKey === lastFlyKeyRef.current) return
     lastFlyKeyRef.current = flyKey
-    mapRef.current?.flyTo({ center: flyTo.center, zoom: flyTo.zoom, duration: 450 })
+    map.flyTo({ center: flyTo.center, zoom: flyTo.zoom, duration: 450 })
   }, [flyTo])
 
   const handleMouseMove = useCallback(
@@ -426,7 +434,7 @@ export function M11MapLibreSurface({
     >
       <Map
         ref={mapRef}
-        initialViewState={CHINA_VIEW_STATE}
+        initialViewState={initialViewState}
         mapStyle={m11MapStyles[state.basemap]}
         interactiveLayerIds={interactiveLayerIds}
         onMouseMove={handleMouseMove}

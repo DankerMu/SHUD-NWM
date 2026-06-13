@@ -64,12 +64,14 @@ vi.mock('react-map-gl/maplibre', () => ({
       {
         children,
         interactiveLayerIds,
+        initialViewState,
         onMouseMove,
         onMouseLeave,
         onClick,
       }: {
         children: ReactNode
         interactiveLayerIds?: string[]
+        initialViewState?: unknown
         onMouseMove?: (event: unknown) => void
         onMouseLeave?: (event: unknown) => void
         onClick?: (event: unknown) => void
@@ -84,6 +86,7 @@ vi.mock('react-map-gl/maplibre', () => ({
         <div
           data-testid="mock-m11-maplibre-map"
           data-interactive-layer-ids={(interactiveLayerIds ?? []).join(',')}
+          data-initial-view-state={JSON.stringify(initialViewState ?? null)}
           onMouseMove={() => onMouseMove?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
           onMouseLeave={() => onMouseLeave?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
           onClick={() => onClick?.({ target: { getCanvas: () => ({ style: {} }) }, features: [] })}
@@ -1648,7 +1651,7 @@ describe('App route state', () => {
     await waitFor(() => expect(loadBasinDetail).toHaveBeenCalledWith('basin-demo', expect.objectContaining({ segmentId: 'seg-001' })))
   })
 
-  it('opens the river forecast popup when a river segment map feature is clicked (M26-4)', async () => {
+  it('opens the river forecast panel when a river segment map feature is clicked (M26-4)', async () => {
     const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
     useOverviewDataStore.setState({
       basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs&basinVersionId=bv-001', 'source=gfs&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&segmentId=seg-009'),
@@ -1662,10 +1665,10 @@ describe('App route state', () => {
 
     fireEvent.keyDown(screen.getByTestId('mock-m11-maplibre-map'), { key: 'Enter' })
 
-    expect(await screen.findByTestId('m11-river-popup')).toBeInTheDocument()
+    expect(await screen.findByTestId('m11-river-forecast-panel')).toBeInTheDocument()
     expect(screen.queryByTestId('m11-station-popup')).not.toBeInTheDocument()
-    // 弹窗内 source/起报选择条存在
-    expect(screen.getByTestId('m11-popup-source-controls')).toBeInTheDocument()
+    // 右侧 16:9 面板：GFS+IFS 同轴双绘，无 source 切换控件
+    expect(screen.queryByTestId('m11-popup-source-controls')).not.toBeInTheDocument()
   })
 
   it('opens the station forcing popup when a met-station map feature is clicked (M26-4)', async () => {
@@ -1687,7 +1690,7 @@ describe('App route state', () => {
     fireEvent.contextMenu(screen.getByTestId('mock-m11-maplibre-map'))
 
     expect(await screen.findByTestId('m11-station-popup')).toBeInTheDocument()
-    expect(screen.queryByTestId('m11-river-popup')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('m11-river-forecast-panel')).not.toBeInTheDocument()
     expect(screen.getByTestId('m11-station-variable-selector')).toBeInTheDocument()
   })
 
@@ -1743,6 +1746,48 @@ describe('App route state', () => {
         expect.objectContaining({ segmentId: 'seg-001', riverNetworkVersionId: 'rn-v1', basinVersionId: 'bv-001' }),
       ),
     )
+  })
+
+  it('keeps the basin URL clean — no river network version is written when no segment is selected (#1)', async () => {
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    // 快照 dataKey='source=gfs' 匹配无 segmentId 的 query；selectedSegment 携带 rn-v1（旧版会被校正进 URL）。
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs', 'source=gfs'),
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+
+    await renderAppAtBasinDetail('/?source=gfs&basinId=basin-demo')
+
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    // 未选河段 → 校正 effect 不得把默认网络号灌进 URL（链接精简）。
+    await waitFor(() => {
+      const params = new URLSearchParams(window.location.search)
+      expect(params.get('basinId')).toBe('basin-demo')
+      expect(params.get('riverNetworkVersionId')).toBeNull()
+      expect(params.get('segmentId')).toBeNull()
+    })
+  })
+
+  it('mounts the basin detail map already fitted to the basin, not the national initial view (#1)', async () => {
+    const loadBasinDetail = vi.fn().mockResolvedValue(undefined)
+    useOverviewDataStore.setState({
+      basinDetail: basinSnapshot('basin-demo', m11Layers, 'source=gfs', 'source=gfs'),
+      basinLoading: false,
+      basinError: null,
+      loadBasinDetail,
+    })
+
+    await renderAppAtBasinDetail('/?source=gfs&basinId=basin-demo')
+
+    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    // 总览→详情会 remount 地图：新挂载须以流域 bbox 作为 initialViewState.bounds，而非全国初始视角。
+    await waitFor(() => {
+      const raw = screen.getByTestId('mock-m11-maplibre-map').getAttribute('data-initial-view-state') ?? ''
+      expect(raw).toContain('bounds')
+      expect(raw).toContain('101')
+    })
   })
 
   it('does not correct basin valid time from a stale basin snapshot', async () => {

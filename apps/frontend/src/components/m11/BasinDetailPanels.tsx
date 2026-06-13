@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FeatureCollection } from 'geojson'
 
 import type { M11MapOverlayInteraction, M11MapPopupSlot } from '@/components/map/M11MapLibreSurface'
-import { M11RiverForecastPopup, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPopup'
+import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
 import type { HydroMetSource } from '@/lib/hydroMet/queryState'
 import {
@@ -89,11 +89,13 @@ export function useBasinDetailMode({
   }, [basinMetadataMatchesQuery, derivedTimeline, onQueryChange, loading, metadataLayers, state])
 
   useEffect(() => {
-    if (loading || !currentBasinData?.selectedSegment?.riverNetworkVersionId) return
+    // 仅当 URL 已选中河段时，才把河段实际网络版本校正回 URL（版本号是 segmentId 的限定符）。
+    // 无选中河段时不写，避免把默认网络号灌进 URL 又被精简化 serialize 丢弃、空转推历史记录（#1）。
+    if (loading || !state.segmentId || !currentBasinData?.selectedSegment?.riverNetworkVersionId) return
     const resolvedRiverNetworkVersionId = currentBasinData.selectedSegment.riverNetworkVersionId
     if (state.riverNetworkVersionId === resolvedRiverNetworkVersionId) return
     onQueryChange({ riverNetworkVersionId: resolvedRiverNetworkVersionId })
-  }, [currentBasinData?.selectedSegment?.riverNetworkVersionId, onQueryChange, loading, state.riverNetworkVersionId])
+  }, [currentBasinData?.selectedSegment?.riverNetworkVersionId, onQueryChange, loading, state.segmentId, state.riverNetworkVersionId])
 
   const detail = currentBasinData?.detail
   const basinNotFoundReason = !loading && detail?.unavailableReason === BASIN_NOT_FOUND_REASON ? detail.unavailableReason : null
@@ -209,43 +211,29 @@ export function useBasinDetailMode({
     lastConcretePopupSourceRef.current = resolvedSource
   }, [resolvedSource])
 
-  const popup: M11MapPopupSlot | null = riverPopup
+  // 代站详情仍走地图锚定 popup（小弹窗）；河段流量预报移到右侧 16:9 面板（见 riverPanel）。
+  const popup: M11MapPopupSlot | null = stationPopup
     ? {
-        longitude: riverPopup.lngLat[0],
-        latitude: riverPopup.lngLat[1],
-        onClose: () => setRiverPopup(null),
+        longitude: stationPopup.lngLat[0],
+        latitude: stationPopup.lngLat[1],
+        onClose: () => setStationPopup(null),
         content: (
-          <M11RiverForecastPopup
+          <M11StationForcingPopup
             basinId={basinId}
             initialSource={resolvedSource}
-            segment={riverPopup.segment}
-            onClose={() => setRiverPopup(null)}
+            station={stationPopup.station}
+            onClose={() => setStationPopup(null)}
           />
         ),
       }
-    : stationPopup
-      ? {
-          longitude: stationPopup.lngLat[0],
-          latitude: stationPopup.lngLat[1],
-          onClose: () => setStationPopup(null),
-          content: (
-            <M11StationForcingPopup
-              basinId={basinId}
-              initialSource={resolvedSource}
-              station={stationPopup.station}
-              onClose={() => setStationPopup(null)}
-            />
-          ),
-        }
-      : null
+    : null
+
+  const riverPanel = riverPopup ? (
+    <M11RiverForecastPanel basinId={basinId} segment={riverPopup.segment} onClose={() => setRiverPopup(null)} />
+  ) : null
 
   return {
     mapLabel: '流域钻取地图',
-    mapTitle: `${basinDisplayName} 流域钻取`,
-    mapMeta:
-      detail?.bbox || staticFallbackBbox
-        ? '地图已按流域 bbox 定位；点击河段查看 q_down 流量预报，点击代站查看六要素 forcing。'
-        : '当前流域缺少 bbox，地图使用中国范围兜底视域；点击河段/代站查看详情弹窗。',
     layers,
     sourceSelection,
     fitTo: mapFitTo,
@@ -258,6 +246,7 @@ export function useBasinDetailMode({
     selectedSegmentGeometry: selectedSegment?.geometry ?? null,
     stationFeatureCollection: stationLayer.featureCollection,
     popup,
+    riverPanel,
     onMapOverlayHover: handleMapOverlayHover,
     onMapOverlayClick: handleMapOverlayClick,
     backToOverview,
