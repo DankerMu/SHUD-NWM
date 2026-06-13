@@ -366,7 +366,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       nationalRiverGeo={nationalGeo.river}
       stationFeatureCollection={stationLayer.featureCollection}
       popup={riverForecastPopup}
-      loading={loading}
+      loading={loading || !overview}
       boundaryLoading={nationalGeo.loading}
       mapLabel="全国总览地图"
       infoTitle="全国水文总览"
