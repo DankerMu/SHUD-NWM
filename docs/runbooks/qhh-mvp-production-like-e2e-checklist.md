@@ -1,5 +1,11 @@
 # QHH MVP 模拟生产环境 E2E 测试清单
 
+> **历史 / 已被 M26 取代**：本清单冻结 2026-05-27 M21/MVP production-like 证据，保留当时
+> `/hydro-met` 执行细节供审计。当前 route authority 以
+> `docs/governance/DOC_STATUS.md` 的 M26 single-map 为准：`/` 是 active display entrypoint，
+> `/ops` 是 active operational display path；`/hydro-met` 等旧展示路径只作为 legacy redirect /
+> compatibility / historical evidence，不得作为当前 live browser proof。
+
 最后更新：2026-05-27
 适用范围：M21 QHH 水文气象展示 + 运维监控 MVP  
 推荐证据目录：`artifacts/mvp-e2e/<run_id>/`
