@@ -2838,17 +2838,18 @@ def _path_uses_markdown_route_context(relative_path: str) -> bool:
 
 def _markdown_section_headings(lines: list[str]) -> tuple[str | None, ...]:
     headings: list[str | None] = []
-    current_heading: str | None = None
-    previous_blockquote_depth: int | None = None
+    current_headings_by_blockquote_depth: dict[int, str] = {}
     for line in lines:
         blockquote_depth = _markdown_blockquote_depth(line)
-        if previous_blockquote_depth is not None and blockquote_depth != previous_blockquote_depth:
-            current_heading = None
         normalized = _markdown_context_line(line)
         if MARKDOWN_HEADING_PATTERN.match(normalized):
-            current_heading = normalized.strip()
-        headings.append(current_heading)
-        previous_blockquote_depth = blockquote_depth
+            current_headings_by_blockquote_depth = {
+                depth: heading
+                for depth, heading in current_headings_by_blockquote_depth.items()
+                if depth <= blockquote_depth
+            }
+            current_headings_by_blockquote_depth[blockquote_depth] = normalized.strip()
+        headings.append(current_headings_by_blockquote_depth.get(blockquote_depth))
     return tuple(headings)
 
 
