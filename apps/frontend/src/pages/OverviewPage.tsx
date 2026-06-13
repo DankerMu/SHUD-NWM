@@ -14,12 +14,11 @@ import {
   M11FloatingLayerSwitcher,
   M11FloatingLegend,
   M11FloatingNotice,
-  M11MapInfoCard,
   M11MetRasterNotice,
   M11OpsLink,
 } from '@/components/map/M11FloatingControls'
 import { mapFeatureStringProperty, popupAnchorFromInteraction, useBasinDetailMode } from '@/components/m11/BasinDetailPanels'
-import { M11RiverForecastPopup, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPopup'
+import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import type { LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import {
   defaultM11QueryState,
@@ -107,8 +106,6 @@ function M11FullscreenMap({
   boundaryLoading,
   fitTo,
   mapLabel,
-  infoTitle,
-  infoMeta,
   onQueryChange,
   onOverlayHover,
   onOverlayClick,
@@ -129,8 +126,6 @@ function M11FullscreenMap({
   boundaryLoading?: boolean
   fitTo?: M11MapCameraFit | null
   mapLabel: string
-  infoTitle: string
-  infoMeta: string
   onQueryChange: (patch: M11QueryPatch) => void
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
   onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
@@ -172,7 +167,6 @@ function M11FullscreenMap({
       />
       <M11FloatingLayerSwitcher layer={state.layer} onQueryChange={onQueryChange} />
       <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
-      <M11MapInfoCard title={infoTitle} meta={infoMeta} />
       <M11OpsLink visible={opsVisible} />
       {state.layer === 'met-raster' ? <M11MetRasterNotice /> : null}
       {children}
@@ -210,13 +204,12 @@ function BasinDetailMode({
       boundaryLoading={detail.boundaryLoading}
       fitTo={detail.fitTo}
       mapLabel={detail.mapLabel}
-      infoTitle={detail.mapTitle}
-      infoMeta={detail.mapMeta}
       onQueryChange={onQueryChange}
       onOverlayHover={detail.onMapOverlayHover}
       onOverlayClick={detail.onMapOverlayClick}
     >
       <M11BackToOverviewButton onClick={detail.backToOverview} />
+      {detail.riverPanel}
       {detail.basinNotFoundReason ? (
         <M11FloatingNotice testId="m11-basin-not-found">
           未找到流域 {basinId}：{detail.basinNotFoundReason}
@@ -291,8 +284,6 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   )
   const summary = currentOverview?.summary
   const sourceSelection = summary?.sourceSelection ?? null
-  const resolvedSource = sourceSelection?.resolvedSource ?? null
-  const initialPopupSource = resolvedSource === 'GFS' || resolvedSource === 'IFS' ? resolvedSource : null
   // basin_version_id → basin_id：全国点河段开流量弹窗时反查所属流域去取该流域 latest-product。
   const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? overview?.basinVersionToBasinId ?? {}
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
@@ -342,21 +333,9 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   )
   const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
 
-  const riverForecastPopup: M11MapPopupSlot | null = riverPopup
-    ? {
-        longitude: riverPopup.lngLat[0],
-        latitude: riverPopup.lngLat[1],
-        onClose: () => setRiverPopup(null),
-        content: (
-          <M11RiverForecastPopup
-            basinId={riverPopup.basinId}
-            initialSource={initialPopupSource}
-            segment={riverPopup.segment}
-            onClose={() => setRiverPopup(null)}
-          />
-        ),
-      }
-    : null
+  const riverForecastPanel = riverPopup ? (
+    <M11RiverForecastPanel basinId={riverPopup.basinId} segment={riverPopup.segment} onClose={() => setRiverPopup(null)} />
+  ) : null
 
   // 全国总览开代站图层：无 basinId 不取数，honest 空态。
   const stationLayer = useMetStationLayer({
@@ -370,7 +349,6 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // 为真，统一驱动 surface 占位与浮层提示、消除空态/不可用闪一帧；不用 currentOverview——那会在
   // query 已切但快照未匹配（如选 met-raster 图层）时误抑制诚实降级提示「未注册」。
   const surfaceSettling = loading || !overview
-  const boundaryCount = basins.filter((basin) => basin.boundary).length
   // 有已发布 run 的流域（latestForecastTime != null ⟺ 河段进了流量 MVT）的静态河流须剔除，规避双线；
   // 无 run 的流域（如 heihe）不在 MVT 中，保留其静态河流。
   const meshRiverBasinIds = useMemo(
@@ -396,16 +374,14 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       nationalRiverGeo={nationalGeo.river}
       meshRiverBasinIds={meshRiverBasinIds}
       stationFeatureCollection={stationLayer.featureCollection}
-      popup={riverForecastPopup}
       loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}
       mapLabel="全国总览地图"
-      infoTitle="全国水文总览"
-      infoMeta={`全国范围 73E-135E / 18N-53N；点击河段查看 q_down 流量预报曲线，点击流域边界进入流域详情。已接入 ${boundaryCount}/${basins.length} 个流域边界。`}
       onQueryChange={onQueryChange}
       onOverlayHover={handleMapOverlayHover}
       onOverlayClick={handleMapOverlayClick}
     >
+      {riverForecastPanel}
       {state.layer === 'met-stations' && stationLayer.statusNote ? (
         // 代站图层的 honest 状态优先（全国总览未选流域时诚实提示「请选择流域」）。
         <M11FloatingNotice testId="m11-met-station-status">{stationLayer.statusNote}</M11FloatingNotice>

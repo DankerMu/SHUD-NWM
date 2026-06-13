@@ -27,6 +27,10 @@ interface ForecastChartProps {
   variant?: 'full' | 'compact'
   /** dark：深色玻璃弹窗内的指挥舱主题（暗坐标系 + 渐变面积 + 辉光曲线）；默认 light 不变。 */
   appearance?: 'light' | 'dark'
+  /** zoomable：x 轴启用滚轮缩放（ECharts inside dataZoom，天然以光标所在时刻为中心放大）。 */
+  zoomable?: boolean
+  /** fill：图表高度填满父容器（height 100%），用于 16:9 面板等由父级定高的场景。 */
+  fill?: boolean
 }
 
 /** series.color(hex) → rgba，用于深色主题的面积渐变/辉光，保持与曲线同色相。 */
@@ -171,7 +175,7 @@ function tooltipFormatter(params: TooltipParam | TooltipParam[], unit?: string) 
   return lines.join('\n')
 }
 
-export function ForecastChart({ data, segmentName, variant = 'full', appearance = 'light' }: ForecastChartProps) {
+export function ForecastChart({ data, segmentName, variant = 'full', appearance = 'light', zoomable = false, fill = false }: ForecastChartProps) {
   if (data?.pointBudgetStatus?.overBudget) {
     return (
       <div
@@ -187,10 +191,10 @@ export function ForecastChart({ data, segmentName, variant = 'full', appearance 
     )
   }
 
-  return <ForecastChartInner data={data} segmentName={segmentName} variant={variant} appearance={appearance} />
+  return <ForecastChartInner data={data} segmentName={segmentName} variant={variant} appearance={appearance} zoomable={zoomable} fill={fill} />
 }
 
-function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 'light' }: ForecastChartProps) {
+function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 'light', zoomable = false, fill = false }: ForecastChartProps) {
   const compact = variant === 'compact'
   const dark = appearance === 'dark'
   const axisColor = dark ? '#94a3b8' : '#64748b'
@@ -233,6 +237,10 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
 
     return {
       color: normalizedSeries.map((series) => series.color),
+      // 滚轮缩放时间轴：inside dataZoom 以光标所在 x（时刻）为中心放大；filterMode none 保曲线连续。
+      dataZoom: zoomable
+        ? [{ type: 'inside', zoomOnMouseWheel: true, moveOnMouseMove: false, moveOnMouseWheel: false, filterMode: 'none' }]
+        : undefined,
       title: compact
         ? undefined
         : {
@@ -323,7 +331,7 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
         ]),
       })),
     }
-  }, [data, normalizedSeries, segmentName, compact, dark, axisColor])
+  }, [data, normalizedSeries, segmentName, compact, dark, axisColor, zoomable])
 
   if (!data || normalizedSeries.length === 0) {
     return (
@@ -345,7 +353,13 @@ function ForecastChartInner({ data, segmentName, variant = 'full', appearance = 
       option={option}
       notMerge
       lazyUpdate
-      style={compact ? { height: 240, minHeight: 216, width: '100%' } : { height: 360, minHeight: 320, width: '100%' }}
+      style={
+        fill
+          ? { height: '100%', width: '100%', minHeight: 0 }
+          : compact
+            ? { height: 240, minHeight: 216, width: '100%' }
+            : { height: 360, minHeight: 320, width: '100%' }
+      }
     />
   )
 }
