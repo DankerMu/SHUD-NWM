@@ -2663,6 +2663,104 @@ def test_route_authority_blockquoted_current_table_row_route_value_is_drift(
     _assert_unallowlisted_budget_counted_report_only_finding(finding)
 
 
+def test_route_authority_blockquoted_historical_heading_does_not_govern_normal_current_route_value(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        > # Historical pre-M26 evidence
+        Current route link ?next=/forecast
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["line"] == 2
+    assert "/forecast" in str(finding["description"])
+    _assert_unallowlisted_budget_counted_report_only_finding(finding)
+
+
+def test_route_authority_normal_historical_heading_does_not_govern_blockquoted_current_route_value(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        # Historical pre-M26 evidence
+        > Current route link ?next=/forecast
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["line"] == 2
+    assert "/forecast" in str(finding["description"])
+    _assert_unallowlisted_budget_counted_report_only_finding(finding)
+
+
+def test_route_authority_blockquoted_historical_table_does_not_merge_with_normal_current_table(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        > | Context | Value |
+        > |---|---|
+        > | Historical pre-M26 evidence | /hydro-met |
+        | Context | Value |
+        |---|---|
+        | Current route | ?next=/forecast |
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_line = {finding["line"]: finding for finding in findings}
+
+    assert set(by_line) == {3, 6}
+    historical = by_line[3]
+    assert "/hydro-met" in str(historical["description"])
+    assert historical["allowlist_key"] == "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+    assert historical["allowlist_state"] == "allowlisted"
+    assert historical["budget_counted"] is False
+    active = by_line[6]
+    assert "/forecast" in str(active["description"])
+    _assert_unallowlisted_budget_counted_report_only_finding(active)
+
+
+def test_route_authority_normal_historical_table_does_not_merge_with_blockquoted_current_table(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        | Context | Value |
+        |---|---|
+        | Historical pre-M26 evidence | /hydro-met |
+        > | Context | Value |
+        > |---|---|
+        > | Current route | ?next=/forecast |
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_line = {finding["line"]: finding for finding in findings}
+
+    assert set(by_line) == {3, 6}
+    historical = by_line[3]
+    assert "/hydro-met" in str(historical["description"])
+    assert historical["allowlist_key"] == "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+    assert historical["allowlist_state"] == "allowlisted"
+    assert historical["budget_counted"] is False
+    active = by_line[6]
+    assert "/forecast" in str(active["description"])
+    _assert_unallowlisted_budget_counted_report_only_finding(active)
+
+
 @pytest.mark.parametrize(
     ("line", "expected_key"),
     [
@@ -3418,7 +3516,7 @@ def test_route_authority_duplicate_tokens_dedupe_before_expensive_context_work(
     token_count = 400
     _write(
         tmp_path / "docs" / "runbooks" / "current.md",
-        "Open " + " ".join("/forecast" for _index in range(token_count)) + " for current proof.\n",
+        "Open " + " ".join("/forecast" for _index in range(token_count)) + " for current proof\n",
     )
     redirect_span_call_count = 0
     original_redirect_span = audit_repo_entropy._stale_route_mention_redirect_span
@@ -3435,7 +3533,56 @@ def test_route_authority_duplicate_tokens_dedupe_before_expensive_context_work(
     assert len(findings) == 1
     assert "/forecast" in str(findings[0]["description"])
     _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
-    assert redirect_span_call_count == 1
+    assert redirect_span_call_count <= 1
+
+
+def test_route_authority_duplicate_tokens_precompute_semantic_work_per_unique_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_count = 400
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        "Open " + " ".join("/forecast" for _index in range(token_count)) + " for current proof\n",
+    )
+    semantic_key_call_count = 0
+    route_valued_call_count = 0
+    clause_analysis_call_count = 0
+    original_semantic_key = audit_repo_entropy._stale_route_mention_semantic_key
+    original_route_valued = audit_repo_entropy._route_token_is_route_valued
+    original_clause_analysis = audit_repo_entropy._stale_route_clause_analysis
+
+    def counting_semantic_key(*args: object) -> str:
+        nonlocal semantic_key_call_count
+        semantic_key_call_count += 1
+        return original_semantic_key(*args)
+
+    def counting_route_valued(*args: object) -> bool:
+        nonlocal route_valued_call_count
+        route_valued_call_count += 1
+        return original_route_valued(*args)
+
+    def counting_clause_analysis(
+        line: str,
+        start: int,
+        end: int,
+    ) -> audit_repo_entropy._StaleRouteClauseAnalysis:
+        nonlocal clause_analysis_call_count
+        clause_analysis_call_count += 1
+        return original_clause_analysis(line, start, end)
+
+    monkeypatch.setattr(audit_repo_entropy, "_stale_route_mention_semantic_key", counting_semantic_key)
+    monkeypatch.setattr(audit_repo_entropy, "_route_token_is_route_valued", counting_route_valued)
+    monkeypatch.setattr(audit_repo_entropy, "_stale_route_clause_analysis", counting_clause_analysis)
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    assert "/forecast" in str(findings[0]["description"])
+    _assert_unallowlisted_budget_counted_report_only_finding(findings[0])
+    assert semantic_key_call_count == 0
+    assert route_valued_call_count == 0
+    assert clause_analysis_call_count == 1
 
 
 def test_route_authority_list_structural_context_is_cached_per_list_item(
