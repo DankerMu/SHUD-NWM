@@ -233,10 +233,12 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert tracked_v1_summary["total_instruction_files"] == 3
     assert inventory.total_test_files == 141
     assert inventory.total_instruction_files == 2
-    assert baseline["summary"]["total_test_files"] == tracked_v1_summary["total_test_files"]
-    assert baseline["summary"]["total_instruction_files"] == tracked_v1_summary["total_instruction_files"]
-    assert baseline["summary"]["total_test_files"] != inventory.total_test_files
-    assert baseline["summary"]["total_instruction_files"] != inventory.total_instruction_files
+    assert inventory.v1_summary_test_files == 141
+    assert inventory.v1_summary_instruction_files == 2
+    assert baseline["summary"]["total_test_files"] == inventory.v1_summary_test_files
+    assert baseline["summary"]["total_instruction_files"] == inventory.v1_summary_instruction_files
+    assert baseline["summary"]["total_test_files"] != tracked_v1_summary["total_test_files"]
+    assert baseline["summary"]["total_instruction_files"] != tracked_v1_summary["total_instruction_files"]
     assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("docs/runbooks/live.md")
     assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted(
         "openspec/changes/example/spec.md"
@@ -319,7 +321,7 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     ]
 
 
-def test_entropy_baseline_writer_v1_summary_sibling_counts_use_existing_v1_contract(
+def test_entropy_baseline_writer_v1_summary_sibling_counts_are_current_derived(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -375,10 +377,61 @@ def test_entropy_baseline_writer_v1_summary_sibling_counts_use_existing_v1_contr
 
     assert inventory.total_test_files == 1
     assert inventory.total_instruction_files == 1
-    assert inventory.v1_summary_test_files == 247
-    assert inventory.v1_summary_instruction_files == 3
-    assert baseline["summary"]["total_test_files"] == 247
-    assert baseline["summary"]["total_instruction_files"] == 3
+    assert inventory.v1_summary_test_files == 1
+    assert inventory.v1_summary_instruction_files == 1
+    assert baseline["summary"]["total_test_files"] == 1
+    assert baseline["summary"]["total_instruction_files"] == 1
+
+
+def test_entropy_baseline_writer_v1_summary_sibling_counts_match_first_write_and_replacement(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "services" / "api" / "main.py", "VALUE = 1\n")
+    _write(tmp_path / "tests" / "test_api.py", "def test_api() -> None:\n    pass\n")
+    _write(tmp_path / "docs" / "test_docs.py", "def test_docs() -> None:\n    pass\n")
+    _write(tmp_path / "AGENTS.md", "Instructions.\n")
+    _write(tmp_path / "docs" / "AGENTS.md", "Docs-local instructions.\n")
+
+    inventory = write_entropy_baseline._baseline_file_inventory(tmp_path)
+    assert inventory.total_test_files == 2
+    assert inventory.v1_summary_test_files == 1
+    assert inventory.total_instruction_files == 2
+    assert inventory.v1_summary_instruction_files == 1
+
+    first_result = write_entropy_baseline.write_entropy_baseline(tmp_path)
+    first_baseline = json.loads(first_result.baseline_path.read_text(encoding="utf-8"))
+    first_summary = first_baseline["summary"]
+
+    assert first_summary["total_test_files"] == 1
+    assert first_summary["total_instruction_files"] == 1
+
+    stale_latest_bytes = (
+        json.dumps(
+            {
+                "version": 1,
+                "summary": {
+                    "total_test_files": 247,
+                    "total_instruction_files": 3,
+                },
+            }
+        )
+        + "\n"
+    ).encode("utf-8")
+    first_result.baseline_path.write_bytes(stale_latest_bytes)
+
+    replacement_result = write_entropy_baseline.write_entropy_baseline(tmp_path)
+    replacement_baseline = json.loads(replacement_result.baseline_path.read_text(encoding="utf-8"))
+    replacement_summary = replacement_baseline["summary"]
+
+    assert replacement_summary["total_test_files"] == first_summary["total_test_files"]
+    assert replacement_summary["total_instruction_files"] == first_summary["total_instruction_files"]
+    assert replacement_summary["total_test_files"] == inventory.v1_summary_test_files
+    assert replacement_summary["total_instruction_files"] == inventory.v1_summary_instruction_files
+    assert replacement_summary["total_test_files"] != 247
+    assert replacement_summary["total_instruction_files"] != 3
+    assert replacement_result.archive_path is not None
+    assert replacement_result.archive_path.read_bytes() == stale_latest_bytes
+    assert not (tmp_path / ".entropy-baseline" / ".latest.json.tmp").exists()
 
 
 def test_entropy_baseline_writer_v1_summary_source_count_excludes_context_families(
@@ -667,6 +720,109 @@ def test_entropy_baseline_writer_fails_before_writing_when_snapshot_changes(
     assert not (baseline_dir / ".latest.json.tmp").exists()
 
 
+def test_entropy_baseline_writer_rejects_untracked_report_visible_files_before_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / "docs" / "tracked.md", "Current docs are clean.\n")
+    _commit_all(tmp_path, "initial tracked docs")
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    _write(tmp_path / "docs" / "local.md", "Untracked local note still mentions /hydro-met.\n")
+
+    assert any(
+        finding["evidence_path"] == "docs/local.md"
+        for finding in audit_repo_entropy.build_report(tmp_path)["findings"]
+        if finding["check_id"] == "stale-display-route-token"
+    )
+
+    def unexpected_build_report(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("writer dirty preflight must run before report generation")
+
+    monkeypatch.setattr(write_entropy_baseline.audit_repo_entropy, "build_report", unexpected_build_report)
+
+    with pytest.raises(write_entropy_baseline.BaselineWriteError, match="dirty or untracked paths"):
+        write_entropy_baseline.write_entropy_baseline(tmp_path)
+
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
+def test_entropy_baseline_writer_rejects_dirty_tracked_report_visible_files_before_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / "docs" / "active.md", "Current docs are clean.\n")
+    _commit_all(tmp_path, "initial tracked docs")
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    _write(tmp_path / "docs" / "active.md", "Dirty tracked docs still mention /hydro-met.\n")
+
+    assert any(
+        finding["evidence_path"] == "docs/active.md"
+        for finding in audit_repo_entropy.build_report(tmp_path)["findings"]
+        if finding["check_id"] == "stale-display-route-token"
+    )
+
+    def unexpected_build_report(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("writer dirty preflight must run before report generation")
+
+    monkeypatch.setattr(write_entropy_baseline.audit_repo_entropy, "build_report", unexpected_build_report)
+
+    with pytest.raises(write_entropy_baseline.BaselineWriteError, match="dirty or untracked paths"):
+        write_entropy_baseline.write_entropy_baseline(tmp_path)
+
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
+def test_entropy_baseline_writer_rejects_untracked_report_visible_files_created_during_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_git(tmp_path)
+    _write(tmp_path / "docs" / "tracked.md", "Current docs are clean.\n")
+    _commit_all(tmp_path, "initial tracked docs")
+    previous_bytes = b'{"previous": true}\n'
+    baseline_dir = tmp_path / ".entropy-baseline"
+    latest = baseline_dir / "latest.json"
+    baseline_dir.mkdir()
+    latest.write_bytes(previous_bytes)
+    real_build_report = write_entropy_baseline.audit_repo_entropy.build_report
+
+    def creating_untracked_build_report(
+        repo_root: Path,
+        *,
+        mode: audit_repo_entropy.AuditMode = "report",
+    ) -> dict[str, object]:
+        report = real_build_report(repo_root, mode=mode)
+        _write(tmp_path / "docs" / "local.md", "Untracked local note still mentions /hydro-met.\n")
+        return report
+
+    monkeypatch.setattr(
+        write_entropy_baseline.audit_repo_entropy,
+        "build_report",
+        creating_untracked_build_report,
+    )
+
+    with pytest.raises(write_entropy_baseline.BaselineWriteError, match="dirty or untracked paths"):
+        write_entropy_baseline.write_entropy_baseline(tmp_path)
+
+    assert latest.read_bytes() == previous_bytes
+    assert _baseline_archive_files(baseline_dir) == []
+    assert not (baseline_dir / ".latest.json.tmp").exists()
+
+
 def test_git_tracked_paths_preserves_non_ascii_path_identity(tmp_path: Path) -> None:
     _init_git(tmp_path)
     unicode_path = "docs/说明.md"
@@ -694,6 +850,7 @@ def test_entropy_baseline_writer_snapshot_uses_unicode_paths_before_mutation(
     _write(tmp_path / unicode_path, "Current docs still mention /hydro-met.\n")
     subprocess.run(["git", "config", "core.quotePath", "true"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", unicode_path], cwd=tmp_path, check=True)
+    _commit_all(tmp_path, "initial unicode docs")
     previous_bytes = b'{"previous": true}\n'
     baseline_dir = tmp_path / ".entropy-baseline"
     latest = baseline_dir / "latest.json"
@@ -2278,3 +2435,22 @@ def _track_generated_artifact(root: Path) -> None:
 
 def _init_git(root: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+
+
+def _commit_all(root: Path, message: str) -> None:
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Entropy Test",
+            "-c",
+            "user.email=entropy-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+        cwd=root,
+        check=True,
+    )

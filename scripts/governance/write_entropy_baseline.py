@@ -25,6 +25,7 @@ TEMP_LATEST_NAME = ".latest.json.tmp"
 MAX_ARCHIVED_LATEST_BYTES = 2_097_152
 COPY_CHUNK_BYTES = 1_048_576
 MAX_BASELINE_INVENTORY_FILES = 50_000
+MAX_WORKTREE_STATUS_PATHS_IN_ERROR = 5
 V1_SOURCE_MODULE_ROOTS = frozenset(
     {
         "apps",
@@ -167,6 +168,7 @@ def write_entropy_baseline(repo_root: Path, *, now: datetime | None = None) -> B
     if _path_exists_or_is_symlink(latest_path):
         _validate_existing_latest_for_archive(latest_path)
 
+    _assert_report_visible_worktree_clean(root)
     before_inventory = _baseline_file_inventory(root)
     before_snapshot = _snapshot_identity(root, file_inventory=before_inventory)
     report = audit_repo_entropy.build_report(root, mode="report")
@@ -181,6 +183,7 @@ def write_entropy_baseline(repo_root: Path, *, now: datetime | None = None) -> B
     after_snapshot = _snapshot_identity(root, file_inventory=file_inventory)
     if after_snapshot != before_snapshot:
         raise BaselineWriteError("repository snapshot changed during baseline generation")
+    _assert_report_visible_worktree_clean(root)
     baseline_bytes = (json.dumps(baseline, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
     baseline_dir = _prepare_baseline_dir(root)
@@ -438,7 +441,9 @@ def _baseline_file_inventory(root: Path) -> BaselineFileInventory:
     source_count = 0
     v1_summary_source_count = 0
     test_count = 0
+    v1_summary_test_count = 0
     instruction_count = 0
+    v1_summary_instruction_count = 0
     module_file_counts: dict[str, int] = {}
 
     inventory_paths = _baseline_inventory_relative_paths(root)
@@ -455,20 +460,19 @@ def _baseline_file_inventory(root: Path) -> BaselineFileInventory:
 
         if _baseline_path_is_instruction(relative_path):
             instruction_count += 1
+            if _baseline_path_is_v1_summary_instruction_counted(relative_path):
+                v1_summary_instruction_count += 1
             continue
         if _baseline_path_is_test(relative_path):
             test_count += 1
+            if _baseline_path_is_v1_summary_test_counted(relative_path):
+                v1_summary_test_count += 1
             continue
 
         source_count += 1
         if _baseline_path_is_v1_summary_source_counted(relative_path):
             v1_summary_source_count += 1
 
-    v1_summary_test_count, v1_summary_instruction_count = _baseline_v1_summary_sibling_counts(
-        root,
-        narrow_test_count=test_count,
-        narrow_instruction_count=instruction_count,
-    )
     return BaselineFileInventory(
         relative_paths=tuple(inventory_paths),
         file_fingerprints=tuple(file_fingerprints),
@@ -480,46 +484,6 @@ def _baseline_file_inventory(root: Path) -> BaselineFileInventory:
         v1_summary_instruction_files=v1_summary_instruction_count,
         module_file_counts=dict(sorted(module_file_counts.items())),
     )
-
-
-def _baseline_v1_summary_sibling_counts(
-    root: Path,
-    *,
-    narrow_test_count: int,
-    narrow_instruction_count: int,
-) -> tuple[int, int]:
-    previous_summary = _previous_v1_baseline_summary(root)
-    return (
-        _baseline_v1_summary_compatible_count(
-            previous_summary.get("total_test_files"),
-            narrow_test_count,
-        ),
-        _baseline_v1_summary_compatible_count(
-            previous_summary.get("total_instruction_files"),
-            narrow_instruction_count,
-        ),
-    )
-
-
-def _baseline_v1_summary_compatible_count(previous_count: object, narrow_count: int) -> int:
-    # The persisted v1 sibling counters predate the newer narrow text-inventory
-    # classifier. When an existing v1 baseline has this field, keep that v1 unit
-    # instead of writing the narrow count under the old field name.
-    if type(previous_count) is int:
-        return previous_count
-    return narrow_count
-
-
-def _previous_v1_baseline_summary(root: Path) -> dict[str, object]:
-    latest_path = root / BASELINE_DIR_NAME / LATEST_BASELINE_NAME
-    try:
-        baseline = json.loads(latest_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    if not isinstance(baseline, dict) or baseline.get("version") != 1:
-        return {}
-    summary = baseline.get("summary")
-    return summary if isinstance(summary, dict) else {}
 
 
 def _baseline_inventory_relative_paths(root: Path) -> list[str]:
@@ -637,6 +601,82 @@ def _baseline_path_is_v1_summary_source_counted(relative_path: str) -> bool:
         not _baseline_path_is_instruction(relative_path)
         and not _baseline_path_is_test(relative_path)
     )
+
+
+def _baseline_path_is_v1_summary_test_counted(relative_path: str) -> bool:
+    return _baseline_path_is_test(relative_path) and _baseline_path_is_v1_summary_sibling_counted(relative_path)
+
+
+def _baseline_path_is_v1_summary_instruction_counted(relative_path: str) -> bool:
+    return _baseline_path_is_instruction(relative_path) and _baseline_path_is_v1_summary_sibling_counted(
+        relative_path
+    )
+
+
+def _baseline_path_is_v1_summary_sibling_counted(relative_path: str) -> bool:
+    # Keep v1 summary sibling counters current while using the same conservative
+    # context-root exclusions as the v1 source summary. Root-level test and
+    # instruction files remain countable under their own classifiers.
+    parts = Path(relative_path).parts
+    return bool(parts) and parts[0] not in V1_SUMMARY_EXCLUDED_ROOTS
+
+
+def _assert_report_visible_worktree_clean(root: Path) -> None:
+    if _git_output(root, "rev-parse", "--is-inside-work-tree") != "true":
+        return
+
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise BaselineWriteError("unable to inspect git worktree status") from exc
+    if result.returncode != 0:
+        raise BaselineWriteError("unable to inspect git worktree status")
+
+    changed_paths = [
+        relative_path
+        for relative_path in _git_status_porcelain_z_paths(result.stdout)
+        if not _baseline_path_is_file_count_skipped(relative_path)
+    ]
+    if not changed_paths:
+        return
+
+    sample = ", ".join(changed_paths[:MAX_WORKTREE_STATUS_PATHS_IN_ERROR])
+    if len(changed_paths) > MAX_WORKTREE_STATUS_PATHS_IN_ERROR:
+        sample = f"{sample}, ..."
+    raise BaselineWriteError(
+        "git worktree has dirty or untracked paths outside .entropy-baseline; "
+        f"commit or clean them before writing an entropy baseline: {sample}"
+    )
+
+
+def _git_status_porcelain_z_paths(output: bytes) -> list[str]:
+    records = output.split(b"\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        if len(record) < 4:
+            continue
+
+        status = record[:2]
+        path_bytes = record[3:] if record[2:3] == b" " else record[2:]
+        if path_bytes:
+            paths.append(os.fsdecode(path_bytes))
+        if (b"R" in status or b"C" in status) and index < len(records):
+            source_path = records[index]
+            index += 1
+            if source_path:
+                paths.append(os.fsdecode(source_path))
+    return sorted(set(paths))
 
 
 def _baseline_high_spread_patterns(
