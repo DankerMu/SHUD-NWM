@@ -2299,12 +2299,231 @@ def test_entropy_audit_apps_api_layer_inversion_remains_standalone_report_only_f
     assert metadata["hard_gate_failing_count"] == 0
 
 
+def test_route_authority_current_runbook_active_legacy_alias_is_report_only_drift(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        "Open /forecast for current live browser proof.\n",
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["check_id"] == "stale-display-route-token"
+    assert finding["evidence_path"] == "docs/runbooks/current.md"
+    assert "/forecast" in finding["description"]
+    assert finding["allowlist_state"] == "unallowlisted"
+    assert finding["allowlist_key"] is None
+    assert finding["budget_counted"] is True
+    assert finding["gate_eligible"] is False
+
+
+def test_route_authority_historical_runbook_banner_allowlists_deep_legacy_evidence(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "historical.md",
+        """
+        > **Historical / superseded by M26**: frozen smoke evidence.
+        > Current route authority is the M26 single-map `/` display entrypoint.
+
+        # Historical smoke evidence
+
+        Preserved run output:
+
+        1. Open /hydro-met for current live browser proof.
+        2. Visit /forecast for current display proof.
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 2
+    assert {finding["evidence_path"] for finding in findings} == {
+        "docs/runbooks/historical.md",
+    }
+    assert {finding["allowlist_reason"] for finding in findings} == {
+        "historical plan or pre-M26 display evidence",
+    }
+    assert {finding["allowlist_key"] for finding in findings} == {
+        "stale-display-route-token:historical-plan-or-pre-m26-evidence",
+    }
+    assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
+    assert all(finding["budget_counted"] is False for finding in findings)
+    assert all(finding["gate_eligible"] is False for finding in findings)
+
+
+def test_route_authority_current_runbook_allowlist_contexts_are_distinct(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        /hydro-met -> / redirect alias
+        Compatibility context keeps /meteorology deep links
+        Historical pre-M26 evidence used /flood-alerts
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_token = _route_authority_findings_by_token(findings)
+
+    assert set(by_token) == {"/hydro-met", "/meteorology", "/flood-alerts"}
+    redirect = by_token["/hydro-met"]
+    compatibility = by_token["/meteorology"]
+    historical = by_token["/flood-alerts"]
+    assert redirect["allowlist_reason"] == "M26 route-consolidation redirect alias"
+    assert redirect["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
+    assert compatibility["allowlist_reason"] == "legacy route compatibility context"
+    assert compatibility["allowlist_key"] == "stale-display-route-token:legacy-route-compatibility-context"
+    assert historical["allowlist_reason"] == "historical plan or pre-M26 display evidence"
+    assert historical["allowlist_key"] == "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+    assert len({finding["allowlist_reason"] for finding in findings}) == 3
+    assert len({finding["allowlist_key"] for finding in findings}) == 3
+    assert all(finding["allowlist_state"] == "allowlisted" for finding in findings)
+    assert all(finding["budget_counted"] is False for finding in findings)
+    assert all(finding["gate_eligible"] is False for finding in findings)
+
+
+def test_route_authority_legacy_alias_coverage_includes_all_current_redirect_forms(
+    tmp_path: Path,
+) -> None:
+    expected_tokens = {
+        "/overview",
+        "/hydro-met",
+        "/forecast",
+        "/meteorology",
+        "/flood-alerts",
+        "/basins/:id",
+        "/segments/:id",
+        "/basins/demo",
+        "/segments/demo",
+    }
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        "\n".join(f"Open {token} for current live browser proof." for token in sorted(expected_tokens)),
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == len(expected_tokens)
+    descriptions = "\n".join(str(finding["description"]) for finding in findings)
+    for token in expected_tokens:
+        assert token in descriptions
+
+
+def test_route_authority_expanded_aliases_do_not_scan_frontend_e2e_unless_old_token(
+    tmp_path: Path,
+) -> None:
+    e2e_path = tmp_path / "apps" / "frontend" / "e2e" / "m11-routes.spec.ts"
+    _write(
+        e2e_path,
+        """
+        await page.goto('/overview')
+        await page.goto('/forecast')
+        await page.goto('/flood-alerts')
+        await page.goto('/basins/demo')
+        await page.goto('/segments/demo')
+        """,
+    )
+
+    assert _route_authority_findings(tmp_path) == []
+
+    _write(
+        e2e_path,
+        """
+        await page.goto('/overview')
+        await page.goto('/forecast')
+        await page.goto('/flood-alerts')
+        await page.goto('/basins/demo')
+        await page.goto('/segments/demo')
+        await page.goto('/hydro-met')
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["evidence_path"] == "apps/frontend/e2e/m11-routes.spec.ts"
+    assert "/hydro-met" in finding["description"]
+    assert all(
+        token not in str(finding["description"])
+        for token in ("/overview", "/forecast", "/flood-alerts", "/basins/demo", "/segments/demo")
+    )
+
+
+def test_route_authority_expanded_aliases_do_not_scan_app_route_source_of_truth(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "apps" / "frontend" / "src" / "App.tsx",
+        """
+        <Route path="/overview" element={<LegacyRedirect />} />
+        <Route path="/forecast" element={<LegacyRedirect />} />
+        <Route path="/flood-alerts" element={<LegacyRedirect />} />
+        <Route
+          path="/basins/:basinId"
+          element={<LegacyRedirect param={{ name: 'basinId', queryKey: 'basinId' }} />}
+        />
+        <Route
+          path="/segments/:segmentId"
+          element={<LegacyRedirect param={{ name: 'segmentId', queryKey: 'segmentId' }} />}
+        />
+        """,
+    )
+
+    assert _route_authority_findings(tmp_path) == []
+
+
+def test_route_authority_expanded_aliases_do_not_scan_frontend_fixtures(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "apps" / "frontend" / "src" / "fixtures" / "routes.ts",
+        """
+        export const fixtureRoutes = [
+          '/overview',
+          '/forecast',
+          '/flood-alerts',
+          '/basins/demo',
+          '/segments/demo',
+        ]
+        """,
+    )
+
+    assert _route_authority_findings(tmp_path) == []
+
+
+def test_route_authority_skips_generated_artifact_roots(tmp_path: Path) -> None:
+    _write(tmp_path / "artifacts" / "generated.md", "Open /overview for current proof.\n")
+
+    assert _route_authority_findings(tmp_path) == []
+
+
 def _findings_by_check(root: Path, check_id: str) -> list[dict[str, object]]:
     return [
         finding
         for finding in audit_repo_entropy.build_report(root)["findings"]
         if finding["check_id"] == check_id
     ]
+
+
+def _route_authority_findings(root: Path) -> list[dict[str, object]]:
+    return _findings_by_check(root, "stale-display-route-token")
+
+
+def _route_authority_findings_by_token(
+    findings: Iterable[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    by_token: dict[str, dict[str, object]] = {}
+    for finding in findings:
+        description = str(finding["description"])
+        for match in audit_repo_entropy.LEGACY_DISPLAY_ROUTE_PATTERN.finditer(description):
+            by_token[match.group("token")] = finding
+    return by_token
 
 
 def _run_entropy_audit_cli(
