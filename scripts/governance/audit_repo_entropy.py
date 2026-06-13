@@ -236,6 +236,7 @@ class _StaleRouteContextFactory:
         self._list_item_contexts: dict[int, tuple[_StaleRouteStructuralContext, ...]] = {}
         self._table_ranges: dict[int, tuple[int, int]] = {}
         self._paragraph_ranges: dict[int, tuple[int, int]] = {}
+        self._paragraph_contexts: dict[tuple[int, int], _StaleRouteStructuralContext] = {}
 
     def line_context(self, line_index: int) -> _StaleRouteLineContext:
         line_context = self._line_contexts.get(line_index)
@@ -284,6 +285,9 @@ class _StaleRouteContextFactory:
         if list_start is not None:
             return self._list_item_context(list_start, line_index)
         start, end = self._paragraph_range(line_index)
+        cached = self._paragraph_contexts.get((start, end))
+        if cached is not None:
+            return cached
         governing_text = _stale_route_paragraph_governing_text_for_range(
             lines,
             line_index,
@@ -291,10 +295,12 @@ class _StaleRouteContextFactory:
             start,
             end,
         )
-        return _StaleRouteStructuralContext(
+        context = _StaleRouteStructuralContext(
             governing_text=governing_text,
             redirect_governing_text=governing_text,
         )
+        self._paragraph_contexts[(start, end)] = context
+        return context
 
     def _table_range(self, line_index: int) -> tuple[int, int]:
         cached = self._table_ranges.get(line_index)
@@ -2164,13 +2170,17 @@ def _stale_route_duplicate_key(
     token_start: int,
 ) -> _StaleRouteDuplicateKey:
     clause_index = max(0, bisect_right(line_context.clause_starts, token_start) - 1)
+    token_end = token_start + len(token)
     if line_context.clause_has_per_mention_redirect_syntax[clause_index]:
         clause_key = (
             line_context.clause_texts[clause_index],
-            _route_arrow_shape_near_token(line_context, clause_index, token_start, token_start + len(token)),
+            _route_arrow_shape_near_token(line_context, clause_index, token_start, token_end),
         )
     else:
-        clause_key = line_context.mention_governing_texts[clause_index]
+        clause_key = (
+            line_context.mention_governing_texts[clause_index],
+            _stale_route_mention_semantic_key(line_context, clause_index, token_start, token_end),
+        )
     return (
         token,
         clause_key,
@@ -2178,6 +2188,77 @@ def _stale_route_duplicate_key(
         _stale_route_redirect_governing_text(line_context, clause_index),
         line_context.has_historical_route_authority_banner,
         line_context.document_has_historical_route_authority_banner,
+    )
+
+
+def _stale_route_mention_semantic_key(
+    line_context: _StaleRouteLineContext,
+    clause_index: int,
+    token_start: int,
+    token_end: int,
+) -> str:
+    left, right = _stale_route_mention_clause_bounds(line_context, clause_index, token_start, token_end)
+    mention_text = line_context.line[left:right].strip()
+    mention_tokens = set(_normalized_reason_text(mention_text).split())
+    if _route_token_is_route_valued(line_context.line, left, right, token_start, token_end):
+        if _line_has_active_route_valued_context(mention_text, mention_tokens, redirect_text=""):
+            return "active-local"
+    if _stale_route_mention_has_redirect_syntax(line_context.line, left, right, token_start, token_end):
+        return "redirect-local"
+    if _line_has_active_route_instruction_context(mention_text) or _line_has_active_route_valued_context(
+        mention_text,
+        mention_tokens,
+        redirect_text="",
+    ):
+        return "active-local"
+    return "context-local"
+
+
+def _stale_route_mention_has_redirect_syntax(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+) -> bool:
+    if _route_arrow_points_from_token(line, token_start, token_end) or _route_arrow_points_to_token(line, token_start):
+        return True
+    clause = line[left:right]
+    if "->" in clause or "→" in clause:
+        return False
+    token_is_route_valued = _route_token_is_route_valued(line, left, right, token_start, token_end)
+    following_route_valued = ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.search(clause, token_end - left)
+    word_start_limit = right
+    if following_route_valued is not None:
+        word_start_limit = left + following_route_valued.start()
+    for match in ROUTE_REDIRECT_WORD_PATTERN.finditer(clause):
+        word_start = left + match.start()
+        if word_start >= word_start_limit:
+            continue
+        word_end = left + match.end()
+        if token_end <= word_start:
+            segment = line[token_end:word_start]
+        elif token_start >= word_end:
+            if token_is_route_valued:
+                continue
+            segment = line[word_end:token_start]
+        else:
+            return True
+        if _route_redirect_connector_segment(segment):
+            return True
+    return False
+
+
+def _route_token_is_route_valued(
+    line: str,
+    left: int,
+    right: int,
+    token_start: int,
+    token_end: int,
+) -> bool:
+    return any(
+        match.start("token") == token_start and match.end("token") == token_end
+        for match in ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.finditer(line, left, right)
     )
 
 
@@ -2273,17 +2354,27 @@ def _stale_route_mention_redirect_span(
     clause = line[left:right]
     if "->" in clause or "→" in clause:
         return ""
+    token_is_route_valued = _route_token_is_route_valued(line, left, right, token_start, token_end)
+    following_route_valued = ROUTE_VALUED_LEGACY_DISPLAY_ROUTE_PATTERN.search(clause, token_end - left)
+    span_right = word_start_limit = right
+    if following_route_valued is not None:
+        span_right = left + following_route_valued.start()
+        word_start_limit = span_right
     for match in ROUTE_REDIRECT_WORD_PATTERN.finditer(clause):
         word_start = left + match.start()
+        if word_start >= word_start_limit:
+            continue
         word_end = left + match.end()
         if token_end <= word_start:
             segment = line[token_end:word_start]
         elif token_start >= word_end:
+            if token_is_route_valued:
+                continue
             segment = line[word_end:token_start]
         else:
-            return line[left:right].strip()
+            return line[left:span_right].strip()
         if _route_redirect_connector_segment(segment):
-            return line[left:right].strip()
+            return line[left:span_right].strip()
     return ""
 
 
