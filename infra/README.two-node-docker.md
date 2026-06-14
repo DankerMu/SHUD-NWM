@@ -15,10 +15,10 @@
 
 | 节点 | 角色 | 能力 | 禁止事项 |
 | --- | --- | --- | --- |
-| 22 | `compute_control` | writer DB、writable workspace、writable published artifacts、scheduler-once、Slurm/Gateway 访问 | 不暴露公网控制入口 |
-| 27 | `display_readonly` | readonly DB、readonly published artifacts、FastAPI/frontend display、`/ops` 只读诊断 | 不挂 Slurm/Munge、workspace、Basins、Docker socket，不配置 Gateway URL，不写业务终态 |
+| 22 | `compute_control` | writer DB、writable workspace、writable published artifacts、writable shared object-store mirror、scheduler-once、Slurm/Gateway 访问 | 不暴露公网控制入口 |
+| 27 | `display_readonly` | readonly DB、readonly published artifacts、readonly shared object-store mirror、FastAPI/frontend display、`/ops` 只读诊断 | 不挂 Slurm/Munge、workspace、Basins、Docker socket，不配置 Gateway URL，不写业务终态 |
 
-共享面只允许是 PostgreSQL 和 published artifacts。27 不能通过挂载 22 私有 workspace、`.nhms-runs`、private `/scratch` 或 mock Gateway 来完成生产验收。
+共享面只允许是 PostgreSQL、published artifacts 和只读 shared object-store mirror。27 不能通过挂载 22 私有 workspace、`.nhms-runs`、private `/scratch` 或 mock Gateway 来完成生产验收。
 
 当前两节点发布目录约定：
 
@@ -80,6 +80,8 @@ NHMS_SERVICE_ROLE=compute_control
 NHMS_REQUIRE_SERVICE_ROLE=true
 DATABASE_URL=postgresql://<writer-user>:<secret>@<db-host>:5432/<db-name>
 WORKSPACE_ROOT=<node-22-writable-workspace>
+OBJECT_STORE_ROOT=<node-22-compute-visible-object-store>
+NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
 NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/ghdc/data/nwm/published
 NHMS_BASINS_ROOT=<node-22-basins-root>
 NHMS_MODEL_ASSET_ROOT=<node-22-model-assets-root>
@@ -119,6 +121,11 @@ WORKSPACE_ROOT
 RUN_WORKSPACE_ROOT
 SHARED_LOG_ROOT
 OBJECT_STORE_ROOT
+NHMS_OBJECT_STORE_COPYBACK_ROOT
+NHMS_SCHEDULER_LOCK_ROOT
+NHMS_SCHEDULER_EVIDENCE_ROOT
+NHMS_SCHEDULER_RUNTIME_ROOT
+NHMS_SCHEDULER_TEMP_ROOT
 NHMS_BASINS_ROOT
 NHMS_MODEL_ASSET_ROOT
 SLURM_GATEWAY_TEMPLATE_DIR
@@ -450,9 +457,10 @@ minimal submit probe evidence
 如果后续容器化 Gateway，只能在 22 启用，且必须单独证明 Slurm/Munge/container 边界；不能把 Gateway 容器或 Slurm/Munge 挂载加入 27 display compose。
 
 当前 22 live probe 暴露的站点边界是：Slurm 计算节点可能没有 `/ghdc` 挂载。此时 `/ghdc/data/nwm/published`
-仍然是 22 与 27 的发布共享面，但不应作为 sbatch runtime workspace。sbatch 应使用计算节点可见的
-workspace/object-store 路径；完成后由 22 publish/copyback 到 `/ghdc/data/nwm/published`，27 再从
-`/home/ghdc/nwm/published` 只读读取。
+仍然是 22 与 27 的展示发布共享面，但不应作为 sbatch runtime workspace。sbatch 应使用计算节点可见的
+workspace/object-store 路径；完成后由 22 publish/copyback 把完整 `runs/<run_id>/...` 同步到
+`/ghdc/data/nwm/object-store`，把展示瓦片、manifest 和日志写到 `/ghdc/data/nwm/published`。27 分别从
+`/home/ghdc/nwm/object-store` 和 `/home/ghdc/nwm/published` 只读读取。
 
 ## 11. Security Probes
 
@@ -564,6 +572,11 @@ docker compose --env-file "$CHECKOUT_ROOT/infra/env/display.env" -f "$CHECKOUT_R
     RUN_WORKSPACE_ROOT \
     SHARED_LOG_ROOT \
     OBJECT_STORE_ROOT \
+    NHMS_OBJECT_STORE_COPYBACK_ROOT \
+    NHMS_SCHEDULER_LOCK_ROOT \
+    NHMS_SCHEDULER_EVIDENCE_ROOT \
+    NHMS_SCHEDULER_RUNTIME_ROOT \
+    NHMS_SCHEDULER_TEMP_ROOT \
     NHMS_BASINS_ROOT \
     NHMS_MODEL_ASSET_ROOT \
     SLURM_GATEWAY_TEMPLATE_DIR \

@@ -18,6 +18,7 @@ DATABASE_URL=postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhm
 WORKSPACE_ROOT=/scratch/frd_muziyao/nhms-production/workspace
 OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-production/object-store
 OBJECT_STORE_PREFIX=s3://nhms-prod
+NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
 
 NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/ghdc/data/nwm/published
 NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
@@ -37,7 +38,7 @@ NHMS_SCHEDULER_LOCK_BACKEND=postgres
 NHMS_SCHEDULER_EVIDENCE_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/evidence
 NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
 NHMS_SCHEDULER_TEMP_ROOT=/scratch/frd_muziyao/nhms-production/tmp
-NHMS_SCHEDULER_ALLOWED_ROOTS=/scratch/frd_muziyao/nhms-production/workspace:/scratch/frd_muziyao/nhms-production/object-store:/scratch/frd_muziyao/nhms-production/runtime:/scratch/frd_muziyao/nhms-production/tmp:/var/lib/nhms/published
+NHMS_SCHEDULER_ALLOWED_ROOTS=/scratch/frd_muziyao/nhms-production/workspace:/scratch/frd_muziyao/nhms-production/object-store:/scratch/frd_muziyao/nhms-production/runtime:/scratch/frd_muziyao/nhms-production/tmp:/ghdc/data/nwm/object-store:/var/lib/nhms/published
 NHMS_SCHEDULER_SOURCES=gfs,IFS
 NHMS_SCHEDULER_MODEL_IDS=basins_qhh_shud
 NHMS_SCHEDULER_BASIN_IDS=basins_qhh

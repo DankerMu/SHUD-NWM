@@ -22,6 +22,10 @@ reviewable burn-down plan rather than another broad cleanup queue.
   `services/orchestrator/scheduler.py` and `services/orchestrator/chain.py`
   into small PRs with compatibility shims, stable evidence keys, and focused
   tests.
+- Harden the approved production copyback/runtime boundary for two-node
+  operation: `NHMS_OBJECT_STORE_COPYBACK_ROOT` remains compute-only, shared run
+  products are validated with no-follow traversal, and q_down display artifacts
+  become visible only after required copyback succeeds.
 - Keep Governance Audit report-only; this change does not enable entropy
   hard-gates, rewrite Slurm reservation semantics, or delete legacy
   compatibility behavior.
@@ -60,6 +64,9 @@ documentation, evidence, and behavior-preserving internal refactor work. -->
 - Orchestrator internals: `services/orchestrator/scheduler.py`,
   `services/orchestrator/chain.py`, and new small modules under
   `services/orchestrator/`.
+- Production runtime/copyback boundary: `services/tile_publisher/publisher.py`,
+  `apps/api/runtime_mode.py`, two-node Docker runtime validation, compute/display
+  env examples, and the two-node deployment docs/runbooks.
 - Tests: focused scheduler, chain, retry, backfill, role-boundary, entropy
   audit, and frontend mocked/live evidence tests.
 - Non-goals: no CI hard-gate enablement, no `.entropy-baseline/latest.json`

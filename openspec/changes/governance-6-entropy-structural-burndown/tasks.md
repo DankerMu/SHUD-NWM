@@ -34,9 +34,9 @@ separate PR boundaries.
   pre-M26 `/hydro-met` execution steps.
 - [ ] 2.5 Add or update the route-authority check in
   `scripts/governance/audit_repo_entropy.py` for current docs/runbooks,
-  covering `/hydro-met`, `/forecast`, `/meteorology`, `/flood-alerts`,
-  `/basins/:id`, and `/segments/:id` with explicit allowlist classes for
-  historical evidence, redirect aliases, and compatibility context.
+  covering `/overview`, `/hydro-met`, `/forecast`, `/meteorology`,
+  `/flood-alerts`, `/basins/:id`, and `/segments/:id` with explicit allowlist
+  classes for historical evidence, redirect aliases, and compatibility context.
 
 ## 3. Mocked/Live Evidence Boundary
 
@@ -111,7 +111,12 @@ separate PR boundaries.
   execution orchestration helpers that do not own lease or candidate-state
   semantics.
 - [ ] 9.2 Preserve `run_once` ordering and mutation fences.
-- [ ] 9.3 Verify with focused forcing and concurrent candidate tests.
+- [ ] 9.3 Preserve scheduler runtime-root preflight semantics: missing
+  `published_artifact_root` is a control publish-stage creatable root, while
+  missing workspace, object-store, runtime, temp, lock, and evidence roots still
+  block before registry, adapter, active-repository, or submission work.
+- [ ] 9.4 Verify with focused forcing, concurrent candidate, and runtime-root
+  preflight tests.
 
 ## 10. Scheduler Evidence Extraction
 
@@ -331,8 +336,42 @@ separate PR boundaries.
 - PR Boundary: Route-authority audit check and tests only.
 - Required Reading: `specs/evidence-boundary-hardening/spec.md`,
   `docs/governance/DOC_STATUS.md`, `apps/frontend/src/App.tsx`.
-- Acceptance: check covers all six legacy route forms and fails on active
-  current-runbook usage outside the allowlist classes.
+- Acceptance: check covers every current legacy redirect alias from
+  `DOC_STATUS.md`, including `/overview`, and fails on active current-runbook
+  usage outside the allowlist classes.
+- Fixture evidence:
+  - Route-authority drift test:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k route_authority`
+    with input `docs/runbooks/current.md: "Open /forecast for current live
+    browser proof."` -> exactly one route finding for `/forecast` with
+    `check_id=stale-display-route-token`, `allowlist_state=unallowlisted`,
+    `allowlist_key=null`, `budget_counted=true`, and `gate_eligible=false`.
+  - Route-authority allowlist test:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k route_authority`
+    with inputs `docs/runbooks/current.md: "/hydro-met -> / redirect alias"`,
+    `docs/runbooks/current.md: "Compatibility context keeps /meteorology deep
+    links"`, and `docs/runbooks/current.md: "Historical pre-M26 evidence used
+    /flood-alerts"` -> allowlisted findings with distinct
+    `allowlist_reason`/`allowlist_key` values for redirect, compatibility, and
+    historical classes.
+  - Legacy alias coverage test:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k route_authority`
+    with input lines containing `/overview`, `/hydro-met`, `/forecast`,
+    `/meteorology`, `/flood-alerts`, `/basins/:id`, `/segments/:id`,
+    `/basins/demo`, and `/segments/demo` -> every token is represented in
+    `stale-display-route-token` descriptions or evidence lines.
+  - Resource-discovery bound test:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k route_authority`
+    with input `artifacts/generated.md: "Open /overview"` -> no
+    `stale-display-route-token` finding for skipped artifact roots.
+  - Full focused audit test slice:
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py` -> pass.
+  - Static check:
+    `uv run --no-sync ruff check scripts/governance/audit_repo_entropy.py tests/test_entropy_audit_script.py`
+    -> pass.
+  - OpenSpec validation:
+    `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
 
 ### G6-05 Frontend mocked/live spec classification
 
@@ -484,11 +523,11 @@ separate PR boundaries.
 - Ownership: `services/orchestrator/scheduler.py`,
   `services/orchestrator/scheduler_execution.py`, forcing/concurrency tests.
 - In Scope: Extract forcing production, candidate cohort grouping, concurrent
-  submit evidence, and execution orchestration helpers that do not own lease or
-  candidate-state semantics.
+  submit evidence, runtime-root preflight behavior, and execution orchestration
+  helpers that do not own lease or candidate-state semantics.
 - Out of Scope: Evidence serialization helper extraction and chain stage
   behavior.
-- Tasks: 9.1, 9.2, 9.3.
+- Tasks: 9.1, 9.2, 9.3, 9.4.
 - Dependencies: G6-12.
 - PR Boundary: Scheduler execution helpers only.
 - Required Reading: `specs/orchestrator-structural-burndown/spec.md`,
@@ -496,7 +535,10 @@ separate PR boundaries.
 - Verification: `uv run --no-sync pytest -q tests/test_production_scheduler.py`
   plus `uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`.
 - Acceptance: `run_once` ordering and mutation fences remain stable; focused
-  forcing/concurrent candidate tests pass.
+  forcing/concurrent candidate tests pass; missing `published_artifact_root` is
+  reported as creatable/non-blocking for the control publish stage while other
+  missing runtime roots still block before registry, adapter, active-repository,
+  or submission work.
 
 ### G6-14 Scheduler evidence extraction
 
@@ -612,3 +654,43 @@ separate PR boundaries.
 - Required Reading: all specs in this change and linked sub-issue evidence.
 - Acceptance: OpenSpec strict validation passes, broader affected suite passes,
   and final cross-review reports no P0/P1 findings.
+
+### G6-20 PR #481 production copyback/runtime finalization
+
+- Implementation Ready: yes.
+- Ownership: `services/tile_publisher/publisher.py`,
+  `tests/test_tile_publisher.py`, two-node runtime validation/tests, env
+  examples, two-node docs/runbooks, and this OpenSpec fixture.
+- In Scope: Finalize the approved production behavior for
+  `NHMS_OBJECT_STORE_COPYBACK_ROOT`: no-follow source/root validation,
+  complete run-tree validation, exact-root equality semantics, rollback-safe
+  replacement, copyback-before-publication visibility, overlap rejection,
+  `ObjectStoreError` normalization, display-forbidden role boundary, and
+  docs/tests evidence.
+- Out of Scope: New display features, new storage backends, or entropy baseline
+  rewrites.
+- Tasks:
+  - [ ] 16.1 Preserve raw configured copyback root until no-follow validation
+    rejects symlink components; compare only verified real paths for equality,
+    overlap, and containment.
+  - [ ] 16.2 Validate every `runs/<run_id>` tree for manifest/output/log
+    completeness even when copyback root exactly equals object-store root.
+  - [ ] 16.3 Replace canonical copyback run trees with rollback-safe sibling
+    staging/backup semantics so failed promotion cannot expose partial run
+    products.
+  - [ ] 16.4 Stage q_down display artifacts until copyback succeeds; failed
+    first publish exposes no new manifest and failed republish leaves the
+    previous manifest/cycle pointer unchanged.
+  - [ ] 16.5 Keep compute-only runtime/env validation and docs aligned so
+    `display_readonly` cannot configure copyback or other compute-control path
+    env.
+  - [ ] 16.6 Verify with focused copyback, full tile publisher, runtime/static
+    Docker tests, ruff, strict OpenSpec validation, and `git diff --check`.
+- Dependencies: PR #481 issue #460 closure under epic #456.
+- PR Boundary: Approved local production copyback/runtime hardening only.
+- Required Reading: this addendum, `services/tile_publisher/publisher.py`,
+  `tests/test_tile_publisher.py`, runtime mode/static Docker validation tests,
+  and two-node env/docs.
+- Acceptance: confirmed copyback/runtime blockers close as a class-level fix and
+  forbidden files `.entropy-baseline/latest.json` and
+  `docs/runbooks/current-production-ops.md` remain untouched.

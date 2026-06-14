@@ -1912,6 +1912,7 @@ class ForecastOrchestrator:
                 database_url=os.getenv("DATABASE_URL", ""),
                 published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
                 published_artifact_uri_prefix=os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://"),
+                object_store_copyback_root=os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", ""),
             )
             payload = publisher.publish_cycle(context.cycle_id).to_dict()
             status = "succeeded"

@@ -140,6 +140,7 @@ DISPLAY_FORBIDDEN_ENV_KEYS = frozenset(
         "RUN_WORKSPACE_ROOT",
         "SHARED_LOG_ROOT",
         "OBJECT_STORE_ROOT",
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         *DISPLAY_FORBIDDEN_SCHEDULER_ROOT_ENV_KEYS,
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
@@ -206,6 +207,8 @@ COMPUTE_REQUIRED_RUNTIME_ENV = frozenset(
         "UV_CACHE_DIR",
         "DATABASE_URL",
         "WORKSPACE_ROOT",
+        "OBJECT_STORE_ROOT",
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         "NHMS_PUBLISHED_ARTIFACT_ROOT",
         "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
         "NHMS_PUBLISHED_ARTIFACT_S3_BUCKET",
@@ -245,6 +248,8 @@ NONEMPTY_RUNTIME_ENV = frozenset(
         "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS",
         "DATABASE_URL",
         "WORKSPACE_ROOT",
+        "OBJECT_STORE_ROOT",
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         "NHMS_PUBLISHED_ARTIFACT_ROOT",
         "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
         "NHMS_BASINS_ROOT",
@@ -262,6 +267,7 @@ COMPUTE_ONLY_PATH_ENV_KEYS = frozenset(
         "RUN_WORKSPACE_ROOT",
         "SHARED_LOG_ROOT",
         "OBJECT_STORE_ROOT",
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         "NHMS_BASINS_ROOT",
         "NHMS_MODEL_ASSET_ROOT",
         "NHMS_SCHEDULER_LOCK_ROOT",
@@ -364,6 +370,7 @@ COMPUTE_AUDITED_INTERPOLATION_ENV = frozenset(
         "DATABASE_URL",
         "WORKSPACE_ROOT",
         "OBJECT_STORE_ROOT",
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         "OBJECT_STORE_PREFIX",
         "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT",
         "NHMS_PUBLISHED_ARTIFACT_ROOT",
@@ -395,6 +402,7 @@ COMPUTE_AUDITED_RUNTIME_ENV = frozenset(
         "DATABASE_URL",
         "WORKSPACE_ROOT",
         "OBJECT_STORE_ROOT",
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         "OBJECT_STORE_PREFIX",
         "NHMS_PUBLISHED_ARTIFACT_ROOT",
         "NHMS_PUBLISHED_ARTIFACT_URI_PREFIX",
@@ -2021,6 +2029,7 @@ def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list
                         details={"key": key},
                     )
                 )
+        findings.extend(_compute_object_store_copyback_overlap_findings(path, env))
     if role == "display":
         for key in ("DATABASE_URL", "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
             if not env.get(key, "").strip():
@@ -2043,6 +2052,37 @@ def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list
                     )
                 )
     return findings
+
+
+def _compute_object_store_copyback_overlap_findings(path: Path, env: Mapping[str, str]) -> list[Finding]:
+    object_store_root = env.get("OBJECT_STORE_ROOT", "").strip()
+    copyback_root = env.get("NHMS_OBJECT_STORE_COPYBACK_ROOT", "").strip()
+    if not object_store_root or not copyback_root:
+        return []
+    normalized_object_store_root = _normalize_posix_path(object_store_root)
+    normalized_copyback_root = _normalize_posix_path(copyback_root)
+    if not normalized_object_store_root.startswith("/") or not normalized_copyback_root.startswith("/"):
+        return []
+    if normalized_object_store_root == normalized_copyback_root:
+        return []
+    if _posix_path_is_child(normalized_copyback_root, normalized_object_store_root):
+        relationship = "copyback_root_under_object_store_root"
+    elif _posix_path_is_child(normalized_object_store_root, normalized_copyback_root):
+        relationship = "object_store_root_under_copyback_root"
+    else:
+        return []
+    return [
+        Finding(
+            "COMPUTE_OBJECT_STORE_COPYBACK_ROOT_OVERLAP",
+            "NHMS_OBJECT_STORE_COPYBACK_ROOT must not overlap OBJECT_STORE_ROOT except for exact equality.",
+            path=str(path),
+            details={
+                "object_store_root": normalized_object_store_root,
+                "copyback_root": normalized_copyback_root,
+                "relationship": relationship,
+            },
+        )
+    ]
 
 
 def _validate_app_docker_assets(
@@ -2327,6 +2367,21 @@ def _compute_mount_findings(
             readonly_code="COMPUTE_OBJECT_STORE_MOUNT_READONLY",
             type_code="COMPUTE_OBJECT_STORE_MOUNT_TYPE_INVALID",
             identity_code="COMPUTE_OBJECT_STORE_MOUNT_IDENTITY_INVALID",
+        )
+    )
+    findings.extend(
+        _require_mount(
+            volumes,
+            path=path,
+            service=service_name,
+            env=env,
+            source_key="NHMS_OBJECT_STORE_COPYBACK_ROOT",
+            target_key="NHMS_OBJECT_STORE_COPYBACK_ROOT",
+            read_only=False,
+            missing_code="COMPUTE_OBJECT_STORE_COPYBACK_MOUNT_MISSING",
+            readonly_code="COMPUTE_OBJECT_STORE_COPYBACK_MOUNT_READONLY",
+            type_code="COMPUTE_OBJECT_STORE_COPYBACK_MOUNT_TYPE_INVALID",
+            identity_code="COMPUTE_OBJECT_STORE_COPYBACK_MOUNT_IDENTITY_INVALID",
         )
     )
     findings.extend(
@@ -4737,6 +4792,7 @@ def _compute_only_roots(env: Mapping[str, str]) -> dict[str, str]:
         "RUN_WORKSPACE_ROOT",
         "SHARED_LOG_ROOT",
         "OBJECT_STORE_ROOT",
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT",
         "SLURM_GATEWAY_WORKSPACE_DIR",
         "SLURM_GATEWAY_TEMPLATE_DIR",
         "MUNGE_SOCKET",
@@ -4790,6 +4846,14 @@ def _is_path_equal_or_child(value: str, root: str) -> bool:
     if not normalized.startswith("/") or not normalized_root.startswith("/"):
         return False
     return normalized == normalized_root or normalized.startswith(f"{normalized_root.rstrip('/')}/")
+
+
+def _posix_path_is_child(value: str, root: str) -> bool:
+    normalized = _normalize_posix_path(value)
+    normalized_root = _normalize_posix_path(root)
+    if not normalized.startswith("/") or not normalized_root.startswith("/"):
+        return False
+    return normalized != normalized_root and normalized.startswith(f"{normalized_root.rstrip('/')}/")
 
 
 def _matching_compute_root(value: str, roots: Mapping[str, str]) -> tuple[str, str] | None:

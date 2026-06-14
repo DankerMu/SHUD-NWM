@@ -9,6 +9,7 @@ x-compute-env: &compute-env
   WORKSPACE_ROOT: ${WORKSPACE_ROOT:?set compute workspace root}
   OBJECT_STORE_ROOT: ${OBJECT_STORE_ROOT:-}
   OBJECT_STORE_PREFIX: ${OBJECT_STORE_PREFIX:-}
+  NHMS_OBJECT_STORE_COPYBACK_ROOT: ${NHMS_OBJECT_STORE_COPYBACK_ROOT:?set shared object-store copyback root}
   NHMS_PUBLISHED_ARTIFACT_ROOT: ${NHMS_PUBLISHED_ARTIFACT_ROOT:?set container published artifact root}
   NHMS_PUBLISHED_ARTIFACT_URI_PREFIX: ${NHMS_PUBLISHED_ARTIFACT_URI_PREFIX:-published://}
   NHMS_PUBLISHED_ARTIFACT_S3_BUCKET: ${NHMS_PUBLISHED_ARTIFACT_S3_BUCKET:-}
@@ -41,6 +42,9 @@ x-compute-volumes: &compute-volumes
   - type: bind
     source: ${OBJECT_STORE_ROOT:?set compute object store root}
     target: ${OBJECT_STORE_ROOT:?set compute object store root}
+  - type: bind
+    source: ${NHMS_OBJECT_STORE_COPYBACK_ROOT:?set shared object-store copyback root}
+    target: ${NHMS_OBJECT_STORE_COPYBACK_ROOT:?set shared object-store copyback root}
   - type: bind
     source: ${NHMS_SCHEDULER_RUNTIME_ROOT:?set scheduler runtime root}
     target: ${NHMS_SCHEDULER_RUNTIME_ROOT:?set scheduler runtime root}

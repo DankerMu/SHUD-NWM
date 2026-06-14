@@ -79,6 +79,19 @@ concurrent submission evidence, and scheduler pass mutation ordering.
 - **THEN** concurrent submit evidence, candidate ordering, and mutation fences
   remain the same as before extraction
 
+#### Scenario: published artifact root is absent during planning
+- **WHEN** runtime root preflight runs with a missing `published_artifact_root`
+  and all other required roots valid
+- **THEN** the preflight reports `published_artifact_root.allow_create=true`,
+  does not emit `SCHEDULER_ROOT_PUBLISHED_ARTIFACT_ROOT_NOT_FOUND`, and dry-run
+  planning remains non-mutating without creating the directory
+
+#### Scenario: any other required runtime root is absent
+- **WHEN** runtime root preflight runs with a missing workspace, object-store,
+  runtime, temp, lock, or evidence root
+- **THEN** the scheduler reports the existing root blocker before registry,
+  adapter, active-repository, or submission work begins
+
 ### Requirement: Scheduler evidence extraction preserves reservation proof
 
 Scheduler evidence extraction SHALL preserve pass evidence assembly,
@@ -157,3 +170,61 @@ callers and tests migrate.
   `scheduler.py` or `chain.py`
 - **THEN** the first extraction PR keeps compatibility shims or re-exports so
   behavior-preserving tests continue to pass
+
+### Requirement: Object-store copyback preserves complete run products
+
+Production copyback to `NHMS_OBJECT_STORE_COPYBACK_ROOT` SHALL validate source
+and target paths without following symlinks and SHALL publish only complete
+`runs/<run_id>` trees.
+
+#### Scenario: configured copyback path contains a symlink component
+- **WHEN** tile publication prepares `NHMS_OBJECT_STORE_COPYBACK_ROOT`
+- **THEN** the raw configured path is checked before path resolution, symlink
+  components are rejected, and no target `runs/<run_id>` tree is created
+
+#### Scenario: copyback root equals object-store root
+- **WHEN** `NHMS_OBJECT_STORE_COPYBACK_ROOT` exactly equals `OBJECT_STORE_ROOT`
+- **THEN** physical copyback is skipped only after every `runs/<run_id>` source
+  tree passes no-follow traversal plus manifest, output, and log completeness
+  validation
+
+#### Scenario: copyback roots overlap without equality
+- **WHEN** the copyback root is inside the object-store root, or the object-store
+  root is inside the copyback root
+- **THEN** publication fails with a normalized object-store copyback error before
+  creating target run-product trees
+
+#### Scenario: source or target object-store operation fails
+- **WHEN** source reads, target writes, unsafe run ids, or filesystem validation
+  fail during copyback
+- **THEN** the failure is reported as a copyback publish error with run id,
+  object key, object-store root, copyback root, error type, and error details
+
+### Requirement: Copyback replacement is rollback-safe
+
+Replacing a canonical copyback `runs/<run_id>` tree SHALL avoid deleting or
+partially corrupting the previous complete tree when promotion fails.
+
+#### Scenario: promotion fails after staging succeeds
+- **WHEN** a complete staged run tree exists but replacing the canonical
+  `runs/<run_id>` directory fails
+- **THEN** the previous canonical tree remains available and no partial new tree
+  is exposed at the canonical path
+
+### Requirement: q_down display publication waits for required copyback
+
+q_down display publication SHALL not advance stable object-store, published
+artifact, cycle manifest, or map-layer references until required run-product
+copyback has succeeded.
+
+#### Scenario: first publish copyback fails
+- **WHEN** q_down publication requires copyback and copyback fails before any
+  previous q_down cycle manifest exists
+- **THEN** no new q_down per-run manifest, publish log, cycle manifest, or
+  display layer is visible at the stable published locations
+
+#### Scenario: republish copyback fails
+- **WHEN** a q_down cycle has already published and a later republish fails
+  during copyback
+- **THEN** the previous q_down cycle manifest remains unchanged and the failed
+  run's new per-run manifest/log artifacts are not exposed at stable URIs

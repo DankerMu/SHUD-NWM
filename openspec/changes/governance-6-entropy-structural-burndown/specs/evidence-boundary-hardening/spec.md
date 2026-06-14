@@ -3,9 +3,9 @@
 ### Requirement: Current runbooks follow M26 route authority
 
 Current runbooks SHALL describe `/` as the active display entrypoint and SHALL
-describe `/hydro-met`, `/forecast`, `/meteorology`, `/flood-alerts`,
-`/basins/:id`, and `/segments/:id` only as legacy redirect aliases,
-compatibility references, or historical evidence.
+describe `/overview`, `/hydro-met`, `/forecast`, `/meteorology`,
+`/flood-alerts`, `/basins/:id`, and `/segments/:id` only as legacy redirect
+aliases, compatibility references, or historical evidence.
 
 #### Scenario: two-node E2E plan defines browser proof
 - **WHEN** `docs/runbooks/two-node-production-e2e-plan.md` describes live
@@ -27,9 +27,10 @@ compatibility references, or historical evidence.
 
 #### Scenario: route-authority grep runs against current runbooks
 - **WHEN** route-authority validation scans current docs and runbooks
-- **THEN** references to `/hydro-met`, `/forecast`, `/meteorology`,
-  `/flood-alerts`, `/basins/:id`, and `/segments/:id` are each classified as
-  historical evidence, redirect alias checks, compatibility context, or drift
+- **THEN** references to `/overview`, `/hydro-met`, `/forecast`,
+  `/meteorology`, `/flood-alerts`, `/basins/:id`, and `/segments/:id` are each
+  classified as historical evidence, redirect alias checks, compatibility
+  context, or drift
 
 ### Requirement: Historical MVP runbooks are clearly marked
 
@@ -93,3 +94,23 @@ terms required by the entropy audit.
 - **WHEN** the audit checks `docs/governance/DOC_STATUS.md`
 - **THEN** the document explicitly mentions `.dockerignore` in the artifact
   ownership policy and the corresponding gate-eligible finding is gone
+
+### Requirement: Display runtime rejects compute-only copyback authority
+
+The `display_readonly` runtime role SHALL reject compute-control path
+configuration, including `NHMS_OBJECT_STORE_COPYBACK_ROOT`, so display nodes can
+read published artifacts without gaining run-product copyback authority.
+
+#### Scenario: display role includes copyback root
+- **WHEN** runtime configuration or the Docker entrypoint starts with
+  `NHMS_SERVICE_ROLE=display_readonly` and
+  `NHMS_OBJECT_STORE_COPYBACK_ROOT` configured
+- **THEN** startup/runtime validation blocks the configuration as a
+  display-forbidden compute-control path env
+
+#### Scenario: compute role includes copyback root
+- **WHEN** runtime/static Docker validation checks a compute-control service
+  with `OBJECT_STORE_ROOT` and `NHMS_OBJECT_STORE_COPYBACK_ROOT`
+- **THEN** the copyback root is required to be compute-only, mounted for compute
+  publication, and rejected if it overlaps `OBJECT_STORE_ROOT` except for exact
+  equality semantics governed by publisher copyback validation
