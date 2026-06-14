@@ -435,6 +435,21 @@ separate PR boundaries.
   `docs/governance/entropy-budget.md`.
 - Acceptance: audit tests cover inline broad mocks, multiline broad mocks,
   mocked-labelled allowlist behavior, and live-labelled/unallowlisted behavior.
+- Invariant: multiline `page.route(` registrations with `'**/api/v1/**'` are
+  classified the same way as single-line broad mocks, with mocked/preview/visual
+  paths allowlisted and live-labelled or otherwise unallowlisted paths
+  gate-eligible.
+- Fixture evidence:
+  - Collect the detector slice explicitly with
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest --collect-only -q tests/test_entropy_audit_script.py -k broad_e2e_mock`;
+    expected result: the five `test_broad_e2e_mock_*` detector tests are the
+    collected tests.
+  - Run the detector slice with
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k broad_e2e_mock`;
+    expected result: inline and multiline broad-mock fixtures behave as
+    expected across live-labelled, mocked-labelled, preview, and visual paths.
+  - Keep the current broad-mock parser regex and the `test_broad_e2e_mock_*`
+    coverage aligned so the live-looking multiline scenario is not missed.
 
 ### G6-07 Frontend evidence profile documentation
 
