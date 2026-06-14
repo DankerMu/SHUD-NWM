@@ -546,12 +546,35 @@ class SqlCaptureForecastStore(PsycopgForecastStore):
 
 
 class SqlCaptureCursor:
+    # to_regclass(...) 可用性探针（#5 flood.run_product_quality / Mission4
+    # hydro.run_display_coverage）在真实 DB 是即时目录查询，不属于测试预置的查询序列。
+    # fake 从 canned registry 旁路应答、不消费 rows_by_statement：run_product_quality
+    # 视为存在（单测走 materialized 路径），其余（含 run_display_coverage）视为缺失
+    # （单测走 CTE / fallback 路径）。
+    _REGCLASS_PRESENT = ("flood.run_product_quality",)
+
     def __init__(self, rows_by_statement: list[list[dict[str, Any]]]) -> None:
         self.rows_by_statement = rows_by_statement
         self.executions: list[tuple[str, tuple[Any, ...]]] = []
+        self._pending_regclass: dict[str, Any] | None = None
 
     def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+        probe = self._regclass_probe_result(statement)
+        if probe is not None:
+            # 探针不计入 executions：测试按下标/计数断言的是主查询序列。
+            self._pending_regclass = probe
+            return
+        self._pending_regclass = None
         self.executions.append((statement, parameters))
+
+    @classmethod
+    def _regclass_probe_result(cls, statement: str) -> dict[str, Any] | None:
+        if "to_regclass(" not in statement:
+            return None
+        for name in cls._REGCLASS_PRESENT:
+            if f"'{name}'" in statement:
+                return {"reg": name}
+        return {"reg": None}
 
     def fetchall(self) -> list[dict[str, Any]]:
         if not self.rows_by_statement:
@@ -559,6 +582,9 @@ class SqlCaptureCursor:
         return self.rows_by_statement.pop(0)
 
     def fetchone(self) -> dict[str, Any]:
+        if self._pending_regclass is not None:
+            result, self._pending_regclass = self._pending_regclass, None
+            return result
         rows = self.fetchall()
         return rows[0] if rows else {}
 

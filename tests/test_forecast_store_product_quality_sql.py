@@ -28,7 +28,11 @@ def test_join_absent_branch_never_references_missing_table() -> None:
 def test_join_available_branch_preserves_materialized_path() -> None:
     sql = _flood_product_quality_join("fpq", available=True)
     assert "LEFT JOIN flood.run_product_quality fpq" in sql
+    # 默认分支必须是物化 JOIN，绝不退化为对 return_period_result 的逐请求聚合
+    # （原由 test_migrations 的源码缺失断言保护，#5 后归位到此处专属测试）。
     assert "LATERAL" not in sql
+    assert "flood.return_period_result" not in sql
+    assert "GROUP BY" not in sql
     # 默认值即 materialized，保证既有调用点行为不变
     assert _flood_product_quality_join("fpq") == sql
 
