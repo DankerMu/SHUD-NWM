@@ -433,7 +433,11 @@ class PostgresSchedulerLease:
         self.display_lock_path = display_lock_path
         self.connection: Any | None = None
         self.acquired = False
-        self.lock_key = _postgres_advisory_lock_key(lock_name)
+        advisory_lock_key = _scheduler_compat_function(
+            "_postgres_advisory_lock_key",
+            _postgres_advisory_lock_key,
+        )
+        self.lock_key = advisory_lock_key(lock_name)
 
     def acquire(self, *, pass_id: str, started_at: datetime) -> dict[str, Any]:
         import psycopg2

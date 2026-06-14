@@ -13476,6 +13476,35 @@ def test_scheduler_config_accepts_postgres_lock_backend(tmp_path: Path) -> None:
     assert config.scheduler_lock_backend == "postgres"
 
 
+def test_postgres_advisory_lock_key_uses_scheduler_compat_monkeypatch(
+    monkeypatch: Any,
+) -> None:
+    lock_name = "production_scheduler"
+    database_url = "postgresql://nhms:secret@db.prod.example/nhms"
+    display_lock_path = "/workspace/locks/scheduler.lock"
+    expected_lock_key = scheduler_module._postgres_advisory_lock_key(lock_name)
+
+    normal_lease = scheduler_module.PostgresSchedulerLease(
+        database_url,
+        lock_name=lock_name,
+        display_lock_path=display_lock_path,
+    )
+    assert normal_lease.lock_key == expected_lock_key
+
+    monkeypatch.setattr(
+        "services.orchestrator.scheduler._postgres_advisory_lock_key",
+        lambda _value: 123,
+    )
+
+    patched_lease = scheduler_module.PostgresSchedulerLease(
+        database_url,
+        lock_name=lock_name,
+        display_lock_path=display_lock_path,
+    )
+
+    assert patched_lease.lock_key == 123
+
+
 def test_postgres_lock_backend_does_not_touch_file_guard(
     monkeypatch: Any, tmp_path: Path
 ) -> None:

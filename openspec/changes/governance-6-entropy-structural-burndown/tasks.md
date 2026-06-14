@@ -68,11 +68,11 @@ separate PR boundaries.
 
 ## 5. Scheduler Lease Extraction
 
-- [ ] 5.1 Create `services/orchestrator/scheduler_lease.py` and move lease
+- [x] 5.1 Create `services/orchestrator/scheduler_lease.py` and move lease
   classes/helpers behind compatibility imports from `scheduler.py`.
-- [ ] 5.2 Preserve CAS renew, atomic replace, live holder non-reclaim,
+- [x] 5.2 Preserve CAS renew, atomic replace, live holder non-reclaim,
   cross-host TTL, lease heartbeat, and lease-lost mutation fence behavior.
-- [ ] 5.3 Verify with focused scheduler lease tests and ruff.
+- [x] 5.3 Verify with focused scheduler lease tests and ruff.
 
 ## 6. Scheduler Candidate-State Extraction
 
