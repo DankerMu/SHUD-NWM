@@ -2029,6 +2029,7 @@ def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list
                         details={"key": key},
                     )
                 )
+        findings.extend(_compute_object_store_copyback_overlap_findings(path, env))
     if role == "display":
         for key in ("DATABASE_URL", "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT"):
             if not env.get(key, "").strip():
@@ -2051,6 +2052,37 @@ def _validate_env_file(path: Path, env: Mapping[str, str], *, role: str) -> list
                     )
                 )
     return findings
+
+
+def _compute_object_store_copyback_overlap_findings(path: Path, env: Mapping[str, str]) -> list[Finding]:
+    object_store_root = env.get("OBJECT_STORE_ROOT", "").strip()
+    copyback_root = env.get("NHMS_OBJECT_STORE_COPYBACK_ROOT", "").strip()
+    if not object_store_root or not copyback_root:
+        return []
+    normalized_object_store_root = _normalize_posix_path(object_store_root)
+    normalized_copyback_root = _normalize_posix_path(copyback_root)
+    if not normalized_object_store_root.startswith("/") or not normalized_copyback_root.startswith("/"):
+        return []
+    if normalized_object_store_root == normalized_copyback_root:
+        return []
+    if _posix_path_is_child(normalized_copyback_root, normalized_object_store_root):
+        relationship = "copyback_root_under_object_store_root"
+    elif _posix_path_is_child(normalized_object_store_root, normalized_copyback_root):
+        relationship = "object_store_root_under_copyback_root"
+    else:
+        return []
+    return [
+        Finding(
+            "COMPUTE_OBJECT_STORE_COPYBACK_ROOT_OVERLAP",
+            "NHMS_OBJECT_STORE_COPYBACK_ROOT must not overlap OBJECT_STORE_ROOT except for exact equality.",
+            path=str(path),
+            details={
+                "object_store_root": normalized_object_store_root,
+                "copyback_root": normalized_copyback_root,
+                "relationship": relationship,
+            },
+        )
+    ]
 
 
 def _validate_app_docker_assets(
@@ -4814,6 +4846,14 @@ def _is_path_equal_or_child(value: str, root: str) -> bool:
     if not normalized.startswith("/") or not normalized_root.startswith("/"):
         return False
     return normalized == normalized_root or normalized.startswith(f"{normalized_root.rstrip('/')}/")
+
+
+def _posix_path_is_child(value: str, root: str) -> bool:
+    normalized = _normalize_posix_path(value)
+    normalized_root = _normalize_posix_path(root)
+    if not normalized.startswith("/") or not normalized_root.startswith("/"):
+        return False
+    return normalized != normalized_root and normalized.startswith(f"{normalized_root.rstrip('/')}/")
 
 
 def _matching_compute_root(value: str, roots: Mapping[str, str]) -> tuple[str, str] | None:

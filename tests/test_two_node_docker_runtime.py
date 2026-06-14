@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2873,6 +2874,57 @@ def test_static_checker_requires_literal_uv_cache_dir_for_non_root_runtime(tmp_p
     }
 
 
+@pytest.mark.parametrize(
+    ("object_store_root", "copyback_root", "relationship"),
+    [
+        (
+            "/scratch/frd_muziyao/nhms-production/object-store",
+            "/scratch/frd_muziyao/nhms-production/object-store/copyback",
+            "copyback_root_under_object_store_root",
+        ),
+        (
+            "/scratch/frd_muziyao/nhms-production/object-store/shared",
+            "/scratch/frd_muziyao/nhms-production/object-store",
+            "object_store_root_under_copyback_root",
+        ),
+    ],
+)
+def test_static_checker_rejects_compute_object_store_copyback_root_overlap(
+    tmp_path: Path,
+    object_store_root: str,
+    copyback_root: str,
+    relationship: str,
+) -> None:
+    compute_env = tmp_path / "compute.example"
+    compute_env.write_text(
+        "\n".join(
+            "OBJECT_STORE_ROOT=" + object_store_root
+            if line.startswith("OBJECT_STORE_ROOT=")
+            else "NHMS_OBJECT_STORE_COPYBACK_ROOT=" + copyback_root
+            if line.startswith("NHMS_OBJECT_STORE_COPYBACK_ROOT=")
+            else line
+            for line in (REPO_ROOT / "infra/env/compute.example").read_text(encoding="utf-8").splitlines()
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = docker_runtime.run_static_check(
+        compute_compose=Path("infra/compose.compute.yml"),
+        display_compose=Path("infra/compose.display.yml"),
+        compute_env=compute_env,
+        display_env=Path("infra/env/display.example"),
+        repo_root=REPO_ROOT,
+    )
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_OBJECT_STORE_COPYBACK_ROOT_OVERLAP"
+        and finding.details["relationship"] == relationship
+        for finding in result.findings
+    )
+
+
 def test_static_checker_rejects_uv_cache_dir_compose_interpolation(tmp_path: Path) -> None:
     compute = docker_runtime.load_compose(REPO_ROOT / "infra/compose.compute.yml")
     for service in compute["services"].values():
@@ -3381,6 +3433,46 @@ def test_entrypoint_rejects_display_forbidden_env_contract(env_key: str, value: 
 
     assert completed.returncode != 0
     assert "DISPLAY_BOUNDARY_CONFIG_UNSAFE" in completed.stderr
+
+
+def test_public_display_forbidden_env_docs_align_with_validator_and_entrypoint() -> None:
+    entrypoint_text = (REPO_ROOT / "infra/docker/entrypoint.sh").read_text(encoding="utf-8")
+    entrypoint_match = re.search(
+        r"readonly DISPLAY_FORBIDDEN_PRESENT_ENVS=\(\n(?P<body>.*?)\n\)",
+        entrypoint_text,
+        flags=re.DOTALL,
+    )
+    assert entrypoint_match is not None
+    entrypoint_keys = {
+        line.strip()
+        for line in entrypoint_match.group("body").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    assert entrypoint_keys == docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+
+    infra_readme_text = (REPO_ROOT / "infra/README.two-node-docker.md").read_text(encoding="utf-8")
+    forbidden_block_match = re.search(
+        r"display forbidden set 保持一致：\n\n```text\n(?P<body>.*?)\n```",
+        infra_readme_text,
+        flags=re.DOTALL,
+    )
+    assert forbidden_block_match is not None
+    infra_readme_keys = {
+        line.strip()
+        for line in forbidden_block_match.group("body").splitlines()
+        if line.strip() in docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+    }
+    assert infra_readme_keys == docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+
+    env_readme_text = (REPO_ROOT / "infra/env/README.md").read_text(encoding="utf-8")
+    env_readme_section = env_readme_text.split("- Forbidden env keys must match", 1)[1].split(
+        "- Forbidden container/host surfaces:",
+        1,
+    )[0]
+    env_readme_keys = set(re.findall(r"`([A-Z][A-Z0-9_]+)`", env_readme_section))
+    assert env_readme_keys == docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+    assert "NHMS_OBJECT_STORE_COPYBACK_ROOT" in infra_readme_keys
+    assert "NHMS_OBJECT_STORE_COPYBACK_ROOT" in env_readme_keys
 
 
 def test_entrypoint_trims_display_readonly_role_before_boundary_validation() -> None:

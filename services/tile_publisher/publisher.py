@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import stat
+import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -14,15 +16,22 @@ from sqlalchemy import bindparam, create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from packages.common.object_store import LocalObjectStore
+from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
-from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow, ensure_directory_no_follow
+from packages.common.safe_fs import (
+    SafeFilesystemError,
+    atomic_write_bytes_no_follow,
+    ensure_directory_no_follow,
+    rmtree_no_follow,
+    verify_directory_no_follow,
+)
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CYCLE_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*_\d{10}")
 _FLOOD_TILE_API_PATH = "/api/v1/tiles/flood-return-period"
 _DELIVERY_REFERENCE_FIELDS = ("uri", "tile_uri", "tile_uri_template")
+_COPYBACK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
 class PublishError(RuntimeError):
@@ -49,6 +58,12 @@ class PublishResult:
             "lineage": self.lineage,
             "status": self.status,
         }
+
+
+@dataclass(frozen=True)
+class _CopybackSourceTree:
+    directories: tuple[str, ...]
+    files: tuple[str, ...]
 
 
 class TilePublisher:
@@ -1037,61 +1052,105 @@ class TilePublisher:
         if self.object_store_copyback_root is None:
             return None
         unique_run_ids = sorted({str(run_id).strip() for run_id in run_ids if str(run_id).strip()})
+        object_store_root = Path(self.object_store.root).expanduser().resolve()
+        copyback_root = self.object_store_copyback_root.expanduser().resolve()
         if not unique_run_ids:
             return {
                 "status": "skipped",
                 "reason": "no_source_run_ids",
-                "root": str(self.object_store_copyback_root),
+                "root": str(copyback_root),
                 "run_ids": [],
             }
 
-        try:
-            ensure_directory_no_follow(self.object_store_copyback_root)
-        except SafeFilesystemError as error:
-            raise PublishError(
-                "OBJECT_STORE_COPYBACK_FAILED",
-                "Failed to prepare object-store copyback root.",
-                {"copyback_root": str(self.object_store_copyback_root)},
-            ) from error
-
-        if self.object_store_copyback_root == Path(self.object_store.root).expanduser().resolve():
+        if copyback_root == object_store_root:
             return {
                 "status": "skipped",
                 "reason": "copyback_root_matches_object_store_root",
-                "root": str(self.object_store_copyback_root),
+                "root": str(copyback_root),
                 "run_ids": unique_run_ids,
             }
 
-        copyback_store = LocalObjectStore(
-            self.object_store_copyback_root,
-            object_store_prefix=self.object_store.object_store_prefix,
-        )
+        if _paths_overlap(copyback_root, object_store_root):
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Object-store copyback root must not overlap OBJECT_STORE_ROOT.",
+                {
+                    "copyback_root": str(copyback_root),
+                    "object_store_root": str(object_store_root),
+                    "reason": "copyback_root_object_store_root_overlap",
+                },
+            )
+
+        try:
+            ensure_directory_no_follow(copyback_root)
+        except (OSError, SafeFilesystemError) as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Failed to prepare object-store copyback root.",
+                {
+                    "copyback_root": str(copyback_root),
+                    "object_store_root": str(object_store_root),
+                    "error": str(error),
+                },
+            ) from error
+
+        try:
+            copyback_store = LocalObjectStore(
+                copyback_root,
+                object_store_prefix=self.object_store.object_store_prefix,
+            )
+        except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Failed to initialize object-store copyback root.",
+                {
+                    "copyback_root": str(copyback_root),
+                    "object_store_root": str(object_store_root),
+                    "error": str(error),
+                },
+            ) from error
+
         copied_runs: list[dict[str, Any]] = []
         total_files = 0
         total_bytes = 0
         for run_id in unique_run_ids:
-            run_key = _run_product_key(run_id)
+            run_key: str | None = None
             try:
+                run_key = _run_product_key(run_id)
                 summary = self._copyback_object_tree(run_key, copyback_store)
             except FileNotFoundError as error:
                 raise PublishError(
                     "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
                     "Run products are missing from the object-store staging root.",
-                    {"run_id": run_id, "object_key": run_key},
+                    _copyback_error_details(
+                        run_id=run_id,
+                        object_key=run_key,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
                 ) from error
-            except (OSError, SafeFilesystemError, ValueError) as error:
+            except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
                 raise PublishError(
                     "OBJECT_STORE_COPYBACK_FAILED",
                     "Failed to copy run products to the shared object-store root.",
-                    {"run_id": run_id, "object_key": run_key},
+                    _copyback_error_details(
+                        run_id=run_id,
+                        object_key=run_key,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
                 ) from error
+            if run_key is None:
+                raise AssertionError("run_key must be set after successful copyback.")
             copied_runs.append({"run_id": run_id, "object_key": run_key, **summary})
             total_files += int(summary["file_count"])
             total_bytes += int(summary["byte_count"])
 
         return {
             "status": "copied",
-            "root": str(self.object_store_copyback_root),
+            "root": str(copyback_root),
             "run_ids": unique_run_ids,
             "file_count": total_files,
             "byte_count": total_bytes,
@@ -1099,35 +1158,64 @@ class TilePublisher:
         }
 
     def _copyback_object_tree(self, key: str, target_store: LocalObjectStore) -> dict[str, int]:
-        source_dir = _object_tree_root_path(self.object_store, key)
-        source_stat = source_dir.lstat()
-        if stat.S_ISLNK(source_stat.st_mode):
-            raise SafeFilesystemError(f"Run product directory must not be a symlink: {source_dir}")
-        if not stat.S_ISDIR(source_stat.st_mode):
-            raise SafeFilesystemError(f"Run product key is not a directory: {key}")
-
+        run_id = _run_id_from_product_key(key)
+        source_tree = _collect_copyback_source_tree(self.object_store, key)
+        self._validate_copyback_source_tree(run_id, source_tree)
         target_dir = _object_tree_root_path(target_store, key)
-        ensure_directory_no_follow(target_dir, containment_root=target_store.root)
+        temp_run_id = f"{run_id}.copyback.{uuid.uuid4().hex}"
+        temp_key = f"runs/{temp_run_id}"
+        temp_dir = _object_tree_root_path(target_store, temp_key)
+        ensure_directory_no_follow(target_dir.parent, containment_root=target_store.root)
 
         file_count = 0
         byte_count = 0
-        for source_path in sorted(source_dir.rglob("*")):
-            source_entry_stat = source_path.lstat()
-            if stat.S_ISLNK(source_entry_stat.st_mode):
-                raise SafeFilesystemError(f"Run product entry must not be a symlink: {source_path}")
-            relative_key = source_path.relative_to(self.object_store.root).as_posix()
-            if stat.S_ISDIR(source_entry_stat.st_mode):
-                ensure_directory_no_follow(target_store.root / relative_key, containment_root=target_store.root)
-                continue
-            if not stat.S_ISREG(source_entry_stat.st_mode):
-                raise SafeFilesystemError(f"Run product entry must be a regular file: {source_path}")
-            content = self.object_store.read_bytes(relative_key)
-            target_store.write_bytes_atomic(relative_key, content)
-            file_count += 1
-            byte_count += len(content)
+        try:
+            ensure_directory_no_follow(temp_dir, containment_root=target_store.root)
+            for directory_key in source_tree.directories:
+                temp_directory_key = _copyback_temp_key(directory_key, source_key=key, temp_key=temp_key)
+                ensure_directory_no_follow(target_store.root / temp_directory_key, containment_root=target_store.root)
+            for file_key in source_tree.files:
+                content = self.object_store.read_bytes(file_key)
+                temp_file_key = _copyback_temp_key(file_key, source_key=key, temp_key=temp_key)
+                target_store.write_bytes_atomic(temp_file_key, content)
+                file_count += 1
+                byte_count += len(content)
+            _replace_directory_tree_no_follow(temp_dir, target_dir, containment_root=target_store.root)
+        except Exception:
+            rmtree_no_follow(temp_dir, containment_root=target_store.root, missing_ok=True)
+            raise
 
         _chmod_tree_readable(target_dir, containment_root=target_store.root)
         return {"file_count": file_count, "byte_count": byte_count}
+
+    def _validate_copyback_source_tree(self, run_id: str, source_tree: _CopybackSourceTree) -> None:
+        files = set(source_tree.files)
+        if not files:
+            raise SafeFilesystemError(f"Run product tree is empty: runs/{run_id}")
+
+        manifest_key = f"runs/{run_id}/input/manifest.json"
+        if manifest_key not in files:
+            raise SafeFilesystemError(f"Run product manifest is missing: {manifest_key}")
+        if not _has_regular_file_under(files, f"runs/{run_id}/output"):
+            raise SafeFilesystemError(f"Run product output files are missing: runs/{run_id}/output")
+        if not _has_regular_file_under(files, f"runs/{run_id}/logs"):
+            raise SafeFilesystemError(f"Run product log files are missing: runs/{run_id}/logs")
+
+        try:
+            manifest_payload = json.loads(self.object_store.read_bytes(manifest_key).decode("utf-8"))
+        except UnicodeDecodeError as error:
+            raise SafeFilesystemError(f"Run product manifest must be UTF-8 JSON: {manifest_key}") from error
+        except json.JSONDecodeError as error:
+            raise SafeFilesystemError(f"Run product manifest is not valid JSON: {manifest_key}: {error.msg}") from error
+
+        if isinstance(manifest_payload, dict):
+            manifest_run_id = manifest_payload.get("run_id")
+            if manifest_run_id is None and "runId" in manifest_payload:
+                manifest_run_id = manifest_payload["runId"]
+            if manifest_run_id is not None and str(manifest_run_id) != run_id:
+                raise SafeFilesystemError(
+                    f"Run product manifest run_id does not match source run_id: {manifest_key}"
+                )
 
 
 def _safe_key_segment(value: Any) -> str:
@@ -1160,6 +1248,166 @@ def _object_tree_root_path(store: LocalObjectStore, key: str) -> Path:
     if len(parts) != 2 or parts[0] != "runs" or not _SAFE_ID_RE.fullmatch(parts[1]):
         raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
     return Path(store.root) / parts[0] / parts[1]
+
+
+def _run_id_from_product_key(key: str) -> str:
+    parts = PurePosixPath(key).parts
+    if len(parts) != 2 or parts[0] != "runs" or not _SAFE_ID_RE.fullmatch(parts[1]):
+        raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
+    return parts[1]
+
+
+def _copyback_error_details(
+    *,
+    run_id: str,
+    object_key: str | None,
+    copyback_root: Path,
+    object_store_root: Path,
+    error: BaseException,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "run_id": run_id,
+        "copyback_root": str(copyback_root),
+        "object_store_root": str(object_store_root),
+        "error": str(error),
+        "error_type": type(error).__name__,
+    }
+    if object_key is not None:
+        details["object_key"] = object_key
+    return details
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return _path_is_relative_to(left, right) or _path_is_relative_to(right, left)
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _collect_copyback_source_tree(store: LocalObjectStore, key: str) -> _CopybackSourceTree:
+    root = Path(store.root)
+    parts = PurePosixPath(key).parts
+    if len(parts) != 2 or parts[0] != "runs" or not _SAFE_ID_RE.fullmatch(parts[1]):
+        raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
+
+    root_path = verify_directory_no_follow(root)
+    root_fd = os.open(root_path, _COPYBACK_DIR_FLAGS)
+    fd = root_fd
+    try:
+        for part in parts:
+            next_fd = _open_copyback_child_dir(fd, part, root / "/".join(parts))
+            if fd != root_fd:
+                os.close(fd)
+            fd = next_fd
+        directories: list[str] = []
+        files: list[str] = []
+        _collect_copyback_source_entries(fd, key, directories, files)
+        return _CopybackSourceTree(directories=tuple(sorted(directories)), files=tuple(sorted(files)))
+    finally:
+        os.close(fd)
+        if fd != root_fd:
+            os.close(root_fd)
+
+
+def _collect_copyback_source_entries(
+    dir_fd: int,
+    directory_key: str,
+    directories: list[str],
+    files: list[str],
+) -> None:
+    try:
+        names = sorted(os.listdir(dir_fd))
+    except OSError as error:
+        message = f"Failed to list run product directory: {directory_key}: {error}"
+        raise SafeFilesystemError(message, kind="io") from error
+    for name in names:
+        if name in {"", ".", ".."} or "/" in name:
+            raise SafeFilesystemError(f"Unsafe run product entry name: {directory_key}/{name}")
+        entry_key = f"{directory_key}/{name}"
+        try:
+            entry_stat = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError as error:
+            raise SafeFilesystemError(f"Failed to stat run product entry: {entry_key}: {error}", kind="io") from error
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Run product entry must not be a symlink: {entry_key}")
+        if stat.S_ISDIR(entry_stat.st_mode):
+            child_fd = _open_copyback_child_dir(dir_fd, name, Path(entry_key))
+            try:
+                directories.append(entry_key)
+                _collect_copyback_source_entries(child_fd, entry_key, directories, files)
+            finally:
+                os.close(child_fd)
+            continue
+        if stat.S_ISREG(entry_stat.st_mode):
+            files.append(entry_key)
+            continue
+        raise SafeFilesystemError(f"Run product entry must be a regular file or directory: {entry_key}")
+
+
+def _open_copyback_child_dir(parent_fd: int, name: str, path_label: Path) -> int:
+    try:
+        expected = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to stat run product directory: {path_label}: {error}", kind="io") from error
+    if stat.S_ISLNK(expected.st_mode):
+        raise SafeFilesystemError(f"Run product path component must not be a symlink: {path_label}")
+    if not stat.S_ISDIR(expected.st_mode):
+        raise SafeFilesystemError(f"Run product path component is not a directory: {path_label}")
+    try:
+        return os.open(name, _COPYBACK_DIR_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        raise
+    except NotADirectoryError as error:
+        raise SafeFilesystemError(f"Run product path component is not a directory: {path_label}") from error
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise SafeFilesystemError(f"Run product path component must not be a symlink: {path_label}") from error
+        raise SafeFilesystemError(f"Failed to open run product directory: {path_label}: {error}", kind="io") from error
+
+
+def _has_regular_file_under(files: set[str], directory_key: str) -> bool:
+    prefix = f"{directory_key.rstrip('/')}/"
+    return any(file_key.startswith(prefix) for file_key in files)
+
+
+def _copyback_temp_key(object_key: str, *, source_key: str, temp_key: str) -> str:
+    source_prefix = f"{source_key.rstrip('/')}/"
+    if object_key == source_key:
+        return temp_key
+    if not object_key.startswith(source_prefix):
+        raise ValueError(f"Copyback source key {object_key!r} is outside {source_key!r}")
+    return f"{temp_key}/{object_key[len(source_prefix):]}"
+
+
+def _replace_directory_tree_no_follow(temp_dir: Path, target_dir: Path, *, containment_root: Path) -> None:
+    containment_root = containment_root.expanduser().resolve()
+    temp_dir = temp_dir.expanduser()
+    target_dir = target_dir.expanduser()
+    temp_dir.relative_to(containment_root)
+    target_dir.relative_to(containment_root)
+    if temp_dir.parent != target_dir.parent:
+        raise SafeFilesystemError("Copyback temporary and target directories must be siblings.")
+    verify_directory_no_follow(temp_dir)
+    ensure_directory_no_follow(target_dir.parent, containment_root=containment_root)
+    rmtree_no_follow(target_dir, containment_root=containment_root, missing_ok=True)
+    parent_fd = os.open(target_dir.parent, _COPYBACK_DIR_FLAGS)
+    try:
+        os.replace(temp_dir.name, target_dir.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to replace copyback target tree {target_dir}: {error}", kind="io") from error
+    finally:
+        os.close(parent_fd)
 
 
 def _chmod_tree_readable(root: Path, *, containment_root: Path) -> None:

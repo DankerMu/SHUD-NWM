@@ -31,6 +31,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -39,6 +40,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from packages.common.object_store import ObjectStoreError
 from services.tile_publisher.publisher import (
     PublishError,
     PublishResult,
@@ -299,9 +301,30 @@ def _layer_id(run_id: str, network: str = "rivnet-1") -> str:
 
 
 def _seed_run_products(publisher: TilePublisher, run_id: str) -> None:
-    publisher.object_store.write_bytes_atomic(f"runs/{run_id}/input/manifest.json", b'{"run": "manifest"}')
+    publisher.object_store.write_bytes_atomic(
+        f"runs/{run_id}/input/manifest.json",
+        json.dumps({"run_id": run_id, "run": "manifest"}).encode("utf-8"),
+    )
     publisher.object_store.write_bytes_atomic(f"runs/{run_id}/output/q.rivqdown.csv", b"seg,q\n1,2\n")
     publisher.object_store.write_bytes_atomic(f"runs/{run_id}/logs/shud_stdout.log", b"ok\n")
+
+
+def _assert_copyback_publish_error(
+    publisher: TilePublisher,
+    *,
+    expected_code: str,
+    session_run_id: str = "run-a",
+) -> PublishError:
+    with _store(create_flood=False) as session:
+        _insert_run(session, run_id=session_run_id, segments=3)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+        assert not session.execute(text("SELECT 1 FROM map.tile_layer")).first()
+
+    assert error.value.error_code == expected_code
+    return error.value
 
 
 # --------------------------------------------------------------------------- #
@@ -378,7 +401,10 @@ def test_publish_qdown_copybacks_complete_run_products_to_shared_object_store(tm
 
         result = publisher._publish_qdown_from_database(session, CYCLE_ID)
 
-    assert (copyback_root / "runs/run-a/input/manifest.json").read_bytes() == b'{"run": "manifest"}'
+    assert json.loads((copyback_root / "runs/run-a/input/manifest.json").read_text(encoding="utf-8")) == {
+        "run": "manifest",
+        "run_id": "run-a",
+    }
     assert (copyback_root / "runs/run-a/output/q.rivqdown.csv").read_bytes() == b"seg,q\n1,2\n"
     assert (copyback_root / "runs/run-a/logs/shud_stdout.log").read_bytes() == b"ok\n"
     assert oct((copyback_root / "runs/run-a").stat().st_mode & 0o777) == "0o755"
@@ -388,7 +414,11 @@ def test_publish_qdown_copybacks_complete_run_products_to_shared_object_store(tm
     assert copyback["status"] == "copied"
     assert copyback["run_ids"] == ["run-a"]
     assert copyback["file_count"] == 3
-    assert copyback["byte_count"] == len(b'{"run": "manifest"}') + len(b"seg,q\n1,2\n") + len(b"ok\n")
+    assert copyback["byte_count"] == (
+        len(json.dumps({"run_id": "run-a", "run": "manifest"}).encode("utf-8"))
+        + len(b"seg,q\n1,2\n")
+        + len(b"ok\n")
+    )
     assert copyback["runs"] == [
         {
             "run_id": "run-a",
@@ -409,6 +439,224 @@ def test_publish_qdown_copyback_missing_run_products_fails_publish(tmp_path: Any
             publisher._publish_qdown_from_database(session, CYCLE_ID)
 
     assert error.value.error_code == "OBJECT_STORE_COPYBACK_SOURCE_MISSING"
+
+
+def test_publish_qdown_copyback_empty_run_products_fails_before_publish_success(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    (Path(publisher.object_store.root) / "runs/run-a").mkdir(parents=True)
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert error.details["run_id"] == "run-a"
+    assert error.details["object_key"] == "runs/run-a"
+    assert error.details["copyback_root"] == str((tmp_path / "shared-object-store").resolve())
+    assert error.details["object_store_root"] == str(Path(publisher.object_store.root).resolve())
+    assert not (tmp_path / "shared-object-store/runs/run-a").exists()
+
+
+@pytest.mark.parametrize(
+    ("seed_keys", "expected_detail"),
+    [
+        (
+            [
+                ("runs/run-a/input/manifest.json", b'{"run_id": "run-a"}'),
+            ],
+            "output",
+        ),
+        (
+            [
+                ("runs/run-a/input/manifest.json", b'{"run_id": "run-a"}'),
+                ("runs/run-a/output/q.rivqdown.csv", b"seg,q\n1,2\n"),
+            ],
+            "logs",
+        ),
+    ],
+)
+def test_publish_qdown_copyback_requires_manifest_output_and_logs(
+    tmp_path: Any,
+    seed_keys: list[tuple[str, bytes]],
+    expected_detail: str,
+) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    for key, content in seed_keys:
+        publisher.object_store.write_bytes_atomic(key, content)
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert expected_detail in error.details["error"]
+    assert not (tmp_path / "shared-object-store/runs/run-a").exists()
+
+
+def test_publish_qdown_copyback_manifest_without_run_id_is_allowed(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    publisher.object_store.write_bytes_atomic("runs/run-a/input/manifest.json", b'{"run": "manifest"}')
+    publisher.object_store.write_bytes_atomic("runs/run-a/output/q.rivqdown.csv", b"seg,q\n1,2\n")
+    publisher.object_store.write_bytes_atomic("runs/run-a/logs/shud_stdout.log", b"ok\n")
+
+    with _store(create_flood=False) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert result.lineage["object_store_copyback"]["status"] == "copied"
+    assert (copyback_root / "runs/run-a/input/manifest.json").read_bytes() == b'{"run": "manifest"}'
+
+
+def test_publish_qdown_copyback_manifest_run_id_mismatch_fails(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    publisher.object_store.write_bytes_atomic("runs/run-a/input/manifest.json", b'{"run_id": "other-run"}')
+    publisher.object_store.write_bytes_atomic("runs/run-a/output/q.rivqdown.csv", b"seg,q\n1,2\n")
+    publisher.object_store.write_bytes_atomic("runs/run-a/logs/shud_stdout.log", b"ok\n")
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert "does not match" in error.details["error"]
+
+
+def test_publish_qdown_copyback_replaces_stale_target_tree(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    stale_file = copyback_root / "runs/run-a/output/old-file.csv"
+    stale_file.parent.mkdir(parents=True)
+    stale_file.write_text("stale\n", encoding="utf-8")
+    stale_log = copyback_root / "runs/run-a/logs/old.log"
+    stale_log.parent.mkdir(parents=True, exist_ok=True)
+    stale_log.write_text("old\n", encoding="utf-8")
+
+    with _store(create_flood=False) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+
+        publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert not stale_file.exists()
+    assert not stale_log.exists()
+    copied_files = sorted(
+        path.relative_to(copyback_root / "runs/run-a").as_posix()
+        for path in (copyback_root / "runs/run-a").rglob("*")
+        if path.is_file()
+    )
+    assert copied_files == [
+        "input/manifest.json",
+        "logs/shud_stdout.log",
+        "output/q.rivqdown.csv",
+    ]
+
+
+def test_publish_qdown_copyback_rejects_source_ancestor_symlink_before_target_create(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    object_store_root = Path(publisher.object_store.root)
+    outside_runs = tmp_path / "outside-runs"
+    outside_run = outside_runs / "run-a"
+    (outside_run / "input").mkdir(parents=True)
+    (outside_run / "output").mkdir()
+    (outside_run / "logs").mkdir()
+    (outside_run / "input/manifest.json").write_text('{"run_id": "run-a"}', encoding="utf-8")
+    (outside_run / "output/q.rivqdown.csv").write_text("seg,q\n1,2\n", encoding="utf-8")
+    (outside_run / "logs/shud_stdout.log").write_text("ok\n", encoding="utf-8")
+    (object_store_root / "runs").symlink_to(outside_runs, target_is_directory=True)
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert error.details["object_key"] == "runs/run-a"
+    assert "symlink" in error.details["error"]
+    assert not (tmp_path / "shared-object-store/runs/run-a").exists()
+
+
+@pytest.mark.parametrize(
+    "copyback_root",
+    [
+        "object-store/copyback",
+        "object-store/runs/run-a/copyback",
+    ],
+)
+def test_publish_qdown_copyback_rejects_copyback_root_inside_object_store_before_target_create(
+    tmp_path: Any,
+    copyback_root: str,
+) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / copyback_root)
+    _seed_run_products(publisher, "run-a")
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert error.details["reason"] == "copyback_root_object_store_root_overlap"
+    assert not (tmp_path / "object-store/runs/run-a/copyback/runs/run-a").exists()
+
+
+def test_publish_qdown_copyback_rejects_object_store_inside_copyback_root(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared"
+    object_store_root = copyback_root / "object-store"
+    publisher = TilePublisher(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=object_store_root,
+        object_store_prefix="",
+        object_store_copyback_root=copyback_root,
+    )
+    _seed_run_products(publisher, "run-a")
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert error.details["reason"] == "copyback_root_object_store_root_overlap"
+    assert not (copyback_root / "runs/run-a").exists()
+
+
+def test_publish_qdown_copyback_normalizes_source_read_object_store_error(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    _seed_run_products(publisher, "run-a")
+    original_read = publisher.object_store.read_bytes
+
+    def fail_read(self: Any, key_or_uri: str) -> bytes:
+        if self.root == publisher.object_store.root and key_or_uri.startswith("runs/run-a/"):
+            raise ObjectStoreError(f"read blocked for {key_or_uri}")
+        return original_read(key_or_uri)
+
+    monkeypatch.setattr("packages.common.object_store.LocalObjectStore.read_bytes", fail_read)
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert error.details["run_id"] == "run-a"
+    assert error.details["object_key"] == "runs/run-a"
+    assert "read blocked" in error.details["error"]
+
+
+def test_publish_qdown_copyback_normalizes_target_write_object_store_error(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    original_write = type(publisher.object_store).write_bytes_atomic
+
+    def fail_write(self: Any, key_or_uri: str, content: bytes) -> str:
+        if self.root == copyback_root.resolve():
+            raise ObjectStoreError(f"write blocked for {key_or_uri}")
+        return original_write(self, key_or_uri, content)
+
+    monkeypatch.setattr("packages.common.object_store.LocalObjectStore.write_bytes_atomic", fail_write)
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert error.details["run_id"] == "run-a"
+    assert error.details["object_key"] == "runs/run-a"
+    assert "write blocked" in error.details["error"]
+
+
+def test_publish_qdown_copyback_normalizes_unsafe_run_id(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+
+    error = _assert_copyback_publish_error(
+        publisher,
+        expected_code="OBJECT_STORE_COPYBACK_FAILED",
+        session_run_id="bad/run",
+    )
+
+    assert error.details["run_id"] == "bad/run"
+    assert "Unsafe run_id" in error.details["error"]
 
 
 def test_publish_qdown_identity_carries_all_nine_fields(tmp_path: Any) -> None:

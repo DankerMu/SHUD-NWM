@@ -15,10 +15,10 @@
 
 | 节点 | 角色 | 能力 | 禁止事项 |
 | --- | --- | --- | --- |
-| 22 | `compute_control` | writer DB、writable workspace、writable published artifacts、scheduler-once、Slurm/Gateway 访问 | 不暴露公网控制入口 |
-| 27 | `display_readonly` | readonly DB、readonly published artifacts、FastAPI/frontend display、`/ops` 只读诊断 | 不挂 Slurm/Munge、workspace、Basins、Docker socket，不配置 Gateway URL，不写业务终态 |
+| 22 | `compute_control` | writer DB、writable workspace、writable published artifacts、writable shared object-store mirror、scheduler-once、Slurm/Gateway 访问 | 不暴露公网控制入口 |
+| 27 | `display_readonly` | readonly DB、readonly published artifacts、readonly shared object-store mirror、FastAPI/frontend display、`/ops` 只读诊断 | 不挂 Slurm/Munge、workspace、Basins、Docker socket，不配置 Gateway URL，不写业务终态 |
 
-共享面只允许是 PostgreSQL 和 published artifacts。27 不能通过挂载 22 私有 workspace、`.nhms-runs`、private `/scratch` 或 mock Gateway 来完成生产验收。
+共享面只允许是 PostgreSQL、published artifacts 和只读 shared object-store mirror。27 不能通过挂载 22 私有 workspace、`.nhms-runs`、private `/scratch` 或 mock Gateway 来完成生产验收。
 
 当前两节点发布目录约定：
 
@@ -121,6 +121,11 @@ WORKSPACE_ROOT
 RUN_WORKSPACE_ROOT
 SHARED_LOG_ROOT
 OBJECT_STORE_ROOT
+NHMS_OBJECT_STORE_COPYBACK_ROOT
+NHMS_SCHEDULER_LOCK_ROOT
+NHMS_SCHEDULER_EVIDENCE_ROOT
+NHMS_SCHEDULER_RUNTIME_ROOT
+NHMS_SCHEDULER_TEMP_ROOT
 NHMS_BASINS_ROOT
 NHMS_MODEL_ASSET_ROOT
 SLURM_GATEWAY_TEMPLATE_DIR
@@ -567,6 +572,11 @@ docker compose --env-file "$CHECKOUT_ROOT/infra/env/display.env" -f "$CHECKOUT_R
     RUN_WORKSPACE_ROOT \
     SHARED_LOG_ROOT \
     OBJECT_STORE_ROOT \
+    NHMS_OBJECT_STORE_COPYBACK_ROOT \
+    NHMS_SCHEDULER_LOCK_ROOT \
+    NHMS_SCHEDULER_EVIDENCE_ROOT \
+    NHMS_SCHEDULER_RUNTIME_ROOT \
+    NHMS_SCHEDULER_TEMP_ROOT \
     NHMS_BASINS_ROOT \
     NHMS_MODEL_ASSET_ROOT \
     SLURM_GATEWAY_TEMPLATE_DIR \
