@@ -415,9 +415,9 @@ separate PR boundaries.
     `assertLiveDisplaySpecsDoNotMockApis` deterministically rejects a
     live-labelled broad API mock fixture.
   - Run a read-only audit confirmation, for example
-    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k broad_mock`,
-    proving reclassified mocked specs no longer produce gate-eligible
-    `broad-e2e-api-mock` findings under current audit semantics.
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k broad_e2e_mock`,
+    proving broad e2e API mock detector classification semantics for
+    mocked, preview, and visual broad mocks under current audit semantics.
 
 ### G6-06 Broad mock detector hardening
 
