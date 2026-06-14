@@ -6,11 +6,15 @@ import re
 import stat
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from errno import EACCES, EEXIST, EISDIR, ELOOP, ENOTDIR, EPERM
+from functools import wraps
 from ipaddress import IPv4Address, ip_address
 from pathlib import Path
+from threading import RLock
+from types import FunctionType
 from typing import Any, Protocol
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -26,6 +30,7 @@ from packages.common.slurm_env import (
 )
 from packages.common.source_identity import normalize_source_id
 from packages.common.state_manager import StateManager
+from services.orchestrator import scheduler_state as _scheduler_state_module
 from services.orchestrator.chain import (
     ForecastOrchestrator,
     OrchestratorConfig,
@@ -220,6 +225,66 @@ from services.slurm_gateway.gateway import ConfigurationError
 from services.slurm_gateway.resource_validation import ResourceProfileValidationError, validate_resource_profile
 from workers.canonical_converter.converter import evaluate_canonical_readiness
 from workers.data_adapters.base import CycleDiscovery, cycle_id_for, format_cycle_time
+
+_SCHEDULER_STATE_COMPAT_EXPORT_NAMES = tuple(
+    name
+    for name, value in globals().items()
+    if name.startswith("_")
+    and isinstance(value, FunctionType)
+    and getattr(_scheduler_state_module, name, None) is value
+)
+_SCHEDULER_STATE_COMPAT_ORIGINALS = {
+    name: getattr(_scheduler_state_module, name) for name in _SCHEDULER_STATE_COMPAT_EXPORT_NAMES
+}
+_SCHEDULER_STATE_COMPAT_WRAPPERS: dict[str, Callable[..., Any]] = {}
+_SCHEDULER_STATE_COMPAT_LOCK = RLock()
+
+
+def _scheduler_state_compat_override(name: str, original: Any) -> Any:
+    value = globals().get(name, original)
+    wrapper = _SCHEDULER_STATE_COMPAT_WRAPPERS.get(name)
+    if wrapper is not None:
+        return None if value is wrapper else value
+    return None if value is original else value
+
+
+@contextmanager
+def _scheduler_state_compat_bindings() -> Any:
+    """Expose old scheduler.py monkeypatches to moved scheduler_state helpers."""
+
+    with _SCHEDULER_STATE_COMPAT_LOCK:
+        previous: dict[str, Any] = {}
+        for name, original in _SCHEDULER_STATE_COMPAT_ORIGINALS.items():
+            override = _scheduler_state_compat_override(name, original)
+            if override is None:
+                continue
+            previous[name] = getattr(_scheduler_state_module, name)
+            setattr(_scheduler_state_module, name, override)
+        try:
+            yield
+        finally:
+            for name, value in previous.items():
+                setattr(_scheduler_state_module, name, value)
+
+
+def _scheduler_state_compat_wrapper(name: str, original: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(original)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with _scheduler_state_compat_bindings():
+            return original(*args, **kwargs)
+
+    return wrapped
+
+
+for _scheduler_state_compat_name, _scheduler_state_compat_original in _SCHEDULER_STATE_COMPAT_ORIGINALS.items():
+    if not isinstance(_scheduler_state_compat_original, FunctionType):
+        continue
+    _SCHEDULER_STATE_COMPAT_WRAPPERS[_scheduler_state_compat_name] = _scheduler_state_compat_wrapper(
+        _scheduler_state_compat_name,
+        _scheduler_state_compat_original,
+    )
+    globals()[_scheduler_state_compat_name] = _SCHEDULER_STATE_COMPAT_WRAPPERS[_scheduler_state_compat_name]
+del _scheduler_state_compat_name, _scheduler_state_compat_original
 
 # Compatibility re-exports for downstream imports and monkeypatch paths that
 # still target services.orchestrator.scheduler after candidate-state extraction.

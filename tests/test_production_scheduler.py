@@ -2047,6 +2047,99 @@ def test_full_tuple_and_candidate_scoped_m23_proofs_remain_authoritative(
     assert "pipeline_jobs[0]" not in validation["legacy_non_authoritative"]
 
 
+def test_candidate_state_decision_scheduler_monkeypatch_active_jobs_compat(monkeypatch: Any) -> None:
+    candidate = _scheduler_candidate_fixture()
+    patched_job = {
+        "job_id": "job_patched_old_path",
+        "slurm_job_id": "patched-old-path",
+        "status": "running",
+        "source": "scheduler.py monkeypatch",
+    }
+
+    def patched_active_jobs(_state: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return [patched_job]
+
+    monkeypatch.setattr(scheduler_module, "_state_active_jobs", patched_active_jobs)
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+            "forcing_version_id": candidate.forcing_version_id,
+            "pipeline_jobs": [],
+        },
+    )
+
+    assert decision is not None
+    assert decision.action == "skip"
+    assert decision.reason == "active_slurm_job"
+    assert decision.evidence["active_slurm_jobs"] == [patched_job]
+
+
+def test_candidate_state_decision_scheduler_monkeypatch_raw_manifest_repair_compat(
+    monkeypatch: Any,
+) -> None:
+    candidate = _scheduler_candidate_fixture()
+    manifest_uri = "s3://nhms/raw/gfs/2026052106/manifest.json"
+    calls: list[tuple[str, str]] = []
+
+    def patched_manifest_missing(patched_candidate: Any, patched_manifest_uri: str) -> bool:
+        calls.append((patched_candidate.candidate_id, patched_manifest_uri))
+        return True
+
+    monkeypatch.setattr(scheduler_module, "_object_manifest_is_missing", patched_manifest_missing)
+
+    decision = scheduler_module._candidate_state_decision(
+        candidate,
+        {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+            "forcing_version_id": candidate.forcing_version_id,
+            "forecast_cycle": {
+                "cycle_id": candidate.cycle_id,
+                "source_id": candidate.source_id,
+                "cycle_time": candidate.cycle_time_utc,
+                "manifest_uri": manifest_uri,
+            },
+            "pipeline_jobs": [
+                {
+                    "job_id": "job_cycle_gfs_2026052106_download",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": candidate.cycle_id,
+                    "status": "succeeded",
+                    "stage": "download",
+                    "job_type": "download_source_cycle",
+                    "updated_at": "2026-05-21T06:02:00Z",
+                },
+                {
+                    "job_id": "job_cycle_gfs_2026052106_convert",
+                    "run_id": "cycle_gfs_2026052106",
+                    "cycle_id": candidate.cycle_id,
+                    "status": "failed",
+                    "stage": "convert",
+                    "job_type": "convert_canonical",
+                    "error_code": "INVALID_MANIFEST",
+                    "retry_count": 3,
+                    "updated_at": "2026-05-21T06:03:00Z",
+                },
+            ],
+            "pipeline_status": "failed",
+            "failed_stage": "convert",
+            "error_code": "INVALID_MANIFEST",
+            "retry_count": 3,
+            "retry_limit": 3,
+        },
+    )
+
+    assert decision is not None
+    assert decision.action == "retry"
+    assert decision.reason == "repair_missing_raw_manifest"
+    assert decision.evidence["reason"] == "repair_missing_raw_manifest"
+    assert decision.evidence["raw_manifest_repair"]["manifest_exists"] is False
+    assert calls == [(candidate.candidate_id, manifest_uri)]
+
+
 def test_nested_task_proof_does_not_authorize_parent_event_active_status(
     tmp_path: Path,
 ) -> None:

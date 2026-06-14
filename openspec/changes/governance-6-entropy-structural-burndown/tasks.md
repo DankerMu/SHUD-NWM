@@ -76,15 +76,15 @@ separate PR boundaries.
 
 ## 6. Scheduler Candidate-State Extraction
 
-- [ ] 6.1 Create `services/orchestrator/scheduler_state.py` for
+- [x] 6.1 Create `services/orchestrator/scheduler_state.py` for
   `CandidateStateDecision`, candidate-state filtering, legacy identity
   validation, manual retry, active Slurm, permanent/cancelled, and terminal
   success helpers.
-- [ ] 6.2 Keep all evidence keys, schema versions, status/reason codes, and old
+- [x] 6.2 Keep all evidence keys, schema versions, status/reason codes, and old
   aliases unchanged.
-- [ ] 6.3 Preserve private helper compatibility from `scheduler.py` until tests
+- [x] 6.3 Preserve private helper compatibility from `scheduler.py` until tests
   and callers migrate.
-- [ ] 6.4 Verify with focused candidate-state and retry scheduler tests.
+- [x] 6.4 Verify with focused candidate-state and retry scheduler tests.
 
 ## 7. Scheduler Discovery Extraction
 
