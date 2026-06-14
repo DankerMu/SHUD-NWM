@@ -1519,7 +1519,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1.7" },
     { name = "eccodes", specifier = ">=1.7.0" },
     { name = "ecmwf-opendata", specifier = ">=0.3.19" },
-    { name = "fastapi", specifier = ">=0.110.0" },
+    { name = "fastapi", specifier = ">=0.110.0,<0.137" },
     { name = "gcsfs", specifier = ">=2024.2.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
