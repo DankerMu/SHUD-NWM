@@ -93,6 +93,13 @@ class PsycopgForecastStore:
     def from_env(cls) -> PsycopgForecastStore:
         return cls(default_database_url())
 
+    @staticmethod
+    def _run_product_quality_available(cursor: Any) -> bool:
+        """flood.run_product_quality 物化表是否存在。只读副本可能缺失（迁移未应用）；缺失时洪频
+        质量改走 return_period_result 存在性判定（#5：取消 node-27 计算频率、有产物就显示）。"""
+        cursor.execute("SELECT to_regclass('flood.run_product_quality') AS reg")
+        return cursor.fetchone()["reg"] is not None
+
     def forecast_series(
         self,
         *,
@@ -650,6 +657,7 @@ class PsycopgForecastStore:
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._transaction() as cursor:
+            available = self._run_product_quality_available(cursor)
             row = self._fetch_optional(
                 cursor,
                 f"""
@@ -658,12 +666,12 @@ class PsycopgForecastStore:
                     mi.river_network_version_id,
                     bv.basin_id,
                     COALESCE(ds.adapter_name, h.source_id) AS source,
-                    {_flood_product_quality_select("fpq")}
+                    {_flood_product_quality_select("fpq", available)}
                 FROM hydro.hydro_run h
                 LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
-                {_flood_product_quality_join("fpq")}
+                {_flood_product_quality_join("fpq", available)}
                 WHERE h.run_id = %s
                 """,
                 (run_id,),
@@ -688,33 +696,37 @@ class PsycopgForecastStore:
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if basin_id is not None:
-            clauses.append("bv.basin_id = %s")
-            params.append(basin_id)
-        if source is not None:
-            clauses.append("(LOWER(h.source_id) = LOWER(%s) OR LOWER(ds.adapter_name) = LOWER(%s))")
-            params.extend([source, source])
-        if cycle_time is not None:
-            clauses.append("h.cycle_time = %s")
-            params.append(_ensure_utc(cycle_time))
-        if status is not None:
-            clauses.append("h.status = %s")
-            params.append(status)
-        if flood_product_ready is True:
-            clauses.append("h.status IN ('frequency_done', 'published')")
-            clauses.append(_flood_product_ready_sql("fpq"))
-
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._transaction() as cursor:
+            available = self._run_product_quality_available(cursor)
+            clauses: list[str] = []
+            params: list[Any] = []
+            if basin_id is not None:
+                clauses.append("bv.basin_id = %s")
+                params.append(basin_id)
+            if source is not None:
+                clauses.append("(LOWER(h.source_id) = LOWER(%s) OR LOWER(ds.adapter_name) = LOWER(%s))")
+                params.extend([source, source])
+            if cycle_time is not None:
+                clauses.append("h.cycle_time = %s")
+                params.append(_ensure_utc(cycle_time))
+            if status is not None:
+                clauses.append("h.status = %s")
+                params.append(status)
+            if flood_product_ready is True:
+                # 物化表在 → 维持「frequency_done/published 且质量完整」严格门；缺失（只读副本）→
+                # 仅存在性门（有 return_period_result 行 或 published），不再要求 frequency 完成（#5）。
+                if available:
+                    clauses.append("h.status IN ('frequency_done', 'published')")
+                clauses.append(_flood_product_ready_sql("fpq", available))
+
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             cursor.execute(
                 f"""
                 SELECT COUNT(*) AS total_count
                 FROM hydro.hydro_run h
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
-                {_flood_product_quality_join("fpq")}
+                {_flood_product_quality_join("fpq", available)}
                 {where}
                 """,
                 tuple(params),
@@ -728,12 +740,12 @@ class PsycopgForecastStore:
                     mi.river_network_version_id,
                     bv.basin_id,
                     COALESCE(ds.adapter_name, h.source_id) AS source,
-                    {_flood_product_quality_select("fpq")}
+                    {_flood_product_quality_select("fpq", available)}
                 FROM hydro.hydro_run h
                 LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
                 LEFT JOIN core.basin_version bv ON bv.basin_version_id = h.basin_version_id
                 LEFT JOIN met.data_source ds ON ds.source_id = h.source_id
-                {_flood_product_quality_join("fpq")}
+                {_flood_product_quality_join("fpq", available)}
                 {where}
                 ORDER BY h.cycle_time DESC NULLS LAST, h.created_at DESC, h.run_id
                 LIMIT %s OFFSET %s
@@ -1228,6 +1240,7 @@ class PsycopgForecastStore:
     ) -> list[dict[str, Any]]:
         identity_sql, identity_params = _qhh_latest_strict_identity_sql(identity)
         candidate_limit = 1 if identity is not None else QHH_LATEST_SEARCH_LIMIT
+        available = self._run_product_quality_available(cursor)
         return self._fetch_all(
             cursor,
             f"""
@@ -1277,7 +1290,7 @@ class PsycopgForecastStore:
                         fv.end_time,
                         h.cycle_time + (%s * INTERVAL '1 hour')
                     ) AS display_end_time,
-                    {_flood_product_quality_select("fpq")}
+                    {_flood_product_quality_select("fpq", available)}
                 FROM hydro.hydro_run h
                 JOIN core.basin_version bv
                   ON bv.basin_version_id = h.basin_version_id
@@ -1287,7 +1300,7 @@ class PsycopgForecastStore:
                   ON rnv.river_network_version_id = mi.river_network_version_id
                 LEFT JOIN met.forcing_version fv
                   ON fv.forcing_version_id = h.forcing_version_id
-                {_flood_product_quality_join("fpq")}
+                {_flood_product_quality_join("fpq", available)}
                 WHERE bv.basin_id = %s
                   AND h.run_type = 'forecast'
                   AND h.status IN ('parsed', 'frequency_done', 'published')
@@ -1755,6 +1768,7 @@ class PsycopgForecastStore:
     ) -> list[dict[str, Any]]:
         identity_sql, identity_params = _qhh_latest_strict_identity_sql(identity)
         context_limit = 1 if identity is not None else QHH_LATEST_CONTEXT_LIMIT
+        available = self._run_product_quality_available(cursor)
         return self._fetch_all(
             cursor,
             f"""
@@ -1820,7 +1834,7 @@ class PsycopgForecastStore:
                 NULL AS river_valid_time_end,
                 NULL AS min_lead_time_hours,
                 NULL AS max_lead_time_hours,
-                {_flood_product_quality_select("fpq")}
+                {_flood_product_quality_select("fpq", available)}
             FROM hydro.hydro_run h
             JOIN core.basin_version bv
               ON bv.basin_version_id = h.basin_version_id
@@ -1830,7 +1844,7 @@ class PsycopgForecastStore:
               ON rnv.river_network_version_id = mi.river_network_version_id
             LEFT JOIN met.forcing_version fv
               ON fv.forcing_version_id = h.forcing_version_id
-            {_flood_product_quality_join("fpq")}
+            {_flood_product_quality_join("fpq", available)}
             WHERE bv.basin_id = %s
               AND h.run_type = 'forecast'
               AND h.status NOT IN ('parsed', 'frequency_done', 'published')
@@ -3567,14 +3581,39 @@ def _flood_product_quality_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _flood_product_quality_join(alias: str) -> str:
-    return f"""
+def _flood_product_quality_join(alias: str, available: bool = True) -> str:
+    if available:
+        return f"""
                 LEFT JOIN flood.run_product_quality {alias}
                   ON {alias}.run_id = h.run_id
     """
+    # 只读副本无 run_product_quality 物化表（迁移未应用）：以 return_period_result 行存在性廉价
+    # 合成质量信号——走 (run_id, max_over_window,...) 索引 ≈3ms，不聚合 6600 万行、不依赖缺失表
+    # （#5：取消 node-27 计算频率，有产物就显示）。
+    return f"""
+                LEFT JOIN LATERAL (
+                    SELECT
+                        EXISTS (
+                            SELECT 1 FROM flood.return_period_result r
+                            WHERE r.run_id = h.run_id
+                        ) AS has_product,
+                        EXISTS (
+                            SELECT 1 FROM flood.return_period_result r
+                            WHERE r.run_id = h.run_id AND r.max_over_window
+                        ) AS has_peak
+                ) {alias} ON TRUE
+    """
 
 
-def _flood_product_quality_select(alias: str) -> str:
+def _flood_product_quality_select(alias: str, available: bool = True) -> str:
+    if not available:
+        # 存在性映射为 0/1 行计数：_flood_product_quality_from_row 据此判 ready（有产物）/unavailable（无）。
+        return f"""
+                    {alias}.has_peak AS flood_quality_max_over_window,
+                    (CASE WHEN {alias}.has_product THEN 1 ELSE 0 END) AS flood_result_rows,
+                    (CASE WHEN {alias}.has_product THEN 1 ELSE 0 END) AS flood_return_period_rows,
+                    (CASE WHEN {alias}.has_product THEN 1 ELSE 0 END) AS flood_warning_rows
+    """
     return f"""
                     CASE
                         WHEN {alias}.run_id IS NULL THEN NULL
@@ -3600,7 +3639,10 @@ def _flood_product_quality_select(alias: str) -> str:
     """
 
 
-def _flood_product_ready_sql(alias: str) -> str:
+def _flood_product_ready_sql(alias: str, available: bool = True) -> str:
+    if not available:
+        # 有产物即就绪：DB 有 return_period_result 行 或 run 已发布（published 目录有产物）。
+        return f"({alias}.has_product OR h.status = 'published')"
     return f"""
             COALESCE(
                 CASE
