@@ -40,12 +40,12 @@ separate PR boundaries.
 
 ## 3. Mocked/Live Evidence Boundary
 
-- [ ] 3.1 Reconcile `apps/frontend/e2e/m11-routes.spec.ts` broad API mock
+- [ ] 3.1 Reconcile `apps/frontend/e2e/m11-routes.mocked.spec.ts` broad API mock
   classification so it is not treated as live display evidence; prefer
   `.mocked.spec.ts` naming or a mocked-labelled directory if that matches the
   audit allowlist semantics.
 - [ ] 3.2 Reconcile both broad API mock registrations in
-  `apps/frontend/e2e/monitoring.spec.ts` so they are mocked regression or are
+  `apps/frontend/e2e/monitoring.mocked.spec.ts` so they are mocked regression or are
   split into a proper live profile; do not treat retry/cancel/operator mocked
   UI checks as display_readonly live proof.
 - [ ] 3.3 Confirm `test:e2e:live-display` still rejects broad API mocks and
@@ -376,8 +376,8 @@ separate PR boundaries.
 ### G6-05 Frontend mocked/live spec classification
 
 - Implementation Ready: yes.
-- Ownership: `apps/frontend/e2e/m11-routes.spec.ts`,
-  `apps/frontend/e2e/monitoring.spec.ts`, frontend Playwright configuration
+- Ownership: `apps/frontend/e2e/m11-routes.mocked.spec.ts`,
+  `apps/frontend/e2e/monitoring.mocked.spec.ts`, frontend Playwright configuration
   needed for classification.
 - In Scope: Reclassify or split broad API mocked regression specs so they
   cannot be treated as live display evidence; confirm live-display profile
@@ -391,6 +391,33 @@ separate PR boundaries.
   frontend e2e config.
 - Acceptance: frontend tests pass for the affected specs, live-display profile
   still requires explicit live base URLs and no broad API mocks.
+- Invariant: broad `page.route('**/api/v1/**')` API mocks are allowed only in
+  mocked-regression, preview, or visual-classified specs. The `m11-routes` and
+  `monitoring` mocked operator/retry/cancel checks must never be accepted as
+  `display_readonly` live display receipts.
+- Fixture evidence:
+  - Run the affected mocked frontend specs after classification, for example
+    `cd apps/frontend && corepack pnpm exec playwright test e2e/m11-routes.mocked.spec.ts e2e/monitoring.mocked.spec.ts`
+    or the equivalent configured mocked-regression project command if the files
+    move to a mocked-labelled directory; expected result: affected mocked specs
+    pass under the mocked-regression project and are not presented as live
+    receipts.
+  - Run the existing frontend unit tests or the smallest affected subset that
+    exercises Playwright config helper behavior.
+  - Confirm live-display missing-env rejection with
+    `cd apps/frontend && corepack pnpm run test:e2e:live-display` in an
+    environment without `PLAYWRIGHT_LIVE_BASE_URL` and
+    `PLAYWRIGHT_LIVE_API_BASE_URL`; expected result is a deterministic blocked
+    profile error, not fallback to local dev or `https://api.example.test`.
+  - Confirm live-display broad-mock rejection by running the helper/config test
+    `cd apps/frontend && corepack pnpm test -- src/__tests__/playwrightConfig.test.ts`;
+    expected result: the slice passes, including the case that
+    `assertLiveDisplaySpecsDoNotMockApis` deterministically rejects a
+    live-labelled broad API mock fixture.
+  - Run a read-only audit confirmation, for example
+    `uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k broad_mock`,
+    proving reclassified mocked specs no longer produce gate-eligible
+    `broad-e2e-api-mock` findings under current audit semantics.
 
 ### G6-06 Broad mock detector hardening
 
