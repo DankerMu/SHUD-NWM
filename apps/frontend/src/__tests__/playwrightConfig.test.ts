@@ -36,6 +36,10 @@ describe('Playwright config helpers', () => {
 
     expect(projectNames).toEqual(['mocked-regression-chromium'])
     expect(projectNames).not.toContain('chromium')
+    expect(config.default.metadata).toMatchObject({
+      evidenceLane: 'mocked-regression',
+      broadApiMocks: 'allowed-in-mocked-regression-only',
+    })
   })
 
   it('requires explicit live display frontend and API URLs', () => {
@@ -82,6 +86,14 @@ describe('Playwright config helpers', () => {
     expect(isLiveDisplaySpecFile('/repo/apps/frontend/e2e/live-display.spec.ts')).toBe(true)
     expect(isLiveDisplaySpecFile('/repo/apps/frontend/e2e/xlive-display.spec.ts')).toBe(false)
     expect(isLiveDisplaySpecFile('/repo/apps/frontend/e2e/nested/live-display.spec.ts')).toBe(true)
+    expect(isLiveDisplaySpecFile('/repo/apps/frontend/e2e/m11-routes.mocked.spec.ts')).toBe(false)
+    expect(isLiveDisplaySpecFile('/repo/apps/frontend/e2e/monitoring.mocked.spec.ts')).toBe(false)
+  })
+
+  it('keeps mocked regression specs outside live display discovery', () => {
+    const e2eDir = path.resolve('e2e')
+
+    expect(findLiveDisplaySpecFiles(e2eDir)).toEqual([path.join(e2eDir, 'live-display.spec.ts')])
   })
 
   it('fails the live display guard for broad API route mocks only in live specs', () => {
@@ -90,7 +102,7 @@ describe('Playwright config helpers', () => {
       const e2eDir = path.join(root, 'e2e')
       mkdirSync(e2eDir)
       writeFileSync(
-        path.join(e2eDir, 'monitoring.spec.ts'),
+        path.join(e2eDir, 'monitoring.mocked.spec.ts'),
         "await page.route('**/api/v1/**', async () => undefined)\n",
       )
       writeFileSync(

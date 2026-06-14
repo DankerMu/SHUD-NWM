@@ -312,6 +312,22 @@ async function mockSingleMapApis(
   })
 }
 
+async function navigateInSession(page: Page, pathAndSearch: string) {
+  // Wait one painted turn so BrowserRouter's popstate listener is attached after the
+  // initial "/" commit. Warmed Vite chunks can make the overview visible before
+  // React's passive effects finish, which leaves a synthetic popstate unobserved.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => window.setTimeout(resolve, 0))
+      }),
+  )
+  await page.evaluate((nextUrl) => {
+    window.history.pushState({}, '', nextUrl)
+    window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }))
+  }, pathAndSearch)
+}
+
 test.describe('M26 single fullscreen map', () => {
   test('renders the national overview fullscreen map at / and normalizes /overview redirect', async ({ page }) => {
     await mockSingleMapApis(page)
@@ -399,8 +415,16 @@ test.describe('M26 single fullscreen map', () => {
     await mockSingleMapApis(page, { runSource: 'ifs' })
 
     // 旧 /basins/:id → /?basinId=:id（保 search + 路径参数语义化）。
+    // 直达带 basinId 的 URL 首挂载会按 Bug-1 合同剥离 basinId；这里先证明旧路由落点，
+    // 再用同一浏览器会话内导航进入详情，覆盖真实的会话内钻取合同。
     await page.goto(
       '/basins/basin-demo?source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=flood-return-period&basemap=satellite&basinVersionId=bv-001&segmentId=seg-009',
+    )
+    await expect(page).toHaveURL(/^[^?]*\/\?/)
+    await expect(page).not.toHaveURL(/basinId=/)
+    await navigateInSession(
+      page,
+      '/?source=ifs&cycle=2026-05-18T00:00:00Z&validTime=2026-05-18T06:00:00Z&layer=flood-return-period&basemap=satellite&basinVersionId=bv-001&riverNetworkVersionId=rn-v1&basinId=basin-demo&segmentId=seg-009',
     )
     await expect(page).toHaveURL(/basinId=basin-demo/)
     await expect(page.getByTestId('m11-fullscreen-map')).toBeVisible()
@@ -419,8 +443,13 @@ test.describe('M26 single fullscreen map', () => {
   test('honestly reports a missing basin on the detail map', async ({ page }) => {
     await mockSingleMapApis(page, { invalidBasin: true })
 
-    await page.goto('/?basinId=not-a-real-basin')
+    await page.goto('/')
+    await expect(page.getByLabel('全国总览地图')).toBeVisible()
+    await expect(page.getByTestId('m11-overview-empty')).toBeVisible()
+    await navigateInSession(page, '/?basinId=not-a-real-basin')
+    await expect(page).toHaveURL(/basinId=not-a-real-basin/)
     await expect(page.getByTestId('m11-fullscreen-map')).toBeVisible()
+    await expect(page.getByLabel('流域钻取地图')).toBeVisible()
     await expect(page.getByTestId('m11-basin-not-found')).toContainText('not-a-real-basin')
   })
 

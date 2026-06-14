@@ -58,8 +58,8 @@ documentation, evidence, and behavior-preserving internal refactor work. -->
   `docs/runbooks/two-node-deployment-overview.md`,
   `docs/runbooks/node-27-bringup-checklist.md`, and historical/superseded
   banners for old MVP runbooks where needed.
-- Frontend evidence: `apps/frontend/e2e/m11-routes.spec.ts`,
-  `apps/frontend/e2e/monitoring.spec.ts`, live display Playwright profile, and
+- Frontend evidence: `apps/frontend/e2e/m11-routes.mocked.spec.ts`,
+  `apps/frontend/e2e/monitoring.mocked.spec.ts`, live display Playwright profile, and
   validation docs that distinguish mocked regression from live receipt.
 - Orchestrator internals: `services/orchestrator/scheduler.py`,
   `services/orchestrator/chain.py`, and new small modules under
