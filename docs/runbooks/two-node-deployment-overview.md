@@ -13,7 +13,8 @@
 - Docker 部署使用同一个 app 镜像，但用不同 Compose/env/systemd 文件启动成不同角色。
 - 27 节点的设计目标是“能看、能诊断、能复制交接信息”，不是“能直接重跑或停止计算”。
 
-这份文档用于说明系统怎么运转、每个节点负责什么、怎么部署、会产生哪些产物。具体命令见 [`infra/README.two-node-docker.md`](../../infra/README.two-node-docker.md)，端到端证据要求见 [`docs/runbooks/two-node-production-e2e-plan.md`](two-node-production-e2e-plan.md)。
+这份文档用于说明系统怎么运转、每个节点负责什么、怎么部署、会产生哪些产物。当前值守命令、生产路径、产物位置和已知卡点见
+[`current-production-ops.md`](current-production-ops.md)。具体命令见 [`infra/README.two-node-docker.md`](../../infra/README.two-node-docker.md)，端到端证据要求见 [`docs/runbooks/two-node-production-e2e-plan.md`](two-node-production-e2e-plan.md)。
 
 ## 2. 整体运转流程
 

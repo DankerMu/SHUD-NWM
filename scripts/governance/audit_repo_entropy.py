@@ -153,7 +153,7 @@ ROUTE_ACTIVE_CLAUSE_CONNECTOR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 BROAD_E2E_API_MOCK_PATTERN = re.compile(
-    r"page\.route\s*\(\s*(?P<glob>(?P<quote>['\"])\*\*/api/v1/\*\*(?P=quote))",
+    r"(?<![A-Za-z0-9_$])page\.route\s*\(\s*(?P<glob>(?P<quote>['\"])\*\*/api/v1/\*\*(?P=quote))",
     re.MULTILINE,
 )
 MARKDOWN_TABLE_SEPARATOR_PATTERN = re.compile(r"^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
@@ -940,6 +940,8 @@ def _check_broad_e2e_mocks(root: Path) -> list[FindingSpec]:
     findings: list[FindingSpec] = []
     for path in _iter_text_files(root, [root / "apps" / "frontend"]):
         rel = _rel(root, path)
+        if _path_is_frontend_generated_artifact(rel):
+            continue
         if not ("/e2e/" in rel or rel.endswith(".spec.ts") or _path_has_label(rel, {"live"})):
             continue
         text = _read_repo_text(root, path)
@@ -971,6 +973,10 @@ def _check_broad_e2e_mocks(root: Path) -> list[FindingSpec]:
 
 def _broad_e2e_mock_line_numbers(text: str) -> list[int]:
     return [text.count("\n", 0, match.start("glob")) + 1 for match in BROAD_E2E_API_MOCK_PATTERN.finditer(text)]
+
+
+def _path_is_frontend_generated_artifact(relative: str) -> bool:
+    return relative.startswith("apps/frontend/artifacts/")
 
 
 def _classify_broad_e2e_mock_path(
@@ -3299,6 +3305,8 @@ def _stale_route_context_class(
         return "redirect"
     has_active_route_context = _line_has_active_route_instruction_context(
         line.clause
+    ) or _line_has_terse_active_route_context(
+        line.clause
     ) or _line_has_active_route_valued_context(
         line.governing_text,
         tokens,
@@ -3359,6 +3367,19 @@ def _line_has_active_route_instruction_context(line: str) -> bool:
     ):
         return True
     return _line_has_active_route_valued_context(line, tokens)
+
+
+def _line_has_terse_active_route_context(line: str) -> bool:
+    if not LEGACY_DISPLAY_ROUTE_PATTERN.search(line):
+        return False
+    tokens = set(_normalized_reason_text(line).split())
+    if _line_has_redirect_alias_context(line, tokens):
+        return False
+    if bool(tokens & {"open", "visit", "browse", "navigate"}):
+        return True
+    return "current" in tokens and "route" in tokens and bool(
+        tokens & {"display", "entrypoint", "page", "path"}
+    )
 
 
 def _line_has_current_route_governing_context(line: str) -> bool:

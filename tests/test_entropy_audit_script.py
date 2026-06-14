@@ -1619,6 +1619,44 @@ def test_broad_e2e_mock_detects_multiline_live_and_unallowlisted_registrations(
     )
 
 
+def test_broad_e2e_mock_ignores_route_calls_on_non_page_identifiers(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "apps" / "frontend" / "e2e" / "live.spec.ts",
+        """
+        await homepage.route('**/api/v1/**', route => route.abort())
+        await page.route('**/api/v1/**', route => route.abort())
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "broad-e2e-api-mock")
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["evidence_path"] == "apps/frontend/e2e/live.spec.ts"
+    assert finding["line"] == 2
+    _assert_unallowlisted_budget_counted_gate_eligible_finding(finding)
+
+
+def test_broad_e2e_mock_skips_frontend_generated_artifacts(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path / "apps" / "frontend" / "artifacts" / "live.spec.ts",
+        """
+        await page.route(
+          '**/api/v1/**',
+          route => route.abort(),
+        )
+        """,
+    )
+
+    findings = _findings_by_check(tmp_path, "broad-e2e-api-mock")
+
+    assert findings == []
+
+
 def test_broad_e2e_mock_detects_multiline_mocked_preview_visual_allowlist(
     tmp_path: Path,
 ) -> None:
@@ -2658,6 +2696,46 @@ def test_route_authority_evidence_boundary_active_instruction_is_report_only_dri
     assert active["allowlist_state"] == "unallowlisted"
     assert active["budget_counted"] is True
     assert active["gate_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    "active_line",
+    [
+        "Open /forecast.",
+        "Current display route: /forecast.",
+    ],
+)
+def test_route_authority_evidence_boundary_terse_active_route_is_report_only_drift(
+    tmp_path: Path,
+    active_line: str,
+) -> None:
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        f"""
+        ## #214 evidence boundary
+
+        - `/hydro-met` browser proof 状态以 #214 evidence matrix 为准。
+        Diagnostic `/meteorology` browser evidence remains frozen.
+        {active_line}
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_token = _route_authority_findings_by_token(findings)
+
+    assert set(by_token) == {"/hydro-met", "/meteorology", "/forecast"}
+    for token in ("/hydro-met", "/meteorology"):
+        assert by_token[token]["allowlist_key"] == (
+            "stale-display-route-token:historical-plan-or-pre-m26-evidence"
+        )
+        assert by_token[token]["allowlist_state"] == "allowlisted"
+        assert by_token[token]["budget_counted"] is False
+        assert by_token[token]["gate_eligible"] is False
+
+    active = by_token["/forecast"]
+    assert active["evidence_path"] == "docs/runbooks/current.md"
+    assert active["line"] == 5
+    _assert_unallowlisted_budget_counted_report_only_finding(active)
 
 
 @pytest.mark.parametrize(
