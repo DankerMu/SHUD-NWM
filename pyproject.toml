@@ -8,7 +8,12 @@ version = "0.1.0"
 description = "National Hydrological Modeling System"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.110.0",
+    # Cap <0.137: 0.137.0 changed include_router to wrap children in a single
+    # _IncludedRouter route instead of flattening copies into app.routes, which
+    # breaks every app.routes-introspection site (slurm gateway _drop_route,
+    # role-boundary route inventory). CI installs from pyproject (not uv.lock),
+    # so an uncapped range silently drifts onto the breaking release.
+    "fastapi>=0.110.0,<0.137",
     "uvicorn[standard]>=0.29.0",
     "sqlalchemy>=2.0.25",
     "asyncpg>=0.29.0",
