@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 import pytest
 from fastapi.testclient import TestClient
@@ -260,14 +260,14 @@ def _clean_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
 def _route_paths(app: object, prefix: str) -> set[str]:
     return {
         str(getattr(route, "path", ""))
-        for route in getattr(app, "routes", [])
+        for route in _iter_routes(app)
         if str(getattr(route, "path", "")).startswith(prefix)
     }
 
 
 def _route_keys(app: object) -> set[tuple[str, str]]:
     routes: set[tuple[str, str]] = set()
-    for route in getattr(app, "routes", []):
+    for route in _iter_routes(app):
         path = str(getattr(route, "path", ""))
         methods = getattr(route, "methods", None)
         if methods is None:
@@ -275,3 +275,14 @@ def _route_keys(app: object) -> set[tuple[str, str]]:
         for method in methods:
             routes.add((str(method).upper(), path))
     return routes
+
+
+def _iter_routes(app_or_router: object) -> Iterable[object]:
+    for route in getattr(app_or_router, "routes", []):
+        yield route
+        included_router = getattr(route, "original_router", None)
+        if included_router is None:
+            include_context = getattr(route, "include_context", None)
+            included_router = getattr(include_context, "included_router", None)
+        if included_router is not None:
+            yield from _iter_routes(included_router)

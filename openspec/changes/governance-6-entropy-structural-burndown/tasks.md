@@ -68,11 +68,11 @@ separate PR boundaries.
 
 ## 5. Scheduler Lease Extraction
 
-- [ ] 5.1 Create `services/orchestrator/scheduler_lease.py` and move lease
+- [x] 5.1 Create `services/orchestrator/scheduler_lease.py` and move lease
   classes/helpers behind compatibility imports from `scheduler.py`.
-- [ ] 5.2 Preserve CAS renew, atomic replace, live holder non-reclaim,
+- [x] 5.2 Preserve CAS renew, atomic replace, live holder non-reclaim,
   cross-host TTL, lease heartbeat, and lease-lost mutation fence behavior.
-- [ ] 5.3 Verify with focused scheduler lease tests and ruff.
+- [x] 5.3 Verify with focused scheduler lease tests and ruff.
 
 ## 6. Scheduler Candidate-State Extraction
 
@@ -609,6 +609,143 @@ separate PR boundaries.
   plus `uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`.
 - Acceptance: focused lease tests pass and `ruff check services/orchestrator`
   passes.
+- Fixture level: expanded.
+- Repair intensity: high.
+- Mandatory expanded triggers: shared orchestrator entrypoint, file IO/path
+  safety, lock publish/delete/overwrite behavior, concurrency, persisted shared
+  state, and mutation fences.
+- Change surface:
+  - `services/orchestrator/scheduler_lease.py` new lease module.
+  - `services/orchestrator/scheduler.py` compatibility imports/re-exports and
+    `_build_scheduler_lease` call site only.
+  - `tests/test_production_scheduler.py` focused import/monkeypatch updates only
+    if compatibility shims cannot keep existing tests unchanged.
+- Must preserve:
+  - File lock payload keys and values: `owner`, `schema_version`, `pass_id`,
+    `lease_token`, `pid`, `host`, `heartbeat_seq`, `heartbeat_at`,
+    `started_at`, and `lock_path`.
+  - `FileSchedulerLease`, `PostgresSchedulerLease`, `_LeaseHeartbeat`,
+    `_default_owner_liveness_probe`, `UnsafeSchedulerLockError`,
+    `_open_lock_parent_directory`, `_open_regular_guard_file`, and
+    `_unlink_lock_file` import/monkeypatch compatibility from
+    `services.orchestrator.scheduler`.
+  - CAS renew, crash-atomic renew temp/write/rename behavior, release CAS
+    no-op on stolen token, live same-host holder non-reclaim, dead-holder
+    reclaim, cross-host 2x TTL grace, CAS abort on concurrent renew, heartbeat
+    lost detection, and lease-lost pre-mutation fence.
+  - `PostgresSchedulerLease` advisory-lock evidence fields and file-guard
+    bypass behavior.
+- Must add/change:
+  - Move lease classes/helpers into `scheduler_lease.py` without changing
+    public constructor signatures, return payload shapes, exception reasons, or
+    test monkeypatch paths from `scheduler.py`.
+  - Keep `ProductionScheduler._build_scheduler_lease` behavior equivalent for
+    file and postgres backends.
+- Risk packs considered:
+  - Public API / CLI / script entry: selected - scheduler imports and
+    monkeypatch paths are compatibility surfaces.
+  - Config / project setup: selected - `scheduler_lock_backend`, lock paths,
+    ttl, database URL, and workspace root flow into lease construction.
+  - File IO / path safety / overwrite: selected - lock parent traversal,
+    symlink/non-regular/oversized lock rejection, guarded flock, atomic renew,
+    unlink, and temp cleanup are lease responsibilities.
+  - Schema / columns / units / field names: selected - lock and pass evidence
+    payload field names must remain stable.
+  - Auth / permissions / secrets: not selected - no credential handling change;
+    database URL is passed through unchanged and must not be logged.
+  - Concurrency / shared state / ordering: selected - CAS, heartbeat, reclaim,
+    release, and lease-lost fences guard shared scheduler mutation.
+  - Resource limits / large input / discovery: selected - bounded lock payload
+    reads via `MAX_LOCK_PAYLOAD_BYTES` remain enforced.
+  - Legacy compatibility / examples: selected - old imports from
+    `scheduler.py` and existing tests/scripts such as
+    `scripts/m24_lease_nfs_proof.py` must keep working.
+  - Error handling / rollback / partial outputs: selected - unsafe lock errors,
+    temp cleanup, failed renew, and contended evidence payloads remain stable.
+  - Release / packaging / dependency compatibility: selected - new module must
+    import without adding dependencies or circular imports.
+  - Documentation / migration notes: not selected - no user-facing docs change
+    required for this internal extraction.
+- Domain packs considered:
+  - Slurm production lifecycle / mock-vs-real parity: selected - lease-lost
+    must still block orchestrator construction and Slurm submission.
+  - Run manifest / QC provenance: not selected - no run manifest or QC change.
+  - Published NHMS artifacts / display identity: not selected - no publish or
+    display artifact behavior change.
+  - Other NHMS domain packs: not selected - no geospatial, forcing, numerical,
+    PostGIS, or provider behavior changes.
+- Invariant Matrix:
+  - Governing invariant: extracting lease code must not let a scheduler pass
+    mutate or submit unless it still owns the exact active lease token and pass
+    identity.
+  - Source-of-truth identity/contract: lock file/advisory lock identity
+    (`pass_id`, `lease_token`, `owner`, `schema_version`, `heartbeat_seq`,
+    holder `pid`/`host`, `lock_path`) and `heartbeat.lost` fence state.
+  - Surfaces:
+    - Producers: `FileSchedulerLease.acquire`, `PostgresSchedulerLease.acquire`,
+      `_LeaseHeartbeat`, and `ProductionScheduler._build_scheduler_lease`.
+    - Validators/preflight: `_open_lock_parent_directory`,
+      `_open_regular_guard_file`, `_existing_lock_state`,
+      `_read_existing_lock`, `_default_owner_liveness_probe`.
+    - Storage/cache/query: lock file plus guard file under `lock_path.parent`,
+      renew temp file, and PostgreSQL advisory lock connection.
+    - Public routes/entrypoints: `ProductionScheduler.run_once`,
+      `ProductionSchedulerConfig`, and imports from
+      `services.orchestrator.scheduler`.
+    - Frontend/downstream consumers: none - scheduler backend-only extraction.
+    - Failure paths/rollback/stale state: renew write failure cleanup, stolen
+      token release no-op, unsafe parent/guard/symlink/non-regular/oversized
+      lock handling, stale/dead/cross-host reclaim decisions.
+    - Evidence/audit/readiness: `lock_result` payloads, `lease_lost` pass
+      evidence, `no_mutation_proof`, and focused scheduler tests.
+  - Regression rows:
+    - Current holder renews with matching `pass_id`/`lease_token` -> heartbeat
+      sequence increments, identity fields remain stable, lock JSON remains
+      valid and non-empty.
+    - Lock token is stolen or heartbeat marks lost before execution -> renewal
+      returns false, `run_once` returns `lease_lost`, orchestrator factory is not
+      called, and `slurm_submit_called` remains false.
+    - Same-host live holder with aged mtime -> contender does not reclaim; dead
+      holder -> contender reclaims; cross-host unknown holder -> only reclaims
+      after 2x TTL.
+    - Concurrent renew between stale decision and unlink -> contender aborts
+      reclaim and preserves the renewed holder lock.
+    - Unsafe lock parent/symlink/non-regular/oversized lock -> stable unsafe
+      reason and no outside/partial file mutation.
+    - Existing imports/monkeypatches from `services.orchestrator.scheduler`
+      -> still resolve to the moved lease implementation.
+- Boundary-surface checklist:
+  - Shared helper roots: `scheduler.py` lease helpers being moved to
+    `scheduler_lease.py`.
+  - Public entrypoints: `ProductionScheduler.run_once`,
+    `ProductionScheduler._build_scheduler_lease`, scheduler CLI plan/submit
+    paths that instantiate scheduler.
+  - Read surfaces: lock file reads, lock parent stat/open, guard file stat/open,
+    PostgreSQL advisory lock connection outcome.
+  - Write/delete/overwrite surfaces: lock acquire create, stale unlink, renew
+    temp write/rename, release unlink, guard file creation.
+  - Staging/publish/rollback surfaces: renew temp cleanup and failed write
+    rollback.
+  - Producer/consumer evidence boundaries: `lock_result`, `lease_lost` evidence,
+    `no_mutation_proof`, postgres advisory lock evidence.
+  - Stale-state/idempotency boundaries: same-host live holder, dead holder,
+    cross-host TTL, concurrent renew CAS, stolen token release no-op.
+  - Unchanged downstream consumers: `tests/test_production_scheduler.py`,
+    `scripts/m24_lease_nfs_proof.py`, and any imports from
+    `services.orchestrator.scheduler`.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'lock or lease or heartbeat or postgres_lock_backend'`
+    -> focused lease/import/mutation-fence tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> full production scheduler tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`
+    -> lint passes.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
+- Non-goals:
+  - No candidate-state, discovery, candidate construction, execution, evidence,
+    chain, reservation, retry, or Slurm protocol rewrites.
+  - No status/reason/evidence key rename and no change to `.entropy-baseline`.
 
 ### G6-10 Scheduler candidate-state extraction
 
