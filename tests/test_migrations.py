@@ -38,6 +38,7 @@ EXPECTED_MIGRATIONS = [
     "000032_source_specific_state_snapshot.sql",
     "000033_station_mvt_active_source_index.sql",
     "000034_return_period_run_quality_materialization.sql",
+    "000035_qhh_display_coverage_materialization.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}
@@ -64,6 +65,7 @@ EXPECTED_TABLES = {
     "flood.flood_frequency_curve",
     "flood.return_period_result",
     "flood.run_product_quality",
+    "hydro.run_display_coverage",
     "map.tile_layer",
     "map.tile_cache",
     "ops.pipeline_job",
@@ -530,11 +532,12 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
     assert "h.status IN ('parsed', 'frequency_done', 'published')" in query_source
     assert "h.status NOT IN ('parsed', 'frequency_done', 'published')" in query_source
     assert "h.cycle_time IS NOT NULL" in query_source
+    # #5 起 _flood_product_quality_join 增加 node-27 缺表 fallback 分支（available=False
+    # 用 LATERAL 聚合 flood.return_period_result），函数源码因此合法含 LATERAL/GROUP BY 字样。
+    # "默认走 run_product_quality 物化表、不退化为聚合" 的双分支契约改由
+    # tests/test_forecast_store_product_quality_sql.py 锁定；此处只确认物化 join 仍在源码中。
     assert "LEFT JOIN flood.run_product_quality" in flood_quality_join_source
     assert "ON {alias}.run_id = h.run_id" in flood_quality_join_source
-    assert "LEFT JOIN LATERAL" not in flood_quality_join_source
-    assert "flood.return_period_result" not in flood_quality_join_source
-    assert "GROUP BY run_id" not in flood_quality_join_source
     assert "QHH_LATEST_SEARCH_LIMIT" in query_source
     assert "QHH_LATEST_CONTEXT_LIMIT" in query_source
     assert "QHH_LATEST_EXPECTED_HORIZON_HOURS" in query_source

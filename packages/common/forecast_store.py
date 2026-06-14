@@ -97,7 +97,7 @@ class PsycopgForecastStore:
     def _run_product_quality_available(cursor: Any) -> bool:
         """flood.run_product_quality 物化表是否存在。只读副本可能缺失（迁移未应用）；缺失时洪频
         质量改走 return_period_result 存在性判定（#5：取消 node-27 计算频率、有产物就显示）。"""
-        cursor.execute("SELECT to_regclass('flood.run_product_quality') AS reg")
+        cursor.execute("SELECT to_regclass('flood.run_product_quality') AS reg", ())
         return cursor.fetchone()["reg"] is not None
 
     def forecast_series(
@@ -1241,6 +1241,36 @@ class PsycopgForecastStore:
         identity_sql, identity_params = _qhh_latest_strict_identity_sql(identity)
         candidate_limit = 1 if identity is not None else QHH_LATEST_SEARCH_LIMIT
         available = self._run_product_quality_available(cursor)
+        # Fast path: when the per-run coverage materialization exists, serve the
+        # station/river coverage from a cheap run_id JOIN instead of recomputing
+        # the deep coverage CTEs on every request. The materialized values are
+        # produced by the identical CTE arithmetic (packages/common/
+        # display_coverage.py), so the rows are field-for-field identical to the
+        # CTE path. node-22 lacks the table and keeps the CTE path below.
+        #
+        # The materialization is a CACHE, not a gate: a candidate run missing its
+        # coverage row (just parsed with its per-run refresh still pending, or a
+        # failed refresh) must NOT be served as zero-coverage / unavailable. On
+        # any cache miss fall through to the authoritative CTE path below
+        # (correct, slower); the steady-state all-hit case keeps the <1s path.
+        if _run_display_coverage_available(cursor):
+            candidates = self._fetch_latest_qhh_display_candidates_fast(
+                cursor,
+                basin_id=basin_id,
+                source_id=source_id,
+                identity_sql=identity_sql,
+                identity_params=identity_params,
+                candidate_limit=candidate_limit,
+                available=available,
+            )
+            # Strip the cache-hit marker off every row, then serve the fast path
+            # only if EVERY candidate hit. A missing marker defaults to a miss
+            # (fall through to the authoritative CTE) — the cache must never bias
+            # toward serving itself. all([]) is True: an empty fast result means
+            # the CTE (identical candidate_runs WHERE) would be empty too.
+            covered = [candidate.pop("coverage_present", False) for candidate in candidates]
+            if all(covered):
+                return candidates
         return self._fetch_all(
             cursor,
             f"""
@@ -1755,6 +1785,133 @@ class PsycopgForecastStore:
                 candidate_limit,
                 list(MVP_STATION_VARIABLES),
                 len(MVP_STATION_VARIABLES),
+            ),
+        )
+
+    def _fetch_latest_qhh_display_candidates_fast(
+        self,
+        cursor: Any,
+        *,
+        basin_id: str,
+        source_id: str,
+        identity_sql: str,
+        identity_params: Sequence[Any],
+        candidate_limit: int,
+        available: bool,
+    ) -> list[dict[str, Any]]:
+        """Cheap latest-product candidates via the run_display_coverage JOIN.
+
+        Reuses the identical (cheap) candidate_runs CTE + flood availability
+        branch as the CTE path, but replaces the station/river coverage CTEs with
+        a single ``run_id`` JOIN onto the materialized coverage. The projected
+        columns reproduce the CTE path's final SELECT field-for-field:
+
+        * ``station_run_id``/``station_model_id``/``station_basin_version_id``
+          mirror the CTE's ``sc.<col>`` — NULL exactly when station coverage is
+          absent, which the materialization records as a NULL station_source_id.
+        * COALESCE defaults (counts -> 0, variable coverage -> '[]') match the
+          CTE path's COALESCEs.
+        """
+        return self._fetch_all(
+            cursor,
+            f"""
+            WITH candidate_runs AS (
+                SELECT
+                    h.run_id,
+                    h.run_type,
+                    h.scenario_id,
+                    h.model_id,
+                    h.basin_version_id,
+                    h.forcing_version_id,
+                    h.source_id,
+                    h.cycle_time,
+                    h.start_time AS run_start_time,
+                    h.end_time AS run_end_time,
+                    h.status,
+                    h.created_at AS run_created_at,
+                    h.updated_at AS run_updated_at,
+                    mi.river_network_version_id,
+                    mi.basin_version_id AS model_basin_version_id,
+                    bv.basin_id,
+                    rnv.basin_version_id AS river_network_basin_version_id,
+                    COALESCE(
+                        CASE WHEN mi.resource_profile->>'output_segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->>'output_segment_count')::integer END,
+                        CASE WHEN mi.resource_profile->>'shud_output_segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->>'shud_output_segment_count')::integer END,
+                        CASE WHEN mi.resource_profile->>'shud_output_river_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->>'shud_output_river_count')::integer END,
+                        CASE WHEN mi.resource_profile->'output_river'->>'output_segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->'output_river'->>'output_segment_count')::integer END,
+                        CASE WHEN mi.resource_profile->'output_river'->>'segment_count' ~ '^[0-9]+$'
+                            THEN (mi.resource_profile->'output_river'->>'segment_count')::integer END,
+                        rnv.segment_count
+                    ) AS expected_segment_count,
+                    fv.forcing_version_id AS fv_forcing_version_id,
+                    fv.model_id AS forcing_model_id,
+                    fv.source_id AS forcing_source_id,
+                    fv.cycle_time AS forcing_cycle_time,
+                    fv.start_time AS forcing_start_time,
+                    fv.end_time AS forcing_end_time,
+                    fv.station_count AS expected_station_count,
+                    fv.checksum AS forcing_checksum,
+                    GREATEST(h.cycle_time, h.start_time, fv.start_time) AS display_start_time,
+                    LEAST(
+                        h.end_time,
+                        fv.end_time,
+                        h.cycle_time + (%s * INTERVAL '1 hour')
+                    ) AS display_end_time,
+                    {_flood_product_quality_select("fpq", available)}
+                FROM hydro.hydro_run h
+                JOIN core.basin_version bv
+                  ON bv.basin_version_id = h.basin_version_id
+                LEFT JOIN core.model_instance mi
+                  ON mi.model_id = h.model_id
+                LEFT JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_id = mi.river_network_version_id
+                LEFT JOIN met.forcing_version fv
+                  ON fv.forcing_version_id = h.forcing_version_id
+                {_flood_product_quality_join("fpq", available)}
+                WHERE bv.basin_id = %s
+                  AND h.run_type = 'forecast'
+                  AND h.status IN ('parsed', 'frequency_done', 'published')
+                  AND LOWER(h.source_id) = LOWER(%s)
+                  {identity_sql}
+                  AND h.cycle_time IS NOT NULL
+                ORDER BY h.cycle_time DESC, h.run_id DESC
+                LIMIT %s
+            )
+            SELECT
+                cr.*,
+                COALESCE(cov.station_count, 0) AS station_count,
+                COALESCE(cov.station_sample_count, 0) AS station_sample_count,
+                CASE WHEN cov.station_source_id IS NOT NULL THEN cr.run_id END AS station_run_id,
+                CASE WHEN cov.station_source_id IS NOT NULL THEN cr.model_id END AS station_model_id,
+                cov.station_display_start_time AS station_display_start_time,
+                cov.station_display_end_time AS station_display_end_time,
+                CASE WHEN cov.station_source_id IS NOT NULL THEN cr.basin_version_id END AS station_basin_version_id,
+                cov.station_source_id,
+                cov.station_valid_time_start,
+                cov.station_valid_time_end,
+                COALESCE(cov.station_variable_coverage, '[]'::jsonb) AS station_variable_coverage,
+                COALESCE(cov.segment_count, 0) AS segment_count,
+                COALESCE(cov.river_sample_count, 0) AS river_sample_count,
+                cov.river_valid_time_start,
+                cov.river_valid_time_end,
+                cov.min_lead_time_hours,
+                cov.max_lead_time_hours,
+                (cov.run_id IS NOT NULL) AS coverage_present
+            FROM candidate_runs cr
+            LEFT JOIN hydro.run_display_coverage cov
+              ON cov.run_id = cr.run_id
+            ORDER BY cr.cycle_time DESC, cr.run_id DESC
+            """,
+            (
+                QHH_LATEST_EXPECTED_HORIZON_HOURS,
+                basin_id,
+                source_id,
+                *identity_params,
+                candidate_limit,
             ),
         )
 
@@ -3579,6 +3736,14 @@ def _flood_product_quality_from_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "unavailable_products": unavailable_products,
         "residual_blockers": residual_blockers,
     }
+
+
+def _run_display_coverage_available(cursor: Any) -> bool:
+    """Whether hydro.run_display_coverage (the latest-product fast-path
+    materialization) exists. Present on node-27 local (migration 000035 applied);
+    absent on node-22, which therefore keeps the coverage-CTE path unchanged."""
+    cursor.execute("SELECT to_regclass('hydro.run_display_coverage') AS reg", ())
+    return cursor.fetchone()["reg"] is not None
 
 
 def _flood_product_quality_join(alias: str, available: bool = True) -> str:
