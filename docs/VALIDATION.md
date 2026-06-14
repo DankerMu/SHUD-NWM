@@ -1190,10 +1190,27 @@ corepack pnpm build
 
 ## Frontend E2E
 
-Frontend Playwright evidence has separate lanes. The default lane is mocked
-regression only: existing deterministic specs may use
-`page.route('**/api/v1/**')`, and their output cannot be cited as a live
-receipt or display_readonly proof.
+Frontend Playwright evidence has separate lanes. Keep receipts labelled with the
+lane that produced them:
+
+- `mocked-regression`: deterministic regression coverage for mocked UI behavior.
+  Broad API mocks such as `page.route('**/api/v1/**')` are allowed. Receipts from
+  this lane are mocked evidence only and must not be cited as live receipts or
+  live `display_readonly` proof.
+- `preview`: browser coverage for preview or ephemeral frontend builds where API
+  responses may still be simulated. Broad API mocks such as
+  `page.route('**/api/v1/**')` are allowed. Receipts from this lane are preview
+  evidence only and must not be cited as live receipts or live
+  `display_readonly` proof.
+- `visual`: screenshot, layout, and visual-regression coverage where stable
+  fixtures may isolate frontend rendering. Broad API mocks such as
+  `page.route('**/api/v1/**')` are allowed. Receipts from this lane are visual
+  evidence only and must not be cited as live receipts or live
+  `display_readonly` proof.
+- `live-display`: live display_readonly browser proof against explicit runtime
+  frontend and API bindings. Broad API mocks such as
+  `page.route('**/api/v1/**')` are not allowed and cannot produce live display
+  receipts. Only this lane may produce live `display_readonly` receipts.
 
 ```bash
 cd apps/frontend

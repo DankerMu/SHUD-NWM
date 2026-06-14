@@ -465,6 +465,69 @@ separate PR boundaries.
 - Required Reading: `specs/evidence-boundary-hardening/spec.md`.
 - Acceptance: docs clearly state broad API mocks cannot produce live display
   receipts.
+- Fixture level: expanded.
+- Repair intensity: low.
+- Mandatory expanded triggers: legacy/example evidence compatibility and
+  published display identity wording; the docs define which frontend evidence
+  lanes may be cited as live `display_readonly` receipts.
+- Change surface: `docs/VALIDATION.md` frontend E2E validation guidance only.
+- Must preserve:
+  - Existing validation commands and live-display URL requirements.
+  - Existing frontend specs, Playwright config, and entropy audit parser
+    behavior from G6-05/G6-06.
+- Must add/change:
+  - `docs/VALIDATION.md` names the four frontend evidence lanes:
+    mocked-regression, preview, visual, and live-display.
+  - Each lane states whether broad API mocks such as
+    `page.route('**/api/v1/**')` are allowed.
+  - Each lane states whether its receipts may be cited as live
+    `display_readonly` evidence.
+  - Live-display guidance states broad API mocks cannot produce live display
+    receipts and that live evidence requires explicit runtime frontend/API
+    bindings.
+- Risk packs considered:
+  - Public API / CLI / script entry: not selected - docs-only command wording;
+    no executable entrypoint changes.
+  - Config / project setup: not selected - frontend configuration is out of
+    scope.
+  - File IO / path safety / overwrite: not selected - no file IO behavior
+    changes.
+  - Schema / columns / units / field names: not selected - no schema or
+    evidence JSON contract changes.
+  - Auth / permissions / secrets: not selected - docs reiterate existing
+    `display_readonly` evidence boundary but do not change auth handling.
+  - Concurrency / shared state / ordering: not selected - no runtime ordering
+    changes.
+  - Resource limits / large input / discovery: not selected - no discovery or
+    parser changes.
+  - Legacy compatibility / examples: selected - current mocked specs remain
+    valid deterministic regression evidence but not live proof.
+  - Error handling / rollback / partial outputs: not selected - no executable
+    failure-path changes.
+  - Release / packaging / dependency compatibility: not selected - no package
+    or dependency changes.
+  - Documentation / migration notes: selected - this issue is the validation
+    documentation boundary.
+- Domain packs considered:
+  - Published NHMS artifacts / display identity: selected - display receipts
+    must be bound to the live display profile, not mocked/preview/visual lanes.
+  - Run manifest / QC provenance: not selected - no manifest/QC provenance
+    change.
+  - Slurm production lifecycle / mock-vs-real parity: not selected - frontend
+    evidence lane wording only; no Slurm behavior.
+  - Other NHMS domain packs: not selected - no geospatial, forcing, numerical,
+    PostGIS, or provider behavior changes.
+- Required evidence:
+  - `rg -n "mocked-regression|preview|visual|live-display|page.route|display_readonly|live receipt|live display" docs/VALIDATION.md`
+    -> the frontend E2E section names all four lanes, states broad mocks are
+    allowed only for mocked-regression/preview/visual evidence, and states those
+    lanes cannot produce live `display_readonly` receipts.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
+- Non-goals:
+  - No frontend spec/config changes.
+  - No audit parser/test changes.
+  - No change to live-display command semantics or URL requirements.
 
 ### G6-08 Artifact ownership literal
 
