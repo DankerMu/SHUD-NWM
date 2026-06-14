@@ -543,6 +543,52 @@ separate PR boundaries.
   `docs/governance/DOC_STATUS.md`.
 - Acceptance: entropy audit no longer reports the
   `agent-artifact-ownership-policy` gate-eligible finding.
+- Fixture level: compact.
+- Repair intensity: low.
+- Change surface: `docs/governance/DOC_STATUS.md` artifact ownership policy
+  wording only.
+- Must preserve:
+  - Existing ownership distinctions for tracked `.agents/skills/**`, local
+    `.codex/**` evidence, frontend visual artifacts, and root `artifacts/`.
+  - Existing `.gitignore` and `.dockerignore` contents and audit parser
+    behavior.
+- Downstream compatibility axes: entropy audit consumers and Docker
+  build-context policy readers continue to see the same ownership model, with
+  the missing literal term added.
+- Must add/change:
+  - `DOC_STATUS.md` explicitly names the literal `.dockerignore` term in the
+    artifact ownership policy so the audit-required ownership term is present.
+  - The wording keeps Docker build context exclusion as policy context, not a
+    new runtime or ignore-file behavior.
+- Risk packs considered:
+  - Config / project setup: selected - the wording documents Docker build
+    context ownership expectations without changing config files.
+  - Documentation / migration notes: selected - this issue is a governance doc
+    source-of-truth correction.
+  - Legacy compatibility / examples: selected - current tracked/generated
+    ownership distinctions must remain intact.
+  - Public API / CLI / script entry, File IO / path safety / overwrite, Schema /
+    columns / units / field names, Auth / permissions / secrets, Concurrency /
+    shared state / ordering, Resource limits / large input / discovery, Error
+    handling / rollback / partial outputs, Release / packaging / dependency
+    compatibility: not selected - no executable behavior, schema, auth,
+    runtime, packaging, or parser changes.
+- Domain packs considered: not selected - no NHMS geospatial, forcing,
+  numerical, PostGIS, Slurm, provider, manifest/QC, or display artifact
+  identity behavior changes.
+- Required evidence:
+  - `rg -n "\\.dockerignore|Agent And Artifact Ownership|Docker build context" docs/governance/DOC_STATUS.md`
+    -> ownership policy explicitly mentions `.dockerignore`.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`
+    followed by
+    `jq -e '[.findings[] | select(.check_id == "agent-artifact-ownership-policy")] | length == 0'`
+    -> current findings contain no `agent-artifact-ownership-policy` entry
+    (the check family may still appear under metadata as an executed check).
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
+- Non-goals:
+  - No changes to `.gitignore`, `.dockerignore`, audit parser code, audit
+    tests, or broader governance doc structure.
 
 ### G6-09 Scheduler lease extraction
 
