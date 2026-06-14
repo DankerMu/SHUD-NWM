@@ -261,13 +261,14 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
 
     orchestrator = modules["services/orchestrator"]
     assert isinstance(orchestrator, dict)
-    assert orchestrator["file_count"] == 12
+    assert orchestrator["file_count"] == 13
     assert orchestrator["finding_count"] == 0
     assert orchestrator["priority"] == "P1"
     assert orchestrator["structure"] == {
         "score": "high",
         "hotspots": ["services/orchestrator/scheduler.py", "services/orchestrator/chain.py"],
     }
+    assert (REPO_ROOT / "services/orchestrator/scheduler_lease.py").is_file()
     assert baseline["summary"]["modules_with_high_entropy"] >= 2
 
     patterns = {
@@ -296,12 +297,6 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
             "impact": "high",
             "effort": "low",
             "axis": "context",
-        },
-        {
-            "target": "Resolve gate-eligible broad E2E API mocks and DOC_STATUS artifact ownership term",
-            "impact": "high",
-            "effort": "low",
-            "axis": "protocol/control",
         },
         {
             "target": (

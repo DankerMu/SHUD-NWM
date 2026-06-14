@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -321,7 +322,7 @@ def test_role_boundary_document_mentions_required_inventory_and_hard_gate() -> N
 
 def _route_inventory(app: object) -> set[GatewayRouteInventoryEntry]:
     entries: set[GatewayRouteInventoryEntry] = set()
-    for route in getattr(app, "routes", []):
+    for route in _iter_routes(app):
         route_type = type(route).__name__
         is_api_route = isinstance(route, APIRoute)
         is_mount = isinstance(route, Mount)
@@ -337,6 +338,17 @@ def _route_inventory(app: object) -> set[GatewayRouteInventoryEntry]:
                     )
                 )
     return entries
+
+
+def _iter_routes(app_or_router: object) -> Iterable[object]:
+    for route in getattr(app_or_router, "routes", []):
+        yield route
+        included_router = getattr(route, "original_router", None)
+        if included_router is None:
+            include_context = getattr(route, "include_context", None)
+            included_router = getattr(include_context, "included_router", None)
+        if included_router is not None:
+            yield from _iter_routes(included_router)
 
 
 def _route_paths(app: object) -> set[str]:

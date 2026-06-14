@@ -15,10 +15,9 @@ rather than merely returning 403.
 from __future__ import annotations
 
 from fastapi import FastAPI
-from fastapi.routing import APIRoute
 
 from services.slurm_gateway.config import SlurmGatewaySettings, get_settings
-from services.slurm_gateway.routes import router as slurm_router
+from services.slurm_gateway.routes import create_slurm_router
 
 INTERNAL_RESET_PATH = "/api/v1/slurm/internal/reset"
 
@@ -32,15 +31,5 @@ def create_gateway_app(settings: SlurmGatewaySettings | None = None) -> FastAPI:
         description="Standalone Slurm submission gateway (no business routes).",
         version="0.1.0",
     )
-    app.include_router(slurm_router)
-    if not settings.allow_internal_reset:
-        _drop_route(app, INTERNAL_RESET_PATH)
+    app.include_router(create_slurm_router(include_internal_reset=settings.allow_internal_reset))
     return app
-
-
-def _drop_route(app: FastAPI, path: str) -> None:
-    app.router.routes = [
-        route
-        for route in app.router.routes
-        if not (isinstance(route, APIRoute) and route.path == path)
-    ]

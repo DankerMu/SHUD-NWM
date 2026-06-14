@@ -33,7 +33,6 @@ class SlurmSafeValidationRoute(APIRoute):
         return custom_route_handler
 
 
-router = APIRouter(prefix="/api/v1/slurm", tags=["slurm"], route_class=SlurmSafeValidationRoute)
 SLURM_ROUTE_JOB_ID_PATTERN = r"^(?:\d+(?:_\d+)?|mock_\d+)$"
 
 
@@ -64,12 +63,10 @@ def _gateway_error_response(exc: SlurmGatewayError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content=response.model_dump(mode="json"))
 
 
-@router.get("/health")
 async def health_check():
     return slurm_gateway.health()
 
 
-@router.post("/jobs", status_code=201)
 async def submit_job(request: SubmitJobRequest):
     try:
         return slurm_gateway.submit_job(request)
@@ -77,7 +74,6 @@ async def submit_job(request: SubmitJobRequest):
         return _gateway_error_response(exc)
 
 
-@router.post("/job-arrays", status_code=201)
 async def submit_job_array(request: Annotated[ArraySubmitJobRequest, Body()]):
     try:
         submit_array = getattr(slurm_gateway, "submit_job_array")
@@ -86,7 +82,6 @@ async def submit_job_array(request: Annotated[ArraySubmitJobRequest, Body()]):
         return _gateway_error_response(exc)
 
 
-@router.get("/jobs")
 async def list_jobs(
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -97,7 +92,6 @@ async def list_jobs(
         return _gateway_error_response(exc)
 
 
-@router.get("/jobs/{job_id}")
 async def get_job_status(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
         return slurm_gateway.get_job_status(job_id)
@@ -105,7 +99,6 @@ async def get_job_status(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_
         return _gateway_error_response(exc)
 
 
-@router.get("/jobs/{job_id}/array-tasks")
 async def get_array_task_results(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
         return slurm_gateway.get_array_task_results(job_id)
@@ -113,7 +106,6 @@ async def get_array_task_results(job_id: Annotated[str, Path(pattern=SLURM_ROUTE
         return _gateway_error_response(exc)
 
 
-@router.delete("/jobs/{job_id}")
 async def cancel_job(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
         return slurm_gateway.cancel_job(job_id)
@@ -121,7 +113,6 @@ async def cancel_job(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATT
         return _gateway_error_response(exc)
 
 
-@router.get("/jobs/{job_id}/logs")
 async def fetch_logs(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATTERN)]):
     try:
         return slurm_gateway.fetch_logs(job_id)
@@ -129,7 +120,6 @@ async def fetch_logs(job_id: Annotated[str, Path(pattern=SLURM_ROUTE_JOB_ID_PATT
         return _gateway_error_response(exc)
 
 
-@router.post("/internal/reset")
 async def reset_registry(
     settings: Annotated[SlurmGatewaySettings, Depends(get_settings)],
     request: Annotated[ResetRequest | None, Body()] = None,
@@ -143,3 +133,21 @@ async def reset_registry(
         )
         return _gateway_error_response(exc)
     return slurm_gateway.reset(request)
+
+
+def create_slurm_router(*, include_internal_reset: bool = True) -> APIRouter:
+    router = APIRouter(prefix="/api/v1/slurm", tags=["slurm"], route_class=SlurmSafeValidationRoute)
+    router.add_api_route("/health", health_check, methods=["GET"])
+    router.add_api_route("/jobs", submit_job, methods=["POST"], status_code=201)
+    router.add_api_route("/job-arrays", submit_job_array, methods=["POST"], status_code=201)
+    router.add_api_route("/jobs", list_jobs, methods=["GET"])
+    router.add_api_route("/jobs/{job_id}", get_job_status, methods=["GET"])
+    router.add_api_route("/jobs/{job_id}/array-tasks", get_array_task_results, methods=["GET"])
+    router.add_api_route("/jobs/{job_id}", cancel_job, methods=["DELETE"])
+    router.add_api_route("/jobs/{job_id}/logs", fetch_logs, methods=["GET"])
+    if include_internal_reset:
+        router.add_api_route("/internal/reset", reset_registry, methods=["POST"])
+    return router
+
+
+router = create_slurm_router()
