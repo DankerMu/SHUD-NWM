@@ -669,3 +669,45 @@ Review focus:
   keeps them.
 - Whether orchestrator compatibility shims should be removed in a second
   Governance-6 follow-up after all internal callers migrate.
+
+## PR #481 Production Copyback/Runtime Boundary Addendum
+
+The user approved keeping the local two-node production copyback/runtime changes
+inside this Governance-6 PR instead of splitting them out. The authority surface
+therefore includes `NHMS_OBJECT_STORE_COPYBACK_ROOT`, compute/display runtime
+role validation, q_down display publication ordering, and docs/tests evidence
+for that behavior.
+
+Design requirements:
+
+- Preserve the raw configured copyback path until no-follow validation has
+  rejected symlink components and unsafe ancestors. Only after that validation
+  may the implementation compare verified real paths for equality, containment,
+  or overlap with `OBJECT_STORE_ROOT`.
+- Exact equality between `NHMS_OBJECT_STORE_COPYBACK_ROOT` and
+  `OBJECT_STORE_ROOT` is a skip for physical copying only. It still must
+  validate each `runs/<run_id>` source tree through the same no-follow traversal
+  and manifest/output/log completeness checks used by real copyback.
+- Copyback replacement must be rollback-safe: a failed promotion must not leave
+  partial canonical `runs/<run_id>` contents or delete the last complete target
+  tree. A sibling backup strategy is acceptable where a portable atomic
+  directory exchange is unavailable.
+- q_down display artifacts at stable object-store or published URIs must not be
+  advanced until required run-product copyback has succeeded. Failed republish
+  must leave the previous cycle manifest unchanged, or no manifest visible for a
+  first publish.
+- Copyback root overlap remains rejected except exact equality. Source and target
+  `ObjectStoreError` failures are normalized as copyback publish errors with run
+  and root details. `display_readonly` remains a forbidden role for compute-only
+  path env, including copyback roots.
+
+Required evidence:
+
+- Focused copyback tests cover source/root symlink rejection, exact-root complete
+  and incomplete run trees, overlap rejection, normalized source/target
+  `ObjectStoreError`, rollback-safe directory replacement, and q_down failed
+  republish visibility.
+- Runtime tests and static Docker validation cover compute-only
+  `NHMS_OBJECT_STORE_COPYBACK_ROOT` and display-forbidden role boundaries.
+- Documentation and env examples describe the compute-only copyback root and
+  the display node's read-only published artifact boundary.

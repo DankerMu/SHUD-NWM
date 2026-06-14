@@ -93,7 +93,7 @@ class TilePublisher:
             or "published://"
         )
         self.object_store_copyback_root = (
-            Path(object_store_copyback_root).expanduser().resolve()
+            _configured_path_no_resolve(object_store_copyback_root)
             if object_store_copyback_root is not None and str(object_store_copyback_root).strip()
             else None
         )
@@ -559,6 +559,7 @@ class TilePublisher:
         tile_layer_available = _has_table(session, "map", "tile_layer")
         layers: list[dict[str, Any]] = []
         artifacts: list[dict[str, Any]] = []
+        artifact_writes: list[dict[str, Any]] = []
         registrations: list[tuple[dict[str, Any], dict[str, Any], str]] = []
         cycle_unavailable: set[str] = set()
         cycle_blockers: list[dict[str, Any]] = []
@@ -577,7 +578,7 @@ class TilePublisher:
             freq = self._qdown_frequency_metadata(session, run, frequency_available=frequency_available)
             cycle_unavailable.update(freq["unavailable_products"])
             cycle_blockers.extend(freq["residual_blockers"])
-            layer_artifact = self._publish_qdown_run(
+            layer_artifact = self._build_qdown_run_publication(
                 cycle_id=cycle_id,
                 run=run,
                 identity=identity,
@@ -586,6 +587,7 @@ class TilePublisher:
             layers.append(layer_artifact["layer"])
             artifacts.append(layer_artifact["manifest_artifact"])
             artifacts.append(layer_artifact["log_artifact"])
+            artifact_writes.extend(layer_artifact["artifact_writes"])
             registrations.append((run, layer_artifact["layer"], layer_artifact["manifest_uri"]))
 
         if not layers:
@@ -606,6 +608,15 @@ class TilePublisher:
             if not cycle_unavailable and not cycle_blockers and identity_skips == 0
             else "degraded"
         )
+        # F1: register each published q_down layer in map.tile_layer so the read
+        # replica can discover display products from the DB; tolerate a missing table.
+        db_registered = False
+        source_run_ids = sorted({str(layer["source_run_id"]) for layer in layers})
+        copyback_summary = self._copyback_run_products(source_run_ids)
+
+        for artifact_write in artifact_writes:
+            self._write_qdown_artifact(artifact_write["key"], artifact_write["payload"])
+
         cycle_manifest_uri = self._write_qdown_cycle_manifest(
             cycle_id=cycle_id,
             layers=layers,
@@ -613,12 +624,6 @@ class TilePublisher:
             unavailable_products=sorted(cycle_unavailable),
             residual_blockers=cycle_blockers,
         )
-
-        # F1: register each published q_down layer in map.tile_layer so the read
-        # replica can discover display products from the DB; tolerate a missing table.
-        db_registered = False
-        source_run_ids = sorted({str(layer["source_run_id"]) for layer in layers})
-        copyback_summary = self._copyback_run_products(source_run_ids)
 
         if tile_layer_available:
             for run, layer, manifest_uri in registrations:
@@ -827,7 +832,7 @@ class TilePublisher:
         ).mappings().first()
         return int(row["rows"]) if row else 0
 
-    def _publish_qdown_run(
+    def _build_qdown_run_publication(
         self,
         *,
         cycle_id: str,
@@ -884,7 +889,7 @@ class TilePublisher:
                 },
             }
         )
-        manifest_uri = self._write_qdown_artifact(manifest_key, manifest_payload)
+        manifest_uri = self._qdown_artifact_uri_for_key(manifest_key)
         _reject_private_display_uri(manifest_uri)
 
         log_key = self.object_store.normalize_key(
@@ -899,12 +904,16 @@ class TilePublisher:
                 "unavailable_products": frequency["unavailable_products"],
             }
         )
-        log_uri = self._write_qdown_artifact(log_key, log_payload)
+        log_uri = self._qdown_artifact_uri_for_key(log_key)
         _reject_private_display_uri(log_uri)
 
         return {
             "layer": layer,
             "manifest_uri": manifest_uri,
+            "artifact_writes": (
+                {"key": manifest_key, "payload": manifest_payload},
+                {"key": log_key, "payload": log_payload},
+            ),
             "manifest_artifact": {
                 "artifact_id": f"q_down_manifest_{run_key}",
                 "artifact_type": "q_down_manifest",
@@ -1017,6 +1026,11 @@ class TilePublisher:
         if self.published_artifact_root is not None:
             published_key = self.object_store.normalize_key(key)
             self._write_published_artifact(published_key, content)
+        return self._qdown_artifact_uri_for_key(key)
+
+    def _qdown_artifact_uri_for_key(self, key: str) -> str:
+        if self.published_artifact_root is not None:
+            published_key = self.object_store.normalize_key(key)
             return f"{_prefix_with_separator(self.published_artifact_uri_prefix)}{published_key}"
         return self.object_store.uri_for_key(key)
 
@@ -1052,17 +1066,41 @@ class TilePublisher:
         if self.object_store_copyback_root is None:
             return None
         unique_run_ids = sorted({str(run_id).strip() for run_id in run_ids if str(run_id).strip()})
-        object_store_root = Path(self.object_store.root).expanduser().resolve()
-        copyback_root = self.object_store_copyback_root.expanduser().resolve()
+        object_store_root_raw = _configured_path_no_resolve(self.object_store.root)
+        copyback_root_raw = self.object_store_copyback_root
         if not unique_run_ids:
             return {
                 "status": "skipped",
                 "reason": "no_source_run_ids",
-                "root": str(copyback_root),
+                "root": str(copyback_root_raw),
                 "run_ids": [],
             }
 
+        try:
+            object_store_root = verify_directory_no_follow(object_store_root_raw).resolve()
+        except (OSError, SafeFilesystemError) as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Object-store staging root is unsafe for copyback.",
+                {
+                    "copyback_root": str(copyback_root_raw),
+                    "object_store_root": str(object_store_root_raw),
+                    "error": str(error),
+                },
+            ) from error
+
+        copyback_root = self._prepare_copyback_root(
+            copyback_root_raw=copyback_root_raw,
+            object_store_root_raw=object_store_root_raw,
+            object_store_root=object_store_root,
+        )
+
         if copyback_root == object_store_root:
+            self._validate_copyback_source_products(
+                unique_run_ids,
+                copyback_root=copyback_root,
+                object_store_root=object_store_root,
+            )
             return {
                 "status": "skipped",
                 "reason": "copyback_root_matches_object_store_root",
@@ -1080,19 +1118,6 @@ class TilePublisher:
                     "reason": "copyback_root_object_store_root_overlap",
                 },
             )
-
-        try:
-            ensure_directory_no_follow(copyback_root)
-        except (OSError, SafeFilesystemError) as error:
-            raise PublishError(
-                "OBJECT_STORE_COPYBACK_FAILED",
-                "Failed to prepare object-store copyback root.",
-                {
-                    "copyback_root": str(copyback_root),
-                    "object_store_root": str(object_store_root),
-                    "error": str(error),
-                },
-            ) from error
 
         try:
             copyback_store = LocalObjectStore(
@@ -1157,6 +1182,76 @@ class TilePublisher:
             "runs": copied_runs,
         }
 
+    def _prepare_copyback_root(
+        self,
+        *,
+        copyback_root_raw: Path,
+        object_store_root_raw: Path,
+        object_store_root: Path,
+    ) -> Path:
+        if _paths_overlap(copyback_root_raw, object_store_root_raw) and copyback_root_raw != object_store_root_raw:
+            _raise_copyback_root_overlap(copyback_root_raw, object_store_root)
+
+        try:
+            _reject_existing_symlink_components(copyback_root_raw)
+            if copyback_root_raw == object_store_root_raw:
+                verified_copyback_root = verify_directory_no_follow(copyback_root_raw)
+            else:
+                verified_copyback_root = ensure_directory_no_follow(copyback_root_raw)
+            copyback_root = verified_copyback_root.resolve()
+        except (OSError, SafeFilesystemError) as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Failed to prepare object-store copyback root.",
+                {
+                    "copyback_root": str(copyback_root_raw),
+                    "object_store_root": str(object_store_root),
+                    "error": str(error),
+                },
+            ) from error
+
+        if _paths_overlap(copyback_root, object_store_root) and copyback_root != object_store_root:
+            _raise_copyback_root_overlap(copyback_root, object_store_root)
+        return copyback_root
+
+    def _validate_copyback_source_products(
+        self,
+        run_ids: list[str],
+        *,
+        copyback_root: Path,
+        object_store_root: Path,
+    ) -> None:
+        for run_id in run_ids:
+            run_key: str | None = None
+            try:
+                run_key = _run_product_key(run_id)
+                source_tree = _collect_copyback_source_tree(self.object_store, run_key)
+                self._validate_copyback_source_tree(run_id, source_tree)
+            except FileNotFoundError as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
+                    "Run products are missing from the object-store staging root.",
+                    _copyback_error_details(
+                        run_id=run_id,
+                        object_key=run_key,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
+                ) from error
+            except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_FAILED",
+                    "Failed to validate run products in the object-store staging root.",
+                    _copyback_error_details(
+                        run_id=run_id,
+                        object_key=run_key,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
+                ) from error
+
     def _copyback_object_tree(self, key: str, target_store: LocalObjectStore) -> dict[str, int]:
         run_id = _run_id_from_product_key(key)
         source_tree = _collect_copyback_source_tree(self.object_store, key)
@@ -1180,12 +1275,12 @@ class TilePublisher:
                 target_store.write_bytes_atomic(temp_file_key, content)
                 file_count += 1
                 byte_count += len(content)
+            _chmod_tree_readable(temp_dir, containment_root=target_store.root)
             _replace_directory_tree_no_follow(temp_dir, target_dir, containment_root=target_store.root)
         except Exception:
             rmtree_no_follow(temp_dir, containment_root=target_store.root, missing_ok=True)
             raise
 
-        _chmod_tree_readable(target_dir, containment_root=target_store.root)
         return {"file_count": file_count, "byte_count": byte_count}
 
     def _validate_copyback_source_tree(self, run_id: str, source_tree: _CopybackSourceTree) -> None:
@@ -1257,6 +1352,32 @@ def _run_id_from_product_key(key: str) -> str:
     return parts[1]
 
 
+def _configured_path_no_resolve(path: Path | str) -> Path:
+    configured = Path(path).expanduser()
+    return configured if configured.is_absolute() else Path.cwd() / configured
+
+
+def _reject_existing_symlink_components(path: Path) -> None:
+    target = _configured_path_no_resolve(path)
+    current = Path(target.anchor)
+    for part in _absolute_path_parts(target):
+        current = current / part
+        try:
+            entry_stat = current.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            raise SafeFilesystemError(f"Failed to stat path component {current}: {error}", kind="io") from error
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Path component must not be a symlink: {current}")
+        if not stat.S_ISDIR(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Path component is not a directory: {current}")
+
+
+def _absolute_path_parts(path: Path) -> tuple[str, ...]:
+    return tuple(part for part in path.parts if part not in {path.anchor, ""})
+
+
 def _copyback_error_details(
     *,
     run_id: str,
@@ -1275,6 +1396,18 @@ def _copyback_error_details(
     if object_key is not None:
         details["object_key"] = object_key
     return details
+
+
+def _raise_copyback_root_overlap(copyback_root: Path, object_store_root: Path) -> None:
+    raise PublishError(
+        "OBJECT_STORE_COPYBACK_FAILED",
+        "Object-store copyback root must not overlap OBJECT_STORE_ROOT.",
+        {
+            "copyback_root": str(copyback_root),
+            "object_store_root": str(object_store_root),
+            "reason": "copyback_root_object_store_root_overlap",
+        },
+    )
 
 
 def _paths_overlap(left: Path, right: Path) -> bool:
@@ -1396,18 +1529,90 @@ def _replace_directory_tree_no_follow(temp_dir: Path, target_dir: Path, *, conta
         raise SafeFilesystemError("Copyback temporary and target directories must be siblings.")
     verify_directory_no_follow(temp_dir)
     ensure_directory_no_follow(target_dir.parent, containment_root=containment_root)
-    rmtree_no_follow(target_dir, containment_root=containment_root, missing_ok=True)
+    backup_name = f".{target_dir.name}.copyback-backup.{uuid.uuid4().hex}"
+    target_backed_up = False
+    promoted = False
     parent_fd = os.open(target_dir.parent, _COPYBACK_DIR_FLAGS)
     try:
+        if _directory_entry_exists(parent_fd, target_dir.name, target_dir):
+            os.replace(target_dir.name, backup_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            target_backed_up = True
         os.replace(temp_dir.name, target_dir.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        promoted = True
         try:
             os.fsync(parent_fd)
         except OSError:
             pass
+        if target_backed_up:
+            try:
+                rmtree_no_follow(target_dir.parent / backup_name, containment_root=containment_root)
+            except (OSError, SafeFilesystemError) as error:
+                raise SafeFilesystemError(
+                    f"Failed to remove previous copyback target backup {target_dir.parent / backup_name}: {error}",
+                    kind="io",
+                ) from error
+            try:
+                os.fsync(parent_fd)
+            except OSError:
+                pass
+    except SafeFilesystemError:
+        if target_backed_up and not promoted:
+            _restore_copyback_backup(
+                parent_fd,
+                backup_name=backup_name,
+                target_name=target_dir.name,
+                target_dir=target_dir,
+                containment_root=containment_root,
+            )
+        raise
     except OSError as error:
+        if target_backed_up and not promoted:
+            _restore_copyback_backup(
+                parent_fd,
+                backup_name=backup_name,
+                target_name=target_dir.name,
+                target_dir=target_dir,
+                containment_root=containment_root,
+            )
         raise SafeFilesystemError(f"Failed to replace copyback target tree {target_dir}: {error}", kind="io") from error
     finally:
         os.close(parent_fd)
+
+
+def _directory_entry_exists(parent_fd: int, name: str, path_label: Path) -> bool:
+    try:
+        entry_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to stat copyback target tree {path_label}: {error}", kind="io") from error
+    if stat.S_ISLNK(entry_stat.st_mode):
+        raise SafeFilesystemError(f"Copyback target tree must not be a symlink: {path_label}")
+    if not stat.S_ISDIR(entry_stat.st_mode):
+        raise SafeFilesystemError(f"Copyback target tree must be a directory: {path_label}")
+    return True
+
+
+def _restore_copyback_backup(
+    parent_fd: int,
+    *,
+    backup_name: str,
+    target_name: str,
+    target_dir: Path,
+    containment_root: Path,
+) -> None:
+    try:
+        rmtree_no_follow(target_dir, containment_root=containment_root, missing_ok=True)
+        os.replace(backup_name, target_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            pass
+    except (OSError, SafeFilesystemError) as error:
+        raise SafeFilesystemError(
+            f"Failed to restore previous copyback target tree {target_dir}: {error}",
+            kind="io",
+        ) from error
 
 
 def _chmod_tree_readable(root: Path, *, containment_root: Path) -> None:

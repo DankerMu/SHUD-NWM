@@ -46,6 +46,7 @@ from services.tile_publisher.publisher import (
     PublishResult,
     TilePublisher,
     _is_private_display_path,
+    _replace_directory_tree_no_follow,
 )
 
 CYCLE_TIME = datetime(2024, 6, 1, 12, tzinfo=UTC)
@@ -544,6 +545,65 @@ def test_publish_qdown_copyback_replaces_stale_target_tree(tmp_path: Any) -> Non
     ]
 
 
+def test_replace_directory_tree_restores_previous_target_when_promotion_fails(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "shared-object-store"
+    target_dir = root / "runs/run-a"
+    temp_dir = root / "runs/run-a.copyback.temp"
+    (target_dir / "output").mkdir(parents=True)
+    (target_dir / "output/old-file.csv").write_text("old\n", encoding="utf-8")
+    (temp_dir / "output").mkdir(parents=True)
+    (temp_dir / "output/new-file.csv").write_text("new\n", encoding="utf-8")
+    original_replace = __import__("os").replace
+    calls = 0
+
+    def fail_temp_promotion(src: str, dst: str, *, src_dir_fd: int, dst_dir_fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("promotion blocked")
+        original_replace(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+    monkeypatch.setattr("services.tile_publisher.publisher.os.replace", fail_temp_promotion)
+
+    with pytest.raises(Exception, match="promotion blocked"):
+        _replace_directory_tree_no_follow(temp_dir, target_dir, containment_root=root)
+
+    assert (target_dir / "output/old-file.csv").read_text(encoding="utf-8") == "old\n"
+    assert not (target_dir / "output/new-file.csv").exists()
+    assert temp_dir.is_dir()
+
+
+def test_publish_qdown_copyback_exact_root_validates_complete_run_tree(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "object-store")
+    _seed_run_products(publisher, "run-a")
+
+    with _store(create_flood=False) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert result.lineage["object_store_copyback"] == {
+        "status": "skipped",
+        "reason": "copyback_root_matches_object_store_root",
+        "root": str(Path(publisher.object_store.root).resolve()),
+        "run_ids": ["run-a"],
+    }
+    assert publisher.object_store.exists(f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json")
+
+
+def test_publish_qdown_copyback_exact_root_rejects_incomplete_run_tree(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "object-store")
+    publisher.object_store.write_bytes_atomic("runs/run-a/input/manifest.json", b'{"run_id": "run-a"}')
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert "output" in error.details["error"]
+    assert not publisher.object_store.exists(f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json")
+
+
 def test_publish_qdown_copyback_rejects_source_ancestor_symlink_before_target_create(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
     object_store_root = Path(publisher.object_store.root)
@@ -562,6 +622,22 @@ def test_publish_qdown_copyback_rejects_source_ancestor_symlink_before_target_cr
     assert error.details["object_key"] == "runs/run-a"
     assert "symlink" in error.details["error"]
     assert not (tmp_path / "shared-object-store/runs/run-a").exists()
+
+
+def test_publish_qdown_copyback_rejects_copyback_root_ancestor_symlink_before_target_create(
+    tmp_path: Any,
+) -> None:
+    shared_parent = tmp_path / "shared-parent"
+    shared_parent.mkdir()
+    link_parent = tmp_path / "copyback-link"
+    link_parent.symlink_to(shared_parent, target_is_directory=True)
+    publisher = _publisher(tmp_path, object_store_copyback_root=link_parent / "shared-object-store")
+    _seed_run_products(publisher, "run-a")
+
+    error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
+
+    assert "symlink" in error.details["error"]
+    assert not (shared_parent / "shared-object-store/runs/run-a").exists()
 
 
 @pytest.mark.parametrize(
@@ -657,6 +733,36 @@ def test_publish_qdown_copyback_normalizes_unsafe_run_id(tmp_path: Any) -> None:
 
     assert error.details["run_id"] == "bad/run"
     assert "Unsafe run_id" in error.details["error"]
+
+
+def test_publish_qdown_copyback_failure_does_not_advance_stable_display_artifacts(tmp_path: Any) -> None:
+    published_root = tmp_path / "published"
+    publisher = _publisher(
+        tmp_path,
+        published_artifact_root=published_root,
+        object_store_copyback_root=tmp_path / "shared-object-store",
+    )
+    _seed_run_products(publisher, "run-a")
+
+    with _store(create_flood=False) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        publisher._publish_qdown_from_database(session, CYCLE_ID)
+        cycle_manifest_key = f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json"
+        previous_cycle_manifest = publisher.object_store.read_bytes(cycle_manifest_key)
+
+        _insert_run(session, run_id="run-b", segments=2)
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    run_b_manifest_key = f"tiles/hydro/{CYCLE_ID}/q-down/run-b/rivnet-1/manifest.json"
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_SOURCE_MISSING"
+    assert publisher.object_store.read_bytes(cycle_manifest_key) == previous_cycle_manifest
+    assert json.loads(previous_cycle_manifest)["source_run_ids"] == ["run-a"]
+    assert not publisher.object_store.exists(run_b_manifest_key)
+    assert not (published_root / run_b_manifest_key).exists()
+    assert json.loads((published_root / cycle_manifest_key).read_text(encoding="utf-8"))["source_run_ids"] == [
+        "run-a"
+    ]
 
 
 def test_publish_qdown_identity_carries_all_nine_fields(tmp_path: Any) -> None:

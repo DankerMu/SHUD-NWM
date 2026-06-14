@@ -654,3 +654,43 @@ separate PR boundaries.
 - Required Reading: all specs in this change and linked sub-issue evidence.
 - Acceptance: OpenSpec strict validation passes, broader affected suite passes,
   and final cross-review reports no P0/P1 findings.
+
+### G6-20 PR #481 production copyback/runtime finalization
+
+- Implementation Ready: yes.
+- Ownership: `services/tile_publisher/publisher.py`,
+  `tests/test_tile_publisher.py`, two-node runtime validation/tests, env
+  examples, two-node docs/runbooks, and this OpenSpec fixture.
+- In Scope: Finalize the approved production behavior for
+  `NHMS_OBJECT_STORE_COPYBACK_ROOT`: no-follow source/root validation,
+  complete run-tree validation, exact-root equality semantics, rollback-safe
+  replacement, copyback-before-publication visibility, overlap rejection,
+  `ObjectStoreError` normalization, display-forbidden role boundary, and
+  docs/tests evidence.
+- Out of Scope: New display features, new storage backends, or entropy baseline
+  rewrites.
+- Tasks:
+  - [ ] 16.1 Preserve raw configured copyback root until no-follow validation
+    rejects symlink components; compare only verified real paths for equality,
+    overlap, and containment.
+  - [ ] 16.2 Validate every `runs/<run_id>` tree for manifest/output/log
+    completeness even when copyback root exactly equals object-store root.
+  - [ ] 16.3 Replace canonical copyback run trees with rollback-safe sibling
+    staging/backup semantics so failed promotion cannot expose partial run
+    products.
+  - [ ] 16.4 Stage q_down display artifacts until copyback succeeds; failed
+    first publish exposes no new manifest and failed republish leaves the
+    previous manifest/cycle pointer unchanged.
+  - [ ] 16.5 Keep compute-only runtime/env validation and docs aligned so
+    `display_readonly` cannot configure copyback or other compute-control path
+    env.
+  - [ ] 16.6 Verify with focused copyback, full tile publisher, runtime/static
+    Docker tests, ruff, strict OpenSpec validation, and `git diff --check`.
+- Dependencies: PR #481 issue #460 closure under epic #456.
+- PR Boundary: Approved local production copyback/runtime hardening only.
+- Required Reading: this addendum, `services/tile_publisher/publisher.py`,
+  `tests/test_tile_publisher.py`, runtime mode/static Docker validation tests,
+  and two-node env/docs.
+- Acceptance: confirmed copyback/runtime blockers close as a class-level fix and
+  forbidden files `.entropy-baseline/latest.json` and
+  `docs/runbooks/current-production-ops.md` remain untouched.
