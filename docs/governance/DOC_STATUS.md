@@ -74,8 +74,9 @@ docs or OpenSpec change rather than silently choosing a stale fact.
   PR explicitly promotes them.
 - Root `artifacts/` remains local/generated production or review evidence and
   stays ignored. `services/artifacts/*.py` is source code and stays trackable.
-- Docker build context excludes non-runtime agent/evidence paths including
-  `.agents`, `.codex`, and `apps/frontend/artifacts`.
+- Docker build context policy is documented in `.dockerignore`; it excludes
+  non-runtime agent/evidence paths including `.agents`, `.codex`, and
+  `apps/frontend/artifacts`.
 
 ## Current Notes
 
