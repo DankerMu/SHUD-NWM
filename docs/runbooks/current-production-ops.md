@@ -213,7 +213,30 @@ tail -100 /scratch/frd_muziyao/nhms-prod/workspace/fcst_gfs_2026061312_basins_he
 URI 口径通常使用 `s3://nhms/...`，但当前本地落盘根是上面的 `/scratch/.../object-store`。
 不要把 `/scratch/frd_muziyao/nhms-prod/object-store` 删除；它是计算节点可见的生产 staging 和对象存储落盘根。
 
-### 5.4 Published Artifacts
+### 5.4 Shared Object Store Copyback
+
+完整水文 run 产物不放在 `published/` 下。`s3://nhms/runs/<run_id>/...` 当前先落在
+`/scratch/frd_muziyao/nhms-prod/object-store/runs/<run_id>/...`，再由 22 控制面的 publish 阶段同步到共享对象存储镜像：
+
+```text
+22 host: /ghdc/data/nwm/object-store/runs/<run_id>/
+27 host: /home/ghdc/nwm/object-store/runs/<run_id>/
+URI key: runs/<run_id>/
+```
+
+当前生产环境通过 `NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store` 启用 copyback。
+如果该同步失败，`publish` 阶段应失败，而不是只发布 tiles 后把完整 run 产物留在 22 私有 staging。
+
+检查最新 run 产物：
+
+```bash
+find /ghdc/data/nwm/object-store/runs -maxdepth 2 -type d -name 'fcst_*20260613*' \
+  -printf '%TY-%Tm-%Td %TH:%TM %M %u %g %p\n' | sort | tail -30
+
+ls -la /ghdc/data/nwm/object-store/runs/fcst_gfs_2026061312_basins_heihe_shud/output/
+```
+
+### 5.5 Published Artifacts
 
 当前 22 写、27 读的发布面：
 
@@ -232,6 +255,9 @@ URI prefix: published://
   tiles/hydro/<source>_<YYYYMMDDHH>/q-down/...
 ```
 
+`published/` 只承载展示发布物、瓦片 manifest 和日志；不要在这里查完整 SHUD `runs/<run_id>/output/`。
+完整 run 产物见第 5.4 节的 `/ghdc/data/nwm/object-store/runs/`。
+
 检查最新发布：
 
 ```bash
@@ -242,8 +268,9 @@ find /ghdc/data/nwm/published/tiles/hydro -maxdepth 3 -type f \
   -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort | tail -30
 ```
 
-注意：Slurm 计算节点不应依赖 `/ghdc`。需要先在 `/scratch/.../object-store` 和 workspace 完成计算，再由 publish/copyback
-阶段把展示产物、manifest、日志写到 `/ghdc/data/nwm/published`。
+注意：Slurm 计算节点不应依赖 `/ghdc`。需要先在 `/scratch/.../object-store` 和 workspace 完成计算，再由 22 控制面的
+publish/copyback 阶段把完整 run 产物写到 `/ghdc/data/nwm/object-store`，把展示产物、manifest、日志写到
+`/ghdc/data/nwm/published`。
 
 ## 6. 如何判断是否卡住
 

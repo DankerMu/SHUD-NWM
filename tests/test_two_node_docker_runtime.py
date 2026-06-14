@@ -2684,6 +2684,11 @@ def test_static_checker_rejects_display_published_mount_literal_identity(tmp_pat
         ("WORKSPACE_ROOT", "WORKSPACE_ROOT", "COMPUTE_WORKSPACE_MOUNT_IDENTITY_INVALID"),
         ("OBJECT_STORE_ROOT", "OBJECT_STORE_ROOT", "COMPUTE_OBJECT_STORE_MOUNT_IDENTITY_INVALID"),
         (
+            "NHMS_OBJECT_STORE_COPYBACK_ROOT",
+            "NHMS_OBJECT_STORE_COPYBACK_ROOT",
+            "COMPUTE_OBJECT_STORE_COPYBACK_MOUNT_IDENTITY_INVALID",
+        ),
+        (
             "NHMS_PUBLISHED_ARTIFACT_HOST_ROOT",
             "NHMS_PUBLISHED_ARTIFACT_ROOT",
             "COMPUTE_PUBLISHED_MOUNT_IDENTITY_INVALID",
@@ -2763,6 +2768,7 @@ def test_static_checker_rejects_compute_api_missing_required_env_and_mounts(tmp_
         for volume in compute_api["volumes"]
         if "WORKSPACE_ROOT" not in str(volume.get("target", ""))
         and "OBJECT_STORE_ROOT" not in str(volume.get("target", ""))
+        and "NHMS_OBJECT_STORE_COPYBACK_ROOT" not in str(volume.get("target", ""))
         and "NHMS_MODEL_ASSET_ROOT" not in str(volume.get("target", ""))
     ]
     compute_compose = tmp_path / "compose.compute.yml"
@@ -2783,6 +2789,7 @@ def test_static_checker_rejects_compute_api_missing_required_env_and_mounts(tmp_
         "COMPUTE_RUNTIME_ENV_MISSING",
         "COMPUTE_WORKSPACE_MOUNT_MISSING",
         "COMPUTE_OBJECT_STORE_MOUNT_MISSING",
+        "COMPUTE_OBJECT_STORE_COPYBACK_MOUNT_MISSING",
         "COMPUTE_MODEL_ASSET_MOUNT_MISSING",
     }
     assert "COMPUTE_RUNTIME_ENV_MISSING" not in scheduler_codes
@@ -3347,6 +3354,7 @@ def test_entrypoint_rejects_reserved_slurm_gateway_role() -> None:
         ("RUN_WORKSPACE_ROOT", "/workspace/runs"),
         ("SHARED_LOG_ROOT", "/workspace/logs"),
         ("OBJECT_STORE_ROOT", "/object-store"),
+        ("NHMS_OBJECT_STORE_COPYBACK_ROOT", "/ghdc/data/nwm/object-store"),
         ("NHMS_SCHEDULER_LOCK_ROOT", "/workspace/scheduler/locks"),
         ("NHMS_SCHEDULER_EVIDENCE_ROOT", "/workspace/scheduler/evidence"),
         ("NHMS_SCHEDULER_RUNTIME_ROOT", "/workspace/runtime"),
@@ -4271,6 +4279,7 @@ def _run_entrypoint(command: list[str], env: dict[str, str]) -> subprocess.Compl
                 "RUN_WORKSPACE_ROOT",
                 "SHARED_LOG_ROOT",
                 "OBJECT_STORE_ROOT",
+                "NHMS_OBJECT_STORE_COPYBACK_ROOT",
                 "MUNGE_SOCKET",
                 "MUNGE_KEY",
                 "SHUD_EXECUTABLE",

@@ -192,6 +192,7 @@ def _publisher(
     *,
     database_url: str | None = None,
     published_artifact_root: Any | None = None,
+    object_store_copyback_root: Any | None = None,
 ) -> TilePublisher:
     return TilePublisher(
         workspace_root=tmp_path / "workspace",
@@ -200,6 +201,7 @@ def _publisher(
         database_url=database_url,
         published_artifact_root=published_artifact_root,
         published_artifact_uri_prefix="published://",
+        object_store_copyback_root=object_store_copyback_root,
     )
 
 
@@ -296,6 +298,12 @@ def _layer_id(run_id: str, network: str = "rivnet-1") -> str:
     return f"q_down_{run_id}_{network}"
 
 
+def _seed_run_products(publisher: TilePublisher, run_id: str) -> None:
+    publisher.object_store.write_bytes_atomic(f"runs/{run_id}/input/manifest.json", b'{"run": "manifest"}')
+    publisher.object_store.write_bytes_atomic(f"runs/{run_id}/output/q.rivqdown.csv", b"seg,q\n1,2\n")
+    publisher.object_store.write_bytes_atomic(f"runs/{run_id}/logs/shud_stdout.log", b"ok\n")
+
+
 # --------------------------------------------------------------------------- #
 # Scenario 1: q_down publish success (no flood table)
 # --------------------------------------------------------------------------- #
@@ -358,6 +366,49 @@ def test_publish_qdown_mirrors_artifacts_to_published_root(tmp_path: Any) -> Non
     artifact_uris = {artifact["uri"] for artifact in result.artifacts}
     assert f"published://{run_manifest_key}" in artifact_uris
     assert f"published://{log_key}" in artifact_uris
+
+
+def test_publish_qdown_copybacks_complete_run_products_to_shared_object_store(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+
+    with _store(create_flood=False) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert (copyback_root / "runs/run-a/input/manifest.json").read_bytes() == b'{"run": "manifest"}'
+    assert (copyback_root / "runs/run-a/output/q.rivqdown.csv").read_bytes() == b"seg,q\n1,2\n"
+    assert (copyback_root / "runs/run-a/logs/shud_stdout.log").read_bytes() == b"ok\n"
+    assert oct((copyback_root / "runs/run-a").stat().st_mode & 0o777) == "0o755"
+    assert oct((copyback_root / "runs/run-a/output/q.rivqdown.csv").stat().st_mode & 0o777) == "0o644"
+
+    copyback = result.lineage["object_store_copyback"]
+    assert copyback["status"] == "copied"
+    assert copyback["run_ids"] == ["run-a"]
+    assert copyback["file_count"] == 3
+    assert copyback["byte_count"] == len(b'{"run": "manifest"}') + len(b"seg,q\n1,2\n") + len(b"ok\n")
+    assert copyback["runs"] == [
+        {
+            "run_id": "run-a",
+            "object_key": "runs/run-a",
+            "file_count": 3,
+            "byte_count": copyback["byte_count"],
+        }
+    ]
+
+
+def test_publish_qdown_copyback_missing_run_products_fails_publish(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+
+    with _store(create_flood=False) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_SOURCE_MISSING"
 
 
 def test_publish_qdown_identity_carries_all_nine_fields(tmp_path: Any) -> None:

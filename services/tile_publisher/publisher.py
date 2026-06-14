@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -62,6 +63,7 @@ class TilePublisher:
         database_url: str | None = None,
         published_artifact_root: Path | str | None = None,
         published_artifact_uri_prefix: str | None = None,
+        object_store_copyback_root: Path | str | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.object_store = LocalObjectStore(object_store_root, object_store_prefix=object_store_prefix)
@@ -74,6 +76,11 @@ class TilePublisher:
         self.published_artifact_uri_prefix = (
             (published_artifact_uri_prefix or os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://")).strip()
             or "published://"
+        )
+        self.object_store_copyback_root = (
+            Path(object_store_copyback_root).expanduser().resolve()
+            if object_store_copyback_root is not None and str(object_store_copyback_root).strip()
+            else None
         )
 
     @classmethod
@@ -91,6 +98,7 @@ class TilePublisher:
             database_url=os.getenv("DATABASE_URL", ""),
             published_artifact_root=os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
             published_artifact_uri_prefix=os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://"),
+            object_store_copyback_root=os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", ""),
         )
 
     def publish_cycle(self, cycle_id: str) -> PublishResult:
@@ -163,23 +171,28 @@ class TilePublisher:
                 }
             )
 
-        self._mark_runs_published(session, [str(run["run_id"]) for run in runs])
+        source_run_ids = [str(run["run_id"]) for run in runs]
+        copyback_summary = self._copyback_run_products(source_run_ids)
+        self._mark_runs_published(session, source_run_ids)
         session.commit()
         layers.sort(key=lambda layer: str(layer["layer_id"]))
         artifacts.sort(key=lambda artifact: str(artifact["artifact_id"]))
+        lineage = {
+            "cycle_id": cycle_id,
+            "published_basins": len(runs),
+            "source_run_ids": source_run_ids,
+            "quality_state": "ready" if cycle_quality["quality_state"] == "ready" else "degraded",
+            "unavailable_products": list(cycle_quality["unavailable_products"]),
+            "residual_blockers": list(cycle_quality["residual_blockers"]),
+        }
+        if copyback_summary is not None:
+            lineage["object_store_copyback"] = copyback_summary
         return PublishResult(
             cycle_id=cycle_id,
             status="published",
             layers=tuple(layers),
             artifacts=tuple(artifacts),
-            lineage={
-                "cycle_id": cycle_id,
-                "published_basins": len(runs),
-                "source_run_ids": [str(run["run_id"]) for run in runs],
-                "quality_state": "ready" if cycle_quality["quality_state"] == "ready" else "degraded",
-                "unavailable_products": list(cycle_quality["unavailable_products"]),
-                "residual_blockers": list(cycle_quality["residual_blockers"]),
-            },
+            lineage=lineage,
         )
 
     def _discover_publishable_runs(self, session: Session, cycle_id: str) -> list[dict[str, Any]]:
@@ -589,6 +602,9 @@ class TilePublisher:
         # F1: register each published q_down layer in map.tile_layer so the read
         # replica can discover display products from the DB; tolerate a missing table.
         db_registered = False
+        source_run_ids = sorted({str(layer["source_run_id"]) for layer in layers})
+        copyback_summary = self._copyback_run_products(source_run_ids)
+
         if tile_layer_available:
             for run, layer, manifest_uri in registrations:
                 self._upsert_qdown_layer(
@@ -603,7 +619,6 @@ class TilePublisher:
 
         layers.sort(key=lambda layer: str(layer["layer_id"]))
         artifacts.sort(key=lambda artifact: str(artifact["artifact_id"]))
-        source_run_ids = sorted({str(layer["source_run_id"]) for layer in layers})
         lineage = {
             "cycle_id": cycle_id,
             "published_basins": len(source_run_ids),
@@ -615,6 +630,8 @@ class TilePublisher:
             "manifest_uri": cycle_manifest_uri,
             "db_registered": db_registered,
         }
+        if copyback_summary is not None:
+            lineage["object_store_copyback"] = copyback_summary
         return PublishResult(
             cycle_id=cycle_id,
             status="published",
@@ -1007,6 +1024,111 @@ class TilePublisher:
                 {"artifact_key": key},
             ) from error
 
+    def _copyback_run_products(self, run_ids: list[str]) -> dict[str, Any] | None:
+        """Mirror complete run products to a shared object-store root.
+
+        ``published`` is intentionally limited to display artifacts. Complete
+        SHUD run products keep the object-store keyspace (``runs/<run_id>/...``)
+        and are copied to ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` on the control
+        node, after compute-node work has finished and before publication is
+        marked successful.
+        """
+
+        if self.object_store_copyback_root is None:
+            return None
+        unique_run_ids = sorted({str(run_id).strip() for run_id in run_ids if str(run_id).strip()})
+        if not unique_run_ids:
+            return {
+                "status": "skipped",
+                "reason": "no_source_run_ids",
+                "root": str(self.object_store_copyback_root),
+                "run_ids": [],
+            }
+
+        try:
+            ensure_directory_no_follow(self.object_store_copyback_root)
+        except SafeFilesystemError as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Failed to prepare object-store copyback root.",
+                {"copyback_root": str(self.object_store_copyback_root)},
+            ) from error
+
+        if self.object_store_copyback_root == Path(self.object_store.root).expanduser().resolve():
+            return {
+                "status": "skipped",
+                "reason": "copyback_root_matches_object_store_root",
+                "root": str(self.object_store_copyback_root),
+                "run_ids": unique_run_ids,
+            }
+
+        copyback_store = LocalObjectStore(
+            self.object_store_copyback_root,
+            object_store_prefix=self.object_store.object_store_prefix,
+        )
+        copied_runs: list[dict[str, Any]] = []
+        total_files = 0
+        total_bytes = 0
+        for run_id in unique_run_ids:
+            run_key = _run_product_key(run_id)
+            try:
+                summary = self._copyback_object_tree(run_key, copyback_store)
+            except FileNotFoundError as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
+                    "Run products are missing from the object-store staging root.",
+                    {"run_id": run_id, "object_key": run_key},
+                ) from error
+            except (OSError, SafeFilesystemError, ValueError) as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_FAILED",
+                    "Failed to copy run products to the shared object-store root.",
+                    {"run_id": run_id, "object_key": run_key},
+                ) from error
+            copied_runs.append({"run_id": run_id, "object_key": run_key, **summary})
+            total_files += int(summary["file_count"])
+            total_bytes += int(summary["byte_count"])
+
+        return {
+            "status": "copied",
+            "root": str(self.object_store_copyback_root),
+            "run_ids": unique_run_ids,
+            "file_count": total_files,
+            "byte_count": total_bytes,
+            "runs": copied_runs,
+        }
+
+    def _copyback_object_tree(self, key: str, target_store: LocalObjectStore) -> dict[str, int]:
+        source_dir = _object_tree_root_path(self.object_store, key)
+        source_stat = source_dir.lstat()
+        if stat.S_ISLNK(source_stat.st_mode):
+            raise SafeFilesystemError(f"Run product directory must not be a symlink: {source_dir}")
+        if not stat.S_ISDIR(source_stat.st_mode):
+            raise SafeFilesystemError(f"Run product key is not a directory: {key}")
+
+        target_dir = _object_tree_root_path(target_store, key)
+        ensure_directory_no_follow(target_dir, containment_root=target_store.root)
+
+        file_count = 0
+        byte_count = 0
+        for source_path in sorted(source_dir.rglob("*")):
+            source_entry_stat = source_path.lstat()
+            if stat.S_ISLNK(source_entry_stat.st_mode):
+                raise SafeFilesystemError(f"Run product entry must not be a symlink: {source_path}")
+            relative_key = source_path.relative_to(self.object_store.root).as_posix()
+            if stat.S_ISDIR(source_entry_stat.st_mode):
+                ensure_directory_no_follow(target_store.root / relative_key, containment_root=target_store.root)
+                continue
+            if not stat.S_ISREG(source_entry_stat.st_mode):
+                raise SafeFilesystemError(f"Run product entry must be a regular file: {source_path}")
+            content = self.object_store.read_bytes(relative_key)
+            target_store.write_bytes_atomic(relative_key, content)
+            file_count += 1
+            byte_count += len(content)
+
+        _chmod_tree_readable(target_dir, containment_root=target_store.root)
+        return {"file_count": file_count, "byte_count": byte_count}
+
 
 def _safe_key_segment(value: Any) -> str:
     """Return a single safe path/key segment for a river_network_version_id.
@@ -1018,12 +1140,44 @@ def _safe_key_segment(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return "default"
-    if _SAFE_ID_RE.match(raw):
+    if _SAFE_ID_RE.fullmatch(raw):
         return raw
     sanitized = re.sub(r"[^A-Za-z0-9_.-]", "-", raw).strip("-") or "default"
-    if not _SAFE_ID_RE.match(sanitized):
+    if not _SAFE_ID_RE.fullmatch(sanitized):
         sanitized = f"x-{sanitized}"
     return sanitized
+
+
+def _run_product_key(run_id: str) -> str:
+    run_id = run_id.strip()
+    if not _SAFE_ID_RE.fullmatch(run_id):
+        raise ValueError(f"Unsafe run_id for object-store copyback: {run_id!r}")
+    return f"runs/{run_id}"
+
+
+def _object_tree_root_path(store: LocalObjectStore, key: str) -> Path:
+    parts = PurePosixPath(key).parts
+    if len(parts) != 2 or parts[0] != "runs" or not _SAFE_ID_RE.fullmatch(parts[1]):
+        raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
+    return Path(store.root) / parts[0] / parts[1]
+
+
+def _chmod_tree_readable(root: Path, *, containment_root: Path) -> None:
+    root = root.resolve()
+    containment_root = containment_root.resolve()
+    root.relative_to(containment_root)
+    entries = [root, *sorted(root.rglob("*"))]
+    for entry in entries:
+        entry.relative_to(containment_root)
+        entry_stat = entry.lstat()
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Copied object-store entry must not be a symlink: {entry}")
+        if stat.S_ISDIR(entry_stat.st_mode):
+            entry.chmod(0o755)
+        elif stat.S_ISREG(entry_stat.st_mode):
+            entry.chmod(0o644)
+        else:
+            raise SafeFilesystemError(f"Copied object-store entry must be a file or directory: {entry}")
 
 
 def _qdown_isoformat(value: Any) -> str | None:
