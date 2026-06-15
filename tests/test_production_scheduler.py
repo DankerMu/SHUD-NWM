@@ -13508,6 +13508,18 @@ def _concurrency_candidate(source_id: str, model_id: str, basin_id: str) -> sche
     )
 
 
+def _evidence_identity_order(evidence: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str, str]]:
+    return [
+        (
+            str(item["source_id"]),
+            str(item["candidate_id"]),
+            str(item["model_id"]),
+            str(item["run_id"]),
+        )
+        for item in evidence
+    ]
+
+
 def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
     import threading
 
@@ -13535,6 +13547,20 @@ def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
 
     # Both cohorts ran (barrier did not deadlock) => submits overlapped.
     assert len(evidence) == 2
+    assert _evidence_identity_order(evidence) == [
+        (
+            "gfs",
+            "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "model_a",
+            "fcst_gfs_2026052106_model_a",
+        ),
+        (
+            "IFS",
+            "IFS:2026-05-21T06:00:00Z:model_b:forecast_ifs_deterministic",
+            "model_b",
+            "fcst_ifs_2026052106_model_b",
+        ),
+    ]
     receipt = scheduler._last_submit_overlap_receipt
     assert receipt.overlapping is True
     receipt_dict = receipt.to_dict()
@@ -13544,6 +13570,167 @@ def test_concurrent_candidates_submits_overlap(tmp_path: Path) -> None:
     assert len(receipt_dict["submissions"]) == 2
     for entry in receipt_dict["submissions"]:
         assert entry["submit_finished_at"] >= entry["submit_started_at"]
+
+
+def test_concurrent_submit_bound_one_keeps_sequential_evidence_order(tmp_path: Path) -> None:
+    import threading
+    import time as _time
+
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+    call_order: list[str] = []
+
+    class _SequentialProofOrchestrator:
+        def __init__(self) -> None:
+            self.object_store = None
+
+        def orchestrate_cycle(self, source: str, cycle_time: datetime, basins: list[dict[str, Any]]) -> PipelineResult:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                call_order.append(source)
+            try:
+                _time.sleep(0.01)
+            finally:
+                with lock:
+                    active -= 1
+            stages = tuple(
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=f"job_{source.lower()}_{stage.stage}",
+                    slurm_job_id=f"slurm_{source.lower()}_{stage.stage}",
+                    status="succeeded",
+                )
+                for stage in M3_STAGES
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=stages,
+                candidate_outcomes=(),
+            )
+
+    config = _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=1)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
+        orchestrator_factory=lambda _source_id: _SequentialProofOrchestrator(),
+    )
+
+    candidates = [
+        _concurrency_candidate("gfs", "model_a", "basin_a"),
+        _concurrency_candidate("IFS", "model_b", "basin_b"),
+    ]
+
+    evidence = scheduler._execute_candidates(candidates)
+
+    assert peak == 1
+    assert call_order == ["gfs", "IFS"]
+    assert _evidence_identity_order(evidence) == [
+        (
+            "gfs",
+            "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "model_a",
+            "fcst_gfs_2026052106_model_a",
+        ),
+        (
+            "IFS",
+            "IFS:2026-05-21T06:00:00Z:model_b:forecast_ifs_deterministic",
+            "model_b",
+            "fcst_ifs_2026052106_model_b",
+        ),
+    ]
+    for item in evidence:
+        assert {"candidate_id", "source_id", "model_id", "run_id", "status", "submitted", "pipeline_run_id"} <= set(
+            item
+        )
+        assert item["status"] == "complete"
+        assert item["submitted"] is True
+    receipt = scheduler._last_submit_overlap_receipt
+    assert receipt.overlapping is False
+    receipt_dict = receipt.to_dict()
+    assert receipt_dict["concurrent_submit_count"] == 2
+    assert receipt_dict["overlapping"] is False
+
+
+def test_mixed_cohort_orchestrator_exception_keeps_sibling_cohort_evidence(tmp_path: Path) -> None:
+    class _MixedOutcomeOrchestrator:
+        def __init__(self, *, raise_on_submit: bool) -> None:
+            self.raise_on_submit = raise_on_submit
+            self.object_store = None
+            self.calls: list[dict[str, Any]] = []
+
+        def orchestrate_cycle(self, source: str, cycle_time: datetime, basins: list[dict[str, Any]]) -> PipelineResult:
+            self.calls.append({"source": source, "cycle_time": cycle_time, "basins": basins})
+            if self.raise_on_submit:
+                raise RuntimeError("submit failed for mixed cohort")
+            stages = tuple(
+                StageRunResult(
+                    stage=stage.stage,
+                    job_type=stage.job_type,
+                    pipeline_job_id=f"job_{source.lower()}_{stage.stage}",
+                    slurm_job_id=f"slurm_{source.lower()}_{stage.stage}",
+                    status="succeeded",
+                )
+                for stage in M3_STAGES
+            )
+            return PipelineResult(
+                run_id=f"cycle_{source.lower()}_{format_cycle_time(cycle_time)}",
+                cycle_id=cycle_id_for(source, cycle_time),
+                status="complete",
+                stages=stages,
+                candidate_outcomes=(),
+            )
+
+    orchestrators = {
+        "gfs": _MixedOutcomeOrchestrator(raise_on_submit=True),
+        "IFS": _MixedOutcomeOrchestrator(raise_on_submit=False),
+    }
+    config = _config(tmp_path, sources=("gfs", "IFS"), concurrent_submit_bound=2)
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", []), "IFS": FakeAdapter("IFS", [])},
+        orchestrator_factory=lambda source_id: orchestrators[source_id],
+    )
+
+    candidates = [
+        _concurrency_candidate("gfs", "model_a", "basin_a"),
+        _concurrency_candidate("IFS", "model_b", "basin_b"),
+    ]
+
+    evidence = scheduler._execute_candidates(candidates)
+
+    assert [len(orchestrators[source].calls) for source in ("gfs", "IFS")] == [1, 1]
+    assert _evidence_identity_order(evidence) == [
+        (
+            "gfs",
+            "gfs:2026-05-21T06:00:00Z:model_a:forecast_gfs_deterministic",
+            "model_a",
+            "fcst_gfs_2026052106_model_a",
+        ),
+        (
+            "IFS",
+            "IFS:2026-05-21T06:00:00Z:model_b:forecast_ifs_deterministic",
+            "model_b",
+            "fcst_ifs_2026052106_model_b",
+        ),
+    ]
+    failed, submitted = evidence
+    assert failed["status"] == "submission_failed"
+    assert failed["submitted"] is False
+    assert failed["slurm_submit_called"] == "unknown_after_attempt"
+    assert failed["mutation_outcome"] == "unknown_after_attempt"
+    assert failed["mutation_occurred"] == "unknown_after_attempt"
+    assert submitted["status"] == "complete"
+    assert submitted["submitted"] is True
+    assert submitted["slurm_submit_called"] is True
+    assert submitted["pipeline_run_id"] == "cycle_ifs_2026052106"
 
 
 def test_scheduler_pass_startup_reconciles_reserved_unbound_jobs(tmp_path: Path) -> None:

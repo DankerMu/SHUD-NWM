@@ -106,16 +106,16 @@ separate PR boundaries.
 
 ## 9. Scheduler Execution Extraction
 
-- [ ] 9.1 Create `services/orchestrator/scheduler_execution.py` for forcing
+- [x] 9.1 Create `services/orchestrator/scheduler_execution.py` for forcing
   production, candidate cohort grouping, concurrent submit evidence, and
   execution orchestration helpers that do not own lease or candidate-state
   semantics.
-- [ ] 9.2 Preserve `run_once` ordering and mutation fences.
-- [ ] 9.3 Preserve scheduler runtime-root preflight semantics: missing
+- [x] 9.2 Preserve `run_once` ordering and mutation fences.
+- [x] 9.3 Preserve scheduler runtime-root preflight semantics: missing
   `published_artifact_root` is a control publish-stage creatable root, while
   missing workspace, object-store, runtime, temp, lock, and evidence roots still
   block before registry, adapter, active-repository, or submission work.
-- [ ] 9.4 Verify with focused forcing, concurrent candidate, and runtime-root
+- [x] 9.4 Verify with focused forcing, concurrent candidate, and runtime-root
   preflight tests.
 
 ## 10. Scheduler Evidence Extraction
@@ -1675,13 +1675,13 @@ separate PR boundaries.
     -> no whitespace errors.
 - Implementation evidence (2026-06-15):
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_invokes_forcing_producer_before_orchestration_for_ready_canonical_candidate or scheduler_blocks_orchestration_when_forcing_producer_fails or scheduler_propagates_produced_forcing_identity_to_orchestration or fresh_cycle_with_zero_canonical_runs_full_chain_without_in_process_forcing'`
-    -> 4 passed, 520 deselected.
-  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'concurrent_candidates_submits_overlap'`
-    -> 1 passed, 523 deselected.
+    -> 4 passed, 522 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'concurrent_candidates_submits_overlap or concurrent_submit_bound or sibling_cohort or mixed_cohort or one_cohort'`
+    -> 3 passed, 523 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'slurm_preflight_blocks_missing_or_localhost_database_before_submission or issue_196_blocked_preflight_evidence_keeps_existing_consumers_stable or cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists'`
-    -> 32 passed, 492 deselected.
+    -> 32 passed, 494 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'no_flag_missing_published_artifact_root_is_created_by_control_publish_stage or no_flag_invalid_env_roots_block_before_registry_adapter_or_submit or no_flag_missing_allowed_roots_blocks_before_registry_adapter_or_submit'`
-    -> 8 passed, 516 deselected.
+    -> 8 passed, 518 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator'`
     -> 1 passed, 191 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py tests/test_entropy_audit_script.py`
@@ -1691,7 +1691,7 @@ separate PR boundaries.
   - `git diff --check`
     -> passed.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
-    -> 524 passed.
+    -> 526 passed.
 - Non-goals:
   - No candidate construction, candidate-state decision, discovery/backfill,
     evidence serialization, reservation/reconcile, retry service, chain stage,
