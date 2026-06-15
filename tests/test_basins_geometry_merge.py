@@ -60,6 +60,13 @@ def test_sub_two_point_parts_are_ignored_not_bridged() -> None:
     assert _merge_polyline_parts(parts) == [(0.0, 0.0), (1.0, 0.0)]
 
 
+def test_all_sub_two_point_parts_return_empty() -> None:
+    # When NO part has >=2 points the function returns [] (the caller then skips
+    # the record) instead of flat-concatenating stray points into a fake line.
+    assert _merge_polyline_parts([[(0.0, 0.0)], [(5.0, 5.0)]]) == []
+    assert _merge_polyline_parts([]) == []
+
+
 def test_merge_folds_back_on_branching_record() -> None:
     # KNOWN LIMIT (documented in _merge_polyline_parts): greedy nearest-endpoint
     # chaining is local, not globally optimal. A single record whose parts branch

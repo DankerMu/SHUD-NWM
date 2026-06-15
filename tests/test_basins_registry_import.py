@@ -2148,9 +2148,10 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
     is unit-tested in test_basins_geometry_merge). Asserts: in-order + reversed
     fine segments stitch into ONE LINESTRING (no fabricated jump); a genuine
     source gap keeps the longest connected part yet still reports the reach's
-    honest summed length (geom truncated for display, length not shrunk); and a
-    single-segment reach (which the removed HAVING COUNT(*)>=2 gate dropped) is
-    now backfilled.
+    honest summed length (geom truncated for display, length not shrunk); a lone
+    single-segment reach still stitches to a valid LINESTRING under ST_LineMerge;
+    and an output reach carrying a non-numeric shud_riv_index is skipped, not
+    crashed, by the text-based target match.
     """
     apply_migrations_from_zero(integration_database_url)
     rnv = "geomfix_rnv_v1"
@@ -2180,7 +2181,8 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
         #            -> ST_LineMerge must yield ONE LINESTRING, not a back-and-forth jump.
         #   reach 2: two parts with a GAP (no shared endpoint), part-a the longer
         #            -> MULTILINESTRING -> keep the longest part; length stays the SUM.
-        #   reach 3: a single segment (the old HAVING COUNT(*)>=2 would have dropped it).
+        #   reach 3: a lone single segment -> ST_Collect/ST_LineMerge of one part
+        #            must still yield a usable LINESTRING.
         execute_values(
             cursor,
             "INSERT INTO core.river_segment "
@@ -2195,7 +2197,10 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
             ],
             template="(%s, %s, %s, %s, ST_GeomFromText(%s, 4490), %s)",
         )
-        # Output reach rows: NULL geom, shud_output_river=true, indices 1/2/3.
+        # Output reach rows: NULL geom, shud_output_river=true, indices 1/2/3 plus
+        # one row with a NON-NUMERIC shud_riv_index. The target match compares the
+        # index as text, so this malformed sibling is simply skipped (matches no gis
+        # index) instead of aborting the whole UPDATE on a ::int cast.
         execute_values(
             cursor,
             "INSERT INTO core.river_segment "
@@ -2204,12 +2209,13 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
                 ("gf_out_1", rnv, 101, Json({"shud_output_river": True, "shud_riv_index": 1})),
                 ("gf_out_2", rnv, 102, Json({"shud_output_river": True, "shud_riv_index": 2})),
                 ("gf_out_3", rnv, 103, Json({"shud_output_river": True, "shud_riv_index": 3})),
+                ("gf_out_bad", rnv, 104, Json({"shud_output_river": True, "shud_riv_index": "not-an-int"})),
             ],
             template="(%s, %s, %s, %s)",
         )
 
         updated = _backfill_output_segment_geometry(cursor, rnv, record_geometry_source=True)
-        assert updated == 3
+        assert updated == 3  # reaches 1/2/3 only; the malformed-index row matches nothing
 
         cursor.execute(
             "SELECT (properties_json->>'shud_riv_index')::int AS idx, "
@@ -2217,10 +2223,18 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
             "(properties_json->>'geometry_source_length_m')::float AS prov_len, "
             "(properties_json->>'geometry_source_segment_count')::int AS prov_cnt "
             "FROM core.river_segment WHERE river_network_version_id = %s "
-            "AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true' ORDER BY idx",
+            "AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true' "
+            "AND properties_json->>'shud_riv_index' ~ '^[0-9]+$' ORDER BY idx",
             (rnv,),
         )
         rows = {row["idx"]: row for row in cursor.fetchall()}
+
+        # target-side text match: the non-numeric reach is skipped, geom stays NULL
+        # (an unguarded ::int cast on the target would instead abort the whole UPDATE).
+        cursor.execute(
+            "SELECT geom FROM core.river_segment WHERE river_segment_id = 'gf_out_bad'"
+        )
+        assert cursor.fetchone()["geom"] is None
 
     # reach 1: reversed part stitched into one continuous LINESTRING (3 deduped points)
     assert rows[1]["gtype"] == "LINESTRING"
@@ -2233,6 +2247,6 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
     assert rows[2]["prov_len"] == 150.0
     assert rows[2]["prov_cnt"] == 2
 
-    # reach 3: single-segment reach is backfilled now that HAVING COUNT(*)>=2 is gone (review #7)
+    # reach 3: a lone single segment still stitches to a valid LINESTRING via ST_LineMerge
     assert rows[3]["gtype"] == "LINESTRING"
     assert rows[3]["length_m"] == 300.0

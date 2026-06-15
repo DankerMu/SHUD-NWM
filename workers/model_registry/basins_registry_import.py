@@ -669,10 +669,12 @@ def _backfill_output_segment_geometry(
                 -- A fully stitched reach is one LINESTRING. A genuine source gap
                 -- / branching reach yields a MULTILINESTRING: keep the longest
                 -- connected part for display; part.path tie-breaks equal-length
-                -- parts so the pick is deterministic across re-imports. Any
-                -- degenerate result (POINT / empty / collection from zero-length
-                -- input) yields NULL and is dropped by the WHERE below instead of
-                -- crashing the ::geometry(LineString,4490) cast or nulling a row.
+                -- parts so the pick is deterministic across re-imports. A POINT /
+                -- empty / collection (from degenerate input) yields NULL via the
+                -- ELSE, and a zero-length LINESTRING (coincident vertices) is
+                -- caught by the ST_Length(kept.geom) > 0 guard on the final WHERE;
+                -- either way the row is dropped, never crashing the
+                -- ::geometry(LineString,4490) cast or writing an unrenderable geom.
                 SELECT CASE
                     WHEN GeometryType(ml.geom) = 'LINESTRING' THEN ml.geom
                     WHEN GeometryType(ml.geom) = 'MULTILINESTRING' THEN (
@@ -684,7 +686,7 @@ def _backfill_output_segment_geometry(
                     ELSE NULL
                 END AS geom
             ) AS kept
-            WHERE kept.geom IS NOT NULL
+            WHERE kept.geom IS NOT NULL AND ST_Length(kept.geom) > 0
         )
         UPDATE core.river_segment target
         SET geom = gis.geom,
@@ -701,7 +703,10 @@ def _backfill_output_segment_geometry(
         FROM gis_by_riv gis
         WHERE target.river_network_version_id = %s
           AND COALESCE(target.properties_json->>'shud_output_river', 'false') = 'true'
-          AND (target.properties_json->>'shud_riv_index')::int = gis.shud_riv_index
+          -- compare the index as text: the target side is int-validated only by its
+          -- writer, so an unguarded ::int here would abort the whole UPDATE on a
+          -- single malformed sibling row. gis.shud_riv_index is already int source-side.
+          AND target.properties_json->>'shud_riv_index' = gis.shud_riv_index::text
           AND (NOT %s OR target.geom IS NULL)
         """,
         (river_network_version_id, record_geometry_source, river_network_version_id, only_missing),

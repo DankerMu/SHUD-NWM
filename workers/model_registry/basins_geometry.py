@@ -726,11 +726,11 @@ def _merge_polyline_parts(parts: list[list[tuple[float, float]]]) -> list[tuple[
     parts at their nearest endpoints, reversing parts when needed.
 
     Input contract: the sole caller (``_river_segments_from_layer``) pre-filters
-    to parts with >= 2 points, so the ``len(points) >= 2`` chain filter and the
-    empty-chain flatten fallback below are defensive only -- a foreign caller
-    passing sub-2-point parts would hit the fallback and get an unstitched
-    concatenation, so keep the pre-filter if this is reused. Coordinates are
-    still in the source shapefile CRS here (merge runs before
+    to parts with >= 2 points, so the ``len(points) >= 2`` chain filter is
+    belt-and-suspenders. A foreign caller passing sub-2-point parts has them
+    dropped; if nothing with >= 2 points survives the function returns ``[]`` and
+    the caller skips the record -- it never fabricates a line from stray points.
+    Coordinates are still in the source shapefile CRS here (merge runs before
     ``_transform_points``), so ``_nearest_attachment`` ranks endpoints by a
     local squared-distance heuristic, not a geodesic metric.
 
@@ -757,7 +757,7 @@ def _merge_polyline_parts(parts: list[list[tuple[float, float]]]) -> list[tuple[
     """
     chain = [list(points) for points in parts if len(points) >= 2]
     if not chain:
-        return [point for points in parts for point in points]
+        return []
     merged = chain.pop(0)
     while chain:
         index, use_start, at_tail = _nearest_attachment(chain, merged[0], merged[-1])
