@@ -726,9 +726,12 @@ def _backfill_output_segment_geometry(
     if not updates:
         return 0
 
-    # Single round-trip. ST_Length(geom) > 0 drops a degenerate (coincident-vertex)
-    # line so the reach is left NULL rather than written unrenderable.
-    execute_values(
+    # ST_Length(geom) > 0 drops a degenerate (coincident-vertex) line so the reach
+    # is left NULL rather than written unrenderable. execute_values pages the batch
+    # (default 100 rows/page) and cursor.rowcount would then report only the LAST
+    # page, undercounting; RETURNING + fetch=True concatenates every page's updated
+    # rows so the returned count is accurate and paging-safe for any basin size.
+    updated_rows = execute_values(
         cursor,
         """
         UPDATE core.river_segment AS target SET
@@ -745,11 +748,13 @@ def _backfill_output_segment_geometry(
         ) AS source
         WHERE target.river_segment_id = source.river_segment_id
           AND ST_Length(source.geom) > 0
+        RETURNING target.river_segment_id
         """,
         updates,
         template="(%s, %s, %s, %s)",
+        fetch=True,
     )
-    return max(int(getattr(cursor, "rowcount", 0) or 0), 0)
+    return len(updated_rows)
 
 
 def _output_river_segment_rows(sources: ImportSources) -> list[dict[str, Any]]:
