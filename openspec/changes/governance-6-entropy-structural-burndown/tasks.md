@@ -76,15 +76,15 @@ separate PR boundaries.
 
 ## 6. Scheduler Candidate-State Extraction
 
-- [ ] 6.1 Create `services/orchestrator/scheduler_state.py` for
+- [x] 6.1 Create `services/orchestrator/scheduler_state.py` for
   `CandidateStateDecision`, candidate-state filtering, legacy identity
   validation, manual retry, active Slurm, permanent/cancelled, and terminal
   success helpers.
-- [ ] 6.2 Keep all evidence keys, schema versions, status/reason codes, and old
+- [x] 6.2 Keep all evidence keys, schema versions, status/reason codes, and old
   aliases unchanged.
-- [ ] 6.3 Preserve private helper compatibility from `scheduler.py` until tests
+- [x] 6.3 Preserve private helper compatibility from `scheduler.py` until tests
   and callers migrate.
-- [ ] 6.4 Verify with focused candidate-state and retry scheduler tests.
+- [x] 6.4 Verify with focused candidate-state and retry scheduler tests.
 
 ## 7. Scheduler Discovery Extraction
 
@@ -762,11 +762,214 @@ separate PR boundaries.
 - Dependencies: G6-09.
 - PR Boundary: Scheduler state helpers and shims only.
 - Required Reading: `specs/orchestrator-structural-burndown/spec.md`,
-  `tests/test_retry.py`, `tests/test_retry_cancel_consistency.py`.
+  `tests/test_production_scheduler.py`, `tests/test_retry.py`,
+  `tests/test_retry_cancel_consistency.py`.
 - Verification: `uv run --no-sync pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py`
   plus `uv run --no-sync ruff check services/orchestrator tests/test_retry.py tests/test_retry_cancel_consistency.py`.
 - Acceptance: evidence keys, status/reason codes, schema versions, and old
   aliases remain unchanged; focused candidate-state and retry tests pass.
+- Fixture level: expanded.
+- Repair intensity: high.
+- Mandatory expanded triggers: shared scheduler state machine, persisted
+  pipeline/hydro state interpretation, retry/cancellation/manual retry,
+  legacy compatibility aliases, bounded evidence ingestion, and Slurm
+  lifecycle parity.
+- Change surface:
+  - `services/orchestrator/scheduler_state.py` new candidate-state module.
+  - `services/orchestrator/scheduler.py` compatibility imports/re-exports and
+    call-site wiring only.
+  - `tests/test_production_scheduler.py`, `tests/test_retry.py`, and
+    `tests/test_retry_cancel_consistency.py` import/compatibility coverage only
+    where existing shims cannot keep tests unchanged.
+- Must preserve:
+  - `CandidateStateDecision` constructor/signature and action/reason/evidence
+    semantics.
+  - Candidate-state decisions and reason codes:
+    `production_identity_mismatch`, `active_slurm_job`,
+    `active_duplicate_pipeline`, `terminal_hydro_success`,
+    `terminal_pipeline_success`, `manual_retry_requested`,
+    `resume_downstream_after_durable_shud`, `repair_missing_raw_manifest`,
+    `retry_downstream_after_raw_repair`, `permanent_failure_guard`,
+    `retry_limit_exhausted`, `policy_blocked`,
+    `manual_retry_required_after_cancelled`, and `retry_failed_candidate`.
+  - Evidence keys and nested shapes including `candidate_identity`,
+    `production_identity_validation`, `pipeline_jobs`, `pipeline_events`,
+    `hydro_run`, `forcing_version`, `forecast_cycle`, `manual_retry`,
+    `retry`, `state_bounds`, `decision`, `reason`, `retry_policy`,
+    `failure`, `identity`, `active_slurm_jobs`, `replacement_submitted`,
+    `restart_stage`, `restart_from_stage`, `fresh_ingestion`,
+    `raw_manifest_repair`, and `manual_retry_required`.
+  - Identity validation schema version
+    `nhms.production.identity_validation.v1`, comparison aliases,
+    `legacy_non_authoritative`, mismatch payloads, candidate-scoped shared
+    cycle filtering, top-level legacy blocker filtering, and nested task-result
+    bounds/overflow evidence.
+  - Manual retry marker ordering, stale marker handling, active truth
+    non-override, repaired historical failure handling, retry attempt/new
+    attempt arithmetic, and prior failure reason propagation.
+  - Secret redaction through moved candidate-state evidence paths, including
+    `log_uri`, `error_message`, provider payloads, object-store evidence, and
+    active Slurm/cancel evidence that currently rely on `_evidence_safe` /
+    `redact_payload`.
+  - Active Slurm skip behavior, terminal hydro/pipeline success precedence,
+    cancelled/permanent failure blocking, downstream retry/restart stage
+    selection, and raw-manifest repair decisions.
+  - Private helper import/monkeypatch compatibility from
+    `services.orchestrator.scheduler` for moved candidate-state helpers until
+    downstream callers/tests migrate.
+- Must add/change:
+  - Move candidate-state dataclass/helpers into `scheduler_state.py` without
+    changing public scheduler candidate evidence, skipped/blocked/candidate
+    payloads, retry semantics, or old private helper call paths.
+  - Keep `scheduler.py` as the compatibility surface for old imports and
+    monkeypatches, including helpers used directly by current tests.
+  - Keep state-provider and active-Slurm-provider fallback signatures stable
+    for old providers that do not accept newer keyword arguments.
+- Risk packs considered:
+  - Public API / CLI / script entry: selected - scheduler private helpers,
+    tests, scripts, and pass evidence are compatibility surfaces.
+  - Config / project setup: selected - retry limits, candidate-state row/event
+    limits, object-store roots used by raw manifest repair, and scheduler
+    provider signatures flow into decisions.
+  - File IO / path safety / overwrite: selected - raw manifest existence checks
+    use `LocalObjectStore` and object-store roots; extraction must not widen
+    path semantics.
+  - Schema / columns / units / field names: selected - evidence keys, schema
+    version, status/reason codes, retry fields, and identity aliases must stay
+    byte-shape compatible.
+  - Auth / permissions / secrets: selected - moved candidate-state evidence
+    may carry secret-bearing `log_uri`, `error_message`, provider payload, or
+    object-store values; redaction behavior must remain stable even though no
+    auth boundary changes.
+  - Concurrency / shared state / ordering: selected - active Slurm, active
+    pipeline, manual retry, terminal truth, repaired-stage truth, and
+    cancellation ordering decide whether submission is allowed.
+  - Resource limits / large input / discovery: selected - candidate-state job,
+    event, and task-result bounds prevent evidence amplification.
+  - Legacy compatibility / examples: selected - legacy non-authoritative rows,
+    old identity aliases, old provider signatures, and old scheduler private
+    helper imports remain supported.
+  - Error handling / rollback / partial outputs: selected - blocked/retry/skip
+    decisions must keep stable failure evidence and no replacement submission
+    when not allowed.
+  - Release / packaging / dependency compatibility: selected - new module must
+    import without new dependencies or circular imports after the lease split.
+  - Documentation / migration notes: not selected - internal extraction only;
+    OpenSpec/PR evidence is sufficient migration record.
+  - Slurm production lifecycle / mock-vs-real parity: selected - active Slurm
+    duplicate skip, cancel/manual retry, and submitted/replacement evidence
+    must remain stable.
+  - Run manifest / QC provenance: selected - state evidence is copied into
+    candidate/model-run/submission manifests and must preserve identity fields.
+  - Published NHMS artifacts / display identity: selected - published manifest
+    identity participates in production identity validation.
+  - Other NHMS domain packs: not selected - no geospatial, forcing-window,
+    numerical, PostGIS schema, or provider discovery behavior changes.
+- Invariant Matrix:
+  - Governing invariant: extracting candidate-state code must not let a
+    candidate submit, retry, skip, or block under a different state truth than
+    the current scheduler would derive from the same persisted state and active
+    Slurm inputs.
+  - Source-of-truth identity/contract: candidate production identity
+    (`candidate_id`, `run_id`, `source_id`, `cycle_time`, `model_id`,
+    `basin_id`, `basin_version_id`, `river_network_version_id`,
+    `canonical_product_id`, `forcing_version_id`, `hydro_run_id`,
+    `published_manifest_id`), pipeline/hydro statuses, retry/manual retry
+    markers, active Slurm job ids, and evidence schema
+    `nhms.production.identity_validation.v1`.
+  - Surfaces:
+    - Producers: candidate-state provider payloads, active Slurm provider
+      payloads, `CandidateStateDecision`, `_candidate_state_decision`,
+      `_candidate_state_evidence`, `_candidate_state_identity_validation`.
+    - Validators/preflight: bounded state/event/task sampling, production
+      identity validation, legacy/non-authoritative filtering, provider
+      signature fallback, and raw manifest existence checks.
+    - Storage/cache/query: persisted pipeline jobs/events, hydro run state,
+      forcing/canonical/published identity rows, object-store raw manifest
+      existence checks, and in-memory active Slurm query results.
+    - Public routes/entrypoints: `ProductionScheduler._build_candidates`,
+      `ProductionScheduler.run_once`, retry/cancel API behavior exercised by
+      `tests/test_retry.py` and `tests/test_retry_cancel_consistency.py`, and
+      imports from `services.orchestrator.scheduler`.
+    - Frontend/downstream consumers: model-run evidence, submitted basin
+      manifest state evidence, scheduler pass evidence, and downstream retry
+      API responses.
+    - Failure paths/rollback/stale state: identity mismatch, active duplicate,
+      terminal success, stale/active manual retry markers, repaired-stage
+      history, permanent/cancelled states, bounded overflow, raw manifest
+      repair, and provider `TypeError` fallback.
+    - Evidence/audit/readiness: skipped/blocked/candidate evidence, retry
+      policy evidence, manual retry evidence, state bounds, and focused
+      candidate-state/retry tests.
+  - Regression rows:
+    - Matching current candidate state with active Slurm job -> skip with
+      `active_slurm_job`, preserve `active_slurm_jobs`, and no replacement
+      submission.
+    - Candidate-state identity mismatch in any authoritative row -> block with
+      `production_identity_mismatch`, preserve validation mismatch payload and
+      do not submit.
+    - Legacy/non-authoritative rows without M23 proof -> do not drive retry,
+      block, cancel, or terminal decisions; old compatible proof may still skip
+      terminal same-candidate success.
+    - Manual retry marker newer than terminal/permanent failure -> candidate is
+      allowed with stable `manual_retry` attempt/prior-failure evidence; stale
+      or active-blocked marker does not override active truth.
+    - Terminal hydro/pipeline success newer than failed evidence -> skip
+      terminal and reuse durable evidence; manual retry marker does not
+      override newer terminal truth.
+    - Permanent, exhausted, or cancelled candidate state -> block with stable
+      retry policy/manual retry required evidence until explicit manual retry.
+    - Bounded job/event/task-result inputs over limits -> evidence includes
+      bounds/overflow metadata and out-of-bound rows do not drive decisions.
+    - Secret-bearing URLs/messages in candidate-state, active Slurm, cancel,
+      or retry evidence -> credentials remain redacted in skipped/blocked/API
+      evidence after extraction.
+    - Existing imports/monkeypatches from `services.orchestrator.scheduler`
+      for moved candidate-state helpers -> still resolve to moved
+      implementation.
+- Boundary-surface checklist:
+  - Shared helper roots: scheduler candidate-state helpers moved to
+    `scheduler_state.py`.
+  - Public entrypoints: `ProductionScheduler._build_candidates`,
+    `ProductionScheduler.run_once`, retry/cancel API tests that depend on
+    candidate-state evidence.
+  - Read surfaces: candidate-state provider payload, active Slurm provider
+    payload, pipeline jobs/events, hydro status, identity containers, raw
+    manifest object existence.
+  - Write/delete/overwrite surfaces: none introduced; decisions only permit or
+    prevent downstream submission/mutation.
+  - Staging/publish/rollback surfaces: raw manifest repair evidence and
+    downstream restart-stage selection only, no publish behavior change.
+  - Producer/consumer evidence boundaries: candidate evidence, blocked/skipped
+    evidence, model-run evidence, basin manifest state evidence, retry API
+    error/response evidence.
+  - Stale-state/idempotency boundaries: active Slurm duplicate skip, active
+    pipeline duplicate skip, stale manual retry markers, repaired historical
+    failures, terminal truth precedence.
+  - Unchanged downstream consumers: discovery, candidate construction,
+    execution, evidence assembly, chain stage execution, reservation/reconcile,
+    and Slurm protocol bodies.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'candidate_state or manual_retry or active_slurm or terminal_hydro or terminal_pipeline or production_identity_mismatch'`
+    -> focused candidate-state, identity, active Slurm, manual retry, and
+    terminal truth tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'redacts_secret_urls_and_error_messages or candidate_state'`
+    -> candidate-state and active Slurm/cancel evidence redaction remains
+    stable after helper extraction.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_retry.py tests/test_retry_cancel_consistency.py`
+    -> retry/manual retry/cancel compatibility tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> full production scheduler tests pass if focused changes touch shared
+    candidate construction surfaces.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py tests/test_retry.py tests/test_retry_cancel_consistency.py`
+    -> lint passes.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
+- Non-goals:
+  - No discovery, candidate construction, execution, evidence module,
+    reservation, reconcile, retry service, or chain stage behavior rewrite.
+  - No status/reason/evidence key rename and no change to `.entropy-baseline`.
+  - No retirement of scheduler private helper shims in this issue.
 
 ### G6-11 Scheduler discovery extraction
 
