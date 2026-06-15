@@ -28,6 +28,7 @@ from .basins_package import BasinsPackageError, publish_basins_package
 from .basins_registry_import import (
     BasinsRegistryImportError,
     ImportSources,
+    _backfill_output_segment_geometry,
     _ensure_basin,
     _ensure_basin_version,
     _ensure_mesh,
@@ -1611,74 +1612,6 @@ def _output_segment_order_offset(cursor: Any, river_network_version_id: str) -> 
         (river_network_version_id,),
     )
     return int(cursor.fetchone()["order_offset"] or 0)
-
-
-def _backfill_output_segment_geometry(cursor: Any, river_network_version_id: str) -> int:
-    cursor.execute(
-        """
-        WITH gis_points AS (
-            SELECT
-                (properties_json->>'source_raw_segment_id')::int AS shud_riv_index,
-                segment_order,
-                length_m,
-                (dump).path[1] AS point_order,
-                (dump).geom AS point_geom
-            FROM (
-                SELECT properties_json, segment_order, length_m, ST_DumpPoints(geom) AS dump
-                FROM core.river_segment
-                WHERE river_network_version_id = %s
-                  AND geom IS NOT NULL
-                  AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
-                  AND properties_json ? 'source_raw_segment_id'
-                  AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
-            ) source
-        ),
-        numbered_points AS (
-            SELECT
-                shud_riv_index,
-                segment_order,
-                length_m,
-                point_order,
-                point_geom,
-                LAG(ST_AsEWKB(point_geom)) OVER (
-                    PARTITION BY shud_riv_index
-                    ORDER BY segment_order, point_order
-                ) AS previous_point
-            FROM gis_points
-        ),
-        deduped_points AS (
-            SELECT *
-            FROM numbered_points
-            WHERE previous_point IS NULL
-               OR previous_point <> ST_AsEWKB(point_geom)
-        ),
-        gis_by_riv AS (
-            SELECT
-                shud_riv_index,
-                ST_MakeLine(point_geom ORDER BY segment_order, point_order)::geometry(LineString, 4490) AS geom,
-                SUM(DISTINCT length_m) AS length_m,
-                COUNT(DISTINCT segment_order) AS source_segment_count
-            FROM deduped_points
-            GROUP BY shud_riv_index
-            HAVING COUNT(*) >= 2
-        )
-        UPDATE core.river_segment target
-        SET geom = gis.geom,
-            length_m = gis.length_m,
-            properties_json = target.properties_json
-                || jsonb_build_object(
-                    'geometry_source', 'gis_rivseg_iRiv',
-                    'geometry_source_segment_count', gis.source_segment_count,
-                    'geometry_source_length_m', gis.length_m
-                )
-        FROM gis_by_riv gis
-        WHERE target.river_network_version_id = %s
-          AND COALESCE(target.properties_json->>'shud_output_river', 'false') = 'true'
-          AND (target.properties_json->>'shud_riv_index')::int = gis.shud_riv_index
-        """,
-        (river_network_version_id, river_network_version_id),
-    )
-    return max(int(getattr(cursor, "rowcount", 0) or 0), 0)
 
 
 def _activate_qhh_model(cursor: Any, model_id: str) -> None:
