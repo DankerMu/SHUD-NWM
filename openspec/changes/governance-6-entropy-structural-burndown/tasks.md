@@ -1673,6 +1673,25 @@ separate PR boundaries.
     -> valid.
   - `git diff --check`
     -> no whitespace errors.
+- Implementation evidence (2026-06-15):
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_invokes_forcing_producer_before_orchestration_for_ready_canonical_candidate or scheduler_blocks_orchestration_when_forcing_producer_fails or scheduler_propagates_produced_forcing_identity_to_orchestration or fresh_cycle_with_zero_canonical_runs_full_chain_without_in_process_forcing'`
+    -> 4 passed, 520 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'concurrent_candidates_submits_overlap'`
+    -> 1 passed, 523 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'slurm_preflight_blocks_missing_or_localhost_database_before_submission or issue_196_blocked_preflight_evidence_keeps_existing_consumers_stable or cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists'`
+    -> 32 passed, 492 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'no_flag_missing_published_artifact_root_is_created_by_control_publish_stage or no_flag_invalid_env_roots_block_before_registry_adapter_or_submit or no_flag_missing_allowed_roots_blocks_before_registry_adapter_or_submit'`
+    -> 8 passed, 516 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator'`
+    -> 1 passed, 191 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py tests/test_entropy_audit_script.py`
+    -> All checks passed.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> Change is valid.
+  - `git diff --check`
+    -> passed.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> 524 passed.
 - Non-goals:
   - No candidate construction, candidate-state decision, discovery/backfill,
     evidence serialization, reservation/reconcile, retry service, chain stage,

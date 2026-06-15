@@ -261,7 +261,7 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
 
     orchestrator = modules["services/orchestrator"]
     assert isinstance(orchestrator, dict)
-    assert orchestrator["file_count"] == 16
+    assert orchestrator["file_count"] == _expected_services_orchestrator_file_count()
     assert orchestrator["finding_count"] == 0
     assert orchestrator["priority"] == "P1"
     assert orchestrator["structure"] == {
@@ -564,6 +564,15 @@ def test_entropy_baseline_writer_v1_summary_source_count_excludes_context_famili
     assert modules["openspec/example"]["file_count"] == 0
     assert modules["openapi"]["file_count"] == 0
     assert modules["README.md"]["file_count"] == 0
+
+
+def test_services_orchestrator_file_count_includes_tracked_scheduler_execution_module() -> None:
+    report = audit_repo_entropy.build_report(REPO_ROOT)
+    baseline = write_entropy_baseline.build_baseline_snapshot(REPO_ROOT, report)
+
+    orchestrator = baseline["modules"]["services/orchestrator"]
+    assert isinstance(orchestrator, dict)
+    assert orchestrator["file_count"] == _expected_services_orchestrator_file_count()
 
 
 @pytest.mark.parametrize(
@@ -4296,6 +4305,14 @@ def _emitted_module_file_count_sum(modules: dict[str, object]) -> int:
         assert isinstance(row, dict)
         total += int(row["file_count"])
     return total
+
+
+def _expected_services_orchestrator_file_count() -> int:
+    tracked_paths = audit_repo_entropy._git_tracked_paths(REPO_ROOT, ("services/orchestrator",))
+    expected = 16
+    if "services/orchestrator/scheduler_execution.py" in tracked_paths:
+        expected += 1
+    return expected
 
 
 def _baseline_archive_files(baseline_dir: Path) -> list[Path]:
