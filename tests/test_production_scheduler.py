@@ -148,6 +148,35 @@ class ProductionScheduler(_RealProductionScheduler):
         return super()._canonical_readiness_for_candidate(candidate, cycle)
 
 
+def test_M3_STAGES_PipelineResult_StageRunResult_legacy_exports_preserve_identity() -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_stages, chain_types
+
+    assert M3_STAGES is legacy_chain.M3_STAGES
+    assert M3_STAGES is chain_stages.M3_STAGES
+    assert PipelineResult is legacy_chain.PipelineResult
+    assert PipelineResult is chain_types.PipelineResult
+    assert StageRunResult is legacy_chain.StageRunResult
+    assert StageRunResult is chain_types.StageRunResult
+
+    stage_result = StageRunResult(
+        stage=M3_STAGES[0].stage,
+        job_type=M3_STAGES[0].job_type,
+        pipeline_job_id="pipeline-job-1",
+        slurm_job_id="slurm-job-1",
+        status="succeeded",
+    )
+    result = PipelineResult(
+        run_id="run-1",
+        cycle_id="gfs_2026050100",
+        status="complete",
+        stages=(stage_result,),
+    )
+
+    assert result.stages[0].stage == "download"
+    assert result.candidate_outcomes == ()
+
+
 def test_registered_model_to_dict_preserves_shud_project_identity() -> None:
     model = scheduler_module.RegisteredSchedulerModel(
         model_id="basins_heihe_shud",
