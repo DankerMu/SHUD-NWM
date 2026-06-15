@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import Any, Mapping
 
-if TYPE_CHECKING:
-    from services.orchestrator.chain import OrchestratorError
+
+class OrchestratorError(RuntimeError):
+    def __init__(self, error_code: str, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -254,6 +259,7 @@ __all__ = [
     "InitialStateSelection",
     "ModelContext",
     "ModelRunAssembly",
+    "OrchestratorError",
     "PipelineResult",
     "StageDefinition",
     "StageRunResult",

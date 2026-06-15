@@ -3,12 +3,13 @@ from __future__ import annotations
 import dataclasses
 import json
 import shlex
+import subprocess
 import sys
 import types
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -801,6 +802,49 @@ def _stage_catalog_snapshot(stages: Sequence[Any]) -> list[tuple[str, str, str, 
     ]
 
 
+def _run_fresh_python(code: str) -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_static_chain_type_module_import_resolves_hints_without_heavy_runtime_imports() -> None:
+    _run_fresh_python(
+        """
+import sys
+from typing import get_type_hints
+
+import services.orchestrator.chain_types as chain_types
+
+for module_name in ("services.orchestrator.chain", "httpx", "services.tile_publisher"):
+    assert module_name not in sys.modules, module_name
+
+type_hints = get_type_hints(chain_types.DisplayLogPublicationAttempt)
+assert type_hints["error"] == chain_types.OrchestratorError | None
+"""
+    )
+
+
+def test_static_chain_stage_catalog_import_avoids_heavy_runtime_imports() -> None:
+    _run_fresh_python(
+        """
+import sys
+
+import services.orchestrator.chain_stages as chain_stages
+
+for module_name in ("services.orchestrator.chain", "httpx", "services.tile_publisher"):
+    assert module_name not in sys.modules, module_name
+
+assert chain_stages.STAGES is chain_stages.M3_STAGES
+"""
+    )
+
+
 def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -> None:
     import services.orchestrator as orchestrator_package
     import services.orchestrator.chain as legacy_chain
@@ -823,6 +867,14 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
         "CycleOrchestrationContext",
         "ModelRunAssembly",
     ]
+
+    assert legacy_chain.OrchestratorError is chain_types.OrchestratorError
+    assert orchestrator_package.OrchestratorError is legacy_chain.OrchestratorError
+    assert orchestrator_package.ForecastOrchestrator is legacy_chain.ForecastOrchestrator
+    assert orchestrator_package.OrchestratorConfig is legacy_chain.OrchestratorConfig
+    assert orchestrator_package.PipelineAlreadyActiveError is legacy_chain.PipelineAlreadyActiveError
+    assert orchestrator_package.PsycopgOrchestratorRepository is legacy_chain.PsycopgOrchestratorRepository
+    assert orchestrator_package.scenario_for_source is legacy_chain.scenario_for_source
 
     for name in type_names:
         assert getattr(legacy_chain, name) is getattr(chain_types, name)
@@ -1120,6 +1172,55 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
     entry["residual_blockers"][0]["code"] = "mutated"
     assert assembly.identity == {"model_id": "model-a"}
     assert assembly.residual_blockers == ({"code": "none"},)
+
+
+def test_display_log_publication_attempt_type_hints_resolve_through_legacy_chain() -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_types
+
+    static_hints = get_type_hints(chain_types.DisplayLogPublicationAttempt)
+    legacy_hints = get_type_hints(legacy_chain.DisplayLogPublicationAttempt)
+
+    assert static_hints["error"] == chain_types.OrchestratorError | None
+    assert legacy_hints["error"] == legacy_chain.OrchestratorError | None
+    assert legacy_hints["error"] == static_hints["error"]
+
+
+def test_package_level_legacy_exports_import_directly_and_match_chain_exports() -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import (
+        ForecastOrchestrator as package_forecast_orchestrator,
+    )
+    from services.orchestrator import (
+        OrchestratorConfig as package_orchestrator_config,
+    )
+    from services.orchestrator import (
+        OrchestratorError as package_orchestrator_error,
+    )
+    from services.orchestrator import (
+        PipelineAlreadyActiveError as package_pipeline_already_active_error,
+    )
+    from services.orchestrator import (
+        PipelineResult as package_pipeline_result,
+    )
+    from services.orchestrator import (
+        PsycopgOrchestratorRepository as package_repository,
+    )
+    from services.orchestrator import (
+        StageRunResult as package_stage_run_result,
+    )
+    from services.orchestrator import (
+        scenario_for_source as package_scenario_for_source,
+    )
+
+    assert package_forecast_orchestrator is legacy_chain.ForecastOrchestrator
+    assert package_orchestrator_config is legacy_chain.OrchestratorConfig
+    assert package_orchestrator_error is legacy_chain.OrchestratorError
+    assert package_pipeline_already_active_error is legacy_chain.PipelineAlreadyActiveError
+    assert package_pipeline_result is legacy_chain.PipelineResult
+    assert package_repository is legacy_chain.PsycopgOrchestratorRepository
+    assert package_stage_run_result is legacy_chain.StageRunResult
+    assert package_scenario_for_source is legacy_chain.scenario_for_source
 
 
 def test_chain_stage_catalog_preserves_static_snapshots_and_legacy_identity() -> None:

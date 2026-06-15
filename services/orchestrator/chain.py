@@ -53,6 +53,7 @@ from services.orchestrator.chain_types import (
     InitialStateSelection,
     ModelContext,
     ModelRunAssembly,
+    OrchestratorError,
     PipelineResult,
     StageDefinition,
     StageRunResult,
@@ -123,14 +124,6 @@ def scenario_for_source(source_id: str) -> str:
     if normalized_source_id == "IFS":
         return "forecast_ifs_deterministic"
     return f"forecast_{source_id.lower()}_deterministic"
-
-
-class OrchestratorError(RuntimeError):
-    def __init__(self, error_code: str, message: str, details: dict[str, Any] | None = None) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.message = message
-        self.details = details or {}
 
 
 class PipelineAlreadyActiveError(OrchestratorError):
