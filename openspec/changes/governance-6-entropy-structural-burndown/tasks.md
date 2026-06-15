@@ -1457,6 +1457,229 @@ separate PR boundaries.
   reported as creatable/non-blocking for the control publish stage while other
   missing runtime roots still block before registry, adapter, active-repository,
   or submission work.
+- Fixture level: high.
+- Repair intensity: high.
+- Change surface:
+  - `ProductionScheduler.run_once` execution segment after candidate
+    construction and before pass-evidence assembly.
+  - `ProductionScheduler._produce_forcing_for_candidates`,
+    `ProductionScheduler._execute_candidates`, and candidate cohort grouping.
+  - New `services/orchestrator/scheduler_execution.py` extraction module.
+  - Runtime-root preflight path and execution-boundary evidence consumed by
+    `run_once` and `plan-production`.
+  - Compatibility aliases/shims in `scheduler.py` for execution helpers used
+    by tests or downstream imports.
+- Must preserve:
+  - Scheduler pass ordering: lock-root preflight, lease acquisition,
+    runtime-root preflight, startup reconcile, discovery/candidate building,
+    lease-lost fence, pre-execution evidence reservation, Slurm sync/cancel
+    checks, forcing production, Slurm preflight, and submission/mutation.
+  - Lease-lost and pre-execution evidence mutation fences: no registry,
+    adapter, active repository, forcing producer, Slurm preflight, or
+    orchestrator submission may run before its existing guard.
+  - In-process forcing runs only for ready canonical candidates that need it;
+    fresh full-chain/zero-canonical ingestion still skips the forcing producer
+    because the Slurm chain produces forcing.
+  - Forcing success/failure evidence, `forcing_version_id`, package URI,
+    manifest URI, model-run evidence fields, blocked-candidate reason codes,
+    and no-mutation proof fields remain unchanged.
+  - Candidate cohort grouping preserves restart-compatible grouping,
+    source/cycle order, per-source orchestrator factory use, concurrent
+    submit bound behavior, overlap receipt evidence, and exception-to-evidence
+    conversion.
+  - Slurm preflight still blocks before submission with the existing
+    `slurm_preflight_blocked` execution boundary and model-run evidence.
+  - Runtime-root preflight still treats missing `published_artifact_root` as
+    `allow_create=true` and non-blocking/non-mutating in planning, while
+    missing workspace, object-store, runtime, temp, lock, or evidence roots
+    block before registry, adapter, active repository, forcing, Slurm, or
+    submission work.
+  - No pass-evidence serialization helper extraction in this issue; evidence
+    assembly remains a downstream G6-14 boundary.
+- Risk packs considered:
+  - Public API / CLI / script entry: selected - `run_once` and
+    `plan-production` expose scheduler status, counts, evidence, and dry-run
+    behavior.
+  - Config / project setup: selected - `dry_run`,
+    `slurm_execution_enabled`, `concurrent_submit_bound`, runtime roots,
+    service role, and cancel/sync flags drive execution behavior.
+  - File IO / path safety / overwrite: selected - runtime root preflight and
+    evidence artifact write paths decide whether planning/submission may
+    proceed.
+  - Schema / columns / units / field names: selected - candidate,
+    blocked/skipped, forcing, model-run, Slurm preflight, overlap receipt,
+    execution boundary, root-preflight, and no-mutation evidence keys must
+    remain stable.
+  - Auth / permissions / secrets: selected - Slurm preflight, gateway,
+    runtime-root, and forcing/adapter error evidence must preserve existing
+    redaction.
+  - Concurrency / shared state / ordering: selected - concurrent submit,
+    source/cycle cohort grouping, lease-lost fencing, cancellation, active
+    Slurm sync, and mutation ordering are core invariants.
+  - Resource limits / large input / discovery: selected - concurrent submit
+    bounds, model-run evidence caps, and runtime-root preflight must remain
+    bounded.
+  - Legacy compatibility / examples: selected - private execution helpers and
+    `services.orchestrator.scheduler` imports remain available through
+    compatibility shims.
+  - Error handling / rollback / partial outputs: selected - forcing failure,
+    Slurm preflight failure, orchestrator exceptions, cancellation exceptions,
+    and root blockers must keep stable blocked/no-mutation outcomes.
+  - Release / packaging / dependency compatibility: selected - the new module
+    must avoid circular imports with scheduler, scheduler_candidates,
+    scheduler_state, scheduler_discovery, and chain.
+  - Documentation / migration notes: selected - OpenSpec tasks and PR evidence
+    must identify the moved execution boundary and retained non-goals.
+- Domain risk packs considered:
+  - Hydro-met time series / forcing windows: selected - forcing producer
+    inputs use canonical source/cycle, max lead, basin/model identity, and
+    canonical policy/source-object identity.
+  - SHUD numerical runtime / conservation / NaN: selected - execution passes
+    the exact basin payload into the SHUD orchestration chain; no numerical
+    behavior may be reinterpreted.
+  - Slurm production lifecycle / mock-vs-real parity: selected - Slurm
+    preflight, submit/cancel/sync boundaries, overlap receipt, and blocked
+    evidence are in scope.
+  - Run manifest / QC provenance: selected - execution evidence and
+    model-run evidence bind forcing and candidate identity into downstream
+    manifests.
+  - Published NHMS artifacts / display identity: selected - runtime-root
+    preflight distinguishes creatable display artifact root from blocking
+    compute/runtime roots.
+  - External hydro-met providers / snapshot reproducibility: selected -
+    canonical/source-object identity passed to forcing producer must remain
+    stable.
+  - Geospatial / CRS / basin geometry: not selected - no basin geometry,
+    CRS, shapefile, or raster/vector validation changes in this issue.
+  - PostGIS / TimescaleDB domain behavior: not selected - no migrations,
+    schema, hypertables, or geometry queries change in this issue.
+- Invariant Matrix:
+  - Governing invariant: execution extraction must not change when a selected
+    scheduler candidate mutates state, produces forcing, runs Slurm
+    preflight, submits an orchestrator cohort, or blocks with no mutation for
+    the same config, roots, candidate state, and repository inputs.
+  - Source-of-truth identity/contract: `SchedulerCandidate` identity fields,
+    `cycle_id_for(source_id, cycle_time)`, `run_id`, `forcing_version_id`,
+    canonical readiness identity, runtime root config, lease token state,
+    Slurm preflight result, and `PipelineResult`/`StageRunResult` evidence.
+  - Surfaces:
+    - Producers: `_build_candidates`, forcing producer,
+      `_orchestrator_factory`, Slurm preflight, active repository, scheduler
+      config, and runtime-root env/config loaders.
+    - Validators/preflight: lease-lost fence, runtime-root preflight,
+      pre-execution evidence reservation, active Slurm sync/cancel,
+      forcing readiness/failure handling, Slurm preflight, cohort grouping,
+      and concurrent submit bound.
+    - Storage/cache/query: active repository candidate/active Slurm methods,
+      file scheduler lease, pre-execution evidence artifacts, and object-store
+      config only through existing interfaces; no DB schema changes.
+    - Public routes/entrypoints: `ProductionScheduler.run_once`,
+      `ProductionScheduler._produce_forcing_for_candidates`,
+      `ProductionScheduler._execute_candidates`,
+      `ProductionScheduler._execute_candidate_cohort`,
+      `plan-production`, and imports from `services.orchestrator.scheduler`.
+    - Frontend/downstream consumers: ops scheduler evidence, model-run
+      evidence, run manifests, retry/cancel consumers, and published display
+      artifact planning evidence; no frontend code change.
+    - Failure paths/rollback/stale state: missing/invalid roots, lease lost,
+      forcing producer unavailable/failure, canonical forcing identity
+      mismatch, Slurm preflight blockers, active Slurm cancel/sync failures,
+      orchestrator exceptions, concurrent submit exceptions, and dry-run
+      planning.
+    - Evidence/audit/readiness: `execution_boundary`, `root_preflight`,
+      `no_mutation_proof`, `pre_execution_evidence`, `forcing_production`,
+      `model_run_evidence`, `slurm_preflight`,
+      `submit_overlap_receipt`, counts/status, and final readiness flags.
+  - Regression rows:
+    - Ready canonical candidate with forcing producer -> producer is invoked
+      before orchestration with identical source/cycle/model/basin/canonical
+      identity, produced `forcing_version_id` reaches candidate, basin
+      payload, and model-run evidence.
+    - Forcing producer failure -> candidate blocks with
+      `forcing_production_blocked`, orchestrator is not called, status is
+      `preflight_blocked`, and no-mutation proof remains false for SHUD
+      runtime.
+    - Fresh zero-canonical full-chain candidate -> in-process forcing
+      producer is skipped, restart stage is suppressed, and orchestration
+      payload stays full-chain.
+    - Two restart-compatible cohorts with `concurrent_submit_bound > 1` ->
+      submissions overlap, both evidence rows are returned, candidate order
+      remains stable, and overlap receipt is recorded.
+    - `concurrent_submit_bound == 1` or a single cohort -> execution remains
+      sequential and evidence shape/order is unchanged.
+    - Slurm preflight blocker -> no orchestrator submission, execution
+      boundary is `slurm_preflight_blocked`, candidate/model-run evidence
+      remains blocked, and counts report zero submitted.
+    - Missing `published_artifact_root` with all other roots valid in dry-run
+      planning -> root preflight is ready, check has `allow_create=true`,
+      the directory is not created, and registry/adapter path may plan
+      without mutation.
+    - Missing workspace, object-store, runtime, temp, lock, or evidence root
+      -> root preflight returns the existing blocker code before registry,
+      adapter, active repository, forcing producer, Slurm preflight, or
+      orchestrator submission.
+    - Lease loss after candidate construction -> pre-execution evidence
+      reservation and submission/mutation remain blocked.
+    - Active Slurm cancel/sync paths -> execution extraction does not move
+      candidate-state ownership; cancel/sync evidence and replacement
+      submission behavior remain unchanged.
+    - Orchestrator exception inside one cohort -> existing error evidence and
+      status mapping remain stable without dropping sibling cohort evidence.
+- Boundary-surface checklist:
+  - Shared helper roots: execution helpers moved to `scheduler_execution.py`;
+    scheduler pass/evidence helpers remain in `scheduler.py` unless needed as
+    compatibility wrappers.
+  - Public entrypoints: `run_once`, execution private methods,
+    `plan-production`, and legacy imports from `services.orchestrator.scheduler`.
+  - Read surfaces: scheduler config, selected candidates, active repository,
+    runtime roots, canonical/forcing identity, Slurm preflight config, and
+    orchestrator factory.
+  - Write/delete/overwrite surfaces: pre-execution evidence artifacts,
+    scheduler evidence artifact path, active repository mutation via existing
+    orchestrator/submission path, and runtime-root directory creation checks.
+  - Staging/publish/rollback surfaces: published artifact root preflight only;
+    no publish-stage extraction or display artifact writes in G6-13.
+  - Producer/consumer evidence boundaries: candidate dictionaries,
+    forcing evidence, blocked candidate evidence, Slurm preflight evidence,
+    model-run evidence, overlap receipt, and root-preflight evidence.
+  - Stale-state/idempotency boundaries: lease-lost fence, pre-execution
+    reservation, active Slurm cancel/sync, restart-compatible cohorts,
+    concurrent submit bound, and dry-run/no-mutation planning.
+  - Unchanged downstream consumers: scheduler candidate construction,
+    scheduler evidence serialization, retry service, chain stage execution,
+    reservation/reconcile protocols, DB schema, frontend, and
+    `.entropy-baseline`.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_invokes_forcing_producer_before_orchestration_for_ready_canonical_candidate or scheduler_blocks_orchestration_when_forcing_producer_fails or scheduler_propagates_produced_forcing_identity_to_orchestration or fresh_cycle_with_zero_canonical_runs_full_chain_without_in_process_forcing'`
+    -> forcing success/failure/identity propagation and fresh full-chain
+    forcing skip tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'concurrent_candidates_submits_overlap'`
+    -> concurrent submit overlap receipt and candidate evidence order pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'slurm_preflight_blocks_missing_or_localhost_database_before_submission or issue_196_blocked_preflight_evidence_keeps_existing_consumers_stable or cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists'`
+    -> Slurm preflight/cancel blocked paths remain no-submit and evidence
+    compatible.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'no_flag_missing_published_artifact_root_is_created_by_control_publish_stage or no_flag_invalid_env_roots_block_before_registry_adapter_or_submit or no_flag_missing_allowed_roots_blocks_before_registry_adapter_or_submit'`
+    -> runtime-root preflight published-root allow-create and other-root
+    blockers remain stable.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> full production scheduler tests pass because this extraction touches
+    shared execution ordering and compatibility shims.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator'`
+    -> orchestrator module-count governance expectation is updated if the new
+    module changes the entropy audit count.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py tests/test_entropy_audit_script.py`
+    -> lint passes.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
+  - `git diff --check`
+    -> no whitespace errors.
+- Non-goals:
+  - No candidate construction, candidate-state decision, discovery/backfill,
+    evidence serialization, reservation/reconcile, retry service, chain stage,
+    DB schema, frontend, or `.entropy-baseline` update.
+  - No status/reason/evidence key rename.
+  - No retirement of scheduler private method/helper compatibility in this
+    issue.
 
 ### G6-14 Scheduler evidence extraction
 
