@@ -24,22 +24,30 @@ MAX_EVIDENCE_BYTES = 5_000_000
 UNKNOWN_AFTER_ATTEMPT = "unknown_after_attempt"
 _EVIDENCE_JSON_INDENT = 2
 _RETAINED_FIELD_SUMMARY_REASON = "evidence_size_limit_exceeded"
+_REQUIRED_BOUNDED_EVIDENCE_FIELDS = frozenset(
+    (
+        "schema_version",
+        "pass_id",
+        "status",
+        "artifact_path",
+        "limit",
+        "counts",
+        "readiness",
+        "resolved_runtime_roots",
+        "runtime_config",
+        "root_preflight",
+        "evidence_pre_execution",
+        "execution_write_proof",
+        "slurm_status_sync_proof",
+        "slurm_cancellation_proof",
+        "no_mutation_proof",
+    )
+)
 _SUMMARIZABLE_BOUNDED_EVIDENCE_FIELDS = (
     "duplicate_exclusions",
-    "runtime_config",
-    "resolved_runtime_roots",
-    "root_preflight",
-    "evidence_pre_execution",
-    "execution_write_proof",
-    "slurm_status_sync_proof",
-    "slurm_cancellation_proof",
-    "no_mutation_proof",
-    "readiness",
 )
 _OPTIONAL_MINIMAL_BOUNDED_EVIDENCE_FIELDS = (
     "duplicate_exclusions",
-    "readiness",
-    "no_mutation_proof",
 )
 _DROPPABLE_BOUNDED_EVIDENCE_FIELDS = (
     "model_discovery",
@@ -449,6 +457,10 @@ def _fit_bounded_evidence_payload(
     if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
         return bounded_payload
 
+    _compact_required_bounded_fields(bounded_payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
     for field_name in _DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
         if field_name not in bounded_payload:
             continue
@@ -469,6 +481,8 @@ def _fit_bounded_evidence_payload(
     for field_name in _SUMMARIZABLE_BOUNDED_EVIDENCE_FIELDS:
         if field_name not in bounded_payload:
             continue
+        if _is_required_bounded_field(bounded_payload, field_name):
+            continue
         bounded_payload[field_name] = _compact_retained_bounded_field(field_name, bounded_payload[field_name])
         if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
             return bounded_payload
@@ -481,12 +495,10 @@ def _fit_bounded_evidence_payload(
     if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
         return bounded_payload
 
-    _drop_lower_priority_proofs(bounded_payload)
-    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
-        return bounded_payload
-
     for field_name in _OPTIONAL_MINIMAL_BOUNDED_EVIDENCE_FIELDS:
         if field_name not in bounded_payload:
+            continue
+        if _is_required_bounded_field(bounded_payload, field_name):
             continue
         bounded_payload[field_name] = _bounded_retained_field_summary(field_name, bounded_payload[field_name])
         if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
@@ -494,6 +506,8 @@ def _fit_bounded_evidence_payload(
 
     for field_name in _OPTIONAL_MINIMAL_BOUNDED_EVIDENCE_FIELDS:
         if field_name not in bounded_payload:
+            continue
+        if _is_required_bounded_field(bounded_payload, field_name):
             continue
         bounded_payload[field_name] = _minimal_bounded_retained_field_summary()
         if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
@@ -521,6 +535,95 @@ def _fit_bounded_evidence_payload(
     return bounded_payload
 
 
+def _compact_required_bounded_fields(payload: dict[str, Any]) -> None:
+    for field_name in _REQUIRED_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in payload:
+            continue
+        if field_name == "counts":
+            payload[field_name] = _compact_counts(payload[field_name])
+        elif field_name not in {"schema_version", "pass_id", "status", "artifact_path", "limit"}:
+            payload[field_name] = _compact_required_bounded_field(field_name, payload[field_name])
+
+
+def _is_required_bounded_field(payload: Mapping[str, Any], field_name: str) -> bool:
+    return field_name in _REQUIRED_BOUNDED_EVIDENCE_FIELDS and field_name in payload
+
+
+def _compact_required_bounded_field(field_name: str, value: Any) -> Any:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        return value
+    if field_name == "resolved_runtime_roots":
+        return _compact_resolved_runtime_roots(value)
+    if field_name == "runtime_config":
+        return _compact_mapping(
+            value,
+            (
+                "service_role",
+                "require_runtime_roots",
+                "dry_run",
+            ),
+        )
+    if field_name == "root_preflight":
+        return _compact_root_preflight(value)
+    if field_name == "evidence_pre_execution":
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "proof",
+                "candidate_count",
+            ),
+        )
+    if field_name in {"execution_write_proof", "slurm_status_sync_proof", "slurm_cancellation_proof"}:
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "protected_by_pre_execution_evidence",
+                "evidence_pre_execution_status",
+                "submitted_count",
+                "slurm_submit_called",
+                "slurm_submit_count",
+                "slurm_submit_proven_absent",
+                "sync_called",
+                "updated_job_count",
+                "cancellation_required",
+                "cancel_called",
+                "cancelled_job_count",
+                "mutation_occurred",
+            ),
+        )
+    if field_name == "no_mutation_proof":
+        return _compact_mapping(
+            value,
+            (
+                "adapter_download_called",
+                "slurm_submit_called",
+                "slurm_status_sync_called",
+                "slurm_cancellation_called",
+                "shud_runtime_called",
+                "hydro_result_table_writes",
+                "met_result_table_writes",
+                "pipeline_status_writes",
+                "pipeline_event_writes",
+            ),
+        )
+    if field_name == "readiness":
+        return _compact_mapping(
+            value,
+            (
+                "schema_version",
+                "interpretation",
+                "production_ready",
+                "final_production_readiness_claimed",
+                "can_claim_final_production_readiness",
+            ),
+        )
+    return _compact_retained_bounded_field(field_name, value)
+
+
 def _drop_empty_optional_bounded_fields(payload: dict[str, Any]) -> None:
     for field_name in (
         "finished_at",
@@ -532,10 +635,6 @@ def _drop_empty_optional_bounded_fields(payload: dict[str, Any]) -> None:
         "blocked_candidates",
         "skipped_candidates",
         "duplicate_exclusions",
-        "execution_write_proof",
-        "slurm_status_sync_proof",
-        "slurm_cancellation_proof",
-        "evidence_pre_execution",
     ):
         if payload.get(field_name) in (None, "", [], {}):
             payload.pop(field_name, None)
@@ -547,6 +646,8 @@ def _drop_not_required_optional_proofs(payload: dict[str, Any]) -> None:
         "slurm_status_sync_proof",
         "slurm_cancellation_proof",
     ):
+        if _is_required_bounded_field(payload, field_name):
+            continue
         value = payload.get(field_name)
         if not isinstance(value, Mapping):
             continue
@@ -556,11 +657,6 @@ def _drop_not_required_optional_proofs(payload: dict[str, Any]) -> None:
             and value.get("mutation_occurred") is not True
         ):
             payload.pop(field_name, None)
-
-
-def _drop_lower_priority_proofs(payload: dict[str, Any]) -> None:
-    for field_name in ("execution_write_proof", "slurm_cancellation_proof"):
-        payload.pop(field_name, None)
 
 
 def _compact_counts(value: Any) -> Any:

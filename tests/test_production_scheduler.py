@@ -4247,6 +4247,8 @@ def test_bounded_evidence_payload_shim_summarizes_large_retained_fields_within_l
     assert shim_payload["runtime_config"]["dry_run"] is False
     assert shim_payload["root_preflight"]["status"] == "ready"
     assert shim_payload["execution_write_proof"]["status"] == "submitted"
+    assert shim_payload["slurm_status_sync_proof"]["status"] == "not_required"
+    assert shim_payload["slurm_cancellation_proof"]["status"] == "not_required"
     assert shim_payload["execution_boundary"] == "planning_only"
     assert "slurm_submit_called" in shim_payload["no_mutation_proof"]
 
@@ -4269,6 +4271,37 @@ def test_write_evidence_bounds_serialized_payload_before_artifact_creation(tmp_p
     assert persisted["status"] == "resource_limit_blocked"
     assert persisted["limit"]["max_evidence_bytes"] == 2_200
     assert persisted["artifact_path"] == str(evidence_dir / f"{pass_id}.json")
+    required_core_keys = {
+        "schema_version",
+        "pass_id",
+        "status",
+        "artifact_path",
+        "limit",
+        "counts",
+        "readiness",
+        "resolved_runtime_roots",
+        "runtime_config",
+        "root_preflight",
+        "evidence_pre_execution",
+        "execution_write_proof",
+        "slurm_status_sync_proof",
+        "slurm_cancellation_proof",
+        "no_mutation_proof",
+    }
+    assert required_core_keys <= set(persisted)
+    for field_name in (
+        "readiness",
+        "resolved_runtime_roots",
+        "runtime_config",
+        "root_preflight",
+        "evidence_pre_execution",
+        "execution_write_proof",
+        "slurm_status_sync_proof",
+        "slurm_cancellation_proof",
+        "no_mutation_proof",
+    ):
+        assert persisted[field_name].get("status") != "omitted"
+        assert persisted[field_name].get("reason") != "evidence_size_limit_exceeded"
     assert persisted["readiness"]["schema_version"] == "nhms.production_readiness.scheduler_input.v1"
     assert persisted["counts"]["candidate_count"] == 1
     assert persisted["execution_boundary"] == "planning_only"
@@ -4276,6 +4309,9 @@ def test_write_evidence_bounds_serialized_payload_before_artifact_creation(tmp_p
     assert persisted["duplicate_exclusions"]["status"] == "omitted"
     assert persisted["runtime_config"]["dry_run"] is False
     assert persisted["evidence_pre_execution"]["status"] == "reserved"
+    assert persisted["execution_write_proof"]["status"] == "submitted"
+    assert persisted["slurm_status_sync_proof"]["status"] == "not_required"
+    assert persisted["slurm_cancellation_proof"]["status"] == "not_required"
     assert evidence == persisted
 
 
@@ -4286,7 +4322,7 @@ def test_write_evidence_fails_before_artifact_creation_when_bounded_core_cannot_
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     evidence_dir = Path(config.evidence_dir)
     evidence_dir.mkdir(parents=True)
-    context = _scheduler_evidence_test_context(config, max_evidence_bytes=32)
+    context = _scheduler_evidence_test_context(config, max_evidence_bytes=1_200)
     evidence = _large_scheduler_evidence_payload(pass_id)
     original = json.loads(json.dumps(evidence))
     artifact_path = evidence_dir / f"{pass_id}.json"
@@ -4928,7 +4964,8 @@ def test_evidence_size_fallback_status_agrees_across_result_artifact_and_cli(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 1_500)
+    max_evidence_bytes = 2_400
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", max_evidence_bytes)
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     scheduler = ProductionScheduler(
         config,
@@ -4942,7 +4979,7 @@ def test_evidence_size_fallback_status_agrees_across_result_artifact_and_cli(
     assert result.status == "resource_limit_blocked"
     assert result.evidence["status"] == "resource_limit_blocked"
     assert persisted["status"] == "resource_limit_blocked"
-    assert len(Path(result.artifact_path or "").read_bytes()) <= 1_500
+    assert len(Path(result.artifact_path or "").read_bytes()) <= max_evidence_bytes
     assert result.evidence["limit"]["reason"] == "evidence_size_limit_exceeded"
     assert persisted["limit"]["reason"] == "evidence_size_limit_exceeded"
 
@@ -4984,7 +5021,7 @@ def test_bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 1_500)
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_400)
     roots = _scheduler_env_roots(tmp_path)
     _set_scheduler_root_env(monkeypatch, roots)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
@@ -5096,7 +5133,7 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 1_800)
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 2_600)
 
     class SyncingRepository(CandidateAndActiveRepository):
         def __init__(self) -> None:
