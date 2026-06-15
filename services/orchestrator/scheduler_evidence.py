@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from errno import EEXIST, EISDIR, ELOOP, ENOTDIR
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Protocol
 
 from services.orchestrator.production_contract import production_contract_matrix
@@ -22,6 +22,43 @@ SCHEDULER_EVIDENCE_GITHUB_ISSUE = 196
 MODEL_RUN_EVIDENCE_SCHEMA_VERSION = "nhms.production_scheduler.model_run_evidence.v1"
 MAX_EVIDENCE_BYTES = 5_000_000
 UNKNOWN_AFTER_ATTEMPT = "unknown_after_attempt"
+_EVIDENCE_JSON_INDENT = 2
+_RETAINED_FIELD_SUMMARY_REASON = "evidence_size_limit_exceeded"
+_SUMMARIZABLE_BOUNDED_EVIDENCE_FIELDS = (
+    "duplicate_exclusions",
+    "runtime_config",
+    "resolved_runtime_roots",
+    "root_preflight",
+    "evidence_pre_execution",
+    "execution_write_proof",
+    "slurm_status_sync_proof",
+    "slurm_cancellation_proof",
+    "no_mutation_proof",
+    "readiness",
+)
+_OPTIONAL_MINIMAL_BOUNDED_EVIDENCE_FIELDS = (
+    "duplicate_exclusions",
+    "readiness",
+    "no_mutation_proof",
+)
+_DROPPABLE_BOUNDED_EVIDENCE_FIELDS = (
+    "model_discovery",
+    "source_cycles",
+    "candidates",
+    "blocked_candidates",
+    "skipped_candidates",
+)
+_OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS = (
+    "artifact_path",
+    "finished_at",
+    "duplicate_exclusions",
+    "readiness",
+    "no_mutation_proof",
+    "readiness_interpretation",
+    "execution_mode",
+    "execution_boundary",
+    "counts",
+)
 
 
 class SchedulerEvidenceWriteError(OSError):
@@ -227,6 +264,7 @@ def reserve_pre_execution_evidence(
     evidence_dir = Path(context.config.evidence_dir)
     workspace_root = Path(context.config.workspace_root)
     artifact_name = f"{pass_id}.pre_execution.json"
+    final_artifact_name = f"{pass_id}.json"
     artifact_path = evidence_dir / artifact_name
     payload = {
         "schema_version": "nhms.production_scheduler.pre_execution_evidence_reservation.v1",
@@ -236,20 +274,22 @@ def reserve_pre_execution_evidence(
         "status": "reserved",
         "candidate_count": candidate_count,
         "artifact_path": str(artifact_path),
-        "final_evidence_artifact": str(evidence_dir / f"{pass_id}.json"),
+        "final_evidence_artifact": str(evidence_dir / final_artifact_name),
         "proof": "scheduler_evidence_directory_write_before_production_mutation",
     }
     try:
+        validate_evidence_artifact_name(artifact_name, artifact_path=artifact_path)
+        validate_evidence_artifact_name(final_artifact_name, artifact_path=evidence_dir / final_artifact_name)
         context.require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
         context.require_under_workspace(artifact_path.parent.resolve(), workspace_root, "evidence_dir")
-        serialized = json.dumps(context.evidence_safe(payload), indent=2, sort_keys=True)
+        serialized = _serialize_evidence_json(context.evidence_safe(payload))
         evidence_dir_fd = _call_open_evidence_directory(context, evidence_dir, workspace_root)
         try:
             _call_require_evidence_artifact_available(
                 context,
-                f"{pass_id}.json",
+                final_artifact_name,
                 evidence_dir_fd,
-                evidence_dir / f"{pass_id}.json",
+                evidence_dir / final_artifact_name,
             )
             _call_write_new_regular_file(context, artifact_name, serialized, evidence_dir_fd, artifact_path)
         finally:
@@ -280,32 +320,429 @@ def write_evidence(
 ) -> Path | None:
     evidence_dir = Path(context.config.evidence_dir)
     workspace_root = Path(context.config.workspace_root)
+    artifact_name = f"{pass_id}.json"
+    artifact_path = evidence_dir / artifact_name
+    validate_evidence_artifact_name(artifact_name, artifact_path=artifact_path)
     context.require_safe_directory_final_component(evidence_dir, workspace_root, "evidence_dir")
-    artifact_path = evidence_dir / f"{pass_id}.json"
     context.require_under_workspace(artifact_path.parent.resolve(), workspace_root, "evidence_dir")
     payload = context.evidence_safe(dict(evidence))
     if not isinstance(payload, dict):
         payload = {}
     payload["artifact_path"] = str(artifact_path)
-    serialized = json.dumps(payload, indent=2, sort_keys=True)
-    bounded_payload: dict[str, Any] | None = None
-    if len(serialized.encode("utf-8")) > context.max_evidence_bytes:
-        bounded_payload = _call_bounded_evidence_payload(context, payload, reason="evidence_size_limit_exceeded")
-        serialized = json.dumps(bounded_payload, indent=2, sort_keys=True)
+    payload_to_write, serialized = _serialized_evidence_within_limit(
+        context,
+        payload,
+        artifact_path=artifact_path,
+    )
     evidence_dir_fd = _call_open_evidence_directory(context, evidence_dir, workspace_root)
     try:
-        _call_write_new_regular_file(context, f"{pass_id}.json", serialized, evidence_dir_fd, artifact_path)
+        _call_write_new_regular_file(context, artifact_name, serialized, evidence_dir_fd, artifact_path)
     finally:
         os.close(evidence_dir_fd)
     if isinstance(evidence, dict):
-        if bounded_payload is not None:
-            evidence.clear()
-            evidence.update(bounded_payload)
-        else:
-            evidence.clear()
-            evidence.update(payload)
+        evidence.clear()
+        evidence.update(payload_to_write)
         evidence.setdefault("artifact_path", str(artifact_path))
     return artifact_path
+
+
+def validate_evidence_artifact_name(artifact_name: str, *, artifact_path: Path) -> None:
+    path_name = Path(artifact_name)
+    windows_path_name = PureWindowsPath(artifact_name)
+    if (
+        not artifact_name
+        or artifact_name in {".", ".."}
+        or "/" in artifact_name
+        or "\\" in artifact_name
+        or (os.altsep is not None and os.altsep in artifact_name)
+        or path_name.is_absolute()
+        or windows_path_name.is_absolute()
+        or bool(windows_path_name.drive)
+        or path_name.name != artifact_name
+        or windows_path_name.name != artifact_name
+    ):
+        raise SchedulerEvidenceWriteError(
+            "unsafe_evidence_artifact",
+            {"artifact_path": str(artifact_path)},
+        )
+
+
+def _serialize_evidence_json(payload: Any, *, compact: bool = False) -> str:
+    if compact:
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return json.dumps(payload, indent=_EVIDENCE_JSON_INDENT, sort_keys=True)
+
+
+def _serialize_evidence_json_if_within_limit(
+    payload: Any,
+    *,
+    max_evidence_bytes: int,
+    compact: bool = False,
+) -> str | None:
+    if compact:
+        encoder = json.JSONEncoder(separators=(",", ":"), sort_keys=True)
+    else:
+        encoder = json.JSONEncoder(indent=_EVIDENCE_JSON_INDENT, sort_keys=True)
+    chunks: list[str] = []
+    serialized_bytes = 0
+    for chunk in encoder.iterencode(payload):
+        serialized_bytes += len(chunk.encode("utf-8"))
+        if serialized_bytes > max_evidence_bytes:
+            return None
+        chunks.append(chunk)
+    return "".join(chunks)
+
+
+def _payload_fits(payload: Mapping[str, Any], *, max_evidence_bytes: int, compact: bool = False) -> bool:
+    return (
+        _serialize_evidence_json_if_within_limit(
+            payload,
+            max_evidence_bytes=max_evidence_bytes,
+            compact=compact,
+        )
+        is not None
+    )
+
+
+def _serialized_evidence_within_limit(
+    context: SchedulerEvidenceWriteContext,
+    payload: dict[str, Any],
+    *,
+    artifact_path: Path,
+) -> tuple[dict[str, Any], str]:
+    serialized = _serialize_evidence_json_if_within_limit(
+        payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+    if serialized is not None:
+        return payload, serialized
+
+    bounded_payload = _call_bounded_evidence_payload(context, payload, reason="evidence_size_limit_exceeded")
+    bounded_payload = _fit_bounded_evidence_payload(
+        bounded_payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+    serialized = _serialize_evidence_json_if_within_limit(
+        bounded_payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+    )
+    if serialized is not None:
+        return bounded_payload, serialized
+    serialized = _serialize_evidence_json_if_within_limit(
+        bounded_payload,
+        max_evidence_bytes=context.max_evidence_bytes,
+        compact=True,
+    )
+    if serialized is not None:
+        return bounded_payload, serialized
+
+    raise SchedulerEvidenceWriteError(
+        "evidence_size_limit_exceeded",
+        {
+            "artifact_path": str(artifact_path),
+            "max_evidence_bytes": context.max_evidence_bytes,
+        },
+    )
+
+
+def _fit_bounded_evidence_payload(
+    payload: Mapping[str, Any],
+    *,
+    max_evidence_bytes: int,
+) -> dict[str, Any]:
+    bounded_payload = dict(payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
+    for field_name in _DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload[field_name] = {} if field_name == "model_discovery" else []
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name, compactor in (
+        ("counts", _compact_counts),
+        ("review_contract", _compact_review_contract),
+    ):
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload[field_name] = compactor(bounded_payload[field_name])
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name in _SUMMARIZABLE_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload[field_name] = _compact_retained_bounded_field(field_name, bounded_payload[field_name])
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    _drop_empty_optional_bounded_fields(bounded_payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
+    _drop_not_required_optional_proofs(bounded_payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
+    _drop_lower_priority_proofs(bounded_payload)
+    if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+        return bounded_payload
+
+    for field_name in _OPTIONAL_MINIMAL_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload[field_name] = _bounded_retained_field_summary(field_name, bounded_payload[field_name])
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name in _OPTIONAL_MINIMAL_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload[field_name] = _minimal_bounded_retained_field_summary()
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name in _DROPPABLE_BOUNDED_EVIDENCE_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload.pop(field_name)
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    for field_name in _OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS:
+        if field_name not in bounded_payload:
+            continue
+        bounded_payload.pop(field_name)
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    if "limit" in bounded_payload:
+        bounded_payload["limit"] = _compact_limit(bounded_payload["limit"])
+        if _payload_fits(bounded_payload, max_evidence_bytes=max_evidence_bytes, compact=True):
+            return bounded_payload
+
+    return bounded_payload
+
+
+def _drop_empty_optional_bounded_fields(payload: dict[str, Any]) -> None:
+    for field_name in (
+        "finished_at",
+        "execution_mode",
+        "readiness_interpretation",
+        "artifact_path",
+        "execution_boundary",
+        "model_discovery",
+        "source_cycles",
+        "candidates",
+        "blocked_candidates",
+        "skipped_candidates",
+        "duplicate_exclusions",
+        "readiness",
+        "no_mutation_proof",
+        "execution_write_proof",
+        "slurm_status_sync_proof",
+        "slurm_cancellation_proof",
+        "evidence_pre_execution",
+    ):
+        if payload.get(field_name) in (None, "", [], {}):
+            payload.pop(field_name, None)
+
+
+def _drop_not_required_optional_proofs(payload: dict[str, Any]) -> None:
+    for field_name in (
+        "execution_write_proof",
+        "slurm_status_sync_proof",
+        "slurm_cancellation_proof",
+    ):
+        value = payload.get(field_name)
+        if not isinstance(value, Mapping):
+            continue
+        if (
+            value.get("status") == "not_required"
+            and value.get("protected_by_pre_execution_evidence") is not True
+            and value.get("mutation_occurred") is not True
+        ):
+            payload.pop(field_name, None)
+
+
+def _drop_lower_priority_proofs(payload: dict[str, Any]) -> None:
+    for field_name in ("execution_write_proof", "slurm_cancellation_proof"):
+        payload.pop(field_name, None)
+
+
+def _compact_counts(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    compact: dict[str, Any] = {}
+    for key, raw_value in value.items():
+        if raw_value not in (0, None, False, "", [], {}):
+            compact[str(key)] = raw_value
+    return compact or {"candidate_count": 0}
+
+
+def _compact_review_contract(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    compact = _compact_mapping(value, ("contract_id", "github_issue", "openspec_change", "scope"))
+    if _payload_fits(compact, max_evidence_bytes=160, compact=True):
+        return compact
+    return _compact_mapping(value, ("contract_id", "github_issue"))
+
+
+def _compact_limit(value: Any) -> Any:
+    return _compact_mapping(value, ("reason",))
+
+
+def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
+    if value is None:
+        return {}
+    if field_name == "resolved_runtime_roots":
+        return _compact_resolved_runtime_roots(value)
+    if field_name == "runtime_config":
+        return _compact_mapping(
+            value,
+            (
+                "service_role",
+                "require_runtime_roots",
+                "dry_run",
+            ),
+        )
+    if field_name == "root_preflight":
+        return _compact_root_preflight(value)
+    if field_name == "evidence_pre_execution":
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "proof",
+                "candidate_count",
+            ),
+        )
+    if field_name in {"execution_write_proof", "slurm_status_sync_proof", "slurm_cancellation_proof"}:
+        return _compact_mapping(
+            value,
+            (
+                "status",
+                "protected_by_pre_execution_evidence",
+                "evidence_pre_execution_status",
+                "submitted_count",
+                "slurm_submit_called",
+                "slurm_submit_count",
+                "slurm_submit_proven_absent",
+                "sync_called",
+                "updated_job_count",
+                "cancellation_required",
+                "cancel_called",
+                "cancelled_job_count",
+                "mutation_occurred",
+            ),
+        )
+    if field_name == "no_mutation_proof":
+        return _compact_mapping(
+            value,
+            (
+                "adapter_download_called",
+                "slurm_submit_called",
+                "slurm_status_sync_called",
+                "slurm_cancellation_called",
+                "shud_runtime_called",
+                "hydro_result_table_writes",
+                "met_result_table_writes",
+                "pipeline_status_writes",
+                "pipeline_event_writes",
+            ),
+        )
+    if field_name == "readiness":
+        return _compact_mapping(
+            value,
+            (
+                "schema_version",
+                "interpretation",
+                "production_ready",
+                "final_production_readiness_claimed",
+                "can_claim_final_production_readiness",
+            ),
+        )
+    return _bounded_retained_field_summary(field_name, value)
+
+
+def _compact_mapping(value: Any, keys: Sequence[str]) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary("", value)
+    return {key: value[key] for key in keys if key in value}
+
+
+def _compact_resolved_runtime_roots(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary("resolved_runtime_roots", value)
+    compact_roots: dict[str, Any] = {}
+    root_names = ("workspace_root", "evidence_root")
+    for root_name in root_names:
+        if root_name not in value:
+            continue
+        root_value = value[root_name]
+        if isinstance(root_value, Mapping):
+            compact_roots[root_name] = _compact_mapping(root_value, ("path",))
+        else:
+            compact_roots[root_name] = root_value
+    return compact_roots
+
+
+def _compact_root_preflight(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _bounded_retained_field_summary("root_preflight", value)
+    compact: dict[str, Any] = _compact_mapping(value, ("status", "checked_at"))
+    checks = value.get("checks")
+    if isinstance(checks, Mapping):
+        compact_checks: dict[str, Any] = {}
+        allowed_roots_policy = checks.get("allowed_roots_policy")
+        if isinstance(allowed_roots_policy, Mapping):
+            compact_checks["allowed_roots_policy"] = _compact_mapping(
+                allowed_roots_policy,
+                ("non_empty", "allowed"),
+            )
+        evidence_root = checks.get("evidence_root")
+        if isinstance(evidence_root, Mapping):
+            compact_checks["evidence_root"] = _compact_mapping(evidence_root, ("writable", "safe"))
+        compact["checks"] = compact_checks
+    return compact
+
+
+def _bounded_retained_field_summary(field_name: str, value: Any) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "status": "omitted",
+        "reason": _RETAINED_FIELD_SUMMARY_REASON,
+    }
+    if isinstance(value, Mapping):
+        summary["omitted_key_count"] = len(value)
+    elif isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        summary["omitted_item_count"] = len(value)
+    elif value is None:
+        summary["original_value"] = None
+    else:
+        summary["omitted_value_type"] = type(value).__name__
+    if field_name in {"execution_write_proof", "slurm_status_sync_proof", "slurm_cancellation_proof"}:
+        summary["proof_status"] = _mapping_status(value)
+    elif field_name in {"evidence_pre_execution", "root_preflight", "readiness"}:
+        summary["source_status"] = _mapping_status(value)
+    return summary
+
+
+def _minimal_bounded_retained_field_summary() -> dict[str, str]:
+    return {
+        "status": "omitted",
+        "reason": _RETAINED_FIELD_SUMMARY_REASON,
+    }
+
+
+def _mapping_status(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        status = value.get("status")
+        if status not in (None, ""):
+            return str(status)
+    return None
 
 
 def _call_bounded_evidence_payload(
@@ -340,6 +777,7 @@ def _call_write_new_regular_file(
     dir_fd: int,
     artifact_path: Path,
 ) -> None:
+    validate_evidence_artifact_name(artifact_name, artifact_path=artifact_path)
     if context.write_new_regular_file is not None:
         context.write_new_regular_file(
             artifact_name,
@@ -357,6 +795,7 @@ def _call_require_evidence_artifact_available(
     dir_fd: int,
     artifact_path: Path,
 ) -> None:
+    validate_evidence_artifact_name(artifact_name, artifact_path=artifact_path)
     if context.require_evidence_artifact_available is not None:
         context.require_evidence_artifact_available(
             artifact_name,
@@ -1157,6 +1596,7 @@ def write_new_regular_file(
     dir_fd: int,
     artifact_path: Path,
 ) -> None:
+    validate_evidence_artifact_name(artifact_name, artifact_path=artifact_path)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(artifact_name, flags, 0o644, dir_fd=dir_fd)
@@ -1196,6 +1636,7 @@ def require_evidence_artifact_available(
     dir_fd: int,
     artifact_path: Path,
 ) -> None:
+    validate_evidence_artifact_name(artifact_name, artifact_path=artifact_path)
     try:
         artifact_stat = os.stat(artifact_name, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -1217,7 +1658,7 @@ def bounded_evidence_payload(
     reason: str,
     max_evidence_bytes: int = MAX_EVIDENCE_BYTES,
 ) -> dict[str, Any]:
-    return {
+    bounded_payload = {
         "schema_version": payload.get("schema_version", SCHEDULER_EVIDENCE_SCHEMA_VERSION),
         "review_contract": payload.get(
             "review_contract",
@@ -1264,6 +1705,7 @@ def bounded_evidence_payload(
         "slurm_cancellation_proof": payload.get("slurm_cancellation_proof"),
         "no_mutation_proof": payload.get("no_mutation_proof", no_mutation_proof()),
     }
+    return _fit_bounded_evidence_payload(bounded_payload, max_evidence_bytes=max_evidence_bytes)
 
 
 def evidence_status(evidence: Mapping[str, Any], fallback: str) -> str:

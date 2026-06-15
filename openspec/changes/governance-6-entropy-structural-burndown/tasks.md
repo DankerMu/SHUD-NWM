@@ -1967,29 +1967,39 @@ separate PR boundaries.
     normal forcing/orchestrator mutation, pre-execution artifact
     no-clobber/no-follow/non-regular rejection, and circular-import-free
     `scheduler_evidence` import.
+  - Added round-4 regression tests for direct and shim artifact basename
+    validation, pre-execution reservation traversal rejection, bounded evidence
+    final byte-limit enforcement, and typed no-artifact failure when the bounded
+    core cannot fit the configured limit.
   - Updated the services/orchestrator entropy file-count expectation for the
     new tracked scheduler evidence module.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'evidence_dir_symlink_cannot_escape_workspace or evidence_final_artifact_symlink_is_not_followed or evidence_existing_artifact_file_is_not_overwritten'`
-    -> `4 passed, 530 deselected`.
+    -> `4 passed, 540 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_evidence_context_accepts_exported_keyword_callbacks or normal_mutation_sees_pre_execution_reservation_before_forcing_and_submit or pre_execution_existing_regular_artifact_blocks_before_forcing_and_submit or pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_target or pre_execution_non_regular_artifact_blocks_before_cancel'`
-    -> `5 passed, 529 deselected`.
+    -> `5 passed, 539 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'pre_execution_reservation or scheduler_evidence_context or scheduler_evidence_private_helper_compatibility_shims_delegate or scheduler_evidence_module_imports_without_scheduler_cycle'`
-    -> `7 passed, 527 deselected`.
+    -> `7 passed, 537 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof or no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof or bounded_evidence_preserves_pre_execution_reservation_proof'`
-    -> `3 passed, 531 deselected`.
+    -> `3 passed, 541 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_pass_startup_reconciles_reserved_unbound_jobs or restart_reconcile'`
-    -> `1 passed, 533 deselected`.
+    -> `1 passed, 543 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_evidence_redacts_signed_candidate_outcome_log_uri or scheduler_evidence_redacts_sensitive_runtime_payloads or scheduler_evidence_private_helper_compatibility_shims_delegate or scheduler_evidence_module_imports_without_scheduler_cycle'`
-    -> `4 passed, 530 deselected`.
+    -> `4 passed, 540 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'unsafe_artifact_names_before_escape or scheduler_write_evidence_shim_rejects_traversal_artifact_name or bounded_evidence_payload_shim_summarizes_large_retained_fields_within_limit or write_evidence_bounds_serialized_payload_before_artifact_creation or write_evidence_fails_before_artifact_creation_when_bounded_core_cannot_fit'`
+    -> `10 passed, 534 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'evidence_artifact or bounded_evidence or scheduler_evidence_context or scheduler_evidence_private_helper_compatibility_shims_delegate or pre_execution'`
+    -> `16 passed, 528 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
-    -> `534 passed`.
+    -> `544 passed`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator'`
     -> `1 passed, 191 deselected`.
