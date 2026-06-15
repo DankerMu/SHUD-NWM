@@ -1408,13 +1408,13 @@ separate PR boundaries.
     -> valid.
 - Implementation evidence (2026-06-15):
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'fresh_cycle_with_zero_canonical or completed_duplicate_is_skipped_before_not_ready_canonical_gate or scheduler_caps_reject_oversized_config or duplicate_active_model_identity or duplicate_active_package_identity or stale_active_db_job_terminal_slurm_sync'`
-    -> 7 passed, 515 deselected.
+    -> 7 passed, 517 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'sync_cycle_statuses or active_slurm_status_sync or cancel_active_slurm'`
-    -> 10 passed, 512 deselected.
+    -> 10 passed, 514 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'duplicate_candidate_identity'`
-    -> 1 passed, 521 deselected.
+    -> 1 passed, 523 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'redacts_secret_urls_and_error_messages or canonical_readiness_query_error'`
-    -> 2 passed, 520 deselected.
+    -> 2 passed, 522 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
     -> 524 passed.
   - Fix-pass evidence for round-1 legacy compatibility findings:
