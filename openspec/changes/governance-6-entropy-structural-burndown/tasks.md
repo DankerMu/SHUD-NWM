@@ -2478,6 +2478,33 @@ separate PR boundaries.
     `openspec validate governance-6-entropy-structural-burndown --strict
     --no-interactive` -> valid.
   - Verification: `git diff --check` -> no whitespace errors.
+  - Round 1 review/verifier closure (PR #520):
+    - Candidate A `CONFIRMED`: array stages lacked direct evidence that a
+      durable unbound reservation exists before `submit_job_array`.
+      Resolution: extended `test_array_stage_submission_threads_idempotency_comment`
+      to query the store-backed reservation during `submit_job_array` and
+      assert `status == "reserved"`, `slurm_job_id is None`, and post-completion
+      binding/idempotency-key preservation.
+    - Candidate B `CONFIRMED`: extracted helper-to-helper calls bypassed
+      legacy `ForecastOrchestrator` private-method overrides. Resolution:
+      routed internal helper calls through legacy orchestrator shims when
+      present and added `test_chain_stage_execution_internal_calls_preserve_legacy_override_surface`.
+    - Candidate C `REFUTED`: timeout monkeypatch target did not drift because
+      `services.orchestrator.chain.time` and
+      `services.orchestrator.chain_stage_execution.time` reference the same
+      module object.
+  - Fix verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'array_stage_submission_threads_idempotency_comment or chain_stage_execution_internal_calls_preserve_legacy_override_surface'`
+    -> `2 passed, 170 deselected`.
+  - Fix verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_execution_module_imports_without_loading_chain_runtime or chain_stage_execution_legacy_methods_delegate or chain_stage_execution_internal_calls_preserve_legacy_override_surface'`
+    -> `3 passed, 169 deselected`.
+  - Fix verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_reserves_before_submit_and_binds_after or array_stage_submission_threads_idempotency_comment or chain_stage_reservation_is_idempotent_across_resubmit or manual_retry_terminal_stage_submits_new_attempt_identity or overlapping_pass_does_not_double_submit_real_submit_path or crash_recovery_resumes_after_last_completed_stage or resume_array_status_override or poll_timeout'`
+    -> `13 passed, 159 deselected`.
+  - Fix verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py`
+    -> `All checks passed!`.
 - Non-goals:
   - No manifest/model-run assembly extraction; `chain_manifests.py` belongs to
     G6-17.

@@ -68,6 +68,17 @@ def _dependencies(
     raise RuntimeError("chain stage execution dependencies are unavailable")
 
 
+def _call_orchestrator_helper(orchestrator: StageExecutionOrchestrator, name: str, *args: Any, **kwargs: Any) -> Any:
+    helper = getattr(orchestrator, name, None)
+    if callable(helper):
+        return helper(*args, **kwargs)
+    return globals()[name.removeprefix("_")](
+        orchestrator,
+        *args,
+        **kwargs,
+    )
+
+
 def submit_and_wait_cycle_stage(
     orchestrator: StageExecutionOrchestrator,
     stage: StageDefinition,
@@ -131,7 +142,14 @@ def submit_and_wait_cycle_stage(
             # Array path must carry the same idempotency --comment as the
             # single-job path so crash-recovery can reconcile array masters.
             stage_manifest["comment"] = deps.slurm_comment_for(idempotency_key)
-            submitted = submit_array_stage(orchestrator, stage, context, tasks, stage_manifest, deps=deps)
+            submitted = _call_orchestrator_helper(
+                orchestrator,
+                "_submit_array_stage",
+                stage,
+                context,
+                tasks,
+                stage_manifest,
+            )
         else:
             submitted = deps.coerce_mapping(
                 orchestrator.slurm_client.submit_job(
@@ -139,7 +157,11 @@ def submit_and_wait_cycle_stage(
                         "run_id": context.run_id,
                         "model_id": deps.cycle_payload_model_id(context),
                         "job_type": stage.job_type,
-                        "manifest": slurm_submission_manifest(orchestrator, stage_manifest),
+                        "manifest": _call_orchestrator_helper(
+                            orchestrator,
+                            "_slurm_submission_manifest",
+                            stage_manifest,
+                        ),
                         "comment": deps.slurm_comment_for(idempotency_key),
                     }
                 )
@@ -239,15 +261,15 @@ def submit_and_wait_cycle_stage(
             publication_attempt=submitted_publish_attempt,
         )
     else:
-        terminal_observation = poll_cycle_stage_until_terminal(
+        terminal_observation = _call_orchestrator_helper(
             orchestrator,
+            "_poll_cycle_stage_until_terminal",
             stage=stage,
             context=context,
             pipeline_job_id=pipeline_job_id,
             initial_job=submitted,
             initial_status=submitted_status,
             log_publication=log_publication,
-            deps=deps,
         )
     terminal = terminal_observation.job
     publication_attempt = terminal_observation.publication_attempt
@@ -574,15 +596,15 @@ def poll_cycle_stage_until_terminal(
     deadline = time.monotonic() + orchestrator.config.job_timeout_seconds
     while deps.status_from_gateway_job(job) not in deps.terminal_job_statuses:
         if time.monotonic() >= deadline:
-            return record_cycle_stage_poll_timeout(
+            return _call_orchestrator_helper(
                 orchestrator,
+                "_record_cycle_stage_poll_timeout",
                 stage=stage,
                 context=context,
                 pipeline_job_id=pipeline_job_id,
                 job=job,
                 current_status=current_status,
                 log_publication=log_publication,
-                deps=deps,
             )
         time.sleep(orchestrator.config.poll_interval_seconds)
         job = deps.coerce_mapping(orchestrator.slurm_client.get_job_status(str(job["job_id"])))
