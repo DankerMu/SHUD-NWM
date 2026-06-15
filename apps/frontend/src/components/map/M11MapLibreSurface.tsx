@@ -325,13 +325,6 @@ export function M11MapLibreSurface({
         event.target.getCanvas().style.cursor = 'pointer'
         return
       }
-      const basinFeature = findEventFeature(event, 'm11-basin-fill')
-      if (basinFeature) {
-        setHoveredRiverSegmentId(null)
-        onOverlayHover?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
-        event.target.getCanvas().style.cursor = 'pointer'
-        return
-      }
       // 代站点 / cluster hover：cursor=pointer（#339 遗留 minor），但不触发 overlay hover 高亮。
       if (showStationLayer) {
         const stationFeature =
@@ -343,15 +336,23 @@ export function M11MapLibreSurface({
           return
         }
       }
+      // 河段 hover 须先于 basin-fill（与点击优先级一致），否则河段高亮被 basin 抢走。
       const overlayFeature = renderableOverlay ? findEventFeature(event, `${renderableOverlay.layer.id}-hit`) : null
-      if (!renderableOverlay || !overlayFeature) {
-        setHoveredRiverSegmentId(null)
-        onOverlayHover?.(null)
-        event.target.getCanvas().style.cursor = ''
+      if (renderableOverlay && overlayFeature) {
+        onOverlayHover?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
+        event.target.getCanvas().style.cursor = 'pointer'
         return
       }
-      onOverlayHover?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
-      event.target.getCanvas().style.cursor = 'pointer'
+      const basinFeature = findEventFeature(event, 'm11-basin-fill')
+      if (basinFeature) {
+        setHoveredRiverSegmentId(null)
+        onOverlayHover?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
+        event.target.getCanvas().style.cursor = 'pointer'
+        return
+      }
+      setHoveredRiverSegmentId(null)
+      onOverlayHover?.(null)
+      event.target.getCanvas().style.cursor = ''
     },
     [onOverlayHover, renderableOverlay, showStationLayer],
   )
@@ -372,11 +373,6 @@ export function M11MapLibreSurface({
         onOverlayClick?.({ layerId: 'basin-river-segments', event, feature: riverFeature })
         return
       }
-      const basinFeature = findEventFeature(event, 'm11-basin-fill')
-      if (basinFeature) {
-        onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
-        return
-      }
       if (showStationLayer) {
         // 点 cluster：用 source 运行时 API 取展开 zoom 后 flyTo（测试以 stub 验证调用）。
         const clusterFeature = findEventFeature(event, MET_STATION_CLUSTER_LAYER_ID)
@@ -391,9 +387,17 @@ export function M11MapLibreSurface({
           return
         }
       }
+      // 河段（流量/水位 MVT 线）比所在流域多边形更具体：须先于 basin-fill 命中。
+      // 否则总览（无 basinSegments）点河段会被底下的 basin-fill 抢走、永远到不了河段分支。
       const overlayFeature = renderableOverlay ? findEventFeature(event, `${renderableOverlay.layer.id}-hit`) : null
       if (renderableOverlay && overlayFeature) {
         onOverlayClick?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
+        return
+      }
+      // 点流域空白处（无河段命中）→ basin 分支（相机飞到流域）。
+      const basinFeature = findEventFeature(event, 'm11-basin-fill')
+      if (basinFeature) {
+        onOverlayClick?.({ layerId: 'basin-boundaries', event, feature: basinFeature })
       }
     },
     [onOverlayClick, renderableOverlay, showStationLayer],

@@ -1282,7 +1282,7 @@ describe('M11 visual foundation shell', () => {
     expect(onOverlayClick).toHaveBeenCalledWith(expect.objectContaining({ layerId: 'flood-return-period' }))
   })
 
-  it('dispatches the matched basin feature when overlay features are returned first', async () => {
+  it('dispatches the river-segment overlay over basin-fill when both are under the click (#508)', async () => {
     const onOverlayClick = vi.fn()
     const layersWithMvt = layers.map((layer) =>
       layer.layerId === 'flood-return-period' ? { ...layer, metadata: floodMvtMetadata } : layer,
@@ -1298,12 +1298,17 @@ describe('M11 visual foundation shell', () => {
     )
 
     await waitFor(() => expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-registered-overlays', 'flood-return-period'))
+    // contextMenu mock 同时命中河段热区（m11-flood-return-period-line-hit）与 basin-fill：
+    // 新优先级下河段比所在流域多边形更具体，必须先命中、被分发；basin-fill 不再抢走点击。
     fireEvent.contextMenu(screen.getByTestId('mock-maplibre-map'))
     expect(onOverlayClick).toHaveBeenCalledWith(
       expect.objectContaining({
-        layerId: 'basin-boundaries',
-        feature: expect.objectContaining({ properties: { basin_id: 'yangtze' } }),
+        layerId: 'flood-return-period',
+        feature: expect.objectContaining({ properties: expect.objectContaining({ segment_id: 'seg-1' }) }),
       }),
+    )
+    expect(onOverlayClick).not.toHaveBeenCalledWith(
+      expect.objectContaining({ layerId: 'basin-boundaries' }),
     )
   })
 

@@ -1194,7 +1194,7 @@ describe('App route state', () => {
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-basin-feature-count', '1')
   })
 
-  it('drills into a basin in-place when its boundary is clicked on the map (M26)', async () => {
+  it('flies the camera to a basin without drilling in when its boundary is clicked (#508)', async () => {
     const user = userEvent.setup()
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasins(
@@ -1213,16 +1213,21 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
+    const searchBeforeClick = window.location.search
 
-    // 点 m11-basin-fill（地图 dblClick mock 派发 basin-fill）→ 直接写 basinId 进入详情，pathname 仍为 /
+    // 点 m11-basin-fill（地图 dblClick mock 派发 basin-fill）→ 相机飞到该流域 bbox，
+    // 留在全国总览：不写 basinId / 不携带钻取上下文、pathname 仍为 /。
     await user.dblClick(screen.getByTestId('mock-m11-maplibre-map'))
     await waitFor(() =>
-      expect(window.location.search).toBe(
-        '?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basemap=satellite&basinVersionId=bv-001&basinId=basin-demo',
-      ),
+      expect(m11FitBoundsCalls).toContainEqual([[[100, 30], [105, 35]], { padding: 36, duration: 450 }]),
     )
-    expect(window.location.search).not.toContain('segmentId=seg-sibling')
+    expect(new URLSearchParams(window.location.search).get('basinId')).toBeNull()
+    expect(window.location.search).not.toContain('basinId=')
+    // 不携带钻取上下文：basinVersionId/riverNetworkVersionId/segmentId 不被改写。
+    expect(window.location.search).toBe(searchBeforeClick)
     expect(window.location.pathname).toBe('/')
+    // 留在全国总览（绝不挂流域钻取地图）。
+    expect(screen.queryByLabelText('流域钻取地图')).not.toBeInTheDocument()
   })
 
   it('resolves best summary links to the concrete overview source identity', async () => {
@@ -1317,7 +1322,7 @@ describe('App route state', () => {
     expect(window.location.pathname).toBe('/')
   })
 
-  it('drills into a basin by writing basinId into the single-page query without leaving / (M26)', async () => {
+  it('keeps the single-page query free of basinId when a basin boundary is clicked (#508)', async () => {
     const user = userEvent.setup()
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasin(m11Layers, overviewFloodScopeKey, overviewFloodValid06ScopeKey, 'basin-demo'),
@@ -1330,13 +1335,16 @@ describe('App route state', () => {
     expect(await screen.findByTestId('m11-fullscreen-map')).toBeInTheDocument()
     await user.dblClick(screen.getByTestId('mock-m11-maplibre-map'))
 
+    // 点流域 → 相机飞到其 bbox（留在全国总览），不把 basinId / 钻取上下文写进单页 query。
     await waitFor(() =>
-      expect(window.location.search).toBe(
-        '?source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&layer=flood-return-period&basinVersionId=bv-001&basinId=basin-demo',
-      ),
+      expect(m11FitBoundsCalls).toContainEqual([[[100, 30], [105, 35]], { padding: 36, duration: 450 }]),
     )
+    const params = new URLSearchParams(window.location.search)
+    expect(params.getAll('basinId')).toEqual([])
+    expect(params.get('riverNetworkVersionId')).toBeNull()
+    expect(params.get('segmentId')).toBeNull()
     expect(window.location.pathname).toBe('/')
-    expect(new URLSearchParams(window.location.search).getAll('basinId')).toEqual(['basin-demo'])
+    expect(screen.queryByLabelText('流域钻取地图')).not.toBeInTheDocument()
   })
 
   it('does not render static basin labels when overview basin inventory is empty', async () => {
@@ -1957,22 +1965,10 @@ describe('App route state', () => {
     expect(screen.getByTestId('m11-map-surface')).toHaveAttribute('data-selected-segment-map-state', 'idle')
   })
 
-  it('selects a basin in-place by clicking its boundary, fits bbox, keeps pathname / (M26)', async () => {
+  it('fits a basin bbox in-place without drilling in, staying on the overview map (#508)', async () => {
     const user = userEvent.setup()
-    const baseSnapshot = basinSnapshot(
-      'basin-demo',
-      m11Layers,
-      'source=gfs&basinVersionId=bv-001',
-      'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z&basinVersionId=bv-001',
-    )
     useOverviewDataStore.setState({
       overview: overviewSnapshotWithBasins(m11Layers, 'source=gfs', 'source=gfs&validTime=2026-05-18T06%3A00%3A00.000Z'),
-      basinDetail: {
-        ...baseSnapshot,
-        selectedSegment: baseSnapshot.selectedSegment
-          ? { ...baseSnapshot.selectedSegment, riverNetworkVersionId: null }
-          : null,
-      },
       loading: false,
       basinLoading: false,
     })
@@ -1981,13 +1977,16 @@ describe('App route state', () => {
     render(<App />)
 
     expect(await screen.findByLabelText('全国总览地图')).toBeInTheDocument()
-    // 点 m11-basin-fill（dblClick mock）→ 直接进入详情，pathname 仍为 /
+    // 点 m11-basin-fill（dblClick mock）→ 相机飞到该流域 bbox，留在全国总览：不钻取、pathname 仍为 /。
     await user.dblClick(screen.getByTestId('mock-m11-maplibre-map'))
 
-    await waitFor(() => expect(new URLSearchParams(window.location.search).get('basinId')).toBe('basin-demo'))
-    expect(await screen.findByLabelText('流域钻取地图')).toBeInTheDocument()
+    // 相机 fit 到总览快照里流域的 bbox（100/30/105/35），而非旧钻取详情 bbox。
+    await waitFor(() => expect(m11FitBoundsCalls).toContainEqual([[[100, 30], [105, 35]], { padding: 36, duration: 450 }]))
+    expect(new URLSearchParams(window.location.search).get('basinId')).toBeNull()
     expect(window.location.pathname).toBe('/')
-    await waitFor(() => expect(m11FitBoundsCalls).toContainEqual([[[101, 31], [104, 34]], { padding: 36, duration: 450 }]))
+    // 留在全国总览地图，绝不切到流域钻取地图。
+    expect(screen.getByLabelText('全国总览地图')).toBeInTheDocument()
+    expect(screen.queryByLabelText('流域钻取地图')).not.toBeInTheDocument()
   })
 
   it('returns to the national overview in-place when basinId is cleared, keeping pathname / (M26)', async () => {

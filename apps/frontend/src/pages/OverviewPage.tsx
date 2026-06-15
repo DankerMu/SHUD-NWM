@@ -17,7 +17,7 @@ import {
   M11MetRasterNotice,
   M11OpsLink,
 } from '@/components/map/M11FloatingControls'
-import { mapFeatureStringProperty, popupAnchorFromInteraction, useBasinDetailMode } from '@/components/m11/BasinDetailPanels'
+import { bboxToMapFit, mapFeatureStringProperty, popupAnchorFromInteraction, useBasinDetailMode } from '@/components/m11/BasinDetailPanels'
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import type { LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import {
@@ -293,6 +293,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
 
   // 全国点河段的就地流量弹窗（segment 身份 + 经纬度锚点 + 反查到的 basinId）。
   const [riverPopup, setRiverPopup] = useState<{ segment: M11RiverPopupSegment; lngLat: [number, number]; basinId: string | null } | null>(null)
+  // 点流域 → 相机飞到其 bbox（留在全国总览、不钻取/不锁定）。
+  const [basinFit, setBasinFit] = useState<M11MapCameraFit | null>(null)
   // 切图层时清掉残留弹窗（弹窗只属于当前水文图层）。
   useEffect(() => setRiverPopup(null), [state.layer])
 
@@ -321,15 +323,16 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         })
         return
       }
-      // 点流域边界 → 钻入流域详情。
+      // 点流域边界 → 相机飞到该流域（留在全国总览，不钻取/不锁定；缩放后直接点河段、
+      // 随时点别的流域切换，无需「返回总览」）。
       const feature = interaction.feature ?? interaction.event.features?.find((item) => item.layer?.id === 'm11-basin-fill')
       const basinId = feature?.properties?.basin_id
       if (typeof basinId !== 'string' || !visibleBasinSet.has(basinId)) return
       const basin = basins.find((item) => item.basinId === basinId)
       if (!basin) return
-      onQueryChange(basinAnalysisPatch(basin, state))
+      setBasinFit(bboxToMapFit(basin.bbox))
     },
-    [basins, basinVersionToBasinId, onQueryChange, state, visibleBasinSet],
+    [basins, basinVersionToBasinId, state, visibleBasinSet],
   )
   const handleMapOverlayHover = useCallback((_interaction: M11MapOverlayInteraction | null) => undefined, [])
 
@@ -376,6 +379,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       stationFeatureCollection={stationLayer.featureCollection}
       loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}
+      fitTo={basinFit}
       mapLabel="全国总览地图"
       onQueryChange={onQueryChange}
       onOverlayHover={handleMapOverlayHover}
@@ -392,20 +396,6 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       ) : null}
     </M11FullscreenMap>
   )
-}
-
-// 进入流域分析的 query patch：写 basinId（就地切详情），携带 basinVersionId/segmentId 上下文。
-function basinAnalysisPatch(basin: OverviewBasin, state: M11QueryState): M11QueryPatch {
-  const selectedVersionIds = new Set(basin.basinVersions.map((version) => version.basinVersionId))
-  const basinVersionId =
-    state.basinVersionId && selectedVersionIds.has(state.basinVersionId) ? state.basinVersionId : basin.selectedBasinVersionId
-  const carriesContext = Boolean(basinVersionId && basinVersionId === state.basinVersionId)
-  return {
-    basinId: basin.basinId,
-    basinVersionId,
-    riverNetworkVersionId: carriesContext ? state.riverNetworkVersionId : null,
-    segmentId: carriesContext ? state.segmentId : null,
-  }
 }
 
 export { NONE_VISIBLE_SENTINEL }
