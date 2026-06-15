@@ -1187,12 +1187,233 @@ separate PR boundaries.
 - Tasks: 8.1, 8.2, 8.3.
 - Dependencies: G6-11.
 - PR Boundary: Scheduler candidate construction only.
-- Required Reading: `specs/orchestrator-structural-burndown/spec.md`,
+- Required Reading:
+  `openspec/changes/governance-6-entropy-structural-burndown/specs/orchestrator-structural-burndown/spec.md`,
   `tests/test_production_scheduler.py`.
 - Verification: `uv run --no-sync pytest -q tests/test_production_scheduler.py`
   plus `uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`.
 - Acceptance: focused canonical readiness, active Slurm sync, and candidate
   selection tests pass.
+- Fixture level: high.
+- Repair intensity: high.
+- Change surface:
+  - `ProductionScheduler._build_candidates` and helper logic that constructs,
+    blocks, skips, or annotates `SchedulerCandidate` values before execution.
+  - New `services/orchestrator/scheduler_candidates.py` extraction module.
+  - Compatibility aliases/shims in `scheduler.py` for candidate construction
+    helpers used by tests or downstream imports.
+  - Candidate selection evidence in `run_once` that consumes
+    `_build_candidates` return values.
+- Must preserve:
+  - `_build_candidates(models, cycles, allow_slurm_status_sync=False)`
+    returns the same five-tuple order:
+    `candidates`, `blocked`, `skipped`, `duplicate_exclusions`,
+    `slurm_status_sync_evidence`.
+  - `SchedulerCandidate` identity fields, `to_dict()` shape,
+    `candidate_id`, `run_id`, `forcing_version_id`,
+    `canonical_product_id`, and state-evidence merge behavior.
+  - Candidate construction order: candidate-id duplicate exclusion before
+    source availability checks; unavailable source cycles block before active
+    repository checks; completed duplicate pipelines skip before canonical
+    readiness queries; terminal/active candidate-state decisions short-circuit
+    not-ready canonical gates.
+  - Candidate-state decisions from `scheduler_state.py` keep their current
+    precedence: identity mismatch blocks, non-active skip decisions skip,
+    active Slurm decisions may defer/sync/cancel, retry decisions may attach
+    restart evidence unless fresh full-chain logic suppresses it.
+  - Canonical readiness behavior remains stable: provider absence/query
+    failure blocks with unavailable evidence, not-ready canonical rows block,
+    true zero-row canonical readiness is fresh full-chain and never inherits
+    a stale `restart_stage`, and empty/no-expected-lead readiness does not
+    become fresh ingestion.
+  - Active Slurm sync behavior remains stable: when sync is not allowed it
+    emits `active_slurm_status_sync_deferred`; when sync is allowed it calls
+    `sync_cycle_statuses`, re-queries state/active jobs, attaches
+    `slurm_state_sync`, handles terminal updates, failed retries, and
+    unknown-after-attempt failures without duplicate submission.
+  - Duplicate candidate identity evidence remains included in both
+    `skipped_candidates` and `duplicate_exclusions`.
+  - `MAX_CANDIDATES` resource-limit behavior and evidence stay unchanged.
+- Risk packs considered:
+  - Public API / CLI / script entry: selected - `run_once` pass evidence and
+    `ProductionScheduler._build_candidates` are exercised by production
+    scheduler tests and may be used by private callers.
+  - Config / project setup: selected - `cancel_active_slurm`, `dry_run`,
+    candidate-state limits, model/source filters, and canonical readiness
+    provider availability change candidate decisions.
+  - File IO / path safety / overwrite: not selected - candidate construction
+    does not introduce file writes; pre-execution evidence and runtime-root
+    writes remain execution/evidence concerns.
+  - Schema / columns / units / field names: selected - candidate, skipped,
+    blocked, duplicate, canonical readiness, and Slurm sync evidence keys
+    must remain stable.
+  - Auth / permissions / secrets: selected - canonical readiness query
+    failures, active Slurm jobs, provider payloads, and evidence paths can
+    carry secret-bearing fields that must remain redacted.
+  - Concurrency / shared state / ordering: selected - active orchestration,
+    active pipeline, active Slurm, sync/re-query ordering, and duplicate
+    candidate identities decide whether submission is allowed.
+  - Resource limits / large input / discovery: selected - `MAX_CANDIDATES`,
+    bounded active Slurm jobs, and candidate-state job/event limits are
+    relevant to construction.
+  - Legacy compatibility / examples: selected - old private imports and
+    `ProductionScheduler._build_candidates` monkeypatch/call paths must
+    continue through shims during extraction.
+  - Error handling / rollback / partial outputs: selected - Slurm sync
+    failure and canonical provider failure must keep conservative evidence
+    and no duplicate or unsafe replacement submission.
+  - Release / packaging / dependency compatibility: selected - the new module
+    must not introduce circular imports with `scheduler.py`,
+    `scheduler_state.py`, or `scheduler_discovery.py`.
+  - Documentation / migration notes: selected - OpenSpec tasks and PR
+    evidence must identify the moved candidate-construction boundary.
+- Domain risk packs considered:
+  - Hydro-met time series / forcing windows: selected - candidate horizon and
+    source readiness context are passed into canonical readiness and must be
+    reused consistently across models for a source/cycle.
+  - Slurm production lifecycle / mock-vs-real parity: selected - active Slurm
+    duplicate skip, sync defer/sync/failure, cancellation-requested skip, and
+    status re-query behavior are core candidate-construction outcomes.
+  - External hydro-met providers / snapshot reproducibility: selected -
+    source object identity and policy identity flow into canonical readiness
+    and fresh full-chain decisions.
+  - Run manifest / QC provenance: selected - candidate state evidence is later
+    copied into submitted basin/model-run manifests; the constructed payload
+    shape must stay stable.
+  - Published NHMS artifacts / display identity: selected - canonical product
+    identity participates in readiness and candidate provenance.
+  - Geospatial / CRS / basin geometry: not selected - extraction only moves
+    candidate construction and does not alter basin geometry validation.
+  - SHUD numerical runtime / conservation / NaN: not selected - no SHUD
+    execution or numerical result handling moves in G6-12.
+  - PostGIS / TimescaleDB domain behavior: not selected - no migrations,
+    schema, hypertables, or geometry queries change in this issue.
+- Invariant Matrix:
+  - Governing invariant: candidate construction extraction must not change
+    which candidate is submitted, skipped, blocked, or marked duplicate for
+    the same models, source cycles, canonical readiness, candidate state, and
+    active Slurm inputs.
+  - Source-of-truth identity/contract: `SchedulerSourceCycle.discovery`,
+    source horizon metadata, `RegisteredSchedulerModel`, `SchedulerCandidate`
+    identity fields, canonical readiness provider output, candidate-state
+    decisions, active repository duplicate truth, active Slurm jobs, and
+    `cycle_id_for(source_id, cycle_time)`.
+  - Surfaces:
+    - Producers: registry-selected models, discovery-selected source cycles,
+      `_candidate_for`, canonical readiness provider, candidate-state
+      provider, active repository duplicate providers, active Slurm provider,
+      and scheduler config.
+    - Validators/preflight: candidate-id dedupe, source availability,
+      active orchestration/pipeline duplicate checks, completion checks,
+      candidate-state identity/skip/block/retry decisions, canonical
+      readiness gating, fresh-zero-row recognition, active Slurm sync
+      re-query, and `MAX_CANDIDATES`.
+    - Storage/cache/query: active repository methods
+      `has_active_orchestration`, `has_active_pipeline`,
+      `has_completed_pipeline`, `candidate_state`, `active_slurm_jobs`; no DB
+      schema changes.
+    - Public routes/entrypoints: `ProductionScheduler.run_once`,
+      `ProductionScheduler._build_candidates`, and imports from
+      `services.orchestrator.scheduler`.
+    - Frontend/downstream consumers: scheduler pass evidence, submitted basin
+      payloads, model-run evidence, retry/cancel API consumers, and chain
+      execution inputs.
+    - Failure paths/rollback/stale state: unavailable source cycle, duplicate
+      candidate identity, completed duplicate, active duplicate, identity
+      mismatch, terminal success, active Slurm defer/sync/failure, canonical
+      provider absence/failure, not-ready canonical rows, fresh full-chain
+      zero rows, and candidate limit overflow.
+    - Evidence/audit/readiness: `candidates`, `blocked_candidates`,
+      `skipped_candidates`, `duplicate_exclusions`,
+      `slurm_status_sync_evidence`, `canonical_readiness`,
+      `fresh_ingestion`, `active_slurm_jobs`, and state evidence nested in
+      candidate dictionaries.
+  - Regression rows:
+    - Completed duplicate pipeline -> skip with
+      `completed_duplicate_pipeline` before canonical readiness provider is
+      queried.
+    - Candidate-state terminal hydro/pipeline success -> skip terminal before
+      not-ready canonical gate and do not attach canonical readiness evidence.
+    - Candidate-state active Slurm job -> skip/defer/sync according to
+      `allow_slurm_status_sync`, `dry_run`, and `cancel_active_slurm`; do not
+      submit a duplicate replacement unless the existing behavior allows it.
+    - Slurm sync succeeds with failed terminal update -> re-query state,
+      attach `slurm_state_sync`, and allow retry candidate submission exactly
+      once.
+    - Slurm sync throws after attempt -> return
+      `active_slurm_status_sync_failed` / unknown-after-attempt evidence and
+      no orchestrator submission.
+    - Canonical readiness provider absent or query error -> block with
+      `canonical_unavailable` evidence and redacted error details.
+    - Not-ready canonical rows with expected leads -> block with existing
+      reason and no fresh ingestion marker.
+    - Zero canonical rows with real expected leads -> mark
+      `fresh_ingestion.required` and force full-chain candidate/cohort with no
+      inherited `restart_stage`.
+    - Empty/no-expected-lead canonical evaluation -> hard-block and do not
+      classify as fresh full-chain.
+    - Duplicate candidate identity -> exclude duplicate candidate and record
+      candidate duplicate evidence without changing selected candidate order.
+    - Two models/cycles that resolve to the same `candidate_id` inside
+      `_build_candidates` -> first candidate remains selected, later
+      duplicates are excluded with `duplicate_candidate_identity` evidence.
+    - Source object identity and horizon readiness context -> reused across
+      models for one scheduler pass without changing provider inputs.
+    - Candidate count exceeds `MAX_CANDIDATES` -> resource-limit status and
+      evidence remain stable before downstream submission/evidence mutation.
+- Boundary-surface checklist:
+  - Shared helper roots: scheduler candidate-construction helpers moved to
+    `scheduler_candidates.py`.
+  - Public entrypoints: `ProductionScheduler._build_candidates`,
+    `ProductionScheduler.run_once`, and `services.orchestrator.scheduler`
+    helper imports.
+  - Read surfaces: selected models, selected source cycles, candidate-state
+    payloads, active Slurm jobs, canonical readiness provider, scheduler
+    config, active repository duplicate truth.
+  - Write/delete/overwrite surfaces: none introduced; construction only
+    chooses downstream submission inputs and evidence.
+  - Staging/publish/rollback surfaces: submitted basin payloads and
+    fresh/retry restart-stage evidence only; no publish behavior change.
+  - Producer/consumer evidence boundaries: candidate dictionaries, blocked
+    and skipped evidence, duplicate exclusions, Slurm sync evidence,
+    canonical readiness evidence, model-run evidence consumers.
+  - Stale-state/idempotency boundaries: active duplicate checks,
+    completed duplicate checks, terminal state truth, active Slurm sync
+    re-query, candidate-scoped retry exceptions, and fresh full-chain restart
+    suppression.
+  - Unchanged downstream consumers: discovery/backfill selection, execution,
+    evidence serialization, scheduler lease/reconcile, retry service, chain
+    stage execution, DB schema, and frontend.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'fresh_cycle_with_zero_canonical or completed_duplicate_is_skipped_before_not_ready_canonical_gate or scheduler_caps_reject_oversized_config or duplicate_active_model_identity or duplicate_active_package_identity or stale_active_db_job_terminal_slurm_sync'`
+    -> focused zero-canonical fresh full-chain, completed duplicate
+    short-circuit, candidate resource limit, duplicate active model/package,
+    and stale active Slurm terminal-sync tests pass.
+  - Add and run a focused regression named with `duplicate_candidate_identity`
+    that exercises the `_build_candidates` duplicate candidate-id branch and
+    proves both skipped and duplicate-exclusion evidence are emitted.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'sync_cycle_statuses or active_slurm_status_sync or cancel_active_slurm'`
+    -> Slurm sync defer/sync/failure/cancel candidate behavior remains
+    stable.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'duplicate_candidate_identity'`
+    -> duplicate candidate-id regression passes.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'redacts_secret_urls_and_error_messages or canonical_readiness_query_error'`
+    -> candidate-construction evidence redaction remains stable.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> full production scheduler tests pass because this extraction touches
+    shared candidate construction and downstream submission inputs.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`
+    -> lint passes.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
+- Non-goals:
+  - No discovery/backfill behavior change, candidate-state decision rewrite,
+    execution/evidence extraction, lease/reconcile change, retry service
+    change, chain stage behavior change, DB schema change, frontend change, or
+    `.entropy-baseline` update.
+  - No status/reason/evidence key rename.
+  - No retirement of scheduler private method/helper compatibility in this
+    issue.
 
 ### G6-13 Scheduler execution extraction
 
