@@ -726,11 +726,15 @@ def _merge_polyline_parts(parts: list[list[tuple[float, float]]]) -> list[tuple[
     parts at their nearest endpoints, reversing parts when needed.
 
     Shapefile part *storage* order is not flow order and parts may be stored
-    reversed. Concatenating them blindly (the old behaviour) drew a long straight
-    "jump" wherever a part's first point was not the running tail -- the heihe
-    cross-ridge straight-line symptom. Greedy nearest-endpoint chaining from
-    either chain end removes those jumps; genuinely disjoint parts then join by
-    the shortest possible link instead of by arbitrary storage order.
+    reversed. Concatenating them blindly (the old behaviour) linked a part's
+    first point to the running tail even when another endpoint was nearer,
+    fabricating a longer-than-necessary straight "jump" between mis-ordered
+    parts. Greedy nearest-endpoint chaining from either chain end always takes
+    the shortest available link instead. NOTE: the dominant heihe cross-ridge
+    lines came from the output-reach backfill stitch (fixed separately in
+    basins_registry_import); where a record's parts are genuinely far apart in
+    the source GIS, the shortest link is still long -- faithful to the source,
+    not a stitch-order artifact this can remove.
     """
     chain = [list(points) for points in parts if len(points) >= 2]
     if not chain:
