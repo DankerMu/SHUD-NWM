@@ -29,6 +29,7 @@ from services.orchestrator.chain import (
     OrchestratorError,
     PsycopgOrchestratorRepository,
     StageDefinition,
+    StageRunResult,
     TerminalJobObservation,
     build_model_run_assembly,
 )
@@ -7263,13 +7264,7 @@ def test_chain_stage_execution_internal_calls_preserve_legacy_override_surface(
         manifest: dict[str, Any],
     ) -> dict[str, Any]:
         array_calls.append(stage.stage)
-        return client.submit_job_array(
-            stage.job_type,
-            cycle_id=context.cycle_id,
-            stage_name=stage.stage,
-            tasks=tasks,
-            manifest=_slurm_submission_manifest(manifest),
-        )
+        return ForecastOrchestrator._submit_array_stage(orchestrator, stage, context, tasks, manifest)
 
     monkeypatch.setattr(orchestrator, "_slurm_submission_manifest", _slurm_submission_manifest)
     monkeypatch.setattr(orchestrator, "_submit_array_stage", _submit_array_stage)
@@ -7310,6 +7305,51 @@ def test_chain_stage_execution_internal_calls_preserve_legacy_override_surface(
     assert result.status == "succeeded"
     assert aggregation is None
     assert poll_calls == [result.slurm_job_id]
+
+    resume_job_id = "job_cycle_gfs_2026050100_convert"
+    repository.jobs[resume_job_id] = {
+        "job_id": resume_job_id,
+        "run_id": context.run_id,
+        "cycle_id": context.cycle_id,
+        "job_type": "convert_canonical",
+        "slurm_job_id": "resume-2001",
+        "model_id": None,
+        "stage": "convert",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+    }
+
+    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[1], context, repository.jobs[resume_job_id])
+
+    assert result.status == "succeeded"
+    assert aggregation is None
+    assert poll_calls[-1] == "resume-2001"
+
+    publish_calls: list[str] = []
+
+    def _run_local_publish_stage(
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        *,
+        pipeline_job_id: str,
+    ) -> StageRunResult:
+        publish_calls.append(pipeline_job_id)
+        return StageRunResult(
+            stage=stage.stage,
+            job_type=stage.job_type,
+            pipeline_job_id=pipeline_job_id,
+            slurm_job_id="local",
+            status="succeeded",
+        )
+
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(tmp_path / "published"))
+    monkeypatch.setattr(orchestrator, "_run_local_publish_stage", _run_local_publish_stage)
+
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[-1], context)
+
+    assert result.status == "succeeded"
+    assert aggregation is None
+    assert publish_calls == [f"job_{context.run_id}_{M3_STAGES[-1].stage}"]
 
 
 def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -> None:

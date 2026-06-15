@@ -2505,6 +2505,31 @@ separate PR boundaries.
   - Fix verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py`
     -> `All checks passed!`.
+  - Round 2 review closure (PR #520):
+    - Candidate B remained partially open: local publish dispatch, resume
+      polling, and array submission manifest construction could still bypass
+      legacy `ForecastOrchestrator` private-method overrides. Resolution:
+      completed invariant-level helper dispatch closure so local publish,
+      resume poll, poll-timeout, array submit, and submission-manifest internal
+      calls route through legacy orchestrator shims when present.
+    - Evidence gap for current-head full chain suite remained to be refreshed;
+      this is tracked for Phase 7/8 evidence before merge.
+  - Round 2 fix verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_execution_internal_calls_preserve_legacy_override_surface'`
+    -> `1 passed, 171 deselected`.
+  - Round 2 fix verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_execution_module_imports_without_loading_chain_runtime or chain_stage_execution_legacy_methods_delegate or chain_stage_execution_internal_calls_preserve_legacy_override_surface'`
+    -> `3 passed, 169 deselected`.
+  - Round 2 fix verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_reserves_before_submit_and_binds_after or array_stage_submission_threads_idempotency_comment or chain_stage_reservation_is_idempotent_across_resubmit or manual_retry_terminal_stage_submits_new_attempt_identity or overlapping_pass_does_not_double_submit_real_submit_path or crash_recovery_resumes_after_last_completed_stage or resume_array_status_override or poll_timeout'`
+    -> `13 passed, 159 deselected`.
+  - Round 2 fix verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py`
+    -> `All checks passed!`.
+  - Round 2 fix verification:
+    `openspec validate governance-6-entropy-structural-burndown --strict
+    --no-interactive` -> valid.
+  - Round 2 fix verification: `git diff --check` -> no whitespace errors.
 - Non-goals:
   - No manifest/model-run assembly extraction; `chain_manifests.py` belongs to
     G6-17.

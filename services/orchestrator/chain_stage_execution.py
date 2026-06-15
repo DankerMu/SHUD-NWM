@@ -90,7 +90,16 @@ def submit_and_wait_cycle_stage(
     deps = _dependencies(orchestrator, deps)
     pipeline_job_id = pipeline_job_id or deps.pipeline_job_id(context.run_id, stage.stage)
     if stage.stage == "publish" and deps.published_artifact_root_configured():
-        return run_local_publish_stage(orchestrator, stage, context, pipeline_job_id=pipeline_job_id, deps=deps), None
+        return (
+            _call_orchestrator_helper(
+                orchestrator,
+                "_run_local_publish_stage",
+                stage,
+                context,
+                pipeline_job_id=pipeline_job_id,
+            ),
+            None,
+        )
     if stage.is_array and not context.active_basins:
         orchestrator.repository.update_forecast_cycle_status(
             source_id=context.source_id,
@@ -487,15 +496,15 @@ def resume_cycle_stage(
     terminal = dict(job)
     deferred_publish_attempt: DisplayLogPublicationAttempt | None = None
     if status not in deps.terminal_job_statuses and job.get("slurm_job_id"):
-        terminal_observation = poll_cycle_stage_until_terminal(
+        terminal_observation = _call_orchestrator_helper(
             orchestrator,
+            "_poll_cycle_stage_until_terminal",
             stage=stage,
             context=context,
             pipeline_job_id=str(job["job_id"]),
             initial_job={"job_id": job["slurm_job_id"], "status": status},
             initial_status=status,
             log_publication=orchestrator._display_log_publication_for_pipeline_job(job),
-            deps=deps,
         )
         terminal = terminal_observation.job
         deferred_publish_attempt = terminal_observation.publication_attempt
@@ -759,7 +768,7 @@ def submit_array_stage(
         # so the array master sbatch is stamped; real_backend.submit_job_array
         # reads ``manifest["comment"]`` and threads it to sbatch --comment,
         # making array-stage crash recovery reconcile-by-comment work.
-        submission_manifest = slurm_submission_manifest(orchestrator, manifest)
+        submission_manifest = _call_orchestrator_helper(orchestrator, "_slurm_submission_manifest", manifest)
         if manifest.get("comment"):
             submission_manifest["comment"] = manifest["comment"]
         return deps.coerce_mapping(
