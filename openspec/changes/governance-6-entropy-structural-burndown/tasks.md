@@ -130,12 +130,12 @@ separate PR boundaries.
 
 ## 11. Chain Types And Stage Catalog Extraction
 
-- [ ] 11.1 Create `services/orchestrator/chain_types.py` for shared stage
+- [x] 11.1 Create `services/orchestrator/chain_types.py` for shared stage
   dataclasses, contexts, result types, and stable type aliases.
-- [ ] 11.2 Create `services/orchestrator/chain_stages.py` for stage catalog and
+- [x] 11.2 Create `services/orchestrator/chain_stages.py` for stage catalog and
   static stage definitions, with re-exports from `chain.py`.
-- [ ] 11.3 Preserve existing import surfaces until tests and callers migrate.
-- [ ] 11.4 Verify with focused orchestration-chain type/catalog tests and ruff.
+- [x] 11.3 Preserve existing import surfaces until tests and callers migrate.
+- [x] 11.4 Verify with focused orchestration-chain type/catalog tests and ruff.
 
 ## 12. Chain Stage Execution Extraction
 
@@ -2200,6 +2200,44 @@ separate PR boundaries.
   - `openspec validate governance-6-entropy-structural-burndown --strict
     --no-interactive` -> valid.
   - `git diff --check` -> no whitespace errors.
+- Implementation evidence (2026-06-15, PR #519, head
+  `88c0de00a13c4103ba2d5d6d3b7db592571b3da4` before final evidence sync):
+  - Extracted stage/context/result dataclasses, `ArrayAggregation`,
+    `DisplayLogPublication*`, `CycleOrchestrationContext`, and
+    `ModelRunAssembly` into `services/orchestrator/chain_types.py`.
+  - Extracted legacy forecast, M3, `STAGES`, and analysis stage catalogs into
+    `services/orchestrator/chain_stages.py`.
+  - Kept `services.orchestrator.chain` as the legacy import surface through
+    explicit re-exports, and kept package-level `services.orchestrator` legacy
+    chain exports through lazy `__getattr__` loading.
+  - Closed Round 1 review findings by defining `OrchestratorError` in the
+    lightweight type module, re-exporting the same object from `chain.py`, and
+    adding fresh-subprocess tests that `chain_types` and `chain_stages` imports
+    do not load `services.orchestrator.chain`, `httpx`, or
+    `services.tile_publisher`.
+  - Added literal stage catalog snapshots, dataclass field/default/frozen
+    snapshots, package/legacy import identity checks, `ArrayAggregation`
+    property checks, `ModelRunAssembly.to_manifest_entry()` key/copy checks,
+    and runtime type-hint regressions for the moved public dataclasses.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_type_exports or chain_stage_catalog or static_chain_type_module or static_chain_stage_catalog or type_hints or package_level_legacy_exports'`
+    -> `6 passed, 163 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
+    -> `169 passed`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'M3_STAGES or PipelineResult or StageRunResult'`
+    -> `1 passed, 544 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator'`
+    -> `1 passed, 191 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py tests/test_production_scheduler.py tests/test_entropy_audit_script.py`
+    -> `All checks passed!`.
+  - Verification:
+    `openspec validate governance-6-entropy-structural-burndown --strict
+    --no-interactive` -> valid.
+  - Verification: `git diff --check` -> no whitespace errors.
 - Non-goals:
   - No stage reserve/submit/bind/poll/resume extraction.
   - No manifest/model-run assembly helper extraction.

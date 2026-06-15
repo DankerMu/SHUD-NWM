@@ -816,6 +816,7 @@ def _run_fresh_python(code: str) -> None:
 def test_static_chain_type_module_import_resolves_hints_without_heavy_runtime_imports() -> None:
     _run_fresh_python(
         """
+import dataclasses
 import sys
 from typing import get_type_hints
 
@@ -823,6 +824,13 @@ import services.orchestrator.chain_types as chain_types
 
 for module_name in ("services.orchestrator.chain", "httpx", "services.tile_publisher"):
     assert module_name not in sys.modules, module_name
+
+for export_name in chain_types.__all__:
+    exported = getattr(chain_types, export_name)
+    if not dataclasses.is_dataclass(exported):
+        continue
+    type_hints = get_type_hints(exported)
+    assert set(type_hints) == {field.name for field in dataclasses.fields(exported)}, export_name
 
 type_hints = get_type_hints(chain_types.DisplayLogPublicationAttempt)
 assert type_hints["error"] == chain_types.OrchestratorError | None
@@ -1178,8 +1186,27 @@ def test_display_log_publication_attempt_type_hints_resolve_through_legacy_chain
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_types
 
-    static_hints = get_type_hints(chain_types.DisplayLogPublicationAttempt)
-    legacy_hints = get_type_hints(legacy_chain.DisplayLogPublicationAttempt)
+    static_hints_by_name = {}
+    legacy_hints_by_name = {}
+    for export_name in chain_types.__all__:
+        static_export = getattr(chain_types, export_name)
+        if not dataclasses.is_dataclass(static_export):
+            continue
+
+        legacy_export = getattr(legacy_chain, export_name)
+        assert legacy_export is static_export
+
+        static_hints = get_type_hints(static_export)
+        legacy_hints = get_type_hints(legacy_export)
+        expected_fields = {field.name for field in dataclasses.fields(static_export)}
+        assert set(static_hints) == expected_fields
+        assert set(legacy_hints) == expected_fields
+        assert legacy_hints == static_hints
+        static_hints_by_name[export_name] = static_hints
+        legacy_hints_by_name[export_name] = legacy_hints
+
+    static_hints = static_hints_by_name["DisplayLogPublicationAttempt"]
+    legacy_hints = legacy_hints_by_name["DisplayLogPublicationAttempt"]
 
     assert static_hints["error"] == chain_types.OrchestratorError | None
     assert legacy_hints["error"] == legacy_chain.OrchestratorError | None
@@ -1187,6 +1214,23 @@ def test_display_log_publication_attempt_type_hints_resolve_through_legacy_chain
 
 
 def test_package_level_legacy_exports_import_directly_and_match_chain_exports() -> None:
+    _run_fresh_python(
+        """
+import sys
+
+import services.orchestrator as orchestrator_package
+
+for module_name in ("services.orchestrator.chain", "httpx", "services.tile_publisher"):
+    assert module_name not in sys.modules, module_name
+
+from services.orchestrator import PipelineResult
+
+legacy_chain = sys.modules["services.orchestrator.chain"]
+assert PipelineResult is legacy_chain.PipelineResult
+assert orchestrator_package.PipelineResult is PipelineResult
+"""
+    )
+
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import (
         ForecastOrchestrator as package_forecast_orchestrator,
