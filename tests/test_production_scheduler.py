@@ -1316,6 +1316,149 @@ def test_completed_duplicate_is_skipped_before_not_ready_canonical_gate(tmp_path
     assert result.evidence["skipped_candidates"][0]["reason"] == "completed_duplicate_pipeline"
 
 
+def test_build_candidates_duplicate_candidate_identity_records_skipped_and_exclusion(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([]),
+        adapters={},
+    )
+    model = scheduler_module.RegisteredSchedulerModel(
+        model_id="model_a",
+        basin_id="basin_a",
+        basin_version_id="basin_a_v1",
+        river_network_version_id="basin_a_rivnet_v1",
+        segment_count=3,
+        output_segment_count=3,
+        model_package_uri="s3://nhms/models/model_a/package/",
+        shud_code_version="2.0",
+        resource_profile={},
+        resource_profile_summary={},
+        display_capabilities={},
+        frequency_capabilities={},
+    )
+    cycles = [
+        scheduler_module.SchedulerSourceCycle(
+            discovery=CycleDiscovery(
+                cycle_id="gfs_2026052106_primary",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                cycle_hour=6,
+                available=True,
+                status="discovered",
+            ),
+            horizon={},
+        ),
+        scheduler_module.SchedulerSourceCycle(
+            discovery=CycleDiscovery(
+                cycle_id="gfs_2026052106_duplicate",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                cycle_hour=6,
+                available=True,
+                status="discovered",
+            ),
+            horizon={"max_lead_hours": 24},
+        ),
+    ]
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[model],
+        cycles=cycles,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].candidate_id == skipped[0]["candidate_id"]
+    assert blocked == []
+    assert slurm_sync == []
+    assert skipped[0]["reason"] == "duplicate_candidate_identity"
+    assert skipped[0]["status"] == "excluded"
+    assert duplicate_exclusions == [{"type": "candidate", **skipped[0]}]
+
+
+def test_build_candidates_uses_scheduler_candidate_state_decision_monkeypatch(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    patched_evidence = {"source": "scheduler.py monkeypatch"}
+
+    def patched_decision(candidate: Any, state: Mapping[str, Any] | None) -> scheduler_module.CandidateStateDecision:
+        del candidate, state
+        return scheduler_module.CandidateStateDecision(
+            action="blocked",
+            reason="patched_candidate_state_block",
+            evidence=patched_evidence,
+        )
+
+    monkeypatch.setattr(scheduler_module, "_candidate_state_decision", patched_decision)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=RawCandidateStateRepository({}),
+    )
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[scheduler_module._coerce_registered_model(_model("model_a", "basin_a"))],
+        cycles=[
+            scheduler_module.SchedulerSourceCycle(
+                discovery=CycleDiscovery(
+                    cycle_id="gfs_2026052106",
+                    source_id="gfs",
+                    cycle_time=_dt("2026-05-21T06:00:00Z"),
+                    cycle_hour=6,
+                    available=True,
+                    status="discovered",
+                ),
+                horizon={},
+            )
+        ],
+    )
+
+    assert candidates == []
+    assert len(blocked) == 1
+    assert blocked[0].reason == "patched_candidate_state_block"
+    assert blocked[0].state_evidence == patched_evidence
+    assert skipped == []
+    assert duplicate_exclusions == []
+    assert slurm_sync == []
+
+
+def test_build_candidates_uses_scheduler_max_candidates_monkeypatch(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(scheduler_module, "MAX_CANDIDATES", 0)
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+    )
+
+    with pytest.raises(scheduler_module.SchedulerResourceLimitError) as exc_info:
+        scheduler._build_candidates(
+            models=[scheduler_module._coerce_registered_model(_model("model_a", "basin_a"))],
+            cycles=[
+                scheduler_module.SchedulerSourceCycle(
+                    discovery=CycleDiscovery(
+                        cycle_id="gfs_2026052106",
+                        source_id="gfs",
+                        cycle_time=_dt("2026-05-21T06:00:00Z"),
+                        cycle_hour=6,
+                        available=True,
+                        status="discovered",
+                    ),
+                    horizon={},
+                )
+            ],
+        )
+
+    assert exc_info.value.reason == "candidate_limit_exceeded"
+    assert exc_info.value.details["max_candidates"] == 0
+    assert exc_info.value.details["source_cycle_count"] == 1
+    assert exc_info.value.details["selected_model_count"] == 1
+
+
 @pytest.mark.parametrize(
     ("status", "reason", "classifier", "retryable", "expected_cycle_status_candidate"),
     [
