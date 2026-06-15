@@ -1718,6 +1718,246 @@ separate PR boundaries.
   plus `uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`.
 - Acceptance: pre-execution evidence reservation order and evidence keys remain
   stable; focused evidence/startup reconcile tests pass.
+- Fixture level: high.
+- Repair intensity: high.
+- Change surface:
+  - `ProductionScheduler.run_once` pass-evidence assembly after discovery,
+    candidate construction, execution/cancel/sync handling, and before final
+    evidence artifact write.
+  - `ProductionScheduler._base_evidence`,
+    `ProductionScheduler._write_prelock_blocked_evidence`,
+    `ProductionScheduler._reserve_pre_execution_evidence`, and
+    `ProductionScheduler._write_evidence`.
+  - Scheduler evidence helpers for candidate/cancel/sync
+    evidence-write-blocked payloads, execution write proof, mutation proof,
+    evidence write error payloads, artifact no-clobber/no-follow helpers, and
+    bounded evidence serialization.
+  - New `services/orchestrator/scheduler_evidence.py` extraction module.
+  - Compatibility imports/shims in `services/orchestrator/scheduler.py` for
+    existing private helper and monkeypatch/import surfaces.
+- Must preserve:
+  - Scheduler pass ordering: lock-root preflight, lease acquisition,
+    runtime-root preflight, startup reconcile, discovery/candidate building,
+    lease-lost fence, pre-execution evidence reservation, Slurm sync/cancel
+    checks, forcing/execution, and final evidence write.
+  - Pre-execution evidence reservation occurs after the lease-lost fence and
+    before any Slurm status-sync, Slurm cancellation, forcing producer,
+    Slurm preflight, orchestrator submission, pipeline status write, or
+    pipeline event write.
+  - Evidence reservation uses the existing schema version, `pass_id`,
+    `started_at`, `reserved_at`, `status`, `candidate_count`,
+    `artifact_path`, `final_evidence_artifact`, and proof key values.
+  - Evidence artifact path safety stays descriptor-bound: evidence directory
+    containment, final-component safety, final evidence no-clobber,
+    pre-execution no-clobber, symlink no-follow, and non-regular artifact
+    rejection remain stable.
+  - Bounded evidence still returns `status: resource_limit_blocked`, preserves
+    review/readiness/runtime-root/preflight/pre-execution proof fields, drops
+    oversized candidate/source/model-run lists, and stays parseable.
+  - Final evidence keeps all existing keys and status/reason/schema values:
+    `review_contract`, `production_contract`, `operator_filters`, `filters`,
+    `model_discovery`, `source_cycles`, candidates/blocked/skipped,
+    `duplicate_exclusions`, `counts`, `model_run_evidence`,
+    `execution_write_proof`, Slurm sync/cancel proofs, `no_mutation_proof`,
+    `execution_boundary`, `restart_reconcile`, `submit_overlap_receipt`,
+    `slurm_preflight`, `evidence_pre_execution`, `root_preflight`,
+    `backfill`, `retention`, and `artifact_path`.
+  - Startup restart reconcile evidence remains attached to final pass evidence
+    without moving reconcile ownership or changing reserved-unbound job
+    semantics.
+  - `scheduler.py` remains the compatibility surface for existing private
+    helper calls and monkeypatch paths until a later migration issue.
+  - No execution orchestration, candidate construction, lease, chain,
+    reservation/reconcile protocol, retry service, DB schema, frontend, or
+    `.entropy-baseline` behavior changes.
+- Risk packs considered:
+  - Public API / CLI / script entry: selected - `run_once`,
+    `run_continuous`, `plan-production`, and ops evidence consumers observe
+    evidence status, counts, artifact paths, and readiness fields.
+  - Config / project setup: selected - `dry_run`, root config, evidence dir,
+    resource limits, Slurm sync/cancel flags, retention, and backfill settings
+    influence evidence shape.
+  - File IO / path safety / overwrite: selected - final and pre-execution
+    evidence artifacts are generated files under an operator-configured
+    evidence root and must not follow symlinks or overwrite existing files.
+  - Schema / columns / units / field names: selected - pass evidence,
+    pre-execution evidence, readiness, proof, root-preflight, and bounded
+    evidence keys are downstream contracts.
+  - Auth / permissions / secrets: selected - evidence serialization must keep
+    existing redaction behavior for signed URIs, credentials, and Slurm/runtime
+    details.
+  - Concurrency / shared state / ordering: selected - evidence reservation is
+    a mutation fence before sync/cancel/submit and must be stable under
+    concurrent scheduler passes and existing artifact races.
+  - Resource limits / large input / discovery: selected - final evidence may
+    exceed `MAX_EVIDENCE_BYTES` and must reduce to a bounded payload without
+    unbounded recursive or oversized JSON behavior.
+  - Legacy compatibility / examples: selected - private evidence helpers and
+    imports from `services.orchestrator.scheduler` remain available through
+    shims.
+  - Error handling / rollback / partial outputs: selected - evidence write
+    failure, existing artifact, unsafe path, symlink, non-regular file, and
+    reservation-blocked paths must produce stable blocked evidence or typed
+    errors without partial mutation.
+  - Release / packaging / dependency compatibility: selected - the new module
+    must avoid circular imports with scheduler, scheduler_state,
+    scheduler_candidates, scheduler_discovery, scheduler_execution, and chain.
+  - Documentation / migration notes: selected - OpenSpec tasks and PR evidence
+    must describe moved evidence ownership and retained non-goals.
+- Domain risk packs considered:
+  - Slurm production lifecycle / mock-vs-real parity: selected - Slurm
+    sync/cancel/preflight/submission proofs in final evidence remain the audit
+    boundary for real and mocked lifecycle paths.
+  - Run manifest / QC provenance: selected - scheduler pass evidence binds
+    candidate identity, model-run evidence, write proofs, and restart reconcile
+    evidence consumed by downstream run/QC review.
+  - Published NHMS artifacts / display identity: selected - runtime-root and
+    artifact path evidence must remain attached so display artifact planning is
+    traceable.
+  - Hydro-met time series / forcing windows: selected - source/cycle evidence
+    and candidate identity fields must remain stable when evidence assembly is
+    moved.
+  - External hydro-met providers / snapshot reproducibility: selected -
+    source-object and provider-derived cycle evidence must not be renamed or
+    dropped from pass evidence.
+  - Geospatial / CRS / basin geometry: not selected - no geometry, CRS,
+    shapefile, or raster/vector validation changes in this issue.
+  - SHUD numerical runtime / conservation / NaN: not selected - no model
+    runtime or numerical output interpretation changes in this issue.
+  - PostGIS / TimescaleDB domain behavior: not selected - no migrations,
+    hypertables, geometry queries, or DB schema changes in this issue.
+- Invariant Matrix:
+  - Governing invariant: evidence extraction must preserve exactly when the
+    scheduler proves evidence writability, how it serializes pass evidence, and
+    which evidence keys prove mutation/no-mutation for the same config,
+    candidate state, roots, lease state, and execution outcomes.
+  - Source-of-truth identity/contract: `pass_id`, scheduler evidence schema
+    version, pre-execution reservation schema version, evidence root identity,
+    final artifact basename, bounded evidence contract, candidate identity,
+    Slurm sync/cancel/submit proofs, and restart reconcile evidence.
+  - Surfaces:
+    - Producers: `ProductionScheduler.run_once`, `_base_evidence`,
+      `_reserve_pre_execution_evidence`, execution/cancel/sync evidence
+      payload builders, restart reconcile, retention/backfill evidence, and
+      bounded evidence builder.
+    - Validators/preflight: lock-root and runtime-root preflight,
+      lease-lost fence, evidence directory/root containment,
+      `_require_evidence_artifact_available`, `_write_new_regular_file`,
+      evidence safe/redaction conversion, and `MAX_EVIDENCE_BYTES` bounding.
+    - Storage/cache/query: evidence directory artifacts, pre-execution
+      reservation artifact, final pass artifact, active repository evidence
+      payloads only through existing interfaces; no DB schema changes.
+    - Public routes/entrypoints: `ProductionScheduler.run_once`,
+      `ProductionScheduler.run_continuous`, private evidence helper shims in
+      `scheduler.py`, `plan-production`, and imports from
+      `services.orchestrator.scheduler`.
+    - Frontend/downstream consumers: ops scheduler evidence, readiness review,
+      run manifest/QC review, retry/cancel/status-sync consumers, and display
+      artifact planning evidence; no frontend code change.
+    - Failure paths/rollback/stale state: evidence dir symlink/traversal,
+      existing final artifact, existing reservation artifact, final artifact
+      symlink, non-regular artifact, oversized evidence, reservation-blocked
+      sync/cancel/submit, startup reserved-unbound reconcile, and resource
+      limit blocked paths.
+    - Evidence/audit/readiness: final pass JSON, pre-execution reservation
+      JSON, `evidence_write_error`, bounded payload, `readiness`,
+      `execution_write_proof`, Slurm proofs, `no_mutation_proof`,
+      `restart_reconcile`, `root_preflight`, `retention`, and audit tests.
+  - Regression rows:
+    - Valid non-dry-run candidate with required mutation ->
+      pre-execution reservation artifact is written before sync/cancel/forcing/
+      Slurm/orchestrator mutation, final evidence includes
+      `evidence_pre_execution`, and execution write proof reports protected
+      mutation.
+    - Reservation write blocked by existing/unsafe artifact -> no sync/cancel/
+      forcing/Slurm/orchestrator mutation is attempted, candidate/cancel/sync
+      evidence uses existing blocked reason keys, pass status is preflight
+      blocked, and final evidence remains conservative.
+    - Lock-root or runtime-root preflight blocked before lease/execution ->
+      evidence writes only when the evidence root is safe and writable, and
+      root-preflight, no-mutation, counts, and execution boundary stay stable.
+    - Final evidence artifact exists or is a symlink/non-regular file ->
+      writer does not follow or overwrite it and returns the existing typed
+      evidence write error semantics.
+    - Oversized pass evidence -> bounded payload is written with
+      `resource_limit_blocked`, preserves readiness/root/pre-execution/proof
+      fields, removes unbounded lists, and stays within byte limit.
+    - Startup reserved-unbound job reconcile -> `restart_reconcile` evidence is
+      still included in final pass evidence and stale reserved jobs are not
+      resubmitted by evidence extraction.
+    - Slurm status sync and cancellation paths -> reservation proof is visible
+      before mutation, sync/cancel proofs keep `unknown_after_attempt` and
+      blocked states, and no-mutation proof reflects the same writes/calls as
+      before extraction.
+    - Existing private helper import or monkeypatch through
+      `services.orchestrator.scheduler` -> compatibility shim delegates to the
+      extracted helper without changing payload shape.
+- Boundary-surface checklist:
+  - Shared helper roots: evidence helpers move to `scheduler_evidence.py`;
+    execution helpers remain in `scheduler_execution.py`; scheduler pass still
+    owns orchestration ordering.
+  - Public entrypoints: `run_once`, `run_continuous`, evidence private method
+    shims, helper imports from `services.orchestrator.scheduler`, and
+    `plan-production`.
+  - Read surfaces: scheduler config, root paths, candidates/skipped/blocked
+    evidence, execution/cancel/sync evidence, restart reconcile evidence,
+    retention/backfill evidence, and existing artifact state.
+  - Write/delete/overwrite surfaces: final evidence artifact,
+    pre-execution reservation artifact, evidence-write error payload only; no
+    delete or overwrite behavior is introduced.
+  - Producer/consumer evidence boundaries: base pass evidence, pre-execution
+    reservation, blocked candidate/cancel/sync evidence, execution write proof,
+    Slurm proofs, bounded evidence, final pass artifact, ops/readiness
+    consumers.
+  - Stale-state/idempotency boundaries: lease-lost fence, existing artifact
+    no-clobber, startup reserved-unbound reconcile, status-sync
+    unknown-after-attempt, cancellation blocked/unknown states, and dry-run
+    no-mutation planning.
+  - Unchanged downstream consumers: scheduler lease/state/discovery/candidates/
+    execution modules, chain stage execution, reservation/reconcile protocols,
+    retry service, DB schema, frontend, docs/runbooks, and `.entropy-baseline`.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'evidence_dir_symlink_cannot_escape_workspace or evidence_final_artifact_symlink_is_not_followed or evidence_existing_artifact_file_is_not_overwritten'`
+    -> evidence directory containment, final artifact no-follow, and
+    no-clobber tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'pre_execution_reservation_fails or pre_execution_reservation_before_mutating or sync_cycle_statuses_sees_pre_execution_reservation_before_mutating or sync_cycle_statuses_blocks_before_sync_when_pre_execution_reservation_fails or cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists'`
+    -> reservation ordering, sync/cancel mutation fence, and conservative
+    blocked evidence tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof or no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof or bounded_evidence_preserves_pre_execution_reservation_proof'`
+    -> bounded evidence keeps required preflight/readiness/reservation proofs.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_pass_startup_reconciles_reserved_unbound_jobs or restart_reconcile'`
+    -> startup reconcile evidence remains attached and reserved-unbound jobs
+    are not resubmitted.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_evidence_redacts_signed_candidate_outcome_log_uri or scheduler_evidence_redacts_sensitive_runtime_payloads'`
+    -> signed candidate outcome log URIs, credential-bearing runtime values,
+    and Slurm/runtime payload inputs keep the existing redacted evidence shape
+    after serialization helper extraction.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_evidence_private_helper_compatibility_shims_delegate or scheduler_evidence_module_imports_without_scheduler_cycle'`
+    -> imports from `services.orchestrator.scheduler` and the new
+    `services.orchestrator.scheduler_evidence` module work without circular
+    import failure, and private helper shims delegate to extracted helpers
+    without changing payload shape.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> full production scheduler tests pass because this extraction touches
+    shared evidence contracts and compatibility shims.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator'`
+    -> orchestrator module-count governance expectation is updated if the new
+    module changes the entropy audit count.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py tests/test_entropy_audit_script.py`
+    -> lint passes.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
+  - `git diff --check`
+    -> no whitespace errors.
+- Non-goals:
+  - No execution orchestration, forcing production, candidate construction,
+    discovery/backfill, lease, chain, reservation/reconcile protocol, retry
+    service, DB schema, frontend, docs/runbooks, or `.entropy-baseline`
+    update.
+  - No status, reason, error code, schema version, evidence-key, readiness-key,
+    or artifact-name rename.
+  - No retirement of scheduler private method/helper compatibility in this
+    issue.
 
 ### G6-15 Chain types and stage catalog extraction
 
