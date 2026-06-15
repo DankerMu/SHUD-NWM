@@ -261,7 +261,7 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
 
     orchestrator = modules["services/orchestrator"]
     assert isinstance(orchestrator, dict)
-    assert orchestrator["file_count"] == 14
+    assert orchestrator["file_count"] == 15
     assert orchestrator["finding_count"] == 0
     assert orchestrator["priority"] == "P1"
     assert orchestrator["structure"] == {
