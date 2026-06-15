@@ -2143,15 +2143,15 @@ def _invoke_click(argv: list[str]) -> int:
 def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
     integration_database_url: str,
 ) -> None:
-    """Real-DB coverage for the output-reach geometry backfill -- the SQL path
-    that actually produced the heihe cross-ridge lines (the Python merge helper
-    is unit-tested in test_basins_geometry_merge). Asserts: in-order + reversed
-    fine segments stitch into ONE LINESTRING (no fabricated jump); a genuine
-    source gap keeps the longest connected part yet still reports the reach's
-    honest summed length (geom truncated for display, length not shrunk); a lone
-    single-segment reach still stitches to a valid LINESTRING under ST_LineMerge;
-    and an output reach carrying a non-numeric shud_riv_index is skipped, not
-    crashed, by the text-based target match.
+    """Real-DB coverage for the output-reach geometry backfill -- the path that
+    actually produced the heihe cross-ridge lines AND the later channel breakage
+    (the Python greedy stitch is unit-tested in test_basins_geometry_merge).
+    Asserts: in-order + reversed fine segments stitch into ONE LINESTRING (no
+    fabricated jump); a genuine source gap is BRIDGED into one continuous line by
+    nearest endpoints (NOT truncated to the longest part, nothing dropped) while
+    length stays the honest summed length; a lone single-segment reach is
+    backfilled; and an output reach carrying a non-numeric shud_riv_index is
+    skipped, not crashed, by the text-based target match.
     """
     apply_migrations_from_zero(integration_database_url)
     rnv = "geomfix_rnv_v1"
@@ -2178,11 +2178,11 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
         )
         # Fine GIS segments grouped by source_raw_segment_id (= SHUD reach index):
         #   reach 1: two parts sharing the (110.1 30.1) joint, 2nd stored REVERSED
-        #            -> ST_LineMerge must yield ONE LINESTRING, not a back-and-forth jump.
-        #   reach 2: two parts with a GAP (no shared endpoint), part-a the longer
-        #            -> MULTILINESTRING -> keep the longest part; length stays the SUM.
-        #   reach 3: a lone single segment -> ST_Collect/ST_LineMerge of one part
-        #            must still yield a usable LINESTRING.
+        #            -> greedy stitch yields ONE LINESTRING, not a back-and-forth jump.
+        #   reach 2: two parts with a GAP (no shared endpoint)
+        #            -> greedy BRIDGES them into one continuous line by nearest
+        #               endpoints, nothing dropped; length stays the SUM.
+        #   reach 3: a lone single segment -> returned as the reach's line unchanged.
         execute_values(
             cursor,
             "INSERT INTO core.river_segment "
@@ -2241,8 +2241,10 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
     assert rows[1]["npts"] == 3
     assert rows[1]["length_m"] == 200.0
 
-    # reach 2: source gap -> longest part kept, but length stays the honest SUM (review #1)
+    # reach 2: source gap BRIDGED into one continuous line (all 4 points, nothing
+    # dropped), not truncated to the longest part; length stays the honest SUM.
     assert rows[2]["gtype"] == "LINESTRING"
+    assert rows[2]["npts"] == 4
     assert rows[2]["length_m"] == 150.0
     assert rows[2]["prov_len"] == 150.0
     assert rows[2]["prov_cnt"] == 2

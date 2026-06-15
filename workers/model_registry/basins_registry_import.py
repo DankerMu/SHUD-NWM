@@ -23,6 +23,7 @@ from .basins_geometry import (
     BasinsGeometryError,
     ParsedBasinsGeometry,
     TrustedBasinsRoot,
+    _merge_polyline_parts,
     parse_basins_geometry,
     safe_basins_file_sha256,
     trusted_basins_root,
@@ -606,110 +607,147 @@ def _backfill_output_segment_geometry(
     ``_ensure_output_river_segments`` deliberately seeds those reach rows with a
     NULL geom. Without this backfill the national / single-run MVT JOINs the
     reach rows but renders nothing — the live display can neither draw nor click
-    those reaches (the heihe symptom). Points of every GIS segment are grouped
-    by ``source_raw_segment_id`` (the SHUD reach index) and stitched into one
-    LineString per reach, matched onto the reach row via ``shud_riv_index``.
+    those reaches (the heihe symptom). Every finer GIS segment is grouped by
+    ``source_raw_segment_id`` (the SHUD reach index) and the group's parts are
+    greedy-stitched (``_merge_polyline_parts``) into ONE continuous LineString
+    per reach, matched onto the reach row via ``shud_riv_index``.
 
-    Called by the seeding orchestrators after import, never by the low-level
-    import itself: qhh via ``qhh_production_bootstrap``, generic basins via the
-    node-27 autopipe. Only ``geom``/``length_m`` are written (neither is part of
-    the output-river idempotency digest). ``record_geometry_source`` additionally
-    stamps provenance into ``properties_json``; the autopipe passes False so the
-    digest stays stable across re-imports (properties_json IS digested), while
-    the qhh bootstrap keeps it True. With ``only_missing`` the UPDATE touches only
-    NULL-geom rows, so re-importing an already-correct basin updates zero rows --
-    and, conversely, a basin whose reaches already hold geometry from an EARLIER
-    (buggy) backfill is NOT re-stitched by this newer logic: repairing an existing
-    basin requires resetting the affected reach geom to NULL first. The node-27
-    autopipe passes only_missing=True and also short-circuits already-seeded
-    basins, so pulling a stitch fix does not retroactively repair live reaches
-    without that reset (new basins seed with NULL geom and are fixed normally).
+    Why greedy in Python, not ``ST_LineMerge`` in SQL: a reach's finer segments
+    routinely meet only at coincident vertices that ST_LineMerge refuses to
+    linearise (degree-3 nodes, an endpoint touching another part's interior,
+    retraced overlaps), so it returns a MULTILINESTRING; keeping just the longest
+    part then DROPS the rest of the channel and the reach renders broken (the
+    node-27 heihe/qhh breakage: ~8-12% of reaches, up to ~57% of length lost).
+    The even older ``ST_MakeLine(... ORDER BY segment_order)`` had the opposite
+    failure: it linked every point in storage order, drawing a cross-ridge
+    straight "jump" wherever record order != flow order. ``_merge_polyline_parts``
+    chains parts by NEAREST endpoints (reversing as needed): parts that touch
+    join with a zero-length link (continuous, no jump), a genuine source gap
+    joins with the shortest bridge (faithful, never a storage-order artifact),
+    and nothing is dropped. This is the SAME stitch the parser uses
+    (``basins_geometry``), so the two paths stay in lock-step by construction.
+
+    ``length_m`` is the SUM of the reach's finer segments (its true channel
+    length). ``record_geometry_source`` additionally stamps provenance into
+    ``properties_json``; the node-27 autopipe passes False so the output-river
+    idempotency digest (which digests properties_json) stays stable, while the
+    qhh bootstrap keeps it True. With ``only_missing`` only NULL-geom reaches are
+    updated, so re-importing an already-correct basin updates zero rows -- and a
+    basin whose reaches already hold geometry from an EARLIER backfill is NOT
+    re-stitched without first resetting the affected reach geom to NULL (the
+    autopipe also short-circuits already-seeded basins). New basins seed with
+    NULL geom and are stitched normally.
     """
+    from psycopg2.extras import execute_values
+
+    def _cell(row: Any, key: str, index: int) -> Any:
+        # Tolerate both plain (tuple) and RealDict cursors across callers/tests.
+        return row[key] if isinstance(row, dict) else row[index]
+
+    # Output reaches still needing geometry (honour only_missing). The index is
+    # matched as text, and a non-numeric shud_riv_index is filtered out here, so
+    # a malformed sibling row can never abort the batch on an integer cast.
     cursor.execute(
         """
-        WITH fine_segments AS (
-            SELECT
-                (properties_json->>'source_raw_segment_id')::int AS shud_riv_index,
-                geom,
-                length_m
-            FROM core.river_segment
-            WHERE river_network_version_id = %s
-              AND geom IS NOT NULL
-              AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
-              AND properties_json ? 'source_raw_segment_id'
-              AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
-        ),
-        merged_lines AS (
-            -- Stitch finer GIS segments by shared endpoints (ST_LineMerge), not
-            -- by storage order: the old ST_MakeLine(... ORDER BY segment_order)
-            -- drew a cross-ridge straight "jump" wherever shapefile record order
-            -- != along-flow order. length_m SUMs the finer segments = the
-            -- reach's true channel length; it is kept honest (NOT shrunk to the
-            -- drawn part) even when a source gap stops the parts merging into one
-            -- line, so a truncated-display reach still reports its real length.
-            -- ST_LineMerge does not preserve flow direction; nothing consumes
-            -- reach direction today and direction belongs to the network
-            -- topology layer (source_downstream_segment_id), not this stitch.
-            SELECT
-                shud_riv_index,
-                ST_LineMerge(ST_Collect(geom)) AS geom,
-                SUM(length_m) AS length_m,
-                COUNT(*) AS source_segment_count
-            FROM fine_segments
-            GROUP BY shud_riv_index
-        ),
-        gis_by_riv AS (
-            SELECT
-                ml.shud_riv_index,
-                kept.geom::geometry(LineString, 4490) AS geom,
-                ml.length_m,
-                ml.source_segment_count
-            FROM merged_lines ml
-            CROSS JOIN LATERAL (
-                -- A fully stitched reach is one LINESTRING. A genuine source gap
-                -- / branching reach yields a MULTILINESTRING: keep the longest
-                -- connected part for display; part.path tie-breaks equal-length
-                -- parts so the pick is deterministic across re-imports. A POINT /
-                -- empty / collection (from degenerate input) yields NULL via the
-                -- ELSE, and a zero-length LINESTRING (coincident vertices) is
-                -- caught by the ST_Length(kept.geom) > 0 guard on the final WHERE;
-                -- either way the row is dropped, never crashing the
-                -- ::geometry(LineString,4490) cast or writing an unrenderable geom.
-                SELECT CASE
-                    WHEN GeometryType(ml.geom) = 'LINESTRING' THEN ml.geom
-                    WHEN GeometryType(ml.geom) = 'MULTILINESTRING' THEN (
-                        SELECT part.geom
-                        FROM ST_Dump(ml.geom) AS part
-                        ORDER BY ST_Length(part.geom) DESC, part.path ASC
-                        LIMIT 1
-                    )
-                    ELSE NULL
-                END AS geom
-            ) AS kept
-            WHERE kept.geom IS NOT NULL AND ST_Length(kept.geom) > 0
-        )
-        UPDATE core.river_segment target
-        SET geom = gis.geom,
-            length_m = gis.length_m,
-            properties_json = CASE
-                WHEN %s THEN target.properties_json
-                    || jsonb_build_object(
-                        'geometry_source', 'gis_rivseg_iRiv',
-                        'geometry_source_segment_count', gis.source_segment_count,
-                        'geometry_source_length_m', gis.length_m
-                    )
-                ELSE target.properties_json
-            END
-        FROM gis_by_riv gis
-        WHERE target.river_network_version_id = %s
-          AND COALESCE(target.properties_json->>'shud_output_river', 'false') = 'true'
-          -- compare the index as text: the target side is int-validated only by its
-          -- writer, so an unguarded ::int here would abort the whole UPDATE on a
-          -- single malformed sibling row. gis.shud_riv_index is already int source-side.
-          AND target.properties_json->>'shud_riv_index' = gis.shud_riv_index::text
-          AND (NOT %s OR target.geom IS NULL)
+        SELECT river_segment_id, properties_json->>'shud_riv_index' AS shud_riv_index
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
+          AND (properties_json->>'shud_riv_index') ~ '^[0-9]+$'
+          AND (NOT %s OR geom IS NULL)
         """,
-        (river_network_version_id, record_geometry_source, river_network_version_id, only_missing),
+        (river_network_version_id, only_missing),
+    )
+    reaches_by_index: dict[str, list[str]] = {}
+    for row in cursor.fetchall():
+        reaches_by_index.setdefault(_cell(row, "shud_riv_index", 1), []).append(
+            _cell(row, "river_segment_id", 0)
+        )
+    if not reaches_by_index:
+        return 0
+
+    # Finer GIS segments grouped by SHUD reach index, each as an ordered point list.
+    cursor.execute(
+        """
+        SELECT
+            properties_json->>'source_raw_segment_id' AS shud_riv_index,
+            (SELECT array_agg(ARRAY[ST_X(dp.geom), ST_Y(dp.geom)] ORDER BY dp.path)
+             FROM ST_DumpPoints(geom) AS dp) AS points,
+            length_m
+        FROM core.river_segment
+        WHERE river_network_version_id = %s
+          AND geom IS NOT NULL
+          AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
+          AND properties_json ? 'source_raw_segment_id'
+          AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
+        """,
+        (river_network_version_id,),
+    )
+    parts_by_index: dict[str, list[list[tuple[float, float]]]] = {}
+    length_by_index: dict[str, float] = {}
+    count_by_index: dict[str, int] = {}
+    for row in cursor.fetchall():
+        index = _cell(row, "shud_riv_index", 0)
+        points = _cell(row, "points", 1)
+        length_m = _cell(row, "length_m", 2)
+        if not points:
+            continue
+        part = [(float(x), float(y)) for x, y in points if x is not None and y is not None]
+        if len(part) < 2:
+            continue
+        parts_by_index.setdefault(index, []).append(part)
+        length_by_index[index] = length_by_index.get(index, 0.0) + (float(length_m) if length_m is not None else 0.0)
+        count_by_index[index] = count_by_index.get(index, 0) + 1
+
+    # Greedy-stitch each reach's parts into ONE continuous LineString (no dropped
+    # part, no storage-order jump). length_m stays the SUM of the finer segments.
+    updates: list[tuple[str, str, float | None, str]] = []
+    for index, reach_ids in reaches_by_index.items():
+        parts = parts_by_index.get(index)
+        if not parts:
+            continue
+        merged = _merge_polyline_parts(parts)
+        if len(merged) < 2:
+            continue
+        wkt = "LINESTRING(" + ",".join(f"{x!r} {y!r}" for x, y in merged) + ")"
+        total_length = length_by_index.get(index)
+        if record_geometry_source:
+            provenance = json.dumps(
+                {
+                    "geometry_source": "gis_rivseg_iRiv",
+                    "geometry_source_segment_count": count_by_index.get(index, len(parts)),
+                    "geometry_source_length_m": total_length,
+                }
+            )
+        else:
+            provenance = "{}"
+        for reach_id in reach_ids:
+            updates.append((reach_id, wkt, total_length, provenance))
+    if not updates:
+        return 0
+
+    # Single round-trip. ST_Length(geom) > 0 drops a degenerate (coincident-vertex)
+    # line so the reach is left NULL rather than written unrenderable.
+    execute_values(
+        cursor,
+        """
+        UPDATE core.river_segment AS target SET
+            geom = source.geom,
+            length_m = source.length_m,
+            properties_json = target.properties_json || source.provenance
+        FROM (
+            SELECT
+                value.river_segment_id::text AS river_segment_id,
+                ST_GeomFromText(value.wkt, 4490) AS geom,
+                value.length_m::double precision AS length_m,
+                value.provenance::jsonb AS provenance
+            FROM (VALUES %s) AS value(river_segment_id, wkt, length_m, provenance)
+        ) AS source
+        WHERE target.river_segment_id = source.river_segment_id
+          AND ST_Length(source.geom) > 0
+        """,
+        updates,
+        template="(%s, %s, %s, %s)",
     )
     return max(int(getattr(cursor, "rowcount", 0) or 0), 0)
 

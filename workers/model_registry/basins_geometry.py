@@ -742,10 +742,11 @@ def _merge_polyline_parts(parts: list[list[tuple[float, float]]]) -> list[tuple[
     the shortest available link instead.
 
     Scope / known limits:
-    - The dominant heihe cross-ridge lines came from the output-reach backfill
-      stitch (``_backfill_output_segment_geometry`` in basins_registry_import,
-      via ST_LineMerge). This Python path is the parser-side defence; if either
-      site's endpoint rule changes, keep both in lock-step.
+    - The output-reach backfill (``_backfill_output_segment_geometry`` in
+      basins_registry_import) now stitches via THIS function too, so the parser
+      and the backfill share one endpoint rule -- unified, not merely "kept in
+      lock-step". (The backfill previously used SQL ST_LineMerge, which dropped
+      the non-mergeable touching parts of a reach and rendered it broken.)
     - Greedy is local, not globally optimal: for a record whose parts branch
       (Y-topology sharing one vertex) the chain can fold back through the shared
       node. A single river-segment record is normally unbranched, so this is a
