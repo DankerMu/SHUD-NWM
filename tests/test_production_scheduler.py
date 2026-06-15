@@ -1316,6 +1316,66 @@ def test_completed_duplicate_is_skipped_before_not_ready_canonical_gate(tmp_path
     assert result.evidence["skipped_candidates"][0]["reason"] == "completed_duplicate_pipeline"
 
 
+def test_build_candidates_duplicate_candidate_identity_records_skipped_and_exclusion(tmp_path: Path) -> None:
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=_dt("2026-05-21T12:00:00Z")),
+        registry=FakeRegistry([]),
+        adapters={},
+    )
+    model = scheduler_module.RegisteredSchedulerModel(
+        model_id="model_a",
+        basin_id="basin_a",
+        basin_version_id="basin_a_v1",
+        river_network_version_id="basin_a_rivnet_v1",
+        segment_count=3,
+        output_segment_count=3,
+        model_package_uri="s3://nhms/models/model_a/package/",
+        shud_code_version="2.0",
+        resource_profile={},
+        resource_profile_summary={},
+        display_capabilities={},
+        frequency_capabilities={},
+    )
+    cycles = [
+        scheduler_module.SchedulerSourceCycle(
+            discovery=CycleDiscovery(
+                cycle_id="gfs_2026052106_primary",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                cycle_hour=6,
+                available=True,
+                status="discovered",
+            ),
+            horizon={},
+        ),
+        scheduler_module.SchedulerSourceCycle(
+            discovery=CycleDiscovery(
+                cycle_id="gfs_2026052106_duplicate",
+                source_id="gfs",
+                cycle_time=cycle_time,
+                cycle_hour=6,
+                available=True,
+                status="discovered",
+            ),
+            horizon={"max_lead_hours": 24},
+        ),
+    ]
+
+    candidates, blocked, skipped, duplicate_exclusions, slurm_sync = scheduler._build_candidates(
+        models=[model],
+        cycles=cycles,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].candidate_id == skipped[0]["candidate_id"]
+    assert blocked == []
+    assert slurm_sync == []
+    assert skipped[0]["reason"] == "duplicate_candidate_identity"
+    assert skipped[0]["status"] == "excluded"
+    assert duplicate_exclusions == [{"type": "candidate", **skipped[0]}]
+
+
 @pytest.mark.parametrize(
     ("status", "reason", "classifier", "retryable", "expected_cycle_status_candidate"),
     [

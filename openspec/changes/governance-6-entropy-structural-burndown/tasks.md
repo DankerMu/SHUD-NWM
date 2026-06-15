@@ -96,12 +96,12 @@ separate PR boundaries.
 
 ## 8. Scheduler Candidate Construction Extraction
 
-- [ ] 8.1 Create `services/orchestrator/scheduler_candidates.py` for
+- [x] 8.1 Create `services/orchestrator/scheduler_candidates.py` for
   `_build_candidates`, canonical readiness gating, fresh full-chain,
   zero-canonical, active Slurm sync, and duplicate exclusion behavior.
-- [ ] 8.2 Keep `ProductionScheduler._build_candidates` as a compatibility shim
+- [x] 8.2 Keep `ProductionScheduler._build_candidates` as a compatibility shim
   for the first extraction.
-- [ ] 8.3 Verify with focused canonical readiness, active Slurm sync, and
+- [x] 8.3 Verify with focused canonical readiness, active Slurm sync, and
   candidate selection tests.
 
 ## 9. Scheduler Execution Extraction
@@ -1406,6 +1406,23 @@ separate PR boundaries.
     -> lint passes.
   - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
     -> valid.
+- Implementation evidence (2026-06-15):
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'fresh_cycle_with_zero_canonical or completed_duplicate_is_skipped_before_not_ready_canonical_gate or scheduler_caps_reject_oversized_config or duplicate_active_model_identity or duplicate_active_package_identity or stale_active_db_job_terminal_slurm_sync'`
+    -> 7 passed, 515 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'sync_cycle_statuses or active_slurm_status_sync or cancel_active_slurm'`
+    -> 10 passed, 512 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'duplicate_candidate_identity'`
+    -> 1 passed, 521 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'redacts_secret_urls_and_error_messages or canonical_readiness_query_error'`
+    -> 2 passed, 520 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> 522 passed.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`
+    -> All checks passed.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> Change is valid.
+  - `git diff --check`
+    -> passed.
 - Non-goals:
   - No discovery/backfill behavior change, candidate-state decision rewrite,
     execution/evidence extraction, lease/reconcile change, retry service
