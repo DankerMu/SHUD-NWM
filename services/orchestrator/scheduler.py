@@ -32,6 +32,7 @@ from packages.common.source_identity import normalize_source_id
 from packages.common.state_manager import StateManager
 from services.orchestrator import scheduler_candidates as _scheduler_candidates
 from services.orchestrator import scheduler_discovery as _scheduler_discovery
+from services.orchestrator import scheduler_execution as _scheduler_execution
 from services.orchestrator import scheduler_state as _scheduler_state_module
 from services.orchestrator.chain import (
     ForecastOrchestrator,
@@ -1957,118 +1958,10 @@ class ProductionScheduler:
         self,
         candidates: Sequence[SchedulerCandidate],
     ) -> tuple[list[SchedulerCandidate], list[SchedulerCandidate], list[dict[str, Any]]]:
-        assert self.forcing_producer is not None
-        ready: list[SchedulerCandidate] = []
-        blocked: list[SchedulerCandidate] = []
-        evidence: list[dict[str, Any]] = []
-        for candidate in candidates:
-            # M23 §255: fresh full-chain ingestion has no canonical to drive
-            # in-process forcing; the Slurm chain's forcing stage produces it.
-            # Pass the candidate straight through so it reaches the orchestrator.
-            if _candidate_is_fresh_full_chain(candidate):
-                ready.append(candidate)
-                continue
-            try:
-                result = self.forcing_producer.produce(
-                    source_id=candidate.source_id,
-                    cycle_time=candidate.cycle_time_utc,
-                    model_id=candidate.model_id,
-                    max_lead_hours=_candidate_max_lead_hours(candidate),
-                    basin_id=candidate.basin_id,
-                    basin_version_id=candidate.basin_version_id,
-                    river_network_version_id=candidate.river_network_version_id,
-                    canonical_product_id=_candidate_canonical_product_id(candidate),
-                    canonical_identity=_candidate_scheduler_canonical_identity(candidate),
-                )
-            except Exception as error:
-                item = _candidate_forcing_blocked_evidence(candidate, error)
-                evidence.append(item)
-                blocked.append(_blocked_candidate(candidate, "forcing_production_blocked", state_evidence=item))
-                continue
-            produced_candidate = _candidate_with_forcing_result(candidate, result)
-            item = _candidate_forcing_ready_evidence(produced_candidate, result)
-            evidence.append(item)
-            ready.append(_candidate_with_state_evidence(produced_candidate, {"forcing_production": item}))
-        return ready, blocked, evidence
+        return _scheduler_execution.produce_forcing_for_candidates(self._scheduler_execution_context(), candidates)
 
     def _execute_candidates(self, candidates: Sequence[SchedulerCandidate]) -> list[dict[str, Any]]:
-        grouped: dict[tuple[str, datetime], list[SchedulerCandidate]] = {}
-        for candidate in candidates:
-            grouped.setdefault((candidate.source_id, candidate.cycle_time_utc), []).append(candidate)
-
-        # M24 §3A: each cohort is an independent candidate (different
-        # basin/source/cycle). Build one submitter per cohort, then run them
-        # concurrently within the configured bound. Durable reservation (unique
-        # idempotency_key) is the correctness backstop against double-submit, so
-        # concurrency here is purely throughput; ordering is preserved in the
-        # collected evidence for determinism.
-        @dataclass
-        class _CohortUnit:
-            source_id: str
-            cycle_time: datetime
-            cycle_id: str
-            execution_candidates: list[SchedulerCandidate]
-            cohort_run_id: str | None
-
-        source_order = {source_id.lower(): index for index, source_id in enumerate(self.config.sources)}
-        units: list[_CohortUnit] = []
-        for (source_id, cycle_time), cycle_candidates in sorted(
-            grouped.items(),
-            key=lambda item: (
-                item[0][1],
-                source_order.get(item[0][0].lower(), 999),
-                item[0][0].lower(),
-                [candidate.model_id for candidate in item[1]],
-            ),
-        ):
-            cycle_id = cycle_id_for(source_id, cycle_time)
-            for cohort_key, cohort_candidates in _restart_compatible_candidate_cohorts(cycle_candidates):
-                for execution_candidates, cohort_run_id in _candidate_execution_cohorts(
-                    source_id,
-                    cycle_time,
-                    cohort_key,
-                    cohort_candidates,
-                ):
-                    units.append(
-                        _CohortUnit(
-                            source_id=source_id,
-                            cycle_time=cycle_time,
-                            cycle_id=cycle_id,
-                            execution_candidates=list(execution_candidates),
-                            cohort_run_id=cohort_run_id,
-                        )
-                    )
-
-        receipt = SubmitOverlapReceipt()
-        self._last_submit_overlap_receipt = receipt
-
-        def _submitter(unit: "_CohortUnit") -> list[dict[str, Any]]:
-            key = f"{unit.source_id}:{unit.cycle_id}:{unit.cohort_run_id or 'full'}"
-            run = timed_submission(
-                lambda: self._execute_candidate_cohort(
-                    unit.source_id,
-                    unit.cycle_time,
-                    unit.cycle_id,
-                    unit.execution_candidates,
-                    orchestration_run_id=unit.cohort_run_id,
-                ),
-                receipt=receipt,
-                idempotency_key=key,
-                candidate_id=unit.cohort_run_id,
-            )
-            return run()
-
-        results = run_concurrent_submissions(
-            [(lambda u=unit: _submitter(u)) for unit in units],
-            max_workers=self.config.concurrent_submit_bound,
-        )
-
-        evidence: list[dict[str, Any]] = []
-        for result in results:
-            if isinstance(result, Exception):
-                raise result
-            evidence.extend(result)
-        return evidence
+        return _scheduler_execution.execute_candidates(self._scheduler_execution_context(), candidates)
 
     def _execute_candidate_cohort(
         self,
@@ -2079,148 +1972,54 @@ class ProductionScheduler:
         *,
         orchestration_run_id: str | None,
     ) -> list[dict[str, Any]]:
-        evidence: list[dict[str, Any]] = []
-        orchestrator = self._orchestrator_for(source_id)
-        basins: list[dict[str, Any]] = []
-        submitted_candidates: list[SchedulerCandidate] = []
-        candidate_output_uris: dict[str, str] = {}
-        for candidate in cycle_candidates:
-            output_uri = _candidate_output_uri(candidate, getattr(orchestrator, "object_store", None))
-            if output_uri is None:
-                evidence.append(
-                    {
-                        **_candidate_identity_evidence(candidate),
-                        "status": "blocked",
-                        "submitted": False,
-                        "mutation_occurred": False,
-                        "cycle_id": cycle_id,
-                        "error_code": "OUTPUT_URI_UNAVAILABLE",
-                        "error_message": (
-                            "Production orchestration requires an absolute deterministic output_uri "
-                            "before runtime handoff."
-                        ),
-                        **_candidate_model_run_review_evidence(
-                            candidate,
-                            output_uri=output_uri,
-                            outcome=None,
-                            status="blocked",
-                            stage_statuses=[],
-                        ),
-                        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
-                        "qhh_script_invoked": False,
-                    }
-                )
-                continue
-            candidate_output_uris[candidate.candidate_id] = output_uri
-            submitted_candidates.append(candidate)
-            basin_manifest = _candidate_basin_manifest(
-                candidate,
-                output_uri=output_uri,
-                orchestration_run_id=orchestration_run_id,
-            )
-            if self.config.slurm_execution_enabled and self.config.slurm_env:
-                basin_manifest["slurm_env"] = dict(self.config.slurm_env)
-            basins.append(basin_manifest)
-        if not basins:
-            return evidence
-        if self.config.slurm_execution_enabled:
-            safe_pairs: list[tuple[SchedulerCandidate, dict[str, Any]]] = []
-            for candidate, basin_manifest in zip(submitted_candidates, basins, strict=True):
-                env_value = basin_manifest.get("slurm_env") or {}
-                if env_value:
-                    env_check, env_blockers = _slurm_env_check(env_value)
-                    if env_blockers:
-                        evidence.append(
-                            _candidate_slurm_preflight_blocked_evidence(
-                                candidate,
-                                {
-                                    "status": "blocked",
-                                    "enabled": True,
-                                    "blockers": env_blockers,
-                                    "checks": {"environment": env_check},
-                                },
-                            )
-                        )
-                        continue
-                findings = iter_secret_manifest_findings(basin_manifest, "manifest")
-                if findings:
-                    evidence.append(
-                        _candidate_secret_manifest_blocked_evidence(candidate, findings=findings)
-                    )
-                    continue
-                resource_profile_blockers = _slurm_resource_profile_blockers(candidate.resource_profile)
-                if resource_profile_blockers:
-                    evidence.append(
-                        _candidate_slurm_preflight_blocked_evidence(
-                            candidate,
-                            {
-                                "status": "blocked",
-                                "enabled": True,
-                                "blockers": resource_profile_blockers,
-                                "checks": {"resource_profile": {"valid": False}},
-                            },
-                        )
-                    )
-                    continue
-                safe_pairs.append((candidate, basin_manifest))
-            submitted_candidates = [candidate for candidate, _basin_manifest in safe_pairs]
-            basins = [basin_manifest for _candidate, basin_manifest in safe_pairs]
-            if not basins:
-                return evidence
-        try:
-            result = orchestrator.orchestrate_cycle(source_id, cycle_time, basins)
-        except Exception as error:
-            safe_error_message = _evidence_safe(getattr(error, "message", str(error)))
-            error_code = str(getattr(error, "error_code", "PRODUCTION_ORCHESTRATION_FAILED"))
-            for candidate in submitted_candidates:
-                output_uri = candidate_output_uris.get(candidate.candidate_id)
-                evidence.append(
-                    {
-                        **_candidate_identity_evidence(candidate, output_uri=output_uri),
-                        "status": "submission_failed",
-                        "submitted": False,
-                        "slurm_submit_called": UNKNOWN_AFTER_ATTEMPT,
-                        "execution_attempted": True,
-                        "mutation_outcome": UNKNOWN_AFTER_ATTEMPT,
-                        "mutation_occurred": UNKNOWN_AFTER_ATTEMPT,
-                        "cycle_id": cycle_id,
-                        "error_code": error_code,
-                        "error_message": safe_error_message,
-                        **_candidate_model_run_review_evidence(
-                            candidate,
-                            output_uri=output_uri,
-                            outcome=None,
-                            status="submission_failed",
-                            stage_statuses=[],
-                        ),
-                        "standard_chain_shape": [stage.stage for stage in ForecastOrchestrator.stages],
-                        "qhh_script_invoked": False,
-                        "pipeline_status_write": UNKNOWN_AFTER_ATTEMPT,
-                        "pipeline_event_write": UNKNOWN_AFTER_ATTEMPT,
-                        "pipeline_status_writes_proven_absent": False,
-                        "pipeline_event_writes_proven_absent": False,
-                        "residual_blockers": [
-                            {
-                                "code": error_code,
-                                "state": "blocked",
-                                "quality_flag": "production_orchestration_failed",
-                                "residual_risk": (
-                                    "Production orchestration raised after the downstream orchestration method "
-                                    "was called; production write outcome is unknown."
-                                ),
-                            }
-                        ],
-                    }
-                )
-            return evidence
-        evidence.extend(
-            _candidate_execution_evidence(
-                result,
-                submitted_candidates,
-                output_uris=candidate_output_uris,
-            )
+        return _scheduler_execution.execute_candidate_cohort(
+            self._scheduler_execution_context(),
+            source_id,
+            cycle_time,
+            cycle_id,
+            cycle_candidates,
+            orchestration_run_id=orchestration_run_id,
         )
-        return evidence
+
+    def _scheduler_execution_context(self) -> _scheduler_execution.SchedulerExecutionContext:
+        return _scheduler_execution.SchedulerExecutionContext(
+            config=self.config,
+            forcing_producer=self.forcing_producer,
+            orchestrator_for=self._orchestrator_for,
+            execute_candidate_cohort=self._execute_candidate_cohort,
+            set_last_submit_overlap_receipt=self._set_last_submit_overlap_receipt,
+            submit_overlap_receipt_factory=SubmitOverlapReceipt,
+            timed_submission=timed_submission,
+            run_concurrent_submissions=run_concurrent_submissions,
+            cycle_id_for=cycle_id_for,
+            restart_compatible_candidate_cohorts=_restart_compatible_candidate_cohorts,
+            candidate_execution_cohorts=_candidate_execution_cohorts,
+            candidate_is_fresh_full_chain=_candidate_is_fresh_full_chain,
+            candidate_max_lead_hours=_candidate_max_lead_hours,
+            candidate_canonical_product_id=_candidate_canonical_product_id,
+            candidate_scheduler_canonical_identity=_candidate_scheduler_canonical_identity,
+            candidate_forcing_blocked_evidence=_candidate_forcing_blocked_evidence,
+            blocked_candidate=_blocked_candidate,
+            candidate_with_forcing_result=_candidate_with_forcing_result,
+            candidate_forcing_ready_evidence=_candidate_forcing_ready_evidence,
+            candidate_with_state_evidence=_candidate_with_state_evidence,
+            candidate_output_uri=_candidate_output_uri,
+            candidate_identity_evidence=_candidate_identity_evidence,
+            candidate_model_run_review_evidence=_candidate_model_run_review_evidence,
+            standard_chain_shape=lambda: [stage.stage for stage in ForecastOrchestrator.stages],
+            candidate_basin_manifest=_candidate_basin_manifest,
+            slurm_env_check=_slurm_env_check,
+            candidate_slurm_preflight_blocked_evidence=_candidate_slurm_preflight_blocked_evidence,
+            secret_manifest_findings=iter_secret_manifest_findings,
+            candidate_secret_manifest_blocked_evidence=_candidate_secret_manifest_blocked_evidence,
+            slurm_resource_profile_blockers=_slurm_resource_profile_blockers,
+            evidence_safe=_evidence_safe,
+            candidate_execution_evidence=_candidate_execution_evidence,
+            unknown_after_attempt=UNKNOWN_AFTER_ATTEMPT,
+        )
+
+    def _set_last_submit_overlap_receipt(self, receipt: SubmitOverlapReceipt) -> None:
+        self._last_submit_overlap_receipt = receipt
 
     def _cancel_requested_active_slurm(self, skipped_candidates: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         grouped: dict[tuple[str, str], dict[str, Any]] = {}
@@ -3163,14 +2962,10 @@ _backfill_deferred_evidence = _scheduler_discovery._backfill_deferred_evidence
 def _restart_compatible_candidate_cohorts(
     candidates: Sequence[SchedulerCandidate],
 ) -> list[tuple[tuple[int, str], list[SchedulerCandidate]]]:
-    cohorts: dict[tuple[int, str], list[SchedulerCandidate]] = {}
-    for candidate in candidates:
-        restart_stage = _candidate_restart_stage(candidate)
-        key = _candidate_restart_cohort_key(restart_stage)
-        cohorts.setdefault(key, []).append(candidate)
-    return sorted(
-        cohorts.items(),
-        key=lambda item: (item[0][0], item[0][1], [candidate.model_id for candidate in item[1]]),
+    return _scheduler_execution.restart_compatible_candidate_cohorts(
+        candidates,
+        candidate_restart_stage=_candidate_restart_stage,
+        candidate_restart_cohort_key=_candidate_restart_cohort_key,
     )
 
 
@@ -3180,32 +2975,28 @@ _candidate_is_fresh_full_chain = _scheduler_candidates._candidate_is_fresh_full_
 
 
 def _candidate_restart_stage(candidate: SchedulerCandidate) -> str | None:
-    # Fresh full-chain ingestion routes on a single source of truth: it must
-    # always land in the (0, "full") cohort and run download->...->publish from
-    # scratch. A residual restart_stage merged from a retry state_decision (e.g.
-    # retention cleared canonical while a stale restart marker lingered) must not
-    # divert it off the full-chain path, so force None here.
-    if _candidate_is_fresh_full_chain(candidate):
-        return None
-    state_evidence = candidate.state_evidence
-    if not isinstance(state_evidence, Mapping):
-        return None
-    stage = str(state_evidence.get("restart_stage") or state_evidence.get("restart_from_stage") or "")
-    if stage in NATIVE_SHUD_STAGE_ALIASES:
-        return "forecast"
-    return _canonical_downstream_stage(stage)
+    return _scheduler_execution.candidate_restart_stage(
+        candidate,
+        candidate_is_fresh_full_chain=_candidate_is_fresh_full_chain,
+        native_shud_stage_aliases=NATIVE_SHUD_STAGE_ALIASES,
+        canonical_downstream_stage=_canonical_downstream_stage,
+    )
 
 
 def _candidate_restart_cohort_key(restart_stage: str | None) -> tuple[int, str]:
-    if restart_stage is None:
-        return (0, "full")
-    stage_order = {stage: index for index, stage in enumerate(DOWNSTREAM_RESTART_STAGES, start=1)}
-    return (stage_order.get(restart_stage, len(stage_order) + 1), restart_stage)
+    return _scheduler_execution.candidate_restart_cohort_key(
+        restart_stage,
+        downstream_restart_stages=DOWNSTREAM_RESTART_STAGES,
+    )
 
 
 def _candidate_execution_cohort_run_id(source_id: str, cycle_time: datetime, cohort_key: tuple[int, str]) -> str:
-    stage = re.sub(r"[^A-Za-z0-9_.-]+", "_", cohort_key[1]).strip("._-") or "full"
-    return f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}_{stage}"
+    return _scheduler_execution.candidate_execution_cohort_run_id(
+        source_id,
+        cycle_time,
+        cohort_key,
+        format_cycle_time=format_cycle_time,
+    )
 
 
 def _candidate_execution_cohorts(
@@ -3214,12 +3005,13 @@ def _candidate_execution_cohorts(
     cohort_key: tuple[int, str],
     candidates: Sequence[SchedulerCandidate],
 ) -> list[tuple[list[SchedulerCandidate], str | None]]:
-    if cohort_key[1] == "full":
-        return [(list(candidates), None)]
-    return [
-        ([candidate], _candidate_execution_cohort_run_id_for_candidate(source_id, cycle_time, cohort_key, candidate))
-        for candidate in candidates
-    ]
+    return _scheduler_execution.candidate_execution_cohorts(
+        source_id,
+        cycle_time,
+        cohort_key,
+        candidates,
+        run_id_for_candidate=_candidate_execution_cohort_run_id_for_candidate,
+    )
 
 
 def _candidate_execution_cohort_run_id_for_candidate(
@@ -3228,9 +3020,13 @@ def _candidate_execution_cohort_run_id_for_candidate(
     cohort_key: tuple[int, str],
     candidate: SchedulerCandidate,
 ) -> str:
-    stage = re.sub(r"[^A-Za-z0-9_.-]+", "_", cohort_key[1]).strip("._-") or "full"
-    model_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate.model_id).strip("._-") or "candidate"
-    return f"cycle_{source_id.lower()}_{format_cycle_time(cycle_time)}_{stage}_{model_id}"
+    return _scheduler_execution.candidate_execution_cohort_run_id_for_candidate(
+        source_id,
+        cycle_time,
+        cohort_key,
+        candidate,
+        format_cycle_time=format_cycle_time,
+    )
 
 
 
