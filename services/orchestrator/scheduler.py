@@ -2593,6 +2593,14 @@ class ProductionScheduler:
             canonical_readiness_for_candidate=self._canonical_readiness_for_candidate,
             orchestrator_for=self._orchestrator_for,
             candidate_factory=_candidate_for,
+            candidate_state_provider_caller=_call_candidate_state_provider,
+            active_slurm_jobs_provider_caller=_call_active_slurm_jobs_provider,
+            active_slurm_jobs_bounder=_bounded_active_slurm_jobs,
+            candidate_state_decider=_candidate_state_decision,
+            candidate_state_identity_mismatch_detector=_candidate_state_has_identity_mismatch,
+            candidate_state_scoped_retry_detector=_candidate_state_is_candidate_scoped_retry,
+            repaired_state_audit_evidence_builder=_candidate_repaired_state_audit_evidence,
+            max_candidates=MAX_CANDIDATES,
         )
 
     def _build_candidates(

@@ -1416,7 +1416,10 @@ separate PR boundaries.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'redacts_secret_urls_and_error_messages or canonical_readiness_query_error'`
     -> 2 passed, 520 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
-    -> 522 passed.
+    -> 524 passed.
+  - Fix-pass evidence for round-1 legacy compatibility findings:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'monkeypatch or duplicate_candidate_identity or candidate_limit_exceeded or scheduler_caps_reject_oversized_config'`
+    -> 7 passed, 517 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py`
     -> All checks passed.
   - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`

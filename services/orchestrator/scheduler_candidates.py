@@ -94,6 +94,24 @@ class SchedulerCandidateConstructionContext:
     ]
     orchestrator_for: Callable[[str], Any]
     candidate_factory: Callable[..., SchedulerCandidateLike]
+    candidate_state_provider_caller: Callable[..., Any] = _call_candidate_state_provider
+    active_slurm_jobs_provider_caller: Callable[..., Any] = _call_active_slurm_jobs_provider
+    active_slurm_jobs_bounder: Callable[..., list[dict[str, Any]]] = _bounded_active_slurm_jobs
+    candidate_state_decider: Callable[
+        [SchedulerCandidateLike, Mapping[str, Any] | None],
+        CandidateStateDecision | None,
+    ] = _candidate_state_decision
+    candidate_state_identity_mismatch_detector: Callable[[Mapping[str, Any]], bool] = (
+        _candidate_state_has_identity_mismatch
+    )
+    candidate_state_scoped_retry_detector: Callable[[CandidateStateDecision | None], bool] = (
+        _candidate_state_is_candidate_scoped_retry
+    )
+    repaired_state_audit_evidence_builder: Callable[
+        [SchedulerCandidateLike, Mapping[str, Any] | None],
+        dict[str, Any] | None,
+    ] = _candidate_repaired_state_audit_evidence
+    max_candidates: int = MAX_CANDIDATES
 
 
 def build_candidates(
@@ -135,15 +153,16 @@ def build_candidates(
         if context.active_repository is not None
         else None
     )
+    max_candidates = int(context.max_candidates)
     for cycle in cycles:
         discovery = cycle.discovery
         has_active_orchestration: bool | None = None
         for model in models:
-            if len(candidates) + len(blocked) + len(skipped) >= MAX_CANDIDATES:
+            if len(candidates) + len(blocked) + len(skipped) >= max_candidates:
                 raise SchedulerResourceLimitError(
                     "candidate_limit_exceeded",
                     {
-                        "max_candidates": MAX_CANDIDATES,
+                        "max_candidates": max_candidates,
                         "source_cycle_count": len(cycles),
                         "selected_model_count": len(models),
                     },
@@ -203,7 +222,7 @@ def build_candidates(
                 skipped.append({**candidate.to_dict(), "reason": "completed_duplicate_pipeline"})
                 continue
             raw_candidate_state = (
-                _call_candidate_state_provider(
+                context.candidate_state_provider_caller(
                     state_provider,
                     source_id=discovery.source_id,
                     cycle_time=discovery.cycle_time,
@@ -218,8 +237,10 @@ def build_candidates(
                 if callable(state_provider)
                 else None
             )
-            state_decision = _candidate_state_decision(candidate, raw_candidate_state)
-            if state_decision is not None and _candidate_state_has_identity_mismatch(state_decision.evidence):
+            state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
+            if state_decision is not None and context.candidate_state_identity_mismatch_detector(
+                state_decision.evidence,
+            ):
                 blocked.append(
                     _blocked_candidate(
                         candidate,
@@ -257,7 +278,7 @@ def build_candidates(
             ):
                 active_slurm_jobs = (
                     list(
-                        _call_active_slurm_jobs_provider(
+                        context.active_slurm_jobs_provider_caller(
                             active_slurm_jobs_provider,
                             source_id=discovery.source_id,
                             cycle_time=discovery.cycle_time,
@@ -268,7 +289,7 @@ def build_candidates(
                     if callable(active_slurm_jobs_provider)
                     else list(state_decision.evidence.get("active_slurm_jobs", []))
                 )
-                active_slurm_jobs = _bounded_active_slurm_jobs(
+                active_slurm_jobs = context.active_slurm_jobs_bounder(
                     active_slurm_jobs,
                     max_jobs=context.config.candidate_state_job_limit,
                 )
@@ -279,7 +300,7 @@ def build_candidates(
                         sync = getattr(context.orchestrator_for(discovery.source_id), "sync_cycle_statuses", None)
                     if allow_slurm_status_sync and callable(sync):
                         try:
-                            synced_updates = _bounded_active_slurm_jobs(
+                            synced_updates = context.active_slurm_jobs_bounder(
                                 [dict(item) for item in sync(cycle_id)],
                                 max_jobs=context.config.candidate_state_job_limit,
                             )
@@ -317,7 +338,7 @@ def build_candidates(
                         slurm_status_sync_evidence.append(slurm_state_sync)
                         if synced_updates:
                             if callable(state_provider):
-                                raw_candidate_state = _call_candidate_state_provider(
+                                raw_candidate_state = context.candidate_state_provider_caller(
                                     state_provider,
                                     source_id=discovery.source_id,
                                     cycle_time=discovery.cycle_time,
@@ -329,7 +350,7 @@ def build_candidates(
                                     job_limit=context.config.candidate_state_job_limit,
                                     event_limit=context.config.candidate_state_event_limit,
                                 )
-                                state_decision = _candidate_state_decision(candidate, raw_candidate_state)
+                                state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
                             if state_decision is not None:
                                 state_decision = CandidateStateDecision(
                                     action=state_decision.action,
@@ -339,7 +360,7 @@ def build_candidates(
                                         "slurm_state_sync": slurm_state_sync,
                                     },
                                 )
-                            if state_decision is not None and _candidate_state_has_identity_mismatch(
+                            if state_decision is not None and context.candidate_state_identity_mismatch_detector(
                                 state_decision.evidence,
                             ):
                                 blocked.append(
@@ -351,9 +372,9 @@ def build_candidates(
                                 )
                                 continue
                             active_slurm_jobs = (
-                                _bounded_active_slurm_jobs(
+                                context.active_slurm_jobs_bounder(
                                     list(
-                                        _call_active_slurm_jobs_provider(
+                                        context.active_slurm_jobs_provider_caller(
                                             active_slurm_jobs_provider,
                                             source_id=discovery.source_id,
                                             cycle_time=discovery.cycle_time,
@@ -370,7 +391,7 @@ def build_candidates(
                                 candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                             elif state_decision is None:
                                 state_evidence = {"slurm_state_sync": slurm_state_sync}
-                                repaired_state_evidence = _candidate_repaired_state_audit_evidence(
+                                repaired_state_evidence = context.repaired_state_audit_evidence_builder(
                                     candidate,
                                     raw_candidate_state,
                                 )
@@ -465,7 +486,10 @@ def build_candidates(
             ):
                 candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
             if state_decision is None:
-                repaired_state_evidence = _candidate_repaired_state_audit_evidence(candidate, raw_candidate_state)
+                repaired_state_evidence = context.repaired_state_audit_evidence_builder(
+                    candidate,
+                    raw_candidate_state,
+                )
                 if repaired_state_evidence is not None:
                     candidate = _candidate_with_state_evidence(candidate, repaired_state_evidence)
             if has_active_orchestration is None:
@@ -478,7 +502,7 @@ def build_candidates(
                 )
             active_slurm_jobs = (
                 list(
-                    _call_active_slurm_jobs_provider(
+                    context.active_slurm_jobs_provider_caller(
                         active_slurm_jobs_provider,
                         source_id=discovery.source_id,
                         cycle_time=discovery.cycle_time,
@@ -489,7 +513,7 @@ def build_candidates(
                 if callable(active_slurm_jobs_provider)
                 else []
             )
-            active_slurm_jobs = _bounded_active_slurm_jobs(
+            active_slurm_jobs = context.active_slurm_jobs_bounder(
                 active_slurm_jobs,
                 max_jobs=context.config.candidate_state_job_limit,
             )
@@ -501,7 +525,7 @@ def build_candidates(
                     sync = getattr(context.orchestrator_for(discovery.source_id), "sync_cycle_statuses", None)
                 if allow_slurm_status_sync and callable(sync):
                     try:
-                        synced_updates = _bounded_active_slurm_jobs(
+                        synced_updates = context.active_slurm_jobs_bounder(
                             [dict(item) for item in sync(cycle_id)],
                             max_jobs=context.config.candidate_state_job_limit,
                         )
@@ -539,7 +563,7 @@ def build_candidates(
                     slurm_status_sync_evidence.append(slurm_state_sync)
                     if synced_updates:
                         if callable(state_provider):
-                            raw_candidate_state = _call_candidate_state_provider(
+                            raw_candidate_state = context.candidate_state_provider_caller(
                                 state_provider,
                                 source_id=discovery.source_id,
                                 cycle_time=discovery.cycle_time,
@@ -551,7 +575,7 @@ def build_candidates(
                                 job_limit=context.config.candidate_state_job_limit,
                                 event_limit=context.config.candidate_state_event_limit,
                             )
-                            state_decision = _candidate_state_decision(candidate, raw_candidate_state)
+                            state_decision = context.candidate_state_decider(candidate, raw_candidate_state)
                         if state_decision is not None:
                             state_decision = CandidateStateDecision(
                                 action=state_decision.action,
@@ -561,7 +585,7 @@ def build_candidates(
                                     "slurm_state_sync": slurm_state_sync,
                                 },
                             )
-                        if state_decision is not None and _candidate_state_has_identity_mismatch(
+                        if state_decision is not None and context.candidate_state_identity_mismatch_detector(
                             state_decision.evidence,
                         ):
                             blocked.append(
@@ -573,9 +597,9 @@ def build_candidates(
                             )
                             continue
                         active_slurm_jobs = (
-                            _bounded_active_slurm_jobs(
+                            context.active_slurm_jobs_bounder(
                                 list(
-                                    _call_active_slurm_jobs_provider(
+                                    context.active_slurm_jobs_provider_caller(
                                         active_slurm_jobs_provider,
                                         source_id=discovery.source_id,
                                         cycle_time=discovery.cycle_time,
@@ -592,7 +616,7 @@ def build_candidates(
                             candidate = _candidate_with_state_evidence(candidate, state_decision.evidence)
                         elif state_decision is None:
                             state_evidence = {"slurm_state_sync": slurm_state_sync}
-                            repaired_state_evidence = _candidate_repaired_state_audit_evidence(
+                            repaired_state_evidence = context.repaired_state_audit_evidence_builder(
                                 candidate,
                                 raw_candidate_state,
                             )
@@ -637,7 +661,7 @@ def build_candidates(
             cycle_active_blocks_candidate = has_active_orchestration and not (
                 context.config.cancel_active_slurm and active_slurm_jobs
             )
-            if cycle_active_blocks_candidate and _candidate_state_is_candidate_scoped_retry(
+            if cycle_active_blocks_candidate and context.candidate_state_scoped_retry_detector(
                 state_decision,
             ):
                 cycle_active_blocks_candidate = False
@@ -684,7 +708,7 @@ def build_candidates(
                     cycle_time=discovery.cycle_time,
                     model_id=model.model_id,
                 )
-                and not _candidate_state_is_candidate_scoped_retry(state_decision)
+                and not context.candidate_state_scoped_retry_detector(state_decision)
             ):
                 skipped.append({**candidate.to_dict(), "reason": "active_duplicate_pipeline"})
                 continue
