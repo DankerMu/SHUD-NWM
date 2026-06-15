@@ -722,15 +722,76 @@ def _normalize_attr_name(name: str) -> str:
 
 
 def _merge_polyline_parts(parts: list[list[tuple[float, float]]]) -> list[tuple[float, float]]:
-    merged: list[tuple[float, float]] = []
-    for points in parts:
-        if not merged:
-            merged.extend(points)
-        elif merged[-1] == points[0]:
-            merged.extend(points[1:])
+    """Stitch a multi-part polyline into one continuous point list by joining
+    parts at their nearest endpoints, reversing parts when needed.
+
+    Input contract: the sole caller (``_river_segments_from_layer``) pre-filters
+    to parts with >= 2 points, so the ``len(points) >= 2`` chain filter is
+    belt-and-suspenders. A foreign caller passing sub-2-point parts has them
+    dropped; if nothing with >= 2 points survives the function returns ``[]`` and
+    the caller skips the record -- it never fabricates a line from stray points.
+    Coordinates are still in the source shapefile CRS here (merge runs before
+    ``_transform_points``), so ``_nearest_attachment`` ranks endpoints by a
+    local squared-distance heuristic, not a geodesic metric.
+
+    Shapefile part *storage* order is not flow order and parts may be stored
+    reversed. Concatenating them blindly (the old behaviour) linked a part's
+    first point to the running tail even when another endpoint was nearer,
+    fabricating a longer-than-necessary straight "jump" between mis-ordered
+    parts. Greedy nearest-endpoint chaining from either chain end always takes
+    the shortest available link instead.
+
+    Scope / known limits:
+    - The dominant heihe cross-ridge lines came from the output-reach backfill
+      stitch (``_backfill_output_segment_geometry`` in basins_registry_import,
+      via ST_LineMerge). This Python path is the parser-side defence; if either
+      site's endpoint rule changes, keep both in lock-step.
+    - Greedy is local, not globally optimal: for a record whose parts branch
+      (Y-topology sharing one vertex) the chain can fold back through the shared
+      node. A single river-segment record is normally unbranched, so this is a
+      known, rare edge (see test_merge_folds_back_on_branching_record).
+    - Where a record's parts are genuinely far apart in the source GIS, the
+      shortest link is still long -- faithful to the source gap, not a
+      stitch-order artifact this can remove (root fix is source-data repair or
+      gap-aware rendering, tracked separately).
+    """
+    chain = [list(points) for points in parts if len(points) >= 2]
+    if not chain:
+        return []
+    merged = chain.pop(0)
+    while chain:
+        index, use_start, at_tail = _nearest_attachment(chain, merged[0], merged[-1])
+        piece = chain.pop(index)
+        if at_tail:
+            oriented = piece if use_start else piece[::-1]
+            merged.extend(oriented[1:] if merged[-1] == oriented[0] else oriented)
         else:
-            merged.extend(points)
+            oriented = piece[::-1] if use_start else piece
+            merged[:0] = oriented[:-1] if oriented[-1] == merged[0] else oriented
     return merged
+
+
+def _nearest_attachment(
+    chain: list[list[tuple[float, float]]],
+    head: tuple[float, float],
+    tail: tuple[float, float],
+) -> tuple[int, bool, bool]:
+    """Pick (part index, endpoint-is-its-start, attach-at-tail) for the unused
+    part whose endpoint sits closest to either free end of the running chain.
+
+    Distance is squared-Euclidean in the source shapefile CRS (pre-transform):
+    it only ranks candidate endpoints for a local join, so absolute units do not
+    matter. Ties resolve to the first-scanned candidate, deterministic for a
+    given part order.
+    """
+    best: tuple[float, int, bool, bool] = (float("inf"), 0, True, True)
+    for index, points in enumerate(chain):
+        for endpoint, use_start in ((points[0], True), (points[-1], False)):
+            for anchor, at_tail in ((tail, True), (head, False)):
+                dist = (endpoint[0] - anchor[0]) ** 2 + (endpoint[1] - anchor[1]) ** 2
+                if dist < best[0]:
+                    best = (dist, index, use_start, at_tail)
+    return best[1], best[2], best[3]
 
 
 def _stable_segment_id(model_id: str, raw_id: Any, segment_order: int) -> str:
