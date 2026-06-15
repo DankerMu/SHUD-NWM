@@ -219,6 +219,33 @@ def _build_scheduler(
     )
 
 
+class _LegacyTypeErrorFallbackAdapter:
+    def __init__(self, source_id: str, cycle_time: str) -> None:
+        self.source_id = source_id
+        self.cycle_time = _dt(cycle_time)
+        self.two_arg_calls: list[tuple[Any, Any]] = []
+
+    def discover_cycles(
+        self,
+        cycle_date: Any,
+        end_date: Any,
+    ) -> list[Any]:
+        requested_date = cycle_date.date() if isinstance(cycle_date, datetime) else cycle_date
+        self.two_arg_calls.append((requested_date, end_date))
+        if requested_date != self.cycle_time.date():
+            return []
+        return [
+            scheduler_module.CycleDiscovery(
+                cycle_id=scheduler_module.cycle_id_for(self.source_id, self.cycle_time),
+                source_id=self.source_id,
+                cycle_time=self.cycle_time,
+                cycle_hour=self.cycle_time.hour,
+                available=True,
+                status="discovered",
+            )
+        ]
+
+
 # ---------------------------------------------------------------------------
 # Requirement: extracted discovery still honors old private-method monkeypatches.
 # ---------------------------------------------------------------------------
@@ -305,6 +332,106 @@ def test_discover_cycles_honors_instance_monkeypatch_cycle_completion_status(
     assert audit["complete_count"] == 1
     assert audit["gap_count"] == 0
     assert audit["selected_count"] == 0
+
+
+def test_legacy_adapter_typeerror_fallback_selects_row_and_source_cycle_evidence(
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    adapter = _LegacyTypeErrorFallbackAdapter("gfs", "2026-05-21T06:00:00Z")
+    config = _config(
+        tmp_path,
+        now=now,
+        sources=("gfs",),
+        lookback_hours=6,
+        max_cycles_per_source=1,
+        backfill_enabled=False,
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": adapter},
+        active_repository=CompletionByCycleRepository(set()),
+    )
+
+    cycles, evidence = scheduler._discover_cycles(now, models=())
+
+    assert [scheduler_module._format_utc(cycle.discovery.cycle_time) for cycle in cycles] == [
+        "2026-05-21T06:00:00Z"
+    ]
+    assert adapter.two_arg_calls == [(adapter.cycle_time.date(), None)]
+    source_cycle_evidence = [
+        item
+        for item in evidence
+        if item.get("source_id") == "gfs" and item.get("cycle_time_utc") is not None
+    ]
+    assert [
+        (item["source_id"], item["cycle_time_utc"], item["status"])
+        for item in source_cycle_evidence
+    ] == [("gfs", "2026-05-21T06:00:00Z", "discovered")]
+
+
+def test_discover_cycles_filters_wrong_source_and_out_of_window_before_selection_and_evidence(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=now,
+        cycle_times=[],
+        lookback_hours=6,
+        backfill_enabled=False,
+    )
+    valid_time = _dt("2026-05-21T06:00:00Z")
+    out_of_window_time = _dt("2026-05-21T00:00:00Z")
+
+    def _row(source_id: str, cycle_time: datetime) -> Any:
+        return scheduler_module.CycleDiscovery(
+            cycle_id=scheduler_module.cycle_id_for(source_id, cycle_time),
+            source_id=source_id,
+            cycle_time=cycle_time,
+            cycle_hour=cycle_time.hour,
+            available=True,
+            status="discovered",
+        )
+
+    def _fake_discover_source_window(
+        adapter: Any,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[Any]:
+        del adapter
+        assert source_id == "gfs"
+        assert start_time <= valid_time <= end_time
+        assert out_of_window_time < start_time
+        return [
+            _row("gfs", valid_time),
+            _row("IFS", valid_time),
+            _row("gfs", out_of_window_time),
+        ]
+
+    monkeypatch.setattr(scheduler, "_discover_source_window", _fake_discover_source_window)
+
+    cycles, evidence = scheduler._discover_cycles(now, models=())
+
+    selected_rows = [
+        (cycle.discovery.source_id, scheduler_module._format_utc(cycle.discovery.cycle_time))
+        for cycle in cycles
+    ]
+    evidence_rows = [
+        (item.get("source_id"), item.get("cycle_time_utc"))
+        for item in evidence
+        if item.get("cycle_time_utc") is not None
+    ]
+    assert selected_rows == [("gfs", "2026-05-21T06:00:00Z")]
+    assert evidence_rows == [("gfs", "2026-05-21T06:00:00Z")]
+    assert ("IFS", "2026-05-21T06:00:00Z") not in selected_rows
+    assert ("IFS", "2026-05-21T06:00:00Z") not in evidence_rows
+    assert ("gfs", "2026-05-21T00:00:00Z") not in selected_rows
+    assert ("gfs", "2026-05-21T00:00:00Z") not in evidence_rows
 
 
 # ---------------------------------------------------------------------------

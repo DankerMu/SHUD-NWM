@@ -1139,7 +1139,7 @@ separate PR boundaries.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_scheduler_backfill.py -k 'candidate_state_completion_fallback'`
     -> terminal candidate-state fallback marks completed cycles complete, and
     mixed/non-terminal model state remains a gap.
-  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'source_cycle_evidence or discovered_cycles_limit'`
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'source_cycle_evidence or cycle_discovery_limit'`
     -> source-cycle evidence redaction and discovery resource-limit paths pass.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
     -> full production scheduler tests pass if extraction touches shared
@@ -1150,13 +1150,13 @@ separate PR boundaries.
     -> valid.
 - Implementation evidence (2026-06-15):
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_scheduler_backfill.py`
-    -> 16 passed.
+    -> 18 passed.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_scheduler_backfill.py -k 'legacy_adapter or typeerror or out_of_window or wrong_source'`
+    -> 2 passed, 16 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_scheduler_backfill.py -k 'candidate_state_completion_fallback or monkeypatch'`
-    -> 5 passed, 11 deselected.
-  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'source_cycle_evidence or discovered_cycles_limit'`
-    -> 1 passed, 520 deselected.
-  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py::test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo`
-    -> 1 passed.
+    -> 5 passed, 13 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'source_cycle_evidence or cycle_discovery_limit'`
+    -> 2 passed, 519 deselected.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
     -> 521 passed.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_scheduler_backfill.py tests/test_production_scheduler.py`
