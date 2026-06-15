@@ -132,7 +132,7 @@ function buildDualForecast(segment: HydroMetRiverForecastSegmentIdentity, result
 }
 
 /**
- * 河段 q_down 预报面板（M26 单页全屏）：固定地图右侧 16:9 玻璃窗（点河段在其右侧展开）。
+ * 河段 q_down 预报面板（M26 单页全屏）：屏幕居中 16:9 玻璃窗（点河段后于屏幕中央展开）。
  * GFS + IFS 同一坐标轴同时渲染、不做切换；滚轮缩放时间轴（以光标所在时刻为中心）。
  * honest 红线：每个源契约校验失败/无产品 → 列出原因，绝不绘制；两源皆无 → honest 空态。
  */
@@ -175,7 +175,7 @@ export function M11RiverForecastPanel({
   return (
     <aside
       className={cn(
-        'absolute right-4 top-1/2 z-[130] flex aspect-video w-[min(44rem,46vw)] max-h-[82vh] -translate-y-1/2 flex-col overflow-hidden',
+        'absolute left-1/2 top-1/2 z-[130] flex aspect-video w-[min(44rem,46vw)] max-h-[82vh] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden',
         M11_POPUP_GLASS,
       )}
       data-testid="m11-river-forecast-panel"
