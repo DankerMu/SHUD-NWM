@@ -136,9 +136,6 @@ function M11FullscreenMap({
 
   return (
     <div className="flex h-full min-h-[40rem] w-full flex-col overflow-hidden bg-[#d7e7ef]">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-neutral-200 bg-white px-4 shadow-sm">
-        <span className="text-base font-semibold tracking-wide text-primary-700">全国水文预报系统</span>
-      </header>
       <section
         className="relative w-full flex-1 overflow-hidden"
         aria-label={mapLabel}
