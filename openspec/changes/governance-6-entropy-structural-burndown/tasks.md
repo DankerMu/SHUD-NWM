@@ -88,11 +88,11 @@ separate PR boundaries.
 
 ## 7. Scheduler Discovery Extraction
 
-- [ ] 7.1 Create `services/orchestrator/scheduler_discovery.py` for cycle
+- [x] 7.1 Create `services/orchestrator/scheduler_discovery.py` for cycle
   discovery, completion checks, and backfill selection.
-- [ ] 7.2 Preserve oldest-gap-first, later-gap defer, and empty-model legacy
+- [x] 7.2 Preserve oldest-gap-first, later-gap defer, and empty-model legacy
   fallback behavior.
-- [ ] 7.3 Verify with focused backfill and discovery tests.
+- [x] 7.3 Verify with focused backfill and discovery tests.
 
 ## 8. Scheduler Candidate Construction Extraction
 
@@ -983,10 +983,196 @@ separate PR boundaries.
 - PR Boundary: Scheduler discovery/backfill helpers only.
 - Required Reading: `specs/orchestrator-structural-burndown/spec.md`,
   `tests/test_scheduler_backfill.py`.
-- Verification: `uv run --no-sync pytest -q tests/test_scheduler_backfill.py`
-  plus `uv run --no-sync ruff check services/orchestrator tests/test_scheduler_backfill.py`.
+- Fixture level: high.
+- Repair intensity: high.
+- Change surface:
+  - `ProductionScheduler._discover_cycles`,
+    `ProductionScheduler._discover_source_window`, and
+    `ProductionScheduler._cycle_completion_status`.
+  - New `services/orchestrator/scheduler_discovery.py` extraction module.
+  - Discovery/backfill evidence helpers needed to preserve selected,
+    deferred, duplicate, and unavailable source-cycle evidence.
+- Must preserve:
+  - Backfill mode remains `bool(backfill_enabled and models)`.
+  - Backfill selects the oldest available incomplete cycle first.
+  - Later source-local and global gaps are deferred with the existing reason
+    codes and evidence shapes.
+  - Empty-model backfill falls back to legacy newest-cycle mode with no
+    backfill audit/deferred evidence.
+  - Discovery date-window scanning, duplicate filtering,
+    `MAX_DISCOVERED_CYCLES`, source ordering, and adapter `TypeError`
+    fallback remain unchanged.
+- Risk packs considered:
+  - Public API / CLI / script entry: selected - `run_once` and
+    `plan-production` expose discovery/backfill pass evidence.
+  - Config / project setup: selected - `lookback_hours`,
+    `cycle_lag_hours`, `max_cycles_per_source`, source filters, and
+    `backfill_enabled` drive selection.
+  - File IO / path safety / overwrite: not selected - no file read/write
+    surface moves in this issue.
+  - Schema / columns / units / field names: selected - pass evidence keys,
+    `backfill_audit`, `backfill_deferred`, and source-cycle evidence fields
+    must remain stable.
+  - Auth / permissions / secrets: selected - source discovery evidence and
+    probe URIs must keep existing redaction behavior when moved.
+  - Concurrency / shared state / ordering: selected - cycle ordering and
+    warm-start gap sequencing are the core behavior.
+  - Resource limits / large input / discovery: selected - daily discovery
+    scanning and `MAX_DISCOVERED_CYCLES` limit are in scope.
+  - Legacy compatibility / examples: selected - private method callers and
+    tests import helpers from `scheduler.py`; empty-model legacy mode must
+    remain.
+  - Error handling / rollback / partial outputs: selected - adapter absence,
+    unavailable cycles, provider fallbacks, and resource-limit failures must
+    keep stable evidence/status behavior.
+  - Release / packaging / dependency compatibility: selected - new module
+    must not create circular imports and old scheduler imports/methods stay
+    available.
+  - Documentation / migration notes: selected - OpenSpec task and evidence
+    state must align with the extraction.
+- Domain risk packs considered:
+  - Geospatial / CRS / basin geometry: not selected - discovery/backfill
+    selection reads source cycle identity and model ids only; basin geometry,
+    CRS, and raster/vector alignment remain candidate construction/runtime
+    concerns.
+  - Hydro-met time series / forcing windows: selected - lookback, cycle lag,
+    source-cycle hour, GFS/IFS source windows, and horizon metadata determine
+    which forecast cycles may enter candidate construction.
+  - SHUD numerical runtime / conservation / NaN: not selected - no SHUD
+    execution, restart, output cadence, or numerical result handling changes.
+  - PostGIS / TimescaleDB domain behavior: not selected - this issue does
+    not alter migrations, SQL, hypertables, geometry queries, or DB schema;
+    repository providers are only read through existing interfaces.
+  - Slurm production lifecycle / mock-vs-real parity: selected - completion
+    checks use active/candidate state repositories and must preserve stale
+    pipeline truth.
+  - External hydro-met providers / snapshot reproducibility: selected -
+    source adapters, probe status, rate-limit/probe-failure evidence, and
+    source-cycle availability decide selection without consuming source
+    budget for unavailable cycles.
+  - Run manifest / QC provenance: not selected - candidate/run manifest
+    assembly is out of scope for G6-11.
+  - Published NHMS artifacts / display identity: not selected - publish and
+    frontend display identity are out of scope.
+- Invariant Matrix:
+  - Governing invariant: discovery extraction must not change which
+    source/cycle pairs enter candidate construction or which source-cycle and
+    backfill evidence rows explain excluded/deferred cycles.
+  - Source-of-truth identity/contract: normalized `source_id`,
+    `cycle_id_for(source_id, cycle_time)`, UTC `cycle_time`,
+    `cycle_hour`, source adapter horizon metadata, and model completion truth
+    from `has_completed_pipeline` or candidate-state terminal decisions.
+  - Surfaces:
+    - Producers: source adapters returning `CycleDiscovery`,
+      registry-selected models, completion provider,
+      candidate-state provider, and scheduler config.
+    - Validators/preflight: date-window boundaries,
+      `MAX_DISCOVERED_CYCLES`, duplicate cycle filtering, source id/window
+      filtering, source horizon metadata, and completion status checks.
+    - Storage/cache/query: active repository `has_completed_pipeline` and
+      `candidate_state`; no DB schema changes.
+    - Public routes/entrypoints: `ProductionScheduler.run_once`,
+      `ProductionScheduler._discover_cycles`,
+      `ProductionScheduler._discover_source_window`,
+      `ProductionScheduler._cycle_completion_status`, and CLI planning tests.
+    - Frontend/downstream consumers: scheduler pass evidence consumed by ops
+      runbooks and downstream candidate construction; no frontend code change.
+    - Failure paths/rollback/stale state: missing adapter, unavailable source
+      cycles, duplicate cycles, over-limit discovery, no completion provider,
+      old adapter signature fallback, empty models, and stale/completed
+      candidate-state truth.
+    - Evidence/audit/readiness: `source_cycles`, `backfill.enabled`,
+      `backfill.audit`, `backfill_deferred`, duplicate exclusions,
+      unavailable not-selected evidence, probe URI redaction, and focused
+      backfill tests.
+  - Regression rows:
+    - Backfill enabled with models and newest completed cycle plus older gap
+      -> select the older gap, not the newest completed cycle.
+    - Backfill enabled with multiple available gaps -> select only the oldest
+      eligible gap and defer later gaps with
+      `backfill_deferred_waiting_for_prior_cycle`.
+    - Backfill enabled across multiple sources with later selected gaps ->
+      keep only the global earliest selected cycle and defer later ones with
+      `backfill_deferred_waiting_for_global_prior_cycle`.
+    - Backfill enabled with empty models -> legacy newest-cycle mode, no
+      `backfill_audit`, and no `backfill_deferred`.
+    - No completion provider -> treat discovered cycles as gaps without
+      raising and preserve audit counts.
+    - Completion provider is false or absent but every selected model has
+      candidate-state terminal `terminal_hydro_success` or
+      `terminal_pipeline_success` -> `_cycle_completion_status` returns
+      `complete`, the cycle does not consume the backfill execution slot, and
+      `backfill_audit.complete_count`, `gap_count`, and `selected_count`
+      reflect the skipped completed cycle.
+    - Candidate-state completion fallback has one model with missing or
+      non-terminal state -> `_cycle_completion_status` returns `gap`, the
+      oldest gap is selected, and later gaps remain deferred.
+    - Adapter returns duplicate or out-of-window cycles -> duplicate/outside
+      rows do not enter candidate construction and duplicate evidence remains
+      stable.
+    - Discovery count exceeds `MAX_DISCOVERED_CYCLES` -> scheduler returns
+      the existing limit evidence/status path.
+    - Source discovery/probe evidence contains secret-bearing keys or URLs
+      -> redacted evidence remains redacted after extraction.
+- Boundary-surface checklist:
+  - Shared helper roots: scheduler discovery/backfill helpers moved to
+    `scheduler_discovery.py`.
+  - Public entrypoints: `run_once`, `_discover_cycles`,
+    `_cycle_completion_status`, `_discover_source_window`, and CLI
+    `plan-production` lookback behavior.
+  - Read surfaces: source adapters, model registry output, active repository
+    completion/candidate-state providers, scheduler config.
+  - Write/delete/overwrite surfaces: none introduced; discovery only chooses
+    later candidate construction inputs and evidence.
+  - Staging/publish/rollback surfaces: none; no artifact publish behavior.
+  - Producer/consumer evidence boundaries: source-cycle evidence, backfill
+    audit/deferred evidence, duplicate evidence, unavailable source evidence,
+    pass-level `backfill` evidence.
+  - Stale-state/idempotency boundaries: completed-cycle skip, terminal
+    candidate-state completion fallback, old adapter signature fallback,
+    duplicate cycle filtering, global prior-cycle defer.
+  - Unchanged downstream consumers: candidate construction, execution,
+    evidence serialization, scheduler lease/reconcile, chain behavior.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_scheduler_backfill.py`
+    -> focused backfill, discovery, and CLI lookback tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_scheduler_backfill.py -k 'candidate_state_completion_fallback'`
+    -> terminal candidate-state fallback marks completed cycles complete, and
+    mixed/non-terminal model state remains a gap.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'source_cycle_evidence or discovered_cycles_limit'`
+    -> source-cycle evidence redaction and discovery resource-limit paths pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> full production scheduler tests pass if extraction touches shared
+    scheduler import or candidate-state compatibility surfaces.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_scheduler_backfill.py tests/test_production_scheduler.py`
+    -> lint passes.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
+- Implementation evidence (2026-06-15):
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_scheduler_backfill.py`
+    -> 16 passed.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_scheduler_backfill.py -k 'candidate_state_completion_fallback or monkeypatch'`
+    -> 5 passed, 11 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'source_cycle_evidence or discovered_cycles_limit'`
+    -> 1 passed, 520 deselected.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py::test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo`
+    -> 1 passed.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> 521 passed.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_scheduler_backfill.py tests/test_production_scheduler.py`
+    -> All checks passed.
+  - `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> Change is valid.
+  - `git diff --check`
+    -> passed.
 - Acceptance: oldest-gap-first, later-gap defer, and empty-model legacy fallback
   behavior remain unchanged.
+- Non-goals:
+  - No candidate construction, execution, evidence serialization, lease,
+    reservation, reconcile, retry service, chain stage, DB schema, or frontend
+    behavior rewrite.
+  - No status/reason/evidence key rename and no change to `.entropy-baseline`.
+  - No retirement of scheduler private method compatibility in this issue.
 
 ### G6-12 Scheduler candidate construction extraction
 
