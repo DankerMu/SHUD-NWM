@@ -139,12 +139,12 @@ separate PR boundaries.
 
 ## 12. Chain Stage Execution Extraction
 
-- [ ] 12.1 Create `services/orchestrator/chain_stage_execution.py` for stage
+- [x] 12.1 Create `services/orchestrator/chain_stage_execution.py` for stage
   reserve/submit/bind/poll/resume substeps.
-- [ ] 12.2 Preserve reserve-before-sbatch, lost-reservation skip, idempotency
+- [x] 12.2 Preserve reserve-before-sbatch, lost-reservation skip, idempotency
   comments, bind-after-submit, startup reconcile, and manual retry terminal
   stage behavior.
-- [ ] 12.3 Verify with focused orchestration-chain reservation and submission
+- [x] 12.3 Verify with focused orchestration-chain reservation and submission
   tests.
 
 ## 13. Chain Manifest Extraction
@@ -2268,6 +2268,227 @@ separate PR boundaries.
   plus `uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py`.
 - Acceptance: focused reservation and submission tests pass without duplicate
   Slurm submission behavior changes.
+- Fixture level: expanded
+- Repair intensity: high
+- Project profile: NHMS
+- Mandatory expanded triggers:
+  - Shared orchestrator compatibility surface: `ForecastOrchestrator` private
+    stage execution methods are downstream scheduler/test entrypoints.
+  - Durable Slurm lifecycle ordering: reserve-before-sbatch, lost-reservation
+    skip, bind-after-submit, startup resume, and retry suffixes prevent
+    duplicate real submissions.
+  - Persisted schema/evidence contracts: `pipeline_job`, pipeline events, Slurm
+    comments, status/error fields, log URIs, retry ids, and array task ids must
+    remain byte/shape compatible.
+  - File IO and publish boundary: terminal log publication must not advertise
+    missing or failed writes.
+  - Resource bounds: poll timeout and array accounting fallback behavior remain
+    bounded and evidence-backed.
+  - Compatibility/ownership proof: `chain.py` remains the legacy method/import
+    surface while `chain_stage_execution.py` owns the moved execution helpers.
+- Change surface:
+  - `services/orchestrator/chain.py` `ForecastOrchestrator` stage execution
+    methods: `_run_cycle_chain`, `_submit_and_wait_cycle_stage`,
+    `_run_local_publish_stage`, `_resume_cycle_stage`,
+    `_poll_cycle_stage_until_terminal`, `_record_cycle_stage_poll_timeout`,
+    `_submit_array_stage`, and the reservation/bind/duplicate-skip call sites.
+  - New `services/orchestrator/chain_stage_execution.py` as the extracted
+    stage execution module.
+  - `tests/test_orchestration_chain.py` reservation, submission, polling,
+    resume, manual retry, duplicate-skip, and array idempotency coverage.
+- Must preserve:
+  - Reserve-before-sbatch: every Slurm submission has a durable unbound
+    reservation before `submit_job` or `submit_job_array` is called.
+  - Lost/in-flight reservation skip: a concurrent active reservation returns
+    `skipped_duplicate_submission` and never calls sbatch.
+  - Idempotency comments: non-array and array submissions carry the same
+    `run_id:stage[:retry_N]` idempotency key through Slurm comments.
+  - Bind-after-submit: a reservation is bound only after a real Slurm job id is
+    returned; submission failure remains durable and retry-eligible.
+  - Resume/poll behavior: startup/crash recovery polls active jobs, publishes
+    logs only after terminal observation, and preserves manual retry terminal
+    behavior.
+  - Status, reason, error code, schema version, evidence key, event detail,
+    pipeline job id, retry id, array task id, and public import compatibility.
+- Must add/change:
+  - Move stage execution code into `chain_stage_execution.py` behind stable
+    `ForecastOrchestrator` compatibility methods or bound helper calls.
+  - Keep `chain.py` as the legacy import and method surface while reducing
+    inline stage execution body size.
+  - Add focused tests or static guards that prove the extracted module owns
+    stage execution without changing the old caller surface.
+- Risk packs considered (core):
+  - Public API / CLI / script entry: selected - private orchestrator methods
+    are exercised by tests and downstream scheduler code as compatibility
+    entrypoints.
+  - Config / project setup: not selected - no env, dependency, or runtime
+    configuration change is expected.
+  - File IO / path safety / overwrite: selected - local publish/log execution
+    writes stage logs and must keep existing safe-write behavior unchanged.
+  - Schema / columns / units / field names: selected - pipeline job rows,
+    pipeline events, manifest submission payloads, and evidence keys must not
+    drift.
+  - Auth / permissions / secrets: not selected - no credential or permission
+    boundary changes.
+  - Concurrency / shared state / ordering: selected - reservation, duplicate
+    submit prevention, retry, poll, and startup resume ordering are the main
+    invariant.
+  - Resource limits / large input / discovery: selected - polling timeout and
+    array accounting fallback/error behavior must remain bounded.
+  - Legacy compatibility / examples: selected - old `chain.py` methods and
+    imports remain usable until callers migrate.
+  - Error handling / rollback / partial outputs: selected - submission failure,
+    poll timeout, log publish failure, partial array retry, and manual retry
+    terminal paths must keep stable behavior.
+  - Release / packaging / dependency compatibility: not selected - no package
+    metadata or dependency update.
+  - Documentation / migration notes: not selected - this issue is an internal
+    refactor with PR evidence, not user-facing docs.
+- Domain risk packs:
+  - Slurm production lifecycle / mock-vs-real parity: selected - sbatch,
+    array submission, Slurm polling, and accounting event behavior are touched.
+  - Run manifest / QC provenance: selected - submission manifests and runtime
+    root contract evidence remain producer provenance for stages.
+  - Published NHMS artifacts / display identity: selected - local publish and
+    log publication behavior are part of the stage execution surface.
+  - SHUD numerical runtime / conservation / NaN: not selected - no model
+    numerical execution or solver output semantics change.
+  - Hydro-met time series / forcing windows: not selected - no forecast window
+    or forcing data selection change.
+  - Geospatial / CRS / basin geometry: not selected - no geometry/projection
+    behavior change.
+  - PostGIS / TimescaleDB domain behavior: not selected - no schema or query
+    semantics beyond existing pipeline job/event writes.
+  - External hydro-met providers / snapshot reproducibility: not selected - no
+    provider discovery or snapshot behavior change.
+- Boundary-surface checklist:
+  - Shared helper roots: `chain.py` stage execution helpers and new
+    `chain_stage_execution.py`.
+  - Public entrypoints: `ForecastOrchestrator._run_cycle_chain`,
+    `_submit_and_wait_cycle_stage`, `_resume_cycle_stage`, and legacy imports.
+  - Read surfaces: existing pipeline job rows, Slurm gateway status/accounting,
+    runtime manifests, active basin task metadata.
+  - Write/delete/overwrite surfaces: pipeline job upsert/status update,
+    pipeline event insertion, object-store/published log writes, forecast cycle
+    status updates; no delete/rollback behavior moves.
+  - Staging/publish/rollback surfaces: local publish stage and durable log
+    publication after terminal observation.
+  - Producer/consumer evidence boundaries: submission event details, status
+    change events, accounting/gap events, task result evidence, and runtime root
+    contract evidence.
+  - Stale-state/idempotency boundaries: in-flight reservation skip, retry job
+    ids, crash recovery resume, poll timeout, and manual retry terminal rows.
+  - Unchanged downstream consumers: scheduler execution, reservation/reconcile,
+    retry service, Slurm gateway, tile publisher, manifest helpers, array
+    accounting, DB schema, frontend, docs/runbooks, and `.entropy-baseline`.
+- Invariant Matrix:
+  - Governing invariant: each chain stage has exactly one durable execution
+    identity per attempt, and no refactor may create duplicate sbatch
+    submissions, stale terminal reuse, or evidence that advertises a job before
+    durable reservation/bind/poll state exists.
+  - Source-of-truth identity/contract: `pipeline_job.idempotency_key`,
+    `pipeline_job.job_id`, `slurm_job_id`, stage name, retry suffix, and the
+    Slurm comment produced from the same idempotency key.
+  - Producers: `ForecastOrchestrator` stage execution methods and extracted
+    `chain_stage_execution.py` helpers.
+  - Validators/preflight: reservation helpers in
+    `services/orchestrator/reservation.py`, repository
+    `reserve_pipeline_job`/`bind_pipeline_job_reservation`, duplicate-skip
+    checks, poll timeout checks, and array accounting completeness checks.
+  - Storage/cache/query: pipeline job rows, pipeline events, object-store logs,
+    published log files, and queried existing stage jobs.
+  - Public routes/entrypoints: legacy `ForecastOrchestrator` private methods
+    used by tests and scheduler-triggered orchestration paths.
+  - Frontend/downstream consumers: scheduler evidence, retry/reconcile,
+    tile publishing, display log consumers, and final pipeline result stage
+    tuples.
+  - Failure paths/rollback/stale state: reservation lost/in-flight skip,
+    submission failure, poll timeout, log publish failure, partial array retry,
+    manual retry terminal stage, startup resume, and stale terminal rows after
+    upstream refresh.
+  - Evidence/audit/readiness: `tests/test_orchestration_chain.py` focused
+    reservation/submission/resume/poll slices, ruff, OpenSpec validation, and
+    PR cross-review evidence.
+  - Regression rows:
+    - New cycle + non-array stage -> reservation exists unbound before
+      `submit_job`, Slurm comment decodes to the same idempotency key, and the
+      row binds after returned `slurm_job_id`.
+    - New cycle + array stage -> `submit_job_array` manifest carries the same
+      idempotency comment and array task id evidence stays unchanged.
+    - Concurrent in-flight reservation -> result is
+      `skipped_duplicate_submission`, no sbatch call occurs, and duplicate-skip
+      evidence records the existing reservation.
+    - Terminal failed/cancelled stage + manual retry attempt -> new
+      `job_id`/idempotency suffix is submitted rather than reusing the old
+      terminal row.
+    - Active job after startup/crash recovery -> resume polls to terminal,
+      updates status/event/log evidence, and does not submit a replacement.
+    - Poll timeout or log publish failure -> stable error code/evidence is
+      persisted without advertising a missing log URI.
+    - Unchanged sibling manifest/array helpers -> stage result tuple,
+      task-result evidence, runtime root contract, and downstream publish
+      filtering remain compatible.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_execution_module_imports_without_loading_chain_runtime or chain_stage_execution_legacy_methods_delegate'`
+    -> `chain_stage_execution` imports without circular heavy runtime loading,
+    `ForecastOrchestrator._submit_and_wait_cycle_stage`,
+    `_resume_cycle_stage`, `_poll_cycle_stage_until_terminal`,
+    `_record_cycle_stage_poll_timeout`, `_submit_array_stage`, and
+    `_slurm_submission_manifest` still exist on the legacy class and delegate to
+    the extracted module.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_reserves_before_submit_and_binds_after or array_stage_submission_threads_idempotency_comment or chain_stage_reservation_is_idempotent_across_resubmit or manual_retry_terminal_stage_submits_new_attempt_identity or overlapping_pass_does_not_double_submit_real_submit_path or crash_recovery_resumes_after_last_completed_stage or resume_array_status_override or poll_timeout'`
+    -> focused reservation, idempotency, duplicate-skip, resume, log publish,
+    and timeout tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
+    -> full orchestration-chain focused suite passes.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py`
+    -> lint passes.
+  - `openspec validate governance-6-entropy-structural-burndown --strict
+    --no-interactive` -> valid.
+  - `git diff --check` -> no whitespace errors.
+- Implementation evidence (2026-06-16, branch
+  `feat/issue-472-chain-stage-execution`, pre-PR head pending):
+  - Added `services/orchestrator/chain_stage_execution.py` for cycle stage
+    submit/wait, local publish-stage execution, resume, poll, poll-timeout,
+    array submit, and Slurm submission manifest helpers.
+  - Kept `ForecastOrchestrator` legacy private method surface in
+    `services/orchestrator/chain.py`; the old methods now thinly delegate to
+    `chain_stage_execution.py` through a dependency bridge instead of importing
+    `chain.py` from the extracted module.
+  - Left manifest/model-run assembly and array accounting helpers in
+    `chain.py` for G6-17/G6-18, with the extracted stage execution module
+    calling the existing helpers on the orchestrator instance.
+  - Added focused guards in `tests/test_orchestration_chain.py` proving
+    `chain_stage_execution` imports without loading
+    `services.orchestrator.chain`, and that legacy `ForecastOrchestrator`
+    methods still exist and delegate to the extracted module.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_execution_module_imports_without_loading_chain_runtime or chain_stage_execution_legacy_methods_delegate'`
+    -> `2 passed, 169 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_reserves_before_submit_and_binds_after or array_stage_submission_threads_idempotency_comment or chain_stage_reservation_is_idempotent_across_resubmit or manual_retry_terminal_stage_submits_new_attempt_identity or overlapping_pass_does_not_double_submit_real_submit_path or crash_recovery_resumes_after_last_completed_stage or resume_array_status_override or poll_timeout'`
+    -> `13 passed, 158 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
+    -> `171 passed`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py`
+    -> `All checks passed!`.
+  - Verification:
+    `openspec validate governance-6-entropy-structural-burndown --strict
+    --no-interactive` -> valid.
+  - Verification: `git diff --check` -> no whitespace errors.
+- Non-goals:
+  - No manifest/model-run assembly extraction; `chain_manifests.py` belongs to
+    G6-17.
+  - No array aggregation/accounting extraction; `chain_array_accounting.py`
+    belongs to G6-18.
+  - No scheduler behavior, reservation protocol, retry service, Slurm gateway,
+    tile publisher, DB schema, frontend, docs/runbooks, or
+    `.entropy-baseline` behavior change except tests/import wiring required for
+    this extraction.
+  - No status, reason, error code, schema version, evidence key, stage name,
+    job id, retry id, or artifact path rename.
 
 ### G6-17 Chain manifest extraction
 

@@ -6974,6 +6974,127 @@ def test_template_export_lines_quotes_grib_env_with_special_chars(monkeypatch):
     assert "$(touch pwn)" not in path_line.replace(quoted, "")
 
 
+def test_chain_stage_execution_module_imports_without_loading_chain_runtime() -> None:
+    command = (
+        "import sys; "
+        "import services.orchestrator.chain_stage_execution as module; "
+        "assert 'services.orchestrator.chain' not in sys.modules; "
+        "assert hasattr(module, 'submit_and_wait_cycle_stage')"
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_chain_stage_execution_legacy_methods_delegate(monkeypatch) -> None:
+    from services.orchestrator import chain_stage_execution
+
+    orchestrator = object.__new__(ForecastOrchestrator)
+    stage = object()
+    context = object()
+    job = {"job_id": "job-1"}
+    manifest = {"stage": "download"}
+    calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def capture(name: str, result: Any) -> Any:
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            calls.append((name, args, kwargs))
+            return result
+
+        return _fake
+
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "submit_and_wait_cycle_stage",
+        capture("submit_and_wait_cycle_stage", ("submitted", None)),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "run_local_publish_stage",
+        capture("run_local_publish_stage", "published"),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "resume_cycle_stage",
+        capture("resume_cycle_stage", ("resumed", None)),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "poll_cycle_stage_until_terminal",
+        capture("poll_cycle_stage_until_terminal", "polled"),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "record_cycle_stage_poll_timeout",
+        capture("record_cycle_stage_poll_timeout", "timed-out"),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "submit_array_stage",
+        capture("submit_array_stage", {"job_id": "array-1"}),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "slurm_submission_manifest",
+        capture("slurm_submission_manifest", {"submitted": True}),
+    )
+
+    for method_name in (
+        "_submit_and_wait_cycle_stage",
+        "_run_local_publish_stage",
+        "_resume_cycle_stage",
+        "_poll_cycle_stage_until_terminal",
+        "_record_cycle_stage_poll_timeout",
+        "_submit_array_stage",
+        "_slurm_submission_manifest",
+    ):
+        assert callable(getattr(ForecastOrchestrator, method_name))
+
+    assert orchestrator._submit_and_wait_cycle_stage(stage, context, pipeline_job_id="job-1") == ("submitted", None)
+    assert orchestrator._run_local_publish_stage(stage, context, pipeline_job_id="job-1") == "published"
+    assert orchestrator._resume_cycle_stage(stage, context, job) == ("resumed", None)
+    assert (
+        orchestrator._poll_cycle_stage_until_terminal(
+            stage=stage,
+            context=context,
+            pipeline_job_id="job-1",
+            initial_job={"job_id": "slurm-1"},
+            initial_status="running",
+            log_publication=None,
+        )
+        == "polled"
+    )
+    assert (
+        orchestrator._record_cycle_stage_poll_timeout(
+            stage=stage,
+            context=context,
+            pipeline_job_id="job-1",
+            job={"job_id": "slurm-1"},
+            current_status="running",
+            log_publication=None,
+        )
+        == "timed-out"
+    )
+    assert orchestrator._submit_array_stage(stage, context, [{"task_id": 0}], manifest) == {"job_id": "array-1"}
+    assert orchestrator._slurm_submission_manifest(manifest) == {"submitted": True}
+
+    assert [name for name, _args, _kwargs in calls] == [
+        "submit_and_wait_cycle_stage",
+        "run_local_publish_stage",
+        "resume_cycle_stage",
+        "poll_cycle_stage_until_terminal",
+        "record_cycle_stage_poll_timeout",
+        "submit_array_stage",
+        "slurm_submission_manifest",
+    ]
+    assert all(args[0] is orchestrator for _name, args, _kwargs in calls)
+
+
 # --- M24 §3A: two-phase reserve -> bind through the real chain submit path ----
 
 

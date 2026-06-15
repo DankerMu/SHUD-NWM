@@ -143,6 +143,29 @@ bind-after-submit semantics for array and non-array stages.
 - **THEN** dead reserved-unbound rows are handled without causing duplicate
   Slurm submissions
 
+#### Scenario: active stage is resumed after startup
+- **WHEN** an existing non-terminal stage job is found during chain execution
+- **THEN** the chain polls that Slurm job to terminal, records the same
+  status/event/log evidence, and does not submit a replacement job
+
+#### Scenario: stage polling times out
+- **WHEN** a submitted stage does not reach a terminal Slurm state before the
+  configured timeout
+- **THEN** the pipeline job and forecast cycle are marked with the stable
+  `SLURM_JOB_TIMEOUT` failure evidence and no fabricated accounting is emitted
+
+#### Scenario: terminal log publication fails
+- **WHEN** terminal log persistence fails during submit, resume, or timeout
+  handling
+- **THEN** durable job status evidence is still recorded and the chain does not
+  advertise a missing or failed published log URI
+
+#### Scenario: manual retry targets a terminal stage
+- **WHEN** manual retry metadata targets a failed, permanently failed,
+  submission-failed, cancelled, or partially failed stage
+- **THEN** the chain submits a new retry attempt identity instead of reusing the
+  old terminal job id or idempotency key
+
 ### Requirement: Chain manifest extraction SHALL preserve published evidence
 
 Chain manifest extraction SHALL preserve published evidence, schema versions,
