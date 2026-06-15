@@ -2041,6 +2041,175 @@ separate PR boundaries.
   plus `uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py`.
 - Acceptance: existing import surfaces keep working and focused chain catalog
   tests pass.
+- Fixture level: expanded.
+- Repair intensity: high.
+- Project profile: NHMS.
+- Change surface:
+  - `services/orchestrator/chain.py` compatibility exports and internal imports.
+  - New `services/orchestrator/chain_types.py` type/context/result module.
+  - New `services/orchestrator/chain_stages.py` static stage catalog module.
+  - Focused chain catalog/type compatibility tests in
+    `tests/test_orchestration_chain.py`; scheduler/analysis tests remain
+    downstream compatibility surfaces.
+- Must preserve:
+  - Existing imports from `services.orchestrator.chain` for `StageDefinition`,
+    `LEGACY_FORECAST_STAGES`, `M3_STAGES`, `STAGES`, `ANALYSIS_STAGES`,
+    `ModelContext`, `ForcingContext`, `InitialStateSelection`,
+    `ForecastRunContext`, `AnalysisRunContext`, `StageRunResult`,
+    `PipelineResult`, `ArrayTaskResult`, `ArrayAggregation`,
+    `DisplayLogPublication`, `DisplayLogPublicationAttempt`,
+    `TerminalJobObservation`, `CycleOrchestrationContext`, and
+    `ModelRunAssembly`.
+  - Stage IDs, order, job types, sbatch template names, success/failure cycle
+    statuses, and `is_array` flags for legacy forecast, M3 production, and
+    analysis chains.
+  - Dataclass frozen/mutable status, field names, defaults, property behavior,
+    and `ModelRunAssembly.to_manifest_entry()` output keys.
+  - No reservation, submission, polling, manifest, retry, Slurm, DB schema, or
+    accounting behavior changes in this issue.
+- Must add/change:
+  - Extract static dataclasses, contexts, result types, and stable type aliases
+    into `chain_types.py`.
+  - Extract static stage definitions and catalog aliases into
+    `chain_stages.py`.
+  - Keep `chain.py` as the old import surface through explicit compatibility
+    re-exports.
+  - Add focused tests proving new modules and legacy `chain.py` exports refer
+    to the same objects and preserve static catalog snapshots.
+- Risk packs considered:
+  - Public API / CLI / script entry: selected - `services.orchestrator.chain`
+    imports are used by scheduler, tests, and integration helpers.
+  - Config / project setup: not selected - no dependency, env, or package
+    configuration change.
+  - File IO / path safety / overwrite: not selected - this extraction does not
+    add file reads/writes or path handling.
+  - Schema / columns / units / field names: selected - dataclass fields,
+    manifest-entry keys, stage status names, and template names are stable
+    contracts.
+  - Auth / permissions / secrets: not selected - no credential or permission
+    boundary is touched.
+  - Concurrency / shared state / ordering: selected - static stage order and
+    array flags define the downstream production stage sequence.
+  - Resource limits / large input / discovery: not selected - no scan, loop, or
+    large-input behavior is added.
+  - Legacy compatibility / examples: selected - old imports from
+    `chain.py` must remain valid until callers migrate.
+  - Error handling / rollback / partial outputs: selected - moved result types
+    and aggregation status properties must preserve failed/partial/succeeded
+    semantics used by downstream error paths.
+  - Release / packaging / dependency compatibility: selected - new modules
+    must import without circular dependencies and without changing package
+    import behavior.
+  - Documentation / migration notes: not selected - OpenSpec and PR evidence
+    carry this extraction; no user-facing docs change is required.
+- Domain risk packs:
+  - Slurm production lifecycle / mock-vs-real parity: selected - stage job
+    types, templates, order, and array flags feed sbatch submission in later
+    execution code.
+  - Run manifest / QC provenance: selected - run context/result and
+    `ModelRunAssembly` contracts feed manifest/QC evidence even though
+    manifest helpers are out of scope.
+  - Published NHMS artifacts / display identity: selected - publish stage
+    identity and result contracts must not change.
+  - Geospatial / CRS / basin geometry: not selected - no basin geometry,
+    projection, or CRS conversion behavior changes.
+  - Hydro-met time series / forcing windows: not selected - no forcing window
+    calculation or time-series ingestion behavior changes.
+  - SHUD numerical runtime / conservation / NaN: not selected - no solver
+    runtime, output cadence, numerical state, or NaN handling changes.
+  - PostGIS / TimescaleDB domain behavior: not selected - no database schema,
+    hypertable, or spatial query behavior changes.
+  - External hydro-met providers / snapshot reproducibility: not selected - no
+    provider download, source identity, or snapshot reproducibility behavior
+    changes.
+- Invariant Matrix:
+  - Governing invariant: moving static chain types and stage catalogs must not
+    change any public `chain.py` import identity or downstream stage/catalog
+    contract.
+  - Source-of-truth identity/contract: dataclass object identity, dataclass
+    field/default metadata, static stage tuple contents/order, and
+    `ModelRunAssembly.to_manifest_entry()` keys.
+  - Surfaces:
+    - Producers: `chain_types.py` defines dataclasses/context/result objects;
+      `chain_stages.py` defines stage tuples and aliases.
+    - Validators/preflight: chain/orchestrator tests that snapshot stage
+      catalogs, dataclass fields/defaults, aggregation properties, and module
+      import identity.
+    - Storage/cache/query: none - no persistent storage or cache behavior
+      changes in this issue.
+    - Public routes/entrypoints: imports from `services.orchestrator.chain`,
+      `services.orchestrator.chain_types`, `services.orchestrator.chain_stages`,
+      and package exports in `services.orchestrator`.
+    - Frontend/downstream consumers: production scheduler, analysis pipeline,
+      gateway/slurm tests, e2e orchestration tests, and manifest/publish
+      consumers that import the old `chain.py` surface.
+    - Failure paths/rollback/stale state: `ArrayAggregation.status`,
+      succeeded/failed/cancelled task ID properties, `StageRunResult` error
+      fields, and `PipelineResult` candidate outcome defaults.
+    - Evidence/audit/readiness: `tests/test_orchestration_chain.py`, targeted
+      scheduler import smoke where needed, ruff, and entropy audit module-count
+      expectation if the added modules affect it.
+  - Regression rows:
+    - Legacy import `from services.orchestrator.chain import M3_STAGES,
+      StageDefinition, ModelContext, StageRunResult, PipelineResult` -> imports
+      succeed and objects are identical to the extracted-module exports.
+    - Static stage literal snapshot for legacy forecast, M3, and analysis
+      catalogs -> stage ID, order, job type, template, success/failure status,
+      and array flag match the pre-extraction contract.
+    - Dataclass field/default snapshot for context/result/aggregation classes
+      -> frozen/mutable status, defaults, and public properties remain
+      compatible.
+    - `ModelRunAssembly.to_manifest_entry()` with representative data ->
+      literal top-level key set and copied nested values are unchanged.
+    - New module import of `chain_types` or `chain_stages` without importing
+      heavy orchestrator runtime dependencies -> no circular import failure.
+    - Unchanged scheduler/analysis/import consumers -> focused chain tests and
+      ruff pass without changing execution, manifest, or array-accounting
+      semantics.
+- Boundary-surface checklist:
+  - Shared helper roots: only static type/catalog definitions move; helper
+    functions and execution methods remain in `chain.py`.
+  - Public entrypoints: `services.orchestrator.chain` compatibility imports,
+    `services.orchestrator.__init__`, direct new-module imports, and downstream
+    tests.
+  - Read surfaces: static stage tuples, dataclass metadata/defaults, result
+    properties, and `ModelRunAssembly.to_manifest_entry()`.
+  - Write/delete/overwrite surfaces: none - no file, DB, object-store, or
+    artifact writes are introduced or changed.
+  - Producer/consumer evidence boundaries: stage/result dataclasses consumed by
+    scheduler evidence, manifest assembly, Slurm submission, analysis pipeline,
+    and published artifact flows; only definitions move.
+  - Stale-state/idempotency boundaries: stage ordering and array flags remain
+    unchanged so later reservation/idempotency behavior sees the same catalog.
+  - Unchanged downstream consumers: scheduler execution/evidence, chain stage
+    execution, manifest helpers, array accounting, reservation/reconcile, retry,
+    DB schema, frontend, docs/runbooks, and `.entropy-baseline`.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_type_exports or chain_stage_catalog'`
+    -> new focused compatibility/catalog tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
+    -> full orchestration-chain focused suite passes.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'M3_STAGES or PipelineResult or StageRunResult'`
+    -> scheduler consumers of legacy chain exports still import and run where
+    matching tests exist.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator'`
+    -> orchestrator module-count governance expectation is updated if the new
+    modules affect the entropy audit count.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py tests/test_production_scheduler.py tests/test_entropy_audit_script.py`
+    -> lint passes.
+  - `openspec validate governance-6-entropy-structural-burndown --strict
+    --no-interactive` -> valid.
+  - `git diff --check` -> no whitespace errors.
+- Non-goals:
+  - No stage reserve/submit/bind/poll/resume extraction.
+  - No manifest/model-run assembly helper extraction.
+  - No array aggregation/accounting helper extraction beyond moving the
+    `ArrayAggregation` and `ArrayTaskResult` dataclasses.
+  - No status, reason, error code, schema version, evidence-key, readiness-key,
+    artifact-name, template-name, or stage-name rename.
+  - No scheduler, Slurm gateway, DB schema, frontend, docs/runbooks, or
+    `.entropy-baseline` update unless a focused compatibility or governance
+    count test requires it.
 
 ### G6-16 Chain stage execution extraction
 

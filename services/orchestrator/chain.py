@@ -33,6 +33,31 @@ from packages.common.state_lineage import (
 )
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
+from services.orchestrator.chain_stages import (
+    ANALYSIS_STAGES,
+    LEGACY_FORECAST_STAGES,
+    STAGES,
+)
+from services.orchestrator.chain_stages import (
+    M3_STAGES as M3_STAGES,
+)
+from services.orchestrator.chain_types import (
+    AnalysisRunContext,
+    ArrayAggregation,
+    ArrayTaskResult,
+    CycleOrchestrationContext,
+    DisplayLogPublication,
+    DisplayLogPublicationAttempt,
+    ForcingContext,
+    ForecastRunContext,
+    InitialStateSelection,
+    ModelContext,
+    ModelRunAssembly,
+    PipelineResult,
+    StageDefinition,
+    StageRunResult,
+    TerminalJobObservation,
+)
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.production_contract import (
     PRODUCTION_CONTRACT_ID,
@@ -136,86 +161,6 @@ class SlurmAccountingEvidenceGap(OrchestratorError):
         super().__init__("SLURM_ACCOUNTING_EVIDENCE_GAP", message, details)
 
 
-@dataclass(frozen=True)
-class StageDefinition:
-    stage: str
-    job_type: str
-    template_name: str
-    success_cycle_status: str
-    failure_cycle_status: str
-    is_array: bool = False
-
-
-LEGACY_FORECAST_STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition("download_gfs", "download", "download_source_cycle.sbatch", "raw_complete", "failed_download"),
-    StageDefinition("convert_canonical", "canonical", "convert_canonical.sbatch", "canonical_ready", "failed_convert"),
-    StageDefinition("produce_forcing", "forcing", "produce_forcing.sbatch", "forcing_ready", "failed_forcing"),
-    StageDefinition("run_shud_forecast", "forecast", "run_shud_forecast.sbatch", "forecast_running", "failed_run"),
-    StageDefinition("parse_output", "parse", "parse_output.sbatch", "complete", "failed_parse"),
-)
-
-M3_STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition(
-        "download",
-        "download_source_cycle",
-        "download_source_cycle.sbatch",
-        "raw_complete",
-        "failed_download",
-        is_array=False,
-    ),
-    StageDefinition(
-        "convert",
-        "convert_canonical",
-        "convert_canonical.sbatch",
-        "canonical_ready",
-        "failed_convert",
-        is_array=False,
-    ),
-    StageDefinition(
-        "forcing",
-        "produce_forcing_array",
-        "produce_forcing_array.sbatch",
-        "forcing_ready",
-        "failed_forcing",
-        is_array=True,
-    ),
-    StageDefinition(
-        "forecast",
-        "run_shud_forecast_array",
-        "run_shud_forecast_array.sbatch",
-        "forecast_running",
-        "failed_run",
-        is_array=True,
-    ),
-    StageDefinition(
-        "parse",
-        "parse_output_array",
-        "parse_output_array.sbatch",
-        "complete",
-        "failed_parse",
-        is_array=True,
-    ),
-    StageDefinition(
-        "state_save_qc",
-        "save_state_snapshot_array",
-        "save_state_snapshot_array.sbatch",
-        "complete",
-        "failed_publish",
-        is_array=True,
-    ),
-    StageDefinition(
-        "frequency",
-        "compute_frequency_array",
-        "compute_frequency_array.sbatch",
-        "complete",
-        "failed_parse",
-        is_array=True,
-    ),
-    StageDefinition("publish", "publish_tiles", "publish_tiles.sbatch", "complete", "failed_publish", is_array=False),
-)
-
-STAGES: tuple[StageDefinition, ...] = M3_STAGES
-
 # Cycle status the convert_canonical stage consumes as input. A canonical-ready
 # cycle is demoted back to this state when its converter_version is stale, so the
 # next tick re-runs conversion with the current converter_version.
@@ -229,39 +174,6 @@ CANONICAL_DEMOTE_CYCLE_STATUS = "raw_complete"
 # mm/day unit gate (failed_forcing) with no self-heal path.
 CANONICAL_PRECIP_VARIABLE = "prcp_rate_or_amount"
 CANONICAL_PRECIP_UNIT = "mm/day"
-
-ANALYSIS_STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition(
-        "era5_download",
-        "analysis_download_source_cycle",
-        "analysis_download_source_cycle.sbatch",
-        "raw_complete",
-        "failed_download",
-    ),
-    StageDefinition(
-        "canonical_convert",
-        "analysis_convert_canonical",
-        "analysis_convert_canonical.sbatch",
-        "canonical_ready",
-        "failed_convert",
-    ),
-    StageDefinition(
-        "forcing_produce",
-        "analysis_produce_forcing",
-        "analysis_produce_forcing.sbatch",
-        "forcing_ready",
-        "failed_forcing",
-    ),
-    StageDefinition("analysis_run", "run_shud_analysis", "run_shud_analysis.sbatch", "forecast_running", "failed_run"),
-    StageDefinition(
-        "parse_output",
-        "parse_analysis_output",
-        "parse_analysis_output.sbatch",
-        "complete",
-        "failed_parse",
-    ),
-    StageDefinition("state_save_qc", "save_state_snapshot", "save_state_snapshot.sbatch", "complete", "failed_publish"),
-)
 
 
 @dataclass(frozen=True)
@@ -319,43 +231,6 @@ class OrchestratorConfig:
             state_soft_stale_threshold_days=int(os.getenv("STATE_SOFT_STALE_THRESHOLD_DAYS", "7")),
             state_hard_stale_threshold_days=int(os.getenv("STATE_HARD_STALE_THRESHOLD_DAYS", "30")),
         )
-
-
-@dataclass(frozen=True)
-class ModelContext:
-    model_id: str
-    basin_id: str | None
-    basin_version_id: str
-    river_network_version_id: str
-    segment_count: int
-    model_package_uri: str
-    output_segment_count: int | None = None
-
-
-@dataclass(frozen=True)
-class ForcingContext:
-    forcing_version_id: str | None
-    forcing_package_uri: str | None
-    start_time: datetime | None = None
-    end_time: datetime | None = None
-    source_id: str | None = None
-    max_lead_hours: int | None = None
-
-
-@dataclass(frozen=True)
-class InitialStateSelection:
-    state_id: str | None
-    state_uri: str | None
-    valid_time: datetime | None
-    checksum: str | None
-    quality: str
-    # Lineage (M24 §2 Lane 1) - optional, default None for backward compatibility.
-    source_id: str | None = None
-    cycle_id: str | None = None
-    lead_hours: int | None = None
-    model_package_version: str | None = None
-    model_package_checksum: str | None = None
-    rejection_code: str | None = None
 
 
 # Bound on the warm-start fallback loop to avoid unbounded scans of stale snapshots.
@@ -487,193 +362,6 @@ def _validate_state_lineage(
             return LINEAGE_MAX_LEAD_EXCEEDED
 
     return None
-
-
-@dataclass(frozen=True)
-class ForecastRunContext:
-    run_id: str
-    source_id: str
-    scenario_id: str
-    cycle_id: str
-    cycle_time: datetime
-    model_id: str
-    basin_id: str | None
-    basin_version_id: str
-    river_network_version_id: str
-    segment_count: int
-    model_package_uri: str
-    forcing_version_id: str | None
-    forcing_package_uri: str | None
-    start_time: datetime
-    end_time: datetime
-    forecast_horizon_hours: int
-    run_manifest_uri: str
-    output_uri: str
-    log_uri: str
-    init_state_id: str | None = None
-    init_state_uri: str | None = None
-    init_state_valid_time: datetime | None = None
-    init_state_checksum: str | None = None
-    init_state_quality: str = "cold_start_no_state"
-    output_segment_count: int | None = None
-
-
-@dataclass(frozen=True)
-class AnalysisRunContext:
-    run_id: str
-    source_id: str
-    cycle_id: str
-    cycle_time: datetime
-    model_id: str
-    basin_id: str | None
-    basin_version_id: str
-    river_network_version_id: str
-    segment_count: int
-    model_package_uri: str
-    forcing_version_id: str | None
-    forcing_package_uri: str | None
-    start_time: datetime
-    end_time: datetime
-    run_manifest_uri: str
-    output_uri: str
-    log_uri: str
-    init_state_id: str | None = None
-    init_state_uri: str | None = None
-    init_state_valid_time: datetime | None = None
-    output_segment_count: int | None = None
-    # M24 §2 Lane 2: restart cadence landing on T_{N+1} and forcing causality marker.
-    update_ic_step_minutes: int | None = None
-    forcing_causality: Mapping[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class StageRunResult:
-    stage: str
-    job_type: str
-    pipeline_job_id: str
-    slurm_job_id: str
-    status: str
-    exit_code: int | None = None
-    error_code: str | None = None
-    error_message: str | None = None
-    log_uri: str | None = None
-    accounting: Mapping[str, Any] = field(default_factory=dict)
-    task_results: tuple[Mapping[str, Any], ...] = ()
-    finished_at: datetime | None = None
-
-
-@dataclass(frozen=True)
-class PipelineResult:
-    run_id: str
-    cycle_id: str
-    status: str
-    stages: tuple[StageRunResult, ...]
-    candidate_outcomes: tuple[dict[str, Any], ...] = ()
-
-
-@dataclass(frozen=True)
-class ArrayTaskResult:
-    task_id: int
-    slurm_job_id: str
-    status: str
-    exit_code: int | None = None
-    error_code: str | None = None
-    error_message: str | None = None
-    log_uri: str | None = None
-    accounting: Mapping[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class ArrayAggregation:
-    total: int
-    succeeded: int
-    failed: int
-    cancelled: int
-    task_results: tuple[ArrayTaskResult, ...]
-
-    @property
-    def succeeded_task_ids(self) -> tuple[int, ...]:
-        return tuple(result.task_id for result in self.task_results if result.status == "succeeded")
-
-    @property
-    def failed_task_ids(self) -> tuple[int, ...]:
-        return tuple(result.task_id for result in self.task_results if result.status == "failed")
-
-    @property
-    def cancelled_task_ids(self) -> tuple[int, ...]:
-        return tuple(result.task_id for result in self.task_results if result.status == "cancelled")
-
-    @property
-    def status(self) -> str:
-        if self.total == 0 or self.succeeded == 0:
-            return "failed"
-        if self.succeeded == self.total:
-            return "succeeded"
-        return "partially_failed"
-
-
-@dataclass(frozen=True)
-class DisplayLogPublication:
-    candidate_uri: str
-    advertised_uri: str | None
-    should_persist_logs: bool
-
-    @property
-    def requires_publish_before_advertise(self) -> bool:
-        return self.should_persist_logs
-
-
-@dataclass(frozen=True)
-class DisplayLogPublicationAttempt:
-    advertised_uri: str | None
-    error: OrchestratorError | None = None
-
-
-@dataclass(frozen=True)
-class TerminalJobObservation:
-    job: dict[str, Any]
-    publication_attempt: DisplayLogPublicationAttempt | None = None
-
-
-@dataclass
-class CycleOrchestrationContext:
-    source_id: str
-    cycle_time: datetime
-    cycle_id: str
-    run_id: str
-    all_basins: list[dict[str, Any]]
-    active_basins: list[dict[str, Any]]
-    restart_stage: str | None = None
-    had_partial: bool = False
-    last_partial_status: str | None = None
-    task_outcomes: dict[int, dict[str, Any]] = field(default_factory=dict)
-    retry_attempt: int | None = None
-
-
-@dataclass(frozen=True)
-class ModelRunAssembly:
-    """Reusable per-model contract shared by scheduler, Slurm arrays, and workers."""
-
-    identity: dict[str, Any]
-    forcing: dict[str, Any]
-    runtime: dict[str, Any]
-    outputs: dict[str, Any]
-    frequency: dict[str, Any]
-    display: dict[str, Any]
-    quality_states: dict[str, Any]
-    residual_blockers: tuple[dict[str, Any], ...]
-
-    def to_manifest_entry(self) -> dict[str, Any]:
-        return {
-            "identity": dict(self.identity),
-            "forcing_metadata": dict(self.forcing),
-            "shud_runtime": dict(self.runtime),
-            "outputs": dict(self.outputs),
-            "frequency_contract": dict(self.frequency),
-            "display_contract": dict(self.display),
-            "quality_states": dict(self.quality_states),
-            "residual_blockers": [dict(item) for item in self.residual_blockers],
-        }
 
 
 class SlurmGatewayClient(Protocol):
