@@ -722,15 +722,47 @@ def _normalize_attr_name(name: str) -> str:
 
 
 def _merge_polyline_parts(parts: list[list[tuple[float, float]]]) -> list[tuple[float, float]]:
-    merged: list[tuple[float, float]] = []
-    for points in parts:
-        if not merged:
-            merged.extend(points)
-        elif merged[-1] == points[0]:
-            merged.extend(points[1:])
+    """Stitch a multi-part polyline into one continuous point list by joining
+    parts at their nearest endpoints, reversing parts when needed.
+
+    Shapefile part *storage* order is not flow order and parts may be stored
+    reversed. Concatenating them blindly (the old behaviour) drew a long straight
+    "jump" wherever a part's first point was not the running tail -- the heihe
+    cross-ridge straight-line symptom. Greedy nearest-endpoint chaining from
+    either chain end removes those jumps; genuinely disjoint parts then join by
+    the shortest possible link instead of by arbitrary storage order.
+    """
+    chain = [list(points) for points in parts if len(points) >= 2]
+    if not chain:
+        return [point for points in parts for point in points]
+    merged = chain.pop(0)
+    while chain:
+        index, use_start, at_tail = _nearest_attachment(chain, merged[0], merged[-1])
+        piece = chain.pop(index)
+        if at_tail:
+            oriented = piece if use_start else piece[::-1]
+            merged.extend(oriented[1:] if merged[-1] == oriented[0] else oriented)
         else:
-            merged.extend(points)
+            oriented = piece[::-1] if use_start else piece
+            merged[:0] = oriented[:-1] if oriented[-1] == merged[0] else oriented
     return merged
+
+
+def _nearest_attachment(
+    chain: list[list[tuple[float, float]]],
+    head: tuple[float, float],
+    tail: tuple[float, float],
+) -> tuple[int, bool, bool]:
+    """Pick (part index, endpoint-is-its-start, attach-at-tail) for the unused
+    part whose endpoint sits closest to either free end of the running chain."""
+    best: tuple[float, int, bool, bool] = (float("inf"), 0, True, True)
+    for index, points in enumerate(chain):
+        for endpoint, use_start in ((points[0], True), (points[-1], False)):
+            for anchor, at_tail in ((tail, True), (head, False)):
+                dist = (endpoint[0] - anchor[0]) ** 2 + (endpoint[1] - anchor[1]) ** 2
+                if dist < best[0]:
+                    best = (dist, index, use_start, at_tail)
+    return best[1], best[2], best[3]
 
 
 def _stable_segment_id(model_id: str, raw_id: Any, segment_order: int) -> str:

@@ -621,51 +621,45 @@ def _backfill_output_segment_geometry(
     """
     cursor.execute(
         """
-        WITH gis_points AS (
+        WITH fine_segments AS (
             SELECT
                 (properties_json->>'source_raw_segment_id')::int AS shud_riv_index,
-                segment_order,
-                length_m,
-                (dump).path[1] AS point_order,
-                (dump).geom AS point_geom
-            FROM (
-                SELECT properties_json, segment_order, length_m, ST_DumpPoints(geom) AS dump
-                FROM core.river_segment
-                WHERE river_network_version_id = %s
-                  AND geom IS NOT NULL
-                  AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
-                  AND properties_json ? 'source_raw_segment_id'
-                  AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
-            ) source
-        ),
-        numbered_points AS (
-            SELECT
-                shud_riv_index,
-                segment_order,
-                length_m,
-                point_order,
-                point_geom,
-                LAG(ST_AsEWKB(point_geom)) OVER (
-                    PARTITION BY shud_riv_index
-                    ORDER BY segment_order, point_order
-                ) AS previous_point
-            FROM gis_points
-        ),
-        deduped_points AS (
-            SELECT *
-            FROM numbered_points
-            WHERE previous_point IS NULL
-               OR previous_point <> ST_AsEWKB(point_geom)
+                geom,
+                length_m
+            FROM core.river_segment
+            WHERE river_network_version_id = %s
+              AND geom IS NOT NULL
+              AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
+              AND properties_json ? 'source_raw_segment_id'
+              AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
         ),
         gis_by_riv AS (
+            -- Stitch finer GIS segments by shared endpoints (ST_LineMerge), not
+            -- by storage order: the old ST_MakeLine(... ORDER BY segment_order)
+            -- drew a cross-ridge straight "jump" wherever shapefile record order
+            -- != along-flow order. Rare branching reach -> keep longest chain.
             SELECT
-                shud_riv_index,
-                ST_MakeLine(point_geom ORDER BY segment_order, point_order)::geometry(LineString, 4490) AS geom,
-                SUM(DISTINCT length_m) AS length_m,
-                COUNT(DISTINCT segment_order) AS source_segment_count
-            FROM deduped_points
-            GROUP BY shud_riv_index
-            HAVING COUNT(*) >= 2
+                merged.shud_riv_index,
+                CASE
+                    WHEN GeometryType(merged.geom) = 'LINESTRING' THEN merged.geom
+                    ELSE (
+                        SELECT part.geom
+                        FROM ST_Dump(merged.geom) AS part
+                        ORDER BY ST_Length(part.geom) DESC
+                        LIMIT 1
+                    )
+                END::geometry(LineString, 4490) AS geom,
+                merged.length_m,
+                merged.source_segment_count
+            FROM (
+                SELECT
+                    shud_riv_index,
+                    ST_LineMerge(ST_Collect(geom)) AS geom,
+                    SUM(length_m) AS length_m,
+                    COUNT(*) AS source_segment_count
+                FROM fine_segments
+                GROUP BY shud_riv_index
+            ) AS merged
         )
         UPDATE core.river_segment target
         SET geom = gis.geom,
