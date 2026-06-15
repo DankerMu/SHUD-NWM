@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from psycopg2.extras import Json, execute_values
 from pyproj import Transformer
 
 import workers.model_registry.basins_geometry as basins_geometry
@@ -18,6 +19,7 @@ from workers.model_registry.basins_discovery import discover_basins_inventory, w
 from workers.model_registry.basins_geometry import parse_basins_geometry
 from workers.model_registry.basins_registry_import import (
     BasinsRegistryImportError,
+    _backfill_output_segment_geometry,
     _ensure_output_river_segments,
     _output_river_segment_rows,
     _resource_profile,
@@ -2135,3 +2137,102 @@ def _invoke_click(argv: list[str]) -> int:
         if isinstance(error.code, int):
             return error.code
         return 1
+
+
+@pytest.mark.integration
+def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
+    integration_database_url: str,
+) -> None:
+    """Real-DB coverage for the output-reach geometry backfill -- the SQL path
+    that actually produced the heihe cross-ridge lines (the Python merge helper
+    is unit-tested in test_basins_geometry_merge). Asserts: in-order + reversed
+    fine segments stitch into ONE LINESTRING (no fabricated jump); a genuine
+    source gap keeps the longest connected part yet still reports the reach's
+    honest summed length (geom truncated for display, length not shrunk); and a
+    single-segment reach (which the removed HAVING COUNT(*)>=2 gate dropped) is
+    now backfilled.
+    """
+    apply_migrations_from_zero(integration_database_url)
+    rnv = "geomfix_rnv_v1"
+    with (
+        psycopg_connection(integration_database_url) as connection,
+        connection.cursor() as cursor,
+    ):
+        cursor.execute(
+            "INSERT INTO core.basin (basin_id, basin_name, basin_group, description) "
+            "VALUES ('geomfix_basin', 'Geom Fix', 'integration', '') ON CONFLICT DO NOTHING"
+        )
+        cursor.execute(
+            "INSERT INTO core.basin_version "
+            "(basin_version_id, basin_id, version_label, geom, active_flag, source_uri, checksum) "
+            "VALUES ('geomfix_bv', 'geomfix_basin', 'v1', "
+            "ST_Multi(ST_MakeEnvelope(109.0, 29.0, 113.0, 33.0, 4490)), true, 'i://b', 'b') "
+            "ON CONFLICT DO NOTHING"
+        )
+        cursor.execute(
+            "INSERT INTO core.river_network_version "
+            "(river_network_version_id, basin_version_id, version_label, segment_count, source_uri, checksum) "
+            "VALUES (%s, 'geomfix_bv', 'v1', 3, 'i://r', 'r') ON CONFLICT DO NOTHING",
+            (rnv,),
+        )
+        # Fine GIS segments grouped by source_raw_segment_id (= SHUD reach index):
+        #   reach 1: two parts sharing the (110.1 30.1) joint, 2nd stored REVERSED
+        #            -> ST_LineMerge must yield ONE LINESTRING, not a back-and-forth jump.
+        #   reach 2: two parts with a GAP (no shared endpoint), part-a the longer
+        #            -> MULTILINESTRING -> keep the longest part; length stays the SUM.
+        #   reach 3: a single segment (the old HAVING COUNT(*)>=2 would have dropped it).
+        execute_values(
+            cursor,
+            "INSERT INTO core.river_segment "
+            "(river_segment_id, river_network_version_id, segment_order, length_m, geom, properties_json) "
+            "VALUES %s",
+            [
+                ("gf_1a", rnv, 1, 100.0, "LINESTRING(110.0 30.0, 110.1 30.1)", Json({"source_raw_segment_id": "1"})),
+                ("gf_1b", rnv, 2, 100.0, "LINESTRING(110.2 30.2, 110.1 30.1)", Json({"source_raw_segment_id": "1"})),
+                ("gf_2a", rnv, 3, 100.0, "LINESTRING(111.0 31.0, 111.4 31.4)", Json({"source_raw_segment_id": "2"})),
+                ("gf_2b", rnv, 4, 50.0, "LINESTRING(111.8 31.8, 111.9 31.9)", Json({"source_raw_segment_id": "2"})),
+                ("gf_3a", rnv, 5, 300.0, "LINESTRING(112.0 32.0, 112.3 32.3)", Json({"source_raw_segment_id": "3"})),
+            ],
+            template="(%s, %s, %s, %s, ST_GeomFromText(%s, 4490), %s)",
+        )
+        # Output reach rows: NULL geom, shud_output_river=true, indices 1/2/3.
+        execute_values(
+            cursor,
+            "INSERT INTO core.river_segment "
+            "(river_segment_id, river_network_version_id, segment_order, properties_json) VALUES %s",
+            [
+                ("gf_out_1", rnv, 101, Json({"shud_output_river": True, "shud_riv_index": 1})),
+                ("gf_out_2", rnv, 102, Json({"shud_output_river": True, "shud_riv_index": 2})),
+                ("gf_out_3", rnv, 103, Json({"shud_output_river": True, "shud_riv_index": 3})),
+            ],
+            template="(%s, %s, %s, %s)",
+        )
+
+        updated = _backfill_output_segment_geometry(cursor, rnv, record_geometry_source=True)
+        assert updated == 3
+
+        cursor.execute(
+            "SELECT (properties_json->>'shud_riv_index')::int AS idx, "
+            "GeometryType(geom) AS gtype, ST_NPoints(geom) AS npts, length_m, "
+            "(properties_json->>'geometry_source_length_m')::float AS prov_len, "
+            "(properties_json->>'geometry_source_segment_count')::int AS prov_cnt "
+            "FROM core.river_segment WHERE river_network_version_id = %s "
+            "AND COALESCE(properties_json->>'shud_output_river', 'false') = 'true' ORDER BY idx",
+            (rnv,),
+        )
+        rows = {row["idx"]: row for row in cursor.fetchall()}
+
+    # reach 1: reversed part stitched into one continuous LINESTRING (3 deduped points)
+    assert rows[1]["gtype"] == "LINESTRING"
+    assert rows[1]["npts"] == 3
+    assert rows[1]["length_m"] == 200.0
+
+    # reach 2: source gap -> longest part kept, but length stays the honest SUM (review #1)
+    assert rows[2]["gtype"] == "LINESTRING"
+    assert rows[2]["length_m"] == 150.0
+    assert rows[2]["prov_len"] == 150.0
+    assert rows[2]["prov_cnt"] == 2
+
+    # reach 3: single-segment reach is backfilled now that HAVING COUNT(*)>=2 is gone (review #7)
+    assert rows[3]["gtype"] == "LINESTRING"
+    assert rows[3]["length_m"] == 300.0

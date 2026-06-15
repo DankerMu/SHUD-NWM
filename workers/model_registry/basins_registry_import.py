@@ -617,7 +617,13 @@ def _backfill_output_segment_geometry(
     stamps provenance into ``properties_json``; the autopipe passes False so the
     digest stays stable across re-imports (properties_json IS digested), while
     the qhh bootstrap keeps it True. With ``only_missing`` the UPDATE touches only
-    NULL-geom rows, so re-importing an already-correct basin updates zero rows.
+    NULL-geom rows, so re-importing an already-correct basin updates zero rows --
+    and, conversely, a basin whose reaches already hold geometry from an EARLIER
+    (buggy) backfill is NOT re-stitched by this newer logic: repairing an existing
+    basin requires resetting the affected reach geom to NULL first. The node-27
+    autopipe passes only_missing=True and also short-circuits already-seeded
+    basins, so pulling a stitch fix does not retroactively repair live reaches
+    without that reset (new basins seed with NULL geom and are fixed normally).
     """
     cursor.execute(
         """
@@ -633,33 +639,52 @@ def _backfill_output_segment_geometry(
               AND properties_json ? 'source_raw_segment_id'
               AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
         ),
-        gis_by_riv AS (
+        merged_lines AS (
             -- Stitch finer GIS segments by shared endpoints (ST_LineMerge), not
             -- by storage order: the old ST_MakeLine(... ORDER BY segment_order)
             -- drew a cross-ridge straight "jump" wherever shapefile record order
-            -- != along-flow order. Rare branching reach -> keep longest chain.
+            -- != along-flow order. length_m SUMs the finer segments = the
+            -- reach's true channel length; it is kept honest (NOT shrunk to the
+            -- drawn part) even when a source gap stops the parts merging into one
+            -- line, so a truncated-display reach still reports its real length.
+            -- ST_LineMerge does not preserve flow direction; nothing consumes
+            -- reach direction today and direction belongs to the network
+            -- topology layer (source_downstream_segment_id), not this stitch.
             SELECT
-                merged.shud_riv_index,
-                CASE
-                    WHEN GeometryType(merged.geom) = 'LINESTRING' THEN merged.geom
-                    ELSE (
+                shud_riv_index,
+                ST_LineMerge(ST_Collect(geom)) AS geom,
+                SUM(length_m) AS length_m,
+                COUNT(*) AS source_segment_count
+            FROM fine_segments
+            GROUP BY shud_riv_index
+        ),
+        gis_by_riv AS (
+            SELECT
+                ml.shud_riv_index,
+                kept.geom::geometry(LineString, 4490) AS geom,
+                ml.length_m,
+                ml.source_segment_count
+            FROM merged_lines ml
+            CROSS JOIN LATERAL (
+                -- A fully stitched reach is one LINESTRING. A genuine source gap
+                -- / branching reach yields a MULTILINESTRING: keep the longest
+                -- connected part for display; part.path tie-breaks equal-length
+                -- parts so the pick is deterministic across re-imports. Any
+                -- degenerate result (POINT / empty / collection from zero-length
+                -- input) yields NULL and is dropped by the WHERE below instead of
+                -- crashing the ::geometry(LineString,4490) cast or nulling a row.
+                SELECT CASE
+                    WHEN GeometryType(ml.geom) = 'LINESTRING' THEN ml.geom
+                    WHEN GeometryType(ml.geom) = 'MULTILINESTRING' THEN (
                         SELECT part.geom
-                        FROM ST_Dump(merged.geom) AS part
-                        ORDER BY ST_Length(part.geom) DESC
+                        FROM ST_Dump(ml.geom) AS part
+                        ORDER BY ST_Length(part.geom) DESC, part.path ASC
                         LIMIT 1
                     )
-                END::geometry(LineString, 4490) AS geom,
-                merged.length_m,
-                merged.source_segment_count
-            FROM (
-                SELECT
-                    shud_riv_index,
-                    ST_LineMerge(ST_Collect(geom)) AS geom,
-                    SUM(length_m) AS length_m,
-                    COUNT(*) AS source_segment_count
-                FROM fine_segments
-                GROUP BY shud_riv_index
-            ) AS merged
+                    ELSE NULL
+                END AS geom
+            ) AS kept
+            WHERE kept.geom IS NOT NULL
         )
         UPDATE core.river_segment target
         SET geom = gis.geom,
