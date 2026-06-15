@@ -2447,7 +2447,8 @@ separate PR boundaries.
     --no-interactive` -> valid.
   - `git diff --check` -> no whitespace errors.
 - Implementation evidence (2026-06-16, branch
-  `feat/issue-472-chain-stage-execution`, pre-PR head pending):
+  `feat/issue-472-chain-stage-execution`, PR head
+  `5507845fbd273c423572dca08af305d5f41f42c6`):
   - Added `services/orchestrator/chain_stage_execution.py` for cycle stage
     submit/wait, local publish-stage execution, resume, poll, poll-timeout,
     array submit, and Slurm submission manifest helpers.
@@ -2470,7 +2471,7 @@ separate PR boundaries.
     -> `13 passed, 158 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
-    -> `171 passed`.
+    -> `172 passed in 747.52s`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py`
     -> `All checks passed!`.
@@ -2512,8 +2513,9 @@ separate PR boundaries.
       completed invariant-level helper dispatch closure so local publish,
       resume poll, poll-timeout, array submit, and submission-manifest internal
       calls route through legacy orchestrator shims when present.
-    - Evidence gap for current-head full chain suite remained to be refreshed;
-      this is tracked for Phase 7/8 evidence before merge.
+    - Evidence gap for current-head full chain suite was refreshed before
+      merge: `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q
+      tests/test_orchestration_chain.py` -> `172 passed in 747.52s`.
   - Round 2 fix verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_stage_execution_internal_calls_preserve_legacy_override_surface'`
     -> `1 passed, 171 deselected`.
