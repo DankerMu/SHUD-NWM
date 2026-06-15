@@ -49,15 +49,10 @@ _DROPPABLE_BOUNDED_EVIDENCE_FIELDS = (
     "skipped_candidates",
 )
 _OPTIONAL_BOUNDED_EVIDENCE_DROP_FIELDS = (
-    "artifact_path",
     "finished_at",
     "duplicate_exclusions",
-    "readiness",
-    "no_mutation_proof",
     "readiness_interpretation",
     "execution_mode",
-    "execution_boundary",
-    "counts",
 )
 
 
@@ -531,16 +526,12 @@ def _drop_empty_optional_bounded_fields(payload: dict[str, Any]) -> None:
         "finished_at",
         "execution_mode",
         "readiness_interpretation",
-        "artifact_path",
-        "execution_boundary",
         "model_discovery",
         "source_cycles",
         "candidates",
         "blocked_candidates",
         "skipped_candidates",
         "duplicate_exclusions",
-        "readiness",
-        "no_mutation_proof",
         "execution_write_proof",
         "slurm_status_sync_proof",
         "slurm_cancellation_proof",
@@ -655,7 +646,7 @@ def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
             ),
         )
     if field_name == "readiness":
-        return _compact_mapping(
+        compact = _compact_mapping(
             value,
             (
                 "schema_version",
@@ -665,6 +656,7 @@ def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
                 "can_claim_final_production_readiness",
             ),
         )
+        return compact if compact else _bounded_retained_field_summary(field_name, value)
     return _bounded_retained_field_summary(field_name, value)
 
 

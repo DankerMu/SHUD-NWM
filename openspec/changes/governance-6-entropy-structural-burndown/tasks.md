@@ -1971,6 +1971,9 @@ separate PR boundaries.
     validation, pre-execution reservation traversal rejection, bounded evidence
     final byte-limit enforcement, and typed no-artifact failure when the bounded
     core cannot fit the configured limit.
+  - Added post-gate bounded evidence regression assertions that the tight-cap
+    persisted payload still retains core audit fields such as `artifact_path`,
+    `readiness`, `counts`, `execution_boundary`, and `no_mutation_proof`.
   - Updated the services/orchestrator entropy file-count expectation for the
     new tracked scheduler evidence module.
   - Verification:
@@ -1993,7 +1996,7 @@ separate PR boundaries.
     -> `4 passed, 540 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'unsafe_artifact_names_before_escape or scheduler_write_evidence_shim_rejects_traversal_artifact_name or bounded_evidence_payload_shim_summarizes_large_retained_fields_within_limit or write_evidence_bounds_serialized_payload_before_artifact_creation or write_evidence_fails_before_artifact_creation_when_bounded_core_cannot_fit'`
-    -> `10 passed, 534 deselected`.
+    -> `11 passed, 533 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'evidence_artifact or bounded_evidence or scheduler_evidence_context or scheduler_evidence_private_helper_compatibility_shims_delegate or pre_execution'`
     -> `16 passed, 528 deselected`.

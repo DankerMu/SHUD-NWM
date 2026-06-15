@@ -4239,12 +4239,16 @@ def test_bounded_evidence_payload_shim_summarizes_large_retained_fields_within_l
         "max_evidence_bytes": 2_000,
     }
     assert shim_payload["pass_id"] == "scheduler_20260521120000_bounded_shim"
+    assert "artifact_path" in shim_payload
     assert shim_payload["counts"]["candidate_count"] == 1
+    assert shim_payload["readiness"]["schema_version"] == "nhms.production_readiness.scheduler_input.v1"
     assert shim_payload["duplicate_exclusions"]["status"] == "omitted"
     assert shim_payload["duplicate_exclusions"]["reason"] == "evidence_size_limit_exceeded"
     assert shim_payload["runtime_config"]["dry_run"] is False
     assert shim_payload["root_preflight"]["status"] == "ready"
     assert shim_payload["execution_write_proof"]["status"] == "submitted"
+    assert shim_payload["execution_boundary"] == "planning_only"
+    assert "slurm_submit_called" in shim_payload["no_mutation_proof"]
 
 
 def test_write_evidence_bounds_serialized_payload_before_artifact_creation(tmp_path: Path) -> None:
@@ -4264,6 +4268,11 @@ def test_write_evidence_bounds_serialized_payload_before_artifact_creation(tmp_p
     assert len(serialized) <= 2_200
     assert persisted["status"] == "resource_limit_blocked"
     assert persisted["limit"]["max_evidence_bytes"] == 2_200
+    assert persisted["artifact_path"] == str(evidence_dir / f"{pass_id}.json")
+    assert persisted["readiness"]["schema_version"] == "nhms.production_readiness.scheduler_input.v1"
+    assert persisted["counts"]["candidate_count"] == 1
+    assert persisted["execution_boundary"] == "planning_only"
+    assert "slurm_submit_called" in persisted["no_mutation_proof"]
     assert persisted["duplicate_exclusions"]["status"] == "omitted"
     assert persisted["runtime_config"]["dry_run"] is False
     assert persisted["evidence_pre_execution"]["status"] == "reserved"
@@ -4919,7 +4928,7 @@ def test_evidence_size_fallback_status_agrees_across_result_artifact_and_cli(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 900)
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 1_500)
     config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
     scheduler = ProductionScheduler(
         config,
@@ -4933,7 +4942,7 @@ def test_evidence_size_fallback_status_agrees_across_result_artifact_and_cli(
     assert result.status == "resource_limit_blocked"
     assert result.evidence["status"] == "resource_limit_blocked"
     assert persisted["status"] == "resource_limit_blocked"
-    assert len(Path(result.artifact_path or "").read_bytes()) <= 900
+    assert len(Path(result.artifact_path or "").read_bytes()) <= 1_500
     assert result.evidence["limit"]["reason"] == "evidence_size_limit_exceeded"
     assert persisted["limit"]["reason"] == "evidence_size_limit_exceeded"
 
@@ -4975,7 +4984,7 @@ def test_bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 900)
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 1_500)
     roots = _scheduler_env_roots(tmp_path)
     _set_scheduler_root_env(monkeypatch, roots)
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
@@ -5087,7 +5096,7 @@ def test_bounded_evidence_preserves_pre_execution_reservation_proof(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 1200)
+    monkeypatch.setattr("services.orchestrator.scheduler.MAX_EVIDENCE_BYTES", 1_800)
 
     class SyncingRepository(CandidateAndActiveRepository):
         def __init__(self) -> None:
@@ -13225,7 +13234,14 @@ def _large_scheduler_evidence_payload(pass_id: str) -> dict[str, Any]:
         "status": "submitted",
         "execution_mode": "production_orchestration",
         "readiness_interpretation": "non_final_scheduler_evidence",
-        "readiness": {"status": "not_final", "payload": large_text},
+        "readiness": {
+            "schema_version": "nhms.production_readiness.scheduler_input.v1",
+            "interpretation": "non_final_scheduler_evidence",
+            "production_ready": False,
+            "final_production_readiness_claimed": False,
+            "can_claim_final_production_readiness": False,
+            "payload": large_text,
+        },
         "counts": {"candidate_count": 1, "submitted_count": 1},
         "resolved_runtime_roots": {"evidence_root": {"path": "/workspace/evidence", "payload": large_text}},
         "runtime_config": {"dry_run": False, "payload": large_text},
