@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Waves, X } from 'lucide-react'
 
 import { ForecastChart } from '@/components/charts/ForecastChart'
-import { M11_POPUP_GLASS } from '@/components/map/M11PopupChrome'
+import { formatIssueTime, M11_POPUP_GLASS } from '@/components/map/M11PopupChrome'
 import { cn } from '@/lib/cn'
 import {
   formatHydroMetRiverForecastMessage,
@@ -38,6 +38,7 @@ interface SourceResult {
   unit: string | null
   cycleTime: string | null
   issueTime: string | null
+  availableIssueTimes: string[]
   reason: string | null
 }
 
@@ -79,21 +80,29 @@ async function loadSource(
   basinId: string,
   source: HydroMetSource,
   segment: HydroMetRiverForecastSegmentIdentity,
+  cycle: string | null,
 ): Promise<SourceResult> {
-  const empty: SourceResult = { source, series: null, unit: null, cycleTime: null, issueTime: null, reason: null }
+  const empty: SourceResult = { source, series: null, unit: null, cycleTime: null, issueTime: null, availableIssueTimes: [], reason: null }
   try {
-    const product = await fetchHydroMetLatestProduct({ source, cycle: null, basinId })
+    const product = await fetchHydroMetLatestProduct({ source, cycle, basinId })
     if (!product) return { ...empty, reason: `${source}：暂无 latest-product` }
+    const availableIssueTimes = product.available_issue_times ?? []
+    // honest 红线：所选起报时次滑出后端候选窗口时，latest-product 会静默回退到最新一轮（rows[0]）；
+    // 显式拒绝串档——返回的 cycle 与请求不一致即诚实标注不可用，绝不画错时次的数据。
+    if (cycle && new Date(product.cycle_time).getTime() !== new Date(cycle).getTime()) {
+      return { ...empty, availableIssueTimes, reason: `${source}：起报 ${formatIssueTime(cycle)} 已不可用` }
+    }
     const identity = productIdentity(product)
     const response = await loadHydroMetRiverForecast({ product: identity, segment })
     const validation = validateHydroMetRiverForecastForChart(response, identity, segment)
-    if (!validation.ok) return { ...empty, reason: `${source}：${validation.messages[0] ?? '契约校验失败'}` }
+    if (!validation.ok) return { ...empty, availableIssueTimes, reason: `${source}：${validation.messages[0] ?? '契约校验失败'}` }
     const points = validation.renderedPoints.map((point) => ({ time: point.timestamp, value: point.value }))
     return {
       source,
       unit: validation.unit,
       cycleTime: validation.cycleTime ?? product.cycle_time,
       issueTime: validation.issueTime ?? validation.cycleTime ?? product.cycle_time,
+      availableIssueTimes,
       reason: null,
       series: {
         scenario: validation.scenarioId,
@@ -151,6 +160,16 @@ export function M11RiverForecastPanel({
   )
   const [loading, setLoading] = useState(true)
   const [forecast, setForecast] = useState<DualForecast>({ data: null, results: [] })
+  // 起报时间按河段身份绑定：换河段（identity 变）时所选 cycle 自动失效回最新，
+  // 派生而非 reset effect —— 规避 setState-in-effect 触发的双重加载。双源时次一致 → 单一选择器同步切换。
+  const [selection, setSelection] = useState<{ key: string; cycle: string } | null>(null)
+  const identityKey = identity.river_segment_id
+  const selectedCycle = selection && selection.key === identityKey ? selection.cycle : null
+  // 可选起报列表从已加载结果派生（双源一致取首个非空）；forecast 重载期间不清空 → 下拉不闪烁。
+  const issueTimes = useMemo(
+    () => forecast.results.find((result) => result.availableIssueTimes.length > 0)?.availableIssueTimes ?? [],
+    [forecast.results],
+  )
 
   useEffect(() => {
     if (!basinId) {
@@ -160,7 +179,7 @@ export function M11RiverForecastPanel({
     }
     let cancelled = false
     setLoading(true)
-    void Promise.all(DUAL_SOURCES.map((source) => loadSource(basinId, source, identity))).then((results) => {
+    void Promise.all(DUAL_SOURCES.map((source) => loadSource(basinId, source, identity, selectedCycle))).then((results) => {
       if (cancelled) return
       setForecast(buildDualForecast(identity, results))
       setLoading(false)
@@ -168,7 +187,7 @@ export function M11RiverForecastPanel({
     return () => {
       cancelled = true
     }
-  }, [basinId, identity])
+  }, [basinId, identity, selectedCycle])
 
   const failedReasons = forecast.results.filter((result) => result.reason).map((result) => result.reason as string)
 
@@ -204,6 +223,27 @@ export function M11RiverForecastPanel({
           </button>
         ) : null}
       </header>
+
+      {issueTimes.length > 0 ? (
+        <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-2 text-[11px] text-slate-400" data-testid="m11-river-panel-cycle-bar">
+          <span className="shrink-0 uppercase tracking-wide">起报</span>
+          <select
+            aria-label="起报时间选择"
+            data-testid="m11-river-panel-cycle"
+            className="h-7 min-w-0 max-w-[12rem] cursor-pointer appearance-none rounded-md border border-white/15 bg-white/10 px-2 font-mono text-[11px] text-slate-100 transition-colors [color-scheme:dark] hover:border-cyan-400/50 focus:border-cyan-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            value={selectedCycle && issueTimes.includes(selectedCycle) ? selectedCycle : issueTimes[0]}
+            onChange={(event) => setSelection({ key: identityKey, cycle: event.target.value })}
+            disabled={loading}
+          >
+            {issueTimes.map((time) => (
+              <option key={time} value={time}>
+                {formatIssueTime(time)}
+              </option>
+            ))}
+          </select>
+          <span className="ml-auto text-[10px] text-slate-500">GFS + IFS 同步切换</span>
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="flex flex-1 items-center justify-center text-sm text-slate-300" role="status" data-testid="m11-river-panel-loading">

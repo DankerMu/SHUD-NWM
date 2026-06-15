@@ -10,7 +10,7 @@ export const M11_POPUP_GLASS =
   'rounded-2xl border border-white/10 bg-slate-950/90 text-slate-100 shadow-[0_24px_64px_-16px_rgba(2,8,28,0.65)] ring-1 ring-white/10 backdrop-blur-2xl supports-[backdrop-filter]:bg-slate-950/75'
 
 // 起报时间显示：ISO → 「MM-DD HH:mm UTC」，下拉更易读；option value 仍用原始 ISO。
-function formatIssueTime(iso: string): string {
+export function formatIssueTime(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
   const mm = String(date.getUTCMonth() + 1).padStart(2, '0')
