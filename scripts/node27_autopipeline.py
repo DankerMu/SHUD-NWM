@@ -181,6 +181,37 @@ def _activate_model(database_url: str, model_id: str) -> int:
         conn.close()
 
 
+def _publish_display_runs(database_url: str) -> int:
+    """Advance fully-ingested display runs from 'parsed' to 'published'.
+
+    ``/api/v1/layers`` (``latest_frequency_ready_run``) only surfaces hydro runs
+    whose status is in ('frequency_done', 'published'); a display node never
+    computes flood frequency, so without this the catalog stays empty and the
+    q_down overlay never registers. 'published' (display products available) is
+    the honest terminal state here -- flood/warning availability is still
+    annotated separately from the actual ``flood.return_period_result``, so this
+    does not fabricate return-period products. Idempotent (published runs and
+    runs without timeseries are left untouched), matching the
+    ``_already_ingested_runs`` completeness predicate."""
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE hydro.hydro_run h
+                    SET status = 'published', updated_at = now()
+                    WHERE h.status = 'parsed'
+                      AND EXISTS (
+                          SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_id = h.run_id
+                      )
+                    """
+                )
+                return cur.rowcount
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # subprocess plumbing
 # --------------------------------------------------------------------------- #
@@ -433,6 +464,16 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[{idx}/{len(pending)}] {run['run_id']}: {result['outcome']}{tail}",
                       file=sys.stderr, flush=True)
 
+    # ---- phase 3: advance fully-ingested runs to 'published' so the layer ----
+    # catalog (discharge / q_down overlay) actually surfaces them. Idempotent;
+    # also back-fills runs parsed by earlier ticks before this step existed.
+    published_count = 0
+    if not args.seed_only:
+        published_count = _publish_display_runs(database_url)
+        if args.progress:
+            print(f"[publish] advanced {published_count} run(s) parsed -> published",
+                  file=sys.stderr, flush=True)
+
     def by(outcome: str) -> list[dict[str, Any]]:
         return [r for r in run_results if r["outcome"] == outcome]
 
@@ -450,6 +491,7 @@ def main(argv: list[str] | None = None) -> int:
         },
         "runs": {
             "already_ingested": already_count,
+            "published": published_count,
             "ingested": len(by("ingested")),
             "skipped": len(by("skipped")),
             "failed": len(by("failed")),
