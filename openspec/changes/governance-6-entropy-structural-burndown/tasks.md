@@ -1971,7 +1971,7 @@ separate PR boundaries.
     new tracked scheduler evidence module.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'evidence_dir_symlink_cannot_escape_workspace or evidence_final_artifact_symlink_is_not_followed or evidence_existing_artifact_file_is_not_overwritten'`
-    -> `4 passed, 525 deselected`.
+    -> `4 passed, 530 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_evidence_context_accepts_exported_keyword_callbacks or normal_mutation_sees_pre_execution_reservation_before_forcing_and_submit or pre_execution_existing_regular_artifact_blocks_before_forcing_and_submit or pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_target or pre_execution_non_regular_artifact_blocks_before_cancel'`
     -> `5 passed, 529 deselected`.
@@ -1980,16 +1980,16 @@ separate PR boundaries.
     -> `7 passed, 527 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof or no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof or bounded_evidence_preserves_pre_execution_reservation_proof'`
-    -> `3 passed, 526 deselected`.
+    -> `3 passed, 531 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_pass_startup_reconciles_reserved_unbound_jobs or restart_reconcile'`
-    -> `1 passed, 528 deselected`.
+    -> `1 passed, 533 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_evidence_redacts_signed_candidate_outcome_log_uri or scheduler_evidence_redacts_sensitive_runtime_payloads or scheduler_evidence_private_helper_compatibility_shims_delegate or scheduler_evidence_module_imports_without_scheduler_cycle'`
-    -> `4 passed, 525 deselected`.
+    -> `4 passed, 530 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
-    -> `529 passed`.
+    -> `534 passed`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator'`
     -> `1 passed, 191 deselected`.
