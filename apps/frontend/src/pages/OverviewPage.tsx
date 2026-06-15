@@ -135,10 +135,7 @@ function M11FullscreenMap({
   const opsVisible = OPERATOR_ROLES.includes(role)
 
   return (
-    <div
-      className="flex h-[calc(100vh-var(--m11-nav-height))] min-h-[40rem] w-full flex-col overflow-hidden bg-[#d7e7ef]"
-      style={{ '--m11-nav-height': '0px' } as React.CSSProperties}
-    >
+    <div className="flex h-full min-h-[40rem] w-full flex-col overflow-hidden bg-[#d7e7ef]">
       <header className="flex h-12 shrink-0 items-center gap-2 border-b border-neutral-200 bg-white px-4 shadow-sm">
         <span className="text-base font-semibold tracking-wide text-primary-700">全国水文预报系统</span>
       </header>
