@@ -4312,6 +4312,8 @@ def _expected_services_orchestrator_file_count() -> int:
     expected = 16
     if "services/orchestrator/scheduler_execution.py" in tracked_paths:
         expected += 1
+    if "services/orchestrator/scheduler_evidence.py" in tracked_paths:
+        expected += 1
     return expected
 
 

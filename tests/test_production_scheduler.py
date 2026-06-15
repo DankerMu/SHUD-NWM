@@ -4055,6 +4055,82 @@ def test_evidence_existing_artifact_file_is_not_overwritten(tmp_path: Path) -> N
     assert evidence == {"pass_id": pass_id, "status": "planned"}
 
 
+def test_scheduler_evidence_private_helper_compatibility_shims_delegate(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    from services.orchestrator import scheduler_evidence
+
+    calls: list[dict[str, Any]] = []
+    original_bounded = scheduler_evidence.bounded_evidence_payload
+
+    def recording_bounded(
+        payload: Mapping[str, Any],
+        *,
+        reason: str,
+        max_evidence_bytes: int = scheduler_evidence.MAX_EVIDENCE_BYTES,
+    ) -> dict[str, Any]:
+        calls.append({"payload": dict(payload), "reason": reason, "max_evidence_bytes": max_evidence_bytes})
+        return original_bounded(payload, reason=reason, max_evidence_bytes=max_evidence_bytes)
+
+    monkeypatch.setattr(scheduler_evidence, "bounded_evidence_payload", recording_bounded)
+    payload = {
+        "schema_version": SCHEDULER_EVIDENCE_SCHEMA_VERSION,
+        "pass_id": "scheduler_20260521120000_fixed",
+        "started_at": "2026-05-21T12:00:00Z",
+        "counts": {"candidate_count": 2},
+        "root_preflight": {"status": "ready"},
+        "runtime_config": {"dry_run": False},
+        "evidence_pre_execution": {"status": "reserved"},
+        "execution_write_proof": {"status": "submitted"},
+        "slurm_status_sync_proof": {"status": "not_required"},
+        "slurm_cancellation_proof": {"status": "not_required"},
+        "no_mutation_proof": _expected_no_mutation_proof(),
+        "candidates": [{"secret_token": "rawsecret"}],
+    }
+
+    shim_payload = scheduler_module._bounded_evidence_payload(payload, reason="compatibility_check")
+
+    assert calls == [
+        {
+            "payload": payload,
+            "reason": "compatibility_check",
+            "max_evidence_bytes": scheduler_module.MAX_EVIDENCE_BYTES,
+        }
+    ]
+    assert shim_payload == original_bounded(
+        payload,
+        reason="compatibility_check",
+        max_evidence_bytes=scheduler_module.MAX_EVIDENCE_BYTES,
+    )
+    assert shim_payload["status"] == "resource_limit_blocked"
+    assert shim_payload["candidates"] == []
+    assert shim_payload["evidence_pre_execution"] == {"status": "reserved"}
+
+    config = _config(tmp_path, now=_dt("2026-05-21T12:00:00Z"))
+    scheduler = ProductionScheduler(config, registry=FakeRegistry([]), adapters={})
+    pass_id = "scheduler_20260521120000_compat"
+    base_from_method = scheduler._base_evidence(pass_id, config.now or _dt("2026-05-21T12:00:00Z"))
+    base_from_module = scheduler_evidence.base_evidence(
+        config,
+        pass_id,
+        config.now or _dt("2026-05-21T12:00:00Z"),
+        resolved_runtime_roots=scheduler_module._scheduler_resolved_runtime_roots,
+        runtime_config_evidence=scheduler_module._scheduler_runtime_config_evidence,
+    )
+    assert base_from_method == base_from_module
+
+
+def test_scheduler_evidence_module_imports_without_scheduler_cycle() -> None:
+    import importlib
+
+    module = importlib.import_module("services.orchestrator.scheduler_evidence")
+
+    assert module.__name__ == "services.orchestrator.scheduler_evidence"
+    assert not hasattr(module, "ProductionScheduler")
+    assert module.empty_counts() == scheduler_module._empty_counts()
+
+
 def test_non_dry_run_blocks_before_candidate_execution_when_evidence_reservation_fails(
     monkeypatch: Any,
     tmp_path: Path,
@@ -10197,6 +10273,48 @@ def test_scheduler_evidence_redacts_signed_candidate_outcome_log_uri(tmp_path: P
     assert "supersecret" not in evidence_text
     assert "rawsecret" not in evidence_text
     assert "user:pass" not in evidence_text
+
+
+def test_scheduler_evidence_redacts_sensitive_runtime_payloads(tmp_path: Path) -> None:
+    roots = _slurm_roots(tmp_path)
+    secret_database_url = "postgresql://nhms:supersecret@db.prod.example/nhms"
+    secret_slurm_value = "s3://bucket/prod?X-Amz-Signature=supersecret"
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        database_url=secret_database_url,
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+        slurm_env={
+            "DATABASE_URL": secret_database_url,
+            "OBJECT_STORE_PREFIX": secret_slurm_value,
+            "AWS_SECRET_ACCESS_KEY": "supersecret",
+        },
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    evidence_text = json.dumps(result.evidence)
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "slurm_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert orchestrator.calls == []
+    assert "supersecret" not in evidence_text
+    assert secret_database_url not in evidence_text
+    assert secret_slurm_value not in evidence_text
+    assert "AWS_SECRET_ACCESS_KEY" not in evidence_text
 
 
 def test_issue_196_dry_run_evidence_has_stable_non_final_review_contract(tmp_path: Path) -> None:

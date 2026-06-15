@@ -120,12 +120,12 @@ separate PR boundaries.
 
 ## 10. Scheduler Evidence Extraction
 
-- [ ] 10.1 Create `services/orchestrator/scheduler_evidence.py` for pass
+- [x] 10.1 Create `services/orchestrator/scheduler_evidence.py` for pass
   evidence assembly, pre-execution evidence reservation/proof helpers, and
   bounded evidence serialization.
-- [ ] 10.2 Preserve pre-execution evidence reservation ordering and evidence
+- [x] 10.2 Preserve pre-execution evidence reservation ordering and evidence
   keys.
-- [ ] 10.3 Verify with focused pre-execution evidence and startup reconcile
+- [x] 10.3 Verify with focused pre-execution evidence and startup reconcile
   tests.
 
 ## 11. Chain Types And Stage Catalog Extraction
@@ -1949,6 +1949,47 @@ separate PR boundaries.
     -> valid.
   - `git diff --check`
     -> no whitespace errors.
+- Implementation evidence (2026-06-15):
+  - Extracted scheduler pass evidence assembly, pre-execution reservation,
+    evidence artifact guards, write-error payloads, proof/count helpers, and
+    bounded serialization into `services/orchestrator/scheduler_evidence.py`.
+  - Kept `services/orchestrator/scheduler.py` as the compatibility surface:
+    old private method/helper names delegate to extracted helpers, and
+    pre-execution reservation still injects the scheduler-module file-write
+    helpers so existing monkeypatch paths remain effective.
+  - Added focused regression tests for signed outcome log URI redaction,
+    sensitive runtime/Slurm payload redaction, private helper compatibility
+    delegation, and circular-import-free `scheduler_evidence` import.
+  - Updated the services/orchestrator entropy file-count expectation for the
+    new tracked scheduler evidence module.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'evidence_dir_symlink_cannot_escape_workspace or evidence_final_artifact_symlink_is_not_followed or evidence_existing_artifact_file_is_not_overwritten'`
+    -> `4 passed, 525 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'pre_execution_reservation_fails or pre_execution_reservation_before_mutating or sync_cycle_statuses_sees_pre_execution_reservation_before_mutating or sync_cycle_statuses_blocks_before_sync_when_pre_execution_reservation_fails or cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists'`
+    -> `3 passed, 526 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof or no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof or bounded_evidence_preserves_pre_execution_reservation_proof'`
+    -> `3 passed, 526 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_pass_startup_reconciles_reserved_unbound_jobs or restart_reconcile'`
+    -> `1 passed, 528 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_evidence_redacts_signed_candidate_outcome_log_uri or scheduler_evidence_redacts_sensitive_runtime_payloads or scheduler_evidence_private_helper_compatibility_shims_delegate or scheduler_evidence_module_imports_without_scheduler_cycle'`
+    -> `4 passed, 525 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py`
+    -> `529 passed`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator'`
+    -> `1 passed, 191 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py tests/test_entropy_audit_script.py`
+    -> `All checks passed!`.
+  - Verification:
+    `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+    -> valid.
+  - Verification: `git diff --check` -> no whitespace errors.
 - Non-goals:
   - No execution orchestration, forcing production, candidate construction,
     discovery/backfill, lease, chain, reservation/reconcile protocol, retry
