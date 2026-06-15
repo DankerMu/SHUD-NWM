@@ -246,7 +246,8 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("openapi/nhms.v1.yaml")
     assert not write_entropy_baseline._baseline_path_is_v1_summary_source_counted("README.md")
     assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted("services/api/main.py")
-    assert modules["apps/frontend"]["file_count"] == 120
+    assert modules["apps/frontend"]["file_count"] == _expected_apps_frontend_file_count()
+    assert _apps_frontend_baseline_counted_path_exists("apps/frontend/src/App.tsx")
     assert modules["services/production_closure"]["file_count"] == 10
     assert modules["services/slurm_gateway"]["file_count"] == 11
     for zero_count_module in (
@@ -4315,6 +4316,25 @@ def _expected_services_orchestrator_file_count() -> int:
     if "services/orchestrator/scheduler_evidence.py" in tracked_paths:
         expected += 1
     return expected
+
+
+def _expected_apps_frontend_file_count() -> int:
+    return len(_apps_frontend_baseline_counted_paths())
+
+
+def _apps_frontend_baseline_counted_path_exists(relative_path: str) -> bool:
+    return relative_path in _apps_frontend_baseline_counted_paths()
+
+
+def _apps_frontend_baseline_counted_paths() -> set[str]:
+    tracked_paths = audit_repo_entropy._git_tracked_paths(REPO_ROOT, ("apps/frontend",))
+    return {
+        relative_path
+        for relative_path in tracked_paths
+        if not write_entropy_baseline._baseline_path_is_file_count_skipped(relative_path)
+        and write_entropy_baseline._baseline_path_is_v1_source_counted(relative_path)
+        and audit_repo_entropy._module_for_relative(relative_path) == "apps/frontend"
+    }
 
 
 def _baseline_archive_files(baseline_dir: Path) -> list[Path]:
