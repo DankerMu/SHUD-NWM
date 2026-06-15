@@ -263,7 +263,7 @@ export function useBasinDetailMode({
   }
 }
 
-function bboxToMapFit(bbox: M11Bbox | null | undefined) {
+export function bboxToMapFit(bbox: M11Bbox | null | undefined) {
   if (!bbox) return null
   return {
     bounds: [
