@@ -262,6 +262,11 @@ def _import_prepared_sources(
                 "mesh_version": _ensure_mesh(cursor, sources),
                 "model_instance": _ensure_model_instance(cursor, sources),
             }
+            # NOTE: output-river reach rows are left NULL-geom here on purpose --
+            # display geometry is a separate concern (see _ensure_output_river_segments).
+            # The seeding orchestrators stitch it on after import:
+            # qhh -> qhh_production_bootstrap, generic -> node27 autopipe
+            # (_backfill_output_segment_geometry, the single shared SQL).
     except BasinsRegistryImportError:
         raise
     except Exception as error:
@@ -586,6 +591,103 @@ def _ensure_output_river_segments(cursor: Any, sources: ImportSources) -> int:
         )
         inserted += len(rows)
     return inserted
+
+
+def _backfill_output_segment_geometry(
+    cursor: Any,
+    river_network_version_id: str,
+    *,
+    only_missing: bool = False,
+    record_geometry_source: bool = True,
+) -> int:
+    """Stitch SHUD output-river (`.sp.riv`) display geometry from the finer GIS
+    river segments onto the ``shud_output_river='true'`` reach rows.
+
+    ``_ensure_output_river_segments`` deliberately seeds those reach rows with a
+    NULL geom. Without this backfill the national / single-run MVT JOINs the
+    reach rows but renders nothing — the live display can neither draw nor click
+    those reaches (the heihe symptom). Points of every GIS segment are grouped
+    by ``source_raw_segment_id`` (the SHUD reach index) and stitched into one
+    LineString per reach, matched onto the reach row via ``shud_riv_index``.
+
+    Called by the seeding orchestrators after import, never by the low-level
+    import itself: qhh via ``qhh_production_bootstrap``, generic basins via the
+    node-27 autopipe. Only ``geom``/``length_m`` are written (neither is part of
+    the output-river idempotency digest). ``record_geometry_source`` additionally
+    stamps provenance into ``properties_json``; the autopipe passes False so the
+    digest stays stable across re-imports (properties_json IS digested), while
+    the qhh bootstrap keeps it True. With ``only_missing`` the UPDATE touches only
+    NULL-geom rows, so re-importing an already-correct basin updates zero rows.
+    """
+    cursor.execute(
+        """
+        WITH gis_points AS (
+            SELECT
+                (properties_json->>'source_raw_segment_id')::int AS shud_riv_index,
+                segment_order,
+                length_m,
+                (dump).path[1] AS point_order,
+                (dump).geom AS point_geom
+            FROM (
+                SELECT properties_json, segment_order, length_m, ST_DumpPoints(geom) AS dump
+                FROM core.river_segment
+                WHERE river_network_version_id = %s
+                  AND geom IS NOT NULL
+                  AND COALESCE(properties_json->>'shud_output_river', 'false') <> 'true'
+                  AND properties_json ? 'source_raw_segment_id'
+                  AND (properties_json->>'source_raw_segment_id') ~ '^[0-9]+$'
+            ) source
+        ),
+        numbered_points AS (
+            SELECT
+                shud_riv_index,
+                segment_order,
+                length_m,
+                point_order,
+                point_geom,
+                LAG(ST_AsEWKB(point_geom)) OVER (
+                    PARTITION BY shud_riv_index
+                    ORDER BY segment_order, point_order
+                ) AS previous_point
+            FROM gis_points
+        ),
+        deduped_points AS (
+            SELECT *
+            FROM numbered_points
+            WHERE previous_point IS NULL
+               OR previous_point <> ST_AsEWKB(point_geom)
+        ),
+        gis_by_riv AS (
+            SELECT
+                shud_riv_index,
+                ST_MakeLine(point_geom ORDER BY segment_order, point_order)::geometry(LineString, 4490) AS geom,
+                SUM(DISTINCT length_m) AS length_m,
+                COUNT(DISTINCT segment_order) AS source_segment_count
+            FROM deduped_points
+            GROUP BY shud_riv_index
+            HAVING COUNT(*) >= 2
+        )
+        UPDATE core.river_segment target
+        SET geom = gis.geom,
+            length_m = gis.length_m,
+            properties_json = CASE
+                WHEN %s THEN target.properties_json
+                    || jsonb_build_object(
+                        'geometry_source', 'gis_rivseg_iRiv',
+                        'geometry_source_segment_count', gis.source_segment_count,
+                        'geometry_source_length_m', gis.length_m
+                    )
+                ELSE target.properties_json
+            END
+        FROM gis_by_riv gis
+        WHERE target.river_network_version_id = %s
+          AND COALESCE(target.properties_json->>'shud_output_river', 'false') = 'true'
+          AND (target.properties_json->>'shud_riv_index')::int = gis.shud_riv_index
+          AND (NOT %s OR target.geom IS NULL)
+        """,
+        (river_network_version_id, record_geometry_source, river_network_version_id, only_missing),
+    )
+    return max(int(getattr(cursor, "rowcount", 0) or 0), 0)
 
 
 def _output_river_segment_rows(sources: ImportSources) -> list[dict[str, Any]]:

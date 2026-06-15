@@ -181,6 +181,33 @@ def _activate_model(database_url: str, model_id: str) -> int:
         conn.close()
 
 
+def _backfill_output_geometry(database_url: str, river_network_version_id: str) -> int:
+    """Stitch display geometry onto the NULL-geom ``.sp.riv`` output reaches the
+    generic import seeds. The import deliberately leaves those reaches NULL
+    (display geometry is a separate concern), so without this the national /
+    per-run MVT JOINs the reach rows but renders nothing -- the basin's river
+    segments are invisible and unclickable on the live map (the heihe
+    regression). Reuses the single shared SQL; only_missing keeps it idempotent
+    and record_geometry_source=False leaves properties_json untouched so a
+    re-seed's import digest stays stable."""
+    from workers.model_registry.basins_registry_import import (
+        _backfill_output_segment_geometry,
+    )
+
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                return _backfill_output_segment_geometry(
+                    cur,
+                    river_network_version_id,
+                    only_missing=True,
+                    record_geometry_source=False,
+                )
+    finally:
+        conn.close()
+
+
 def _publish_display_runs(database_url: str) -> int:
     """Advance fully-ingested display runs from 'parsed' to 'published'.
 
@@ -307,6 +334,8 @@ def _seed_basin(
             return {"basin": basin, "outcome": "seed_failed", "stage": "import", "error": (err or out)[-600:]}
         import_report = _last_json(out) or {}
 
+        rnv_id = import_report.get("river_network_version_id")
+        geom_rows = _backfill_output_geometry(database_url, rnv_id) if rnv_id else 0
         activated = _activate_model(database_url, model_id)
         return {
             "basin": basin,
@@ -316,6 +345,7 @@ def _seed_basin(
             "import_status": import_report.get("status"),
             "segment_count": import_report.get("segment_count"),
             "output_segment_count": import_report.get("output_segment_count"),
+            "output_geometry_backfilled": geom_rows,
             "model_activated_rows": activated,
         }
     finally:
