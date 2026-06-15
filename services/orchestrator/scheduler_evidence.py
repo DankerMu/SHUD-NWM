@@ -78,6 +78,40 @@ class SchedulerCandidateLike(Protocol):
     state_evidence: Mapping[str, Any]
 
 
+class BoundedEvidencePayloadCallback(Protocol):
+    def __call__(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        reason: str,
+        max_evidence_bytes: int,
+    ) -> dict[str, Any]:
+        ...
+
+
+class WriteNewRegularFileCallback(Protocol):
+    def __call__(self, artifact_name: str, serialized: str, *, dir_fd: int, artifact_path: Path) -> None:
+        ...
+
+
+class RequireEvidenceArtifactAvailableCallback(Protocol):
+    def __call__(self, artifact_name: str, *, dir_fd: int, artifact_path: Path) -> None:
+        ...
+
+
+class ReservationBlockedPayloadCallback(Protocol):
+    def __call__(
+        self,
+        *,
+        pass_id: str,
+        artifact_path: Path,
+        reason: str,
+        details: Mapping[str, Any] | None,
+        evidence_safe: Callable[[Any], Any],
+    ) -> dict[str, Any]:
+        ...
+
+
 @dataclass(frozen=True)
 class SchedulerEvidenceWriteContext:
     config: SchedulerEvidenceConfig
@@ -85,11 +119,11 @@ class SchedulerEvidenceWriteContext:
     require_under_workspace: Callable[[Path, Path, str], None]
     evidence_safe: Callable[[Any], Any] = _evidence_safe
     max_evidence_bytes: int = MAX_EVIDENCE_BYTES
-    bounded_evidence_payload: Callable[[Mapping[str, Any], str], dict[str, Any]] | None = None
+    bounded_evidence_payload: BoundedEvidencePayloadCallback | None = None
     open_evidence_directory: Callable[[Path, Path], int] | None = None
-    write_new_regular_file: Callable[[str, str, int, Path], None] | None = None
-    require_evidence_artifact_available: Callable[[str, int, Path], None] | None = None
-    reservation_blocked_payload: Callable[[str, Path, str, Mapping[str, Any] | None], dict[str, Any]] | None = None
+    write_new_regular_file: WriteNewRegularFileCallback | None = None
+    require_evidence_artifact_available: RequireEvidenceArtifactAvailableCallback | None = None
+    reservation_blocked_payload: ReservationBlockedPayloadCallback | None = None
     evidence_write_error_payload: Callable[[OSError], dict[str, Any]] | None = None
 
 
@@ -281,7 +315,11 @@ def _call_bounded_evidence_payload(
     reason: str,
 ) -> dict[str, Any]:
     if context.bounded_evidence_payload is not None:
-        return context.bounded_evidence_payload(payload, reason)
+        return context.bounded_evidence_payload(
+            payload,
+            reason=reason,
+            max_evidence_bytes=context.max_evidence_bytes,
+        )
     return bounded_evidence_payload(payload, reason=reason, max_evidence_bytes=context.max_evidence_bytes)
 
 
@@ -303,7 +341,12 @@ def _call_write_new_regular_file(
     artifact_path: Path,
 ) -> None:
     if context.write_new_regular_file is not None:
-        context.write_new_regular_file(artifact_name, serialized, dir_fd, artifact_path)
+        context.write_new_regular_file(
+            artifact_name,
+            serialized,
+            dir_fd=dir_fd,
+            artifact_path=artifact_path,
+        )
         return
     write_new_regular_file(artifact_name, serialized, dir_fd=dir_fd, artifact_path=artifact_path)
 
@@ -315,7 +358,11 @@ def _call_require_evidence_artifact_available(
     artifact_path: Path,
 ) -> None:
     if context.require_evidence_artifact_available is not None:
-        context.require_evidence_artifact_available(artifact_name, dir_fd, artifact_path)
+        context.require_evidence_artifact_available(
+            artifact_name,
+            dir_fd=dir_fd,
+            artifact_path=artifact_path,
+        )
         return
     require_evidence_artifact_available(artifact_name, dir_fd=dir_fd, artifact_path=artifact_path)
 
@@ -328,7 +375,13 @@ def _call_reservation_blocked_payload(
     details: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     if context.reservation_blocked_payload is not None:
-        return context.reservation_blocked_payload(pass_id, artifact_path, reason, details)
+        return context.reservation_blocked_payload(
+            pass_id=pass_id,
+            artifact_path=artifact_path,
+            reason=reason,
+            details=details,
+            evidence_safe=context.evidence_safe,
+        )
     return evidence_reservation_blocked_payload(
         pass_id=pass_id,
         artifact_path=artifact_path,

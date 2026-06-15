@@ -4121,6 +4121,85 @@ def test_scheduler_evidence_private_helper_compatibility_shims_delegate(
     assert base_from_method == base_from_module
 
 
+def test_scheduler_evidence_context_accepts_exported_keyword_callbacks(tmp_path: Path) -> None:
+    from services.orchestrator import scheduler_evidence
+
+    started_at = _dt("2026-05-21T12:00:00Z")
+    config = _config(tmp_path, now=started_at, dry_run=False)
+    evidence_dir = Path(config.evidence_dir)
+    evidence_dir.mkdir(parents=True)
+    context = scheduler_evidence.SchedulerEvidenceWriteContext(
+        config=config,
+        require_safe_directory_final_component=scheduler_module._require_safe_directory_final_component,
+        require_under_workspace=scheduler_module._require_under_workspace,
+        max_evidence_bytes=750,
+        bounded_evidence_payload=scheduler_evidence.bounded_evidence_payload,
+        write_new_regular_file=scheduler_evidence.write_new_regular_file,
+        require_evidence_artifact_available=scheduler_evidence.require_evidence_artifact_available,
+        reservation_blocked_payload=scheduler_evidence.evidence_reservation_blocked_payload,
+    )
+    pass_id = "scheduler_20260521120000_keyword_callbacks"
+
+    reservation = scheduler_evidence.reserve_pre_execution_evidence(
+        context,
+        pass_id,
+        started_at,
+        1,
+        now=started_at,
+    )
+    pre_execution_artifact = evidence_dir / f"{pass_id}.pre_execution.json"
+    persisted_reservation = json.loads(pre_execution_artifact.read_text(encoding="utf-8"))
+
+    evidence = {
+        "schema_version": SCHEDULER_EVIDENCE_SCHEMA_VERSION,
+        "pass_id": pass_id,
+        "started_at": "2026-05-21T12:00:00Z",
+        "status": "submitted",
+        "execution_mode": "production_orchestration",
+        "readiness_interpretation": "non_final_scheduler_evidence",
+        "readiness": {"production_ready": False},
+        "counts": {"candidate_count": 1},
+        "runtime_config": {"dry_run": False},
+        "root_preflight": {"status": "ready"},
+        "evidence_pre_execution": reservation,
+        "execution_write_proof": {"status": "submitted"},
+        "slurm_status_sync_proof": {"status": "not_required"},
+        "slurm_cancellation_proof": {"status": "not_required"},
+        "no_mutation_proof": _expected_no_mutation_proof(),
+        "candidates": [{"payload": "x" * 2_000}],
+    }
+
+    artifact_path = scheduler_evidence.write_evidence(context, pass_id, evidence)
+    persisted_final = json.loads(Path(artifact_path or "").read_text(encoding="utf-8"))
+
+    assert reservation["status"] == "reserved"
+    assert persisted_reservation["status"] == "reserved"
+    assert persisted_reservation["proof"] == "scheduler_evidence_directory_write_before_production_mutation"
+    assert persisted_final["status"] == "resource_limit_blocked"
+    assert persisted_final["limit"] == {"reason": "evidence_size_limit_exceeded", "max_evidence_bytes": 750}
+    assert persisted_final["evidence_pre_execution"]["status"] == "reserved"
+    assert evidence["status"] == "resource_limit_blocked"
+    assert evidence["artifact_path"] == str(evidence_dir / f"{pass_id}.json")
+
+    blocked_pass_id = f"{pass_id}_blocked"
+    blocked_pre_execution_artifact = evidence_dir / f"{blocked_pass_id}.pre_execution.json"
+    blocked_pre_execution_artifact.write_text("existing pre-execution\n", encoding="utf-8")
+
+    blocked = scheduler_evidence.reserve_pre_execution_evidence(
+        context,
+        blocked_pass_id,
+        started_at,
+        1,
+        now=started_at,
+    )
+
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "evidence_artifact_exists"
+    assert blocked["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+    assert blocked["artifact_path"] == str(blocked_pre_execution_artifact)
+    assert blocked_pre_execution_artifact.read_text(encoding="utf-8") == "existing pre-execution\n"
+
+
 def test_scheduler_evidence_module_imports_without_scheduler_cycle() -> None:
     import importlib
 
@@ -4208,6 +4287,80 @@ def test_non_dry_run_blocks_before_candidate_execution_when_final_evidence_artif
     assert result.evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
 
 
+def test_normal_mutation_sees_pre_execution_reservation_before_forcing_and_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    suffix = "444455556666"
+    pass_id = f"scheduler_{format_cycle_time(now)}_{suffix}"
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
+    reservation_path = tmp_path / "scheduler" / "evidence" / f"{pass_id}.pre_execution.json"
+    producer_observations: list[dict[str, Any]] = []
+    submit_observations: list[dict[str, Any]] = []
+
+    class ReservationCheckingForcingProducer(FakeForcingProducer):
+        def produce(self, **kwargs: Any) -> Any:
+            producer_observations.append(
+                {
+                    "reservation_exists": reservation_path.is_file(),
+                    "reservation": json.loads(reservation_path.read_text(encoding="utf-8"))
+                    if reservation_path.is_file()
+                    else None,
+                }
+            )
+            return super().produce(**kwargs)
+
+    class ReservationCheckingOrchestrator(FakeProductionOrchestrator):
+        def orchestrate_cycle(
+            self,
+            source: str,
+            cycle_time: datetime,
+            basins: list[dict[str, Any]],
+        ) -> PipelineResult:
+            submit_observations.append(
+                {
+                    "reservation_exists": reservation_path.is_file(),
+                    "reservation": json.loads(reservation_path.read_text(encoding="utf-8"))
+                    if reservation_path.is_file()
+                    else None,
+                }
+            )
+            return super().orchestrate_cycle(source, cycle_time, basins)
+
+    forcing_producer = ReservationCheckingForcingProducer()
+    orchestrator = ReservationCheckingOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert result.status == "submitted"
+    assert [item["reservation_exists"] for item in producer_observations] == [True]
+    assert [item["reservation_exists"] for item in submit_observations] == [True]
+    assert producer_observations[0]["reservation"]["pass_id"] == pass_id
+    assert submit_observations[0]["reservation"]["status"] == "reserved"
+    assert len(forcing_producer.calls) == 1
+    assert len(orchestrator.calls) == 1
+    for evidence in (result.evidence, persisted):
+        assert evidence["evidence_pre_execution"]["status"] == "reserved"
+        assert evidence["evidence_pre_execution"]["artifact_path"] == str(reservation_path)
+        assert evidence["evidence_pre_execution"]["proof"] == (
+            "scheduler_evidence_directory_write_before_production_mutation"
+        )
+        assert evidence["execution_write_proof"]["protected_by_pre_execution_evidence"] is True
+        assert evidence["no_mutation_proof"]["met_result_table_writes"] is True
+        assert evidence["no_mutation_proof"]["slurm_submit_called"] is True
+
+
 def test_cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists(
     monkeypatch: Any,
     tmp_path: Path,
@@ -4246,6 +4399,158 @@ def test_cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_e
     assert cancellation["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
     assert cancellation["cancel_attempted"] is False
     assert cancellation["mutation_occurred"] is False
+
+
+def test_pre_execution_existing_regular_artifact_blocks_before_forcing_and_submit(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    suffix = "aaaabbbbcccc"
+    pass_id = f"scheduler_{format_cycle_time(now)}_{suffix}"
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
+    forcing_producer = FakeForcingProducer()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=_AlwaysReadyCanonicalReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
+    reservation_path.parent.mkdir(parents=True)
+    reservation_path.write_text("existing reservation\n", encoding="utf-8")
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert reservation_path.read_text(encoding="utf-8") == "existing reservation\n"
+    assert forcing_producer.calls == []
+    assert orchestrator.calls == []
+    assert orchestrator.cancel_calls == []
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "preflight_blocked"
+        assert evidence["execution_boundary"] == "evidence_preflight_blocked"
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+        assert evidence["evidence_pre_execution"]["status"] == "blocked"
+        assert evidence["evidence_pre_execution"]["reason"] == "evidence_artifact_exists"
+        assert evidence["evidence_pre_execution"]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+        assert evidence["evidence_pre_execution"]["artifact_path"] == str(reservation_path)
+        assert evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+        assert evidence["model_run_evidence"][0]["submitted"] is False
+        assert evidence["model_run_evidence"][0]["mutation_occurred"] is False
+
+
+def test_pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_target(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    suffix = "ddddeeeeffff"
+    pass_id = f"scheduler_{format_cycle_time(now)}_{suffix}"
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
+    sync_calls: list[str] = []
+
+    class SyncMustNotRunOrchestrator(FakeProductionOrchestrator):
+        def sync_cycle_statuses(self, cycle_id: str) -> list[dict[str, Any]]:
+            sync_calls.append(cycle_id)
+            return [{"job_id": "job_forcing", "cycle_id": cycle_id, "slurm_job_id": "7777", "status": "failed"}]
+
+    orchestrator = SyncMustNotRunOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeSlurmActiveRepository(
+            active_jobs=[
+                {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
+            ]
+        ),
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
+    reservation_path.parent.mkdir(parents=True)
+    outside_target = tmp_path.parent / f"{tmp_path.name}-pre-execution-outside-target.json"
+    outside_target.write_text("keep outside\n", encoding="utf-8")
+    reservation_path.symlink_to(outside_target)
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert reservation_path.is_symlink()
+    assert outside_target.read_text(encoding="utf-8") == "keep outside\n"
+    assert sync_calls == []
+    assert orchestrator.calls == []
+    assert orchestrator.cancel_calls == []
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "preflight_blocked"
+        assert evidence["execution_boundary"] == "evidence_preflight_blocked"
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["slurm_status_sync_count"] == 0
+        assert evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+        assert evidence["evidence_pre_execution"]["status"] == "blocked"
+        assert evidence["evidence_pre_execution"]["reason"] == "unsafe_evidence_artifact"
+        assert evidence["evidence_pre_execution"]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+        assert evidence["evidence_pre_execution"]["artifact_path"] == str(reservation_path)
+        assert evidence["slurm_status_sync_proof"]["status"] == "preflight_blocked"
+        assert evidence["slurm_status_sync_proof"]["sync_called"] is False
+        assert evidence["model_run_evidence"][0]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+        assert evidence["model_run_evidence"][0]["sync_attempted"] is False
+        assert evidence["model_run_evidence"][0]["mutation_occurred"] is False
+
+
+def test_pre_execution_non_regular_artifact_blocks_before_cancel(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-21T12:00:00Z")
+    suffix = "111122223333"
+    pass_id = f"scheduler_{format_cycle_time(now)}_{suffix}"
+    monkeypatch.setattr(scheduler_module, "uuid4", lambda: type("FixedUUID", (), {"hex": suffix})())
+    forcing_producer = FakeForcingProducer()
+    orchestrator = FakeProductionOrchestrator()
+    scheduler = ProductionScheduler(
+        _config(tmp_path, now=now, dry_run=False, cancel_active_slurm=True),
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        active_repository=FakeSlurmActiveRepository(
+            active_jobs=[
+                {"job_id": "job_forcing", "slurm_job_id": "7777", "stage": "forcing", "status": "running"}
+            ]
+        ),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+    reservation_path = Path(scheduler.config.evidence_dir) / f"{pass_id}.pre_execution.json"
+    reservation_path.mkdir(parents=True)
+
+    result = scheduler.run_once()
+    persisted = json.loads(Path(result.artifact_path or "").read_text(encoding="utf-8"))
+
+    assert reservation_path.is_dir()
+    assert forcing_producer.calls == []
+    assert orchestrator.calls == []
+    assert orchestrator.cancel_calls == []
+    for evidence in (result.evidence, persisted):
+        assert evidence["status"] == "preflight_blocked"
+        assert evidence["execution_boundary"] == "evidence_preflight_blocked"
+        assert evidence["counts"]["submitted_count"] == 0
+        assert evidence["counts"]["slurm_cancelled_count"] == 0
+        assert evidence["no_mutation_proof"] == _expected_no_mutation_proof()
+        assert evidence["evidence_pre_execution"]["status"] == "blocked"
+        assert evidence["evidence_pre_execution"]["reason"] == "unsafe_evidence_artifact"
+        assert evidence["evidence_pre_execution"]["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+        assert evidence["evidence_pre_execution"]["artifact_path"] == str(reservation_path)
+        assert evidence["model_run_evidence"] == []
+        assert evidence["slurm_cancellation_proof"]["status"] == "preflight_blocked"
+        cancellation = evidence["slurm_cancellation_evidence"][0]
+        assert cancellation["error_code"] == "EVIDENCE_WRITE_PRECHECK_FAILED"
+        assert cancellation["cancel_attempted"] is False
+        assert cancellation["mutation_occurred"] is False
 
 
 def test_stale_unowned_lock_is_not_unlinked(tmp_path: Path) -> None:

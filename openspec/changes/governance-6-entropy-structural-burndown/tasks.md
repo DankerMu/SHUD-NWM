@@ -1920,9 +1920,13 @@ separate PR boundaries.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'evidence_dir_symlink_cannot_escape_workspace or evidence_final_artifact_symlink_is_not_followed or evidence_existing_artifact_file_is_not_overwritten'`
     -> evidence directory containment, final artifact no-follow, and
     no-clobber tests pass.
-  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'pre_execution_reservation_fails or pre_execution_reservation_before_mutating or sync_cycle_statuses_sees_pre_execution_reservation_before_mutating or sync_cycle_statuses_blocks_before_sync_when_pre_execution_reservation_fails or cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists'`
-    -> reservation ordering, sync/cancel mutation fence, and conservative
-    blocked evidence tests pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_evidence_context_accepts_exported_keyword_callbacks or scheduler_evidence_private_helper_compatibility_shims_delegate or scheduler_evidence_module_imports_without_scheduler_cycle'`
+    -> direct scheduler-evidence context callbacks, compatibility shims, and
+    circular-import-free module import pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'normal_mutation_sees_pre_execution_reservation_before_forcing_and_submit or sync_cycle_statuses_sees_pre_execution_reservation_before_mutating or sync_cycle_statuses_blocks_before_sync_when_pre_execution_reservation_fails or cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists or pre_execution_existing_regular_artifact_blocks_before_forcing_and_submit or pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_target or pre_execution_non_regular_artifact_blocks_before_cancel'`
+    -> reservation ordering, sync/cancel/forcing/orchestrator mutation fence,
+    pre-execution artifact no-clobber/no-follow/non-regular rejection, and
+    conservative blocked evidence tests pass.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof or no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof or bounded_evidence_preserves_pre_execution_reservation_proof'`
     -> bounded evidence keeps required preflight/readiness/reservation proofs.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_pass_startup_reconciles_reserved_unbound_jobs or restart_reconcile'`
@@ -1959,15 +1963,21 @@ separate PR boundaries.
     helpers so existing monkeypatch paths remain effective.
   - Added focused regression tests for signed outcome log URI redaction,
     sensitive runtime/Slurm payload redaction, private helper compatibility
-    delegation, and circular-import-free `scheduler_evidence` import.
+    delegation, direct keyword-compatible context callbacks, reservation before
+    normal forcing/orchestrator mutation, pre-execution artifact
+    no-clobber/no-follow/non-regular rejection, and circular-import-free
+    `scheduler_evidence` import.
   - Updated the services/orchestrator entropy file-count expectation for the
     new tracked scheduler evidence module.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'evidence_dir_symlink_cannot_escape_workspace or evidence_final_artifact_symlink_is_not_followed or evidence_existing_artifact_file_is_not_overwritten'`
     -> `4 passed, 525 deselected`.
   - Verification:
-    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'pre_execution_reservation_fails or pre_execution_reservation_before_mutating or sync_cycle_statuses_sees_pre_execution_reservation_before_mutating or sync_cycle_statuses_blocks_before_sync_when_pre_execution_reservation_fails or cancel_active_slurm_blocks_before_cancel_when_final_evidence_artifact_exists'`
-    -> `3 passed, 526 deselected`.
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'scheduler_evidence_context_accepts_exported_keyword_callbacks or normal_mutation_sees_pre_execution_reservation_before_forcing_and_submit or pre_execution_existing_regular_artifact_blocks_before_forcing_and_submit or pre_execution_symlink_artifact_blocks_before_status_sync_and_preserves_target or pre_execution_non_regular_artifact_blocks_before_cancel'`
+    -> `5 passed, 529 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'pre_execution_reservation or scheduler_evidence_context or scheduler_evidence_private_helper_compatibility_shims_delegate or scheduler_evidence_module_imports_without_scheduler_cycle'`
+    -> `7 passed, 527 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py -k 'bounded_evidence_preserves_no_flag_root_runtime_and_preflight_proof or no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof or bounded_evidence_preserves_pre_execution_reservation_proof'`
     -> `3 passed, 526 deselected`.

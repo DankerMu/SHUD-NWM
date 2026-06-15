@@ -1886,7 +1886,7 @@ class ProductionScheduler:
             require_under_workspace=_require_under_workspace,
             evidence_safe=_evidence_safe,
             max_evidence_bytes=MAX_EVIDENCE_BYTES,
-            bounded_evidence_payload=lambda payload, reason: _bounded_evidence_payload(payload, reason=reason),
+            bounded_evidence_payload=_bounded_evidence_payload,
             open_evidence_directory=_open_evidence_directory,
             write_new_regular_file=lambda artifact_name, serialized, dir_fd, artifact_path: _write_new_regular_file(
                 artifact_name,
@@ -1901,7 +1901,7 @@ class ProductionScheduler:
                     artifact_path=artifact_path,
                 )
             ),
-            reservation_blocked_payload=lambda pass_id, artifact_path, reason, details: (
+            reservation_blocked_payload=lambda pass_id, artifact_path, reason, details, evidence_safe: (
                 _evidence_reservation_blocked_payload(
                     pass_id=pass_id,
                     artifact_path=artifact_path,
@@ -6225,11 +6225,16 @@ _source_object_identity = _scheduler_candidates._source_object_identity
 _accepted_horizon_from_hours = _scheduler_candidates._accepted_horizon_from_hours
 
 
-def _bounded_evidence_payload(payload: Mapping[str, Any], *, reason: str) -> dict[str, Any]:
+def _bounded_evidence_payload(
+    payload: Mapping[str, Any],
+    *,
+    reason: str,
+    max_evidence_bytes: int | None = None,
+) -> dict[str, Any]:
     return _scheduler_evidence.bounded_evidence_payload(
         payload,
         reason=reason,
-        max_evidence_bytes=MAX_EVIDENCE_BYTES,
+        max_evidence_bytes=MAX_EVIDENCE_BYTES if max_evidence_bytes is None else max_evidence_bytes,
     )
 
 
