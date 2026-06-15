@@ -20,6 +20,8 @@ import { isRoleOverrideEnabled, type AuthRole, useAuthStore } from '@/stores/aut
 import { useMonitoringStore } from '@/stores/monitoring'
 import { useToast } from '@/hooks/useToast'
 
+import { SiteHeader } from './SiteHeader'
+
 const roleOptions: Array<{ value: AuthRole; label: string }> = [
   { value: 'viewer', label: 'Viewer' },
   { value: 'analyst', label: 'Analyst' },
@@ -50,24 +52,27 @@ export function AppShell({ children }: AppShellProps) {
 
   return (
     <ToastProvider>
-      <div className="relative h-screen w-screen overflow-hidden bg-background text-foreground">
-        {isRoleOverrideEnabled ? (
-          <div className="absolute right-4 top-4 z-30">
-            <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
-              <SelectTrigger className="w-36" aria-label="Role">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent align="end">
-                {roleOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        ) : null}
-        <main className="h-full w-full overflow-hidden">{children}</main>
+      <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+        <SiteHeader />
+        <main className="relative min-h-0 w-full flex-1 overflow-hidden">
+          {isRoleOverrideEnabled ? (
+            <div className="absolute right-4 top-4 z-30">
+              <Select value={role} onValueChange={(value) => setRole(value as AuthRole)}>
+                <SelectTrigger className="w-36" aria-label="Role">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent align="end">
+                  {roleOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
+          {children}
+        </main>
       </div>
       {toasts.map((toast) => (
         <Toast
