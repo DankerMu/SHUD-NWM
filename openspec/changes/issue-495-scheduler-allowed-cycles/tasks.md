@@ -58,6 +58,9 @@
       or paths that intentionally exercise four-cycle behavior.
 - [x] QHH scheduler fixture compatibility: 06Z-only readiness fixtures use
       explicit `0,6,12,18` allowed-cycle config.
+- [x] Two-node static checker contract: compute compose interpolation approves
+      `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC` and still rejects an unapproved
+      scheduler interpolation key.
 
 ## Documentation Evidence
 
