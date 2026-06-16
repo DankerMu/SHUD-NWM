@@ -254,6 +254,25 @@ def _env(db_path: Path, object_store_root: Path, copyback_root: Path) -> dict[st
     return env
 
 
+def _assert_cli_apply_zero_runs_rejects_unsafe_copyback_root(
+    *,
+    db_path: Path,
+    object_store_root: Path,
+    copyback_root: Path,
+) -> dict[str, Any]:
+    result = _run_module(_env(db_path, object_store_root, copyback_root), "--apply")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["status"] == "failed"
+    assert payload["error_code"] == "OBJECT_STORE_COPYBACK_FAILED"
+    assert payload["message"] == "Failed to prepare object-store copyback root."
+    assert payload["details"]["copyback_root"] == str(copyback_root)
+    assert "Traceback" not in result.stderr
+    return payload
+
+
 def test_db_discovery_filters_eligible_qdown_runs_and_counts_joined_forcing_versions(
     tmp_path: Path,
 ) -> None:
@@ -392,6 +411,67 @@ def test_cli_rejects_copyback_root_equal_object_store_root_with_zero_eligible_ru
     assert payload["details"]["reason"] == "copyback_root_matches_object_store_root"
     assert "already_present" not in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_cli_apply_zero_runs_rejects_final_symlink_copyback_root_without_writes(
+    tmp_path: Path,
+) -> None:
+    _engine, db_path = _init_db(tmp_path)
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    real_target = tmp_path / "real-copyback-root"
+    real_target.mkdir()
+    copyback_root = tmp_path / "copyback-link"
+    copyback_root.symlink_to(real_target, target_is_directory=True)
+
+    _assert_cli_apply_zero_runs_rejects_unsafe_copyback_root(
+        db_path=db_path,
+        object_store_root=object_store_root,
+        copyback_root=copyback_root,
+    )
+
+    assert copyback_root.is_symlink()
+    assert list(real_target.iterdir()) == []
+
+
+def test_cli_apply_zero_runs_rejects_regular_file_copyback_root_without_writes(
+    tmp_path: Path,
+) -> None:
+    _engine, db_path = _init_db(tmp_path)
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    copyback_root = tmp_path / "shared-object-store"
+    copyback_root.write_text("unsafe target\n", encoding="utf-8")
+
+    _assert_cli_apply_zero_runs_rejects_unsafe_copyback_root(
+        db_path=db_path,
+        object_store_root=object_store_root,
+        copyback_root=copyback_root,
+    )
+
+    assert copyback_root.read_text(encoding="utf-8") == "unsafe target\n"
+
+
+def test_cli_apply_zero_runs_rejects_copyback_parent_symlink_without_writes(
+    tmp_path: Path,
+) -> None:
+    _engine, db_path = _init_db(tmp_path)
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    link_parent = tmp_path / "link-parent"
+    link_parent.symlink_to(real_parent, target_is_directory=True)
+    copyback_root = link_parent / "shared-object-store"
+
+    _assert_cli_apply_zero_runs_rejects_unsafe_copyback_root(
+        db_path=db_path,
+        object_store_root=object_store_root,
+        copyback_root=copyback_root,
+    )
+
+    assert link_parent.is_symlink()
+    assert not (real_parent / "shared-object-store").exists()
 
 
 def test_cli_apply_prepare_publish_error_emits_json_without_traceback_or_writes(tmp_path: Path) -> None:

@@ -161,8 +161,6 @@ def run_backfill(config: BackfillConfig) -> dict[str, Any]:
         copyback_root=copyback_root_raw,
         runs=runs,
     )
-    if not runs:
-        return _redact_output(report)
 
     target_store: LocalObjectStore | None = None
     copyback_root = copyback_root_raw
@@ -177,7 +175,11 @@ def run_backfill(config: BackfillConfig) -> dict[str, Any]:
             raise _backfill_error_from_publish_error(error) from error
         _reject_same_copyback_root(copyback_root=copyback_root, object_store_root=object_store_root)
         target_store = LocalObjectStore(copyback_root, object_store_prefix=config.object_store_prefix)
-    else:
+        report["copyback_root"] = str(copyback_root)
+    if not runs:
+        return _redact_output(report)
+
+    if not config.apply:
         copyback_root, target_exists = _dry_run_copyback_root(
             copyback_root_raw=copyback_root_raw,
             object_store_root=object_store_root,
