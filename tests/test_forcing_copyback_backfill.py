@@ -9,10 +9,12 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
+from services.tile_publisher import forcing_copyback_backfill as backfill_module
 from services.tile_publisher.forcing_copyback_backfill import BackfillConfig, run_backfill
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -286,6 +288,17 @@ def test_db_discovery_filters_eligible_qdown_runs_and_counts_joined_forcing_vers
     assert report["packages"][0]["forcing_version_ids"] == ["forcing-1", "forcing-2"]
 
 
+def test_discovery_sql_drives_from_hydro_run_with_correlated_qdown_exists() -> None:
+    sql = backfill_module._DISCOVER_BACKFILL_RUNS_SQL
+
+    assert "FROM hydro.hydro_run h" in sql
+    assert "EXISTS (" in sql
+    assert "rt.run_id = h.run_id" in sql
+    assert "rt.variable = 'q_down'" in sql
+    assert "SELECT DISTINCT" not in sql
+    assert "JOIN (\n" not in sql
+
+
 def test_cli_dry_run_emits_json_and_writes_nothing(tmp_path: Path) -> None:
     _engine, db_path, object_store_root, copyback_root, _checksum, _manifest_bytes = _seed_valid_candidate(tmp_path)
 
@@ -313,17 +326,71 @@ def test_cli_apply_copies_valid_missing_package(tmp_path: Path) -> None:
     assert (copyback_root / f"{FORCING_KEY}/forcing.tsd.forc").read_bytes() == b"forcing-bytes\n"
 
 
-def test_cli_missing_env_fails_stably_without_target_writes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "missing_env",
+    ["DATABASE_URL", "OBJECT_STORE_ROOT", "NHMS_OBJECT_STORE_COPYBACK_ROOT"],
+)
+def test_cli_missing_env_fails_stably_without_target_writes(tmp_path: Path, missing_env: str) -> None:
     _engine, db_path, object_store_root, copyback_root, _checksum, _manifest_bytes = _seed_valid_candidate(tmp_path)
     env = _env(db_path, object_store_root, copyback_root)
-    env.pop("DATABASE_URL")
+    env.pop(missing_env)
 
     result = _run_module(env)
 
     assert result.returncode == 2
     payload = json.loads(result.stderr)
     assert payload["error_code"] == "CONFIG_MISSING"
-    assert payload["details"]["missing"] == ["DATABASE_URL"]
+    assert payload["details"]["missing"] == [missing_env]
+    assert "Traceback" not in result.stderr
+    assert not copyback_root.exists()
+
+
+@pytest.mark.parametrize("args", [(), ("--apply",)])
+def test_cli_rejects_copyback_root_equal_object_store_root_without_already_present(
+    tmp_path: Path,
+    args: tuple[str, ...],
+) -> None:
+    _engine, db_path, object_store_root, _copyback_root, _checksum, _manifest_bytes = _seed_valid_candidate(tmp_path)
+    before = {
+        path.relative_to(object_store_root).as_posix(): path.read_bytes()
+        for path in object_store_root.rglob("*")
+        if path.is_file()
+    }
+
+    result = _run_module(_env(db_path, object_store_root, object_store_root), *args)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["error_code"] == "COPYBACK_ROOT_SAME_AS_OBJECT_STORE_ROOT"
+    assert payload["details"]["reason"] == "copyback_root_matches_object_store_root"
+    assert "already_present" not in result.stderr
+    assert "Traceback" not in result.stderr
+    after = {
+        path.relative_to(object_store_root).as_posix(): path.read_bytes()
+        for path in object_store_root.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_cli_apply_prepare_publish_error_emits_json_without_traceback_or_writes(tmp_path: Path) -> None:
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest_bytes = _seed_valid_candidate(tmp_path)
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    link_parent = tmp_path / "link-parent"
+    link_parent.symlink_to(real_parent, target_is_directory=True)
+    unsafe_copyback_root = link_parent / "shared-object-store"
+
+    result = _run_module(_env(db_path, object_store_root, unsafe_copyback_root), "--apply")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["error_code"] == "OBJECT_STORE_COPYBACK_FAILED"
+    assert payload["message"] == "Failed to prepare object-store copyback root."
+    assert "Traceback" not in result.stderr
+    assert not (real_parent / "shared-object-store").exists()
     assert not copyback_root.exists()
 
 
@@ -345,6 +412,36 @@ def test_already_present_checksum_consistent_target_is_not_copied(tmp_path: Path
     assert report["copied_count"] == 0
     assert report["packages"][0]["status"] == "already_present"
     assert (copyback_root / f"{FORCING_KEY}/forcing_package.json").read_bytes() == manifest_bytes
+
+
+def test_dry_run_already_present_checksum_consistent_target_is_not_mutated(tmp_path: Path) -> None:
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest_bytes = _seed_valid_candidate(tmp_path)
+    _write_forcing_package(copyback_root)
+    before = {
+        path.relative_to(copyback_root).as_posix(): path.read_bytes()
+        for path in copyback_root.rglob("*")
+        if path.is_file()
+    }
+
+    report = run_backfill(
+        _base_config(
+            db_path=db_path,
+            object_store_root=object_store_root,
+            copyback_root=copyback_root,
+            apply=False,
+        )
+    )
+
+    after = {
+        path.relative_to(copyback_root).as_posix(): path.read_bytes()
+        for path in copyback_root.rglob("*")
+        if path.is_file()
+    }
+    assert report["already_present_checksum_consistent_count"] == 1
+    assert report["copyable_package_count"] == 0
+    assert report["copied_count"] == 0
+    assert report["packages"][0]["status"] == "already_present"
+    assert after == before
 
 
 def test_missing_source_reports_failure_with_required_identity_fields(tmp_path: Path) -> None:
@@ -626,6 +723,35 @@ def test_apply_with_existing_target_regular_file_reports_failure_without_partial
     assert not list(copyback_root.rglob("*.copyback.*"))
 
 
+def test_apply_with_existing_target_directory_missing_manifest_fails_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest_bytes = _seed_valid_candidate(tmp_path)
+    target_root = copyback_root / FORCING_KEY
+    target_root.mkdir(parents=True)
+    (target_root / "forcing.tsd.forc").write_bytes(b"stale-target-output\n")
+    (target_root / "operator-note.txt").write_text("preserve me\n", encoding="utf-8")
+
+    report = run_backfill(
+        _base_config(
+            db_path=db_path,
+            object_store_root=object_store_root,
+            copyback_root=copyback_root,
+            apply=True,
+        )
+    )
+
+    assert report["failure_count"] == 1
+    assert report["copied_count"] == 0
+    assert report["copyable_package_count"] == 0
+    assert report["packages"][0]["status"] == "failed"
+    assert "manifest is missing" in report["failures"][0]["reason"]
+    assert not (target_root / "forcing_package.json").exists()
+    assert (target_root / "forcing.tsd.forc").read_bytes() == b"stale-target-output\n"
+    assert (target_root / "operator-note.txt").read_text(encoding="utf-8") == "preserve me\n"
+    assert not list(copyback_root.rglob("*.copyback.*"))
+
+
 def test_apply_with_existing_target_symlink_reports_failure_without_partial_package(
     tmp_path: Path,
 ) -> None:
@@ -707,3 +833,85 @@ def test_apply_write_failure_leaves_no_partial_package_and_preserves_prior_valid
     assert (copyback_root / f"{FORCING_KEY}/forcing_package.json").read_bytes() == manifest_1
     assert not (copyback_root / FORCING_KEY_2).exists()
     assert not list(copyback_root.rglob("*.copyback.*"))
+
+
+def test_cli_apply_redacts_credential_forcing_uri_while_copying_by_object_key(tmp_path: Path) -> None:
+    engine, db_path = _init_db(tmp_path)
+    object_store_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    object_store_root.mkdir()
+    checksum, manifest_bytes = _write_forcing_package(object_store_root)
+    credential_uri = (
+        f"s3://user:pass@bucket/{FORCING_KEY}/"
+        "?token=secret&X-Amz-Signature=presigned-secret"
+    )
+    _insert_run(engine, run_id="run-a")
+    _insert_forcing_version(
+        engine,
+        package_uri=credential_uri,
+        checksum=checksum,
+        lineage_json={"forcing_package_manifest_checksum": checksum, "output_files": []},
+    )
+
+    result = _run_module(_env(db_path, object_store_root, copyback_root), "--apply")
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["packages"][0]["object_key"] == FORCING_KEY
+    assert report["packages"][0]["references"][0]["forcing_package_uri"] == f"s3://bucket/{FORCING_KEY}/"
+    assert report["copied_count"] == 1
+    assert (copyback_root / f"{FORCING_KEY}/forcing_package.json").read_bytes() == manifest_bytes
+    for raw_secret in ("user:pass", "token=secret", "X-Amz-Signature", "presigned-secret"):
+        assert raw_secret not in result.stdout
+
+
+def test_failure_reason_redacts_secret_shaped_exception_text(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest_bytes = _seed_valid_candidate(tmp_path)
+    original_write = LocalObjectStore.write_bytes_atomic
+
+    def fail_target_write(self: LocalObjectStore, key_or_uri: str, content: bytes) -> str:
+        if Path(self.root).resolve() == copyback_root.resolve():
+            raise ObjectStoreError(
+                "copy failed token=secret password=hunter2 "
+                "uri=s3://user:pass@bucket/forcing/path?X-Amz-Signature=presigned-secret"
+            )
+        return original_write(self, key_or_uri, content)
+
+    monkeypatch.setattr(LocalObjectStore, "write_bytes_atomic", fail_target_write)
+
+    report = run_backfill(
+        _base_config(
+            db_path=db_path,
+            object_store_root=object_store_root,
+            copyback_root=copyback_root,
+            apply=True,
+        )
+    )
+
+    body = json.dumps(report, sort_keys=True)
+    assert report["failure_count"] == 1
+    assert report["copied_count"] == 0
+    assert "[redacted]" in report["failures"][0]["reason"]
+    for raw_secret in ("token=secret", "password=hunter2", "user:pass", "X-Amz-Signature", "presigned-secret"):
+        assert raw_secret not in body
+    assert not list(copyback_root.rglob("*.copyback.*"))
+
+
+def test_cli_error_stderr_redacts_secret_shaped_details(tmp_path: Path) -> None:
+    _engine, db_path = _init_db(tmp_path)
+    object_store_root = tmp_path / "object-store-token=secret"
+    copyback_root = tmp_path / "shared-object-store"
+
+    result = _run_module(_env(db_path, object_store_root, copyback_root))
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["error_code"] == "OBJECT_STORE_ROOT_UNSAFE"
+    assert "token=secret" not in result.stderr
+    assert "[redacted]" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not copyback_root.exists()

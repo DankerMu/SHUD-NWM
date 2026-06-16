@@ -37,7 +37,8 @@ OBJECT_STORE_PREFIX=s3://nhms
 
 `OBJECT_STORE_ROOT` 是历史 forcing package 的 staging/source root；
 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 是 22 写、27 只读消费的 shared object-store mirror。
-两者不能互相嵌套。
+两者不能互相嵌套，也不能配置成同一个目录。发布时的 exact-root skip 语义不适用于本工具；
+backfill 的目标是修复 shared mirror，same-root 属于配置错误。
 
 ## Dry-Run
 
@@ -53,6 +54,9 @@ dry-run 会扫描：
 - `hydro.hydro_run.status IN ('parsed', 'frequency_done', 'published')`
 - `hydro.river_timeseries.variable = 'q_down'`
 - `met.forcing_version` 中 joined 的 `forcing_package_uri`、`checksum`、`lineage_json`
+
+扫描只读，不写数据库；查询从符合状态的 `hydro.hydro_run` 出发，用 `EXISTS` 验证 q_down 覆盖，
+避免为发现候选而 materialize 全量 q_down run 集合。历史包很多时 stdout JSON 仍可能很大，建议始终重定向保存。
 
 报告重点看：
 

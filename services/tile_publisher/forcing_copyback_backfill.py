@@ -14,8 +14,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
+from packages.common.redaction import redact_payload
 from packages.common.safe_fs import SafeFilesystemError, verify_directory_no_follow
 from services.tile_publisher.publisher import (
+    PublishError,
     TilePublisher,
     _collect_copyback_source_tree,
     _commit_qdown_copyback_batch,
@@ -43,6 +45,32 @@ _COUNT_FIELDS = (
     "copied_count",
     "failure_count",
 )
+_DISCOVER_BACKFILL_RUNS_SQL = """
+    SELECT
+           h.run_id,
+           h.status,
+           h.model_id,
+           h.basin_version_id,
+           h.forcing_version_id,
+           h.source_id,
+           h.cycle_time,
+           fv.forcing_version_id AS forcing_row_forcing_version_id,
+           fv.forcing_package_uri AS forcing_package_uri,
+           fv.checksum AS forcing_checksum,
+           fv.lineage_json AS forcing_lineage_json
+    FROM hydro.hydro_run h
+    LEFT JOIN met.forcing_version fv
+      ON fv.forcing_version_id = h.forcing_version_id
+    WHERE h.status IN ('parsed', 'frequency_done', 'published')
+      AND EXISTS (
+          SELECT 1
+          FROM hydro.river_timeseries rt
+          WHERE rt.run_id = h.run_id
+            AND rt.variable = 'q_down'
+            AND rt.value IS NOT NULL
+      )
+    ORDER BY h.run_id
+"""
 
 
 class BackfillError(RuntimeError):
@@ -93,35 +121,7 @@ class _Candidate:
 
 def discover_backfill_runs(session: Session) -> list[dict[str, Any]]:
     _require_backfill_schema(session)
-    rows = session.execute(
-        text(
-            """
-            SELECT DISTINCT
-                   h.run_id,
-                   h.status,
-                   h.model_id,
-                   h.basin_version_id,
-                   h.forcing_version_id,
-                   h.source_id,
-                   h.cycle_time,
-                   fv.forcing_version_id AS forcing_row_forcing_version_id,
-                   fv.forcing_package_uri AS forcing_package_uri,
-                   fv.checksum AS forcing_checksum,
-                   fv.lineage_json AS forcing_lineage_json
-            FROM hydro.hydro_run h
-            JOIN (
-                SELECT DISTINCT run_id
-                FROM hydro.river_timeseries
-                WHERE variable = 'q_down'
-                  AND value IS NOT NULL
-            ) q ON q.run_id = h.run_id
-            LEFT JOIN met.forcing_version fv
-              ON fv.forcing_version_id = h.forcing_version_id
-            WHERE h.status IN ('parsed', 'frequency_done', 'published')
-            ORDER BY h.run_id
-            """
-        )
-    ).mappings()
+    rows = session.execute(text(_DISCOVER_BACKFILL_RUNS_SQL)).mappings()
     return [_with_parsed_forcing_lineage(dict(row)) for row in rows]
 
 
@@ -162,16 +162,20 @@ def run_backfill(config: BackfillConfig) -> dict[str, Any]:
         runs=runs,
     )
     if not runs:
-        return report
+        return _redact_output(report)
 
     target_store: LocalObjectStore | None = None
     copyback_root = copyback_root_raw
     if config.apply:
-        copyback_root = publisher._prepare_copyback_root(
-            copyback_root_raw=copyback_root_raw,
-            object_store_root_raw=object_store_root_raw,
-            object_store_root=object_store_root,
-        )
+        try:
+            copyback_root = publisher._prepare_copyback_root(
+                copyback_root_raw=copyback_root_raw,
+                object_store_root_raw=object_store_root_raw,
+                object_store_root=object_store_root,
+            )
+        except PublishError as error:
+            raise _backfill_error_from_publish_error(error) from error
+        _reject_same_copyback_root(copyback_root=copyback_root, object_store_root=object_store_root)
         target_store = LocalObjectStore(copyback_root, object_store_prefix=config.object_store_prefix)
     else:
         copyback_root, target_exists = _dry_run_copyback_root(
@@ -190,7 +194,7 @@ def run_backfill(config: BackfillConfig) -> dict[str, Any]:
         apply=config.apply,
         report=report,
     )
-    return report
+    return _redact_output(report)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -209,6 +213,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BackfillError as error:
         _emit_error(error, stream=sys.stderr)
         return 2 if error.error_code == "CONFIG_MISSING" else 1
+    except PublishError as error:
+        _emit_error(_backfill_error_from_publish_error(error), stream=sys.stderr)
+        return 1
     except (OSError, ObjectStoreError, SafeFilesystemError, ValueError) as error:
         _emit_error(
             BackfillError(
@@ -350,6 +357,7 @@ def _dry_run_copyback_root(
             "NHMS_OBJECT_STORE_COPYBACK_ROOT must be a safe directory when it already exists.",
             details={"copyback_root": str(copyback_root_raw), "error": str(error)},
         ) from error
+    _reject_same_copyback_root(copyback_root=copyback_root, object_store_root=object_store_root)
     if _paths_overlap(copyback_root, object_store_root) and copyback_root != object_store_root:
         raise BackfillError(
             "COPYBACK_ROOT_OVERLAP",
@@ -360,6 +368,20 @@ def _dry_run_copyback_root(
             },
         )
     return copyback_root, True
+
+
+def _reject_same_copyback_root(*, copyback_root: Path, object_store_root: Path) -> None:
+    if copyback_root != object_store_root:
+        return
+    raise BackfillError(
+        "COPYBACK_ROOT_SAME_AS_OBJECT_STORE_ROOT",
+        "NHMS_OBJECT_STORE_COPYBACK_ROOT must be different from OBJECT_STORE_ROOT for backfill.",
+        details={
+            "copyback_root": str(copyback_root),
+            "object_store_root": str(object_store_root),
+            "reason": "copyback_root_matches_object_store_root",
+        },
+    )
 
 
 def _empty_report(
@@ -753,8 +775,20 @@ def _emit_error(error: BackfillError, *, stream: Any) -> None:
     }
     if error.details:
         payload["details"] = error.details
-    json.dump(payload, stream, sort_keys=True)
+    json.dump(_redact_output(payload), stream, sort_keys=True)
     stream.write("\n")
+
+
+def _backfill_error_from_publish_error(error: PublishError) -> BackfillError:
+    return BackfillError(
+        error.error_code,
+        error.message,
+        details=dict(error.details),
+    )
+
+
+def _redact_output(payload: Any) -> Any:
+    return redact_payload(payload)
 
 
 if __name__ == "__main__":
