@@ -14,7 +14,6 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from packages.common.best_available import BestAvailableManager
-from packages.common.manifest_index import ManifestValidationError, serialize_manifest_index
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload
 from packages.common.safe_fs import (
@@ -33,7 +32,7 @@ from packages.common.state_lineage import (
 )
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
-from services.orchestrator import chain_stage_execution
+from services.orchestrator import chain_manifests, chain_stage_execution
 from services.orchestrator.chain_stages import (
     ANALYSIS_STAGES,
     LEGACY_FORECAST_STAGES,
@@ -53,7 +52,6 @@ from services.orchestrator.chain_types import (
     ForecastRunContext,
     InitialStateSelection,
     ModelContext,
-    ModelRunAssembly,
     OrchestratorError,
     PipelineResult,
     StageDefinition,
@@ -62,9 +60,6 @@ from services.orchestrator.chain_types import (
 )
 from services.orchestrator.persistence import PipelineJob, PipelineStore
 from services.orchestrator.production_contract import (
-    PRODUCTION_CONTRACT_ID,
-    PRODUCTION_CONTRACT_SCHEMA_VERSION,
-    production_stage_for,
     production_status_for,
 )
 from services.orchestrator.reservation import (
@@ -84,6 +79,89 @@ from workers.canonical_converter.converter import (
 )
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
+ANALYSIS_SCENARIO_ID = chain_manifests.ANALYSIS_SCENARIO_ID
+DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = chain_manifests.DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
+FORCING_CAUSALITY_CAUSAL = chain_manifests.FORCING_CAUSALITY_CAUSAL
+FORCING_CAUSALITY_DELAYED_REANALYSIS = chain_manifests.FORCING_CAUSALITY_DELAYED_REANALYSIS
+ManifestValidationError = chain_manifests.ManifestValidationError
+PRODUCTION_CONTRACT_ID = chain_manifests.PRODUCTION_CONTRACT_ID
+PRODUCTION_CONTRACT_SCHEMA_VERSION = chain_manifests.PRODUCTION_CONTRACT_SCHEMA_VERSION
+_analysis_forcing_causality = chain_manifests._analysis_forcing_causality
+_analysis_update_ic_step_minutes = chain_manifests._analysis_update_ic_step_minutes
+_assembly_from_entry = chain_manifests._assembly_from_entry
+_assembly_payload_from_runtime_manifest = chain_manifests._assembly_payload_from_runtime_manifest
+_assembly_quality_states = chain_manifests._assembly_quality_states
+_cycle_residual_blockers = chain_manifests._cycle_residual_blockers
+_default_forcing_uri = chain_manifests._default_forcing_uri
+_directory_uri = chain_manifests._directory_uri
+_display_contract = chain_manifests._display_contract
+_ensure_segment_utc = chain_manifests._ensure_segment_utc
+_era5_reanalysis_latency_minutes = chain_manifests._era5_reanalysis_latency_minutes
+_frequency_contract = chain_manifests._frequency_contract
+_forecast_state_checkpoint_hours = chain_manifests._forecast_state_checkpoint_hours
+_has_uri_scheme = chain_manifests._has_uri_scheme
+_model_package_manifest_uri = chain_manifests._model_package_manifest_uri
+_model_run_stage_evidence = chain_manifests._model_run_stage_evidence
+_nested_value = chain_manifests._nested_value
+_output_river_contract = chain_manifests._output_river_contract
+_preserve_directory_uri = chain_manifests._preserve_directory_uri
+_project_name_for_basin = chain_manifests._project_name_for_basin
+_safe_project_name = chain_manifests._safe_project_name
+_station_metadata_for_basin = chain_manifests._station_metadata_for_basin
+_tri_state = chain_manifests._tri_state
+ModelRunAssembly = chain_manifests.ModelRunAssembly
+build_reindexed_manifest = chain_manifests.build_reindexed_manifest
+production_stage_for = chain_manifests.production_stage_for
+serialize_manifest_index = chain_manifests.serialize_manifest_index
+
+
+def build_model_run_assembly(
+    basin: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_id: str,
+    cycle_time: datetime,
+    scenario_id: str,
+    workspace_root: Path,
+    object_store: LocalObjectStore,
+    default_forecast_horizon_hours: int,
+) -> ModelRunAssembly:
+    return chain_manifests.build_model_run_assembly(
+        basin,
+        source_id=source_id,
+        cycle_id=cycle_id,
+        cycle_time=cycle_time,
+        scenario_id=scenario_id,
+        workspace_root=workspace_root,
+        object_store=object_store,
+        default_forecast_horizon_hours=default_forecast_horizon_hours,
+        default_forcing_uri=_default_forcing_uri,
+        preserve_directory_uri=_preserve_directory_uri,
+        station_metadata_for_basin=_station_metadata_for_basin,
+        output_river_contract=_output_river_contract,
+        frequency_contract=_frequency_contract,
+        display_contract=_display_contract,
+        assembly_quality_states=_assembly_quality_states,
+        project_name_for_basin=_project_name_for_basin,
+        model_package_manifest_uri=_model_package_manifest_uri,
+    )
+
+
+def _frequency_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
+    return chain_manifests._frequency_quality_state(
+        entry,
+        cycle_id=cycle_id,
+        model_run_stage_evidence=_model_run_stage_evidence,
+    )
+
+
+def _publish_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
+    return chain_manifests._publish_quality_state(
+        entry,
+        cycle_id=cycle_id,
+        model_run_stage_evidence=_model_run_stage_evidence,
+    )
+
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 _SAFE_AREA_RE = re.compile(r"^[\d,.\-\s]+$")
 
@@ -101,7 +179,6 @@ TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 RAW_MANIFEST_READY_CYCLE_STATUSES = {"raw_complete", "canonical_ready", "forcing_ready", "complete", "published"}
 ANALYSIS_SOURCE_ID = "ERA5"
-ANALYSIS_SCENARIO_ID = "analysis_true_field"
 # ERA5 reanalysis is published with a multi-day production delay; the analysis
 # segment is therefore built from *delayed reanalysis*, never a real-time causal
 # nowcast. We record a conservative default latency (5 days, ERA5T-style "initial
@@ -109,7 +186,6 @@ ANALYSIS_SCENARIO_ID = "analysis_true_field"
 # trails real time. Overridable via ERA5_REANALYSIS_LATENCY_MINUTES.
 # TODO(M24): source the exact per-cycle latency from the ERA5 download metadata
 # (publish_time - segment_end) once it is recorded; until then this is the floor.
-DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = 5 * 24 * 60
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 MAX_CANDIDATE_STATE_TASK_RESULTS = 16
@@ -229,96 +305,6 @@ class OrchestratorConfig:
 
 # Bound on the warm-start fallback loop to avoid unbounded scans of stale snapshots.
 _MAX_STATE_FALLBACK_CANDIDATES = 8
-
-# Forcing causality modes for the analysis/nowcast segment (M24 §2 Lane 2). The
-# analysis segment [T_N, T_{N+1}] must be built from data that does not leak the
-# future relative to its own segment; ``causal`` is the real-time default,
-# ``delayed_reanalysis`` is the only mode permitted to use ERA5-style reanalysis
-# and must record the latency with which the reanalysis trails real time.
-FORCING_CAUSALITY_CAUSAL = "causal"
-FORCING_CAUSALITY_DELAYED_REANALYSIS = "delayed_reanalysis"
-
-
-def _analysis_update_ic_step_minutes(start_time: datetime, end_time: datetime) -> int:
-    """Restart cadence (minutes) that writes a SHUD restart state exactly at ``end_time``.
-
-    The analysis segment is ``[T_N, T_{N+1}]`` with ``end_time == T_{N+1}``. SHUD writes
-    a restart artifact every ``Update_IC_STEP`` minutes measured from the segment start,
-    so the cadence must divide the segment so that a write lands on the final step. The
-    simplest cadence guaranteed to land exactly on ``T_{N+1}`` (and never on an earlier
-    modulo boundary, never on the default 1440-minute day) is the full segment length.
-
-    Short 6h/12h cycles therefore get 360/720-minute cadences; a 24h cycle gets 1440.
-    Returns the segment length in whole minutes. Raises on a non-positive or
-    non-minute-aligned window so a wrong-time restart is a hard error, not silent.
-    """
-
-    duration_seconds = (_ensure_segment_utc(end_time) - _ensure_segment_utc(start_time)).total_seconds()
-    if duration_seconds <= 0:
-        raise OrchestratorError(
-            "ANALYSIS_SEGMENT_INVALID_WINDOW",
-            "Analysis segment end_time must be after start_time.",
-            {"start_time": start_time.isoformat(), "end_time": end_time.isoformat()},
-        )
-    if duration_seconds % 60 != 0:
-        raise OrchestratorError(
-            "ANALYSIS_SEGMENT_NON_MINUTE_ALIGNED",
-            "Analysis segment length must be a whole number of minutes for restart cadence.",
-            {"duration_seconds": duration_seconds},
-        )
-    return int(duration_seconds // 60)
-
-
-def _ensure_segment_utc(value: datetime) -> datetime:
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-
-def _era5_reanalysis_latency_minutes() -> int:
-    """Recorded latency (minutes) by which ERA5 reanalysis trails its own segment.
-
-    Overridable via ``ERA5_REANALYSIS_LATENCY_MINUTES``; falls back to a conservative
-    default when unset or unparseable, so the analysis causality marker always carries
-    a non-null latency. (TODO M24: replace with the exact per-cycle publish lag once
-    the ERA5 download metadata records it.)
-    """
-
-    raw = os.getenv("ERA5_REANALYSIS_LATENCY_MINUTES", "").strip()
-    if raw:
-        try:
-            value = int(raw)
-            if value > 0:
-                return value
-        except ValueError:
-            pass
-    return DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
-
-
-def _analysis_forcing_causality(latency_minutes: int | None = None) -> dict[str, Any]:
-    """Causality marker recorded on the analysis context/manifest.
-
-    The marker must honestly reflect the *actual* forcing source of the segment.
-
-    The analysis segment is currently built exclusively from whole-day ERA5
-    reanalysis (``ANALYSIS_SOURCE_ID == "ERA5"``, stage chain
-    ``era5_download -> analysis_*``). ERA5 is historical data published with a
-    multi-day delay, so it is ``delayed_reanalysis`` with a recorded latency -- it is
-    NOT a real-time ``causal`` nowcast and must never be marked as such. Callers that
-    omit ``latency_minutes`` for the ERA5 analysis path therefore get the default
-    recorded reanalysis latency, not a causal marker.
-
-    ``causal`` is reserved for a *future* real-time implementation (cycle-N lead /
-    nowcast with no future leak and, by construction, no reanalysis latency). When
-    that path exists it will pass an explicit ``latency_minutes=0``-style causal
-    marker; until then the ERA5 segment is always ``delayed_reanalysis``.
-    """
-
-    resolved_latency = _era5_reanalysis_latency_minutes() if latency_minutes is None else int(latency_minutes)
-    return {
-        "mode": FORCING_CAUSALITY_DELAYED_REANALYSIS,
-        "latency_minutes": resolved_latency,
-        "no_future_leak": True,
-    }
-
 
 # Re-exported from the shared module so chain and the forecast runtime share one
 # implementation (single source of truth; see services.orchestrator.time_consistency).
@@ -1971,63 +1957,15 @@ class ForecastOrchestrator:
         return "forcing_ready_partial"
 
     def _build_cycle_stage_manifest(self, stage: StageDefinition, context: CycleOrchestrationContext) -> dict[str, Any]:
-        manifest_index_entries = self._reindexed_manifest_entries(context.active_basins)
-        manifest: dict[str, Any] = {
-            "run_id": context.run_id,
-            "model_id": _cycle_payload_model_id(context),
-            "job_type": stage.job_type,
-            "stage": stage.stage,
-            "stage_name": stage.stage,
-            "cycle_id": context.cycle_id,
-            "source_id": context.source_id,
-            "cycle_time": _format_time(context.cycle_time),
-            "workspace_dir": str(Path(self.config.workspace_root)),
-            "object_store_root": str(Path(self.config.object_store_root)),
-            "object_store_prefix": self.config.object_store_prefix,
-            "published_artifact_root": os.getenv("NHMS_PUBLISHED_ARTIFACT_ROOT", ""),
-            "published_artifact_uri_prefix": os.getenv("NHMS_PUBLISHED_ARTIFACT_URI_PREFIX", "published://"),
-            "total_basins": len(context.all_basins),
-            "active_basins": len(context.active_basins),
-            "manifest_index": manifest_index_entries,
-            "model_runs": [
-                _model_run_stage_evidence(stage.stage, entry, cycle_id=context.cycle_id)
-                for entry in manifest_index_entries
-            ],
-            "identity_contract": {
-                "source_id": context.source_id,
-                "cycle_id": context.cycle_id,
-                "cycle_time": _format_time(context.cycle_time),
-                "scenario_ids": sorted(
-                    {
-                        str(entry.get("scenario_id") or self._forecast_scenario_id(context.source_id))
-                        for entry in manifest_index_entries
-                    }
-                ),
-                "run_ids": [str(entry["run_id"]) for entry in manifest_index_entries],
-                "model_ids": [str(entry["model_id"]) for entry in manifest_index_entries],
-            },
-        }
-        if stage.stage == "frequency":
-            manifest["quality_states"] = [
-                _frequency_quality_state(entry, cycle_id=context.cycle_id) for entry in manifest_index_entries
-            ]
-        if stage.stage == "publish":
-            active_keys = {_basin_key(basin) for basin in context.active_basins}
-            excluded = [basin for basin in context.all_basins if _basin_key(basin) not in active_keys]
-            quality_states = [
-                _publish_quality_state(entry, cycle_id=context.cycle_id)
-                for entry in manifest_index_entries
-            ]
-            manifest["metadata"] = {
-                "total_basins": len(context.all_basins),
-                "published_basins": len(context.active_basins),
-                "excluded_basins": [_basin_identifier(basin) for basin in excluded],
-                "quality_states": quality_states,
-                "residual_blockers": _cycle_residual_blockers(manifest_index_entries),
-            }
-            manifest["basins"] = list(context.active_basins)
-            manifest["quality_states"] = quality_states
-        return manifest
+        return chain_manifests.build_cycle_stage_manifest(
+            self,
+            stage,
+            context,
+            model_run_stage_evidence=_model_run_stage_evidence,
+            frequency_quality_state=_frequency_quality_state,
+            publish_quality_state=_publish_quality_state,
+            cycle_residual_blockers=_cycle_residual_blockers,
+        )
 
     def _write_cycle_manifest_index(
         self,
@@ -2035,77 +1973,19 @@ class ForecastOrchestrator:
         stage: StageDefinition,
         tasks: list[dict[str, Any]],
     ) -> Path:
-        try:
-            content = serialize_manifest_index(tasks)
-        except ManifestValidationError as exc:
-            raise OrchestratorError(
-                "CYCLE_MANIFEST_INDEX_INVALID",
-                f"Cycle manifest index for stage {stage.stage} exceeds the Slurm array manifest contract.",
-                {"stage": stage.stage, **exc.details},
-            ) from exc
-        manifest_path = self._workspace_path("runs", context.run_id, "input", f"{stage.stage}_manifest_index.json")
-        try:
-            self._safe_workspace_write_bytes(manifest_path, content)
-        except (OSError, SafeFilesystemError) as exc:
-            raise OrchestratorError(
-                "CYCLE_MANIFEST_INDEX_WRITE_FAILED",
-                f"Failed to write cycle manifest index safely for stage {stage.stage}: {exc}",
-                {"manifest_path": str(manifest_path), "stage": stage.stage},
-            ) from exc
-        return manifest_path
+        return chain_manifests.write_cycle_manifest_index(self, context, stage, tasks)
 
     def _prepare_forecast_runtime_manifests(
         self,
         stage: StageDefinition,
         context: CycleOrchestrationContext,
     ) -> None:
-        if stage.stage != "forecast":
-            return
-
-        staged: list[tuple[int, dict[str, Any], dict[str, Any], bytes, Path, str]] = []
-        for index, basin in enumerate(context.active_basins):
-            manifest = self._build_forecast_runtime_manifest(context, basin)
-            content = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
-            manifest_uri = manifest["outputs"]["run_manifest_uri"]
-            try:
-                self.object_store.write_bytes_atomic(manifest_uri, content)
-            except OSError as exc:
-                raise OrchestratorError(
-                    "RUNTIME_MANIFEST_WRITE_FAILED",
-                    f"Failed to write runtime manifest to object store for task {index}: {exc}",
-                    {"task_id": index, "manifest_uri": manifest_uri},
-                ) from exc
-
-            manifest_path = self._workspace_path("runs", str(basin["run_id"]), "input", "manifest.json")
-            try:
-                self._safe_workspace_write_bytes(manifest_path, content)
-            except (OSError, SafeFilesystemError) as exc:
-                raise OrchestratorError(
-                    "RUNTIME_MANIFEST_WRITE_FAILED",
-                    f"Failed to write runtime manifest safely for task {index}: {exc}",
-                    {"task_id": index, "manifest_path": str(manifest_path)},
-                ) from exc
-
-            self._validate_forecast_runtime_manifest(manifest_path, manifest, task_index=index)
-            staged.append((index, basin, manifest, content, manifest_path, manifest_uri))
-
-        created_run_ids: list[str] = []
-        try:
-            for _index, basin, manifest, _content, manifest_path, _manifest_uri in staged:
-                self.repository.create_hydro_run_from_basin(basin, manifest)
-                created_run_ids.append(str(manifest["run_id"]))
-                basin["manifest_path"] = str(manifest_path)
-                basin["model_run_assembly"] = _assembly_payload_from_runtime_manifest(manifest)
-                basin["output_uri"] = manifest["outputs"]["output_uri"]
-                basin["run_manifest_uri"] = manifest["outputs"]["run_manifest_uri"]
-                basin["log_uri"] = manifest["outputs"]["log_uri"]
-        except Exception as exc:
-            self._mark_staged_hydro_runs_failed(
-                created_run_ids,
-                error_code=getattr(exc, "error_code", "RUNTIME_MANIFEST_STAGING_FAILED"),
-                error_message=getattr(exc, "message", str(exc)),
-            )
-            raise
+        chain_manifests.prepare_forecast_runtime_manifests(
+            self,
+            stage,
+            context,
+            assembly_payload_from_runtime_manifest=_assembly_payload_from_runtime_manifest,
+        )
 
     def _mark_staged_hydro_runs_failed(
         self,
@@ -2130,64 +2010,13 @@ class ForecastOrchestrator:
         context: CycleOrchestrationContext,
         basin: Mapping[str, Any],
     ) -> dict[str, Any]:
-        assembly = build_model_run_assembly(
+        return chain_manifests.build_forecast_runtime_manifest(
+            self,
+            context,
             basin,
-            source_id=context.source_id,
-            cycle_id=context.cycle_id,
-            cycle_time=context.cycle_time,
-            scenario_id=str(basin.get("scenario_id") or self._forecast_scenario_id(context.source_id)),
-            workspace_root=Path(self.config.workspace_root),
-            object_store=self.object_store,
-            default_forecast_horizon_hours=self.config.forecast_horizon_hours,
+            assembly_builder=build_model_run_assembly,
+            forecast_state_checkpoint_hours=_forecast_state_checkpoint_hours,
         )
-        run_id = str(basin["run_id"])
-        manifest = {
-            "run_id": run_id,
-            "run_type": "forecast",
-            "candidate_id": assembly.identity["candidate_id"],
-            "scenario_id": assembly.identity["scenario_id"],
-            "source_id": context.source_id,
-            "cycle_time": _format_time(context.cycle_time),
-            "start_time": assembly.identity["start_time"],
-            "end_time": assembly.identity["end_time"],
-            "forecast_horizon_hours": assembly.identity["forecast_horizon_hours"],
-            "workspace_dir": str(Path(self.config.workspace_root)),
-            "object_store_root": str(Path(self.config.object_store_root)),
-            "object_store_prefix": self.config.object_store_prefix,
-            "identity": dict(assembly.identity),
-            "model": {
-                "model_id": assembly.identity["model_id"],
-                "basin_id": basin.get("basin_id"),
-                "basin_version_id": assembly.identity["basin_version_id"],
-                "river_network_version_id": assembly.identity["river_network_version_id"],
-                "model_package_uri": assembly.identity["model_package_uri"],
-                "model_package_manifest_uri": assembly.identity["model_package_manifest_uri"],
-                "model_package_checksum": assembly.identity.get("model_package_checksum"),
-                "segment_count": assembly.identity["segment_count"],
-                "project_name": assembly.runtime.get("project_name"),
-            },
-            "forcing": dict(assembly.forcing),
-            "initial_state": {
-                "state_id": basin.get("init_state_id"),
-                "ic_file_uri": basin.get("init_state_uri"),
-                "valid_time": _format_time_or_none(_parse_gateway_time(basin.get("init_state_valid_time"))),
-                "checksum": basin.get("init_state_checksum"),
-                "quality": basin.get("init_state_quality") or "cold_start_no_state",
-                "lineage": dict(basin.get("init_state_lineage") or {}),
-            },
-            "runtime": dict(assembly.runtime),
-            "outputs": dict(assembly.outputs),
-            "frequency": dict(assembly.frequency),
-            "display": dict(assembly.display),
-            "quality_states": dict(assembly.quality_states),
-            "residual_blockers": [dict(item) for item in assembly.residual_blockers],
-        }
-        manifest["runtime"]["init_mode"] = 3 if basin.get("init_state_id") or basin.get("init_state_uri") else 1
-        checkpoint_hours = _forecast_state_checkpoint_hours(manifest["forecast_horizon_hours"])
-        if checkpoint_hours:
-            manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours
-            manifest["runtime"]["update_ic_step_minutes"] = min(checkpoint_hours) * 60
-        return manifest
 
     def _validate_forecast_runtime_manifest(
         self,
@@ -2196,81 +2025,20 @@ class ForecastOrchestrator:
         *,
         task_index: int,
     ) -> None:
-        if not manifest_path.exists():
-            raise OrchestratorError(
-                "RUNTIME_MANIFEST_MISSING",
-                f"Forecast runtime manifest was not written for task {task_index}.",
-                {"manifest_path": str(manifest_path), "task_id": task_index},
-            )
-        try:
-            persisted = json.loads(self._safe_workspace_read_bytes(manifest_path).decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise OrchestratorError(
-                "RUNTIME_MANIFEST_INVALID_JSON",
-                f"Forecast runtime manifest is not valid JSON for task {task_index}.",
-                {"manifest_path": str(manifest_path), "task_id": task_index, "error": str(exc)},
-            ) from exc
-        except (OSError, SafeFilesystemError) as exc:
-            raise OrchestratorError(
-                "RUNTIME_MANIFEST_READ_FAILED",
-                f"Forecast runtime manifest cannot be safely read for task {task_index}: {exc}",
-                {"manifest_path": str(manifest_path), "task_id": task_index},
-            ) from exc
-        required_paths = (
-            ("run_id",),
-            ("run_type",),
-            ("scenario_id",),
-            ("source_id",),
-            ("cycle_time",),
-            ("start_time",),
-            ("end_time",),
-            ("model", "model_id"),
-            ("model", "basin_version_id"),
-            ("model", "river_network_version_id"),
-            ("model", "model_package_uri"),
-            ("forcing", "forcing_uri"),
-            ("outputs", "run_manifest_uri"),
-            ("outputs", "output_uri"),
-            ("outputs", "log_uri"),
-            ("identity",),
-            ("workspace_dir",),
-            ("object_store_root",),
+        chain_manifests.validate_forecast_runtime_manifest(
+            self,
+            manifest_path,
+            manifest,
+            task_index=task_index,
         )
-        missing = [".".join(path) for path in required_paths if _nested_value(persisted, path) in (None, "")]
-        if missing:
-            raise OrchestratorError(
-                "RUNTIME_MANIFEST_INVALID",
-                f"Forecast runtime manifest is missing required fields for task {task_index}: {', '.join(missing)}.",
-                {"manifest_path": str(manifest_path), "task_id": task_index, "missing_fields": missing},
-            )
-        if persisted.get("run_id") != manifest.get("run_id"):
-            raise OrchestratorError(
-                "RUNTIME_MANIFEST_INVALID",
-                f"Forecast runtime manifest run_id mismatch for task {task_index}.",
-                {"manifest_path": str(manifest_path), "task_id": task_index},
-            )
 
     def _reindexed_manifest_entries(self, basins: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        entries = build_reindexed_manifest([dict(basin) for basin in basins], range(len(basins)))
-        for entry in entries:
-            if "model_run_assembly" not in entry:
-                source_id = normalize_source_id(str(entry.get("source_id") or self.config.source_id))
-                cycle_time = parse_cycle_time(entry["cycle_time"])
-                assembly = build_model_run_assembly(
-                    entry,
-                    source_id=source_id,
-                    cycle_id=str(entry.get("cycle_id") or cycle_id_for(source_id, cycle_time)),
-                    cycle_time=cycle_time,
-                    scenario_id=str(entry.get("scenario_id") or self._forecast_scenario_id(source_id)),
-                    workspace_root=Path(self.config.workspace_root),
-                    object_store=self.object_store,
-                    default_forecast_horizon_hours=self.config.forecast_horizon_hours,
-                )
-                entry["model_run_assembly"] = assembly.to_manifest_entry()
-                entry["output_uri"] = assembly.outputs["output_uri"]
-                entry["run_manifest_uri"] = assembly.outputs["run_manifest_uri"]
-                entry["log_uri"] = assembly.outputs["log_uri"]
-        return entries
+        return chain_manifests.reindexed_manifest_entries(
+            self,
+            basins,
+            reindex_builder=build_reindexed_manifest,
+            assembly_builder=build_model_run_assembly,
+        )
 
     def _normalize_cycle_basins(
         self,
@@ -3557,59 +3325,10 @@ class ForecastOrchestrator:
         return scenario_for_source(source_id)
 
     def _build_run_manifest(self, context: ForecastRunContext) -> dict[str, Any]:
-        manifest = {
-            "run_id": context.run_id,
-            "run_type": "forecast",
-            "scenario_id": context.scenario_id,
-            "source_id": context.source_id,
-            "cycle_time": _format_time(context.cycle_time),
-            "start_time": _format_time(context.start_time),
-            "end_time": _format_time(context.end_time),
-            "forecast_horizon_hours": context.forecast_horizon_hours,
-            "model": {
-                "model_id": context.model_id,
-                "basin_version_id": context.basin_version_id,
-                "river_network_version_id": context.river_network_version_id,
-                "model_package_uri": context.model_package_uri,
-                "segment_count": context.segment_count,
-                "output_segment_count": (
-                    context.output_segment_count
-                    if context.output_segment_count is not None
-                    else context.segment_count
-                ),
-            },
-            "forcing": {
-                "forcing_version_id": context.forcing_version_id,
-                "forcing_uri": context.forcing_package_uri,
-            },
-            "initial_state": {
-                "state_id": context.init_state_id,
-                "ic_file_uri": context.init_state_uri,
-                "valid_time": _format_time_or_none(context.init_state_valid_time),
-                "checksum": context.init_state_checksum,
-                "quality": context.init_state_quality,
-            },
-            "runtime": {
-                "output_interval_minutes": 60,
-                "init_mode": 3 if context.init_state_id else 1,
-            },
-            "outputs": {
-                "run_manifest_uri": context.run_manifest_uri,
-                "output_uri": context.output_uri,
-                "log_uri": context.log_uri,
-                "output_segment_count": (
-                    context.output_segment_count
-                    if context.output_segment_count is not None
-                    else context.segment_count
-                ),
-                "gis_segment_count": context.segment_count,
-            },
-        }
-        checkpoint_hours = _forecast_state_checkpoint_hours(context.forecast_horizon_hours)
-        if checkpoint_hours:
-            manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours
-            manifest["runtime"]["update_ic_step_minutes"] = min(checkpoint_hours) * 60
-        return manifest
+        return chain_manifests.build_forecast_run_manifest(
+            context,
+            forecast_state_checkpoint_hours=_forecast_state_checkpoint_hours,
+        )
 
     def _state_passes_qc(self, state: StateSnapshot) -> bool:
         """Selection-time QC gate for a warm-start candidate.
@@ -3724,17 +3443,7 @@ class ForecastOrchestrator:
         return self.state_manager.get_latest_usable_state(model_id=model_id, before_time=before_time)
 
     def _write_run_manifest(self, context: ForecastRunContext | AnalysisRunContext, manifest: dict[str, Any]) -> None:
-        content = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
-        self.object_store.write_bytes_atomic(context.run_manifest_uri, content)
-        workspace_manifest = self._workspace_path("runs", context.run_id, "input", "manifest.json")
-        try:
-            self._safe_workspace_write_bytes(workspace_manifest, content)
-        except (OSError, SafeFilesystemError) as exc:
-            raise OrchestratorError(
-                "RUNTIME_MANIFEST_WRITE_FAILED",
-                f"Failed to write run manifest safely: {exc}",
-                {"manifest_path": str(workspace_manifest), "run_id": context.run_id},
-            ) from exc
+        chain_manifests.write_run_manifest(self, context, manifest)
 
     def _workspace_path(self, *parts: str) -> Path:
         workspace_root = Path(self.config.workspace_root).expanduser().resolve()
@@ -3884,63 +3593,11 @@ class AnalysisOrchestrator(ForecastOrchestrator):
         )
 
     def _build_run_manifest(self, context: AnalysisRunContext) -> dict[str, Any]:
-        return {
-            "run_id": context.run_id,
-            "run_type": "analysis",
-            "scenario_id": ANALYSIS_SCENARIO_ID,
-            "source_id": context.source_id,
-            "cycle_time": _format_time(context.cycle_time),
-            "start_time": _format_time(context.start_time),
-            "end_time": _format_time(context.end_time),
-            "model": {
-                "model_id": context.model_id,
-                "basin_version_id": context.basin_version_id,
-                "river_network_version_id": context.river_network_version_id,
-                "model_package_uri": context.model_package_uri,
-                "segment_count": context.segment_count,
-                "output_segment_count": (
-                    context.output_segment_count
-                    if context.output_segment_count is not None
-                    else context.segment_count
-                ),
-            },
-            "initial_state": {
-                "state_id": context.init_state_id,
-                "ic_file_uri": context.init_state_uri,
-                "valid_time": _format_time_or_none(context.init_state_valid_time),
-            },
-            "forcing": {
-                "forcing_version_id": context.forcing_version_id,
-                "forcing_uri": context.forcing_package_uri,
-            },
-            "forcing_causality": dict(
-                context.forcing_causality
-                if context.forcing_causality is not None
-                else _analysis_forcing_causality()
-            ),
-            "runtime": {
-                "output_interval_minutes": 60,
-                "init_mode": 3 if context.init_state_id else 1,
-                # Restart cadence lands exactly at end_time == T_{N+1} so the saved
-                # interim state is valid at the next cycle's init time.
-                "update_ic_step_minutes": (
-                    context.update_ic_step_minutes
-                    if context.update_ic_step_minutes is not None
-                    else _analysis_update_ic_step_minutes(context.start_time, context.end_time)
-                ),
-            },
-            "outputs": {
-                "run_manifest_uri": context.run_manifest_uri,
-                "output_uri": context.output_uri,
-                "log_uri": context.log_uri,
-                "output_segment_count": (
-                    context.output_segment_count
-                    if context.output_segment_count is not None
-                    else context.segment_count
-                ),
-                "gis_segment_count": context.segment_count,
-            },
-        }
+        return chain_manifests.build_analysis_run_manifest(
+            context,
+            analysis_forcing_causality=_analysis_forcing_causality,
+            analysis_update_ic_step_minutes=_analysis_update_ic_step_minutes,
+        )
 
     def _before_stage_submit(self, stage: StageDefinition, context: ForecastRunContext | AnalysisRunContext) -> None:
         if stage.stage == "era5_download":
@@ -6319,574 +5976,8 @@ def _safe_candidate_outcome_payload(payload: Mapping[str, Any]) -> dict[str, Any
     return dict(redacted) if isinstance(redacted, Mapping) else {}
 
 
-def build_reindexed_manifest(
-    entries: Sequence[Mapping[str, Any]],
-    succeeded_task_ids: Sequence[int],
-) -> list[dict[str, Any]]:
-    by_task_id = {int(entry.get("task_id", index)): dict(entry) for index, entry in enumerate(entries)}
-    reindexed: list[dict[str, Any]] = []
-    for new_task_id, previous_task_id in enumerate(succeeded_task_ids):
-        entry = dict(by_task_id[int(previous_task_id)])
-        entry["task_id"] = new_task_id
-        entry["original_task_id"] = int(entry.get("original_task_id", previous_task_id))
-        reindexed.append(entry)
-    return reindexed
-
-
-def build_model_run_assembly(
-    basin: Mapping[str, Any],
-    *,
-    source_id: str,
-    cycle_id: str,
-    cycle_time: datetime,
-    scenario_id: str,
-    workspace_root: Path,
-    object_store: LocalObjectStore,
-    default_forecast_horizon_hours: int,
-) -> ModelRunAssembly:
-    source_id = normalize_source_id(source_id)
-    cycle_time = _ensure_utc(cycle_time)
-    compact_cycle = format_cycle_time(cycle_time)
-    model_id = str(basin["model_id"])
-    run_id = str(basin.get("run_id") or f"fcst_{source_id.lower()}_{compact_cycle}_{model_id}")
-    forcing_version_id = str(
-        basin.get("forcing_version_id") or f"forc_{source_id.lower()}_{compact_cycle}_{model_id}"
-    )
-    basin_version_id = str(basin["basin_version_id"])
-    river_network_version_id = str(basin["river_network_version_id"])
-    forecast_horizon_hours = int(
-        basin.get("forecast_horizon_hours")
-        or basin.get("max_lead_hours")
-        or default_forecast_horizon_hours
-    )
-    start_time = cycle_time
-    end_time = start_time + timedelta(hours=forecast_horizon_hours)
-    model_package_uri = str(basin.get("model_package_uri") or f"models/{model_id}/")
-    forcing_uri = str(
-        basin.get("forcing_package_uri")
-        or basin.get("forcing_uri")
-        or _default_forcing_uri(source_id, compact_cycle, basin_version_id, model_id, object_store)
-    )
-    output_uri = _preserve_directory_uri(
-        str(basin.get("output_uri")) if basin.get("output_uri") not in (None, "") else None,
-        object_store,
-        f"runs/{run_id}/output/",
-    )
-    run_manifest_uri = str(
-        basin.get("run_manifest_uri") or object_store.uri_for_key(f"runs/{run_id}/input/manifest.json")
-    )
-    log_uri = _preserve_directory_uri(
-        str(basin.get("log_uri")) if basin.get("log_uri") not in (None, "") else None,
-        object_store,
-        f"runs/{run_id}/logs/",
-    )
-    candidate_id = str(basin.get("candidate_id") or f"{source_id}:{_format_time(cycle_time)}:{model_id}:{scenario_id}")
-    station_metadata = _station_metadata_for_basin(basin)
-    output_river = _output_river_contract(basin)
-    frequency = _frequency_contract(basin)
-    display = _display_contract(basin, output_uri=output_uri)
-    quality_states, blockers = _assembly_quality_states(
-        basin,
-        station_metadata=station_metadata,
-        output_river=output_river,
-        frequency=frequency,
-        display=display,
-    )
-    runtime = {
-        "command_style": str(
-            basin.get("shud_command_style")
-            or _nested_mapping(basin.get("runtime")).get("command_style")
-            or "shud_project"
-        ),
-        "project_name": _project_name_for_basin(basin, fallback=model_id),
-        "output_interval_minutes": int(
-            basin.get("output_interval_minutes")
-            or _nested_mapping(basin.get("runtime")).get("output_interval_minutes")
-            or 60
-        ),
-        "threads": int(
-            basin.get("shud_threads")
-            or _nested_mapping(basin.get("resource_profile")).get("shud_threads")
-            or _nested_mapping(basin.get("runtime")).get("threads")
-            or 1
-        ),
-        "mode": "native_shud_project",
-        "output_river": output_river,
-    }
-    identity = {
-        "schema_version": PRODUCTION_CONTRACT_SCHEMA_VERSION,
-        "contract_id": PRODUCTION_CONTRACT_ID,
-        "candidate_id": candidate_id,
-        "run_id": run_id,
-        "hydro_run_id": str(basin.get("hydro_run_id") or run_id),
-        "published_manifest_id": str(basin.get("published_manifest_id") or f"manifest_{run_id}"),
-        "canonical_product_id": str(
-            basin.get("canonical_product_id") or f"canon_{source_id.lower()}_{compact_cycle}"
-        ),
-        "forcing_version_id": forcing_version_id,
-        "source": source_id,
-        "source_id": source_id,
-        "cycle_id": cycle_id,
-        "cycle_time": _format_time(cycle_time),
-        "scenario_id": scenario_id,
-        "model_id": model_id,
-        "basin_id": basin.get("basin_id"),
-        "basin_version_id": basin_version_id,
-        "river_network_version_id": river_network_version_id,
-        "model_package_uri": model_package_uri,
-        "model_package_manifest_uri": _model_package_manifest_uri(basin, model_package_uri),
-        "model_package_checksum": basin.get("model_package_checksum") or basin.get("package_checksum"),
-        "segment_count": int(output_river.get("segment_count") or 0),
-        "forecast_horizon_hours": forecast_horizon_hours,
-        "start_time": _format_time(start_time),
-        "end_time": _format_time(end_time),
-    }
-    forcing = {
-        "forcing_version_id": forcing_version_id,
-        "forcing_uri": forcing_uri,
-        "forcing_package_uri": forcing_uri,
-        "station_metadata": station_metadata,
-        "station_count": station_metadata.get("station_count"),
-        "station_ids": station_metadata.get("station_ids", []),
-        "quality_flag": station_metadata.get("quality_flag"),
-    }
-    if station_metadata.get("shud_station"):
-        forcing["shud_station"] = station_metadata["shud_station"]
-    outputs = {
-        "run_manifest_uri": run_manifest_uri,
-        "output_uri": output_uri,
-        "log_uri": log_uri,
-        "reuse_policy": "deterministic_run_uri",
-        "output_segment_count": int(output_river.get("segment_count") or 0),
-        "gis_segment_count": _optional_int(basin.get("segment_count")),
-    }
-    return ModelRunAssembly(
-        identity=identity,
-        forcing=forcing,
-        runtime=runtime,
-        outputs=outputs,
-        frequency=frequency,
-        display=display,
-        quality_states=quality_states,
-        residual_blockers=tuple(blockers),
-    )
-
-
-def _default_forcing_uri(
-    source_id: str,
-    compact_cycle: str,
-    basin_version_id: str,
-    model_id: str,
-    object_store: LocalObjectStore,
-) -> str:
-    return _directory_uri(object_store, f"forcing/{source_id.lower()}/{compact_cycle}/{basin_version_id}/{model_id}/")
-
-
-def _directory_uri(object_store: LocalObjectStore, key: str) -> str:
-    return object_store.uri_for_key(key).rstrip("/") + "/"
-
-
-def _preserve_directory_uri(value: str | None, object_store: LocalObjectStore, fallback_key: str) -> str:
-    if value is not None and _has_uri_scheme(value):
-        return value.rstrip("/") + "/"
-    return _directory_uri(object_store, fallback_key)
-
-
-def _has_uri_scheme(value: str) -> bool:
-    candidate = value.strip()
-    if not candidate:
-        return False
-    match = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", candidate)
-    return match is not None
-
-
-def _model_package_manifest_uri(basin: Mapping[str, Any], model_package_uri: str) -> str:
-    resource_profile = _nested_mapping(basin.get("resource_profile"))
-    explicit = (
-        basin.get("model_package_manifest_uri")
-        or basin.get("manifest_uri")
-        or resource_profile.get("manifest_uri")
-    )
-    if explicit not in (None, ""):
-        return str(explicit)
-    package_uri = model_package_uri.rstrip("/")
-    if package_uri.endswith("/package"):
-        return f"{package_uri.removesuffix('/package')}/manifest.json"
-    return f"{package_uri}/manifest.json"
-
-
-def _station_metadata_for_basin(basin: Mapping[str, Any]) -> dict[str, Any]:
-    resource_profile = _nested_mapping(basin.get("resource_profile"))
-    explicit = _nested_mapping(
-        basin.get("forcing_station_metadata")
-        or basin.get("station_metadata")
-        or resource_profile.get("forcing_station_metadata")
-    )
-    if explicit:
-        station_ids = [str(item) for item in explicit.get("station_ids") or []]
-        station_count = _optional_int(explicit.get("station_count"))
-        if station_count is None:
-            station_count = len(station_ids)
-        state = "ready" if station_count > 0 else "unavailable"
-        return {
-            "schema_version": "nhms.forcing_station_metadata.v1",
-            "state": str(explicit.get("state") or state),
-            "station_count": station_count,
-            "station_ids": station_ids,
-            "source": str(explicit.get("source") or "registry_package_metadata"),
-            "shud_station": explicit.get("shud_station"),
-            "quality_flag": str(
-                explicit.get("quality_flag") or ("ok" if station_count > 0 else "station_forcing_unavailable")
-            ),
-        }
-    station_count = _optional_int(basin.get("station_count"))
-    raw_station_ids = basin.get("station_ids")
-    station_ids = (
-        [str(item) for item in raw_station_ids or []]
-        if isinstance(raw_station_ids, Sequence) and not isinstance(raw_station_ids, str | bytes)
-        else []
-    )
-    if station_count is None and station_ids:
-        station_count = len(station_ids)
-    if station_count is None:
-        station_count = 0
-    state = "ready" if station_count > 0 else "unavailable"
-    return {
-        "schema_version": "nhms.forcing_station_metadata.v1",
-        "state": state,
-        "station_count": station_count,
-        "station_ids": station_ids,
-        "source": "registry_package_metadata",
-        "quality_flag": "ok" if station_count > 0 else "station_forcing_unavailable",
-    }
-
-
-def _output_river_contract(basin: Mapping[str, Any]) -> dict[str, Any]:
-    explicit = _nested_mapping(basin.get("output_river") or basin.get("shud_output_river"))
-    resource_profile = _nested_mapping(basin.get("resource_profile"))
-    gis_segment_count = _optional_int(basin.get("segment_count"))
-    profile_output_river = _nested_mapping(resource_profile.get("output_river"))
-    output_segment_count = _first_optional_int(
-        basin.get("output_segment_count"),
-        basin.get("shud_output_segment_count"),
-        basin.get("shud_output_river_count"),
-        resource_profile.get("output_segment_count"),
-        resource_profile.get("shud_output_segment_count"),
-        resource_profile.get("shud_output_river_count"),
-        profile_output_river.get("output_segment_count"),
-        profile_output_river.get("segment_count"),
-    )
-    if explicit:
-        state = str(explicit.get("state") or "ready")
-        segment_ids = [str(item) for item in explicit.get("river_segment_ids") or explicit.get("segment_ids") or []]
-        explicit_segment_count = _first_optional_int(
-            explicit.get("output_segment_count"),
-            explicit.get("segment_count"),
-        )
-        resolved_segment_count = _first_optional_int(
-            explicit_segment_count,
-            output_segment_count,
-            len(segment_ids) if segment_ids else None,
-            gis_segment_count,
-        )
-        if resolved_segment_count is None:
-            state = "unavailable"
-            resolved_segment_count = 0
-        return {
-            "state": state,
-            "river_network_version_id": str(basin["river_network_version_id"]),
-            "segment_count": resolved_segment_count,
-            "output_segment_count": resolved_segment_count,
-            "gis_segment_count": gis_segment_count,
-            "river_segment_ids": segment_ids,
-            "identity_source": str(explicit.get("identity_source") or "registry_package_metadata"),
-            "quality_flag": str(
-                explicit.get("quality_flag") or ("ok" if state == "ready" else "output_river_unavailable")
-            ),
-        }
-    if output_segment_count is None and gis_segment_count is None:
-        return {
-            "state": "unavailable",
-            "river_network_version_id": str(basin["river_network_version_id"]),
-            "segment_count": 0,
-            "output_segment_count": 0,
-            "gis_segment_count": None,
-            "river_segment_ids": [],
-            "identity_source": "registry_package_metadata",
-            "quality_flag": "output_river_unavailable",
-        }
-    resolved_segment_count = output_segment_count if output_segment_count is not None else gis_segment_count
-    return {
-        "state": "ready" if resolved_segment_count > 0 else "unavailable",
-        "river_network_version_id": str(basin["river_network_version_id"]),
-        "segment_count": resolved_segment_count,
-        "output_segment_count": resolved_segment_count,
-        "gis_segment_count": gis_segment_count,
-        "river_segment_ids": [],
-        "identity_source": (
-            "resource_profile.output_segment_count" if output_segment_count is not None else "registry_package_metadata"
-        ),
-        "quality_flag": "ok" if resolved_segment_count > 0 else "output_river_unavailable",
-    }
-
-
-def _frequency_contract(basin: Mapping[str, Any]) -> dict[str, Any]:
-    capabilities = _nested_mapping(basin.get("frequency_capabilities"))
-    has_curves = _tri_state(
-        basin.get("frequency_curves_available"),
-        capabilities.get("curves_available"),
-        capabilities.get("return_periods"),
-    )
-    has_thresholds = _tri_state(
-        basin.get("warning_thresholds_available"),
-        capabilities.get("warning_thresholds_available"),
-        capabilities.get("warning_thresholds"),
-    )
-    unavailable: list[str] = []
-    if has_curves is False:
-        unavailable.append("frequency_curves")
-    if has_thresholds is False:
-        unavailable.append("warning_thresholds")
-    state = "ready" if not unavailable else "unavailable"
-    return {
-        "state": state,
-        "return_periods_enabled": bool(capabilities.get("return_periods", True)),
-        "frequency_curves": "available" if has_curves is not False else "unavailable",
-        "warning_thresholds": "available" if has_thresholds is not False else "unavailable",
-        "quality_flag": "ok" if state == "ready" else "frequency_inputs_unavailable",
-        "unavailable_products": unavailable,
-    }
-
-
-def _display_contract(basin: Mapping[str, Any], *, output_uri: str) -> dict[str, Any]:
-    capabilities = _nested_mapping(basin.get("display_capabilities"))
-    optional_weather = _tri_state(
-        basin.get("optional_weather_available"),
-        capabilities.get("optional_weather_available"),
-        capabilities.get("weather_products"),
-    )
-    tiles_enabled = bool(capabilities.get("tiles", True))
-    unavailable = []
-    if optional_weather is False:
-        unavailable.append("optional_weather_products")
-    return {
-        "state": "ready" if tiles_enabled else "unavailable",
-        "tiles_enabled": tiles_enabled,
-        "output_uri": output_uri,
-        "optional_weather_products": "available" if optional_weather is not False else "unavailable",
-        "quality_flag": "ok" if not unavailable and tiles_enabled else "display_inputs_unavailable",
-        "unavailable_products": unavailable,
-    }
-
-
-def _assembly_quality_states(
-    basin: Mapping[str, Any],
-    *,
-    station_metadata: Mapping[str, Any],
-    output_river: Mapping[str, Any],
-    frequency: Mapping[str, Any],
-    display: Mapping[str, Any],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    states = {
-        "station_forcing": {
-            "state": station_metadata.get("state"),
-            "quality_flag": station_metadata.get("quality_flag"),
-        },
-        "frequency": {
-            "state": frequency.get("state"),
-            "quality_flag": frequency.get("quality_flag"),
-            "unavailable_products": list(frequency.get("unavailable_products") or []),
-        },
-        "display": {
-            "state": display.get("state"),
-            "quality_flag": display.get("quality_flag"),
-            "unavailable_products": list(display.get("unavailable_products") or []),
-        },
-    }
-    states["output_river"] = {
-        "state": output_river.get("state"),
-        "quality_flag": output_river.get("quality_flag"),
-        "segment_count": output_river.get("segment_count"),
-    }
-    blockers: list[dict[str, Any]] = []
-    if station_metadata.get("state") != "ready":
-        blockers.append(
-            {
-                "code": "STATION_FORCING_UNAVAILABLE",
-                "state": "unavailable",
-                "quality_flag": station_metadata.get("quality_flag"),
-                "residual_risk": "No forcing station metadata is available for this model package.",
-            }
-        )
-    if output_river.get("state") != "ready":
-        blockers.append(
-            {
-                "code": "OUTPUT_RIVER_UNAVAILABLE",
-                "state": "unavailable",
-                "quality_flag": output_river.get("quality_flag"),
-                "residual_risk": (
-                    "SHUD output-river segment metadata is unavailable; segment_count was not fabricated."
-                ),
-            }
-        )
-    for product in frequency.get("unavailable_products") or []:
-        blockers.append(
-            {
-                "code": str(product).upper() + "_UNAVAILABLE",
-                "state": "unavailable",
-                "quality_flag": frequency.get("quality_flag"),
-                "residual_risk": (
-                    f"{product} is unavailable; downstream products must carry null values or quality flags."
-                ),
-            }
-        )
-    for product in display.get("unavailable_products") or []:
-        blockers.append(
-            {
-                "code": str(product).upper() + "_UNAVAILABLE",
-                "state": "unavailable",
-                "quality_flag": display.get("quality_flag"),
-                "residual_risk": f"{product} is unavailable; durable model outputs remain reusable.",
-            }
-        )
-    for item in basin.get("residual_blockers") or ():
-        if isinstance(item, Mapping):
-            blockers.append(dict(item))
-    return states, blockers
-
-
-def _model_run_stage_evidence(stage: str, entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
-    assembly = _assembly_from_entry(entry)
-    identity = dict(assembly.get("identity") or {})
-    return {
-        "stage": stage,
-        "production_stage": production_stage_for(stage),
-        "cycle_id": cycle_id,
-        "candidate_id": identity.get("candidate_id") or entry.get("candidate_id"),
-        "run_id": identity.get("run_id") or entry.get("run_id"),
-        "hydro_run_id": identity.get("hydro_run_id") or entry.get("hydro_run_id") or entry.get("run_id"),
-        "model_id": identity.get("model_id") or entry.get("model_id"),
-        "source": identity.get("source") or identity.get("source_id") or entry.get("source_id"),
-        "source_id": identity.get("source_id") or entry.get("source_id"),
-        "cycle_time": identity.get("cycle_time") or entry.get("cycle_time"),
-        "scenario_id": identity.get("scenario_id") or entry.get("scenario_id"),
-        "canonical_product_id": identity.get("canonical_product_id") or entry.get("canonical_product_id"),
-        "forcing_version_id": identity.get("forcing_version_id") or entry.get("forcing_version_id"),
-        "published_manifest_id": identity.get("published_manifest_id") or entry.get("published_manifest_id"),
-        "model_package_uri": identity.get("model_package_uri") or entry.get("model_package_uri"),
-        "basin_id": identity.get("basin_id") or entry.get("basin_id"),
-        "basin_version_id": identity.get("basin_version_id") or entry.get("basin_version_id"),
-        "river_network_version_id": identity.get("river_network_version_id") or entry.get("river_network_version_id"),
-        "output_uri": _nested_mapping(assembly.get("outputs")).get("output_uri") or entry.get("output_uri"),
-        "quality_states": dict(assembly.get("quality_states") or entry.get("quality_states") or {}),
-        "residual_blockers": list(assembly.get("residual_blockers") or entry.get("residual_blockers") or []),
-    }
-
-
-def _frequency_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
-    evidence = _model_run_stage_evidence("frequency", entry, cycle_id=cycle_id)
-    frequency_state = _nested_mapping(evidence.get("quality_states")).get("frequency") or {}
-    return {
-        **evidence,
-        "state": _nested_mapping(frequency_state).get("state", "ready"),
-        "quality_flag": _nested_mapping(frequency_state).get("quality_flag", "ok"),
-        "unavailable_products": list(_nested_mapping(frequency_state).get("unavailable_products") or []),
-    }
-
-
-def _publish_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
-    evidence = _model_run_stage_evidence("publish", entry, cycle_id=cycle_id)
-    display_state = _nested_mapping(evidence.get("quality_states")).get("display") or {}
-    return {
-        **evidence,
-        "state": _nested_mapping(display_state).get("state", "ready"),
-        "quality_flag": _nested_mapping(display_state).get("quality_flag", "ok"),
-        "unavailable_products": list(_nested_mapping(display_state).get("unavailable_products") or []),
-    }
-
-
-def _cycle_residual_blockers(entries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    blockers: list[dict[str, Any]] = []
-    for entry in entries:
-        run_id = str(entry.get("run_id") or "")
-        for blocker in entry.get("residual_blockers") or []:
-            if isinstance(blocker, Mapping):
-                blockers.append({"run_id": run_id, **dict(blocker)})
-        assembly = _assembly_from_entry(entry)
-        for blocker in assembly.get("residual_blockers") or []:
-            if isinstance(blocker, Mapping):
-                candidate = {"run_id": run_id, **dict(blocker)}
-                if candidate not in blockers:
-                    blockers.append(candidate)
-    return blockers
-
-
-def _assembly_from_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
-    assembly = entry.get("model_run_assembly")
-    return dict(assembly) if isinstance(assembly, Mapping) else {}
-
-
-def _assembly_payload_from_runtime_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "identity": dict(_nested_mapping(manifest.get("identity"))),
-        "forcing": dict(_nested_mapping(manifest.get("forcing"))),
-        "runtime": dict(_nested_mapping(manifest.get("runtime"))),
-        "outputs": dict(_nested_mapping(manifest.get("outputs"))),
-        "frequency": dict(_nested_mapping(manifest.get("frequency"))),
-        "display": dict(_nested_mapping(manifest.get("display"))),
-        "quality_states": dict(_nested_mapping(manifest.get("quality_states"))),
-        "residual_blockers": list(manifest.get("residual_blockers") or []),
-    }
-
-
 def _nested_mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _tri_state(*values: Any) -> bool | None:
-    for value in values:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"true", "available", "ready", "yes", "1"}:
-                return True
-            if normalized in {"false", "unavailable", "missing", "blocked", "no", "0"}:
-                return False
-    return None
-
-
-def _safe_project_name(value: str) -> str:
-    candidate = value.strip() or "shud"
-    if _SAFE_ID_RE.fullmatch(candidate):
-        return candidate
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate).strip("._-") or "shud"
-
-
-def _project_name_for_basin(basin: Mapping[str, Any], *, fallback: str) -> str:
-    resource_profile = _nested_mapping(basin.get("resource_profile"))
-    runtime = _nested_mapping(basin.get("runtime"))
-    for value in (
-        basin.get("project_name"),
-        basin.get("shud_input_name"),
-        resource_profile.get("project_name"),
-        resource_profile.get("shud_input_name"),
-        runtime.get("project_name"),
-        runtime.get("shud_input_name"),
-        fallback,
-    ):
-        if value not in (None, ""):
-            return _safe_project_name(str(value))
-    return _safe_project_name(fallback)
-
-
-def _nested_value(value: Mapping[str, Any], path: Sequence[str]) -> Any:
-    current: Any = value
-    for part in path:
-        if not isinstance(current, Mapping):
-            return None
-        current = current.get(part)
-    return current
 
 
 def _workspace_relative_parts(path: Path, workspace_root: Path) -> tuple[str, ...]:
@@ -7314,14 +6405,6 @@ def _ifs_max_lead_hours_for_cycle(cycle_time: datetime) -> int | None:
     if hour in {0, 12}:
         return 168
     return None
-
-
-def _forecast_state_checkpoint_hours(forecast_horizon_hours: Any) -> list[int]:
-    try:
-        horizon = int(forecast_horizon_hours)
-    except (TypeError, ValueError):
-        return []
-    return [hour for hour in (6, 12) if hour <= horizon]
 
 
 def _elapsed_hours(start_time: datetime, end_time: datetime) -> int | None:

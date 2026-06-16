@@ -20,10 +20,13 @@ from packages.common.object_store import LocalObjectStore
 from services.artifacts import ArtifactReader, ArtifactReaderConfig
 from services.orchestrator.chain import (
     M3_STAGES,
+    AnalysisOrchestrator,
+    AnalysisRunContext,
     CycleOrchestrationContext,
     DisplayLogPublication,
     ForcingContext,
     ForecastOrchestrator,
+    ForecastRunContext,
     ModelContext,
     OrchestratorConfig,
     OrchestratorError,
@@ -6995,6 +6998,23 @@ def test_chain_stage_execution_module_imports_without_loading_chain_runtime() ->
     )
 
 
+def test_chain_manifest_module_imports_without_loading_chain_runtime() -> None:
+    command = (
+        "import sys; "
+        "import services.orchestrator.chain_manifests as module; "
+        "assert 'services.orchestrator.chain' not in sys.modules; "
+        "assert hasattr(module, 'build_model_run_assembly')"
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_chain_stage_execution_legacy_methods_delegate(monkeypatch) -> None:
     from services.orchestrator import chain_stage_execution
 
@@ -7097,6 +7117,488 @@ def test_chain_stage_execution_legacy_methods_delegate(monkeypatch) -> None:
         "slurm_submission_manifest",
     ]
     assert all(args[0] is orchestrator for _name, args, _kwargs in calls)
+
+
+def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
+    from services.orchestrator import chain as chain_runtime
+    from services.orchestrator import chain_manifests
+
+    orchestrator = object.__new__(ForecastOrchestrator)
+    analysis_orchestrator = object.__new__(AnalysisOrchestrator)
+    stage = object()
+    cycle_context = object()
+    run_context = object()
+    analysis_context = object()
+    basin = {"run_id": "run-1"}
+    basins = [basin]
+    tasks = [{"task_id": 0}]
+    manifest = {"run_id": "run-1"}
+    manifest_path = Path("runs/run-1/input/manifest.json")
+    cycle_manifest = {"stage": "forecast"}
+    index_path = Path("runs/cycle/input/forecast_manifest_index.json")
+    runtime_manifest = {"run_id": "run-1"}
+    reindexed_entries = [{"task_id": 0, "run_id": "run-1"}]
+    run_manifest = {"run_type": "forecast"}
+    analysis_manifest = {"run_type": "analysis"}
+    calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def capture(name: str, result: Any = None) -> Any:
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            calls.append((name, args, kwargs))
+            return result
+
+        return _fake
+
+    monkeypatch.setattr(
+        chain_manifests,
+        "build_cycle_stage_manifest",
+        capture("build_cycle_stage_manifest", cycle_manifest),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "write_cycle_manifest_index",
+        capture("write_cycle_manifest_index", index_path),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "prepare_forecast_runtime_manifests",
+        capture("prepare_forecast_runtime_manifests"),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "build_forecast_runtime_manifest",
+        capture("build_forecast_runtime_manifest", runtime_manifest),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "validate_forecast_runtime_manifest",
+        capture("validate_forecast_runtime_manifest"),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "reindexed_manifest_entries",
+        capture("reindexed_manifest_entries", reindexed_entries),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "build_forecast_run_manifest",
+        capture("build_forecast_run_manifest", run_manifest),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "build_analysis_run_manifest",
+        capture("build_analysis_run_manifest", analysis_manifest),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "write_run_manifest",
+        capture("write_run_manifest"),
+    )
+    legacy_top_level_helpers = (
+        "ANALYSIS_SCENARIO_ID",
+        "DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES",
+        "FORCING_CAUSALITY_CAUSAL",
+        "FORCING_CAUSALITY_DELAYED_REANALYSIS",
+        "_analysis_forcing_causality",
+        "_analysis_update_ic_step_minutes",
+        "_assembly_payload_from_runtime_manifest",
+        "_default_forcing_uri",
+        "_directory_uri",
+        "_display_contract",
+        "_ensure_segment_utc",
+        "_era5_reanalysis_latency_minutes",
+        "_forecast_state_checkpoint_hours",
+        "_frequency_contract",
+        "_has_uri_scheme",
+        "_model_package_manifest_uri",
+        "_model_run_stage_evidence",
+        "_nested_value",
+        "_output_river_contract",
+        "_preserve_directory_uri",
+        "_project_name_for_basin",
+        "_safe_project_name",
+        "_station_metadata_for_basin",
+        "_tri_state",
+        "build_reindexed_manifest",
+        "ManifestValidationError",
+        "PRODUCTION_CONTRACT_ID",
+        "PRODUCTION_CONTRACT_SCHEMA_VERSION",
+        "production_stage_for",
+        "serialize_manifest_index",
+    )
+    for helper_name in legacy_top_level_helpers:
+        assert getattr(chain_runtime, helper_name) is getattr(chain_manifests, helper_name)
+    assert chain_runtime.build_model_run_assembly is not chain_manifests.build_model_run_assembly
+    assert chain_runtime._frequency_quality_state is not chain_manifests._frequency_quality_state
+    assert chain_runtime._publish_quality_state is not chain_manifests._publish_quality_state
+
+    for method_name in (
+        "_build_cycle_stage_manifest",
+        "_write_cycle_manifest_index",
+        "_prepare_forecast_runtime_manifests",
+        "_build_forecast_runtime_manifest",
+        "_validate_forecast_runtime_manifest",
+        "_reindexed_manifest_entries",
+        "_build_run_manifest",
+        "_write_run_manifest",
+    ):
+        assert callable(getattr(ForecastOrchestrator, method_name))
+
+    assert orchestrator._build_cycle_stage_manifest(stage, cycle_context) == cycle_manifest
+    assert orchestrator._write_cycle_manifest_index(cycle_context, stage, tasks) == index_path
+    assert orchestrator._prepare_forecast_runtime_manifests(stage, cycle_context) is None
+    assert orchestrator._build_forecast_runtime_manifest(cycle_context, basin) == runtime_manifest
+    assert orchestrator._validate_forecast_runtime_manifest(manifest_path, manifest, task_index=3) is None
+    assert orchestrator._reindexed_manifest_entries(basins) == reindexed_entries
+    assert orchestrator._build_run_manifest(run_context) == run_manifest
+    assert analysis_orchestrator._build_run_manifest(analysis_context) == analysis_manifest
+    assert orchestrator._write_run_manifest(run_context, manifest) is None
+
+    assert [name for name, _args, _kwargs in calls] == [
+        "build_cycle_stage_manifest",
+        "write_cycle_manifest_index",
+        "prepare_forecast_runtime_manifests",
+        "build_forecast_runtime_manifest",
+        "validate_forecast_runtime_manifest",
+        "reindexed_manifest_entries",
+        "build_forecast_run_manifest",
+        "build_analysis_run_manifest",
+        "write_run_manifest",
+    ]
+    orchestrator_first_delegates = {
+        "build_cycle_stage_manifest",
+        "write_cycle_manifest_index",
+        "prepare_forecast_runtime_manifests",
+        "build_forecast_runtime_manifest",
+        "validate_forecast_runtime_manifest",
+        "reindexed_manifest_entries",
+        "write_run_manifest",
+    }
+    assert all(
+        args[0] is orchestrator
+        for name, args, _kwargs in calls
+        if name in orchestrator_first_delegates
+    )
+
+    call_by_name = {name: (args, kwargs) for name, args, kwargs in calls}
+    assert call_by_name["build_cycle_stage_manifest"][0][1:] == (stage, cycle_context)
+    assert call_by_name["build_cycle_stage_manifest"][1] == {
+        "model_run_stage_evidence": chain_runtime._model_run_stage_evidence,
+        "frequency_quality_state": chain_runtime._frequency_quality_state,
+        "publish_quality_state": chain_runtime._publish_quality_state,
+        "cycle_residual_blockers": chain_runtime._cycle_residual_blockers,
+    }
+    assert call_by_name["write_cycle_manifest_index"][0][1:] == (cycle_context, stage, tasks)
+    assert call_by_name["prepare_forecast_runtime_manifests"][0][1:] == (stage, cycle_context)
+    assert call_by_name["prepare_forecast_runtime_manifests"][1] == {
+        "assembly_payload_from_runtime_manifest": chain_runtime._assembly_payload_from_runtime_manifest
+    }
+    assert call_by_name["build_forecast_runtime_manifest"][0][1:] == (cycle_context, basin)
+    assert call_by_name["build_forecast_runtime_manifest"][1] == {
+        "assembly_builder": chain_runtime.build_model_run_assembly,
+        "forecast_state_checkpoint_hours": chain_runtime._forecast_state_checkpoint_hours,
+    }
+    assert call_by_name["validate_forecast_runtime_manifest"][0][1:] == (
+        manifest_path,
+        manifest,
+    )
+    assert call_by_name["validate_forecast_runtime_manifest"][1] == {"task_index": 3}
+    assert call_by_name["reindexed_manifest_entries"][0][1:] == (basins,)
+    assert call_by_name["reindexed_manifest_entries"][1] == {
+        "reindex_builder": chain_runtime.build_reindexed_manifest,
+        "assembly_builder": chain_runtime.build_model_run_assembly,
+    }
+    assert call_by_name["build_forecast_run_manifest"][0] == (run_context,)
+    assert call_by_name["build_forecast_run_manifest"][1] == {
+        "forecast_state_checkpoint_hours": chain_runtime._forecast_state_checkpoint_hours,
+    }
+    assert call_by_name["build_analysis_run_manifest"][0] == (analysis_context,)
+    assert call_by_name["write_run_manifest"][0][1:] == (run_context, manifest)
+
+
+def test_chain_manifest_quality_state_legacy_helpers_use_monkeypatched_stage_evidence(monkeypatch) -> None:
+    from services.orchestrator import chain as chain_runtime
+
+    calls: list[tuple[str, Mapping[str, Any], str]] = []
+
+    def fake_stage_evidence(stage: str, entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
+        calls.append((stage, entry, cycle_id))
+        return {
+            "run_id": entry["run_id"],
+            "cycle_id": cycle_id,
+            "quality_states": {
+                "frequency": {
+                    "state": "degraded",
+                    "quality_flag": "frequency_inputs_unavailable",
+                    "unavailable_products": ["return_period"],
+                },
+                "display": {
+                    "state": "degraded",
+                    "quality_flag": "display_inputs_unavailable",
+                    "unavailable_products": ["tiles"],
+                },
+            },
+        }
+
+    entry = {"run_id": "run-1"}
+    monkeypatch.setattr(chain_runtime, "_model_run_stage_evidence", fake_stage_evidence)
+
+    assert chain_runtime._frequency_quality_state(entry, cycle_id="cycle-1") == {
+        "run_id": "run-1",
+        "cycle_id": "cycle-1",
+        "quality_states": {
+            "frequency": {
+                "state": "degraded",
+                "quality_flag": "frequency_inputs_unavailable",
+                "unavailable_products": ["return_period"],
+            },
+            "display": {
+                "state": "degraded",
+                "quality_flag": "display_inputs_unavailable",
+                "unavailable_products": ["tiles"],
+            },
+        },
+        "state": "degraded",
+        "quality_flag": "frequency_inputs_unavailable",
+        "unavailable_products": ["return_period"],
+    }
+    assert chain_runtime._publish_quality_state(entry, cycle_id="cycle-1") == {
+        "run_id": "run-1",
+        "cycle_id": "cycle-1",
+        "quality_states": {
+            "frequency": {
+                "state": "degraded",
+                "quality_flag": "frequency_inputs_unavailable",
+                "unavailable_products": ["return_period"],
+            },
+            "display": {
+                "state": "degraded",
+                "quality_flag": "display_inputs_unavailable",
+                "unavailable_products": ["tiles"],
+            },
+        },
+        "state": "degraded",
+        "quality_flag": "display_inputs_unavailable",
+        "unavailable_products": ["tiles"],
+    }
+    assert calls == [
+        ("frequency", entry, "cycle-1"),
+        ("publish", entry, "cycle-1"),
+    ]
+
+
+def test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from services.orchestrator import chain as chain_runtime
+
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    cycle_time = datetime(2024, 1, 1, tzinfo=UTC)
+    basin = {
+        "run_id": "run-1",
+        "model_id": "model-1",
+        "basin_id": "basin-1",
+        "basin_version_id": "basin-v1",
+        "river_network_version_id": "river-v1",
+    }
+
+    monkeypatch.setattr(chain_runtime, "_forecast_state_checkpoint_hours", lambda _horizon: [77])
+    monkeypatch.setattr(
+        chain_runtime,
+        "_default_forcing_uri",
+        lambda source_id, compact_cycle, basin_version_id, model_id, store: (
+            f"patched://forcing/{source_id}/{compact_cycle}/{basin_version_id}/{model_id}/"
+        ),
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_station_metadata_for_basin",
+        lambda _basin: {
+            "schema_version": "patched.station.v1",
+            "state": "ready",
+            "station_count": 2,
+            "station_ids": ["s1", "s2"],
+            "source": "patched",
+            "quality_flag": "patched_station_ok",
+            "shud_station": "patched_station.txt",
+        },
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_output_river_contract",
+        lambda _basin: {
+            "state": "ready",
+            "river_network_version_id": "patched-river",
+            "segment_count": 5,
+            "output_segment_count": 5,
+            "gis_segment_count": 9,
+            "river_segment_ids": ["r1"],
+            "identity_source": "patched",
+            "quality_flag": "patched_output_ok",
+        },
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_project_name_for_basin",
+        lambda _basin, *, fallback: f"patched-project-{fallback}",
+    )
+
+    assembly = chain_runtime.build_model_run_assembly(
+        basin,
+        source_id="gfs",
+        cycle_id="gfs-2024010100",
+        cycle_time=cycle_time,
+        scenario_id="forecast_gfs_deterministic",
+        workspace_root=tmp_path / "workspace",
+        object_store=object_store,
+        default_forecast_horizon_hours=168,
+    )
+    assert assembly.forcing["forcing_uri"] == "patched://forcing/gfs/2024010100/basin-v1/model-1/"
+    assert assembly.forcing["station_metadata"]["station_count"] == 2
+    assert assembly.runtime["output_river"]["river_network_version_id"] == "patched-river"
+    assert assembly.runtime["project_name"] == "patched-project-model-1"
+    assert assembly.outputs["output_segment_count"] == 5
+    assert assembly.identity["segment_count"] == 5
+
+    run_context = ForecastRunContext(
+        run_id="run-1",
+        source_id="gfs",
+        scenario_id="forecast_gfs_deterministic",
+        cycle_id="gfs-2024010100",
+        cycle_time=cycle_time,
+        model_id="model-1",
+        basin_id="basin-1",
+        basin_version_id="basin-v1",
+        river_network_version_id="river-v1",
+        segment_count=9,
+        model_package_uri="s3://models/model-1/",
+        forcing_version_id="forcing-v1",
+        forcing_package_uri="s3://forcing/gfs/",
+        start_time=cycle_time,
+        end_time=cycle_time + timedelta(hours=168),
+        forecast_horizon_hours=168,
+        run_manifest_uri="s3://runs/run-1/input/manifest.json",
+        output_uri="s3://runs/run-1/output/",
+        log_uri="s3://runs/run-1/logs/",
+    )
+    forecast_orchestrator = object.__new__(ForecastOrchestrator)
+    run_manifest = forecast_orchestrator._build_run_manifest(run_context)
+    assert run_manifest["runtime"]["state_checkpoint_hours"] == [77]
+    assert run_manifest["runtime"]["update_ic_step_minutes"] == 77 * 60
+
+    cycle_context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs-2024010100",
+        run_id="cycle-run-1",
+        all_basins=[dict(basin)],
+        active_basins=[dict(basin)],
+    )
+    config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+    )
+    forecast_orchestrator.config = config
+    forecast_orchestrator.object_store = object_store
+    runtime_manifest = forecast_orchestrator._build_forecast_runtime_manifest(
+        cycle_context,
+        dict(basin),
+    )
+    assert runtime_manifest["runtime"]["state_checkpoint_hours"] == [77]
+    assert runtime_manifest["forcing"]["forcing_uri"] == "patched://forcing/gfs/2024010100/basin-v1/model-1/"
+    assert runtime_manifest["forcing"]["station_count"] == 2
+    assert runtime_manifest["model"]["project_name"] == "patched-project-model-1"
+    assert runtime_manifest["runtime"]["project_name"] == "patched-project-model-1"
+    assert runtime_manifest["runtime"]["output_river"]["segment_count"] == 5
+
+
+def test_chain_manifest_build_analysis_run_manifest_direct_export(monkeypatch) -> None:
+    from services.orchestrator import chain as chain_runtime
+    from services.orchestrator import chain_manifests
+
+    monkeypatch.setattr(
+        chain_runtime,
+        "_analysis_forcing_causality",
+        lambda: {"type": "patched_analysis", "latency_minutes": 42},
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_analysis_update_ic_step_minutes",
+        lambda start_time, end_time: 240,
+    )
+    context = AnalysisRunContext(
+        run_id="analysis-run-1",
+        source_id="era5",
+        cycle_id="era5-2024010100",
+        cycle_time=datetime(2024, 1, 1, tzinfo=UTC),
+        model_id="shud-v1",
+        basin_id="basin-1",
+        basin_version_id="basin-v1",
+        river_network_version_id="river-v1",
+        segment_count=12,
+        output_segment_count=10,
+        model_package_uri="object://models/shud-v1",
+        forcing_version_id="era5-202401",
+        forcing_package_uri="object://forcing/era5-202401",
+        start_time=datetime(2024, 1, 1, tzinfo=UTC),
+        end_time=datetime(2024, 1, 2, tzinfo=UTC),
+        run_manifest_uri="object://runs/analysis-run-1/input/manifest.json",
+        output_uri="object://runs/analysis-run-1/output/",
+        log_uri="object://runs/analysis-run-1/logs/",
+        init_state_id="state-1",
+        init_state_uri="object://states/state-1.nc",
+        init_state_valid_time=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert chain_manifests.build_analysis_run_manifest(context) == {
+        "run_id": "analysis-run-1",
+        "run_type": "analysis",
+        "scenario_id": "analysis_true_field",
+        "source_id": "era5",
+        "cycle_time": "2024-01-01T00:00:00Z",
+        "start_time": "2024-01-01T00:00:00Z",
+        "end_time": "2024-01-02T00:00:00Z",
+        "model": {
+            "model_id": "shud-v1",
+            "basin_version_id": "basin-v1",
+            "river_network_version_id": "river-v1",
+            "model_package_uri": "object://models/shud-v1",
+            "segment_count": 12,
+            "output_segment_count": 10,
+        },
+        "initial_state": {
+            "state_id": "state-1",
+            "ic_file_uri": "object://states/state-1.nc",
+            "valid_time": "2024-01-01T00:00:00Z",
+        },
+        "forcing": {
+            "forcing_version_id": "era5-202401",
+            "forcing_uri": "object://forcing/era5-202401",
+        },
+        "forcing_causality": {
+            "mode": "delayed_reanalysis",
+            "latency_minutes": 7200,
+            "no_future_leak": True,
+        },
+        "runtime": {
+            "output_interval_minutes": 60,
+            "init_mode": 3,
+            "update_ic_step_minutes": 1440,
+        },
+        "outputs": {
+            "run_manifest_uri": "object://runs/analysis-run-1/input/manifest.json",
+            "output_uri": "object://runs/analysis-run-1/output/",
+            "log_uri": "object://runs/analysis-run-1/logs/",
+            "output_segment_count": 10,
+            "gis_segment_count": 12,
+        },
+    }
+    analysis_orchestrator = object.__new__(AnalysisOrchestrator)
+    legacy_manifest = analysis_orchestrator._build_run_manifest(context)
+    assert legacy_manifest["forcing_causality"] == {"type": "patched_analysis", "latency_minutes": 42}
+    assert legacy_manifest["runtime"]["update_ic_step_minutes"] == 240
 
 
 # --- M24 §3A: two-phase reserve -> bind through the real chain submit path ----
