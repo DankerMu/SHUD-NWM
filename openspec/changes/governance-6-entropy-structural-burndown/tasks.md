@@ -2974,7 +2974,7 @@ separate PR boundaries.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_array_accounting or legacy_top_level_helpers'`
     -> 6 passed, 177 deselected in 1.78s.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
-    -> 182 passed in 747.78s.
+    -> 183 passed in 748.06s (post-C5 current-head evidence).
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator_file_count'`
     -> 1 passed, 191 deselected in 4.46s.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py tests/test_entropy_audit_script.py`
