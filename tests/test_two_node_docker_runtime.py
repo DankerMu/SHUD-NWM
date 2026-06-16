@@ -1541,6 +1541,35 @@ def test_static_checker_rejects_live_mvt_flag_as_compute_interpolation(tmp_path:
     )
 
 
+def test_static_checker_approves_compute_scheduler_allowed_cycle_hours_interpolation(tmp_path: Path) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"]["NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC"] = (
+            "${NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC-0,12}"
+        )
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
+
+
+def test_static_checker_rejects_unapproved_compute_scheduler_cycle_lag_interpolation(tmp_path: Path) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"]["NHMS_SCHEDULER_CYCLE_LAG_HOURS"] = "${NHMS_SCHEDULER_CYCLE_LAG_HOURS:-6}"
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_INTERPOLATION_ENV_UNAPPROVED"
+        and finding.details["unapproved_keys"] == ["NHMS_SCHEDULER_CYCLE_LAG_HOURS"]
+        for finding in result.findings
+    )
+
+
 @pytest.mark.parametrize(
     ("role", "omitted_key", "process_value"),
     [
