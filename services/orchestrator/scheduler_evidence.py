@@ -78,6 +78,7 @@ class SchedulerEvidenceConfig(Protocol):
     model_ids: Sequence[str]
     basin_ids: Sequence[str]
     sources: Sequence[str]
+    allowed_cycle_hours_utc: Sequence[int]
     source_exclusions: Sequence[Mapping[str, Any]]
     evidence_dir: Path | str
     workspace_root: Path | str
@@ -1661,6 +1662,7 @@ def scheduler_runtime_config_evidence(config: SchedulerEvidenceConfig) -> dict[s
         "continuous": config.continuous,
         "interval_seconds": config.interval_seconds,
         "sources": list(config.sources),
+        "allowed_cycle_hours_utc": list(config.allowed_cycle_hours_utc),
         "model_ids": list(config.model_ids),
         "basin_ids": list(config.basin_ids),
         "lookback_hours": config.lookback_hours,

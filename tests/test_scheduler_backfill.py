@@ -201,6 +201,7 @@ def _build_scheduler(
     lookback_hours: int = 24,
     active_repository: Any | None = None,
     models: Sequence[Mapping[str, Any]] | None = None,
+    allowed_cycle_hours_utc: Sequence[int] = (0, 6, 12, 18),
 ) -> ProductionScheduler:
     config = _config(
         tmp_path,
@@ -209,6 +210,7 @@ def _build_scheduler(
         lookback_hours=lookback_hours,
         max_cycles_per_source=max_cycles_per_source,
         backfill_enabled=backfill_enabled,
+        allowed_cycle_hours_utc=tuple(allowed_cycle_hours_utc),
     )
     registry_models = list(models) if models is not None else [_model("model_a", "basin_a")]
     return ProductionScheduler(
@@ -457,6 +459,166 @@ def test_backfill_selects_older_gap_over_newest_completed(tmp_path: Path) -> Non
     selected = _source_cycle_times(scheduler, now, models)
 
     assert selected == ["2026-05-21T00:00:00Z"]
+
+
+def test_allowed_cycle_hours_filter_before_completion_and_gap_accounting(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    now = _dt("2026-05-22T00:00:00Z")
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=now,
+        cycle_times=[
+            "2026-05-21T00:00:00Z",
+            "2026-05-21T06:00:00Z",
+            "2026-05-21T12:00:00Z",
+            "2026-05-21T18:00:00Z",
+        ],
+        backfill_enabled=True,
+        max_cycles_per_source=8,
+        active_repository=CompletionByCycleRepository(set()),
+        allowed_cycle_hours_utc=(0, 12),
+    )
+    selected_models = scheduler._discover_models()[0]
+    completion_calls: list[str] = []
+
+    def _fake_cycle_completion_status(
+        discovery: Any,
+        models: Sequence[Any],
+        *,
+        horizon: Mapping[str, Any] | None = None,
+    ) -> str:
+        del models, horizon
+        cycle_time = scheduler_module._format_utc(discovery.cycle_time)
+        completion_calls.append(cycle_time)
+        assert discovery.cycle_time.hour in {0, 12}
+        return "gap"
+
+    monkeypatch.setattr(scheduler, "_cycle_completion_status", _fake_cycle_completion_status)
+
+    cycles, evidence = scheduler._discover_cycles(now, models=selected_models)
+
+    assert [scheduler_module._format_utc(cycle.discovery.cycle_time) for cycle in cycles] == [
+        "2026-05-21T00:00:00Z"
+    ]
+    assert completion_calls == ["2026-05-21T00:00:00Z", "2026-05-21T12:00:00Z"]
+    excluded = [
+        item
+        for item in evidence
+        if item.get("selection_reason") == "cycle_hour_not_allowed"
+    ]
+    assert [(item["cycle_time_utc"], item["selection_status"], item["status"]) for item in excluded] == [
+        ("2026-05-21T06:00:00Z", "excluded", "excluded"),
+        ("2026-05-21T18:00:00Z", "excluded", "excluded"),
+    ]
+    audit = next(item for item in evidence if item.get("type") == "backfill_audit")
+    assert audit["discovered_count"] == 2
+    assert audit["complete_count"] == 0
+    assert audit["gap_count"] == 2
+    assert audit["available_gap_count"] == 2
+    assert audit["unavailable_gap_count"] == 0
+    assert audit["selected_count"] == 1
+    assert audit["deferred_count"] == 1
+
+
+def test_allowed_cycle_hours_filter_before_dedupe_latest_source_collapse(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    now = _dt("2026-05-22T00:00:00Z")
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=now,
+        cycle_times=[],
+        backfill_enabled=False,
+        max_cycles_per_source=8,
+        allowed_cycle_hours_utc=(0, 12),
+    )
+    cycle_00 = _dt("2026-05-21T00:00:00Z")
+    cycle_12 = _dt("2026-05-21T12:00:00Z")
+    cycle_06 = _dt("2026-05-21T06:00:00Z")
+    cycle_18 = _dt("2026-05-21T18:00:00Z")
+
+    def _row(cycle_time: datetime) -> Any:
+        return scheduler_module.CycleDiscovery(
+            cycle_id=scheduler_module.cycle_id_for("gfs", cycle_time),
+            source_id="gfs",
+            cycle_time=cycle_time,
+            cycle_hour=cycle_time.hour,
+            available=True,
+            status="discovered",
+        )
+
+    def _fake_discover_source_window(
+        adapter: Any,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[Any]:
+        del adapter, start_time, end_time
+        assert source_id == "gfs"
+        return [
+            _row(cycle_06),
+            _row(cycle_12),
+            _row(cycle_12),
+            _row(cycle_18),
+            _row(cycle_00),
+            _row(cycle_00),
+        ]
+
+    monkeypatch.setattr(scheduler, "_discover_source_window", _fake_discover_source_window)
+
+    cycles, evidence = scheduler._discover_cycles(now, models=())
+
+    assert [scheduler_module._format_utc(cycle.discovery.cycle_time) for cycle in cycles] == [
+        "2026-05-21T00:00:00Z",
+        "2026-05-21T12:00:00Z",
+    ]
+    duplicate_exclusions = [
+        item for item in evidence if item.get("reason") == "duplicate_source_cycle"
+    ]
+    assert [item["cycle_time_utc"] for item in duplicate_exclusions] == [
+        "2026-05-21T12:00:00Z",
+        "2026-05-21T00:00:00Z",
+    ]
+    cycle_hour_exclusions = [
+        item
+        for item in evidence
+        if item.get("selection_reason") == "cycle_hour_not_allowed"
+    ]
+    assert [item["cycle_time_utc"] for item in cycle_hour_exclusions] == [
+        "2026-05-21T06:00:00Z",
+        "2026-05-21T18:00:00Z",
+    ]
+
+
+def test_allowed_cycle_hours_explicit_four_cycle_compatibility(tmp_path: Path) -> None:
+    now = _dt("2026-05-21T18:00:00Z")
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=now,
+        cycle_times=[
+            "2026-05-21T00:00:00Z",
+            "2026-05-21T06:00:00Z",
+            "2026-05-21T12:00:00Z",
+            "2026-05-21T18:00:00Z",
+        ],
+        backfill_enabled=False,
+        max_cycles_per_source=4,
+        allowed_cycle_hours_utc=(0, 6, 12, 18),
+    )
+
+    cycles, evidence = scheduler._discover_cycles(now, models=())
+
+    assert [scheduler_module._format_utc(cycle.discovery.cycle_time) for cycle in cycles] == [
+        "2026-05-21T00:00:00Z",
+        "2026-05-21T06:00:00Z",
+        "2026-05-21T12:00:00Z",
+        "2026-05-21T18:00:00Z",
+    ]
+    assert not any(item.get("selection_reason") == "cycle_hour_not_allowed" for item in evidence)
 
 
 # ---------------------------------------------------------------------------

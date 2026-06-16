@@ -465,6 +465,7 @@ _SCHEDULER_LEASE_COMPAT_EXPORTS = (
 )
 
 DEFAULT_PRODUCTION_SOURCES = ("gfs", "IFS")
+DEFAULT_ALLOWED_CYCLE_HOURS_UTC = (0, 12)
 DEFAULT_LOOKBACK_HOURS = 24
 DEFAULT_CYCLE_LAG_HOURS = 0
 DEFAULT_MAX_CYCLES_PER_SOURCE = 1
@@ -788,6 +789,12 @@ class ProductionSchedulerConfig:
     slurm_env: Mapping[str, str] = field(default_factory=dict)
     cancel_active_slurm: bool = False
     sources: tuple[str, ...] = DEFAULT_PRODUCTION_SOURCES
+    allowed_cycle_hours_utc: tuple[int, ...] = field(
+        default_factory=lambda: _env_allowed_cycle_hours_utc(
+            "NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC",
+            DEFAULT_ALLOWED_CYCLE_HOURS_UTC,
+        )
+    )
     lookback_hours: int = DEFAULT_LOOKBACK_HOURS
     cycle_lag_hours: int = DEFAULT_CYCLE_LAG_HOURS
     max_cycles_per_source: int = DEFAULT_MAX_CYCLES_PER_SOURCE
@@ -908,6 +915,11 @@ class ProductionSchedulerConfig:
             raise ValueError(f"production scheduler source count exceeds limit {MAX_SOURCES}")
         object.__setattr__(self, "sources", sources)
         object.__setattr__(self, "source_exclusions", tuple(source_exclusions))
+        object.__setattr__(
+            self,
+            "allowed_cycle_hours_utc",
+            _normalize_allowed_cycle_hours_utc(self.allowed_cycle_hours_utc),
+        )
         lookback_hours = max(int(self.lookback_hours), 0)
         if lookback_hours > MAX_LOOKBACK_HOURS:
             raise ValueError(f"production scheduler lookback_hours exceeds limit {MAX_LOOKBACK_HOURS}")
@@ -2209,7 +2221,11 @@ class ProductionScheduler:
             config=self.config,
             adapters=self.adapters,
             active_repository=self.active_repository,
-            floor_to_source_cycle_boundary=_floor_to_source_cycle_boundary,
+            floor_to_source_cycle_boundary=lambda value, _sources: _floor_to_source_cycle_boundary(
+                value,
+                _sources,
+                allowed_cycle_hours_utc=self.config.allowed_cycle_hours_utc,
+            ),
             source_horizon_metadata=_source_horizon_metadata,
             candidate_factory=_candidate_for,
             candidate_state_provider_caller=_call_candidate_state_provider,
@@ -2397,9 +2413,18 @@ def _fetch_active_model_details(registry: ModelRegistryReader) -> list[Mapping[s
     return rows
 
 
-def _floor_to_source_cycle_boundary(value: datetime, sources: Sequence[str]) -> datetime:
+def _floor_to_source_cycle_boundary(
+    value: datetime,
+    sources: Sequence[str],
+    *,
+    allowed_cycle_hours_utc: Sequence[int] | None = None,
+) -> datetime:
     normalized = _ensure_utc(value).replace(minute=0, second=0, microsecond=0)
-    cycle_hours = sorted(_cycle_hours_for_sources(sources))
+    cycle_hours = (
+        list(_normalize_allowed_cycle_hours_utc(allowed_cycle_hours_utc))
+        if allowed_cycle_hours_utc is not None
+        else sorted(_cycle_hours_for_sources(sources))
+    )
     candidates: list[datetime] = []
     for hour in cycle_hours:
         candidate = normalized.replace(hour=hour)
@@ -6150,6 +6175,48 @@ def _env_int(name: str, default: int) -> int:
         return int(str(value))
     except ValueError:
         return default
+
+
+def _env_allowed_cycle_hours_utc(name: str, default: Sequence[int]) -> tuple[int, ...]:
+    value = os.getenv(name)
+    if value is None:
+        return _normalize_allowed_cycle_hours_utc(default)
+    return _parse_allowed_cycle_hours_utc(value, name)
+
+
+def _parse_allowed_cycle_hours_utc(value: str, name: str = "allowed_cycle_hours_utc") -> tuple[int, ...]:
+    if value == "":
+        raise ValueError(f"{name} must contain at least one UTC cycle hour")
+    parsed: list[int] = []
+    for raw_token in value.split(","):
+        token = raw_token.strip()
+        if token == "":
+            raise ValueError(f"{name} must not contain empty cycle hour tokens")
+        try:
+            hour = int(token)
+        except ValueError as error:
+            raise ValueError(f"{name} must contain integer UTC cycle hours") from error
+        parsed.append(hour)
+    return _normalize_allowed_cycle_hours_utc(parsed, field_name=name)
+
+
+def _normalize_allowed_cycle_hours_utc(
+    value: Sequence[int],
+    *,
+    field_name: str = "allowed_cycle_hours_utc",
+) -> tuple[int, ...]:
+    hours: set[int] = set()
+    for raw_hour in value:
+        try:
+            hour = int(raw_hour)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"production scheduler {field_name} must contain integer UTC cycle hours") from error
+        if hour < 0 or hour > 23:
+            raise ValueError(f"production scheduler {field_name} must only contain values in 0..23")
+        hours.add(hour)
+    if not hours:
+        raise ValueError(f"production scheduler {field_name} must contain at least one UTC cycle hour")
+    return tuple(sorted(hours))
 
 
 def _env_path_list(name: str) -> tuple[str, ...]:

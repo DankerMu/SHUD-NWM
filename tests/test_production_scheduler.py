@@ -1552,6 +1552,74 @@ def test_source_blocker_preserves_adapter_classifier_and_redacts_probe_credentia
     assert "secret-signature" not in rendered
 
 
+def test_allowed_cycle_hours_floor_to_prior_00_12_boundary() -> None:
+    assert scheduler_module._floor_to_source_cycle_boundary(
+        _dt("2026-05-21T06:59:00Z"),
+        ("gfs",),
+        allowed_cycle_hours_utc=(0, 12),
+    ) == _dt("2026-05-21T00:00:00Z")
+    assert scheduler_module._floor_to_source_cycle_boundary(
+        _dt("2026-05-21T18:01:00Z"),
+        ("gfs",),
+        allowed_cycle_hours_utc=(0, 12),
+    ) == _dt("2026-05-21T12:00:00Z")
+
+
+def test_disallowed_cycle_hours_do_not_reach_candidates_readiness_forcing_or_submit(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        now=_dt("2026-05-22T00:00:00Z"),
+        dry_run=False,
+        allowed_cycle_hours_utc=(0, 12),
+    )
+    orchestrator = FakeProductionOrchestrator()
+    forcing_producer = FakeForcingProducer()
+
+    class StrictReadinessProvider:
+        def canonical_readiness(self, **_kwargs: Any) -> Mapping[str, Any]:
+            raise AssertionError("canonical readiness must not be called for disallowed cycle hours")
+
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={
+            "gfs": FakeAdapter(
+                "gfs",
+                [
+                    ("2026-05-21T06:00:00Z", True),
+                    ("2026-05-21T18:00:00Z", True),
+                ],
+            )
+        },
+        active_repository=FakeActiveRepository(active=False),
+        canonical_readiness_provider=StrictReadinessProvider(),
+        forcing_producer=forcing_producer,
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert result.evidence["candidates"] == []
+    assert result.evidence["blocked_candidates"] == []
+    assert result.evidence["counts"]["candidate_count"] == 0
+    assert result.evidence["counts"]["source_cycle_count"] == 0
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert forcing_producer.calls == []
+    assert orchestrator.calls == []
+    excluded = [
+        item
+        for item in result.evidence["source_cycles"]
+        if item.get("selection_reason") == "cycle_hour_not_allowed"
+    ]
+    assert [item["cycle_time_utc"] for item in excluded] == [
+        "2026-05-21T06:00:00Z",
+        "2026-05-21T18:00:00Z",
+    ]
+    assert {item["selection_status"] for item in excluded} == {"excluded"}
+
+
 def test_pass_source_cycle_evidence_redacts_forbidden_probe_credentials(tmp_path: Path) -> None:
     signed_probe = (
         "https://user:password@provider.example.test/file"
@@ -4020,6 +4088,51 @@ def test_production_scheduler_config_rejects_blank_scheduler_paths(tmp_path: Pat
         ProductionSchedulerConfig(**kwargs)
 
 
+@pytest.mark.parametrize("env_value", ["0,12", "12, 0,12"])
+def test_scheduler_allowed_cycle_hours_env_parses_dedupes_and_emits_runtime_evidence(
+    tmp_path: Path,
+    monkeypatch: Any,
+    env_value: str,
+) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", env_value)
+
+    config = ProductionSchedulerConfig(workspace_root=tmp_path)
+    evidence = scheduler_module._scheduler_runtime_config_evidence(config)
+
+    assert config.allowed_cycle_hours_utc == (0, 12)
+    assert evidence["allowed_cycle_hours_utc"] == [0, 12]
+
+
+@pytest.mark.parametrize(
+    ("env_value", "match"),
+    [
+        ("", "must contain at least one UTC cycle hour"),
+        ("0,,12", "must not contain empty cycle hour tokens"),
+        ("0,nope", "must contain integer UTC cycle hours"),
+        ("0,24", "must only contain values in 0..23"),
+        ("-1,12", "must only contain values in 0..23"),
+    ],
+)
+def test_scheduler_allowed_cycle_hours_env_fails_closed(
+    tmp_path: Path,
+    monkeypatch: Any,
+    env_value: str,
+    match: str,
+) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", env_value)
+
+    with pytest.raises(ValueError, match=match):
+        ProductionSchedulerConfig(workspace_root=tmp_path)
+
+
+def test_scheduler_allowed_cycle_hours_default_is_00_12(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", raising=False)
+
+    config = ProductionSchedulerConfig(workspace_root=tmp_path)
+
+    assert config.allowed_cycle_hours_utc == (0, 12)
+
+
 def test_default_evidence_dir_symlink_cannot_escape_workspace(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside-evidence"
     outside.mkdir()
@@ -4943,21 +5056,25 @@ def test_stale_scheduler_lock_takeover_does_not_delete_fresh_contender_lock(tmp_
     assert not lock_path.exists()
 
 
-def test_scheduler_caps_reject_oversized_config_and_bound_candidate_work(tmp_path: Path) -> None:
+def test_scheduler_caps_reject_oversized_config_and_bound_candidate_work(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     with pytest.raises(ValueError, match="lookback_hours exceeds limit"):
         _config(tmp_path, lookback_hours=169)
     with pytest.raises(ValueError, match="source count exceeds limit"):
         _config(tmp_path, sources=("gfs", "IFS", "a", "b", "c"))
 
-    config = _config(tmp_path, now=_dt("2026-05-21T18:00:00Z"), sources=("gfs",), max_cycles_per_source=16)
-    models = [_model(f"model_{index:05d}", "basin_a") for index in range(626)]
+    monkeypatch.setattr(scheduler_module, "MAX_CANDIDATES", 10)
+    config = _config(tmp_path, now=_dt("2026-05-21T18:00:00Z"), sources=("gfs",), max_cycles_per_source=2)
+    models = [_model(f"model_{index:05d}", "basin_a") for index in range(11)]
     scheduler = ProductionScheduler(
         config,
         registry=FakeRegistry(models),
         adapters={
             "gfs": FakeAdapter(
                 "gfs",
-                [(f"2026-05-21T{hour:02d}:00:00Z", True) for hour in range(16)],
+                [("2026-05-21T12:00:00Z", True)],
             )
         },
     )
@@ -5108,16 +5225,17 @@ def test_no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof(
     monkeypatch.delenv("NHMS_SCHEDULER_MODEL_IDS")
     monkeypatch.delenv("NHMS_SCHEDULER_BASIN_IDS")
     monkeypatch.setenv("NHMS_SERVICE_ROLE", "compute_control")
+    monkeypatch.setattr(scheduler_module, "MAX_CANDIDATES", 10)
     monkeypatch.setattr(
         "services.orchestrator.scheduler.PsycopgModelRegistryStore.from_env",
-        lambda: FakeRegistry([_model(f"model_{index:05d}", "basin_a") for index in range(626)]),
+        lambda: FakeRegistry([_model(f"model_{index:05d}", "basin_a") for index in range(11)]),
     )
     monkeypatch.setattr(
         "services.orchestrator.scheduler._default_adapters",
         lambda: {
             "gfs": FakeAdapter(
                 "gfs",
-                [(f"2026-05-21T{hour:02d}:00:00Z", True) for hour in range(16)],
+                [("2026-05-21T12:00:00Z", True)],
             )
         },
     )
@@ -5134,7 +5252,7 @@ def test_no_flag_resource_limit_evidence_retains_runtime_root_preflight_proof(
         sources=("gfs",),
         lookback_hours=24,
         cycle_lag_hours=0,
-        max_cycles_per_source=16,
+        max_cycles_per_source=2,
         model_ids=(),
         basin_ids=(),
         dry_run=True,
@@ -12118,6 +12236,7 @@ def test_plan_production_cli_public_path_skips_active_duplicate(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", "0,6,12,18")
     monkeypatch.setattr(
         "services.orchestrator.scheduler._active_repository_from_env",
         lambda: FakeActiveRepository(active=True),
@@ -13265,6 +13384,7 @@ def _config(tmp_path: Path, **kwargs: Any) -> ProductionSchedulerConfig:
         "lookback_hours": 24,
         "cycle_lag_hours": 0,
         "max_cycles_per_source": 1,
+        "allowed_cycle_hours_utc": (0, 6, 12, 18),
         "dry_run": True,
     }
     values.update(kwargs)
@@ -13371,6 +13491,7 @@ def _set_scheduler_root_env(monkeypatch: Any, roots: Mapping[str, Path]) -> None
             for key in ("workspace_root", "object_store_root", "published_root", "runtime_root", "temp_root")
         ),
     )
+    monkeypatch.setenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", "0,6,12,18")
     monkeypatch.setenv("NHMS_SCHEDULER_SOURCES", "gfs")
     monkeypatch.setenv("NHMS_SCHEDULER_MODEL_IDS", "model_a")
     monkeypatch.setenv("NHMS_SCHEDULER_BASIN_IDS", "basin_a")

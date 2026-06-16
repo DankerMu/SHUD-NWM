@@ -1,59 +1,59 @@
 ## Implementation Tasks
 
-- [ ] Add `allowed_cycle_hours_utc` to `ProductionSchedulerConfig` with env
+- [x] Add `allowed_cycle_hours_utc` to `ProductionSchedulerConfig` with env
       parsing/validation for `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC`.
-- [ ] Include allowed cycle hours in scheduler runtime config evidence.
-- [ ] Update `_floor_to_source_cycle_boundary()` to use configured allowed
+- [x] Include allowed cycle hours in scheduler runtime config evidence.
+- [x] Update `_floor_to_source_cycle_boundary()` to use configured allowed
       hours.
-- [ ] Filter disallowed cycle hours in `_discover_cycles()` before dedupe,
+- [x] Filter disallowed cycle hours in `_discover_cycles()` before dedupe,
       completion status, gap accounting, candidate/blocked selection, readiness,
       forcing, or submit paths.
-- [ ] Emit excluded evidence for disallowed cycles with
+- [x] Emit excluded evidence for disallowed cycles with
       `cycle_hour_not_allowed`.
-- [ ] Update focused scheduler/backfill tests for `00/12` filtering, evidence,
+- [x] Update focused scheduler/backfill tests for `00/12` filtering, evidence,
       gap counts, no downstream side effects, floor boundary behavior, invalid
       config, and explicit four-cycle compatibility.
-- [ ] Update `infra/env/compute.example` with
+- [x] Update `infra/env/compute.example` with
       `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12`.
 
 ## Required Evidence
 
-- [ ] `uv run --no-sync pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`
-- [ ] `uv run --no-sync ruff check services/orchestrator/scheduler.py tests/test_production_scheduler.py tests/test_scheduler_backfill.py`
-- [ ] Config parse case: `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12` ->
+- [x] `uv run --no-sync pytest -q tests/test_production_scheduler.py tests/test_scheduler_backfill.py`
+- [x] `uv run --no-sync ruff check services/orchestrator/scheduler.py tests/test_production_scheduler.py tests/test_scheduler_backfill.py`
+- [x] Config parse case: `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12` ->
       config stores `(0, 12)` or equivalent sorted immutable sequence and
       runtime config evidence emits `[0, 12]`.
-- [ ] Config parse case: duplicates/whitespace such as `12, 0,12` -> sorted
+- [x] Config parse case: duplicates/whitespace such as `12, 0,12` -> sorted
       deduped `[0, 12]`.
-- [ ] Config failure case: empty configured value, non-integer token, or value
+- [x] Config failure case: empty configured value, non-integer token, or value
       outside `0..23` -> stable fail-closed exception before scheduler work.
-- [ ] Discovery case: source window returns `00/06/12/18` and allowed hours
+- [x] Discovery case: source window returns `00/06/12/18` and allowed hours
       are `0,12` -> selected cycles include only `00/12`.
-- [ ] Dedupe-order case: disallowed `06/18` cycles mixed with allowed `00/12`
+- [x] Dedupe-order case: disallowed `06/18` cycles mixed with allowed `00/12`
       cycles do not consume dedupe keys, do not replace allowed cycles, and do
       not affect latest/oldest allowed-cycle collapse results.
-- [ ] Completion-status case: `cycle_completion_status_provider` or equivalent
+- [x] Completion-status case: `cycle_completion_status_provider` or equivalent
       completion lookup is not called for disallowed `06/18` cycles and receives
       only allowed `00/12` cycles.
-- [ ] Evidence case: filtered `06/18` rows include
+- [x] Evidence case: filtered `06/18` rows include
       `selection_status=excluded` and
       `selection_reason=cycle_hour_not_allowed`.
-- [ ] Backfill case: `06/18` are not counted in `gap_count`,
+- [x] Backfill case: `06/18` are not counted in `gap_count`,
       `available_gap_count`, or `unavailable_gap_count`.
-- [ ] Candidate case: `06/18` do not appear in `candidates` or
+- [x] Candidate case: `06/18` do not appear in `candidates` or
       `blocked_candidates`.
-- [ ] Side-effect guard: disallowed `06/18` does not call canonical readiness
+- [x] Side-effect guard: disallowed `06/18` does not call canonical readiness
       provider, forcing producer, or submit path.
-- [ ] Floor boundary case: current time near `06/18` floors to the nearest prior
+- [x] Floor boundary case: current time near `06/18` floors to the nearest prior
       allowed `00/12` boundary.
-- [ ] Compatibility case: explicit allowed hours `0,6,12,18` preserves tests
+- [x] Compatibility case: explicit allowed hours `0,6,12,18` preserves tests
       or paths that intentionally exercise four-cycle behavior.
 
 ## Documentation Evidence
 
-- [ ] `infra/env/compute.example` contains
+- [x] `infra/env/compute.example` contains
       `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12`.
-- [ ] Env comment explains that scheduler allowed hours are the hard gate for
+- [x] Env comment explains that scheduler allowed hours are the hard gate for
       business candidate/backfill selection.
 
 ## Non-Goals / Out of Scope

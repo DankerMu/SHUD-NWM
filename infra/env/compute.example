@@ -40,6 +40,8 @@ NHMS_SCHEDULER_RUNTIME_ROOT=/scratch/frd_muziyao/nhms-production/runtime
 NHMS_SCHEDULER_TEMP_ROOT=/scratch/frd_muziyao/nhms-production/tmp
 NHMS_SCHEDULER_ALLOWED_ROOTS=/scratch/frd_muziyao/nhms-production/workspace:/scratch/frd_muziyao/nhms-production/object-store:/scratch/frd_muziyao/nhms-production/runtime:/scratch/frd_muziyao/nhms-production/tmp:/ghdc/data/nwm/object-store:/var/lib/nhms/published
 NHMS_SCHEDULER_SOURCES=gfs,IFS
+# Scheduler hard gate for business candidate/backfill selection.
+NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12
 NHMS_SCHEDULER_MODEL_IDS=basins_qhh_shud
 NHMS_SCHEDULER_BASIN_IDS=basins_qhh
 NHMS_SCHEDULER_INTERVAL_SECONDS=300
