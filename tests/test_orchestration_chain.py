@@ -6995,6 +6995,23 @@ def test_chain_stage_execution_module_imports_without_loading_chain_runtime() ->
     )
 
 
+def test_chain_manifest_module_imports_without_loading_chain_runtime() -> None:
+    command = (
+        "import sys; "
+        "import services.orchestrator.chain_manifests as module; "
+        "assert 'services.orchestrator.chain' not in sys.modules; "
+        "assert hasattr(module, 'build_model_run_assembly')"
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_chain_stage_execution_legacy_methods_delegate(monkeypatch) -> None:
     from services.orchestrator import chain_stage_execution
 
@@ -7097,6 +7114,167 @@ def test_chain_stage_execution_legacy_methods_delegate(monkeypatch) -> None:
         "slurm_submission_manifest",
     ]
     assert all(args[0] is orchestrator for _name, args, _kwargs in calls)
+
+
+def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
+    from services.orchestrator import chain as chain_runtime
+    from services.orchestrator import chain_manifests
+
+    orchestrator = object.__new__(ForecastOrchestrator)
+    stage = object()
+    cycle_context = object()
+    run_context = object()
+    basin = {"run_id": "run-1"}
+    basins = [basin]
+    tasks = [{"task_id": 0}]
+    manifest = {"run_id": "run-1"}
+    manifest_path = Path("runs/run-1/input/manifest.json")
+    cycle_manifest = {"stage": "forecast"}
+    index_path = Path("runs/cycle/input/forecast_manifest_index.json")
+    runtime_manifest = {"run_id": "run-1"}
+    reindexed_entries = [{"task_id": 0, "run_id": "run-1"}]
+    run_manifest = {"run_type": "forecast"}
+    calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def capture(name: str, result: Any = None) -> Any:
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            calls.append((name, args, kwargs))
+            return result
+
+        return _fake
+
+    monkeypatch.setattr(
+        chain_manifests,
+        "build_cycle_stage_manifest",
+        capture("build_cycle_stage_manifest", cycle_manifest),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "write_cycle_manifest_index",
+        capture("write_cycle_manifest_index", index_path),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "prepare_forecast_runtime_manifests",
+        capture("prepare_forecast_runtime_manifests"),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "build_forecast_runtime_manifest",
+        capture("build_forecast_runtime_manifest", runtime_manifest),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "validate_forecast_runtime_manifest",
+        capture("validate_forecast_runtime_manifest"),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "reindexed_manifest_entries",
+        capture("reindexed_manifest_entries", reindexed_entries),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "build_forecast_run_manifest",
+        capture("build_forecast_run_manifest", run_manifest),
+    )
+    monkeypatch.setattr(
+        chain_manifests,
+        "write_run_manifest",
+        capture("write_run_manifest"),
+    )
+    legacy_top_level_helpers = (
+        "_default_forcing_uri",
+        "_preserve_directory_uri",
+        "_model_package_manifest_uri",
+        "_station_metadata_for_basin",
+        "_frequency_contract",
+        "_assembly_quality_states",
+        "_assembly_from_entry",
+        "_tri_state",
+        "_safe_project_name",
+        "_project_name_for_basin",
+        "_era5_reanalysis_latency_minutes",
+        "_ensure_segment_utc",
+    )
+    for helper_name in legacy_top_level_helpers:
+        assert getattr(chain_runtime, helper_name) is getattr(chain_manifests, helper_name)
+
+    for method_name in (
+        "_build_cycle_stage_manifest",
+        "_write_cycle_manifest_index",
+        "_prepare_forecast_runtime_manifests",
+        "_build_forecast_runtime_manifest",
+        "_validate_forecast_runtime_manifest",
+        "_reindexed_manifest_entries",
+        "_build_run_manifest",
+        "_write_run_manifest",
+    ):
+        assert callable(getattr(ForecastOrchestrator, method_name))
+
+    assert orchestrator._build_cycle_stage_manifest(stage, cycle_context) == cycle_manifest
+    assert orchestrator._write_cycle_manifest_index(cycle_context, stage, tasks) == index_path
+    assert orchestrator._prepare_forecast_runtime_manifests(stage, cycle_context) is None
+    assert orchestrator._build_forecast_runtime_manifest(cycle_context, basin) == runtime_manifest
+    assert orchestrator._validate_forecast_runtime_manifest(manifest_path, manifest, task_index=3) is None
+    assert orchestrator._reindexed_manifest_entries(basins) == reindexed_entries
+    assert orchestrator._build_run_manifest(run_context) == run_manifest
+    assert orchestrator._write_run_manifest(run_context, manifest) is None
+
+    assert [name for name, _args, _kwargs in calls] == [
+        "build_cycle_stage_manifest",
+        "write_cycle_manifest_index",
+        "prepare_forecast_runtime_manifests",
+        "build_forecast_runtime_manifest",
+        "validate_forecast_runtime_manifest",
+        "reindexed_manifest_entries",
+        "build_forecast_run_manifest",
+        "write_run_manifest",
+    ]
+    orchestrator_first_delegates = {
+        "build_cycle_stage_manifest",
+        "write_cycle_manifest_index",
+        "prepare_forecast_runtime_manifests",
+        "build_forecast_runtime_manifest",
+        "validate_forecast_runtime_manifest",
+        "reindexed_manifest_entries",
+        "write_run_manifest",
+    }
+    assert all(
+        args[0] is orchestrator
+        for name, args, _kwargs in calls
+        if name in orchestrator_first_delegates
+    )
+
+    call_by_name = {name: (args, kwargs) for name, args, kwargs in calls}
+    assert call_by_name["build_cycle_stage_manifest"][0][1:] == (stage, cycle_context)
+    assert call_by_name["build_cycle_stage_manifest"][1] == {
+        "model_run_stage_evidence": chain_runtime._model_run_stage_evidence,
+        "frequency_quality_state": chain_runtime._frequency_quality_state,
+        "publish_quality_state": chain_runtime._publish_quality_state,
+        "cycle_residual_blockers": chain_runtime._cycle_residual_blockers,
+    }
+    assert call_by_name["write_cycle_manifest_index"][0][1:] == (cycle_context, stage, tasks)
+    assert call_by_name["prepare_forecast_runtime_manifests"][0][1:] == (stage, cycle_context)
+    assert call_by_name["prepare_forecast_runtime_manifests"][1] == {
+        "assembly_payload_from_runtime_manifest": chain_runtime._assembly_payload_from_runtime_manifest
+    }
+    assert call_by_name["build_forecast_runtime_manifest"][0][1:] == (cycle_context, basin)
+    assert call_by_name["build_forecast_runtime_manifest"][1] == {
+        "assembly_builder": chain_runtime.build_model_run_assembly
+    }
+    assert call_by_name["validate_forecast_runtime_manifest"][0][1:] == (
+        manifest_path,
+        manifest,
+    )
+    assert call_by_name["validate_forecast_runtime_manifest"][1] == {"task_index": 3}
+    assert call_by_name["reindexed_manifest_entries"][0][1:] == (basins,)
+    assert call_by_name["reindexed_manifest_entries"][1] == {
+        "reindex_builder": chain_runtime.build_reindexed_manifest,
+        "assembly_builder": chain_runtime.build_model_run_assembly,
+    }
+    assert call_by_name["build_forecast_run_manifest"][0] == (run_context,)
+    assert call_by_name["write_run_manifest"][0][1:] == (run_context, manifest)
 
 
 # --- M24 §3A: two-phase reserve -> bind through the real chain submit path ----
