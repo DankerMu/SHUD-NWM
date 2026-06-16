@@ -22,10 +22,12 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore, sha256_bytes
+from packages.common.state_lineage import WARM_START_LINEAGE_MISMATCH
 from packages.common.state_manager import StateSnapshot
 from services.orchestrator.chain import (
     ForecastOrchestrator,
     OrchestratorConfig,
+    OrchestratorError,
     _analysis_forcing_causality,
     _analysis_update_ic_step_minutes,
     _check_three_way_time_consistency,
@@ -562,7 +564,12 @@ def test_consume_blocks_on_native_header_snapshot_mismatch(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
-def _cohort_orchestrator(tmp_path: Path, state_manager: FakeStateManager) -> ForecastOrchestrator:
+def _cohort_orchestrator(
+    tmp_path: Path,
+    state_manager: FakeStateManager,
+    *,
+    require_forecast_warm_start: bool = False,
+) -> ForecastOrchestrator:
     object_root = tmp_path / "object-store"
     config = OrchestratorConfig(
         workspace_root=tmp_path / "workspace",
@@ -570,6 +577,7 @@ def _cohort_orchestrator(tmp_path: Path, state_manager: FakeStateManager) -> For
         object_store_prefix="s3://nhms",
         poll_interval_seconds=0,
         job_timeout_seconds=5,
+        require_forecast_warm_start=require_forecast_warm_start,
     )
     return ForecastOrchestrator(
         config=config,
@@ -654,3 +662,133 @@ def test_cycle_cohort_forecast_manifest_uses_prior_cycle_saved_state(tmp_path: P
         == runtime_manifest["initial_state"]["checksum"]
         == entry["init_state_checksum"]
     )
+
+
+def test_strict_cycle_prefilled_exact_successor_is_validated_and_preserved(tmp_path: Path) -> None:
+    t_next = "2026-05-01T12:00:00Z"
+    prior_state = StateSnapshot(
+        state_id="state_demo_model_2026050112",
+        model_id="demo_model",
+        run_id="fcst_gfs_2026050100_demo_model",
+        valid_time=_dt(t_next),
+        state_uri="states/gfs/demo_model/2026050112/state.cfg.ic",
+        checksum="csum-next",
+        usable_flag=True,
+        source_id="gfs",
+        cycle_id="gfs_2026050100",
+        lead_hours=12,
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="package-sha",
+    )
+    orchestrator = _cohort_orchestrator(
+        tmp_path,
+        FakeStateManager([prior_state]),
+        require_forecast_warm_start=True,
+    )
+
+    basin = {
+        "model_id": "demo_model",
+        "basin_id": "demo_model",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "river_v01",
+        "segment_count": 2,
+        "model_package_uri": "models/demo_model/package/",
+        "model_package_checksum": "package-sha",
+        "source_id": "gfs",
+        "init_state_id": prior_state.state_id,
+        "init_state_uri": prior_state.state_uri,
+    }
+    basins = orchestrator._normalize_cycle_basins([basin], "gfs", _dt(t_next))
+    orchestrator._apply_cohort_warm_start(basins, "gfs", _dt(t_next))
+
+    record = basins[0]
+    assert record["init_state_id"] == prior_state.state_id
+    assert record["init_state_uri"] == prior_state.state_uri
+    assert record["init_state_checksum"] == prior_state.checksum
+    assert record["init_state_valid_time"] == t_next
+    assert record["init_state_quality"] == "fresh"
+    assert record["init_state_lineage"] == {
+        "source_id": "gfs",
+        "cycle_id": "gfs_2026050100",
+        "lead_hours": 12,
+        "model_package_version": "models/demo_model/package/",
+        "model_package_checksum": "package-sha",
+    }
+
+    from services.orchestrator.chain import CycleOrchestrationContext
+
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt(t_next),
+        cycle_id="gfs_2026050112",
+        run_id="cycle_run",
+        all_basins=basins,
+        active_basins=list(basins),
+        restart_stage=None,
+    )
+    runtime_manifest = orchestrator._build_forecast_runtime_manifest(context, record)
+    entry = orchestrator._reindexed_manifest_entries(context.active_basins)[0]
+
+    assert runtime_manifest["initial_state"]["state_id"] == prior_state.state_id
+    assert runtime_manifest["initial_state"]["valid_time"] == t_next
+    assert runtime_manifest["initial_state"]["lineage"]["lead_hours"] == 12
+    assert runtime_manifest["runtime"]["init_mode"] == 3
+    assert runtime_manifest["initial_state"]["quality"] != "cold_start_no_state"
+    assert entry["init_state_uri"] == prior_state.state_uri
+    assert entry["init_state_checksum"] == prior_state.checksum
+
+
+def test_strict_cycle_prefilled_invalid_state_blocks_before_side_effects(tmp_path: Path) -> None:
+    t_next = "2026-05-01T12:00:00Z"
+    invalid_state = StateSnapshot(
+        state_id="state_demo_model_2026050112",
+        model_id="demo_model",
+        run_id="fcst_gfs_2026050106_demo_model",
+        valid_time=_dt(t_next),
+        state_uri="states/gfs/demo_model/2026050112/state.cfg.ic",
+        checksum="csum-next",
+        usable_flag=True,
+        source_id="gfs",
+        cycle_id="gfs_2026050106",
+        lead_hours=6,
+        model_package_version="models/demo_model/package/",
+    )
+    repository = FakeOrchestratorRepository()
+    client = FakeSlurmClient()
+    object_root = tmp_path / "object-store"
+    orchestrator = ForecastOrchestrator(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            poll_interval_seconds=0,
+            job_timeout_seconds=5,
+            require_forecast_warm_start=True,
+        ),
+        repository=repository,
+        state_manager=FakeStateManager([invalid_state]),
+        slurm_client=client,
+        object_store=LocalObjectStore(object_root, "s3://nhms"),
+    )
+
+    basin = {
+        "model_id": "demo_model",
+        "basin_id": "demo_model",
+        "basin_version_id": "basin_v01",
+        "river_network_version_id": "river_v01",
+        "segment_count": 2,
+        "model_package_uri": "models/demo_model/package/",
+        "source_id": "gfs",
+        "init_state_id": invalid_state.state_id,
+        "init_state_uri": invalid_state.state_uri,
+    }
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", _dt(t_next), [basin])
+
+    assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+    assert repository.created_runs == []
+    assert repository.hydro_statuses == []
+    assert repository.cycle_statuses == []
+    assert client.submissions == []
+    assert not (tmp_path / "workspace" / "runs").exists()

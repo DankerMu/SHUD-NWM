@@ -29,6 +29,9 @@ from packages.common.state_lineage import (
     LINEAGE_SOURCE_MISMATCH,
     STATE_QC_FAILED,
     STATE_TOO_STALE,
+    WARM_START_LINEAGE_MISMATCH,
+    WARM_START_SUCCESSOR_CHECKPOINT_MISSING,
+    WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE,
 )
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
@@ -260,6 +263,7 @@ class OrchestratorConfig:
     era5_area: str = "55,70,15,140"
     state_soft_stale_threshold_days: int = 7
     state_hard_stale_threshold_days: int = 30
+    require_forecast_warm_start: bool = False
     slurm_job_type_templates: Mapping[str, str] = field(default_factory=dict)
     slurm_env: Mapping[str, str] = field(default_factory=dict)
 
@@ -298,6 +302,7 @@ class OrchestratorConfig:
             era5_area=os.getenv("ERA5_AREA", "55,70,15,140"),
             state_soft_stale_threshold_days=int(os.getenv("STATE_SOFT_STALE_THRESHOLD_DAYS", "7")),
             state_hard_stale_threshold_days=int(os.getenv("STATE_HARD_STALE_THRESHOLD_DAYS", "30")),
+            require_forecast_warm_start=_env_flag("NHMS_REQUIRE_FORECAST_WARM_START", default=False),
         )
 
 
@@ -340,6 +345,39 @@ def _validate_state_lineage(
             return LINEAGE_MAX_LEAD_EXCEEDED
 
     return None
+
+
+def _validate_strict_state_lineage(
+    state: StateSnapshot,
+    *,
+    source_id: str | None,
+    model_package_version: str | None,
+    model_package_checksum: str | None,
+) -> str | None:
+    if source_id is not None:
+        if state.source_id is None or normalize_source_id(state.source_id) != normalize_source_id(source_id):
+            return LINEAGE_SOURCE_MISMATCH
+
+    if model_package_version is not None:
+        if state.model_package_version is None or state.model_package_version != model_package_version:
+            return LINEAGE_PACKAGE_VERSION_MISMATCH
+    if model_package_checksum is not None:
+        if state.model_package_checksum is None or state.model_package_checksum != model_package_checksum:
+            return LINEAGE_PACKAGE_VERSION_MISMATCH
+
+    return None
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value.")
 
 
 class SlurmGatewayClient(Protocol):
@@ -1998,10 +2036,23 @@ class ForecastOrchestrator:
         """
 
         if self.state_manager is None:
+            if self.config.require_forecast_warm_start:
+                raise OrchestratorError(
+                    WARM_START_SUCCESSOR_CHECKPOINT_MISSING,
+                    "Strict forecast warm-start requires a state manager.",
+                    {"source_id": source_id, "cycle_time": _format_time(cycle_time)},
+                )
             return
         for basin in basins:
-            if basin.get("init_state_uri") not in (None, ""):
-                # Caller (scheduler) already selected a state; do not override it.
+            if self.config.require_forecast_warm_start and _basin_has_prefilled_initial_state(basin):
+                selection = self._validate_prefilled_forecast_initial_state(
+                    basin,
+                    source_id=str(basin.get("source_id") or source_id),
+                    cycle_time=cycle_time,
+                    model_package_version=basin.get("model_package_uri"),
+                    model_package_checksum=basin.get("model_package_checksum"),
+                )
+                _apply_initial_state_selection_to_basin(basin, selection)
                 continue
             model_id = str(basin.get("model_id") or "")
             if not model_id:
@@ -2014,20 +2065,7 @@ class ForecastOrchestrator:
                 model_package_checksum=basin.get("model_package_checksum"),
                 max_lead_hours=_basin_max_lead_hours(basin),
             )
-            basin["init_state_id"] = selection.state_id
-            basin["init_state_uri"] = selection.state_uri
-            basin["init_state_checksum"] = selection.checksum
-            basin["init_state_valid_time"] = (
-                _format_time(selection.valid_time) if selection.valid_time is not None else None
-            )
-            basin["init_state_quality"] = selection.quality
-            basin["init_state_lineage"] = {
-                "source_id": selection.source_id,
-                "cycle_id": selection.cycle_id,
-                "lead_hours": selection.lead_hours,
-                "model_package_version": selection.model_package_version,
-                "model_package_checksum": selection.model_package_checksum,
-            }
+            _apply_initial_state_selection_to_basin(basin, selection)
             if selection.rejection_code is not None:
                 basin["init_state_rejection_code"] = selection.rejection_code
 
@@ -2273,14 +2311,15 @@ class ForecastOrchestrator:
             cycle_time=parsed_cycle_time,
             model_id=model_id,
         )
-        self.repository.ensure_forecast_cycle(source_id=source_id, cycle_time=parsed_cycle_time)
         initial_state = self._select_forecast_initial_state(
             model_id=model_id,
             cycle_time=parsed_cycle_time,
             source_id=source_id,
             model_package_version=model.model_package_uri,
+            model_package_checksum=model.model_package_checksum,
             max_lead_hours=max_lead_hours,
         )
+        self.repository.ensure_forecast_cycle(source_id=source_id, cycle_time=parsed_cycle_time)
         context = self._build_run_context(
             source_id,
             parsed_cycle_time,
@@ -3163,6 +3202,7 @@ class ForecastOrchestrator:
             init_state_valid_time=selected_state.valid_time,
             init_state_checksum=selected_state.checksum,
             init_state_quality=selected_state.quality,
+            init_state_lineage=_initial_state_lineage(selected_state),
             output_segment_count=model.output_segment_count,
         )
 
@@ -3203,6 +3243,14 @@ class ForecastOrchestrator:
         model_package_checksum: str | None = None,
         max_lead_hours: int | None = None,
     ) -> InitialStateSelection:
+        if self.config.require_forecast_warm_start:
+            return self._select_strict_forecast_initial_state(
+                model_id=model_id,
+                cycle_time=cycle_time,
+                source_id=source_id,
+                model_package_version=model_package_version,
+                model_package_checksum=model_package_checksum,
+            )
         if self.state_manager is None:
             return InitialStateSelection(None, None, None, None, "cold_start_no_state")
 
@@ -3270,6 +3318,241 @@ class ForecastOrchestrator:
         return InitialStateSelection(
             None, None, None, None, "cold_start_no_state", rejection_code=last_rejection_code
         )
+
+    def _select_strict_forecast_initial_state(
+        self,
+        *,
+        model_id: str,
+        cycle_time: datetime,
+        source_id: str | None,
+        model_package_version: str | None,
+        model_package_checksum: str | None,
+    ) -> InitialStateSelection:
+        if self.state_manager is None:
+            raise OrchestratorError(
+                WARM_START_SUCCESSOR_CHECKPOINT_MISSING,
+                "Strict forecast warm-start requires a state manager.",
+                {"model_id": model_id, "source_id": source_id, "cycle_time": _format_time(cycle_time)},
+            )
+        state = self._get_exact_forecast_state(
+            model_id=model_id,
+            cycle_time=cycle_time,
+            source_id=source_id,
+        )
+        if state is None:
+            raise OrchestratorError(
+                WARM_START_SUCCESSOR_CHECKPOINT_MISSING,
+                "Exact successor checkpoint is required for strict forecast warm-start.",
+                {"model_id": model_id, "source_id": source_id, "cycle_time": _format_time(cycle_time)},
+            )
+        return self._validate_strict_forecast_state(
+            state,
+            model_id=model_id,
+            cycle_time=cycle_time,
+            source_id=source_id,
+            model_package_version=model_package_version,
+            model_package_checksum=model_package_checksum,
+        )
+
+    def _validate_prefilled_forecast_initial_state(
+        self,
+        basin: Mapping[str, Any],
+        *,
+        source_id: str | None,
+        cycle_time: datetime,
+        model_package_version: str | None,
+        model_package_checksum: str | None,
+    ) -> InitialStateSelection:
+        model_id = str(basin.get("model_id") or "")
+        if not model_id:
+            raise OrchestratorError("BASIN_MODEL_ID_MISSING", "Each basin entry requires model_id.")
+        state = self._resolve_prefilled_forecast_state(
+            basin,
+            model_id=model_id,
+            cycle_time=cycle_time,
+            source_id=source_id,
+        )
+        if state is None:
+            raise OrchestratorError(
+                WARM_START_SUCCESSOR_CHECKPOINT_MISSING,
+                "Scheduler-prefilled warm-start state was not found.",
+                {
+                    "model_id": model_id,
+                    "source_id": source_id,
+                    "cycle_time": _format_time(cycle_time),
+                    "init_state_id": basin.get("init_state_id"),
+                    "init_state_uri": basin.get("init_state_uri"),
+                },
+            )
+        selection = self._validate_strict_forecast_state(
+            state,
+            model_id=model_id,
+            cycle_time=cycle_time,
+            source_id=source_id,
+            model_package_version=model_package_version,
+            model_package_checksum=model_package_checksum,
+        )
+        self._validate_prefilled_state_identity(basin, selection)
+        return selection
+
+    def _resolve_prefilled_forecast_state(
+        self,
+        basin: Mapping[str, Any],
+        *,
+        model_id: str,
+        cycle_time: datetime,
+        source_id: str | None,
+    ) -> StateSnapshot | None:
+        if self.state_manager is None:
+            return None
+        state_id = _optional_str(basin.get("init_state_id"))
+        if state_id is not None:
+            provider = getattr(self.state_manager, "get_state_snapshot", None)
+            if callable(provider):
+                state = provider(state_id)
+                if state is not None:
+                    return state
+            repository_provider = getattr(getattr(self.state_manager, "repository", None), "get_state_snapshot", None)
+            if callable(repository_provider):
+                state = repository_provider(state_id)
+                if state is not None:
+                    return state
+        return self._get_exact_forecast_state(model_id=model_id, cycle_time=cycle_time, source_id=source_id)
+
+    def _validate_prefilled_state_identity(
+        self,
+        basin: Mapping[str, Any],
+        selection: InitialStateSelection,
+    ) -> None:
+        valid_time = _parse_gateway_time(basin.get("init_state_valid_time"))
+        lineage = _coerce_mapping(basin.get("init_state_lineage") or {})
+        checks = (
+            ("init_state_id", selection.state_id),
+            ("init_state_uri", selection.state_uri),
+            ("init_state_checksum", selection.checksum),
+        )
+        for field_name, expected in checks:
+            observed = basin.get(field_name)
+            if observed not in (None, "") and expected is not None and str(observed) != str(expected):
+                raise OrchestratorError(
+                    WARM_START_LINEAGE_MISMATCH,
+                    "Scheduler-prefilled warm-start identity does not match the strict successor checkpoint.",
+                    {"field": field_name, "observed": observed, "expected": expected},
+                )
+        if valid_time is not None and selection.valid_time is not None:
+            if _ensure_utc(valid_time) != _ensure_utc(selection.valid_time):
+                raise OrchestratorError(
+                    WARM_START_LINEAGE_MISMATCH,
+                    "Scheduler-prefilled warm-start valid_time does not match the strict successor checkpoint.",
+                    {"observed": _format_time(valid_time), "expected": _format_time(selection.valid_time)},
+                )
+        lineage_checks = (
+            ("cycle_id", selection.cycle_id),
+            ("model_package_version", selection.model_package_version),
+            ("model_package_checksum", selection.model_package_checksum),
+        )
+        observed_source_id = lineage.get("source_id")
+        if observed_source_id not in (None, "") and selection.source_id not in (None, ""):
+            if normalize_source_id(str(observed_source_id)) != normalize_source_id(selection.source_id):
+                raise OrchestratorError(
+                    WARM_START_LINEAGE_MISMATCH,
+                    "Scheduler-prefilled warm-start lineage does not match the strict successor checkpoint.",
+                    {"field": "source_id", "observed": observed_source_id, "expected": selection.source_id},
+                )
+        for key, expected in lineage_checks:
+            observed = lineage.get(key)
+            if observed not in (None, "") and expected not in (None, "") and str(observed) != str(expected):
+                raise OrchestratorError(
+                    WARM_START_LINEAGE_MISMATCH,
+                    "Scheduler-prefilled warm-start lineage does not match the strict successor checkpoint.",
+                    {"field": key, "observed": observed, "expected": expected},
+                )
+        lead_hours = _optional_int(lineage.get("lead_hours"))
+        if lead_hours is not None and selection.lead_hours is not None and lead_hours != selection.lead_hours:
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Scheduler-prefilled warm-start lead_hours does not match the strict successor checkpoint.",
+                {"observed": lead_hours, "expected": selection.lead_hours},
+            )
+
+    def _validate_strict_forecast_state(
+        self,
+        state: StateSnapshot,
+        *,
+        model_id: str,
+        cycle_time: datetime,
+        source_id: str | None,
+        model_package_version: str | None,
+        model_package_checksum: str | None,
+    ) -> InitialStateSelection:
+        if state.model_id != model_id or _ensure_utc(state.valid_time) != _ensure_utc(cycle_time):
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Strict forecast warm-start state must match model_id and cycle_time.",
+                {
+                    "model_id": model_id,
+                    "state_model_id": state.model_id,
+                    "cycle_time": _format_time(cycle_time),
+                    "state_valid_time": _format_time(state.valid_time),
+                },
+            )
+        if not state.usable_flag or not self._state_passes_qc(state):
+            raise OrchestratorError(
+                WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE,
+                "Exact successor checkpoint is unusable or failed state-variable QC.",
+                {"state_id": state.state_id, "cycle_time": _format_time(cycle_time)},
+            )
+        rejection_code = _validate_strict_state_lineage(
+            state,
+            source_id=source_id,
+            model_package_version=model_package_version,
+            model_package_checksum=model_package_checksum,
+        )
+        if rejection_code is not None or state.lead_hours != 12:
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Exact successor checkpoint lineage is incompatible with strict forecast warm-start.",
+                {
+                    "state_id": state.state_id,
+                    "lineage_rejection_code": rejection_code,
+                    "lead_hours": state.lead_hours,
+                    "required_lead_hours": 12,
+                },
+            )
+        return InitialStateSelection(
+            state_id=state.state_id,
+            state_uri=state.state_uri,
+            valid_time=state.valid_time,
+            checksum=state.checksum,
+            quality="fresh",
+            source_id=state.source_id,
+            cycle_id=state.cycle_id,
+            lead_hours=state.lead_hours,
+            model_package_version=state.model_package_version,
+            model_package_checksum=state.model_package_checksum,
+            rejection_code=None,
+        )
+
+    def _get_exact_forecast_state(
+        self,
+        *,
+        model_id: str,
+        cycle_time: datetime,
+        source_id: str | None,
+    ) -> StateSnapshot | None:
+        if self.state_manager is None:
+            return None
+        repository = getattr(self.state_manager, "repository", None)
+        exact_provider = getattr(repository, "get_state_snapshot_by_model_time", None)
+        if not callable(exact_provider):
+            exact_provider = getattr(self.state_manager, "get_state_snapshot_by_model_time", None)
+        if not callable(exact_provider):
+            return None
+        if source_id is not None:
+            exact = exact_provider(model_id=model_id, valid_time=_ensure_utc(cycle_time), source_id=source_id)
+            if exact is not None:
+                return exact
+        return exact_provider(model_id=model_id, valid_time=_ensure_utc(cycle_time), source_id=None)
 
     def _exact_or_latest_usable_state(
         self,
@@ -4088,6 +4371,7 @@ class PsycopgOrchestratorRepository:
                 _nested_mapping(row.get("resource_profile")).get("output_segment_count"),
                 row["segment_count"],
             ),
+            model_package_checksum=_optional_str(_nested_mapping(row.get("resource_profile")).get("package_checksum")),
         )
 
     def find_forcing_context(self, *, source_id: str, cycle_time: datetime, model_id: str) -> ForcingContext:
@@ -6084,6 +6368,12 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _optional_str(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
 def _first_optional_int(*values: Any) -> int | None:
     for value in values:
         coerced = _optional_int(value)
@@ -6113,6 +6403,39 @@ def _basin_max_lead_hours(basin: Mapping[str, Any]) -> int | None:
     if isinstance(horizon, Mapping):
         return _optional_int(horizon.get("max_lead_hours"))
     return None
+
+
+def _basin_has_prefilled_initial_state(basin: Mapping[str, Any]) -> bool:
+    return any(
+        basin.get(key) not in (None, "")
+        for key in (
+            "init_state_id",
+            "init_state_uri",
+            "init_state_checksum",
+            "init_state_valid_time",
+            "init_state_lineage",
+        )
+    )
+
+
+def _apply_initial_state_selection_to_basin(basin: dict[str, Any], selection: InitialStateSelection) -> None:
+    basin["init_state_id"] = selection.state_id
+    basin["init_state_uri"] = selection.state_uri
+    basin["init_state_checksum"] = selection.checksum
+    basin["init_state_valid_time"] = _format_time(selection.valid_time) if selection.valid_time is not None else None
+    basin["init_state_quality"] = selection.quality
+    basin["init_state_lineage"] = _initial_state_lineage(selection)
+
+
+def _initial_state_lineage(selection: InitialStateSelection) -> dict[str, Any]:
+    lineage = {
+        "source_id": selection.source_id,
+        "cycle_id": selection.cycle_id,
+        "lead_hours": selection.lead_hours,
+        "model_package_version": selection.model_package_version,
+        "model_package_checksum": selection.model_package_checksum,
+    }
+    return lineage if any(value is not None for value in lineage.values()) else {}
 
 
 def _auto_trigger_forecast_hours(
