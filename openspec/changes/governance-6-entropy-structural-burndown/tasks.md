@@ -2965,10 +2965,14 @@ separate PR boundaries.
     `production_status_for` legacy export, extended sacct parsing coverage to
     include a cancelled task row, and restored legacy `_array_task_log_uri`
     monkeypatch compatibility for `parse_sacct_array_results` log URIs.
+  - Review-fix evidence (2026-06-16, PR #522 round 2 finding C5):
+    moved `production_status_for` behind `ArrayAccountingDependencies` so
+    legacy `chain.production_status_for` monkeypatches still affect
+    `_stage_task_result_evidence` after extraction.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'array_accounting or array_partial or partial_array or partial_success or parse_sacct or accounting_gap or malformed_array_accounting or stage_task_result or candidate_outcomes'`
-    -> 12 passed, 170 deselected in 88.60s.
+    -> 13 passed, 170 deselected in 88.76s (0:01:28).
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_array_accounting or legacy_top_level_helpers'`
-    -> 5 passed, 177 deselected in 1.41s.
+    -> 6 passed, 177 deselected in 1.78s.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
     -> 182 passed in 747.78s.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator_file_count'`

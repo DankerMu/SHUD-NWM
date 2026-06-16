@@ -1357,6 +1357,37 @@ def test_chain_array_accounting_legacy_stage_evidence_uses_current_chain_metric_
     assert evidence[0]["resource_metrics"] == {"patched_metric": "yes"}
 
 
+def test_chain_array_accounting_legacy_stage_evidence_uses_current_chain_production_status_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_types
+
+    aggregation = chain_types.ArrayAggregation(
+        total=1,
+        succeeded=1,
+        failed=0,
+        cancelled=0,
+        task_results=(
+            chain_types.ArrayTaskResult(
+                task_id=0,
+                slurm_job_id="4000_0",
+                status="succeeded",
+            ),
+        ),
+    )
+
+    def fake_production_status(status: str) -> str:
+        assert status == "succeeded"
+        return "patched-production-status"
+
+    monkeypatch.setattr(legacy_chain, "production_status_for", fake_production_status)
+
+    evidence = legacy_chain._stage_task_result_evidence(aggregation)
+
+    assert evidence[0]["production_status"] == "patched-production-status"
+
+
 def test_chain_array_accounting_legacy_candidate_outcome_sanitizer_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

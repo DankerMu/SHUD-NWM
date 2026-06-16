@@ -5746,6 +5746,7 @@ def _array_accounting_dependencies() -> chain_array_accounting.ArrayAccountingDe
         sacct_extra_fields=_sacct_extra_fields,
         slurm_accounting_from_payload=_slurm_accounting_from_payload,
         resource_metrics_from_payload=_resource_metrics_from_payload,
+        production_status_for=production_status_for,
         context_array_log_uri=_context_array_log_uri,
         array_task_status=_array_task_status,
         parse_slurm_exit_code=_parse_slurm_exit_code,

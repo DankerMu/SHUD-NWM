@@ -36,6 +36,7 @@ class ArrayAccountingDependencies:
     sacct_extra_fields: Callable[[Sequence[str]], dict[str, Any]]
     slurm_accounting_from_payload: Callable[[Mapping[str, Any]], dict[str, Any]]
     resource_metrics_from_payload: Callable[[Mapping[str, Any]], dict[str, Any]]
+    production_status_for: Callable[[str], str]
     context_array_log_uri: Callable[[CycleOrchestrationContext | None, Any, str, int], str | None]
     array_task_status: Callable[[str], str]
     parse_slurm_exit_code: Callable[[str], int | None]
@@ -62,6 +63,7 @@ def _default_dependencies() -> ArrayAccountingDependencies:
         sacct_extra_fields=sacct_extra_fields,
         slurm_accounting_from_payload=slurm_accounting_from_payload,
         resource_metrics_from_payload=resource_metrics_from_payload,
+        production_status_for=production_status_for,
         context_array_log_uri=context_array_log_uri,
         array_task_status=array_task_status,
         parse_slurm_exit_code=parse_slurm_exit_code,
@@ -665,7 +667,7 @@ def stage_task_result_evidence(
             "slurm_job_id": task.slurm_job_id,
             "state": task.status,
             "status": task.status,
-            "production_status": production_status_for(task.status),
+            "production_status": deps.production_status_for(task.status),
             "exit_code": task.exit_code,
             "error_code": task.error_code,
             "error_message": task.error_message,
