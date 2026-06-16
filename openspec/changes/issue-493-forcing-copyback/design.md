@@ -87,7 +87,7 @@ Regression rows:
 
 | Case | Seeded input | Expected output |
 | --- | --- | --- |
-| Happy path | `hydro_run.run_id=run-a`, `forcing_version_id=forcing-1`; `met.forcing_version.forcing_package_uri=forcing/gfs/2026061400/basin-1/model-1/`; object-store has `forcing_package.json` bytes whose SHA-256 equals `checksum`, plus one listed same-package file. | `shared-object-store/forcing/gfs/2026061400/basin-1/model-1/forcing_package.json` bytes equal source; `runs/run-a/...` still copied; lineage `object_store_copyback.forcing_packages[0].object_key` is the forcing key. |
+| Happy path | `hydro_run.run_id=run-a`, `forcing_version_id=forcing-1`; `met.forcing_version.forcing_package_uri=forcing/gfs/2024060112/basin-1/model-1/`; object-store has `forcing_package.json` bytes whose SHA-256 equals `checksum`, plus one listed same-package file. | `shared-object-store/forcing/gfs/2024060112/basin-1/model-1/forcing_package.json` bytes equal source; `runs/run-a/...` still copied; lineage `object_store_copyback.forcing_packages[0].object_key` is the forcing key. |
 | Dedupe | `run-a` and `run-b` both reference `forcing-1` with the same normalized forcing key. | Lineage has two run entries but one forcing package entry; total package file count counted once. |
 | Missing row | `hydro_run.forcing_version_id=missing-forcing` and no matching `met.forcing_version`. | `PublishError` before display artifact writes; details include `run_id=run-a`, `forcing_version_id=missing-forcing`, and missing field `forcing_version`. |
 | Missing URI/checksum | Matching forcing row has blank `forcing_package_uri` or blank `checksum`. | `PublishError` details identify the missing field, run, forcing version, and no stable q_down manifest advance. |

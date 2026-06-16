@@ -771,6 +771,47 @@ def test_publish_qdown_copyback_revalidates_copied_forcing_package_before_succes
     _assert_no_qdown_display_advance(publisher)
 
 
+def test_publish_qdown_copyback_rejects_file_grown_after_scan_before_copy_read(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    publisher.object_store.write_bytes_atomic("runs/run-a/output/q.rivqdown.csv", b"x" * 255)
+    monkeypatch.setattr("services.tile_publisher.publisher._COPYBACK_MAX_FILE_BYTES", 256)
+    original_read_limited = type(publisher.object_store).read_bytes_limited
+    grew_file = False
+
+    def grow_before_copy_read(self: Any, key_or_uri: str, *, max_bytes: int) -> bytes:
+        nonlocal grew_file
+        if (
+            self.root == publisher.object_store.root
+            and key_or_uri == "runs/run-a/output/q.rivqdown.csv"
+            and not grew_file
+        ):
+            grew_file = True
+            publisher.object_store.write_bytes_atomic(key_or_uri, b"x" * 257)
+        return original_read_limited(self, key_or_uri, max_bytes=max_bytes)
+
+    monkeypatch.setattr("packages.common.object_store.LocalObjectStore.read_bytes_limited", grow_before_copy_read)
+
+    with _store(create_flood=False, create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert error.value.details["object_key"] == "runs/run-a"
+    assert "exceeds read limit" in error.value.details["error"]
+    assert grew_file is True
+    assert not (copyback_root / "runs/run-a").exists()
+    assert not (copyback_root / "forcing").exists()
+    _assert_no_qdown_display_advance(publisher)
+
+
 def test_publish_qdown_copyback_rejects_over_limit_source_tree_before_target_promotion(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -860,6 +901,122 @@ def test_publish_qdown_copyback_cleanup_failure_blocks_publish_and_rolls_back(
     assert old_output.read_bytes() == b"old\n"
     assert not (copyback_root / "runs/run-a/logs/shud_stdout.log").exists()
     assert not (copyback_root / FORCING_KEY).exists()
+    _assert_no_qdown_display_advance(publisher)
+
+
+def test_publish_qdown_copyback_partial_backup_cleanup_failure_restores_all_targets(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published_root = tmp_path / "published"
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(
+        tmp_path,
+        published_artifact_root=published_root,
+        object_store_copyback_root=copyback_root,
+    )
+    _seed_run_products(publisher, "run-a")
+    _seed_run_products(publisher, "run-b")
+    old_manifest_a = copyback_root / "runs/run-a/input/manifest.json"
+    old_output_a = copyback_root / "runs/run-a/output/q.rivqdown.csv"
+    old_manifest_b = copyback_root / "runs/run-b/input/manifest.json"
+    old_output_b = copyback_root / "runs/run-b/output/q.rivqdown.csv"
+    old_manifest_a.parent.mkdir(parents=True)
+    old_output_a.parent.mkdir(parents=True)
+    old_manifest_b.parent.mkdir(parents=True)
+    old_output_b.parent.mkdir(parents=True)
+    old_manifest_a.write_bytes(b'{"run_id":"run-a","old":true}\n')
+    old_output_a.write_bytes(b"old-a\n")
+    old_manifest_b.write_bytes(b'{"run_id":"run-b","old":true}\n')
+    old_output_b.write_bytes(b"old-b\n")
+    publisher_module = __import__("services.tile_publisher.publisher", fromlist=["rmtree_no_follow"])
+    original_rmtree = publisher_module.rmtree_no_follow
+    backup_cleanup_calls = 0
+
+    def fail_second_backup_cleanup(
+        path: Path,
+        *,
+        containment_root: Path | None = None,
+        missing_ok: bool = False,
+    ) -> None:
+        nonlocal backup_cleanup_calls
+        if ".copyback-backup." in Path(path).name:
+            backup_cleanup_calls += 1
+            if backup_cleanup_calls == 2:
+                raise OSError("second backup cleanup blocked")
+        original_rmtree(path, containment_root=containment_root, missing_ok=missing_ok)
+
+    monkeypatch.setattr(publisher_module, "rmtree_no_follow", fail_second_backup_cleanup)
+
+    with _store(create_flood=False, create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _insert_run(session, run_id="run-b", segments=2)
+        _seed_forcing_package(publisher, session)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert "second backup cleanup blocked" in error.value.details["error"]
+    assert backup_cleanup_calls >= 2
+    assert old_manifest_a.read_bytes() == b'{"run_id":"run-a","old":true}\n'
+    assert old_output_a.read_bytes() == b"old-a\n"
+    assert old_manifest_b.read_bytes() == b'{"run_id":"run-b","old":true}\n'
+    assert old_output_b.read_bytes() == b"old-b\n"
+    assert not (copyback_root / "runs/run-a/logs/shud_stdout.log").exists()
+    assert not (copyback_root / "runs/run-b/logs/shud_stdout.log").exists()
+    assert not (copyback_root / FORCING_KEY).exists()
+    assert not list(copyback_root.rglob("*.copyback*"))
+    _assert_no_qdown_display_advance(publisher)
+    assert not (published_root / f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json").exists()
+
+
+def test_publish_qdown_copyback_rollback_clone_cleanup_failure_blocks_publish_and_rolls_back(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    old_manifest = copyback_root / "runs/run-a/input/manifest.json"
+    old_manifest.parent.mkdir(parents=True)
+    old_manifest.write_bytes(b'{"run_id":"run-a","old":true}\n')
+    old_output = copyback_root / "runs/run-a/output/q.rivqdown.csv"
+    old_output.parent.mkdir(parents=True)
+    old_output.write_bytes(b"old\n")
+    publisher_module = __import__("services.tile_publisher.publisher", fromlist=["rmtree_no_follow"])
+    original_rmtree = publisher_module.rmtree_no_follow
+    rollback_cleanup_calls = 0
+
+    def fail_rollback_clone_cleanup(
+        path: Path,
+        *,
+        containment_root: Path | None = None,
+        missing_ok: bool = False,
+    ) -> None:
+        nonlocal rollback_cleanup_calls
+        if ".copyback-rollback." in Path(path).name:
+            rollback_cleanup_calls += 1
+            raise OSError("rollback clone cleanup blocked")
+        original_rmtree(path, containment_root=containment_root, missing_ok=missing_ok)
+
+    monkeypatch.setattr(publisher_module, "rmtree_no_follow", fail_rollback_clone_cleanup)
+
+    with _store(create_flood=False, create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert "rollback clone cleanup blocked" in error.value.details["error"]
+    assert rollback_cleanup_calls == 1
+    assert old_manifest.read_bytes() == b'{"run_id":"run-a","old":true}\n'
+    assert old_output.read_bytes() == b"old\n"
+    assert not (copyback_root / "runs/run-a/logs/shud_stdout.log").exists()
+    assert not (copyback_root / FORCING_KEY).exists()
+    assert not list(copyback_root.rglob("*.copyback*"))
     _assert_no_qdown_display_advance(publisher)
 
 
@@ -1036,14 +1193,14 @@ def test_publish_qdown_copyback_normalizes_source_read_object_store_error(
 ) -> None:
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
     _seed_run_products(publisher, "run-a")
-    original_read = publisher.object_store.read_bytes
+    original_read_limited = type(publisher.object_store).read_bytes_limited
 
-    def fail_read(self: Any, key_or_uri: str) -> bytes:
+    def fail_read(self: Any, key_or_uri: str, *, max_bytes: int) -> bytes:
         if self.root == publisher.object_store.root and key_or_uri.startswith("runs/run-a/"):
             raise ObjectStoreError(f"read blocked for {key_or_uri}")
-        return original_read(key_or_uri)
+        return original_read_limited(self, key_or_uri, max_bytes=max_bytes)
 
-    monkeypatch.setattr("packages.common.object_store.LocalObjectStore.read_bytes", fail_read)
+    monkeypatch.setattr("packages.common.object_store.LocalObjectStore.read_bytes_limited", fail_read)
 
     error = _assert_copyback_publish_error(publisher, expected_code="OBJECT_STORE_COPYBACK_FAILED")
 

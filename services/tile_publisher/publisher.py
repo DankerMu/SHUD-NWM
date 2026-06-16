@@ -24,6 +24,7 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
     rmtree_no_follow,
     verify_directory_no_follow,
 )
@@ -78,6 +79,7 @@ class _CopybackSourceTree:
 class _CopybackRollbackEntry:
     target_dir: Path
     backup_dir: Path | None
+    cleanup_dirs: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1775,7 +1777,7 @@ class TilePublisher:
         temp_dir = _object_tree_root_path(target_store, temp_key)
         ensure_directory_no_follow(target_dir.parent, containment_root=target_store.root)
 
-        byte_count = sum(size for _file_key, size in source_tree.file_sizes)
+        byte_count = 0
         file_count = len(source_tree.files)
         try:
             ensure_directory_no_follow(temp_dir, containment_root=target_store.root)
@@ -1783,7 +1785,9 @@ class TilePublisher:
                 temp_directory_key = _copyback_temp_key(directory_key, source_key=key, temp_key=temp_key)
                 ensure_directory_no_follow(target_store.root / temp_directory_key, containment_root=target_store.root)
             for file_key in source_tree.files:
-                content = self.object_store.read_bytes(file_key)
+                content = self.object_store.read_bytes_limited(file_key, max_bytes=_COPYBACK_MAX_FILE_BYTES)
+                byte_count += len(content)
+                _enforce_copyback_tree_count("total bytes", byte_count, _COPYBACK_MAX_TOTAL_BYTES, tree_key=key)
                 temp_file_key = _copyback_temp_key(file_key, source_key=key, temp_key=temp_key)
                 target_store.write_bytes_atomic(temp_file_key, content)
             _chmod_tree_readable(temp_dir, containment_root=target_store.root)
@@ -1820,7 +1824,7 @@ class TilePublisher:
         if manifest_key not in files:
             raise SafeFilesystemError(f"Forcing package manifest is missing: {manifest_key}")
 
-        manifest_bytes = store.read_bytes(manifest_key)
+        manifest_bytes = store.read_bytes_limited(manifest_key, max_bytes=_COPYBACK_MAX_FILE_BYTES)
         manifest_checksum = hashlib.sha256(manifest_bytes).hexdigest()
         if manifest_checksum != ref.checksum:
             raise SafeFilesystemError(
@@ -1853,7 +1857,7 @@ class TilePublisher:
             if output_key is not None:
                 expected_checksum = _same_package_output_file_checksum(output_file)
                 if expected_checksum is not None:
-                    actual_checksum = store.checksum(output_key)
+                    actual_checksum = _copyback_file_checksum_limited(store, output_key)
                     if actual_checksum != expected_checksum:
                         raise SafeFilesystemError(
                             f"Forcing package output file checksum mismatch: {output_key}"
@@ -1873,7 +1877,9 @@ class TilePublisher:
             raise SafeFilesystemError(f"Run product log files are missing: runs/{run_id}/logs")
 
         try:
-            manifest_payload = json.loads(self.object_store.read_bytes(manifest_key).decode("utf-8"))
+            manifest_payload = json.loads(
+                self.object_store.read_bytes_limited(manifest_key, max_bytes=_COPYBACK_MAX_FILE_BYTES).decode("utf-8")
+            )
         except UnicodeDecodeError as error:
             raise SafeFilesystemError(f"Run product manifest must be UTF-8 JSON: {manifest_key}") from error
         except json.JSONDecodeError as error:
@@ -2082,6 +2088,10 @@ def _copyback_error_details(
     if object_key is not None:
         details["object_key"] = object_key
     return details
+
+
+def _copyback_file_checksum_limited(store: LocalObjectStore, key: str) -> str:
+    return hashlib.sha256(store.read_bytes_limited(key, max_bytes=_COPYBACK_MAX_FILE_BYTES)).hexdigest()
 
 
 def _forcing_metadata_error_details(
@@ -2523,20 +2533,30 @@ def _rollback_qdown_copyback_batch(
     errors: list[str] = []
     for entry in reversed(rollback_log):
         try:
+            cleanup_dirs: list[Path] = []
             if entry.backup_dir is None:
                 rmtree_no_follow(entry.target_dir, containment_root=containment_root, missing_ok=True)
-                continue
-            parent_fd = os.open(entry.target_dir.parent, _COPYBACK_DIR_FLAGS)
-            try:
-                _restore_copyback_backup(
-                    parent_fd,
-                    backup_name=entry.backup_dir.name,
-                    target_name=entry.target_dir.name,
-                    target_dir=entry.target_dir,
-                    containment_root=containment_root,
-                )
-            finally:
-                os.close(parent_fd)
+                cleanup_dirs.extend(entry.cleanup_dirs)
+            else:
+                cleanup_dirs.extend(entry.cleanup_dirs)
+                cleanup_dirs.append(entry.backup_dir)
+                parent_fd = os.open(entry.target_dir.parent, _COPYBACK_DIR_FLAGS)
+                try:
+                    _restore_copyback_backup(
+                        parent_fd,
+                        backup_name=entry.backup_dir.name,
+                        target_name=entry.target_dir.name,
+                        target_dir=entry.target_dir,
+                        containment_root=containment_root,
+                    )
+                finally:
+                    os.close(parent_fd)
+            for cleanup_dir in cleanup_dirs:
+                if cleanup_dir != entry.backup_dir:
+                    try:
+                        rmtree_no_follow(cleanup_dir, containment_root=containment_root, missing_ok=True)
+                    except (OSError, SafeFilesystemError):
+                        pass
         except (OSError, SafeFilesystemError) as error:
             errors.append(str(error))
     rollback_log.clear()
@@ -2555,19 +2575,182 @@ def _commit_qdown_copyback_batch(
 
     errors: list[str] = []
     remaining_for_rollback: list[_CopybackRollbackEntry] = []
-    for entry in rollback_log:
+    for index, entry in enumerate(rollback_log):
         if entry.backup_dir is None:
             remaining_for_rollback.append(entry)
             continue
+        rollback_backup = _copyback_rollback_backup_dir(entry)
+        try:
+            _clone_copyback_backup_tree_no_follow(
+                entry.backup_dir,
+                rollback_backup,
+                containment_root=containment_root,
+            )
+        except (OSError, SafeFilesystemError) as error:
+            errors.append(str(error))
+            remaining_for_rollback.extend(rollback_log[index:])
+            break
         try:
             rmtree_no_follow(entry.backup_dir, containment_root=containment_root, missing_ok=True)
         except (OSError, SafeFilesystemError) as error:
             errors.append(str(error))
-            remaining_for_rollback.append(entry)
+            remaining_for_rollback.append(
+                _CopybackRollbackEntry(
+                    target_dir=entry.target_dir,
+                    backup_dir=rollback_backup,
+                    cleanup_dirs=(*entry.cleanup_dirs, entry.backup_dir),
+                )
+            )
+            remaining_for_rollback.extend(rollback_log[index + 1 :])
+            break
+        remaining_for_rollback.append(
+            _CopybackRollbackEntry(
+                target_dir=entry.target_dir,
+                backup_dir=rollback_backup,
+                cleanup_dirs=(*entry.cleanup_dirs, entry.backup_dir),
+            )
+        )
     if errors:
         rollback_log[:] = remaining_for_rollback
         raise SafeFilesystemError(f"Failed to clean up q_down copyback backups: {'; '.join(errors)}", kind="io")
+    rollback_log[:] = remaining_for_rollback
+    for entry in remaining_for_rollback:
+        cleanup_dirs = entry.cleanup_dirs
+        if entry.backup_dir is not None:
+            cleanup_dirs = (*cleanup_dirs, entry.backup_dir)
+        for cleanup_dir in cleanup_dirs:
+            try:
+                rmtree_no_follow(cleanup_dir, containment_root=containment_root, missing_ok=True)
+            except (OSError, SafeFilesystemError) as error:
+                raise SafeFilesystemError(
+                    f"Failed to clean up q_down copyback temporary directory {cleanup_dir}: {error}",
+                    kind="io",
+                ) from error
     rollback_log.clear()
+
+
+def _copyback_rollback_backup_dir(entry: _CopybackRollbackEntry) -> Path:
+    return entry.target_dir.parent / f".{entry.target_dir.name}.copyback-rollback.{uuid.uuid4().hex}"
+
+
+def _clone_copyback_backup_tree_no_follow(source_dir: Path, clone_dir: Path, *, containment_root: Path) -> None:
+    containment_root = containment_root.expanduser().resolve()
+    source_dir = source_dir.expanduser()
+    clone_dir = clone_dir.expanduser()
+    source_dir.relative_to(containment_root)
+    clone_dir.relative_to(containment_root)
+    _verify_copyback_target_tree_clean(source_dir, containment_root=containment_root)
+
+    counters = {"directories": 0, "files": 0, "bytes": 0}
+    source_fd: int | None = None
+    try:
+        ensure_directory_no_follow(clone_dir, containment_root=containment_root)
+        source_fd = os.open(source_dir, _COPYBACK_DIR_FLAGS)
+        _clone_copyback_backup_entries_no_follow(
+            source_fd,
+            source_dir=source_dir,
+            clone_dir=clone_dir,
+            containment_root=containment_root,
+            counters=counters,
+            depth=0,
+        )
+        _chmod_tree_readable(clone_dir, containment_root=containment_root)
+    except Exception:
+        rmtree_no_follow(clone_dir, containment_root=containment_root, missing_ok=True)
+        raise
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+
+
+def _clone_copyback_backup_entries_no_follow(
+    source_fd: int,
+    *,
+    source_dir: Path,
+    clone_dir: Path,
+    containment_root: Path,
+    counters: dict[str, int],
+    depth: int,
+) -> None:
+    if depth > _COPYBACK_MAX_DEPTH:
+        raise SafeFilesystemError(
+            f"Copyback rollback backup tree exceeds maximum depth {_COPYBACK_MAX_DEPTH}: {source_dir}"
+        )
+    try:
+        names = sorted(os.listdir(source_fd))
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to list copyback rollback backup directory {source_dir}: {error}") from error
+    for name in names:
+        if name in {"", ".", ".."} or "/" in name:
+            raise SafeFilesystemError(f"Unsafe copyback rollback backup entry name: {source_dir}/{name}")
+        source_entry = source_dir / name
+        clone_entry = clone_dir / name
+        try:
+            entry_stat = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+        except OSError as error:
+            raise SafeFilesystemError(
+                f"Failed to stat copyback rollback backup entry {source_entry}: {error}",
+                kind="io",
+            ) from error
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Copyback rollback backup entry must not be a symlink: {source_entry}")
+        if stat.S_ISDIR(entry_stat.st_mode):
+            counters["directories"] += 1
+            _enforce_copyback_tree_count(
+                "directories",
+                counters["directories"],
+                _COPYBACK_MAX_DIRECTORIES,
+                tree_key=str(source_dir),
+            )
+            child_fd = _open_copyback_child_dir(source_fd, name, source_entry, tree_key=str(source_dir))
+            try:
+                ensure_directory_no_follow(clone_entry, containment_root=containment_root)
+                _clone_copyback_backup_entries_no_follow(
+                    child_fd,
+                    source_dir=source_entry,
+                    clone_dir=clone_entry,
+                    containment_root=containment_root,
+                    counters=counters,
+                    depth=depth + 1,
+                )
+            finally:
+                os.close(child_fd)
+            continue
+        if stat.S_ISREG(entry_stat.st_mode):
+            counters["files"] += 1
+            _enforce_copyback_tree_count(
+                "files",
+                counters["files"],
+                _COPYBACK_MAX_FILES,
+                tree_key=str(source_dir),
+            )
+            content = read_bytes_limited_no_follow(
+                source_entry,
+                max_bytes=_COPYBACK_MAX_FILE_BYTES,
+                containment_root=containment_root,
+            )
+            _enforce_copyback_tree_count(
+                "file bytes",
+                len(content),
+                _COPYBACK_MAX_FILE_BYTES,
+                tree_key=str(source_dir),
+            )
+            counters["bytes"] += len(content)
+            _enforce_copyback_tree_count(
+                "total bytes",
+                counters["bytes"],
+                _COPYBACK_MAX_TOTAL_BYTES,
+                tree_key=str(source_dir),
+            )
+            ensure_directory_no_follow(clone_entry.parent, containment_root=containment_root)
+            atomic_write_bytes_no_follow(
+                clone_entry,
+                content,
+                containment_root=containment_root,
+                temp_suffix="part",
+            )
+            continue
+        raise SafeFilesystemError(f"Copyback rollback backup entry must be a file or directory: {source_entry}")
 
 
 def _directory_entry_exists(parent_fd: int, name: str, path_label: Path) -> bool:
