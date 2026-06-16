@@ -4323,6 +4323,8 @@ def _expected_services_orchestrator_file_count() -> int:
         expected += 1
     if "services/orchestrator/chain_manifests.py" in tracked_paths:
         expected += 1
+    if "services/orchestrator/chain_array_accounting.py" in tracked_paths:
+        expected += 1
     return expected
 
 

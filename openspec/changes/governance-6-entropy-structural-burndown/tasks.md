@@ -158,12 +158,12 @@ separate PR boundaries.
 
 ## 14. Chain Array Accounting Extraction
 
-- [ ] 14.1 Create `services/orchestrator/chain_array_accounting.py` and move
+- [x] 14.1 Create `services/orchestrator/chain_array_accounting.py` and move
   array aggregation/accounting helpers only after stage execution and manifest
   extraction are stable.
-- [ ] 14.2 Preserve partial-stage aggregation, task outcomes, downstream
+- [x] 14.2 Preserve partial-stage aggregation, task outcomes, downstream
   manifest reduction, and publish behavior.
-- [ ] 14.3 Verify with focused array, accounting, partial failure, and manifest
+- [x] 14.3 Verify with focused array, accounting, partial failure, and manifest
   reduction tests.
 
 ## 15. Review-Fix And Epic Verification
@@ -2829,6 +2829,148 @@ separate PR boundaries.
   plus `uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py`.
 - Acceptance: partial-stage aggregation, task outcomes, downstream manifest
   reduction, and publish behavior remain unchanged.
+- Fixture level: expanded; repair intensity: high.
+- Project profile: NHMS.
+- Change surface:
+  - `services/orchestrator/chain.py` legacy array accounting methods/helpers.
+  - New `services/orchestrator/chain_array_accounting.py`.
+  - `services/orchestrator/chain_stage_execution.py` dependency wiring only if
+    needed for moved helper imports.
+  - `tests/test_orchestration_chain.py` focused array/accounting regression
+    tests and `tests/test_entropy_audit_script.py` file-count expectation if
+    the new module changes audited counts.
+- Must preserve:
+  - Public/private compatibility surfaces in `chain.py`, including
+    `_aggregate_array_stage`, `_require_complete_array_accounting`,
+    `_record_cycle_stage_status_override`, `_record_cycle_stage_accounting_*`,
+    `_apply_array_progress`, `parse_sacct_array_results`,
+    `_coerce_array_aggregation`, `_aggregation_from_task_results`,
+    `_aggregation_error_code`, `_aggregation_error_message`,
+    `_slurm_accounting_from_payload`, `_resource_metrics_from_payload`,
+    `_stage_task_result_evidence`, `_record_array_task_outcomes`, and
+    `_candidate_outcomes`.
+  - Array aggregation status, task result ordering, task/original task id
+    mapping, task outcome redaction, accounting gap/event payloads, cycle
+    partial status transitions, retry merge behavior, downstream active-basin
+    reindexing, and publish manifest filtering.
+  - Existing manifest schema versions, evidence keys, error codes, status
+    strings, log URI shape, object-store paths, reservation/submit/poll
+    behavior, and scheduler behavior.
+- Must add/change:
+  - Move array aggregation/accounting helpers into
+    `chain_array_accounting.py`.
+  - Keep `chain.py` wrappers or re-exports so legacy tests and downstream
+    monkeypatch/import callers continue to work.
+- Selected risk packs:
+  - File IO / path safety / overwrite: selected - array task log URI helpers
+    derive object-store paths and must not change path shape.
+  - Schema / columns / units / field names: selected - event/task result
+    evidence keys and accounting metric aliases must remain stable.
+  - Concurrency / shared state / ordering: selected - partial array progress
+    mutates active basin ordering and retry outcome state.
+  - Resource limits / large input / discovery: selected - task accounting and
+    candidate outcome evidence must keep existing bounded/sanitized behavior.
+  - Legacy compatibility / examples: selected - moved private helpers remain
+    importable/patchable from `chain.py`.
+  - Error handling / rollback / partial outputs: selected - malformed,
+    missing, incomplete, partial, failed, and cancelled accounting states must
+    preserve stable gap/error and downstream filtering behavior.
+  - Slurm production lifecycle / mock-vs-real parity: selected - gateway
+    payload, sacct stdout, and fake client paths must aggregate identically.
+  - Run manifest / QC provenance: selected - downstream manifest reduction and
+    task evidence remain bound to the producing array task/candidate.
+  - Published NHMS artifacts / display identity: selected - publish excludes
+    failed basins and preserves surviving basin identity.
+  - Public API / CLI / script entry: not selected - no API/CLI surface changes.
+  - Config / project setup: not selected - no config keys or setup changes.
+  - Auth / permissions / secrets: not selected - no auth boundary changes;
+    redaction regressions are covered through evidence tests above.
+  - Release / packaging / dependency compatibility: not selected - no runtime
+    dependencies or packaging metadata changes.
+  - Documentation / migration notes: not selected - structural code extraction
+    only; OpenSpec/PR evidence is sufficient.
+  - Geospatial / CRS / basin geometry: not selected - basin identity is
+    carried, but no geometry/CRS computation changes.
+  - Hydro-met time series / forcing windows: not selected - no forecast-window
+    or forcing cadence behavior changes.
+  - SHUD numerical runtime / conservation / NaN: not selected - no model
+    runtime/output numerical interpretation changes.
+  - PostGIS / TimescaleDB domain behavior: not selected - no schema or query
+    semantics change.
+  - External hydro-met providers / snapshot reproducibility: not selected - no
+    provider ingestion change.
+- Boundary-surface checklist:
+  - Shared helper roots: array aggregation/coercion/status/evidence helpers
+    named above.
+  - Public/private entrypoints: `ForecastOrchestrator` legacy methods and
+    `chain.py` top-level helper names.
+  - Read surfaces: Slurm gateway task payloads, sacct stdout, pipeline events,
+    active basin manifests, task outcome state.
+  - Write/update surfaces: pipeline job status overrides, accounting/gap
+    events, context task outcomes, active basin reindexing, final candidate
+    outcomes.
+  - Staging/publish/rollback surfaces: partial array retry, downstream stage
+    manifest reduction, publish manifest filtering, failed/cancelled task
+    exclusion.
+  - Unchanged downstream consumers: `chain_stage_execution.py`, repository
+    event/job persistence, publish evidence helpers, candidate-state readers.
+- Invariant Matrix:
+  - Governing invariant: Moving array accounting helpers must be a structural
+    extraction only; every submitted array task keeps the same accounting,
+    task identity, partial-progress, downstream reduction, and publish
+    eligibility semantics.
+  - Source-of-truth identity/contract: `(stage, task_id, original_task_id,
+    model_id/basin_id/candidate_id, slurm_job_id, status, accounting,
+    log_uri)` plus `context.active_basins` order.
+  - Producers: Slurm gateway `get_array_task_results`, sacct stdout parser,
+    fake Slurm clients, retry aggregation merge.
+  - Validators/preflight: `_require_complete_array_accounting`,
+    `_coerce_array_aggregation`, `_array_task_status`,
+    `_parse_slurm_exit_code`.
+  - Storage/cache/query: pipeline job rows, pipeline events,
+    `context.task_outcomes`, `context.active_basins`.
+  - Public routes/entrypoints: none - orchestration internal helper extraction
+    only.
+  - Frontend/downstream consumers: publish manifest/evidence consumers and
+    candidate-state readers of task result events.
+  - Failure paths/rollback/stale state: malformed/incomplete accounting,
+    unavailable providers, failed/cancelled tasks, partial retry merge,
+    downstream exclusion, redaction.
+  - Evidence/audit/readiness: focused array/accounting tests, full chain suite,
+    ruff, OpenSpec validation, entropy audit file-count expectation if
+    changed.
+  - Regression rows:
+    - Gateway task payload with all tasks succeeded -> aggregation succeeds,
+      task evidence/accounting/log URIs match pre-extraction behavior, and
+      active basins remain unchanged.
+    - sacct stdout with succeeded/failed/cancelled tasks -> status, exit code,
+      error code, accounting extras, and per-task log URI mapping are
+      unchanged.
+    - Missing, malformed, or incomplete accounting -> stable
+      `slurm_accounting_gap` event and
+      `SLURM_ARRAY_ACCOUNTING_INCOMPLETE`/parse errors without fabricated
+      metrics.
+    - Partial array failure at forcing/forecast/parse/frequency -> task
+      outcomes record original task ids, downstream manifests include only
+      survivors, and final publish excludes failed basins.
+    - Partial retry succeeds -> failed task retry results merge back under the
+      original task id and stale failure outcomes are cleared as before.
+    - Legacy imports/monkeypatches of moved `chain.py` helper names ->
+      compatibility wrappers still dispatch through the current binding.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'array_accounting or array_partial or partial_array or partial_success or parse_sacct or accounting_gap or malformed_array_accounting or stage_task_result or candidate_outcomes'`
+    -> 11 passed, 170 deselected in 88.79s.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_array_accounting'`
+    -> 4 passed, 177 deselected in 1.73s.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
+    -> 181 passed in 747.50s.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator_file_count'`
+    -> 1 passed, 191 deselected in 4.46s.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py tests/test_entropy_audit_script.py`
+    -> All checks passed.
+  - `openspec validate governance-6-entropy-structural-burndown --strict
+    --no-interactive` -> valid.
+  - `git diff --check` -> no whitespace errors.
 
 ### G6-19 Epic final review-fix closure
 
