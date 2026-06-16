@@ -2737,8 +2737,9 @@ separate PR boundaries.
   - No status, reason, error code, schema version, evidence key, stage name,
     job id, retry id, manifest URI, output URI, log URI, quality flag, or
     artifact path rename.
-- Implementation evidence (2026-06-16, PR #521, head
-  `0a0f8164d53172f54f7ea87a8ef0e34d8de76693`):
+- Implementation evidence (2026-06-16, PR #521, last code-reviewed head
+  `0a0f8164d53172f54f7ea87a8ef0e34d8de76693`; later commits in this PR are
+  evidence-only metadata refreshes tracked by GitHub PR head/CI):
   - Added `services/orchestrator/chain_manifests.py` for cycle stage manifest
     assembly, manifest index safe writes, forecast runtime manifest
     build/write/validate/staging, direct forecast/analysis run manifests,
