@@ -13,10 +13,12 @@
 
 ## 3. Tests and Evidence
 
-- [x] 3.1 Add `tests/test_tile_publisher.py` happy-path coverage with `run-a` + `forcing-1`, source key `forcing/gfs/2026061400/basin-1/model-1/`, manifest bytes whose SHA-256 equals DB checksum, and expected identical bytes in shared object-store plus unchanged `runs/run-a` copyback.
+- [x] 3.1 Add `tests/test_tile_publisher.py` happy-path coverage with `run-a` + `forcing-1`, source key `forcing/gfs/2024060112/basin-1/model-1/`, manifest bytes whose SHA-256 equals DB checksum, and expected identical bytes in shared object-store plus unchanged `runs/run-a` copyback.
 - [x] 3.2 Add shared-package dedupe coverage with two q_down runs referencing one normalized forcing key; expected lineage has two run entries and one forcing package entry.
 - [x] 3.3 Add missing metadata failures: no `met.forcing_version`, missing `forcing_package_uri`, missing checksum; expected details include `run_id`, `forcing_version_id`, and missing field, with no stable q_down manifest advance.
 - [x] 3.4 Add integrity/path failures: missing manifest, checksum mismatch, lineage checksum mismatch, wrong prefix, traversal/absolute key, source symlink, and regular-file source key.
 - [x] 3.5 Add no-stable-artifact regression for forcing copyback failure and assert `NHMS_PUBLISHED_ARTIFACT_ROOT` does not receive forcing packages.
-- [x] 3.6 Run `uv run pytest -q tests/test_tile_publisher.py`.
-- [x] 3.7 Run `uv run ruff check services/tile_publisher/publisher.py tests/test_tile_publisher.py`.
+- [x] 3.6 Add Phase 6 regression coverage for forcing identity mismatch, S3 path-prefix URI normalization, q_down multi-tree rollback, bounded source-tree rejection, exact-root forcing validation failures, no-display assertions for unsafe forcing failures, and present output-file checksum validation.
+- [x] 3.7 Run `uv run --no-sync pytest -q tests/test_tile_publisher.py -k 'copyback or forcing'`.
+- [x] 3.8 Run `uv run --no-sync pytest -q tests/test_tile_publisher.py`.
+- [x] 3.9 Run `uv run --no-sync ruff check services/tile_publisher/publisher.py tests/test_tile_publisher.py`.
