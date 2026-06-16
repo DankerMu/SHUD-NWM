@@ -6,8 +6,8 @@ The q_down publisher MUST mirror each successfully published run's referenced fo
 
 #### Scenario: Successful forcing package copyback
 
-- **WHEN** q_down publish selects `run-a` with `forcing_version_id=forcing-1`, and `met.forcing_version` references `forcing/gfs/2026061400/basin-1/model-1/` with a `checksum` equal to the SHA-256 of source `forcing_package.json`
-- **THEN** the shared object-store contains `forcing/gfs/2026061400/basin-1/model-1/forcing_package.json` with bytes identical to the source
+- **WHEN** q_down publish selects `run-a` with `forcing_version_id=forcing-1`, and `met.forcing_version` references `forcing/gfs/2024060112/basin-1/model-1/` with a `checksum` equal to the SHA-256 of source `forcing_package.json`
+- **THEN** the shared object-store contains `forcing/gfs/2024060112/basin-1/model-1/forcing_package.json` with bytes identical to the source
 - **AND** the run product copyback under `runs/<run_id>` still occurs.
 
 #### Scenario: Shared forcing package deduplication

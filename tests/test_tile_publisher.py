@@ -47,6 +47,7 @@ from services.tile_publisher.publisher import (
     PublishResult,
     TilePublisher,
     _is_private_display_path,
+    _parse_forcing_lineage,
     _replace_directory_tree_no_follow,
 )
 
@@ -424,6 +425,35 @@ def _assert_copyback_publish_error(
 
     assert error.value.error_code == expected_code
     return error.value
+
+
+def test_parse_forcing_lineage_accepts_raw_dict_without_aliasing() -> None:
+    raw = {"forcing_package_manifest_checksum": "abc", "output_files": [{"uri": "forcing/file"}]}
+
+    parsed = _parse_forcing_lineage(raw)
+
+    assert parsed == raw
+    assert parsed is not raw
+
+
+@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_parse_forcing_lineage_empty_values_return_empty_dict(raw: Any) -> None:
+    assert _parse_forcing_lineage(raw) == {}
+
+
+def test_parse_forcing_lineage_valid_json_string_dict() -> None:
+    assert _parse_forcing_lineage('{"output_files":[{"uri":"forcing/file"}]}') == {
+        "output_files": [{"uri": "forcing/file"}]
+    }
+
+
+@pytest.mark.parametrize("raw", ["[1, 2, 3]", '"not-a-dict"'])
+def test_parse_forcing_lineage_json_non_dict_returns_empty_dict(raw: str) -> None:
+    assert _parse_forcing_lineage(raw) == {}
+
+
+def test_parse_forcing_lineage_malformed_json_records_stable_parse_error() -> None:
+    assert _parse_forcing_lineage('{"output_files":') == {"_parse_error": "invalid_json"}
 
 
 # --------------------------------------------------------------------------- #
@@ -971,53 +1001,63 @@ def test_publish_qdown_copyback_partial_backup_cleanup_failure_restores_all_targ
     assert not (published_root / f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json").exists()
 
 
-def test_publish_qdown_copyback_rollback_clone_cleanup_failure_blocks_publish_and_rolls_back(
+def test_publish_qdown_copyback_rollback_clone_cleanup_failure_after_commit_does_not_roll_back(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     copyback_root = tmp_path / "shared-object-store"
     publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
     _seed_run_products(publisher, "run-a")
-    old_manifest = copyback_root / "runs/run-a/input/manifest.json"
-    old_manifest.parent.mkdir(parents=True)
-    old_manifest.write_bytes(b'{"run_id":"run-a","old":true}\n')
-    old_output = copyback_root / "runs/run-a/output/q.rivqdown.csv"
-    old_output.parent.mkdir(parents=True)
-    old_output.write_bytes(b"old\n")
+    _seed_run_products(publisher, "run-b")
+    old_manifest_a = copyback_root / "runs/run-a/input/manifest.json"
+    old_output_a = copyback_root / "runs/run-a/output/q.rivqdown.csv"
+    old_manifest_b = copyback_root / "runs/run-b/input/manifest.json"
+    old_output_b = copyback_root / "runs/run-b/output/q.rivqdown.csv"
+    old_manifest_a.parent.mkdir(parents=True)
+    old_output_a.parent.mkdir(parents=True)
+    old_manifest_b.parent.mkdir(parents=True)
+    old_output_b.parent.mkdir(parents=True)
+    old_manifest_a.write_bytes(b'{"run_id":"run-a","old":true}\n')
+    old_output_a.write_bytes(b"old-a\n")
+    old_manifest_b.write_bytes(b'{"run_id":"run-b","old":true}\n')
+    old_output_b.write_bytes(b"old-b\n")
     publisher_module = __import__("services.tile_publisher.publisher", fromlist=["rmtree_no_follow"])
     original_rmtree = publisher_module.rmtree_no_follow
-    rollback_cleanup_calls = 0
+    rollback_cleanup_paths: list[Path] = []
 
-    def fail_rollback_clone_cleanup(
+    def fail_second_rollback_clone_cleanup(
         path: Path,
         *,
         containment_root: Path | None = None,
         missing_ok: bool = False,
     ) -> None:
-        nonlocal rollback_cleanup_calls
         if ".copyback-rollback." in Path(path).name:
-            rollback_cleanup_calls += 1
-            raise OSError("rollback clone cleanup blocked")
+            rollback_cleanup_paths.append(Path(path))
+            if len(rollback_cleanup_paths) == 2:
+                raise OSError("second rollback clone cleanup blocked")
         original_rmtree(path, containment_root=containment_root, missing_ok=missing_ok)
 
-    monkeypatch.setattr(publisher_module, "rmtree_no_follow", fail_rollback_clone_cleanup)
+    monkeypatch.setattr(publisher_module, "rmtree_no_follow", fail_second_rollback_clone_cleanup)
 
     with _store(create_flood=False, create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
+        _insert_run(session, run_id="run-b", segments=2)
         _seed_forcing_package(publisher, session)
 
-        with pytest.raises(PublishError) as error:
-            publisher._publish_qdown_from_database(session, CYCLE_ID)
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
 
-    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
-    assert "rollback clone cleanup blocked" in error.value.details["error"]
-    assert rollback_cleanup_calls == 1
-    assert old_manifest.read_bytes() == b'{"run_id":"run-a","old":true}\n'
-    assert old_output.read_bytes() == b"old\n"
-    assert not (copyback_root / "runs/run-a/logs/shud_stdout.log").exists()
-    assert not (copyback_root / FORCING_KEY).exists()
-    assert not list(copyback_root.rglob("*.copyback*"))
-    _assert_no_qdown_display_advance(publisher)
+    assert result.status == "published"
+    assert len(rollback_cleanup_paths) == 2
+    assert not rollback_cleanup_paths[0].exists()
+    assert rollback_cleanup_paths[1].exists()
+    assert json.loads(old_manifest_a.read_text(encoding="utf-8")) == {"run_id": "run-a", "run": "manifest"}
+    assert old_output_a.read_bytes() == b"seg,q\n1,2\n"
+    assert json.loads(old_manifest_b.read_text(encoding="utf-8")) == {"run_id": "run-b", "run": "manifest"}
+    assert old_output_b.read_bytes() == b"seg,q\n1,2\n"
+    assert (copyback_root / "runs/run-a/logs/shud_stdout.log").read_bytes() == b"ok\n"
+    assert (copyback_root / "runs/run-b/logs/shud_stdout.log").read_bytes() == b"ok\n"
+    assert (copyback_root / f"{FORCING_KEY}/forcing_package.json").is_file()
+    assert publisher.object_store.exists(f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json")
 
 
 def test_replace_directory_tree_restores_previous_target_when_promotion_fails(
@@ -1382,6 +1422,8 @@ def test_publish_qdown_copyback_missing_forcing_metadata_fails_before_artifact_a
     [
         ("forcing/gfs/2026061400/basin-1/model-1", "cycle_time"),
         ("forcing/gfs/2024060112/basin-2/model-1", "basin_version_id"),
+        ("forcing/ifs/2024060112/basin-1/model-1", "source_id"),
+        ("forcing/gfs/2024060112/basin-1/model-2", "model_id"),
     ],
 )
 def test_publish_qdown_copyback_rejects_forcing_key_identity_mismatch_before_display_advance(
@@ -1407,6 +1449,7 @@ def test_publish_qdown_copyback_rejects_forcing_key_identity_mismatch_before_dis
     assert mismatch_field in error.value.details["error"]
     _assert_no_qdown_display_advance(publisher)
     assert not (tmp_path / "shared-object-store/runs/run-a").exists()
+    assert not (tmp_path / "shared-object-store/forcing").exists()
 
 
 @pytest.mark.parametrize(

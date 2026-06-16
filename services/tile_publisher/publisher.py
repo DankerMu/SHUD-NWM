@@ -2614,11 +2614,9 @@ def _commit_qdown_copyback_batch(
         rollback_log[:] = remaining_for_rollback
         raise SafeFilesystemError(f"Failed to clean up q_down copyback backups: {'; '.join(errors)}", kind="io")
     rollback_log[:] = remaining_for_rollback
+
     for entry in remaining_for_rollback:
-        cleanup_dirs = entry.cleanup_dirs
-        if entry.backup_dir is not None:
-            cleanup_dirs = (*cleanup_dirs, entry.backup_dir)
-        for cleanup_dir in cleanup_dirs:
+        for cleanup_dir in entry.cleanup_dirs:
             try:
                 rmtree_no_follow(cleanup_dir, containment_root=containment_root, missing_ok=True)
             except (OSError, SafeFilesystemError) as error:
@@ -2626,7 +2624,16 @@ def _commit_qdown_copyback_batch(
                     f"Failed to clean up q_down copyback temporary directory {cleanup_dir}: {error}",
                     kind="io",
                 ) from error
+
+    committed_rollback_backups = tuple(
+        entry.backup_dir for entry in remaining_for_rollback if entry.backup_dir is not None
+    )
     rollback_log.clear()
+    for cleanup_dir in committed_rollback_backups:
+        try:
+            rmtree_no_follow(cleanup_dir, containment_root=containment_root, missing_ok=True)
+        except (OSError, SafeFilesystemError):
+            pass
 
 
 def _copyback_rollback_backup_dir(entry: _CopybackRollbackEntry) -> Path:
@@ -2786,7 +2793,11 @@ def _restore_copyback_backup(
     target_dir: Path,
     containment_root: Path,
 ) -> None:
+    backup_dir = target_dir.parent / backup_name
     try:
+        if not _directory_entry_exists(parent_fd, backup_name, backup_dir):
+            raise SafeFilesystemError(f"Previous copyback target backup is missing: {backup_dir}", kind="io")
+        _verify_copyback_target_tree_clean(backup_dir, containment_root=containment_root)
         rmtree_no_follow(target_dir, containment_root=containment_root, missing_ok=True)
         os.replace(backup_name, target_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         try:
