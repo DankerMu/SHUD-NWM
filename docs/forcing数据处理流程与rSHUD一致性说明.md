@@ -77,7 +77,7 @@ IFS/GFS GRIB2 ──①获取──▶ 规范化 NetCDF ──②解码映射─
 | `wind_u_10m` / `wind_v_10m` | `10u` / `10v` | `u10m` / `v10m` | `u10` / `v10` |
 | `prcp_rate_or_amount` | `tp`（累积 m） | `apcp`（累积 mm） | `tp`（累积 m） |
 | `surface_pressure` | `sp` | `pressfc` | `sp` |
-| 辐射 | `ssr+str`（累积 J/m²） | `dswrf`（W/m²） | `ssr+str`（累积 J/m²） |
+| 辐射 | `ssr` 净短波（去累积）→ `Rn` | `dswrf` 下行短波（W/m²）→ `Rn` | `ssr`+`str` 净全波（去累积）→ `Rn` |
 
 ### ③ 单位换算与物理量反演（本项目的核心，也是与 rSHUD 差异最集中处）
 
@@ -89,12 +89,29 @@ IFS/GFS GRIB2 ──①获取──▶ 规范化 NetCDF ──②解码映射─
 | 降水（IFS/GFS 累积场） | **去累积**：减前一步累积值 → 步长增量；再 `×24/步长(h) → mm/day`；亚阈值微负记 noise 容差 | `converter.py:708-791`（GFS）/`905-961`（IFS） |
 | 相对湿度（GFS） | 原生 `rh2m(%) ÷ 100 → [0,1]`，钳位 | `converter.py:810-822` |
 | 相对湿度（IFS） | **由露点 Magnus 反演**：`es=exp(17.625·T/(243.04+T))`、`ed=exp(17.625·Td/(243.04+Td))`、`RH=ed/es`，钳位 [0,1] | `converter.py:890-902` |
-| 辐射（IFS） | **去累积** `ssr+str`（J/m²）`÷ 步长秒 → W/m²` 净辐射 | `converter.py:964-998` |
-| 辐射（GFS） | `dswrf` 直接为 W/m²（下行短波） | `converter.py` |
+| 辐射（GFS） | `dswrf` 本就是 W/m²（下行短波），直通 | `converter.py:53,137` |
+| 辐射（IFS，业务主源） | **去累积** `ssr` 净短波：`max(0,(ssr(t)−ssr(t−1))/步长秒) → W/m²`（标准量 `shortwave_down`）；另算 `ssr+str` 净全波仅作旁路 | `converter.py:1001-1033` |
+| 辐射（ERA5 fallback） | **去累积** `(Δssr+Δstr)/步长秒 → W/m²` 净全波（标准量 `net_radiation`） | `converter.py:861-887` |
 | 风速 | u/v 分量分别插值，到站点后 **`wind=√(u²+v²)`** | `workers/forcing_producer/producer.py:1644` |
 | 气压 | 直通 Pa（仅入库，不写 SHUD forcing） | — |
 
 > **去累积（de-accumulation）是本项目相对 LDAS 流程多出来的关键步骤**：IFS/GFS 的降水、辐射是"自起报时刻起的累积量"，必须逐步相减还原成该时段的速率/通量；而 LDAS 给的本就是逐步速率/均值，无需此步（见 §3.2）。
+
+#### 辐射 `Rn` 计算方法（按源分口径，统一收敛到 SHUD `Rn` 列，W/m²）
+
+SHUD forcing 第 5 列 `Rn`（rSHUD 记 `RN_w.m2`）在本项目按数据源用不同口径填充，但**都归一到 W/m²**：由 `producer.py:1073` 选取规范辐射量，再乘 `rn_shortwave_factor`（默认 **1.0**，`producer.py:280`）直通（`producer.py:1122-1131`）。
+
+- **GFS**：`dswrf` 本就是 W/m² 下行短波通量，直通进 `Rn`（`converter.py:53,137`）。
+- **IFS（业务主源）**：取 ECMWF 累积净太阳辐射 `ssr`（J/m²），**去累积**还原本时段净短波通量 `Rn = max(0, (ssr(t) − ssr(t−1)) / Δt秒)`（`converter.py:1001-1033`，标准量 `shortwave_down`），**不含 `str`**。
+- **ERA5（延迟降级 fallback）**：`Rn = (Δssr + Δstr) / Δt秒`，即净全波＝净短波＋净长波（`converter.py:861-887`，标准量 `net_radiation`）。
+
+> 注：converter 对 IFS 也算了 `ssr+str` 净全波（`converter.py:964-998`）并入库，但**它不是 IFS 写 SHUD 的 `Rn`**——IFS 的 `Rn` 只用 `ssr` 净短波（见 `IFS_CANONICAL_TO_FORCING` `producer.py:84-90`、`IFS_REQUIRED_STANDARD_VARIABLES` `converter.py:114`），净全波仅作旁路/诊断并供 ERA5 路复用。
+
+SHUD 模型侧统一对 `Rn` 做 `rn<0→0` 再 `nearbyint` 取整 W/m²（`converter.py:33-34`），故去累积在夜间持平段产生的亚 W/m² 伪负值与 0 逐位等价，不构成数据降级。
+
+**与 rSHUD/AutoSHUD 对齐**：AutoSHUD 各路径喂 `RN_w.m2` 的一律是短波——NLDAS `DSWRF`、CMFD `SRad`、CMIP6 `rsds`（下行短波直通），GLDAS `Swnet`（净短波直通），ERA5 `pmax(ssr.inc/dt, 0)`（净太阳短波去累积，`ERA5_NC2CSV.R:653,659`）。
+
+因此 **GFS `dswrf` ↔ AutoSHUD 下行短波路**、**IFS `ssr` 去累积 ↔ AutoSHUD ERA5 `ssr` 去累积，逐字一致**。唯一差异：本项目 ERA5 fallback 多算了 `str`（净长波，通常为负），若要与 AutoSHUD ERA5 严格一致应去掉 `str`；但该路为非业务主源。
 
 ### ④ 空间插值到固定站点（IDW）
 
@@ -233,7 +250,7 @@ write(t(x), ...)                    # 数据行
 | 5.1 | 数据源 | LDAS 再分析 | IFS/GFS 预报 | 业务化要"预报未来"，再分析只有历史；输出契约不变 |
 | 5.2 | **降水/辐射去累积** | 逐步速率，乘法换算即可 | **累积场必须逐步相减**再换算 | 物理必需：IFS/GFS 是累积量；去累积后单位与 LDAS 同为 mm/day、W/m² |
 | 5.3 | **湿度反演路径** | 由**比湿** SH 反演（Bolton 系数 17.67/243.5） | GFS 用**原生 RH**；IFS 由**露点** Magnus 反演（A-E 系数 17.625/243.04） | 同一物理量 RH 的等价反演，殊途同归；两套 Magnus 系数差异 <0.4% RH，均为公认标准 |
-| 5.4 | 风速 / 辐射严格度 | NLDAS 脚本 `abs(UGRD)`（仅 u 分量）；辐射有时取净有时取下行 | 风速 **`√(u²+v²)`**；IFS 辐射 J/m² 严格去累积成 W/m² | **本项目更严格**，物理上更准确 |
+| 5.4 | 风速 / 辐射严格度 | NLDAS 脚本 `abs(UGRD)`（仅 u 分量）；辐射有时取净有时取下行 | 风速 **`√(u²+v²)`**；IFS 辐射取 `ssr` 净短波严格去累积成 W/m² | 风速更严格（全模长 vs 仅 u）；辐射与 AutoSHUD ERA5（`ssr` 净短波去累积）**同口径** |
 | 5.5 | 格点→站点取值 | 站点≈格点中心，最近邻 | **IDW**（k=4, p=2） | NWP 格点（0.25°）较粗，IDW 为标准空间插值；站点与格点重合时退化为最近邻，与 rSHUD 一致 |
 
 > **要点**：5.2–5.4 这些"多出来的处理"，恰恰是因为 IFS/GFS 作为**预报产品**给的是累积量与不同的湿度变量；本项目针对性地做了去累积与按源反演，**而且在风速、辐射上比 AutoSHUD 的 LDAS 脚本做得更严谨**。所有差异最终都收敛到**同一套 SHUD 五变量契约**。
