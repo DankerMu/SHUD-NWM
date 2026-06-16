@@ -38,6 +38,7 @@ from workers.model_registry.qhh_production_bootstrap import (
 _QHH_SCHEDULER_SOURCE_ID = "gfs"
 _QHH_SCHEDULER_SOURCE_VERSION = "qhh-scheduler-readiness-fixture"
 _QHH_SCHEDULER_SOURCE_NAME = "GFS QHH scheduler readiness fixture"
+_QHH_SCHEDULER_FOUR_CYCLE_HOURS = (0, 6, 12, 18)
 
 
 def test_read_qhh_tsd_forc_reports_created_station_identity(tmp_path: Path) -> None:
@@ -1278,6 +1279,7 @@ def test_bootstrap_qhh_production_success_idempotent_and_scheduler_ready(
             workspace_root=tmp_path / "workspace",
             model_ids=(model_id,),
             now=_dt("2026-05-21T12:00:00Z"),
+            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
         ),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": _qhh_scheduler_ready_gfs_adapter()},
@@ -1481,6 +1483,7 @@ def test_bootstrap_seed_failures_roll_back_rows_and_scheduler_visibility(
             workspace_root=tmp_path / f"workspace-{failure_point}",
             model_ids=(model_id,),
             now=_dt("2026-05-21T12:00:00Z"),
+            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
         ),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
@@ -1603,6 +1606,7 @@ def test_bootstrap_blocks_stale_qhh_sibling_rows_before_scheduler_visibility(
             workspace_root=tmp_path / f"workspace-{stale_kind}",
             model_ids=(model_id,),
             now=_dt("2026-05-21T12:00:00Z"),
+            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
         ),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
@@ -1693,6 +1697,7 @@ def test_bootstrap_blocks_unmarked_same_basin_active_forcing_grid_and_removes_sc
             workspace_root=tmp_path / "workspace-unmarked-station",
             model_ids=(model_id,),
             now=_dt("2026-05-21T12:00:00Z"),
+            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
         ),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
@@ -1776,6 +1781,7 @@ def test_bootstrap_replaces_stale_run_scoped_resource_profile_and_scheduler_deri
             workspace_root=tmp_path / "workspace-stale-profile",
             model_ids=(model_id,),
             now=_dt("2026-05-21T12:00:00Z"),
+            allowed_cycle_hours_utc=_QHH_SCHEDULER_FOUR_CYCLE_HOURS,
         ),
         registry=PsycopgModelRegistryStore(integration_database_url),
         adapters={"gfs": _qhh_scheduler_ready_gfs_adapter()},
