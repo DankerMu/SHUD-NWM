@@ -2958,12 +2958,19 @@ separate PR boundaries.
     - Legacy imports/monkeypatches of moved `chain.py` helper names ->
       compatibility wrappers still dispatch through the current binding.
 - Required evidence:
+  - Review-fix evidence (2026-06-16, PR #522 review findings C1-C4):
+    moved the remaining `ForecastOrchestrator` array aggregation/accounting
+    method bodies behind `chain_array_accounting.py` module functions while
+    preserving thin `chain.py` wrappers, restored the
+    `production_status_for` legacy export, extended sacct parsing coverage to
+    include a cancelled task row, and restored legacy `_array_task_log_uri`
+    monkeypatch compatibility for `parse_sacct_array_results` log URIs.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'array_accounting or array_partial or partial_array or partial_success or parse_sacct or accounting_gap or malformed_array_accounting or stage_task_result or candidate_outcomes'`
-    -> 11 passed, 170 deselected in 88.79s.
-  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_array_accounting'`
-    -> 4 passed, 177 deselected in 1.73s.
+    -> 12 passed, 170 deselected in 88.60s.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_array_accounting or legacy_top_level_helpers'`
+    -> 5 passed, 177 deselected in 1.41s.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
-    -> 181 passed in 747.50s.
+    -> 182 passed in 747.78s.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator_file_count'`
     -> 1 passed, 191 deselected in 4.46s.
   - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py tests/test_entropy_audit_script.py`

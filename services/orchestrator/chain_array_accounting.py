@@ -12,6 +12,7 @@ from services.orchestrator.chain_types import (
     ArrayTaskResult,
     CycleOrchestrationContext,
     OrchestratorError,
+    StageDefinition,
 )
 from services.orchestrator.production_contract import production_status_for
 
@@ -25,9 +26,13 @@ class ArrayAccountingDependencies:
     coerce_mapping: Callable[[Any], dict[str, Any]]
     safe_candidate_outcome_payload: Callable[[Mapping[str, Any]], dict[str, Any]]
     safe_pipeline_event_details: Callable[[Mapping[str, Any]], dict[str, Any]]
+    record_array_task_outcomes: Callable[..., None]
+    stage_task_result_evidence: Callable[..., tuple[Mapping[str, Any], ...]]
     parse_sacct_array_results: Callable[..., ArrayAggregation]
     coerce_array_aggregation: Callable[..., ArrayAggregation]
     aggregation_from_task_results: Callable[[Sequence[ArrayTaskResult]], ArrayAggregation]
+    aggregation_error_code: Callable[[ArrayAggregation | None], str | None]
+    aggregation_error_message: Callable[[ArrayAggregation | None], str | None]
     sacct_extra_fields: Callable[[Sequence[str]], dict[str, Any]]
     slurm_accounting_from_payload: Callable[[Mapping[str, Any]], dict[str, Any]]
     resource_metrics_from_payload: Callable[[Mapping[str, Any]], dict[str, Any]]
@@ -36,6 +41,10 @@ class ArrayAccountingDependencies:
     parse_slurm_exit_code: Callable[[str], int | None]
     basin_key: Callable[[Mapping[str, Any]], tuple[str, str]]
     basin_original_task_id: Callable[[Mapping[str, Any], int], int]
+    status_from_gateway_job: Callable[[Mapping[str, Any]], str]
+    parse_gateway_time: Callable[[Any], datetime | None]
+    utcnow: Callable[[], datetime]
+    build_reindexed_manifest: Callable[[Sequence[Mapping[str, Any]], Sequence[int]], list[dict[str, Any]]]
 
 
 def _default_dependencies() -> ArrayAccountingDependencies:
@@ -43,9 +52,13 @@ def _default_dependencies() -> ArrayAccountingDependencies:
         coerce_mapping=_coerce_mapping,
         safe_candidate_outcome_payload=safe_candidate_outcome_payload,
         safe_pipeline_event_details=safe_pipeline_event_details,
+        record_array_task_outcomes=record_array_task_outcomes,
+        stage_task_result_evidence=stage_task_result_evidence,
         parse_sacct_array_results=parse_sacct_array_results,
         coerce_array_aggregation=coerce_array_aggregation,
         aggregation_from_task_results=aggregation_from_task_results,
+        aggregation_error_code=aggregation_error_code,
+        aggregation_error_message=aggregation_error_message,
         sacct_extra_fields=sacct_extra_fields,
         slurm_accounting_from_payload=slurm_accounting_from_payload,
         resource_metrics_from_payload=resource_metrics_from_payload,
@@ -54,6 +67,10 @@ def _default_dependencies() -> ArrayAccountingDependencies:
         parse_slurm_exit_code=parse_slurm_exit_code,
         basin_key=basin_key,
         basin_original_task_id=basin_original_task_id,
+        status_from_gateway_job=status_from_gateway_job,
+        parse_gateway_time=parse_gateway_time,
+        utcnow=utcnow,
+        build_reindexed_manifest=build_reindexed_manifest,
     )
 
 
@@ -147,6 +164,282 @@ def candidate_outcomes(
             )
         )
     return tuple(outcomes)
+
+
+def aggregate_array_stage(
+    orchestrator: Any,
+    stage: StageDefinition,
+    context: CycleOrchestrationContext,
+    slurm_job_id: str,
+    terminal: dict[str, Any],
+    pipeline_job_id: str,
+    *,
+    deps: ArrayAccountingDependencies | None = None,
+) -> ArrayAggregation:
+    deps = deps or _default_dependencies()
+    provider = getattr(orchestrator.slurm_client, "get_array_task_results", None)
+    if callable(provider):
+        try:
+            raw_results = provider(slurm_job_id)
+        except (KeyError, LookupError):
+            raw_results = None
+        except (TypeError, ValueError, OrchestratorError) as error:
+            orchestrator._record_cycle_stage_accounting_gap(
+                stage,
+                context,
+                pipeline_job_id,
+                slurm_job_id=slurm_job_id,
+                message="Slurm array accounting was unavailable or malformed.",
+                details={"error": str(error), "error_code": getattr(error, "error_code", None)},
+            )
+            raw_results = None
+        if raw_results is not None:
+            try:
+                aggregation = deps.coerce_array_aggregation(
+                    raw_results,
+                    slurm_job_id,
+                    context=context,
+                    object_store=orchestrator.object_store,
+                )
+                return orchestrator._require_complete_array_accounting(
+                    aggregation,
+                    stage=stage,
+                    context=context,
+                    slurm_job_id=slurm_job_id,
+                )
+            except (TypeError, ValueError, OrchestratorError) as error:
+                orchestrator._record_cycle_stage_accounting_gap(
+                    stage,
+                    context,
+                    pipeline_job_id,
+                    slurm_job_id=slurm_job_id,
+                    message="Slurm array accounting was unavailable or malformed.",
+                    details={"error": str(error), "error_code": getattr(error, "error_code", None)},
+                )
+            raw_results = None
+
+    stdout_provider = getattr(orchestrator.slurm_client, "get_array_sacct_output", None)
+    if callable(stdout_provider):
+        try:
+            aggregation = deps.parse_sacct_array_results(
+                str(stdout_provider(slurm_job_id)),
+                slurm_job_id,
+                context=context,
+                object_store=orchestrator.object_store,
+            )
+            return orchestrator._require_complete_array_accounting(
+                aggregation,
+                stage=stage,
+                context=context,
+                slurm_job_id=slurm_job_id,
+            )
+        except OrchestratorError as error:
+            orchestrator._record_cycle_stage_accounting_gap(
+                stage,
+                context,
+                pipeline_job_id,
+                slurm_job_id=slurm_job_id,
+                message="Slurm array accounting was unavailable or malformed.",
+                details={"error": error.message, "error_code": error.error_code},
+            )
+
+    orchestrator._record_cycle_stage_accounting_gap(
+        stage,
+        context,
+        pipeline_job_id,
+        slurm_job_id=slurm_job_id,
+        message="Slurm array accounting was unavailable or incomplete.",
+        details={
+            "reason": "array_task_accounting_unavailable",
+            "master_status": deps.status_from_gateway_job(terminal),
+            "expected_task_count": len(context.active_basins),
+        },
+    )
+    return ArrayAggregation(total=0, succeeded=0, failed=0, cancelled=0, task_results=())
+
+
+def require_complete_array_accounting(
+    aggregation: ArrayAggregation,
+    *,
+    stage: StageDefinition,
+    context: CycleOrchestrationContext,
+    slurm_job_id: str,
+) -> ArrayAggregation:
+    expected_task_ids = set(range(len(context.active_basins)))
+    observed_task_ids = {task.task_id for task in aggregation.task_results}
+    if observed_task_ids == expected_task_ids:
+        return aggregation
+    missing_task_ids = sorted(expected_task_ids - observed_task_ids)
+    unexpected_task_ids = sorted(observed_task_ids - expected_task_ids)
+    raise OrchestratorError(
+        "SLURM_ARRAY_ACCOUNTING_INCOMPLETE",
+        "Slurm array accounting did not include exactly the submitted task ids.",
+        {
+            "slurm_job_id": slurm_job_id,
+            "stage": stage.stage,
+            "expected_task_count": len(context.active_basins),
+            "observed_task_count": len(observed_task_ids),
+            "missing_task_ids": missing_task_ids,
+            "unexpected_task_ids": unexpected_task_ids,
+        },
+    )
+
+
+def record_cycle_stage_status_override(
+    orchestrator: Any,
+    stage: StageDefinition,
+    context: CycleOrchestrationContext,
+    pipeline_job_id: str,
+    terminal: dict[str, Any],
+    aggregation: ArrayAggregation,
+    log_uri: str | None,
+    *,
+    deps: ArrayAccountingDependencies | None = None,
+) -> None:
+    deps = deps or _default_dependencies()
+    previous_status, record = orchestrator.repository.update_pipeline_job_status(
+        pipeline_job_id,
+        aggregation.status,
+        finished_at=deps.parse_gateway_time(terminal.get("finished_at")) or deps.utcnow(),
+        exit_code=terminal.get("exit_code"),
+        error_code=deps.aggregation_error_code(aggregation) or terminal.get("error_code"),
+        error_message=deps.aggregation_error_message(aggregation) or terminal.get("error_message"),
+        log_uri=log_uri,
+    )
+    if str(record.get("status")) != aggregation.status:
+        return
+    task_payload = deps.stage_task_result_evidence(aggregation, context=context)
+    orchestrator.repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=pipeline_job_id,
+        event_type="status_change",
+        status_from=previous_status or deps.status_from_gateway_job(terminal),
+        status_to=aggregation.status,
+        message=f"{stage.stage} array aggregated as {aggregation.status}",
+        details=deps.safe_pipeline_event_details(
+            {
+                "stage": stage.stage,
+                "job_type": stage.job_type,
+                "total": aggregation.total,
+                "succeeded": aggregation.succeeded,
+                "failed": aggregation.failed,
+                "cancelled": aggregation.cancelled,
+                "pipeline_job_id": pipeline_job_id,
+                "slurm": {
+                    "job_id": terminal.get("job_id") or terminal.get("slurm_job_id"),
+                    "state": aggregation.status,
+                    "exit_code": terminal.get("exit_code"),
+                    "log_uri": log_uri,
+                    "accounting": deps.slurm_accounting_from_payload(terminal),
+                    "task_results": task_payload,
+                    "resource_metrics": deps.resource_metrics_from_payload(terminal),
+                },
+                "task_results": task_payload,
+            }
+        ),
+    )
+
+
+def record_cycle_stage_accounting_event(
+    orchestrator: Any,
+    stage: StageDefinition,
+    context: CycleOrchestrationContext,
+    pipeline_job_id: str,
+    terminal: Mapping[str, Any],
+    *,
+    log_uri: str | None,
+    deps: ArrayAccountingDependencies | None = None,
+) -> None:
+    deps = deps or _default_dependencies()
+    accounting = deps.slurm_accounting_from_payload(terminal)
+    if not accounting:
+        orchestrator._record_cycle_stage_accounting_gap(
+            stage,
+            context,
+            pipeline_job_id,
+            slurm_job_id=str(terminal.get("job_id") or terminal.get("slurm_job_id") or ""),
+            message="Slurm accounting metrics were unavailable.",
+            details={"reason": "accounting_unavailable"},
+        )
+        return
+    orchestrator.repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=pipeline_job_id,
+        event_type="slurm_accounting",
+        status_from=None,
+        status_to=str(terminal.get("status") or ""),
+        message=f"{stage.stage} Slurm accounting captured.",
+        details=deps.safe_pipeline_event_details(
+            {
+                "stage": stage.stage,
+                "job_type": stage.job_type,
+                "cycle_id": context.cycle_id,
+                "slurm": {
+                    "job_id": terminal.get("job_id") or terminal.get("slurm_job_id"),
+                    "state": terminal.get("state") or terminal.get("status"),
+                    "array_task_id": terminal.get("array_task_id"),
+                    "exit_code": terminal.get("exit_code"),
+                    "log_uri": log_uri,
+                    "accounting": accounting,
+                    "resource_metrics": deps.resource_metrics_from_payload(terminal),
+                },
+            }
+        ),
+    )
+
+
+def record_cycle_stage_accounting_gap(
+    orchestrator: Any,
+    stage: StageDefinition,
+    context: CycleOrchestrationContext,
+    pipeline_job_id: str,
+    *,
+    slurm_job_id: str,
+    message: str,
+    details: Mapping[str, Any],
+    deps: ArrayAccountingDependencies | None = None,
+) -> None:
+    deps = deps or _default_dependencies()
+    orchestrator.repository.insert_pipeline_event(
+        entity_type="pipeline_job",
+        entity_id=pipeline_job_id,
+        event_type="slurm_accounting_gap",
+        status_from=None,
+        status_to="blocked",
+        message=message,
+        details=deps.safe_pipeline_event_details(
+            {
+                "stage": stage.stage,
+                "job_type": stage.job_type,
+                "cycle_id": context.cycle_id,
+                "slurm_job_id": slurm_job_id,
+                "gap": dict(details),
+                "fabricated_metrics": False,
+            }
+        ),
+    )
+
+
+def apply_array_progress(
+    orchestrator: Any,
+    stage: StageDefinition,
+    context: CycleOrchestrationContext,
+    aggregation: ArrayAggregation,
+    *,
+    deps: ArrayAccountingDependencies | None = None,
+) -> None:
+    deps = deps or _default_dependencies()
+    deps.record_array_task_outcomes(context, stage=stage.stage, aggregation=aggregation)
+    if aggregation.status == "succeeded":
+        if context.had_partial and stage.stage in {"parse", "state_save_qc", "frequency"}:
+            context.last_partial_status = "parsed_partial"
+        return
+    if aggregation.status == "failed":
+        context.active_basins = []
+        return
+    context.had_partial = True
+    context.last_partial_status = orchestrator._partial_cycle_status(stage)
+    context.active_basins = deps.build_reindexed_manifest(context.active_basins, aggregation.succeeded_task_ids)
 
 
 def safe_candidate_outcome_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -413,6 +706,39 @@ def context_array_log_uri(
 
 def array_task_log_uri(object_store: _ObjectStoreLike, run_id: str, master_job_id: str, task_id: int) -> str:
     return object_store.uri_for_key(f"runs/{run_id}/logs/{master_job_id}_{task_id}.out")
+
+
+def status_from_gateway_job(job: Mapping[str, Any]) -> str:
+    status = job.get("status", "submitted")
+    value = getattr(status, "value", status)
+    normalized = str(value)
+    return "pending" if normalized == "submitted" else normalized
+
+
+def parse_gateway_time(value: Any) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return _ensure_utc(value) if isinstance(value, datetime) else None
+    if isinstance(value, str):
+        return _ensure_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    return None
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def build_reindexed_manifest(
+    entries: Sequence[Mapping[str, Any]],
+    succeeded_task_ids: Sequence[int],
+) -> list[dict[str, Any]]:
+    by_task_id = {int(entry.get("task_id", index)): dict(entry) for index, entry in enumerate(entries)}
+    reindexed: list[dict[str, Any]] = []
+    for new_task_id, previous_task_id in enumerate(succeeded_task_ids):
+        entry = dict(by_task_id[int(previous_task_id)])
+        entry["task_id"] = new_task_id
+        entry["original_task_id"] = int(entry.get("original_task_id", previous_task_id))
+        reindexed.append(entry)
+    return reindexed
 
 
 def array_task_status(raw_state: str) -> str:

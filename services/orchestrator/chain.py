@@ -32,7 +32,7 @@ from packages.common.state_lineage import (
 )
 from packages.common.state_manager import StateManager, StateSnapshot, assess_freshness
 from services.artifacts import ArtifactLogError, published_log_relative_path, published_log_uri
-from services.orchestrator import chain_array_accounting, chain_manifests, chain_stage_execution
+from services.orchestrator import chain_array_accounting, chain_manifests, chain_stage_execution, production_contract
 from services.orchestrator.chain_stages import (
     ANALYSIS_STAGES,
     LEGACY_FORECAST_STAGES,
@@ -109,6 +109,7 @@ _tri_state = chain_manifests._tri_state
 ModelRunAssembly = chain_manifests.ModelRunAssembly
 build_reindexed_manifest = chain_manifests.build_reindexed_manifest
 production_stage_for = chain_manifests.production_stage_for
+production_status_for = production_contract.production_status_for
 serialize_manifest_index = chain_manifests.serialize_manifest_index
 
 
@@ -1433,85 +1434,15 @@ class ForecastOrchestrator:
         terminal: dict[str, Any],
         pipeline_job_id: str,
     ) -> ArrayAggregation:
-        provider = getattr(self.slurm_client, "get_array_task_results", None)
-        if callable(provider):
-            try:
-                raw_results = provider(slurm_job_id)
-            except (KeyError, LookupError):
-                raw_results = None
-            except (TypeError, ValueError, OrchestratorError) as error:
-                self._record_cycle_stage_accounting_gap(
-                    stage,
-                    context,
-                    pipeline_job_id,
-                    slurm_job_id=slurm_job_id,
-                    message="Slurm array accounting was unavailable or malformed.",
-                    details={"error": str(error), "error_code": getattr(error, "error_code", None)},
-                )
-                raw_results = None
-            if raw_results is not None:
-                try:
-                    aggregation = _coerce_array_aggregation(
-                        raw_results,
-                        slurm_job_id,
-                        context=context,
-                        object_store=self.object_store,
-                    )
-                    return self._require_complete_array_accounting(
-                        aggregation,
-                        stage=stage,
-                        context=context,
-                        slurm_job_id=slurm_job_id,
-                    )
-                except (TypeError, ValueError, OrchestratorError) as error:
-                    self._record_cycle_stage_accounting_gap(
-                        stage,
-                        context,
-                        pipeline_job_id,
-                        slurm_job_id=slurm_job_id,
-                        message="Slurm array accounting was unavailable or malformed.",
-                        details={"error": str(error), "error_code": getattr(error, "error_code", None)},
-                    )
-                raw_results = None
-
-        stdout_provider = getattr(self.slurm_client, "get_array_sacct_output", None)
-        if callable(stdout_provider):
-            try:
-                aggregation = parse_sacct_array_results(
-                    str(stdout_provider(slurm_job_id)),
-                    slurm_job_id,
-                    context=context,
-                    object_store=self.object_store,
-                )
-                return self._require_complete_array_accounting(
-                    aggregation,
-                    stage=stage,
-                    context=context,
-                    slurm_job_id=slurm_job_id,
-                )
-            except OrchestratorError as error:
-                self._record_cycle_stage_accounting_gap(
-                    stage,
-                    context,
-                    pipeline_job_id,
-                    slurm_job_id=slurm_job_id,
-                    message="Slurm array accounting was unavailable or malformed.",
-                    details={"error": error.message, "error_code": error.error_code},
-                )
-
-        self._record_cycle_stage_accounting_gap(
+        return chain_array_accounting.aggregate_array_stage(
+            self,
             stage,
             context,
+            slurm_job_id,
+            terminal,
             pipeline_job_id,
-            slurm_job_id=slurm_job_id,
-            message="Slurm array accounting was unavailable or incomplete.",
-            details={
-                "reason": "array_task_accounting_unavailable",
-                "master_status": _status_from_gateway_job(terminal),
-                "expected_task_count": len(context.active_basins),
-            },
+            deps=_array_accounting_dependencies(),
         )
-        return ArrayAggregation(total=0, succeeded=0, failed=0, cancelled=0, task_results=())
 
     def _require_complete_array_accounting(
         self,
@@ -1521,23 +1452,11 @@ class ForecastOrchestrator:
         context: CycleOrchestrationContext,
         slurm_job_id: str,
     ) -> ArrayAggregation:
-        expected_task_ids = set(range(len(context.active_basins)))
-        observed_task_ids = {task.task_id for task in aggregation.task_results}
-        if observed_task_ids == expected_task_ids:
-            return aggregation
-        missing_task_ids = sorted(expected_task_ids - observed_task_ids)
-        unexpected_task_ids = sorted(observed_task_ids - expected_task_ids)
-        raise OrchestratorError(
-            "SLURM_ARRAY_ACCOUNTING_INCOMPLETE",
-            "Slurm array accounting did not include exactly the submitted task ids.",
-            {
-                "slurm_job_id": slurm_job_id,
-                "stage": stage.stage,
-                "expected_task_count": len(context.active_basins),
-                "observed_task_count": len(observed_task_ids),
-                "missing_task_ids": missing_task_ids,
-                "unexpected_task_ids": unexpected_task_ids,
-            },
+        return chain_array_accounting.require_complete_array_accounting(
+            aggregation,
+            stage=stage,
+            context=context,
+            slurm_job_id=slurm_job_id,
         )
 
     def _record_cycle_stage_status_override(
@@ -1549,46 +1468,15 @@ class ForecastOrchestrator:
         aggregation: ArrayAggregation,
         log_uri: str | None,
     ) -> None:
-        previous_status, record = self.repository.update_pipeline_job_status(
+        chain_array_accounting.record_cycle_stage_status_override(
+            self,
+            stage,
+            context,
             pipeline_job_id,
-            aggregation.status,
-            finished_at=_parse_gateway_time(terminal.get("finished_at")) or _utcnow(),
-            exit_code=terminal.get("exit_code"),
-            error_code=_aggregation_error_code(aggregation) or terminal.get("error_code"),
-            error_message=_aggregation_error_message(aggregation) or terminal.get("error_message"),
-            log_uri=log_uri,
-        )
-        if str(record.get("status")) != aggregation.status:
-            return
-        task_payload = _stage_task_result_evidence(aggregation, context=context)
-        self.repository.insert_pipeline_event(
-            entity_type="pipeline_job",
-            entity_id=pipeline_job_id,
-            event_type="status_change",
-            status_from=previous_status or _status_from_gateway_job(terminal),
-            status_to=aggregation.status,
-            message=f"{stage.stage} array aggregated as {aggregation.status}",
-            details=_safe_pipeline_event_details(
-                {
-                    "stage": stage.stage,
-                    "job_type": stage.job_type,
-                    "total": aggregation.total,
-                    "succeeded": aggregation.succeeded,
-                    "failed": aggregation.failed,
-                    "cancelled": aggregation.cancelled,
-                    "pipeline_job_id": pipeline_job_id,
-                    "slurm": {
-                        "job_id": terminal.get("job_id") or terminal.get("slurm_job_id"),
-                        "state": aggregation.status,
-                        "exit_code": terminal.get("exit_code"),
-                        "log_uri": log_uri,
-                        "accounting": _slurm_accounting_from_payload(terminal),
-                        "task_results": task_payload,
-                        "resource_metrics": _resource_metrics_from_payload(terminal),
-                    },
-                    "task_results": task_payload,
-                }
-            ),
+            terminal,
+            aggregation,
+            log_uri,
+            deps=_array_accounting_dependencies(),
         )
 
     def _record_cycle_stage_accounting_event(
@@ -1600,40 +1488,14 @@ class ForecastOrchestrator:
         *,
         log_uri: str | None,
     ) -> None:
-        accounting = _slurm_accounting_from_payload(terminal)
-        if not accounting:
-            self._record_cycle_stage_accounting_gap(
-                stage,
-                context,
-                pipeline_job_id,
-                slurm_job_id=str(terminal.get("job_id") or terminal.get("slurm_job_id") or ""),
-                message="Slurm accounting metrics were unavailable.",
-                details={"reason": "accounting_unavailable"},
-            )
-            return
-        self.repository.insert_pipeline_event(
-            entity_type="pipeline_job",
-            entity_id=pipeline_job_id,
-            event_type="slurm_accounting",
-            status_from=None,
-            status_to=str(terminal.get("status") or ""),
-            message=f"{stage.stage} Slurm accounting captured.",
-            details=_safe_pipeline_event_details(
-                {
-                    "stage": stage.stage,
-                    "job_type": stage.job_type,
-                    "cycle_id": context.cycle_id,
-                    "slurm": {
-                        "job_id": terminal.get("job_id") or terminal.get("slurm_job_id"),
-                        "state": terminal.get("state") or terminal.get("status"),
-                        "array_task_id": terminal.get("array_task_id"),
-                        "exit_code": terminal.get("exit_code"),
-                        "log_uri": log_uri,
-                        "accounting": accounting,
-                        "resource_metrics": _resource_metrics_from_payload(terminal),
-                    },
-                }
-            ),
+        chain_array_accounting.record_cycle_stage_accounting_event(
+            self,
+            stage,
+            context,
+            pipeline_job_id,
+            terminal,
+            log_uri=log_uri,
+            deps=_array_accounting_dependencies(),
         )
 
     def _record_cycle_stage_accounting_gap(
@@ -1646,23 +1508,15 @@ class ForecastOrchestrator:
         message: str,
         details: Mapping[str, Any],
     ) -> None:
-        self.repository.insert_pipeline_event(
-            entity_type="pipeline_job",
-            entity_id=pipeline_job_id,
-            event_type="slurm_accounting_gap",
-            status_from=None,
-            status_to="blocked",
+        chain_array_accounting.record_cycle_stage_accounting_gap(
+            self,
+            stage,
+            context,
+            pipeline_job_id,
+            slurm_job_id=slurm_job_id,
             message=message,
-            details=_safe_pipeline_event_details(
-                {
-                    "stage": stage.stage,
-                    "job_type": stage.job_type,
-                    "cycle_id": context.cycle_id,
-                    "slurm_job_id": slurm_job_id,
-                    "gap": dict(details),
-                    "fabricated_metrics": False,
-                }
-            ),
+            details=details,
+            deps=_array_accounting_dependencies(),
         )
 
     def _after_cycle_stage_terminal(
@@ -1927,17 +1781,13 @@ class ForecastOrchestrator:
         context: CycleOrchestrationContext,
         aggregation: ArrayAggregation,
     ) -> None:
-        _record_array_task_outcomes(context, stage=stage.stage, aggregation=aggregation)
-        if aggregation.status == "succeeded":
-            if context.had_partial and stage.stage in {"parse", "state_save_qc", "frequency"}:
-                context.last_partial_status = "parsed_partial"
-            return
-        if aggregation.status == "failed":
-            context.active_basins = []
-            return
-        context.had_partial = True
-        context.last_partial_status = self._partial_cycle_status(stage)
-        context.active_basins = build_reindexed_manifest(context.active_basins, aggregation.succeeded_task_ids)
+        chain_array_accounting.apply_array_progress(
+            self,
+            stage,
+            context,
+            aggregation,
+            deps=_array_accounting_dependencies(),
+        )
 
     def _success_cycle_status(self, stage: StageDefinition, context: CycleOrchestrationContext) -> str:
         if not context.had_partial:
@@ -5886,9 +5736,13 @@ def _array_accounting_dependencies() -> chain_array_accounting.ArrayAccountingDe
         coerce_mapping=_coerce_mapping,
         safe_candidate_outcome_payload=_safe_candidate_outcome_payload,
         safe_pipeline_event_details=_safe_pipeline_event_details,
+        record_array_task_outcomes=_record_array_task_outcomes,
+        stage_task_result_evidence=_stage_task_result_evidence,
         parse_sacct_array_results=parse_sacct_array_results,
         coerce_array_aggregation=_coerce_array_aggregation,
         aggregation_from_task_results=_aggregation_from_task_results,
+        aggregation_error_code=_aggregation_error_code,
+        aggregation_error_message=_aggregation_error_message,
         sacct_extra_fields=_sacct_extra_fields,
         slurm_accounting_from_payload=_slurm_accounting_from_payload,
         resource_metrics_from_payload=_resource_metrics_from_payload,
@@ -5897,6 +5751,10 @@ def _array_accounting_dependencies() -> chain_array_accounting.ArrayAccountingDe
         parse_slurm_exit_code=_parse_slurm_exit_code,
         basin_key=_basin_key,
         basin_original_task_id=_basin_original_task_id,
+        status_from_gateway_job=_status_from_gateway_job,
+        parse_gateway_time=_parse_gateway_time,
+        utcnow=_utcnow,
+        build_reindexed_manifest=build_reindexed_manifest,
     )
 
 
@@ -6046,7 +5904,9 @@ def _context_array_log_uri(
     master_job_id: str,
     task_id: int,
 ) -> str | None:
-    return chain_array_accounting.context_array_log_uri(context, object_store, master_job_id, task_id)
+    if context is None or object_store is None:
+        return None
+    return _array_task_log_uri(object_store, context.run_id, master_job_id, task_id)
 
 
 def _array_task_log_uri(object_store: LocalObjectStore, run_id: str, master_job_id: str, task_id: int) -> str:

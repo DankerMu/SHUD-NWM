@@ -1205,6 +1205,7 @@ def test_chain_array_accounting_module_parses_sacct_and_legacy_chain_wrapper_mat
     stdout = "\n".join(
         [
             "4000_1|FAILED|1:0|00:02:00|2048K|1024K|cpu=1,mem=2G|1M|2M",
+            "4000_2|CANCELLED|0:15|00:03:00|4096K|2048K|cpu=1,mem=2G|3M|4M",
             "4000_0|COMPLETED|0:0|00:01:00|1024K|512K|cpu=1,mem=2G|0|0",
             "unrelated|COMPLETED|0:0",
         ]
@@ -1225,10 +1226,62 @@ def test_chain_array_accounting_module_parses_sacct_and_legacy_chain_wrapper_mat
 
     assert extracted == legacy
     assert extracted.status == "partially_failed"
-    assert [task.task_id for task in extracted.task_results] == [0, 1]
+    assert [task.task_id for task in extracted.task_results] == [0, 1, 2]
+    assert extracted.cancelled_task_ids == (2,)
     assert extracted.task_results[0].accounting["elapsed"] == "00:01:00"
     assert extracted.task_results[1].error_code == "NODE_FAILURE"
+    assert extracted.task_results[2].status == "cancelled"
+    assert extracted.task_results[2].exit_code == 0
+    assert extracted.task_results[2].error_code == "NODE_FAILURE"
+    assert extracted.task_results[2].accounting["elapsed"] == "00:03:00"
     assert extracted.task_results[0].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/4000_0.out"
+    assert extracted.task_results[2].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/4000_2.out"
+    assert legacy.cancelled_task_ids == (2,)
+    assert legacy.task_results[2].status == "cancelled"
+    assert legacy.task_results[2].exit_code == 0
+    assert legacy.task_results[2].error_code == "NODE_FAILURE"
+    assert legacy.task_results[2].accounting["elapsed"] == "00:03:00"
+    assert legacy.task_results[2].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/4000_2.out"
+
+
+def test_chain_array_accounting_legacy_parse_uses_current_array_task_log_uri_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[],
+    )
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    calls: list[tuple[str, str, int]] = []
+
+    def fake_log_uri(
+        object_store_arg: LocalObjectStore,
+        run_id: str,
+        master_job_id: str,
+        task_id: int,
+    ) -> str:
+        assert object_store_arg is object_store
+        calls.append((run_id, master_job_id, task_id))
+        return f"patched://{run_id}/{master_job_id}/{task_id}.out"
+
+    monkeypatch.setattr(legacy_chain, "_array_task_log_uri", fake_log_uri)
+
+    aggregation = legacy_chain.parse_sacct_array_results(
+        "4000_0|COMPLETED|0:0",
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+
+    assert calls == [("cycle_gfs_2026050100", "4000", 0)]
+    assert aggregation.task_results[0].log_uri == "patched://cycle_gfs_2026050100/4000/0.out"
 
 
 def test_chain_array_accounting_legacy_wrapper_uses_current_chain_parse_binding(
@@ -7297,7 +7350,7 @@ def test_chain_stage_execution_legacy_methods_delegate(monkeypatch) -> None:
 
 def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     from services.orchestrator import chain as chain_runtime
-    from services.orchestrator import chain_manifests
+    from services.orchestrator import chain_manifests, production_contract
 
     orchestrator = object.__new__(ForecastOrchestrator)
     analysis_orchestrator = object.__new__(AnalysisOrchestrator)
@@ -7404,6 +7457,7 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     )
     for helper_name in legacy_top_level_helpers:
         assert getattr(chain_runtime, helper_name) is getattr(chain_manifests, helper_name)
+    assert chain_runtime.production_status_for is production_contract.production_status_for
     assert chain_runtime.build_model_run_assembly is not chain_manifests.build_model_run_assembly
     assert chain_runtime._frequency_quality_state is not chain_manifests._frequency_quality_state
     assert chain_runtime._publish_quality_state is not chain_manifests._publish_quality_state
