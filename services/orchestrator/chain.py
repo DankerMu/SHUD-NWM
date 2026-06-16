@@ -361,10 +361,11 @@ def _validate_strict_state_lineage(
     if model_package_version is not None:
         if state.model_package_version is None or state.model_package_version != model_package_version:
             return LINEAGE_PACKAGE_VERSION_MISMATCH
-    if state.model_package_checksum is not None:
-        if model_package_checksum is None or state.model_package_checksum != model_package_checksum:
-            return LINEAGE_PACKAGE_VERSION_MISMATCH
-    elif model_package_checksum is not None:
+    if (
+        state.model_package_checksum in (None, "")
+        or model_package_checksum in (None, "")
+        or state.model_package_checksum != model_package_checksum
+    ):
         return LINEAGE_PACKAGE_VERSION_MISMATCH
 
     return None

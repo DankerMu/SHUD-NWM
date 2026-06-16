@@ -532,6 +532,24 @@ def test_strict_forecast_missing_target_checksum_blocks_when_state_has_checksum(
     _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
 
 
+def test_strict_forecast_missing_target_and_state_checksum_blocks(tmp_path: Path) -> None:
+    state = _state(
+        "state_demo_model_2026050100",
+        "2026-05-01T00:00:00Z",
+        source_id="GFS",
+        model_package_version="models/demo_model/package/",
+        lead_hours=12,
+    )
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([state]), require_forecast_warm_start=True)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
+
+
 def test_strict_forecast_wrong_lead_blocks(tmp_path: Path) -> None:
     state = _state(
         "state_demo_model_2026050100",
@@ -617,6 +635,7 @@ def _assert_no_forecast_mutation(
     assert repository.created_runs == []
     assert repository.hydro_statuses == []
     assert not (tmp_path / "workspace" / "runs").exists()
+    assert not orchestrator.object_store.exists("runs/fcst_gfs_2026050100_demo_model/input/manifest.json")
     assert orchestrator.slurm_client.submissions == []
 
 
