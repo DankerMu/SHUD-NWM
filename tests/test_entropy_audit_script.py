@@ -231,9 +231,9 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert baseline["summary"]["total_source_files"] > emitted_module_file_count_sum
     assert tracked_v1_summary["total_test_files"] == 247
     assert tracked_v1_summary["total_instruction_files"] == 3
-    assert inventory.total_test_files == 143
+    assert inventory.total_test_files == 144
     assert inventory.total_instruction_files == 2
-    assert inventory.v1_summary_test_files == 143
+    assert inventory.v1_summary_test_files == 144
     assert inventory.v1_summary_instruction_files == 2
     assert baseline["summary"]["total_test_files"] == inventory.v1_summary_test_files
     assert baseline["summary"]["total_instruction_files"] == inventory.v1_summary_instruction_files

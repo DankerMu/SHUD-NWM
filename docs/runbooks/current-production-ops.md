@@ -226,6 +226,9 @@ URI key: runs/<run_id>/
 
 当前生产环境通过 `NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store` 启用 copyback。
 如果该同步失败，`publish` 阶段应失败，而不是只发布 tiles 后把完整 run 产物留在 22 私有 staging。
+历史已发布 q_down run 如果缺少对应 `forcing/...` 包，按
+[`forcing-copyback-backfill.md`](forcing-copyback-backfill.md) 在 node-22 先 dry-run、再显式 `--apply`
+补拷；不要通过手动修改 `hydro`/`met` 状态来绕过缺包。
 
 检查最新 run 产物：
 
