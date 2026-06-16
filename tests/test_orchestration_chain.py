@@ -21,12 +21,16 @@ from services.artifacts import ArtifactReader, ArtifactReaderConfig
 from services.orchestrator.chain import (
     M3_STAGES,
     CycleOrchestrationContext,
+    DisplayLogPublication,
     ForcingContext,
     ForecastOrchestrator,
     ModelContext,
     OrchestratorConfig,
     OrchestratorError,
     PsycopgOrchestratorRepository,
+    StageDefinition,
+    StageRunResult,
+    TerminalJobObservation,
     build_model_run_assembly,
 )
 from services.orchestrator.persistence import Base, PipelineJob, PipelineStore
@@ -6974,6 +6978,127 @@ def test_template_export_lines_quotes_grib_env_with_special_chars(monkeypatch):
     assert "$(touch pwn)" not in path_line.replace(quoted, "")
 
 
+def test_chain_stage_execution_module_imports_without_loading_chain_runtime() -> None:
+    command = (
+        "import sys; "
+        "import services.orchestrator.chain_stage_execution as module; "
+        "assert 'services.orchestrator.chain' not in sys.modules; "
+        "assert hasattr(module, 'submit_and_wait_cycle_stage')"
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_chain_stage_execution_legacy_methods_delegate(monkeypatch) -> None:
+    from services.orchestrator import chain_stage_execution
+
+    orchestrator = object.__new__(ForecastOrchestrator)
+    stage = object()
+    context = object()
+    job = {"job_id": "job-1"}
+    manifest = {"stage": "download"}
+    calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+
+    def capture(name: str, result: Any) -> Any:
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            calls.append((name, args, kwargs))
+            return result
+
+        return _fake
+
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "submit_and_wait_cycle_stage",
+        capture("submit_and_wait_cycle_stage", ("submitted", None)),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "run_local_publish_stage",
+        capture("run_local_publish_stage", "published"),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "resume_cycle_stage",
+        capture("resume_cycle_stage", ("resumed", None)),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "poll_cycle_stage_until_terminal",
+        capture("poll_cycle_stage_until_terminal", "polled"),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "record_cycle_stage_poll_timeout",
+        capture("record_cycle_stage_poll_timeout", "timed-out"),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "submit_array_stage",
+        capture("submit_array_stage", {"job_id": "array-1"}),
+    )
+    monkeypatch.setattr(
+        chain_stage_execution,
+        "slurm_submission_manifest",
+        capture("slurm_submission_manifest", {"submitted": True}),
+    )
+
+    for method_name in (
+        "_submit_and_wait_cycle_stage",
+        "_run_local_publish_stage",
+        "_resume_cycle_stage",
+        "_poll_cycle_stage_until_terminal",
+        "_record_cycle_stage_poll_timeout",
+        "_submit_array_stage",
+        "_slurm_submission_manifest",
+    ):
+        assert callable(getattr(ForecastOrchestrator, method_name))
+
+    assert orchestrator._submit_and_wait_cycle_stage(stage, context, pipeline_job_id="job-1") == ("submitted", None)
+    assert orchestrator._run_local_publish_stage(stage, context, pipeline_job_id="job-1") == "published"
+    assert orchestrator._resume_cycle_stage(stage, context, job) == ("resumed", None)
+    assert (
+        orchestrator._poll_cycle_stage_until_terminal(
+            stage=stage,
+            context=context,
+            pipeline_job_id="job-1",
+            initial_job={"job_id": "slurm-1"},
+            initial_status="running",
+            log_publication=None,
+        )
+        == "polled"
+    )
+    assert (
+        orchestrator._record_cycle_stage_poll_timeout(
+            stage=stage,
+            context=context,
+            pipeline_job_id="job-1",
+            job={"job_id": "slurm-1"},
+            current_status="running",
+            log_publication=None,
+        )
+        == "timed-out"
+    )
+    assert orchestrator._submit_array_stage(stage, context, [{"task_id": 0}], manifest) == {"job_id": "array-1"}
+    assert orchestrator._slurm_submission_manifest(manifest) == {"submitted": True}
+
+    assert [name for name, _args, _kwargs in calls] == [
+        "submit_and_wait_cycle_stage",
+        "run_local_publish_stage",
+        "resume_cycle_stage",
+        "poll_cycle_stage_until_terminal",
+        "record_cycle_stage_poll_timeout",
+        "submit_array_stage",
+        "slurm_submission_manifest",
+    ]
+    assert all(args[0] is orchestrator for _name, args, _kwargs in calls)
+
+
 # --- M24 §3A: two-phase reserve -> bind through the real chain submit path ----
 
 
@@ -7051,6 +7176,7 @@ def test_array_stage_submission_threads_idempotency_comment(tmp_path: Path) -> N
     )
 
     array_comments: dict[str, str | None] = {}
+    observed_reservations: dict[str, dict[str, Any] | None] = {}
 
     class _ArrayCommentCapturingClient(FakeCycleSlurmClient):
         def submit_job_array(
@@ -7062,7 +7188,10 @@ def test_array_stage_submission_threads_idempotency_comment(tmp_path: Path) -> N
             tasks: list[dict[str, Any]],
             manifest: dict[str, Any],
         ) -> dict[str, Any]:
-            array_comments[stage_name] = manifest.get("comment")
+            comment = manifest.get("comment")
+            array_comments[stage_name] = comment
+            key = idempotency_key_from_comment(comment)
+            observed_reservations[stage_name] = repository.query_candidate_state(key)
             return super().submit_job_array(
                 job_type,
                 cycle_id=cycle_id,
@@ -7091,6 +7220,136 @@ def test_array_stage_submission_threads_idempotency_comment(tmp_path: Path) -> N
             idempotency_key_from_comment(comment)
             == f"cycle_gfs_2026050100:{stage_name}"
         )
+        reservation = observed_reservations.get(stage_name)
+        assert reservation is not None, f"array stage {stage_name} submitted before reservation"
+        assert reservation["status"] == "reserved"
+        assert reservation["slurm_job_id"] is None
+
+        job = repository.jobs[f"job_cycle_gfs_2026050100_{stage_name}"]
+        assert job["idempotency_key"] == f"cycle_gfs_2026050100:{stage_name}"
+        assert job["slurm_job_id"] is not None
+
+
+def test_chain_stage_execution_internal_calls_preserve_legacy_override_surface(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = StoreBackedCycleRepository(_pipeline_store())
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    cycle_time = _dt("2026-05-01T00:00:00Z")
+    basins = orchestrator._normalize_cycle_basins(_basins(1), "gfs", cycle_time)
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=basins,
+        active_basins=list(basins),
+    )
+
+    manifest_calls: list[str] = []
+    array_calls: list[str] = []
+
+    def _slurm_submission_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+        manifest_calls.append(str(manifest["stage"]))
+        submission = dict(manifest)
+        submission["legacy_override_marker"] = True
+        return submission
+
+    def _submit_array_stage(
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        tasks: list[dict[str, Any]],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        array_calls.append(stage.stage)
+        return ForecastOrchestrator._submit_array_stage(orchestrator, stage, context, tasks, manifest)
+
+    monkeypatch.setattr(orchestrator, "_slurm_submission_manifest", _slurm_submission_manifest)
+    monkeypatch.setattr(orchestrator, "_submit_array_stage", _submit_array_stage)
+
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[2], context)
+
+    assert result.status == "succeeded"
+    assert aggregation is not None
+    assert array_calls == ["forcing"]
+    assert manifest_calls == ["forcing"]
+
+    poll_calls: list[str] = []
+
+    def _poll_cycle_stage_until_terminal(
+        *,
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        pipeline_job_id: str,
+        initial_job: dict[str, Any],
+        initial_status: str,
+        log_publication: DisplayLogPublication | None,
+    ) -> TerminalJobObservation:
+        poll_calls.append(str(initial_job["job_id"]))
+        terminal = dict(initial_job)
+        terminal.update(
+            {
+                "status": "succeeded",
+                "finished_at": _fmt(_dt("2026-05-01T00:02:00Z")),
+                "accounting": {"elapsed_raw": "00:01:00"},
+            }
+        )
+        return TerminalJobObservation(job=terminal)
+
+    monkeypatch.setattr(orchestrator, "_poll_cycle_stage_until_terminal", _poll_cycle_stage_until_terminal)
+
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[0], context)
+
+    assert result.status == "succeeded"
+    assert aggregation is None
+    assert poll_calls == [result.slurm_job_id]
+
+    resume_job_id = "job_cycle_gfs_2026050100_convert"
+    repository.jobs[resume_job_id] = {
+        "job_id": resume_job_id,
+        "run_id": context.run_id,
+        "cycle_id": context.cycle_id,
+        "job_type": "convert_canonical",
+        "slurm_job_id": "resume-2001",
+        "model_id": None,
+        "stage": "convert",
+        "status": "running",
+        "submitted_at": _fmt(_dt("2026-05-01T00:00:00Z")),
+    }
+
+    result, aggregation = orchestrator._resume_cycle_stage(M3_STAGES[1], context, repository.jobs[resume_job_id])
+
+    assert result.status == "succeeded"
+    assert aggregation is None
+    assert poll_calls[-1] == "resume-2001"
+
+    publish_calls: list[str] = []
+
+    def _run_local_publish_stage(
+        stage: StageDefinition,
+        context: CycleOrchestrationContext,
+        *,
+        pipeline_job_id: str,
+    ) -> StageRunResult:
+        publish_calls.append(pipeline_job_id)
+        return StageRunResult(
+            stage=stage.stage,
+            job_type=stage.job_type,
+            pipeline_job_id=pipeline_job_id,
+            slurm_job_id="local",
+            status="succeeded",
+        )
+
+    monkeypatch.setenv("NHMS_PUBLISHED_ARTIFACT_ROOT", str(tmp_path / "published"))
+    monkeypatch.setattr(orchestrator, "_run_local_publish_stage", _run_local_publish_stage)
+
+    result, aggregation = orchestrator._submit_and_wait_cycle_stage(M3_STAGES[-1], context)
+
+    assert result.status == "succeeded"
+    assert aggregation is None
+    assert publish_calls == [f"job_{context.run_id}_{M3_STAGES[-1].stage}"]
 
 
 def test_chain_stage_reservation_is_idempotent_across_resubmit(tmp_path: Path) -> None:
