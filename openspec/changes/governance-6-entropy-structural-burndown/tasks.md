@@ -2737,8 +2737,8 @@ separate PR boundaries.
   - No status, reason, error code, schema version, evidence key, stage name,
     job id, retry id, manifest URI, output URI, log URI, quality flag, or
     artifact path rename.
-- Implementation evidence (2026-06-16, branch
-  `feat/issue-473-chain-manifests`, pre-PR head pending):
+- Implementation evidence (2026-06-16, PR #521, head
+  `436cf4e3396f009b093493ae2509c5da2afff57d` plus follow-up review-fix):
   - Added `services/orchestrator/chain_manifests.py` for cycle stage manifest
     assembly, manifest index safe writes, forecast runtime manifest
     build/write/validate/staging, direct forecast/analysis run manifests,
@@ -2750,6 +2750,18 @@ separate PR boundaries.
     aliases, and the quality-state legacy helpers remain wrappers so
     monkeypatching `chain._model_run_stage_evidence` still affects frequency
     and publish quality-state construction.
+  - Round 2 correctness/verifier closure:
+    - Candidate A `CONFIRMED`: moved helper internals did not observe legacy
+      `chain.py` monkeypatches for checkpoint hours, default forcing URI,
+      station metadata, and output-river contracts.
+    - Fix: added dependency injection points in `chain_manifests.py` and made
+      legacy `chain.py` wrappers pass the current helper bindings into
+      forecast runtime/run manifest and model-run assembly builders.
+    - Fix: restored historical transitive import aliases for manifest
+      serialization and production contract helpers from `chain.py`.
+    - Regression: `test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases`
+      patches the legacy `chain.py` helper names and verifies forecast
+      run/runtime manifests and model-run assembly observe the patched helpers.
   - Left array aggregation/accounting in `chain.py`; this PR does not move
     `_apply_array_progress`, task accounting aggregation, or downstream
     reduction behavior beyond existing calls to manifest helpers.
@@ -2762,7 +2774,7 @@ separate PR boundaries.
     `services/orchestrator/chain_manifests.py` module is counted when tracked.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_manifest'`
-    -> `4 passed, 172 deselected`.
+    -> `5 passed, 172 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator_file_count'`
     -> `1 passed, 191 deselected`.
@@ -2774,7 +2786,7 @@ separate PR boundaries.
     -> `24 passed, 152 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
-    -> `176 passed in 747.39s`.
+    -> `177 passed in 747.44s`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py tests/test_entropy_audit_script.py`
     -> `All checks passed!`.

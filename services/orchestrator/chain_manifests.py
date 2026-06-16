@@ -39,6 +39,8 @@ StageEvidenceBuilder = Callable[[str, Mapping[str, Any]], dict[str, Any]]
 QualityStateBuilder = Callable[[Mapping[str, Any]], dict[str, Any]]
 ResidualBlockerBuilder = Callable[[Sequence[Mapping[str, Any]]], list[dict[str, Any]]]
 AssemblyPayloadBuilder = Callable[[Mapping[str, Any]], dict[str, Any]]
+DefaultForcingUriBuilder = Callable[[str, str, str, str, LocalObjectStore], str]
+DirectoryPreserver = Callable[[str | None, LocalObjectStore, str], str]
 
 
 class ChainManifestOrchestrator(Protocol):
@@ -256,8 +258,10 @@ def build_forecast_runtime_manifest(
     basin: Mapping[str, Any],
     *,
     assembly_builder: AssemblyBuilder | None = None,
+    forecast_state_checkpoint_hours: Callable[[Any], list[int]] | None = None,
 ) -> dict[str, Any]:
     assembly_builder = assembly_builder or build_model_run_assembly
+    forecast_state_checkpoint_hours = forecast_state_checkpoint_hours or _forecast_state_checkpoint_hours
     assembly = assembly_builder(
         basin,
         source_id=context.source_id,
@@ -311,7 +315,7 @@ def build_forecast_runtime_manifest(
         "residual_blockers": [dict(item) for item in assembly.residual_blockers],
     }
     manifest["runtime"]["init_mode"] = 3 if basin.get("init_state_id") or basin.get("init_state_uri") else 1
-    checkpoint_hours = _forecast_state_checkpoint_hours(manifest["forecast_horizon_hours"])
+    checkpoint_hours = forecast_state_checkpoint_hours(manifest["forecast_horizon_hours"])
     if checkpoint_hours:
         manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours
         manifest["runtime"]["update_ic_step_minutes"] = min(checkpoint_hours) * 60
@@ -411,7 +415,12 @@ def reindexed_manifest_entries(
     return entries
 
 
-def build_forecast_run_manifest(context: ForecastRunContext) -> dict[str, Any]:
+def build_forecast_run_manifest(
+    context: ForecastRunContext,
+    *,
+    forecast_state_checkpoint_hours: Callable[[Any], list[int]] | None = None,
+) -> dict[str, Any]:
+    forecast_state_checkpoint_hours = forecast_state_checkpoint_hours or _forecast_state_checkpoint_hours
     manifest = {
         "run_id": context.run_id,
         "run_type": "forecast",
@@ -456,7 +465,7 @@ def build_forecast_run_manifest(context: ForecastRunContext) -> dict[str, Any]:
             "gis_segment_count": context.segment_count,
         },
     }
-    checkpoint_hours = _forecast_state_checkpoint_hours(context.forecast_horizon_hours)
+    checkpoint_hours = forecast_state_checkpoint_hours(context.forecast_horizon_hours)
     if checkpoint_hours:
         manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours
         manifest["runtime"]["update_ic_step_minutes"] = min(checkpoint_hours) * 60
@@ -601,8 +610,26 @@ def build_model_run_assembly(
     workspace_root: Path,
     object_store: LocalObjectStore,
     default_forecast_horizon_hours: int,
+    default_forcing_uri: DefaultForcingUriBuilder | None = None,
+    preserve_directory_uri: DirectoryPreserver | None = None,
+    station_metadata_for_basin: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    output_river_contract: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    frequency_contract: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
+    display_contract: Callable[..., dict[str, Any]] | None = None,
+    assembly_quality_states: Callable[..., tuple[dict[str, Any], list[dict[str, Any]]]] | None = None,
+    project_name_for_basin: Callable[..., str] | None = None,
+    model_package_manifest_uri: Callable[[Mapping[str, Any], str], str] | None = None,
 ) -> ModelRunAssembly:
     del workspace_root
+    default_forcing_uri = default_forcing_uri or _default_forcing_uri
+    preserve_directory_uri = preserve_directory_uri or _preserve_directory_uri
+    station_metadata_for_basin = station_metadata_for_basin or _station_metadata_for_basin
+    output_river_contract = output_river_contract or _output_river_contract
+    frequency_contract = frequency_contract or _frequency_contract
+    display_contract = display_contract or _display_contract
+    assembly_quality_states = assembly_quality_states or _assembly_quality_states
+    project_name_for_basin = project_name_for_basin or _project_name_for_basin
+    model_package_manifest_uri = model_package_manifest_uri or _model_package_manifest_uri
     source_id = normalize_source_id(source_id)
     cycle_time = _ensure_utc(cycle_time)
     compact_cycle = format_cycle_time(cycle_time)
@@ -624,9 +651,9 @@ def build_model_run_assembly(
     forcing_uri = str(
         basin.get("forcing_package_uri")
         or basin.get("forcing_uri")
-        or _default_forcing_uri(source_id, compact_cycle, basin_version_id, model_id, object_store)
+        or default_forcing_uri(source_id, compact_cycle, basin_version_id, model_id, object_store)
     )
-    output_uri = _preserve_directory_uri(
+    output_uri = preserve_directory_uri(
         str(basin.get("output_uri")) if basin.get("output_uri") not in (None, "") else None,
         object_store,
         f"runs/{run_id}/output/",
@@ -634,17 +661,17 @@ def build_model_run_assembly(
     run_manifest_uri = str(
         basin.get("run_manifest_uri") or object_store.uri_for_key(f"runs/{run_id}/input/manifest.json")
     )
-    log_uri = _preserve_directory_uri(
+    log_uri = preserve_directory_uri(
         str(basin.get("log_uri")) if basin.get("log_uri") not in (None, "") else None,
         object_store,
         f"runs/{run_id}/logs/",
     )
     candidate_id = str(basin.get("candidate_id") or f"{source_id}:{_format_time(cycle_time)}:{model_id}:{scenario_id}")
-    station_metadata = _station_metadata_for_basin(basin)
-    output_river = _output_river_contract(basin)
-    frequency = _frequency_contract(basin)
-    display = _display_contract(basin, output_uri=output_uri)
-    quality_states, blockers = _assembly_quality_states(
+    station_metadata = station_metadata_for_basin(basin)
+    output_river = output_river_contract(basin)
+    frequency = frequency_contract(basin)
+    display = display_contract(basin, output_uri=output_uri)
+    quality_states, blockers = assembly_quality_states(
         basin,
         station_metadata=station_metadata,
         output_river=output_river,
@@ -693,7 +720,7 @@ def build_model_run_assembly(
         "basin_version_id": basin_version_id,
         "river_network_version_id": river_network_version_id,
         "model_package_uri": model_package_uri,
-        "model_package_manifest_uri": _model_package_manifest_uri(basin, model_package_uri),
+        "model_package_manifest_uri": model_package_manifest_uri(basin, model_package_uri),
         "model_package_checksum": basin.get("model_package_checksum") or basin.get("package_checksum"),
         "segment_count": int(output_river.get("segment_count") or 0),
         "forecast_horizon_hours": forecast_horizon_hours,

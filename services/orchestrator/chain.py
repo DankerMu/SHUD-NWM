@@ -83,6 +83,9 @@ ANALYSIS_SCENARIO_ID = chain_manifests.ANALYSIS_SCENARIO_ID
 DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES = chain_manifests.DEFAULT_ERA5_REANALYSIS_LATENCY_MINUTES
 FORCING_CAUSALITY_CAUSAL = chain_manifests.FORCING_CAUSALITY_CAUSAL
 FORCING_CAUSALITY_DELAYED_REANALYSIS = chain_manifests.FORCING_CAUSALITY_DELAYED_REANALYSIS
+ManifestValidationError = chain_manifests.ManifestValidationError
+PRODUCTION_CONTRACT_ID = chain_manifests.PRODUCTION_CONTRACT_ID
+PRODUCTION_CONTRACT_SCHEMA_VERSION = chain_manifests.PRODUCTION_CONTRACT_SCHEMA_VERSION
 _analysis_forcing_causality = chain_manifests._analysis_forcing_causality
 _analysis_update_ic_step_minutes = chain_manifests._analysis_update_ic_step_minutes
 _assembly_from_entry = chain_manifests._assembly_from_entry
@@ -107,8 +110,41 @@ _safe_project_name = chain_manifests._safe_project_name
 _station_metadata_for_basin = chain_manifests._station_metadata_for_basin
 _tri_state = chain_manifests._tri_state
 ModelRunAssembly = chain_manifests.ModelRunAssembly
-build_model_run_assembly = chain_manifests.build_model_run_assembly
 build_reindexed_manifest = chain_manifests.build_reindexed_manifest
+production_stage_for = chain_manifests.production_stage_for
+serialize_manifest_index = chain_manifests.serialize_manifest_index
+
+
+def build_model_run_assembly(
+    basin: Mapping[str, Any],
+    *,
+    source_id: str,
+    cycle_id: str,
+    cycle_time: datetime,
+    scenario_id: str,
+    workspace_root: Path,
+    object_store: LocalObjectStore,
+    default_forecast_horizon_hours: int,
+) -> ModelRunAssembly:
+    return chain_manifests.build_model_run_assembly(
+        basin,
+        source_id=source_id,
+        cycle_id=cycle_id,
+        cycle_time=cycle_time,
+        scenario_id=scenario_id,
+        workspace_root=workspace_root,
+        object_store=object_store,
+        default_forecast_horizon_hours=default_forecast_horizon_hours,
+        default_forcing_uri=_default_forcing_uri,
+        preserve_directory_uri=_preserve_directory_uri,
+        station_metadata_for_basin=_station_metadata_for_basin,
+        output_river_contract=_output_river_contract,
+        frequency_contract=_frequency_contract,
+        display_contract=_display_contract,
+        assembly_quality_states=_assembly_quality_states,
+        project_name_for_basin=_project_name_for_basin,
+        model_package_manifest_uri=_model_package_manifest_uri,
+    )
 
 
 def _frequency_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
@@ -1979,6 +2015,7 @@ class ForecastOrchestrator:
             context,
             basin,
             assembly_builder=build_model_run_assembly,
+            forecast_state_checkpoint_hours=_forecast_state_checkpoint_hours,
         )
 
     def _validate_forecast_runtime_manifest(
@@ -3288,7 +3325,10 @@ class ForecastOrchestrator:
         return scenario_for_source(source_id)
 
     def _build_run_manifest(self, context: ForecastRunContext) -> dict[str, Any]:
-        return chain_manifests.build_forecast_run_manifest(context)
+        return chain_manifests.build_forecast_run_manifest(
+            context,
+            forecast_state_checkpoint_hours=_forecast_state_checkpoint_hours,
+        )
 
     def _state_passes_qc(self, state: StateSnapshot) -> bool:
         """Selection-time QC gate for a warm-start candidate.

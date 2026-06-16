@@ -26,6 +26,7 @@ from services.orchestrator.chain import (
     DisplayLogPublication,
     ForcingContext,
     ForecastOrchestrator,
+    ForecastRunContext,
     ModelContext,
     OrchestratorConfig,
     OrchestratorError,
@@ -7218,11 +7219,16 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
         "_safe_project_name",
         "_station_metadata_for_basin",
         "_tri_state",
-        "build_model_run_assembly",
         "build_reindexed_manifest",
+        "ManifestValidationError",
+        "PRODUCTION_CONTRACT_ID",
+        "PRODUCTION_CONTRACT_SCHEMA_VERSION",
+        "production_stage_for",
+        "serialize_manifest_index",
     )
     for helper_name in legacy_top_level_helpers:
         assert getattr(chain_runtime, helper_name) is getattr(chain_manifests, helper_name)
+    assert chain_runtime.build_model_run_assembly is not chain_manifests.build_model_run_assembly
     assert chain_runtime._frequency_quality_state is not chain_manifests._frequency_quality_state
     assert chain_runtime._publish_quality_state is not chain_manifests._publish_quality_state
 
@@ -7289,7 +7295,8 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     }
     assert call_by_name["build_forecast_runtime_manifest"][0][1:] == (cycle_context, basin)
     assert call_by_name["build_forecast_runtime_manifest"][1] == {
-        "assembly_builder": chain_runtime.build_model_run_assembly
+        "assembly_builder": chain_runtime.build_model_run_assembly,
+        "forecast_state_checkpoint_hours": chain_runtime._forecast_state_checkpoint_hours,
     }
     assert call_by_name["validate_forecast_runtime_manifest"][0][1:] == (
         manifest_path,
@@ -7302,6 +7309,9 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
         "assembly_builder": chain_runtime.build_model_run_assembly,
     }
     assert call_by_name["build_forecast_run_manifest"][0] == (run_context,)
+    assert call_by_name["build_forecast_run_manifest"][1] == {
+        "forecast_state_checkpoint_hours": chain_runtime._forecast_state_checkpoint_hours,
+    }
     assert call_by_name["build_analysis_run_manifest"][0] == (analysis_context,)
     assert call_by_name["write_run_manifest"][0][1:] == (run_context, manifest)
 
@@ -7375,6 +7385,125 @@ def test_chain_manifest_quality_state_legacy_helpers_use_monkeypatched_stage_evi
         ("frequency", entry, "cycle-1"),
         ("publish", entry, "cycle-1"),
     ]
+
+
+def test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from services.orchestrator import chain as chain_runtime
+
+    object_store = LocalObjectStore(tmp_path / "object-store", "s3://nhms")
+    cycle_time = datetime(2024, 1, 1, tzinfo=UTC)
+    basin = {
+        "run_id": "run-1",
+        "model_id": "model-1",
+        "basin_id": "basin-1",
+        "basin_version_id": "basin-v1",
+        "river_network_version_id": "river-v1",
+    }
+
+    monkeypatch.setattr(chain_runtime, "_forecast_state_checkpoint_hours", lambda _horizon: [77])
+    monkeypatch.setattr(
+        chain_runtime,
+        "_default_forcing_uri",
+        lambda source_id, compact_cycle, basin_version_id, model_id, store: (
+            f"patched://forcing/{source_id}/{compact_cycle}/{basin_version_id}/{model_id}/"
+        ),
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_station_metadata_for_basin",
+        lambda _basin: {
+            "schema_version": "patched.station.v1",
+            "state": "ready",
+            "station_count": 2,
+            "station_ids": ["s1", "s2"],
+            "source": "patched",
+            "quality_flag": "patched_station_ok",
+            "shud_station": "patched_station.txt",
+        },
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_output_river_contract",
+        lambda _basin: {
+            "state": "ready",
+            "river_network_version_id": "patched-river",
+            "segment_count": 5,
+            "output_segment_count": 5,
+            "gis_segment_count": 9,
+            "river_segment_ids": ["r1"],
+            "identity_source": "patched",
+            "quality_flag": "patched_output_ok",
+        },
+    )
+
+    assembly = chain_runtime.build_model_run_assembly(
+        basin,
+        source_id="gfs",
+        cycle_id="gfs-2024010100",
+        cycle_time=cycle_time,
+        scenario_id="forecast_gfs_deterministic",
+        workspace_root=tmp_path / "workspace",
+        object_store=object_store,
+        default_forecast_horizon_hours=168,
+    )
+    assert assembly.forcing["forcing_uri"] == "patched://forcing/gfs/2024010100/basin-v1/model-1/"
+    assert assembly.forcing["station_metadata"]["station_count"] == 2
+    assert assembly.runtime["output_river"]["river_network_version_id"] == "patched-river"
+    assert assembly.outputs["output_segment_count"] == 5
+    assert assembly.identity["segment_count"] == 5
+
+    run_context = ForecastRunContext(
+        run_id="run-1",
+        source_id="gfs",
+        scenario_id="forecast_gfs_deterministic",
+        cycle_id="gfs-2024010100",
+        cycle_time=cycle_time,
+        model_id="model-1",
+        basin_id="basin-1",
+        basin_version_id="basin-v1",
+        river_network_version_id="river-v1",
+        segment_count=9,
+        model_package_uri="s3://models/model-1/",
+        forcing_version_id="forcing-v1",
+        forcing_package_uri="s3://forcing/gfs/",
+        start_time=cycle_time,
+        end_time=cycle_time + timedelta(hours=168),
+        forecast_horizon_hours=168,
+        run_manifest_uri="s3://runs/run-1/input/manifest.json",
+        output_uri="s3://runs/run-1/output/",
+        log_uri="s3://runs/run-1/logs/",
+    )
+    forecast_orchestrator = object.__new__(ForecastOrchestrator)
+    run_manifest = forecast_orchestrator._build_run_manifest(run_context)
+    assert run_manifest["runtime"]["state_checkpoint_hours"] == [77]
+    assert run_manifest["runtime"]["update_ic_step_minutes"] == 77 * 60
+
+    cycle_context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=cycle_time,
+        cycle_id="gfs-2024010100",
+        run_id="cycle-run-1",
+        all_basins=[dict(basin)],
+        active_basins=[dict(basin)],
+    )
+    config = OrchestratorConfig(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=tmp_path / "object-store",
+        object_store_prefix="s3://nhms",
+    )
+    forecast_orchestrator.config = config
+    forecast_orchestrator.object_store = object_store
+    runtime_manifest = forecast_orchestrator._build_forecast_runtime_manifest(
+        cycle_context,
+        dict(basin),
+    )
+    assert runtime_manifest["runtime"]["state_checkpoint_hours"] == [77]
+    assert runtime_manifest["forcing"]["forcing_uri"] == "patched://forcing/gfs/2024010100/basin-v1/model-1/"
+    assert runtime_manifest["forcing"]["station_count"] == 2
+    assert runtime_manifest["runtime"]["output_river"]["segment_count"] == 5
 
 
 def test_chain_manifest_build_analysis_run_manifest_direct_export() -> None:
