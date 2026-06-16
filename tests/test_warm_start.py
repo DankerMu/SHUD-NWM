@@ -19,7 +19,12 @@ from packages.common.state_lineage import (
     WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE,
 )
 from packages.common.state_manager import StateSnapshot
-from services.orchestrator.chain import ForecastOrchestrator, OrchestratorConfig, OrchestratorError
+from services.orchestrator.chain import (
+    ForecastOrchestrator,
+    ModelContext,
+    OrchestratorConfig,
+    OrchestratorError,
+)
 from tests.test_orchestrator import FakeOrchestratorRepository, FakeSlurmClient
 from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig
 
@@ -398,10 +403,7 @@ def test_strict_forecast_missing_exact_blocks_before_side_effects(tmp_path: Path
 
     assert exc_info.value.error_code == WARM_START_SUCCESSOR_CHECKPOINT_MISSING
     assert state_manager.latest_usable_calls == 0
-    assert repository.created_runs == []
-    assert repository.hydro_statuses == []
-    assert not (tmp_path / "workspace" / "runs").exists()
-    assert orchestrator.slurm_client.submissions == []
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
 
 
 def test_strict_forecast_without_state_manager_blocks_before_side_effects(tmp_path: Path) -> None:
@@ -412,10 +414,7 @@ def test_strict_forecast_without_state_manager_blocks_before_side_effects(tmp_pa
         orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
     assert exc_info.value.error_code == WARM_START_SUCCESSOR_CHECKPOINT_MISSING
-    assert repository.created_runs == []
-    assert repository.hydro_statuses == []
-    assert not (tmp_path / "workspace" / "runs").exists()
-    assert orchestrator.slurm_client.submissions == []
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
 
 
 def test_strict_forecast_unusable_exact_state_blocks(tmp_path: Path) -> None:
@@ -436,8 +435,7 @@ def test_strict_forecast_unusable_exact_state_blocks(tmp_path: Path) -> None:
         orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
     assert exc_info.value.error_code == WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE
-    assert repository.created_runs == []
-    assert orchestrator.slurm_client.submissions == []
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
 
 
 def test_strict_forecast_qc_failure_blocks(tmp_path: Path) -> None:
@@ -456,8 +454,7 @@ def test_strict_forecast_qc_failure_blocks(tmp_path: Path) -> None:
         orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
     assert exc_info.value.error_code == WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE
-    assert repository.created_runs == []
-    assert orchestrator.slurm_client.submissions == []
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
 
 
 def test_strict_forecast_lineage_mismatch_blocks(tmp_path: Path) -> None:
@@ -475,8 +472,25 @@ def test_strict_forecast_lineage_mismatch_blocks(tmp_path: Path) -> None:
         orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
     assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
-    assert repository.created_runs == []
-    assert orchestrator.slurm_client.submissions == []
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
+
+
+def test_strict_forecast_package_version_mismatch_blocks_before_side_effects(tmp_path: Path) -> None:
+    state = _state(
+        "state_demo_model_2026050100",
+        "2026-05-01T00:00:00Z",
+        source_id="GFS",
+        model_package_version="models/demo_model/old-package/",
+        lead_hours=12,
+    )
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([state]), require_forecast_warm_start=True)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
 
 
 def test_strict_forecast_package_checksum_mismatch_blocks(tmp_path: Path) -> None:
@@ -496,8 +510,26 @@ def test_strict_forecast_package_checksum_mismatch_blocks(tmp_path: Path) -> Non
         orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
     assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
-    assert repository.created_runs == []
-    assert orchestrator.slurm_client.submissions == []
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
+
+
+def test_strict_forecast_missing_target_checksum_blocks_when_state_has_checksum(tmp_path: Path) -> None:
+    state = _state(
+        "state_demo_model_2026050100",
+        "2026-05-01T00:00:00Z",
+        source_id="GFS",
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="package-sha",
+        lead_hours=12,
+    )
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([state]), require_forecast_warm_start=True)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
 
 
 def test_strict_forecast_wrong_lead_blocks(tmp_path: Path) -> None:
@@ -515,7 +547,76 @@ def test_strict_forecast_wrong_lead_blocks(tmp_path: Path) -> None:
         orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
 
     assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
+
+
+def test_model_context_checksum_mismatch_blocks_under_strict_mode(tmp_path: Path) -> None:
+    state = _state(
+        "state_demo_model_2026050112",
+        "2026-05-01T12:00:00Z",
+        source_id="gfs",
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="old-package-sha",
+        lead_hours=12,
+    )
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([state]), require_forecast_warm_start=True)
+    model = ModelContext(
+        model_id="demo_model",
+        basin_id="yangtze",
+        basin_version_id="basin_v1",
+        river_network_version_id="rivnet_v1",
+        segment_count=2,
+        model_package_uri="models/demo_model/package/",
+        model_package_checksum="package-sha",
+    )
+    basins = orchestrator._normalize_cycle_basins([model], "gfs", _dt("2026-05-01T12:00:00Z"))
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator._apply_cohort_warm_start(basins, "gfs", _dt("2026-05-01T12:00:00Z"))
+
+    assert basins[0]["model_package_checksum"] == "package-sha"
+    assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+
+
+def test_normalize_raw_package_checksum_alias_feeds_strict_validation(tmp_path: Path) -> None:
+    state = _state(
+        "state_demo_model_2026050112",
+        "2026-05-01T12:00:00Z",
+        source_id="GFS",
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="old-package-sha",
+        lead_hours=12,
+    )
+    repository = FakeOrchestratorRepository()
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([state]), require_forecast_warm_start=True)
+    basin = {
+        "model_id": "demo_model",
+        "basin_id": "yangtze",
+        "basin_version_id": "basin_v1",
+        "river_network_version_id": "rivnet_v1",
+        "segment_count": 2,
+        "model_package_uri": "models/demo_model/package/",
+        "package_checksum": "package-sha",
+        "source_id": "gfs",
+    }
+    basins = orchestrator._normalize_cycle_basins([basin], "gfs", _dt("2026-05-01T12:00:00Z"))
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator._apply_cohort_warm_start(basins, "gfs", _dt("2026-05-01T12:00:00Z"))
+
+    assert basins[0]["model_package_checksum"] == "package-sha"
+    assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+
+
+def _assert_no_forecast_mutation(
+    tmp_path: Path,
+    repository: FakeOrchestratorRepository,
+    orchestrator: ForecastOrchestrator,
+) -> None:
     assert repository.created_runs == []
+    assert repository.hydro_statuses == []
+    assert not (tmp_path / "workspace" / "runs").exists()
     assert orchestrator.slurm_client.submissions == []
 
 

@@ -6183,6 +6183,7 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms/default")
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setenv("FORECAST_SOURCE_ID", "IFS")
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
     monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
     monkeypatch.setattr(scheduler_module.StateManager, "from_env", staticmethod(lambda: "state-manager-from-env"))
@@ -6219,6 +6220,7 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     assert constructed[0]["config"].source_id == "gfs"
     assert constructed[0]["config"].workspace_root == roots["workspace_root"].resolve()
     assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
+    assert constructed[0]["config"].require_forecast_warm_start is True
     assert constructed[0]["config"].slurm_job_type_templates == dict(DEFAULT_JOB_TYPE_TEMPLATES)
     assert constructed[0]["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
     assert calls[0]["source"] == "gfs"

@@ -361,9 +361,11 @@ def _validate_strict_state_lineage(
     if model_package_version is not None:
         if state.model_package_version is None or state.model_package_version != model_package_version:
             return LINEAGE_PACKAGE_VERSION_MISMATCH
-    if model_package_checksum is not None:
-        if state.model_package_checksum is None or state.model_package_checksum != model_package_checksum:
+    if state.model_package_checksum is not None:
+        if model_package_checksum is None or state.model_package_checksum != model_package_checksum:
             return LINEAGE_PACKAGE_VERSION_MISMATCH
+    elif model_package_checksum is not None:
+        return LINEAGE_PACKAGE_VERSION_MISMATCH
 
     return None
 
@@ -1944,9 +1946,12 @@ class ForecastOrchestrator:
                     "segment_count": basin.segment_count,
                     "output_segment_count": basin.output_segment_count,
                     "model_package_uri": basin.model_package_uri,
+                    "model_package_checksum": basin.model_package_checksum,
                 }
             else:
                 entry = dict(basin)
+            if entry.get("model_package_checksum") in (None, "") and entry.get("package_checksum") not in (None, ""):
+                entry["model_package_checksum"] = entry["package_checksum"]
             provided_identity_fields = {
                 field_name
                 for field_name in (
@@ -2044,15 +2049,16 @@ class ForecastOrchestrator:
                 )
             return
         for basin in basins:
-            if self.config.require_forecast_warm_start and _basin_has_prefilled_initial_state(basin):
-                selection = self._validate_prefilled_forecast_initial_state(
-                    basin,
-                    source_id=str(basin.get("source_id") or source_id),
-                    cycle_time=cycle_time,
-                    model_package_version=basin.get("model_package_uri"),
-                    model_package_checksum=basin.get("model_package_checksum"),
-                )
-                _apply_initial_state_selection_to_basin(basin, selection)
+            if _basin_has_prefilled_initial_state(basin):
+                if self.config.require_forecast_warm_start:
+                    selection = self._validate_prefilled_forecast_initial_state(
+                        basin,
+                        source_id=str(basin.get("source_id") or source_id),
+                        cycle_time=cycle_time,
+                        model_package_version=basin.get("model_package_uri"),
+                        model_package_checksum=basin.get("model_package_checksum"),
+                    )
+                    _apply_initial_state_selection_to_basin(basin, selection)
                 continue
             model_id = str(basin.get("model_id") or "")
             if not model_id:
@@ -3424,8 +3430,32 @@ class ForecastOrchestrator:
         basin: Mapping[str, Any],
         selection: InitialStateSelection,
     ) -> None:
-        valid_time = _parse_gateway_time(basin.get("init_state_valid_time"))
-        lineage = _coerce_mapping(basin.get("init_state_lineage") or {})
+        raw_valid_time = basin.get("init_state_valid_time")
+        try:
+            valid_time = _parse_gateway_time(raw_valid_time)
+        except (TypeError, ValueError) as exc:
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Scheduler-prefilled warm-start valid_time is malformed.",
+                {"field": "init_state_valid_time", "observed": raw_valid_time},
+            ) from exc
+        if raw_valid_time not in (None, "") and valid_time is None:
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Scheduler-prefilled warm-start valid_time is malformed.",
+                {"field": "init_state_valid_time", "observed": raw_valid_time},
+            )
+        raw_lineage = basin.get("init_state_lineage")
+        if raw_lineage in (None, ""):
+            lineage: dict[str, Any] = {}
+        elif isinstance(raw_lineage, Mapping):
+            lineage = dict(raw_lineage)
+        else:
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Scheduler-prefilled warm-start lineage is malformed.",
+                {"field": "init_state_lineage", "observed_type": type(raw_lineage).__name__},
+            )
         checks = (
             ("init_state_id", selection.state_id),
             ("init_state_uri", selection.state_uri),
@@ -3453,7 +3483,16 @@ class ForecastOrchestrator:
         )
         observed_source_id = lineage.get("source_id")
         if observed_source_id not in (None, "") and selection.source_id not in (None, ""):
-            if normalize_source_id(str(observed_source_id)) != normalize_source_id(selection.source_id):
+            try:
+                observed_normalized_source = normalize_source_id(str(observed_source_id))
+                expected_normalized_source = normalize_source_id(selection.source_id)
+            except ValueError as exc:
+                raise OrchestratorError(
+                    WARM_START_LINEAGE_MISMATCH,
+                    "Scheduler-prefilled warm-start lineage source_id is malformed.",
+                    {"field": "source_id", "observed": observed_source_id, "expected": selection.source_id},
+                ) from exc
+            if observed_normalized_source != expected_normalized_source:
                 raise OrchestratorError(
                     WARM_START_LINEAGE_MISMATCH,
                     "Scheduler-prefilled warm-start lineage does not match the strict successor checkpoint.",
@@ -3467,7 +3506,25 @@ class ForecastOrchestrator:
                     "Scheduler-prefilled warm-start lineage does not match the strict successor checkpoint.",
                     {"field": key, "observed": observed, "expected": expected},
                 )
-        lead_hours = _optional_int(lineage.get("lead_hours"))
+        raw_lead_hours = lineage.get("lead_hours")
+        if raw_lead_hours in (None, ""):
+            lead_hours = None
+        elif isinstance(raw_lead_hours, bool):
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Scheduler-prefilled warm-start lead_hours is malformed.",
+                {"field": "lead_hours", "observed": raw_lead_hours},
+            )
+        elif isinstance(raw_lead_hours, int):
+            lead_hours = raw_lead_hours
+        elif isinstance(raw_lead_hours, str) and raw_lead_hours.strip().lstrip("+-").isdigit():
+            lead_hours = int(raw_lead_hours)
+        else:
+            raise OrchestratorError(
+                WARM_START_LINEAGE_MISMATCH,
+                "Scheduler-prefilled warm-start lead_hours is malformed.",
+                {"field": "lead_hours", "observed": raw_lead_hours},
+            )
         if lead_hours is not None and selection.lead_hours is not None and lead_hours != selection.lead_hours:
             raise OrchestratorError(
                 WARM_START_LINEAGE_MISMATCH,

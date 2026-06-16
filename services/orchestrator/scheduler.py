@@ -2131,6 +2131,7 @@ class ProductionScheduler:
                 era5_area=config.era5_area,
                 state_soft_stale_threshold_days=config.state_soft_stale_threshold_days,
                 state_hard_stale_threshold_days=config.state_hard_stale_threshold_days,
+                require_forecast_warm_start=config.require_forecast_warm_start,
                 slurm_job_type_templates=dict(self.config.slurm_job_type_templates or {}),
                 slurm_env=dict(self.config.slurm_env),
             )
@@ -2149,6 +2150,7 @@ class ProductionScheduler:
                 era5_area=config.era5_area,
                 state_soft_stale_threshold_days=config.state_soft_stale_threshold_days,
                 state_hard_stale_threshold_days=config.state_hard_stale_threshold_days,
+                require_forecast_warm_start=config.require_forecast_warm_start,
                 slurm_job_type_templates=config.slurm_job_type_templates,
                 slurm_env=config.slurm_env,
             )
