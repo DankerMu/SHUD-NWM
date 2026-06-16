@@ -2563,6 +2563,180 @@ separate PR boundaries.
 - Acceptance: manifest schema versions, identity fields, quality states,
   residual blockers, safe-write behavior, and publish-stage evidence remain
   stable.
+- Fixture level: expanded/high.
+- Risk packs considered (core):
+  - Public API / CLI / script entry: selected - private `chain.py` manifest
+    helpers are used by tests and may be monkeypatched by downstream
+    orchestration consumers during migration.
+  - Config / project setup: selected - manifest helpers read workspace root,
+    object-store root/prefix, published artifact env vars, scenario defaults,
+    and forecast horizon defaults; extraction must keep lookup timing and
+    values stable.
+  - File IO / path safety / overwrite: selected - runtime manifests and cycle
+    manifest indexes use object-store atomic writes and safe workspace writes;
+    symlink/path-escape protections must not regress.
+  - Schema / columns / units / field names: selected - runtime manifest,
+    manifest index, model-run assembly, quality state, residual blocker, and
+    publish metadata field names are downstream contracts.
+  - Auth / permissions / secrets: not selected - no auth boundary or credential
+    handling changes are expected.
+  - Concurrency / shared state / ordering: selected - forecast runtime
+    manifests are staged before hydro-run creation, and failed staging must not
+    leave successful rows advertised as usable.
+  - Resource limits / large input / discovery: selected - manifest index count
+    and byte limits must still reject before Slurm submission.
+  - Legacy compatibility / examples: selected - old `ForecastOrchestrator`
+    helper methods and top-level helper imports remain usable until callers
+    migrate.
+  - Error handling / rollback / partial outputs: selected - object-store write
+    failures, unsafe workspace writes, invalid/missing/unreadable runtime
+    manifests, and downstream publish blocking must preserve error codes and
+    rollback evidence.
+  - Release / packaging / dependency compatibility: not selected - no package
+    metadata/dependency update.
+  - Documentation / migration notes: selected - OpenSpec and PR evidence must
+    clearly state that array accounting remains G6-18 and stage execution
+    remains G6-16.
+- Domain risk packs:
+  - Run manifest / QC provenance: selected - this issue owns model-run
+    assembly, runtime manifest fields, quality states, and residual blockers.
+  - Published NHMS artifacts / display identity: selected - publish-stage
+    evidence and display quality states must remain tied to the producing run.
+  - Slurm production lifecycle / mock-vs-real parity: selected - manifest
+    indexes and submission manifests feed array/non-array Slurm submissions.
+  - SHUD numerical runtime / conservation / NaN: selected only for manifest
+    metadata propagation - runtime command style, output cadence, init mode,
+    warm-start checkpoint hours, and output-river identity must remain stable.
+  - Hydro-met time series / forcing windows: selected - cycle/start/end time
+    and forecast horizon fields in manifests must not drift.
+  - Geospatial / CRS / basin geometry: selected - basin, river network, segment
+    count, output-river identity, and display metadata are published evidence.
+  - PostGIS / TimescaleDB domain behavior: selected only for repository
+    hydro-run creation/status side effects; no schema/query behavior change.
+  - External hydro-met providers / snapshot reproducibility: not selected - no
+    provider discovery or snapshot fetch behavior changes.
+- Boundary-surface checklist:
+  - Shared helper roots: `chain.py` manifest helpers and new
+    `chain_manifests.py`.
+  - Public entrypoints: `ForecastOrchestrator._build_cycle_stage_manifest`,
+    `_write_cycle_manifest_index`, `_prepare_forecast_runtime_manifests`,
+    `_build_forecast_runtime_manifest`, `_validate_forecast_runtime_manifest`,
+    `_reindexed_manifest_entries`, direct forecast/analysis
+    `_build_run_manifest`/`_write_run_manifest`, top-level
+    `build_reindexed_manifest`, `build_model_run_assembly`, and model-run
+    evidence helpers.
+  - Read surfaces: `CycleOrchestrationContext`, basin candidate dictionaries,
+    workspace/object-store config, published artifact env vars, object-store
+    manifest contents, safe workspace manifest contents.
+  - Write/delete/overwrite surfaces: object-store runtime manifest writes,
+    safe workspace runtime manifest writes, safe cycle manifest index writes,
+    hydro-run creation, staged hydro-run failure marking; no delete behavior
+    moves.
+  - Staging/publish/rollback surfaces: staged runtime manifests before
+    repository writes, manifest validation before forecast Slurm submission,
+    publish manifest metadata for quality states/excluded basins/residual
+    blockers.
+  - Producer/consumer evidence boundaries: runtime manifest `identity`,
+    `forcing`, `runtime`, `outputs`, `frequency`, `display`,
+    `quality_states`, `residual_blockers`; cycle stage manifest
+    `manifest_index`, `model_runs`, `identity_contract`, publish `metadata`,
+    `basins`, and `quality_states`.
+  - Stale-state/idempotency boundaries: warm-start init fields, checkpoint
+    hours, deterministic run/output/log manifest URIs, sibling duplicate
+    identity rejection before side effects.
+  - Unchanged downstream consumers: `chain_stage_execution.py`, array
+    accounting/application of partial progress, scheduler, retry/reconcile,
+    Slurm gateway, tile publisher, DB schema, frontend, docs/runbooks, and
+    `.entropy-baseline`.
+- Invariant Matrix:
+  - Governing invariant: each model run and cycle stage manifest remains a
+    stable producer-provenance contract; extraction must not rename fields,
+    fabricate ready quality, loosen safe writes, or expose downstream publish
+    evidence before validated manifests exist.
+  - Source-of-truth identity/contract: `PRODUCTION_CONTRACT_SCHEMA_VERSION`,
+    `PRODUCTION_CONTRACT_ID`, `candidate_id`, `run_id`, `hydro_run_id`,
+    `published_manifest_id`, `canonical_product_id`, `forcing_version_id`,
+    `source_id`, `cycle_id`, `cycle_time`, `scenario_id`, `model_id`,
+    `basin_id`, `basin_version_id`, `river_network_version_id`, model package
+    URI/manifest/checksum, output/log/run-manifest URIs, forecast horizon,
+    start/end time, station/output-river/frequency/display quality states, and
+    residual blockers.
+  - Producers: `ForecastOrchestrator` manifest methods and extracted
+    `chain_manifests.py` helpers.
+  - Validators/preflight: manifest index serialization limits, safe workspace
+    write/read helpers, runtime manifest required-field validation, run_id
+    persisted/expected comparison, candidate identity/duplicate validation
+    before manifest writes.
+  - Storage/cache/query: object-store runtime manifests, workspace
+    `runs/<run_id>/input/manifest.json`, workspace
+    `runs/<cycle_run_id>/input/<stage>_manifest_index.json`, repository
+    hydro-run rows, Slurm submission manifest payloads.
+  - Public routes/entrypoints: legacy `ForecastOrchestrator` private methods,
+    top-level helper imports from `services.orchestrator.chain`, and tests
+    that subclass/monkeypatch validation/write helpers.
+  - Frontend/downstream consumers: stage submission payload consumers, publish
+    stage, tile publisher/display identity, production closure evidence, and
+    governance entropy audit file-count expectations.
+  - Failure paths/rollback/stale state: object-store write failure, safe
+    workspace write/read failure, invalid JSON, missing required manifest
+    fields, manifest index count/size overflow, symlink target rejection,
+    forecast array submission failure after hydro-run staging, and duplicate
+    sibling identity rejection before side effects.
+  - Evidence/audit/readiness: manifest/publish focused tests, import/shim
+    compatibility tests, entropy audit file-count tests, ruff, OpenSpec
+    validation, and PR cross-review evidence.
+  - Regression rows:
+    - Forecast stage with two basins -> each task receives the same runtime
+      manifest path/URI, repository hydro-run row, and manifest index entry as
+      before extraction.
+    - Unsafe runtime manifest path or cycle manifest index path -> safe-write
+      error code is stable and no downstream stage submission occurs.
+    - Manifest index count/size overflow -> `CYCLE_MANIFEST_INDEX_INVALID`
+      occurs before Slurm submission and no partial index is written.
+    - Model-run identity/quality metadata -> schema version, contract id,
+      canonical product, forcing version, model package manifest, station
+      metadata, output-river identity, frequency/display quality states, and
+      residual blockers propagate unchanged to runtime and stage manifests.
+    - Invalid/missing/unreadable runtime manifest -> forecast submission fails
+      with stable error evidence and publish is blocked.
+    - Forecast submission failure after runtime manifest staging -> staged
+      hydro-run rows are marked failed with the same error code.
+    - Partial upstream array state -> publish manifest still filters basins and
+      carries survivor identity; array accounting aggregation itself remains
+      outside this PR.
+    - Legacy helper override/import surface -> old methods and top-level
+      helpers still exist and dispatch through the extracted module where
+      callers override them.
+- Required evidence:
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'forecast_stage_writes_runtime_manifests_and_manifest_index_paths or forecast_runtime_manifest_write_rejects_symlink_target_without_submission or cycle_manifest_index_write_rejects_symlink_target_without_stage_submission or cycle_manifest_index_rejects_task_count_over_limit_before_stage_submission or cycle_manifest_index_rejects_serialized_size_over_limit_before_stage_submission or model_run_identity_and_quality_contracts_propagate_to_worker_manifests or nested_forcing_station_metadata_reaches_runtime_manifest or missing_station_forcing_is_quality_state_without_discarding_output_uri or missing_output_river_metadata_is_unavailable_not_fabricated_ready_segment or valid_output_river_metadata_remains_ready or forecast_manifest_write_failure_marks_pipeline_failed or forecast_submission_failure_marks_staged_hydro_runs_failed or invalid_forecast_runtime_manifest_blocks_publish or missing_forecast_runtime_manifest_blocks_publish or unreadable_forecast_runtime_manifest_blocks_publish'`
+    -> manifest staging, safe writes, validation, identity, quality, rollback,
+    and publish-blocking behavior pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'publish_manifest_excludes_basin_failed_at_last_array_stage or two_basin_happy_path_reports_per_basin_identity_in_published_evidence or same_named_segment_in_different_networks_keeps_distinct_production_identity or scheduler_style_relative_output_key_does_not_downgrade_runtime_output_uri or relative_output_uri_falls_back_to_object_store_output_uri or legacy_explicit_absolute_output_uri_is_preserved_outside_production_candidate_scope or production_candidate_wrong_absolute_output_uri_rejected_before_manifest_writes or production_candidate_relative_output_uri_normalizes_to_canonical_uri or production_candidate_missing_package_or_version_metadata_rejected_before_side_effects or legacy_manual_basin_without_production_candidate_identity_keeps_default_metadata_compatibility or prefilled_identity_mismatch_rejected_before_manifest_writes or duplicate_sibling_identity_rejected_before_manifest_writes'`
+    -> publish evidence, URI normalization, production identity validation, and
+    duplicate pre-side-effect behavior pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_manifest'`
+    -> new import/delegation regression tests for `chain_manifests.py` pass.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator_file_count'`
+    -> entropy audit tracked-file count is refreshed for the new module.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
+    -> full orchestration-chain focused suite passes before merge.
+  - `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py tests/test_entropy_audit_script.py`
+    -> lint passes.
+  - `openspec validate governance-6-entropy-structural-burndown --strict
+    --no-interactive` -> valid.
+  - `git diff --check` -> no whitespace errors.
+- Non-goals:
+  - No array aggregation/accounting extraction; `chain_array_accounting.py`
+    belongs to G6-18.
+  - No stage reserve/submit/bind/poll/resume behavior change; that surface
+    belongs to G6-16 and remains in `chain_stage_execution.py`.
+  - No scheduler behavior, reservation protocol, retry service, Slurm gateway,
+    tile publisher, DB schema, frontend, docs/runbooks, or
+    `.entropy-baseline` behavior change except tests/import wiring required for
+    this extraction.
+  - No status, reason, error code, schema version, evidence key, stage name,
+    job id, retry id, manifest URI, output URI, log URI, quality flag, or
+    artifact path rename.
 
 ### G6-18 Chain array accounting extraction
 
