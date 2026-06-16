@@ -1189,6 +1189,266 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
     assert assembly.residual_blockers == ({"code": "none"},)
 
 
+def test_chain_array_accounting_module_parses_sacct_and_legacy_chain_wrapper_matches(tmp_path: Path) -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_array_accounting
+
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[],
+    )
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    stdout = "\n".join(
+        [
+            "4000_1|FAILED|1:0|00:02:00|2048K|1024K|cpu=1,mem=2G|1M|2M",
+            "4000_2|CANCELLED|0:15|00:03:00|4096K|2048K|cpu=1,mem=2G|3M|4M",
+            "4000_0|COMPLETED|0:0|00:01:00|1024K|512K|cpu=1,mem=2G|0|0",
+            "unrelated|COMPLETED|0:0",
+        ]
+    )
+
+    extracted = chain_array_accounting.parse_sacct_array_results(
+        stdout,
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+    legacy = legacy_chain.parse_sacct_array_results(
+        stdout,
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+
+    assert extracted == legacy
+    assert extracted.status == "partially_failed"
+    assert [task.task_id for task in extracted.task_results] == [0, 1, 2]
+    assert extracted.cancelled_task_ids == (2,)
+    assert extracted.task_results[0].accounting["elapsed"] == "00:01:00"
+    assert extracted.task_results[1].error_code == "NODE_FAILURE"
+    assert extracted.task_results[2].status == "cancelled"
+    assert extracted.task_results[2].exit_code == 0
+    assert extracted.task_results[2].error_code == "NODE_FAILURE"
+    assert extracted.task_results[2].accounting["elapsed"] == "00:03:00"
+    assert extracted.task_results[0].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/4000_0.out"
+    assert extracted.task_results[2].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/4000_2.out"
+    assert legacy.cancelled_task_ids == (2,)
+    assert legacy.task_results[2].status == "cancelled"
+    assert legacy.task_results[2].exit_code == 0
+    assert legacy.task_results[2].error_code == "NODE_FAILURE"
+    assert legacy.task_results[2].accounting["elapsed"] == "00:03:00"
+    assert legacy.task_results[2].log_uri == "s3://nhms/runs/cycle_gfs_2026050100/logs/4000_2.out"
+
+
+def test_chain_array_accounting_legacy_parse_uses_current_array_task_log_uri_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[],
+        active_basins=[],
+    )
+    object_store = LocalObjectStore(tmp_path / "objects", object_store_prefix="s3://nhms")
+    calls: list[tuple[str, str, int]] = []
+
+    def fake_log_uri(
+        object_store_arg: LocalObjectStore,
+        run_id: str,
+        master_job_id: str,
+        task_id: int,
+    ) -> str:
+        assert object_store_arg is object_store
+        calls.append((run_id, master_job_id, task_id))
+        return f"patched://{run_id}/{master_job_id}/{task_id}.out"
+
+    monkeypatch.setattr(legacy_chain, "_array_task_log_uri", fake_log_uri)
+
+    aggregation = legacy_chain.parse_sacct_array_results(
+        "4000_0|COMPLETED|0:0",
+        "4000",
+        context=context,
+        object_store=object_store,
+    )
+
+    assert calls == [("cycle_gfs_2026050100", "4000", 0)]
+    assert aggregation.task_results[0].log_uri == "patched://cycle_gfs_2026050100/4000/0.out"
+
+
+def test_chain_array_accounting_legacy_wrapper_uses_current_chain_parse_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_types
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_parse(
+        stdout: str,
+        master_job_id: str,
+        *,
+        context: CycleOrchestrationContext | None = None,
+        object_store: LocalObjectStore | None = None,
+    ) -> chain_types.ArrayAggregation:
+        calls.append(
+            {
+                "stdout": stdout,
+                "master_job_id": master_job_id,
+                "context": context,
+                "object_store": object_store,
+            }
+        )
+        return chain_types.ArrayAggregation(
+            total=1,
+            succeeded=1,
+            failed=0,
+            cancelled=0,
+            task_results=(chain_types.ArrayTaskResult(7, "patched", "succeeded"),),
+        )
+
+    monkeypatch.setattr(legacy_chain, "parse_sacct_array_results", fake_parse)
+
+    aggregation = legacy_chain._coerce_array_aggregation({"stdout": "patched stdout"}, "4000")
+
+    assert calls == [
+        {"stdout": "patched stdout", "master_job_id": "4000", "context": None, "object_store": None}
+    ]
+    assert aggregation.task_results[0].slurm_job_id == "patched"
+
+
+def test_chain_array_accounting_legacy_stage_evidence_uses_current_chain_metric_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_types
+
+    aggregation = chain_types.ArrayAggregation(
+        total=1,
+        succeeded=1,
+        failed=0,
+        cancelled=0,
+        task_results=(
+            chain_types.ArrayTaskResult(
+                task_id=0,
+                slurm_job_id="4000_0",
+                status="succeeded",
+                accounting={"elapsed": "00:01:00"},
+            ),
+        ),
+    )
+
+    def fake_metrics(payload: Mapping[str, Any]) -> dict[str, Any]:
+        assert payload == {"elapsed": "00:01:00"}
+        return {"patched_metric": "yes"}
+
+    monkeypatch.setattr(legacy_chain, "_resource_metrics_from_payload", fake_metrics)
+
+    evidence = legacy_chain._stage_task_result_evidence(aggregation)
+
+    assert evidence[0]["resource_metrics"] == {"patched_metric": "yes"}
+
+
+def test_chain_array_accounting_legacy_stage_evidence_uses_current_chain_production_status_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_types
+
+    aggregation = chain_types.ArrayAggregation(
+        total=1,
+        succeeded=1,
+        failed=0,
+        cancelled=0,
+        task_results=(
+            chain_types.ArrayTaskResult(
+                task_id=0,
+                slurm_job_id="4000_0",
+                status="succeeded",
+            ),
+        ),
+    )
+
+    def fake_production_status(status: str) -> str:
+        assert status == "succeeded"
+        return "patched-production-status"
+
+    monkeypatch.setattr(legacy_chain, "production_status_for", fake_production_status)
+
+    evidence = legacy_chain._stage_task_result_evidence(aggregation)
+
+    assert evidence[0]["production_status"] == "patched-production-status"
+
+
+def test_chain_array_accounting_legacy_candidate_outcome_sanitizer_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.orchestrator.chain as legacy_chain
+    from services.orchestrator import chain_types
+
+    context = CycleOrchestrationContext(
+        source_id="gfs",
+        cycle_time=_dt("2026-05-01T00:00:00Z"),
+        cycle_id="gfs_2026050100",
+        run_id="cycle_gfs_2026050100",
+        all_basins=[
+            {
+                "task_id": 0,
+                "model_id": "model_0",
+                "basin_id": "basin_0",
+                "candidate_id": "candidate_0",
+                "run_id": "run_0",
+            }
+        ],
+        active_basins=[
+            {
+                "task_id": 0,
+                "model_id": "model_0",
+                "basin_id": "basin_0",
+                "candidate_id": "candidate_0",
+                "run_id": "run_0",
+            }
+        ],
+    )
+    aggregation = chain_types.ArrayAggregation(
+        total=1,
+        succeeded=0,
+        failed=1,
+        cancelled=0,
+        task_results=(
+            chain_types.ArrayTaskResult(
+                task_id=0,
+                slurm_job_id="4000_0",
+                status="failed",
+                exit_code=1,
+                log_uri="s3://signed/log?X-Amz-Signature=secret",
+            ),
+        ),
+    )
+
+    def fake_safe_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+        sanitized = dict(payload)
+        sanitized["sanitizer"] = "patched"
+        return sanitized
+
+    monkeypatch.setattr(legacy_chain, "_safe_candidate_outcome_payload", fake_safe_payload)
+
+    legacy_chain._record_array_task_outcomes(context, stage="forcing", aggregation=aggregation)
+    outcomes = legacy_chain._candidate_outcomes(context, final_status="failed")
+
+    assert context.task_outcomes[0]["sanitizer"] == "patched"
+    assert outcomes[0]["sanitizer"] == "patched"
+    assert outcomes[0]["failed_stage"] == "forcing"
+
+
 def test_display_log_publication_attempt_type_hints_resolve_through_legacy_chain() -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_types
@@ -7121,7 +7381,7 @@ def test_chain_stage_execution_legacy_methods_delegate(monkeypatch) -> None:
 
 def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     from services.orchestrator import chain as chain_runtime
-    from services.orchestrator import chain_manifests
+    from services.orchestrator import chain_manifests, production_contract
 
     orchestrator = object.__new__(ForecastOrchestrator)
     analysis_orchestrator = object.__new__(AnalysisOrchestrator)
@@ -7228,6 +7488,7 @@ def test_chain_manifest_legacy_methods_delegate(monkeypatch) -> None:
     )
     for helper_name in legacy_top_level_helpers:
         assert getattr(chain_runtime, helper_name) is getattr(chain_manifests, helper_name)
+    assert chain_runtime.production_status_for is production_contract.production_status_for
     assert chain_runtime.build_model_run_assembly is not chain_manifests.build_model_run_assembly
     assert chain_runtime._frequency_quality_state is not chain_manifests._frequency_quality_state
     assert chain_runtime._publish_quality_state is not chain_manifests._publish_quality_state
