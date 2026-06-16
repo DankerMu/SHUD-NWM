@@ -95,7 +95,7 @@ _display_contract = chain_manifests._display_contract
 _ensure_segment_utc = chain_manifests._ensure_segment_utc
 _era5_reanalysis_latency_minutes = chain_manifests._era5_reanalysis_latency_minutes
 _frequency_contract = chain_manifests._frequency_contract
-_frequency_quality_state = chain_manifests._frequency_quality_state
+_forecast_state_checkpoint_hours = chain_manifests._forecast_state_checkpoint_hours
 _has_uri_scheme = chain_manifests._has_uri_scheme
 _model_package_manifest_uri = chain_manifests._model_package_manifest_uri
 _model_run_stage_evidence = chain_manifests._model_run_stage_evidence
@@ -103,12 +103,28 @@ _nested_value = chain_manifests._nested_value
 _output_river_contract = chain_manifests._output_river_contract
 _preserve_directory_uri = chain_manifests._preserve_directory_uri
 _project_name_for_basin = chain_manifests._project_name_for_basin
-_publish_quality_state = chain_manifests._publish_quality_state
 _safe_project_name = chain_manifests._safe_project_name
 _station_metadata_for_basin = chain_manifests._station_metadata_for_basin
 _tri_state = chain_manifests._tri_state
+ModelRunAssembly = chain_manifests.ModelRunAssembly
 build_model_run_assembly = chain_manifests.build_model_run_assembly
 build_reindexed_manifest = chain_manifests.build_reindexed_manifest
+
+
+def _frequency_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
+    return chain_manifests._frequency_quality_state(
+        entry,
+        cycle_id=cycle_id,
+        model_run_stage_evidence=_model_run_stage_evidence,
+    )
+
+
+def _publish_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
+    return chain_manifests._publish_quality_state(
+        entry,
+        cycle_id=cycle_id,
+        model_run_stage_evidence=_model_run_stage_evidence,
+    )
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 _SAFE_AREA_RE = re.compile(r"^[\d,.\-\s]+$")
@@ -6345,14 +6361,6 @@ def _ifs_max_lead_hours_for_cycle(cycle_time: datetime) -> int | None:
     if hour in {0, 12}:
         return 168
     return None
-
-
-def _forecast_state_checkpoint_hours(forecast_horizon_hours: Any) -> list[int]:
-    try:
-        horizon = int(forecast_horizon_hours)
-    except (TypeError, ValueError):
-        return []
-    return [hour for hour in (6, 12) if hour <= horizon]
 
 
 def _elapsed_hours(start_time: datetime, end_time: datetime) -> int | None:

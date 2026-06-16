@@ -2744,31 +2744,37 @@ separate PR boundaries.
     build/write/validate/staging, direct forecast/analysis run manifests,
     model-run assembly, quality states, residual blockers, and publish-stage
     evidence helpers.
-  - Kept `ForecastOrchestrator` legacy private manifest methods in
-    `services/orchestrator/chain.py`; the old methods now delegate to
-    `chain_manifests.py`, and legacy top-level helper imports remain aliases
-    for moved manifest helpers.
+  - Kept `ForecastOrchestrator` and `AnalysisOrchestrator` legacy private
+    manifest methods in `services/orchestrator/chain.py`; the old methods now
+    delegate to `chain_manifests.py`, most moved top-level helpers remain
+    aliases, and the quality-state legacy helpers remain wrappers so
+    monkeypatching `chain._model_run_stage_evidence` still affects frequency
+    and publish quality-state construction.
   - Left array aggregation/accounting in `chain.py`; this PR does not move
     `_apply_array_progress`, task accounting aggregation, or downstream
     reduction behavior beyond existing calls to manifest helpers.
   - Added focused tests proving `chain_manifests` imports without loading
     `services.orchestrator.chain`, legacy manifest private methods delegate to
-    the extracted module, and moved top-level manifest helpers remain available
-    from `chain.py`.
+    the extracted module, moved top-level manifest helpers remain available
+    from `chain.py`, analysis manifests are covered directly, and legacy
+    quality-state helpers preserve monkeypatch compatibility.
   - Updated entropy audit test expectations so the new
     `services/orchestrator/chain_manifests.py` module is counted when tracked.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'chain_manifest'`
-    -> `2 passed, 172 deselected`.
+    -> `4 passed, 172 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'services_orchestrator_file_count'`
     -> `1 passed, 191 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'forecast_stage_writes_runtime_manifests_and_manifest_index_paths or forecast_runtime_manifest_write_rejects_symlink_target_without_submission or cycle_manifest_index_write_rejects_symlink_target_without_stage_submission or cycle_manifest_index_rejects_task_count_over_limit_before_stage_submission or cycle_manifest_index_rejects_serialized_size_over_limit_before_stage_submission or model_run_identity_and_quality_contracts_propagate_to_worker_manifests or nested_forcing_station_metadata_reaches_runtime_manifest or missing_station_forcing_is_quality_state_without_discarding_output_uri or missing_output_river_metadata_is_unavailable_not_fabricated_ready_segment or valid_output_river_metadata_remains_ready or forecast_manifest_write_failure_marks_pipeline_failed or forecast_submission_failure_marks_staged_hydro_runs_failed or invalid_forecast_runtime_manifest_blocks_publish or missing_forecast_runtime_manifest_blocks_publish or unreadable_forecast_runtime_manifest_blocks_publish'`
-    -> `15 passed, 159 deselected`.
+    -> `15 passed, 161 deselected`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py -k 'publish_manifest_excludes_basin_failed_at_last_array_stage or two_basin_happy_path_reports_per_basin_identity_in_published_evidence or same_named_segment_in_different_networks_keeps_distinct_production_identity or scheduler_style_relative_output_key_does_not_downgrade_runtime_output_uri or relative_output_uri_falls_back_to_object_store_output_uri or legacy_explicit_absolute_output_uri_is_preserved_outside_production_candidate_scope or production_candidate_wrong_absolute_output_uri_rejected_before_manifest_writes or production_candidate_relative_output_uri_normalizes_to_canonical_uri or production_candidate_missing_package_or_version_metadata_rejected_before_side_effects or legacy_manual_basin_without_production_candidate_identity_keeps_default_metadata_compatibility or prefilled_identity_mismatch_rejected_before_manifest_writes or duplicate_sibling_identity_rejected_before_manifest_writes'`
-    -> `24 passed, 150 deselected`.
+    -> `24 passed, 152 deselected`.
+  - Verification:
+    `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_orchestration_chain.py`
+    -> `176 passed in 747.39s`.
   - Verification:
     `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_orchestration_chain.py tests/test_entropy_audit_script.py`
     -> `All checks passed!`.

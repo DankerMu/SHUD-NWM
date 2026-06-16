@@ -90,8 +90,22 @@ def build_cycle_stage_manifest(
     cycle_residual_blockers: Callable[[Sequence[Mapping[str, Any]]], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     model_run_stage_evidence = model_run_stage_evidence or _model_run_stage_evidence
-    frequency_quality_state = frequency_quality_state or _frequency_quality_state
-    publish_quality_state = publish_quality_state or _publish_quality_state
+    if frequency_quality_state is None:
+        def frequency_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
+            return _frequency_quality_state(
+                entry,
+                cycle_id=cycle_id,
+                model_run_stage_evidence=model_run_stage_evidence,
+            )
+
+    if publish_quality_state is None:
+        def publish_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
+            return _publish_quality_state(
+                entry,
+                cycle_id=cycle_id,
+                model_run_stage_evidence=model_run_stage_evidence,
+            )
+
     cycle_residual_blockers = cycle_residual_blockers or _cycle_residual_blockers
     manifest_index_entries = orchestrator._reindexed_manifest_entries(context.active_basins)
     manifest: dict[str, Any] = {
@@ -1028,8 +1042,14 @@ def _model_run_stage_evidence(stage: str, entry: Mapping[str, Any], *, cycle_id:
     }
 
 
-def _frequency_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
-    evidence = _model_run_stage_evidence("frequency", entry, cycle_id=cycle_id)
+def _frequency_quality_state(
+    entry: Mapping[str, Any],
+    *,
+    cycle_id: str,
+    model_run_stage_evidence: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    model_run_stage_evidence = model_run_stage_evidence or _model_run_stage_evidence
+    evidence = model_run_stage_evidence("frequency", entry, cycle_id=cycle_id)
     frequency_state = _nested_mapping(evidence.get("quality_states")).get("frequency") or {}
     return {
         **evidence,
@@ -1039,8 +1059,14 @@ def _frequency_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict
     }
 
 
-def _publish_quality_state(entry: Mapping[str, Any], *, cycle_id: str) -> dict[str, Any]:
-    evidence = _model_run_stage_evidence("publish", entry, cycle_id=cycle_id)
+def _publish_quality_state(
+    entry: Mapping[str, Any],
+    *,
+    cycle_id: str,
+    model_run_stage_evidence: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    model_run_stage_evidence = model_run_stage_evidence or _model_run_stage_evidence
+    evidence = model_run_stage_evidence("publish", entry, cycle_id=cycle_id)
     display_state = _nested_mapping(evidence.get("quality_states")).get("display") or {}
     return {
         **evidence,
