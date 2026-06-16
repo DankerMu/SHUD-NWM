@@ -65,3 +65,11 @@ sub-issues, and epic closure evidence have no remaining P0 or P1 findings.
   implemented sub-issues, evidence, or issue closure state
 - **THEN** fixes and re-review continue until the final review evidence states
   that no P0 or P1 findings remain
+
+#### Scenario: epic closure evidence is assembled
+- **WHEN** final epic closure evidence is assembled for Governance-6
+- **THEN** strict OpenSpec validation passes, the broader affected scheduler /
+  chain / retry suite passes, baseline report-only commands leave
+  `.entropy-baseline/latest.json` unchanged, frontend evidence gates are
+  recorded, every in-scope addendum task is closed or explicitly descoped, and
+  the final cross-review states that no P0 or P1 findings remain

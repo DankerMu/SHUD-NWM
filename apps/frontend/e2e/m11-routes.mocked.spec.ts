@@ -328,16 +328,27 @@ async function navigateInSession(page: Page, pathAndSearch: string) {
   }, pathAndSearch)
 }
 
+async function selectRole(page: Page, roleName: 'Operator') {
+  const roleTrigger = page.getByLabel('Role')
+  await expect(roleTrigger).toBeVisible()
+  await roleTrigger.focus()
+  await expect(roleTrigger).toBeFocused()
+  await roleTrigger.press('Enter')
+  await expect(page.getByRole('listbox')).toBeVisible()
+  await page.getByRole('option', { name: roleName }).click()
+}
+
 test.describe('M26 single fullscreen map', () => {
   test('renders the national overview fullscreen map at / and normalizes /overview redirect', async ({ page }) => {
     await mockSingleMapApis(page)
 
     await page.goto('/')
     await expect(page.getByTestId('m11-fullscreen-map')).toBeVisible()
+    await expect(page.getByTestId('m11-map-surface')).toBeVisible()
     await expect(page.getByLabel('全国总览地图')).toBeVisible()
-    await expect(page.getByText('全国水文总览')).toBeVisible()
     await expect(page.getByTestId('m11-floating-layer-switcher')).toBeVisible()
     await expect(page.getByTestId('m11-floating-legend')).toBeVisible()
+    await expect(page.getByRole('button', { name: /流量/, pressed: true })).toBeVisible()
     // NavBar 已删除（#337）：全屏地图无导航。
     await expect(page.getByRole('navigation', { name: 'Main navigation' })).toHaveCount(0)
 
@@ -400,15 +411,16 @@ test.describe('M26 single fullscreen map', () => {
     await expect(page.getByTestId('m11-met-station-status')).toBeVisible()
   })
 
-  test('renders the overview info card and map surface for the national map', async ({ page }) => {
+  test('renders the national overview map surface and floating controls', async ({ page }) => {
     await mockSingleMapApis(page)
 
     await page.goto('/?source=gfs&validTime=2026-05-18T06:00:00Z')
     await expect(page.getByTestId('m11-fullscreen-map')).toBeVisible()
+    await expect(page.getByLabel('全国总览地图')).toBeVisible()
     await expect(page.getByTestId('m11-map-surface')).toBeVisible()
-    // 全国总览信息卡：诚实说明范围 + 流域边界接入计数（计数随 mocked 数据 fan-out 决定）。
-    await expect(page.getByText('全国水文总览')).toBeVisible()
-    await expect(page.getByText(/个流域边界/)).toBeVisible()
+    await expect(page.getByTestId('m11-map-surface')).toHaveAttribute('data-basemap', 'vector')
+    await expect(page.getByTestId('m11-floating-layer-switcher')).toBeVisible()
+    await expect(page.getByTestId('m11-floating-legend')).toContainText('径流量图例')
   })
 
   test('drills into a basin detail map through basinId query (/basins/:id redirect landing)', async ({ page }) => {
@@ -461,9 +473,7 @@ test.describe('M26 single fullscreen map', () => {
     // 默认 viewer（webServer VITE_AUTH_ROLE=viewer）：无运维直链。
     await expect(page.getByTestId('m11-ops-link')).toHaveCount(0)
 
-    await expect(page.getByLabel('Role')).toBeVisible()
-    await page.getByLabel('Role').click({ force: true })
-    await page.getByRole('option', { name: 'Operator' }).click({ force: true })
+    await selectRole(page, 'Operator')
     await expect(page.getByTestId('m11-ops-link')).toBeVisible()
     await expect(page.getByTestId('m11-ops-link')).toHaveAttribute('href', '/ops')
   })

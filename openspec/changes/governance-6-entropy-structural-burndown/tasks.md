@@ -24,15 +24,15 @@ separate PR boundaries.
 
 ## 2. Current Route Authority Runbook Cleanup
 
-- [ ] 2.1 Update `docs/runbooks/two-node-production-e2e-plan.md` so live browser
+- [x] 2.1 Update `docs/runbooks/two-node-production-e2e-plan.md` so live browser
   proof uses `/` plus `/ops`; `/hydro-met` is only a legacy redirect smoke.
-- [ ] 2.2 Update `docs/runbooks/two-node-deployment-overview.md` so node-27
+- [x] 2.2 Update `docs/runbooks/two-node-deployment-overview.md` so node-27
   user-facing display wording names `/` as the single-map entrypoint.
-- [ ] 2.3 Update `docs/runbooks/node-27-bringup-checklist.md` so executable
+- [x] 2.3 Update `docs/runbooks/node-27-bringup-checklist.md` so executable
   browser steps use `/` and `/ops`, with old paths only in redirect checks.
-- [ ] 2.4 Add historical/superseded banners to old MVP runbooks that preserve
+- [x] 2.4 Add historical/superseded banners to old MVP runbooks that preserve
   pre-M26 `/hydro-met` execution steps.
-- [ ] 2.5 Add or update the route-authority check in
+- [x] 2.5 Add or update the route-authority check in
   `scripts/governance/audit_repo_entropy.py` for current docs/runbooks,
   covering `/overview`, `/hydro-met`, `/forecast`, `/meteorology`,
   `/flood-alerts`, `/basins/:id`, and `/segments/:id` with explicit allowlist
@@ -40,30 +40,30 @@ separate PR boundaries.
 
 ## 3. Mocked/Live Evidence Boundary
 
-- [ ] 3.1 Reconcile `apps/frontend/e2e/m11-routes.mocked.spec.ts` broad API mock
+- [x] 3.1 Reconcile `apps/frontend/e2e/m11-routes.mocked.spec.ts` broad API mock
   classification so it is not treated as live display evidence; prefer
   `.mocked.spec.ts` naming or a mocked-labelled directory if that matches the
   audit allowlist semantics.
-- [ ] 3.2 Reconcile both broad API mock registrations in
+- [x] 3.2 Reconcile both broad API mock registrations in
   `apps/frontend/e2e/monitoring.mocked.spec.ts` so they are mocked regression or are
   split into a proper live profile; do not treat retry/cancel/operator mocked
   UI checks as display_readonly live proof.
-- [ ] 3.3 Confirm `test:e2e:live-display` still rejects broad API mocks and
+- [x] 3.3 Confirm `test:e2e:live-display` still rejects broad API mocks and
   requires explicit `PLAYWRIGHT_LIVE_BASE_URL` and
   `PLAYWRIGHT_LIVE_API_BASE_URL`.
-- [ ] 3.4 Harden `scripts/governance/audit_repo_entropy.py` broad mock detection
+- [x] 3.4 Harden `scripts/governance/audit_repo_entropy.py` broad mock detection
   so multiline `page.route(` plus `'**/api/v1/**'` registrations are detected.
-- [ ] 3.5 Add focused audit tests for inline broad mocks, multiline broad mocks,
+- [x] 3.5 Add focused audit tests for inline broad mocks, multiline broad mocks,
   mocked-labelled allowlist behavior, and live-labelled/unallowlisted behavior.
-- [ ] 3.6 Clarify frontend evidence profiles in `docs/VALIDATION.md` so
+- [x] 3.6 Clarify frontend evidence profiles in `docs/VALIDATION.md` so
   mocked-regression, preview, visual, and live-display lanes state whether API
   mocks are allowed and whether they can produce live receipts.
 
 ## 4. Artifact Ownership Control
 
-- [ ] 4.1 Update `docs/governance/DOC_STATUS.md` artifact ownership wording so
+- [x] 4.1 Update `docs/governance/DOC_STATUS.md` artifact ownership wording so
   `.dockerignore` appears as the expected literal term.
-- [ ] 4.2 Run entropy audit JSON and confirm the
+- [x] 4.2 Run entropy audit JSON and confirm the
   `agent-artifact-ownership-policy` gate-eligible finding is gone.
 
 ## 5. Scheduler Lease Extraction
@@ -168,25 +168,91 @@ separate PR boundaries.
 
 ## 15. Review-Fix And Epic Verification
 
-- [ ] 15.1 Run `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`.
-- [ ] 15.2 Run Stage 3 Design Consistency, Spec Completeness, and Tasks
+- [x] 15.1 Run `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`.
+- [x] 15.2 Run Stage 3 Design Consistency, Spec Completeness, and Tasks
   Executability reviews; fix and re-review until all three report no P0/P1.
-- [ ] 15.3 For each implementation sub-issue, require PR review-fix loops until
+- [x] 15.3 For each implementation sub-issue, require PR review-fix loops until
   the final review evidence has no P0/P1 findings.
-- [ ] 15.4 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`.
-- [ ] 15.5 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`.
-- [ ] 15.6 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` and confirm stdout remains parseable and the baseline file is not modified by the command.
-- [ ] 15.7 For docs cleanup, run route-authority grep over current docs/runbooks
+- [x] 15.4 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`.
+- [x] 15.5 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`.
+- [x] 15.6 Run `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json` and confirm stdout remains parseable and the baseline file is not modified by the command.
+- [x] 15.7 For docs cleanup, run route-authority grep over current docs/runbooks
   and confirm old-route mentions are historical, redirect, or compatibility
   context.
-- [ ] 15.8 For frontend evidence cleanup, run `cd apps/frontend && corepack pnpm
+- [x] 15.8 For frontend evidence cleanup, run `cd apps/frontend && corepack pnpm
   test` and the relevant mocked/live Playwright command for the issue scope.
-- [ ] 15.9 For each orchestrator extraction issue, run its focused pytest slice
+- [x] 15.9 For each orchestrator extraction issue, run its focused pytest slice
   plus `uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py tests/test_orchestration_chain.py tests/test_scheduler_backfill.py tests/test_retry.py tests/test_retry_cancel_consistency.py`.
-- [ ] 15.10 Before closing the epic, run the broader affected suite:
+- [x] 15.10 Before closing the epic, run the broader affected suite:
   `uv run --no-sync pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py tests/test_scheduler_backfill.py tests/test_retry.py tests/test_retry_cancel_consistency.py`.
-- [ ] 15.11 Before closing the epic, run a final cross-review against the
+- [x] 15.11 Before closing the epic, run a final cross-review against the
   implemented issues and closure evidence; do not close while any P0/P1 remains.
+
+Closure evidence captured on 2026-06-16:
+
+- 15.1 OpenSpec strict validation:
+  `openspec validate governance-6-entropy-structural-burndown --strict --no-interactive`
+  -> valid.
+- 15.2 Stage 3 review-fix loop:
+  Design Consistency, Spec Completeness, and Tasks Executability reviews were
+  run for #475 closure. The first pass found P1 closure-ledger gaps: missing
+  positive epic closure scenario, stale unchecked 2.x/3.x/4.x/15.x task
+  states, G6-20 addendum tasks 16.1 through 16.6 not folded into G6-19
+  closure, #475/#456 issue evidence not naming the G6-20 scope, and concrete
+  `/basins/demo` / `/segments/demo` route examples absent from the spec
+  scenario. #475 fixes updated the specs, task ledger, G6-19 dependency/scope,
+  G6-20 evidence, and GitHub issue closure comments. Follow-up closure
+  re-review is recorded under 15.11 before final closure.
+- 15.3 sub-issue review-fix evidence:
+  #457-#474 are closed. PR evidence for #478, #479, #480, #498, #499,
+  #501, #502, #503, #504, #506, #509, #511, #514, #519, #520, #521, and
+  #522 records final review/fix closure with no remaining P0/P1. #460 was
+  closed through PR #481 and issue comment evidence records final six-reviewer
+  cross-review with no actionable findings and green CI.
+- 15.4 JSON entropy audit:
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format json`
+  -> parseable JSON, `metadata.baseline_written=false`,
+  `metadata.finding_count=418`, `metadata.budget_counted_count=121`,
+  `metadata.gate_eligible_count=0`.
+- 15.5 Markdown entropy audit:
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --format markdown`
+  -> Markdown report generated and `.entropy-baseline/latest.json` unchanged.
+- 15.6 hard-gate entropy audit:
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync python scripts/governance/audit_repo_entropy.py --mode hard-gate --format json`
+  -> parseable JSON, exit 0, `metadata.mode=hard-gate`,
+  `metadata.baseline_written=false`, and `.entropy-baseline/latest.json`
+  SHA remained `d5d497984ec101e1fcf5ed29107904f9d14b7205bf9b4db06c3f01efec9025b5`
+  before and after JSON, Markdown, and hard-gate commands.
+- 15.7 route-authority cleanup:
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_entropy_audit_script.py -k 'route_authority_current_repo_has_no_unallowlisted_findings_in_current_docs or route_authority_legacy_alias_coverage_includes_all_current_redirect_forms or broad_e2e_mock or agent_artifact_ownership'`
+  -> 8 passed, 184 deselected.
+  Current runbook grep over `/hydro-met|/overview|/forecast|/meteorology|/flood-alerts|/basins/:id|/segments/:id|/basins/|/segments/`
+  retained only redirect, compatibility, or historical contexts.
+- 15.8 frontend evidence cleanup:
+  `cd apps/frontend && corepack pnpm test` -> 31 files / 524 tests passed.
+  `cd apps/frontend && corepack pnpm exec playwright test e2e/m11-routes.mocked.spec.ts e2e/monitoring.mocked.spec.ts --project=mocked-regression-chromium --workers=1`
+  -> 19 passed in 35.2s after #475 refreshed stale assertions to the current
+  fullscreen map UI and made the role override interaction stable.
+  `cd apps/frontend && env -u PLAYWRIGHT_LIVE_BASE_URL -u PLAYWRIGHT_LIVE_API_BASE_URL corepack pnpm run test:e2e:live-display -- --list`
+  -> expected blocked-profile exit 1 with missing live URL error and no local
+  fallback.
+- 15.9 orchestrator extraction gates:
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync ruff check services/orchestrator tests/test_production_scheduler.py tests/test_orchestration_chain.py tests/test_scheduler_backfill.py tests/test_retry.py tests/test_retry_cancel_consistency.py`
+  -> All checks passed. Individual extraction PRs record focused pytest slices
+  for G6-09 through G6-18.
+- 15.10 broader affected suite:
+  `PYTHONDONTWRITEBYTECODE=1 uv run --no-sync pytest -q tests/test_production_scheduler.py tests/test_orchestration_chain.py tests/test_scheduler_backfill.py tests/test_retry.py tests/test_retry_cancel_consistency.py`
+  -> 845 passed, 71 warnings in 951.13s.
+- 15.11 final cross-review:
+  Code/test final review for #475 passed with no P0/P1 and no P2/P3 notes; it
+  confirmed no production code changed and the mocked E2E repair still asserts
+  route redirect, mocked API request identity, fullscreen map UI, and
+  role-gated `/ops` behavior without treating mocked specs as live evidence.
+  Follow-up closure review passed with no P0/P1 and no P2/P3 notes; it
+  confirmed the previous P1 findings are closed: `15.2` now has concrete
+  Stage 3 review-fix evidence, G6-20 is folded into G6-19 closure, `16.1`
+  through `16.6` are checked with #460 / PR #481 evidence, and #475/#456
+  scope-sync comments include G6-20.
 
 ## Stage 5 Issue Plan
 
@@ -2991,12 +3057,14 @@ separate PR boundaries.
   cross-review until no P0/P1 remains.
 - Out of Scope: New implementation changes except fixes required by final
   review.
-- Tasks: 15.1, 15.2, 15.3, 15.10, 15.11.
-- Dependencies: G6-01 through G6-18.
+- Tasks: 15.1 through 15.11, plus verifying the in-change G6-20 addendum
+  tasks 16.1 through 16.6 are closed by PR #481 / issue #460 evidence.
+- Dependencies: G6-01 through G6-18 and PR #481 issue #460 closure evidence.
 - PR Boundary: No implementation PR unless final review finds required fixes.
 - Required Reading: all specs in this change and linked sub-issue evidence.
 - Acceptance: OpenSpec strict validation passes, broader affected suite passes,
-  and final cross-review reports no P0/P1 findings.
+  G6-20 addendum tasks are closed or explicitly descoped, and final
+  cross-review reports no P0/P1 findings.
 
 ### G6-20 PR #481 production copyback/runtime finalization
 
@@ -3013,21 +3081,21 @@ separate PR boundaries.
 - Out of Scope: New display features, new storage backends, or entropy baseline
   rewrites.
 - Tasks:
-  - [ ] 16.1 Preserve raw configured copyback root until no-follow validation
+  - [x] 16.1 Preserve raw configured copyback root until no-follow validation
     rejects symlink components; compare only verified real paths for equality,
     overlap, and containment.
-  - [ ] 16.2 Validate every `runs/<run_id>` tree for manifest/output/log
+  - [x] 16.2 Validate every `runs/<run_id>` tree for manifest/output/log
     completeness even when copyback root exactly equals object-store root.
-  - [ ] 16.3 Replace canonical copyback run trees with rollback-safe sibling
+  - [x] 16.3 Replace canonical copyback run trees with rollback-safe sibling
     staging/backup semantics so failed promotion cannot expose partial run
     products.
-  - [ ] 16.4 Stage q_down display artifacts until copyback succeeds; failed
+  - [x] 16.4 Stage q_down display artifacts until copyback succeeds; failed
     first publish exposes no new manifest and failed republish leaves the
     previous manifest/cycle pointer unchanged.
-  - [ ] 16.5 Keep compute-only runtime/env validation and docs aligned so
+  - [x] 16.5 Keep compute-only runtime/env validation and docs aligned so
     `display_readonly` cannot configure copyback or other compute-control path
     env.
-  - [ ] 16.6 Verify with focused copyback, full tile publisher, runtime/static
+  - [x] 16.6 Verify with focused copyback, full tile publisher, runtime/static
     Docker tests, ruff, strict OpenSpec validation, and `git diff --check`.
 - Dependencies: PR #481 issue #460 closure under epic #456.
 - PR Boundary: Approved local production copyback/runtime hardening only.
@@ -3037,3 +3105,22 @@ separate PR boundaries.
 - Acceptance: confirmed copyback/runtime blockers close as a class-level fix and
   forbidden files `.entropy-baseline/latest.json` and
   `docs/runbooks/current-production-ops.md` remain untouched.
+- Required evidence:
+  - Issue #460 closure comment records PR #481 -> merge commit
+    `8fff6961e2a528b20259d76255fdf9dc398ebe9d`, final HEAD
+    `92896f7804bc56ec18addad65699760c04c5cd10`, and six-reviewer final
+    cross-review with no actionable findings.
+  - PR #481 / #460 evidence records copyback/runtime validation:
+    `tests/test_tile_publisher.py -k copyback` -> 19 passed,
+    `tests/test_tile_publisher.py` -> 62 passed,
+    `tests/test_runtime_mode.py tests/test_two_node_docker_runtime.py` ->
+    437 passed,
+    `tests/test_production_scheduler.py tests/test_entropy_audit_script.py` ->
+    709 passed, plus ruff, entrypoint bash syntax, strict OpenSpec validation,
+    and `git diff --check`.
+  - GitHub CI for PR #481 was green for Detect changed areas, Entropy Audit,
+    Markdown Lint, SQL Migration Dry Run, and Unit Tests; path-filtered
+    OpenAPI/JSON/frontend checks were skipped.
+  - `.entropy-baseline/latest.json` and
+    `docs/runbooks/current-production-ops.md` were intentionally left untouched
+    by the PR #481 closure scope.
