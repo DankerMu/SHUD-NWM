@@ -927,6 +927,7 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 ("segment_count", "required"),
                 ("model_package_uri", "required"),
                 ("output_segment_count", None),
+                ("model_package_checksum", None),
             ],
         ),
         "ForcingContext": (
@@ -986,6 +987,7 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
                 ("init_state_valid_time", None),
                 ("init_state_checksum", None),
                 ("init_state_quality", "cold_start_no_state"),
+                ("init_state_lineage", None),
                 ("output_segment_count", None),
             ],
         ),
