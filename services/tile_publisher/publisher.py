@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import re
 import stat
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -64,6 +66,16 @@ class PublishResult:
 class _CopybackSourceTree:
     directories: tuple[str, ...]
     files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ForcingPackageRef:
+    run_id: str
+    forcing_version_id: str
+    object_key: str
+    checksum: str
+    lineage_manifest_checksum: str | None
+    output_files: tuple[Any, ...]
 
 
 class TilePublisher:
@@ -612,7 +624,8 @@ class TilePublisher:
         # replica can discover display products from the DB; tolerate a missing table.
         db_registered = False
         source_run_ids = sorted({str(layer["source_run_id"]) for layer in layers})
-        copyback_summary = self._copyback_run_products(source_run_ids)
+        published_runs = [run for run, _layer, _manifest_uri in registrations]
+        copyback_summary = self._copyback_qdown_products(published_runs)
 
         for artifact_write in artifact_writes:
             self._write_qdown_artifact(artifact_write["key"], artifact_write["payload"])
@@ -677,6 +690,11 @@ class TilePublisher:
             )
 
         is_sqlite = session.get_bind().dialect.name == "sqlite"
+        forcing_table_available = _has_optional_table(session, "met", "forcing_version")
+        forcing_columns = _table_columns(session, "met", "forcing_version") if forcing_table_available else set()
+        if "forcing_version_id" not in forcing_columns:
+            forcing_table_available = False
+            forcing_columns = set()
         where_clauses = [
             "h.run_type = 'forecast'" if "run_type" in hydro_columns else "1 = 1",
             "h.status IN ('parsed', 'frequency_done', 'published')",
@@ -696,6 +714,10 @@ class TilePublisher:
             "GROUP_CONCAT(DISTINCT r.quality_flag)" if is_sqlite else "STRING_AGG(DISTINCT r.quality_flag, ',')"
         )
         optional = self._qdown_optional_selects(hydro_columns)
+        forcing = self._qdown_forcing_selects(
+            table_available=forcing_table_available,
+            forcing_columns=forcing_columns,
+        )
         rows = session.execute(
             text(
                 f"""
@@ -703,6 +725,7 @@ class TilePublisher:
                        h.source_id, h.cycle_time, h.scenario_id,
                        r.river_network_version_id,
                        {optional['select']}
+                       {forcing['select']}
                        COUNT(DISTINCT r.river_network_version_id || '::' || r.river_segment_id) AS segment_count,
                        COUNT(r.value) AS row_count,
                        MIN(r.valid_time) AS first_valid_time,
@@ -712,16 +735,17 @@ class TilePublisher:
                 FROM hydro.hydro_run h
                 JOIN hydro.river_timeseries r
                   ON r.run_id = h.run_id AND r.variable = 'q_down'
+                {forcing['join']}
                 WHERE {' AND '.join(where_clauses)}
                 GROUP BY h.run_id, h.model_id, h.basin_version_id, h.forcing_version_id,
                          h.source_id, h.cycle_time, h.scenario_id,
-                         r.river_network_version_id{optional['group']}
+                         r.river_network_version_id{optional['group']}{forcing['group']}
                 ORDER BY h.run_id
                 """
             ),
             params,
         ).mappings()
-        return [dict(row) for row in rows]
+        return [_with_parsed_forcing_lineage(dict(row)) for row in rows]
 
     @staticmethod
     def _qdown_optional_selects(hydro_columns: set[str]) -> dict[str, str]:
@@ -734,6 +758,53 @@ class TilePublisher:
         select = (", ".join(select_parts) + ",") if select_parts else ""
         group = ("," + ", ".join(group_parts)) if group_parts else ""
         return {"select": select, "group": group}
+
+    @staticmethod
+    def _qdown_forcing_selects(
+        *,
+        table_available: bool,
+        forcing_columns: set[str],
+    ) -> dict[str, str]:
+        if not table_available:
+            return {
+                "join": "",
+                "select": (
+                    "NULL AS forcing_row_forcing_version_id, "
+                    "NULL AS forcing_package_uri, "
+                    "NULL AS forcing_checksum, "
+                    "NULL AS forcing_lineage_json,"
+                ),
+                "group": "",
+            }
+        select_parts = [
+            "fv.forcing_version_id AS forcing_row_forcing_version_id",
+            (
+                "fv.forcing_package_uri AS forcing_package_uri"
+                if "forcing_package_uri" in forcing_columns
+                else "NULL AS forcing_package_uri"
+            ),
+            (
+                "fv.checksum AS forcing_checksum"
+                if "checksum" in forcing_columns
+                else "NULL AS forcing_checksum"
+            ),
+            (
+                "fv.lineage_json AS forcing_lineage_json"
+                if "lineage_json" in forcing_columns
+                else "NULL AS forcing_lineage_json"
+            ),
+        ]
+        group_parts = ["fv.forcing_version_id"]
+        group_parts.extend(
+            f"fv.{column}"
+            for column in ("forcing_package_uri", "checksum", "lineage_json")
+            if column in forcing_columns
+        )
+        return {
+            "join": "LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id",
+            "select": f"{', '.join(select_parts)},",
+            "group": ("," + ", ".join(group_parts)) if group_parts else "",
+        }
 
     def _build_qdown_identity(self, run: dict[str, Any]) -> dict[str, Any]:
         """Assemble the strict-identity manifest, refusing to silently fill NULLs."""
@@ -1142,7 +1213,13 @@ class TilePublisher:
             run_key: str | None = None
             try:
                 run_key = _run_product_key(run_id)
-                summary = self._copyback_object_tree(run_key, copyback_store)
+                summary = self._copyback_object_tree(
+                    run_key,
+                    copyback_store,
+                    validate_source_tree=lambda source_tree, run_id=run_id: self._validate_copyback_source_tree(
+                        run_id, source_tree
+                    ),
+                )
             except FileNotFoundError as error:
                 raise PublishError(
                     "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
@@ -1180,6 +1257,190 @@ class TilePublisher:
             "file_count": total_files,
             "byte_count": total_bytes,
             "runs": copied_runs,
+        }
+
+    def _copyback_qdown_products(self, runs: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if self.object_store_copyback_root is None:
+            return None
+
+        unique_run_ids = sorted({str(run.get("run_id")).strip() for run in runs if str(run.get("run_id")).strip()})
+        object_store_root_raw = _configured_path_no_resolve(self.object_store.root)
+        copyback_root_raw = self.object_store_copyback_root
+        if not unique_run_ids:
+            return {
+                "status": "skipped",
+                "reason": "no_source_run_ids",
+                "root": str(copyback_root_raw),
+                "run_ids": [],
+            }
+
+        try:
+            object_store_root = verify_directory_no_follow(object_store_root_raw).resolve()
+        except (OSError, SafeFilesystemError) as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Object-store staging root is unsafe for copyback.",
+                {
+                    "copyback_root": str(copyback_root_raw),
+                    "object_store_root": str(object_store_root_raw),
+                    "error": str(error),
+                },
+            ) from error
+
+        copyback_root = self._prepare_copyback_root(
+            copyback_root_raw=copyback_root_raw,
+            object_store_root_raw=object_store_root_raw,
+            object_store_root=object_store_root,
+        )
+        forcing_refs = self._forcing_package_refs_for_runs(
+            runs,
+            copyback_root=copyback_root,
+            object_store_root=object_store_root,
+        )
+        self._validate_qdown_copyback_sources(
+            run_ids=unique_run_ids,
+            forcing_refs=forcing_refs,
+            copyback_root=copyback_root,
+            object_store_root=object_store_root,
+        )
+
+        if copyback_root == object_store_root:
+            return {
+                "status": "skipped",
+                "reason": "copyback_root_matches_object_store_root",
+                "root": str(copyback_root),
+                "run_ids": unique_run_ids,
+                "runs": [{"run_id": run_id, "object_key": _run_product_key(run_id)} for run_id in unique_run_ids],
+                "forcing_packages": [
+                    {
+                        "object_key": ref.object_key,
+                        "run_ids": _run_ids_for_forcing_key(self.object_store, ref.object_key, runs),
+                        "forcing_version_ids": _forcing_version_ids_for_key(self.object_store, ref.object_key, runs),
+                    }
+                    for ref in forcing_refs
+                ],
+            }
+
+        if _paths_overlap(copyback_root, object_store_root):
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Object-store copyback root must not overlap OBJECT_STORE_ROOT.",
+                {
+                    "copyback_root": str(copyback_root),
+                    "object_store_root": str(object_store_root),
+                    "reason": "copyback_root_object_store_root_overlap",
+                },
+            )
+
+        try:
+            copyback_store = LocalObjectStore(
+                copyback_root,
+                object_store_prefix=self.object_store.object_store_prefix,
+            )
+        except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Failed to initialize object-store copyback root.",
+                {
+                    "copyback_root": str(copyback_root),
+                    "object_store_root": str(object_store_root),
+                    "error": str(error),
+                },
+            ) from error
+
+        copied_runs: list[dict[str, Any]] = []
+        copied_forcing: list[dict[str, Any]] = []
+        total_files = 0
+        total_bytes = 0
+
+        for run_id in unique_run_ids:
+            run_key = _run_product_key(run_id)
+            try:
+                summary = self._copyback_object_tree(
+                    run_key,
+                    copyback_store,
+                    validate_source_tree=lambda source_tree, run_id=run_id: self._validate_copyback_source_tree(
+                        run_id, source_tree
+                    ),
+                )
+            except FileNotFoundError as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
+                    "Run products are missing from the object-store staging root.",
+                    _copyback_error_details(
+                        run_id=run_id,
+                        object_key=run_key,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
+                ) from error
+            except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_FAILED",
+                    "Failed to copy run products to the shared object-store root.",
+                    _copyback_error_details(
+                        run_id=run_id,
+                        object_key=run_key,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
+                ) from error
+            copied_runs.append({"run_id": run_id, "object_key": run_key, **summary})
+            total_files += int(summary["file_count"])
+            total_bytes += int(summary["byte_count"])
+
+        for ref in forcing_refs:
+            try:
+                summary = self._copyback_object_tree(
+                    ref.object_key,
+                    copyback_store,
+                    validate_source_tree=lambda source_tree, ref=ref: self._validate_forcing_source_tree(
+                        ref, source_tree
+                    ),
+                )
+            except FileNotFoundError as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
+                    "Forcing package is missing from the object-store staging root.",
+                    _forcing_copyback_error_details(
+                        ref,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
+                ) from error
+            except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_FAILED",
+                    "Failed to copy forcing package to the shared object-store root.",
+                    _forcing_copyback_error_details(
+                        ref,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
+                ) from error
+            copied_forcing.append(
+                {
+                    "object_key": ref.object_key,
+                    "run_ids": _run_ids_for_forcing_key(self.object_store, ref.object_key, runs),
+                    "forcing_version_ids": _forcing_version_ids_for_key(self.object_store, ref.object_key, runs),
+                    **summary,
+                }
+            )
+            total_files += int(summary["file_count"])
+            total_bytes += int(summary["byte_count"])
+
+        return {
+            "status": "copied",
+            "root": str(copyback_root),
+            "run_ids": unique_run_ids,
+            "file_count": total_files,
+            "byte_count": total_bytes,
+            "runs": copied_runs,
+            "forcing_packages": copied_forcing,
         }
 
     def _prepare_copyback_root(
@@ -1252,13 +1513,128 @@ class TilePublisher:
                     ),
                 ) from error
 
-    def _copyback_object_tree(self, key: str, target_store: LocalObjectStore) -> dict[str, int]:
-        run_id = _run_id_from_product_key(key)
+    def _forcing_package_refs_for_runs(
+        self,
+        runs: list[dict[str, Any]],
+        *,
+        copyback_root: Path,
+        object_store_root: Path,
+    ) -> list[_ForcingPackageRef]:
+        refs_by_key: dict[str, _ForcingPackageRef] = {}
+        for run in runs:
+            try:
+                ref = self._forcing_package_ref_for_run(run)
+            except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_FAILED",
+                    "Forcing package metadata is missing or unsafe for q_down copyback.",
+                    _forcing_metadata_error_details(
+                        self.object_store,
+                        run,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
+                ) from error
+            existing_ref = refs_by_key.get(ref.object_key)
+            if existing_ref is not None and existing_ref.checksum != ref.checksum:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_FAILED",
+                    "Forcing package metadata is inconsistent for deduplicated q_down copyback.",
+                    _forcing_copyback_error_details(
+                        ref,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=ValueError(
+                            "Forcing package checksum differs for the same normalized forcing package key."
+                        ),
+                    ),
+                )
+            refs_by_key.setdefault(ref.object_key, ref)
+        return [refs_by_key[key] for key in sorted(refs_by_key)]
+
+    def _forcing_package_ref_for_run(self, run: dict[str, Any]) -> _ForcingPackageRef:
+        run_id = str(run.get("run_id") or "")
+        forcing_version_id = str(run.get("forcing_version_id") or "").strip()
+        if not forcing_version_id:
+            raise ValueError("Missing forcing metadata field: forcing_version_id")
+        if run.get("forcing_package_uri") in (None, "") and run.get("forcing_checksum") in (None, ""):
+            raise ValueError("Missing forcing metadata field: forcing_version")
+        package_uri = str(run.get("forcing_package_uri") or "").strip()
+        if not package_uri:
+            raise ValueError("Missing forcing metadata field: forcing_package_uri")
+        checksum = str(run.get("forcing_checksum") or "").strip()
+        if not checksum:
+            raise ValueError("Missing forcing metadata field: checksum")
+        object_key = _normalize_forcing_package_key(self.object_store, package_uri)
+        lineage = run.get("forcing_lineage") if isinstance(run.get("forcing_lineage"), dict) else {}
+        lineage_manifest_checksum = _optional_nonempty_string(lineage.get("forcing_package_manifest_checksum"))
+        if lineage_manifest_checksum is not None and lineage_manifest_checksum != checksum:
+            raise ValueError(
+                "Forcing package lineage manifest checksum does not match met.forcing_version.checksum"
+            )
+        output_files = _lineage_output_files(lineage)
+        return _ForcingPackageRef(
+            run_id=run_id,
+            forcing_version_id=forcing_version_id,
+            object_key=object_key,
+            checksum=checksum,
+            lineage_manifest_checksum=lineage_manifest_checksum,
+            output_files=output_files,
+        )
+
+    def _validate_qdown_copyback_sources(
+        self,
+        *,
+        run_ids: list[str],
+        forcing_refs: list[_ForcingPackageRef],
+        copyback_root: Path,
+        object_store_root: Path,
+    ) -> None:
+        self._validate_copyback_source_products(
+            run_ids,
+            copyback_root=copyback_root,
+            object_store_root=object_store_root,
+        )
+        for ref in forcing_refs:
+            try:
+                source_tree = _collect_copyback_source_tree(self.object_store, ref.object_key)
+                self._validate_forcing_source_tree(ref, source_tree)
+            except FileNotFoundError as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
+                    "Forcing package is missing from the object-store staging root.",
+                    _forcing_copyback_error_details(
+                        ref,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
+                ) from error
+            except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_FAILED",
+                    "Failed to validate forcing package in the object-store staging root.",
+                    _forcing_copyback_error_details(
+                        ref,
+                        copyback_root=copyback_root,
+                        object_store_root=object_store_root,
+                        error=error,
+                    ),
+                ) from error
+
+    def _copyback_object_tree(
+        self,
+        key: str,
+        target_store: LocalObjectStore,
+        *,
+        validate_source_tree: Callable[[_CopybackSourceTree], None],
+    ) -> dict[str, int]:
+        key = self.object_store.normalize_key(key)
         source_tree = _collect_copyback_source_tree(self.object_store, key)
-        self._validate_copyback_source_tree(run_id, source_tree)
+        validate_source_tree(source_tree)
         target_dir = _object_tree_root_path(target_store, key)
-        temp_run_id = f"{run_id}.copyback.{uuid.uuid4().hex}"
-        temp_key = f"runs/{temp_run_id}"
+        temp_key = _copyback_temp_tree_key(key)
         temp_dir = _object_tree_root_path(target_store, temp_key)
         ensure_directory_no_follow(target_dir.parent, containment_root=target_store.root)
 
@@ -1282,6 +1658,46 @@ class TilePublisher:
             raise
 
         return {"file_count": file_count, "byte_count": byte_count}
+
+    def _validate_forcing_source_tree(self, ref: _ForcingPackageRef, source_tree: _CopybackSourceTree) -> None:
+        files = set(source_tree.files)
+        if not files:
+            raise SafeFilesystemError(f"Forcing package tree is empty: {ref.object_key}")
+
+        manifest_key = f"{ref.object_key}/forcing_package.json"
+        if manifest_key not in files:
+            raise SafeFilesystemError(f"Forcing package manifest is missing: {manifest_key}")
+
+        manifest_bytes = self.object_store.read_bytes(manifest_key)
+        manifest_checksum = hashlib.sha256(manifest_bytes).hexdigest()
+        if manifest_checksum != ref.checksum:
+            raise SafeFilesystemError(
+                f"Forcing package manifest checksum mismatch: {manifest_key}"
+            )
+        if ref.lineage_manifest_checksum is not None and ref.lineage_manifest_checksum != ref.checksum:
+            raise SafeFilesystemError(
+                "Forcing package lineage manifest checksum does not match met.forcing_version.checksum: "
+                f"{manifest_key}"
+            )
+
+        try:
+            manifest_payload = json.loads(manifest_bytes.decode("utf-8"))
+        except UnicodeDecodeError as error:
+            raise SafeFilesystemError(f"Forcing package manifest must be UTF-8 JSON: {manifest_key}") from error
+        except json.JSONDecodeError as error:
+            raise SafeFilesystemError(
+                f"Forcing package manifest is not valid JSON: {manifest_key}: {error.msg}"
+            ) from error
+
+        output_files = [*ref.output_files]
+        if isinstance(manifest_payload, dict):
+            manifest_files = manifest_payload.get("files")
+            if isinstance(manifest_files, list):
+                output_files.extend(manifest_files)
+        for output_file in output_files:
+            output_key = _same_package_output_file_key(self.object_store, output_file, package_key=ref.object_key)
+            if output_key is not None and output_key not in files:
+                raise SafeFilesystemError(f"Forcing package output file is missing: {output_key}")
 
     def _validate_copyback_source_tree(self, run_id: str, source_tree: _CopybackSourceTree) -> None:
         files = set(source_tree.files)
@@ -1338,16 +1754,88 @@ def _run_product_key(run_id: str) -> str:
     return f"runs/{run_id}"
 
 
+def _normalize_forcing_package_key(object_store: LocalObjectStore, package_uri: str) -> str:
+    raw = package_uri.strip()
+    if raw.startswith("/"):
+        raise ValueError(f"Forcing package key must not be absolute: {package_uri!r}")
+    _reject_empty_forcing_package_segment(raw)
+    key = object_store.normalize_key(raw).rstrip("/")
+    return _validate_forcing_package_key(key)
+
+
+def _reject_empty_forcing_package_segment(raw: str) -> None:
+    candidate = raw
+    if candidate.startswith("s3://"):
+        candidate = unquote(urlparse(candidate).path)
+    candidate = candidate.strip("/")
+    if "//" in candidate:
+        raise ValueError(f"Forcing package key must not contain empty segments: {raw!r}")
+
+
+def _validate_forcing_package_key(key: str) -> str:
+    parts = PurePosixPath(key).parts
+    if len(parts) != 5:
+        raise ValueError(f"Forcing package key must use forcing/<source>/<cycle>/<basin>/<model>: {key!r}")
+    if parts[0] != "forcing":
+        raise ValueError(f"Forcing package key must start with forcing/: {key!r}")
+    for part in parts:
+        if not part or part in {".", ".."} or "/" in part:
+            raise ValueError(f"Forcing package key has an unsafe segment: {key!r}")
+        if not _SAFE_ID_RE.fullmatch(part):
+            raise ValueError(f"Forcing package key segment is unsafe: {key!r}")
+    return "/".join(parts)
+
+
 def _object_tree_root_path(store: LocalObjectStore, key: str) -> Path:
     parts = PurePosixPath(key).parts
-    if len(parts) != 2 or parts[0] != "runs" or not _SAFE_ID_RE.fullmatch(parts[1]):
-        raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
-    return Path(store.root) / parts[0] / parts[1]
+    if _is_run_tree_key(parts):
+        return Path(store.root) / parts[0] / parts[1]
+    if _is_forcing_tree_key(parts):
+        return Path(store.root).joinpath(*parts)
+    raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
+
+
+def _copyback_temp_tree_key(key: str) -> str:
+    parts = PurePosixPath(key).parts
+    if _is_run_tree_key(parts):
+        return f"runs/{parts[1]}.copyback.{uuid.uuid4().hex}"
+    if _is_forcing_tree_key(parts):
+        return "/".join((*parts[:-1], f"{parts[-1]}.copyback.{uuid.uuid4().hex}"))
+    raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
+
+
+def _is_run_tree_key(parts: tuple[str, ...]) -> bool:
+    return len(parts) == 2 and parts[0] == "runs" and _SAFE_ID_RE.fullmatch(parts[1]) is not None
+
+
+def _is_forcing_tree_key(parts: tuple[str, ...]) -> bool:
+    return (
+        len(parts) == 5
+        and parts[0] == "forcing"
+        and all(_SAFE_ID_RE.fullmatch(part) for part in parts)
+    )
+
+
+def _copyback_tree_label(key: str) -> str:
+    parts = PurePosixPath(key).parts
+    if parts and parts[0] == "forcing":
+        return "forcing package"
+    return "run product"
+
+
+def _copyback_tree_label_title(key: str) -> str:
+    label = _copyback_tree_label(key)
+    return "Forcing package" if label == "forcing package" else "Run product"
+
+
+def _copyback_path_component_label(key: str) -> str:
+    parts = PurePosixPath(key).parts
+    return "forcing package" if parts and parts[0] == "forcing" else "run product"
 
 
 def _run_id_from_product_key(key: str) -> str:
     parts = PurePosixPath(key).parts
-    if len(parts) != 2 or parts[0] != "runs" or not _SAFE_ID_RE.fullmatch(parts[1]):
+    if not _is_run_tree_key(parts):
         raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
     return parts[1]
 
@@ -1398,6 +1886,103 @@ def _copyback_error_details(
     return details
 
 
+def _forcing_metadata_error_details(
+    object_store: LocalObjectStore,
+    run: dict[str, Any],
+    *,
+    copyback_root: Path,
+    object_store_root: Path,
+    error: BaseException,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "run_id": run.get("run_id"),
+        "forcing_version_id": run.get("forcing_version_id"),
+        "copyback_root": str(copyback_root),
+        "object_store_root": str(object_store_root),
+        "error": str(error),
+        "error_type": type(error).__name__,
+    }
+    package_uri = run.get("forcing_package_uri")
+    if package_uri is not None:
+        details["forcing_package_uri"] = package_uri
+    missing_field = _missing_forcing_field(run, error)
+    if missing_field is not None:
+        details["missing_field"] = missing_field
+    try:
+        if isinstance(package_uri, str) and package_uri.strip():
+            details["object_key"] = _normalize_forcing_package_key(object_store, package_uri)
+    except Exception:
+        pass
+    return details
+
+
+def _forcing_copyback_error_details(
+    ref: _ForcingPackageRef,
+    *,
+    copyback_root: Path,
+    object_store_root: Path,
+    error: BaseException,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "run_id": ref.run_id,
+        "forcing_version_id": ref.forcing_version_id,
+        "object_key": ref.object_key,
+        "copyback_root": str(copyback_root),
+        "object_store_root": str(object_store_root),
+        "error": str(error),
+        "error_type": type(error).__name__,
+    }
+    return details
+
+
+def _missing_forcing_field(run: dict[str, Any], error: BaseException) -> str | None:
+    message = str(error)
+    marker = "Missing forcing metadata field: "
+    if marker in message:
+        return message.split(marker, 1)[1].split()[0]
+    if not run.get("forcing_version_id"):
+        return "forcing_version_id"
+    if run.get("forcing_row_forcing_version_id") in (None, ""):
+        return "forcing_version"
+    if run.get("forcing_package_uri") in (None, ""):
+        return "forcing_package_uri"
+    if run.get("forcing_checksum") in (None, ""):
+        return "checksum"
+    return None
+
+
+def _run_ids_for_forcing_key(object_store: LocalObjectStore, object_key: str, runs: list[dict[str, Any]]) -> list[str]:
+    return sorted({
+        str(run.get("run_id"))
+        for run in runs
+        if str(run.get("run_id") or "").strip()
+        and _run_forcing_object_key(object_store, run) == object_key
+    })
+
+
+def _forcing_version_ids_for_key(
+    object_store: LocalObjectStore,
+    object_key: str,
+    runs: list[dict[str, Any]],
+) -> list[str]:
+    return sorted({
+        str(run.get("forcing_version_id"))
+        for run in runs
+        if str(run.get("forcing_version_id") or "").strip()
+        and _run_forcing_object_key(object_store, run) == object_key
+    })
+
+
+def _run_forcing_object_key(object_store: LocalObjectStore, run: dict[str, Any]) -> str | None:
+    package_uri = run.get("forcing_package_uri")
+    if not isinstance(package_uri, str) or not package_uri.strip():
+        return None
+    try:
+        return _normalize_forcing_package_key(object_store, package_uri)
+    except ValueError:
+        return None
+
+
 def _raise_copyback_root_overlap(copyback_root: Path, object_store_root: Path) -> None:
     raise PublishError(
         "OBJECT_STORE_COPYBACK_FAILED",
@@ -1425,7 +2010,7 @@ def _path_is_relative_to(path: Path, parent: Path) -> bool:
 def _collect_copyback_source_tree(store: LocalObjectStore, key: str) -> _CopybackSourceTree:
     root = Path(store.root)
     parts = PurePosixPath(key).parts
-    if len(parts) != 2 or parts[0] != "runs" or not _SAFE_ID_RE.fullmatch(parts[1]):
+    if not (_is_run_tree_key(parts) or _is_forcing_tree_key(parts)):
         raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
 
     root_path = verify_directory_no_follow(root)
@@ -1433,7 +2018,7 @@ def _collect_copyback_source_tree(store: LocalObjectStore, key: str) -> _Copybac
     fd = root_fd
     try:
         for part in parts:
-            next_fd = _open_copyback_child_dir(fd, part, root / "/".join(parts))
+            next_fd = _open_copyback_child_dir(fd, part, root / "/".join(parts), tree_key=key)
             if fd != root_fd:
                 os.close(fd)
             fd = next_fd
@@ -1456,20 +2041,27 @@ def _collect_copyback_source_entries(
     try:
         names = sorted(os.listdir(dir_fd))
     except OSError as error:
-        message = f"Failed to list run product directory: {directory_key}: {error}"
+        message = f"Failed to list {_copyback_tree_label(directory_key)} directory: {directory_key}: {error}"
         raise SafeFilesystemError(message, kind="io") from error
     for name in names:
         if name in {"", ".", ".."} or "/" in name:
-            raise SafeFilesystemError(f"Unsafe run product entry name: {directory_key}/{name}")
+            raise SafeFilesystemError(
+                f"Unsafe {_copyback_tree_label(directory_key)} entry name: {directory_key}/{name}"
+            )
         entry_key = f"{directory_key}/{name}"
         try:
             entry_stat = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         except OSError as error:
-            raise SafeFilesystemError(f"Failed to stat run product entry: {entry_key}: {error}", kind="io") from error
+            raise SafeFilesystemError(
+                f"Failed to stat {_copyback_tree_label(directory_key)} entry: {entry_key}: {error}",
+                kind="io",
+            ) from error
         if stat.S_ISLNK(entry_stat.st_mode):
-            raise SafeFilesystemError(f"Run product entry must not be a symlink: {entry_key}")
+            raise SafeFilesystemError(
+                f"{_copyback_tree_label_title(directory_key)} entry must not be a symlink: {entry_key}"
+            )
         if stat.S_ISDIR(entry_stat.st_mode):
-            child_fd = _open_copyback_child_dir(dir_fd, name, Path(entry_key))
+            child_fd = _open_copyback_child_dir(dir_fd, name, Path(entry_key), tree_key=directory_key)
             try:
                 directories.append(entry_key)
                 _collect_copyback_source_entries(child_fd, entry_key, directories, files)
@@ -1479,30 +2071,46 @@ def _collect_copyback_source_entries(
         if stat.S_ISREG(entry_stat.st_mode):
             files.append(entry_key)
             continue
-        raise SafeFilesystemError(f"Run product entry must be a regular file or directory: {entry_key}")
+        raise SafeFilesystemError(
+            f"{_copyback_tree_label_title(directory_key)} entry must be a regular file or directory: {entry_key}"
+        )
 
 
-def _open_copyback_child_dir(parent_fd: int, name: str, path_label: Path) -> int:
+def _open_copyback_child_dir(parent_fd: int, name: str, path_label: Path, *, tree_key: str) -> int:
     try:
         expected = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
         raise
     except OSError as error:
-        raise SafeFilesystemError(f"Failed to stat run product directory: {path_label}: {error}", kind="io") from error
+        raise SafeFilesystemError(
+            f"Failed to stat {_copyback_path_component_label(tree_key)} directory: {path_label}: {error}",
+            kind="io",
+        ) from error
     if stat.S_ISLNK(expected.st_mode):
-        raise SafeFilesystemError(f"Run product path component must not be a symlink: {path_label}")
+        raise SafeFilesystemError(
+            f"{_copyback_tree_label_title(tree_key)} path component must not be a symlink: {path_label}"
+        )
     if not stat.S_ISDIR(expected.st_mode):
-        raise SafeFilesystemError(f"Run product path component is not a directory: {path_label}")
+        raise SafeFilesystemError(
+            f"{_copyback_tree_label_title(tree_key)} path component is not a directory: {path_label}"
+        )
     try:
         return os.open(name, _COPYBACK_DIR_FLAGS, dir_fd=parent_fd)
     except FileNotFoundError:
         raise
     except NotADirectoryError as error:
-        raise SafeFilesystemError(f"Run product path component is not a directory: {path_label}") from error
+        raise SafeFilesystemError(
+            f"{_copyback_tree_label_title(tree_key)} path component is not a directory: {path_label}"
+        ) from error
     except OSError as error:
         if error.errno == errno.ELOOP:
-            raise SafeFilesystemError(f"Run product path component must not be a symlink: {path_label}") from error
-        raise SafeFilesystemError(f"Failed to open run product directory: {path_label}: {error}", kind="io") from error
+            raise SafeFilesystemError(
+                f"{_copyback_tree_label_title(tree_key)} path component must not be a symlink: {path_label}"
+            ) from error
+        raise SafeFilesystemError(
+            f"Failed to open {_copyback_path_component_label(tree_key)} directory: {path_label}: {error}",
+            kind="io",
+        ) from error
 
 
 def _has_regular_file_under(files: set[str], directory_key: str) -> bool:
@@ -1678,6 +2286,80 @@ def _qdown_identity_blockers(error: PublishError, run: dict[str, Any]) -> list[d
             ),
         }
     ]
+
+
+def _with_parsed_forcing_lineage(row: dict[str, Any]) -> dict[str, Any]:
+    row["forcing_lineage"] = _parse_forcing_lineage(row.get("forcing_lineage_json"))
+    return row
+
+
+def _parse_forcing_lineage(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        if not raw.strip():
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"_parse_error": "invalid_json"}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _optional_nonempty_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _lineage_output_files(lineage: dict[str, Any]) -> tuple[Any, ...]:
+    raw = lineage.get("output_files")
+    if isinstance(raw, list | tuple):
+        return tuple(raw)
+    return ()
+
+
+def _same_package_output_file_key(
+    object_store: LocalObjectStore,
+    output_file: Any,
+    *,
+    package_key: str,
+) -> str | None:
+    candidate: Any
+    if isinstance(output_file, dict):
+        candidate = output_file.get("uri") or output_file.get("key") or output_file.get("path")
+    else:
+        candidate = output_file
+    if not isinstance(candidate, str) or not candidate.strip():
+        return None
+    value = candidate.strip()
+    if value.startswith("s3://"):
+        parsed = urlparse(value)
+        value = unquote(parsed.path).strip("/")
+    elif "://" in value:
+        return None
+    else:
+        if PurePosixPath(value).is_absolute():
+            return None
+        value = value.strip("/")
+    if not value:
+        return None
+    try:
+        normalized = object_store.normalize_key(value)
+    except ValueError:
+        return None
+    package_prefix = f"{package_key.rstrip('/')}/"
+    if normalized.startswith(package_prefix):
+        return normalized
+    if normalized.startswith("forcing/"):
+        return None
+    if PurePosixPath(normalized).is_absolute():
+        return None
+    return f"{package_prefix}{normalized}"
 
 
 def _is_private_display_path(path: str) -> bool:
@@ -2013,6 +2695,13 @@ def _cycle_filter(cycle_id: str) -> dict[str, Any] | None:
 
 def _has_table(session: Session, schema: str, table_name: str) -> bool:
     return inspect(session.connection()).has_table(table_name, schema=schema)
+
+
+def _has_optional_table(session: Session, schema: str, table_name: str) -> bool:
+    try:
+        return _has_table(session, schema, table_name)
+    except Exception:
+        return False
 
 
 def _table_columns(session: Session, schema: str, table_name: str) -> set[str]:

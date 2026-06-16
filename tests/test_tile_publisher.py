@@ -31,6 +31,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,7 @@ def _attach_schemas(engine: Engine) -> None:
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS flood")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS ops")
         dbapi_connection.execute("ATTACH DATABASE ':memory:' AS map")
+        dbapi_connection.execute("ATTACH DATABASE ':memory:' AS met")
 
 
 def _create_hydro_tables(connection: Any) -> None:
@@ -162,12 +164,34 @@ def _create_tile_layer_table(connection: Any) -> None:
     )
 
 
+def _create_forcing_version_table(connection: Any) -> None:
+    connection.execute(
+        text(
+            """
+            CREATE TABLE met.forcing_version (
+                forcing_version_id TEXT PRIMARY KEY,
+                model_id TEXT,
+                source_id TEXT,
+                cycle_time DATETIME,
+                start_time DATETIME,
+                end_time DATETIME,
+                station_count INTEGER,
+                forcing_package_uri TEXT,
+                checksum TEXT,
+                lineage_json TEXT
+            )
+            """
+        )
+    )
+
+
 @contextmanager
 def _store(
     *,
     create_hydro: bool = True,
     create_flood: bool = False,
     create_tile_layer: bool = True,
+    create_met: bool = False,
 ) -> Iterator[Session]:
     engine = create_engine(
         "sqlite://",
@@ -183,6 +207,8 @@ def _store(
             _create_flood_table(connection)
         if create_tile_layer:
             _create_tile_layer_table(connection)
+        if create_met:
+            _create_forcing_version_table(connection)
     session = Session(engine)
     try:
         yield session
@@ -310,14 +336,80 @@ def _seed_run_products(publisher: TilePublisher, run_id: str) -> None:
     publisher.object_store.write_bytes_atomic(f"runs/{run_id}/logs/shud_stdout.log", b"ok\n")
 
 
+FORCING_KEY = "forcing/gfs/2026061400/basin-1/model-1"
+
+
+def _seed_forcing_package(
+    publisher: TilePublisher,
+    session: Session,
+    *,
+    forcing_version_id: str = "forcing-1",
+    package_key: str = FORCING_KEY,
+    package_uri: str | None = None,
+    checksum: str | None = None,
+    lineage_checksum: str | None = None,
+    lineage_json: Any | None = None,
+    write_manifest: bool = True,
+    write_output: bool = True,
+    manifest_payload: dict[str, Any] | None = None,
+) -> tuple[str, bytes]:
+    output_key = f"{package_key}/forcing.tsd.forc"
+    payload = manifest_payload or {
+        "forcing_version_id": forcing_version_id,
+        "files": [{"role": "tsd_forc", "uri": output_key}],
+    }
+    manifest_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    manifest_checksum = sha256(manifest_bytes).hexdigest()
+    if write_output:
+        publisher.object_store.write_bytes_atomic(output_key, b"forcing-bytes\n")
+    if write_manifest:
+        publisher.object_store.write_bytes_atomic(f"{package_key}/forcing_package.json", manifest_bytes)
+    lineage = (
+        lineage_json
+        if lineage_json is not None
+        else {
+            "forcing_package_manifest_uri": f"{package_key}/forcing_package.json",
+            "forcing_package_manifest_checksum": lineage_checksum or manifest_checksum,
+            "output_files": payload["files"],
+        }
+    )
+    session.execute(
+        text(
+            """
+            INSERT INTO met.forcing_version (
+                forcing_version_id, model_id, source_id, cycle_time, start_time, end_time,
+                station_count, forcing_package_uri, checksum, lineage_json
+            ) VALUES (
+                :forcing_version_id, 'model-1', :source_id, :cycle_time, :cycle_time, :cycle_time,
+                1, :forcing_package_uri, :checksum, :lineage_json
+            )
+            """
+        ),
+        {
+            "forcing_version_id": forcing_version_id,
+            "source_id": SOURCE_ID,
+            "cycle_time": CYCLE_TIME,
+            "forcing_package_uri": package_uri if package_uri is not None else f"{package_key}/",
+            "checksum": manifest_checksum if checksum is None else checksum,
+            "lineage_json": lineage if isinstance(lineage, str) else json.dumps(lineage),
+        },
+    )
+    session.commit()
+    return manifest_checksum, manifest_bytes
+
+
 def _assert_copyback_publish_error(
     publisher: TilePublisher,
     *,
     expected_code: str,
     session_run_id: str = "run-a",
+    seed_forcing: bool = True,
+    forcing_options: dict[str, Any] | None = None,
 ) -> PublishError:
-    with _store(create_flood=False) as session:
+    with _store(create_flood=False, create_met=seed_forcing) as session:
         _insert_run(session, run_id=session_run_id, segments=3)
+        if seed_forcing:
+            _seed_forcing_package(publisher, session, **(forcing_options or {}))
 
         with pytest.raises(PublishError) as error:
             publisher._publish_qdown_from_database(session, CYCLE_ID)
@@ -397,8 +489,9 @@ def test_publish_qdown_copybacks_complete_run_products_to_shared_object_store(tm
     publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False) as session:
+    with _store(create_flood=False, create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
+        _checksum, forcing_manifest_bytes = _seed_forcing_package(publisher, session)
 
         result = publisher._publish_qdown_from_database(session, CYCLE_ID)
 
@@ -408,24 +501,39 @@ def test_publish_qdown_copybacks_complete_run_products_to_shared_object_store(tm
     }
     assert (copyback_root / "runs/run-a/output/q.rivqdown.csv").read_bytes() == b"seg,q\n1,2\n"
     assert (copyback_root / "runs/run-a/logs/shud_stdout.log").read_bytes() == b"ok\n"
+    assert (copyback_root / f"{FORCING_KEY}/forcing_package.json").read_bytes() == forcing_manifest_bytes
+    assert (copyback_root / f"{FORCING_KEY}/forcing.tsd.forc").read_bytes() == b"forcing-bytes\n"
     assert oct((copyback_root / "runs/run-a").stat().st_mode & 0o777) == "0o755"
     assert oct((copyback_root / "runs/run-a/output/q.rivqdown.csv").stat().st_mode & 0o777) == "0o644"
+    assert oct((copyback_root / FORCING_KEY).stat().st_mode & 0o777) == "0o755"
+    assert oct((copyback_root / f"{FORCING_KEY}/forcing_package.json").stat().st_mode & 0o777) == "0o644"
 
     copyback = result.lineage["object_store_copyback"]
     assert copyback["status"] == "copied"
     assert copyback["run_ids"] == ["run-a"]
-    assert copyback["file_count"] == 3
-    assert copyback["byte_count"] == (
+    run_byte_count = (
         len(json.dumps({"run_id": "run-a", "run": "manifest"}).encode("utf-8"))
         + len(b"seg,q\n1,2\n")
         + len(b"ok\n")
     )
+    forcing_byte_count = len(forcing_manifest_bytes) + len(b"forcing-bytes\n")
+    assert copyback["file_count"] == 5
+    assert copyback["byte_count"] == run_byte_count + forcing_byte_count
     assert copyback["runs"] == [
         {
             "run_id": "run-a",
             "object_key": "runs/run-a",
             "file_count": 3,
-            "byte_count": copyback["byte_count"],
+            "byte_count": run_byte_count,
+        }
+    ]
+    assert copyback["forcing_packages"] == [
+        {
+            "object_key": FORCING_KEY,
+            "run_ids": ["run-a"],
+            "forcing_version_ids": ["forcing-1"],
+            "file_count": 2,
+            "byte_count": forcing_byte_count,
         }
     ]
 
@@ -433,8 +541,9 @@ def test_publish_qdown_copybacks_complete_run_products_to_shared_object_store(tm
 def test_publish_qdown_copyback_missing_run_products_fails_publish(tmp_path: Any) -> None:
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
 
-    with _store(create_flood=False) as session:
+    with _store(create_flood=False, create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
 
         with pytest.raises(PublishError) as error:
             publisher._publish_qdown_from_database(session, CYCLE_ID)
@@ -495,8 +604,9 @@ def test_publish_qdown_copyback_manifest_without_run_id_is_allowed(tmp_path: Any
     publisher.object_store.write_bytes_atomic("runs/run-a/output/q.rivqdown.csv", b"seg,q\n1,2\n")
     publisher.object_store.write_bytes_atomic("runs/run-a/logs/shud_stdout.log", b"ok\n")
 
-    with _store(create_flood=False) as session:
+    with _store(create_flood=False, create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
 
         result = publisher._publish_qdown_from_database(session, CYCLE_ID)
 
@@ -526,8 +636,9 @@ def test_publish_qdown_copyback_replaces_stale_target_tree(tmp_path: Any) -> Non
     stale_log.parent.mkdir(parents=True, exist_ok=True)
     stale_log.write_text("old\n", encoding="utf-8")
 
-    with _store(create_flood=False) as session:
+    with _store(create_flood=False, create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
 
         publisher._publish_qdown_from_database(session, CYCLE_ID)
 
@@ -580,17 +691,21 @@ def test_publish_qdown_copyback_exact_root_validates_complete_run_tree(tmp_path:
     publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "object-store")
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False) as session:
+    with _store(create_flood=False, create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
 
         result = publisher._publish_qdown_from_database(session, CYCLE_ID)
 
-    assert result.lineage["object_store_copyback"] == {
-        "status": "skipped",
-        "reason": "copyback_root_matches_object_store_root",
-        "root": str(Path(publisher.object_store.root).resolve()),
-        "run_ids": ["run-a"],
-    }
+    copyback = result.lineage["object_store_copyback"]
+    assert copyback["status"] == "skipped"
+    assert copyback["reason"] == "copyback_root_matches_object_store_root"
+    assert copyback["root"] == str(Path(publisher.object_store.root).resolve())
+    assert copyback["run_ids"] == ["run-a"]
+    assert copyback["runs"] == [{"run_id": "run-a", "object_key": "runs/run-a"}]
+    assert copyback["forcing_packages"] == [
+        {"object_key": FORCING_KEY, "run_ids": ["run-a"], "forcing_version_ids": ["forcing-1"]}
+    ]
     assert publisher.object_store.exists(f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json")
 
 
@@ -744,8 +859,9 @@ def test_publish_qdown_copyback_failure_does_not_advance_stable_display_artifact
     )
     _seed_run_products(publisher, "run-a")
 
-    with _store(create_flood=False) as session:
+    with _store(create_flood=False, create_met=True) as session:
         _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session)
         publisher._publish_qdown_from_database(session, CYCLE_ID)
         cycle_manifest_key = f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json"
         previous_cycle_manifest = publisher.object_store.read_bytes(cycle_manifest_key)
@@ -763,6 +879,182 @@ def test_publish_qdown_copyback_failure_does_not_advance_stable_display_artifact
     assert json.loads((published_root / cycle_manifest_key).read_text(encoding="utf-8"))["source_run_ids"] == [
         "run-a"
     ]
+    assert not (published_root / "forcing").exists()
+
+
+def test_publish_qdown_copyback_deduplicates_shared_forcing_package(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _seed_run_products(publisher, "run-b")
+
+    with _store(create_flood=False, create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _insert_run(session, run_id="run-b", segments=2)
+        _checksum, manifest_bytes = _seed_forcing_package(publisher, session)
+
+        result = publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    copyback = result.lineage["object_store_copyback"]
+    assert len(copyback["runs"]) == 2
+    assert copyback["forcing_packages"] == [
+        {
+            "object_key": FORCING_KEY,
+            "run_ids": ["run-a", "run-b"],
+            "forcing_version_ids": ["forcing-1"],
+            "file_count": 2,
+            "byte_count": len(manifest_bytes) + len(b"forcing-bytes\n"),
+        }
+    ]
+    assert (copyback_root / f"{FORCING_KEY}/forcing_package.json").read_bytes() == manifest_bytes
+
+
+@pytest.mark.parametrize(
+    ("create_met", "forcing_options", "missing_field"),
+    [
+        (False, {}, "forcing_version"),
+        (True, {"package_uri": ""}, "forcing_package_uri"),
+        (True, {"checksum": ""}, "checksum"),
+    ],
+)
+def test_publish_qdown_copyback_missing_forcing_metadata_fails_before_artifact_advance(
+    tmp_path: Any,
+    create_met: bool,
+    forcing_options: dict[str, Any],
+    missing_field: str,
+) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    _seed_run_products(publisher, "run-a")
+
+    with _store(create_flood=False, create_met=create_met) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        if create_met:
+            _seed_forcing_package(publisher, session, **forcing_options)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert error.value.details["run_id"] == "run-a"
+    assert error.value.details["forcing_version_id"] == "forcing-1"
+    assert error.value.details["missing_field"] == missing_field
+    assert not publisher.object_store.exists(f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json")
+
+
+@pytest.mark.parametrize(
+    ("forcing_options", "expected_error"),
+    [
+        ({"write_manifest": False}, "manifest is missing"),
+        ({"checksum": "0" * 64, "lineage_checksum": "0" * 64}, "checksum mismatch"),
+        ({"lineage_checksum": "1" * 64}, "lineage manifest checksum"),
+        ({"write_output": False}, "output file is missing"),
+    ],
+)
+def test_publish_qdown_copyback_forcing_integrity_failures_do_not_publish_display(
+    tmp_path: Any,
+    forcing_options: dict[str, Any],
+    expected_error: str,
+) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    _seed_run_products(publisher, "run-a")
+
+    with _store(create_flood=False, create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session, **forcing_options)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code in {"OBJECT_STORE_COPYBACK_FAILED", "OBJECT_STORE_COPYBACK_SOURCE_MISSING"}
+    assert error.value.details["run_id"] == "run-a"
+    assert error.value.details["forcing_version_id"] == "forcing-1"
+    assert error.value.details["object_key"] == FORCING_KEY
+    assert expected_error in error.value.details["error"]
+    assert not publisher.object_store.exists(f"tiles/hydro/{CYCLE_ID}/q-down/manifest.json")
+
+
+@pytest.mark.parametrize(
+    ("package_uri", "expected_error"),
+    [
+        ("runs/run-a/", "must use forcing/<source>/<cycle>/<basin>/<model>"),
+        ("forcing/gfs/2026061400/basin-1/model-1/extra", "must use forcing/<source>/<cycle>/<basin>/<model>"),
+        ("", "Missing forcing metadata field: forcing_package_uri"),
+        ("forcing/gfs//basin-1/model-1", "must not contain empty segments"),
+        ("forcing/gfs/../basin-1/model-1", "must not contain '..'"),
+        ("/forcing/gfs/2026061400/basin-1/model-1", "must not be absolute"),
+    ],
+)
+def test_publish_qdown_copyback_rejects_unsafe_forcing_keys(
+    tmp_path: Any,
+    package_uri: str,
+    expected_error: str,
+) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    _seed_run_products(publisher, "run-a")
+
+    with _store(create_flood=False, create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(publisher, session, package_uri=package_uri)
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert error.value.details["run_id"] == "run-a"
+    assert error.value.details["forcing_version_id"] == "forcing-1"
+    assert expected_error in error.value.details["error"]
+    assert not (tmp_path / "shared-object-store/forcing").exists()
+
+
+def test_publish_qdown_copyback_rejects_forcing_source_symlink(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    _seed_run_products(publisher, "run-a")
+    object_store_root = Path(publisher.object_store.root)
+    outside_forcing = tmp_path / "outside-forcing"
+    (outside_forcing / "gfs/2026061400/basin-1/model-1").mkdir(parents=True)
+    (object_store_root / "forcing").symlink_to(outside_forcing, target_is_directory=True)
+
+    with _store(create_flood=False, create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(
+            publisher,
+            session,
+            write_manifest=False,
+            write_output=False,
+        )
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert error.value.details["object_key"] == FORCING_KEY
+    assert "symlink" in error.value.details["error"]
+    assert not (tmp_path / "shared-object-store/forcing").exists()
+
+
+def test_publish_qdown_copyback_rejects_forcing_source_regular_file(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "shared-object-store")
+    _seed_run_products(publisher, "run-a")
+    source_file = Path(publisher.object_store.root) / FORCING_KEY
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("not a directory", encoding="utf-8")
+
+    with _store(create_flood=False, create_met=True) as session:
+        _insert_run(session, run_id="run-a", segments=3)
+        _seed_forcing_package(
+            publisher,
+            session,
+            write_manifest=False,
+            write_output=False,
+        )
+
+        with pytest.raises(PublishError) as error:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+
+    assert error.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    assert error.value.details["object_key"] == FORCING_KEY
+    assert "not a directory" in error.value.details["error"]
+    assert not (tmp_path / "shared-object-store/forcing").exists()
 
 
 def test_publish_qdown_identity_carries_all_nine_fields(tmp_path: Any) -> None:
