@@ -465,6 +465,8 @@ def build_forecast_run_manifest(
             "gis_segment_count": context.segment_count,
         },
     }
+    if context.init_state_lineage:
+        manifest["initial_state"]["lineage"] = dict(context.init_state_lineage)
     checkpoint_hours = forecast_state_checkpoint_hours(context.forecast_horizon_hours)
     if checkpoint_hours:
         manifest["runtime"]["state_checkpoint_hours"] = checkpoint_hours

@@ -14,7 +14,13 @@ import pytest
 from packages.common.object_store import LocalObjectStore
 from services.orchestrator import cli
 from services.orchestrator import scheduler as scheduler_module
-from services.orchestrator.chain import M3_STAGES, PipelineResult, StageRunResult, build_model_run_assembly
+from services.orchestrator.chain import (
+    M3_STAGES,
+    OrchestratorConfig,
+    PipelineResult,
+    StageRunResult,
+    build_model_run_assembly,
+)
 from services.orchestrator.production_contract import (
     PRODUCTION_STAGE_TAXONOMY,
     PRODUCTION_STATUS_TAXONOMY,
@@ -6177,6 +6183,7 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     monkeypatch.setenv("OBJECT_STORE_PREFIX", "s3://nhms/default")
     monkeypatch.setenv("SLURM_GATEWAY_URL", "http://slurm-gateway.internal:8000")
     monkeypatch.setenv("FORECAST_SOURCE_ID", "IFS")
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
     monkeypatch.setattr(scheduler_module, "_orchestrator_repository_from_env", lambda: "repository-from-env")
     monkeypatch.setattr(scheduler_module, "_retry_service_from_env", lambda: "retry-service-from-env")
     monkeypatch.setattr(scheduler_module.StateManager, "from_env", staticmethod(lambda: "state-manager-from-env"))
@@ -6213,10 +6220,33 @@ def test_slurm_preflight_ready_without_factory_uses_default_orchestrator_path(
     assert constructed[0]["config"].source_id == "gfs"
     assert constructed[0]["config"].workspace_root == roots["workspace_root"].resolve()
     assert constructed[0]["config"].object_store_root == roots["object_store_root"].resolve()
+    assert constructed[0]["config"].require_forecast_warm_start is True
     assert constructed[0]["config"].slurm_job_type_templates == dict(DEFAULT_JOB_TYPE_TEMPLATES)
     assert constructed[0]["config"].slurm_gateway_url == "http://slurm-gateway.internal:8000"
     assert calls[0]["source"] == "gfs"
     assert calls[0]["basins"][0]["output_uri"].startswith("s3://nhms/default/runs/")
+
+
+def test_orchestrator_config_parses_strict_forecast_warm_start_env(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "true")
+
+    assert OrchestratorConfig.from_env().require_forecast_warm_start is True
+
+    monkeypatch.setenv("NHMS_REQUIRE_FORECAST_WARM_START", "false")
+    assert OrchestratorConfig.from_env().require_forecast_warm_start is False
+
+
+def test_compute_env_example_enables_strict_forecast_warm_start() -> None:
+    content = Path("infra/env/compute.example").read_text(encoding="utf-8")
+
+    assert "NHMS_REQUIRE_FORECAST_WARM_START=true" in content
+    assert "forbid cold starts" in content
+    assert "exact +12h successor checkpoint" in content
 
 
 @pytest.mark.parametrize(

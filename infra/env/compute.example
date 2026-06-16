@@ -11,6 +11,9 @@ NHMS_SUPPLEMENTAL_GID=1107
 NHMS_SERVICE_ROLE=compute_control
 NHMS_REQUIRE_SERVICE_ROLE=true
 NHMS_AUTH_MODE=production
+# Strict production forecast warm-start: forbid cold starts and latest-state
+# fallback; require the exact +12h successor checkpoint for each business cycle.
+NHMS_REQUIRE_FORECAST_WARM_START=true
 UV_CACHE_DIR=/tmp/nhms-uv-cache
 
 DATABASE_URL=postgresql://nhms_control_rw:change-me@db.internal.example:5432/nhms

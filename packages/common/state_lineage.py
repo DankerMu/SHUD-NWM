@@ -29,6 +29,12 @@ STATE_QC_FAILED = "STATE_QC_FAILED"
 # rejection of some younger candidate (staleness, not lineage, drove the cold start).
 STATE_TOO_STALE = "STATE_TOO_STALE"
 
+# Public strict forecast warm-start blocker codes. These are intentionally
+# lower-case because they are exposed through OrchestratorError.error_code.
+WARM_START_SUCCESSOR_CHECKPOINT_MISSING = "warm_start_successor_checkpoint_missing"
+WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE = "warm_start_successor_checkpoint_unusable"
+WARM_START_LINEAGE_MISMATCH = "warm_start_lineage_mismatch"
+
 
 REJECTION_CODES = frozenset(
     {
@@ -37,5 +43,8 @@ REJECTION_CODES = frozenset(
         LINEAGE_MAX_LEAD_EXCEEDED,
         STATE_QC_FAILED,
         STATE_TOO_STALE,
+        WARM_START_SUCCESSOR_CHECKPOINT_MISSING,
+        WARM_START_SUCCESSOR_CHECKPOINT_UNUSABLE,
+        WARM_START_LINEAGE_MISMATCH,
     }
 )

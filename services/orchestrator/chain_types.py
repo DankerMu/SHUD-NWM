@@ -32,6 +32,7 @@ class ModelContext:
     segment_count: int
     model_package_uri: str
     output_segment_count: int | None = None
+    model_package_checksum: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ class ForecastRunContext:
     init_state_valid_time: datetime | None = None
     init_state_checksum: str | None = None
     init_state_quality: str = "cold_start_no_state"
+    init_state_lineage: Mapping[str, Any] | None = None
     output_segment_count: int | None = None
 
 
