@@ -2738,7 +2738,7 @@ separate PR boundaries.
     job id, retry id, manifest URI, output URI, log URI, quality flag, or
     artifact path rename.
 - Implementation evidence (2026-06-16, PR #521, head
-  `4dafd4d6c80696b674e191f1198cf88c24ca5cc9` plus follow-up review-fix):
+  `0a0f8164d53172f54f7ea87a8ef0e34d8de76693`):
   - Added `services/orchestrator/chain_manifests.py` for cycle stage manifest
     assembly, manifest index safe writes, forecast runtime manifest
     build/write/validate/staging, direct forecast/analysis run manifests,
