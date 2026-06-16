@@ -37,6 +37,7 @@ _COPYBACK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0
 _COPYBACK_MAX_FILES = 100_000
 _COPYBACK_MAX_DIRECTORIES = 20_000
 _COPYBACK_MAX_TOTAL_BYTES = 100 * 1024 * 1024 * 1024
+_COPYBACK_MAX_FILE_BYTES = 512 * 1024 * 1024
 _COPYBACK_MAX_DEPTH = 32
 
 
@@ -87,6 +88,13 @@ class _ForcingPackageRef:
     checksum: str
     lineage_manifest_checksum: str | None
     output_files: tuple[Any, ...]
+
+
+class _ForcingPackageValidationError(RuntimeError):
+    def __init__(self, ref: _ForcingPackageRef, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.ref = ref
+        self.original_error = error
 
 
 class TilePublisher:
@@ -1324,11 +1332,11 @@ class TilePublisher:
                 "runs": [{"run_id": run_id, "object_key": _run_product_key(run_id)} for run_id in unique_run_ids],
                 "forcing_packages": [
                     {
-                        "object_key": ref.object_key,
-                        "run_ids": _run_ids_for_forcing_key(self.object_store, ref.object_key, runs),
-                        "forcing_version_ids": _forcing_version_ids_for_key(self.object_store, ref.object_key, runs),
+                        "object_key": object_key,
+                        "run_ids": _run_ids_for_forcing_key(self.object_store, object_key, runs),
+                        "forcing_version_ids": _forcing_version_ids_for_key(self.object_store, object_key, runs),
                     }
-                    for ref in forcing_refs
+                    for object_key in _forcing_refs_by_key(forcing_refs)
                 ],
             }
 
@@ -1405,16 +1413,44 @@ class TilePublisher:
                 total_files += int(summary["file_count"])
                 total_bytes += int(summary["byte_count"])
 
-            for ref in forcing_refs:
+            for object_key, refs in _forcing_refs_by_key(forcing_refs).items():
+                ref = refs[0]
                 try:
                     summary = self._copyback_object_tree_with_rollback(
-                        ref.object_key,
+                        object_key,
                         copyback_store,
-                        validate_source_tree=lambda source_tree, ref=ref: self._validate_forcing_source_tree(
-                            ref, source_tree
+                        validate_source_tree=lambda source_tree, refs=refs: self._validate_forcing_source_tree_for_refs(
+                            refs, source_tree, self.object_store
+                        ),
+                        validate_target_tree=lambda target_tree, refs=refs: self._validate_forcing_source_tree_for_refs(
+                            refs, target_tree, copyback_store
                         ),
                         rollback_log=rollback_log,
                     )
+                except _ForcingPackageValidationError as error:
+                    ref = error.ref
+                    original_error = error.original_error
+                    if isinstance(original_error, FileNotFoundError):
+                        raise PublishError(
+                            "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
+                            "Forcing package is missing from the object-store staging root.",
+                            _forcing_copyback_error_details(
+                                ref,
+                                copyback_root=copyback_root,
+                                object_store_root=object_store_root,
+                                error=original_error,
+                            ),
+                        ) from original_error
+                    raise PublishError(
+                        "OBJECT_STORE_COPYBACK_FAILED",
+                        "Failed to copy forcing package to the shared object-store root.",
+                        _forcing_copyback_error_details(
+                            ref,
+                            copyback_root=copyback_root,
+                            object_store_root=object_store_root,
+                            error=original_error,
+                        ),
+                    ) from original_error
                 except FileNotFoundError as error:
                     raise PublishError(
                         "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
@@ -1439,9 +1475,9 @@ class TilePublisher:
                     ) from error
                 copied_forcing.append(
                     {
-                        "object_key": ref.object_key,
-                        "run_ids": _run_ids_for_forcing_key(self.object_store, ref.object_key, runs),
-                        "forcing_version_ids": _forcing_version_ids_for_key(self.object_store, ref.object_key, runs),
+                        "object_key": object_key,
+                        "run_ids": _run_ids_for_forcing_key(self.object_store, object_key, runs),
+                        "forcing_version_ids": _forcing_version_ids_for_key(self.object_store, object_key, runs),
                         **summary,
                     }
                 )
@@ -1469,7 +1505,25 @@ class TilePublisher:
                     ) from rollback_error
             raise
 
-        cleanup_errors = _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+        try:
+            _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+        except SafeFilesystemError as error:
+            details: dict[str, Any] = {
+                "copyback_root": str(copyback_root),
+                "object_store_root": str(object_store_root),
+                "error": str(error),
+                "error_type": type(error).__name__,
+            }
+            try:
+                _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+            except SafeFilesystemError as rollback_error:
+                details["rollback_error"] = str(rollback_error)
+                details["rollback_error_type"] = type(rollback_error).__name__
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_FAILED",
+                "Failed to finalize q_down copyback batch.",
+                details,
+            ) from error
 
         summary: dict[str, Any] = {
             "status": "copied",
@@ -1480,8 +1534,6 @@ class TilePublisher:
             "runs": copied_runs,
             "forcing_packages": copied_forcing,
         }
-        if cleanup_errors:
-            summary["backup_cleanup_errors"] = cleanup_errors
         return summary
 
     def _prepare_copyback_root(
@@ -1561,7 +1613,7 @@ class TilePublisher:
         copyback_root: Path,
         object_store_root: Path,
     ) -> list[_ForcingPackageRef]:
-        refs_by_key: dict[str, _ForcingPackageRef] = {}
+        refs_by_key: dict[str, list[_ForcingPackageRef]] = {}
         for run in runs:
             try:
                 ref = self._forcing_package_ref_for_run(run)
@@ -1577,8 +1629,8 @@ class TilePublisher:
                         error=error,
                     ),
                 ) from error
-            existing_ref = refs_by_key.get(ref.object_key)
-            if existing_ref is not None and existing_ref.checksum != ref.checksum:
+            existing_refs = refs_by_key.setdefault(ref.object_key, [])
+            if existing_refs and any(existing_ref.checksum != ref.checksum for existing_ref in existing_refs):
                 raise PublishError(
                     "OBJECT_STORE_COPYBACK_FAILED",
                     "Forcing package metadata is inconsistent for deduplicated q_down copyback.",
@@ -1591,8 +1643,8 @@ class TilePublisher:
                         ),
                     ),
                 )
-            refs_by_key.setdefault(ref.object_key, ref)
-        return [refs_by_key[key] for key in sorted(refs_by_key)]
+            existing_refs.append(ref)
+        return [ref for key in sorted(refs_by_key) for ref in refs_by_key[key]]
 
     def _forcing_package_ref_for_run(self, run: dict[str, Any]) -> _ForcingPackageRef:
         run_id = str(run.get("run_id") or "")
@@ -1641,7 +1693,7 @@ class TilePublisher:
         for ref in forcing_refs:
             try:
                 source_tree = _collect_copyback_source_tree(self.object_store, ref.object_key)
-                self._validate_forcing_source_tree(ref, source_tree)
+                self._validate_forcing_source_tree(ref, source_tree, self.object_store)
             except FileNotFoundError as error:
                 raise PublishError(
                     "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
@@ -1665,6 +1717,18 @@ class TilePublisher:
                     ),
                 ) from error
 
+    def _validate_forcing_source_tree_for_refs(
+        self,
+        refs: list[_ForcingPackageRef],
+        source_tree: _CopybackSourceTree,
+        store: LocalObjectStore,
+    ) -> None:
+        for ref in refs:
+            try:
+                self._validate_forcing_source_tree(ref, source_tree, store)
+            except (ObjectStoreError, OSError, SafeFilesystemError, ValueError, json.JSONDecodeError) as error:
+                raise _ForcingPackageValidationError(ref, error) from error
+
     def _copyback_object_tree(
         self,
         key: str,
@@ -1683,12 +1747,19 @@ class TilePublisher:
         target_store: LocalObjectStore,
         *,
         validate_source_tree: Callable[[_CopybackSourceTree], None],
+        validate_target_tree: Callable[[_CopybackSourceTree], None] | None = None,
         rollback_log: list[_CopybackRollbackEntry],
     ) -> dict[str, int]:
         key = self.object_store.normalize_key(key)
         source_tree = _collect_copyback_source_tree(self.object_store, key)
         validate_source_tree(source_tree)
-        return self._copyback_collected_object_tree(key, target_store, source_tree, rollback_log=rollback_log)
+        return self._copyback_collected_object_tree(
+            key,
+            target_store,
+            source_tree,
+            rollback_log=rollback_log,
+            validate_target_tree=validate_target_tree,
+        )
 
     def _copyback_collected_object_tree(
         self,
@@ -1697,6 +1768,7 @@ class TilePublisher:
         source_tree: _CopybackSourceTree,
         *,
         rollback_log: list[_CopybackRollbackEntry] | None,
+        validate_target_tree: Callable[[_CopybackSourceTree], None] | None = None,
     ) -> dict[str, int]:
         target_dir = _object_tree_root_path(target_store, key)
         temp_key = _copyback_temp_tree_key(key)
@@ -1717,6 +1789,8 @@ class TilePublisher:
             _chmod_tree_readable(temp_dir, containment_root=target_store.root)
             if rollback_log is None:
                 _replace_directory_tree_no_follow(temp_dir, target_dir, containment_root=target_store.root)
+                if validate_target_tree is not None:
+                    validate_target_tree(_collect_copyback_source_tree(target_store, key))
             else:
                 rollback_entry = _replace_directory_tree_for_qdown_batch(
                     temp_dir,
@@ -1724,13 +1798,20 @@ class TilePublisher:
                     containment_root=target_store.root,
                 )
                 rollback_log.append(rollback_entry)
+                if validate_target_tree is not None:
+                    validate_target_tree(_collect_copyback_source_tree(target_store, key))
         except Exception:
             rmtree_no_follow(temp_dir, containment_root=target_store.root, missing_ok=True)
             raise
 
         return {"file_count": file_count, "byte_count": byte_count}
 
-    def _validate_forcing_source_tree(self, ref: _ForcingPackageRef, source_tree: _CopybackSourceTree) -> None:
+    def _validate_forcing_source_tree(
+        self,
+        ref: _ForcingPackageRef,
+        source_tree: _CopybackSourceTree,
+        store: LocalObjectStore,
+    ) -> None:
         files = set(source_tree.files)
         if not files:
             raise SafeFilesystemError(f"Forcing package tree is empty: {ref.object_key}")
@@ -1739,7 +1820,7 @@ class TilePublisher:
         if manifest_key not in files:
             raise SafeFilesystemError(f"Forcing package manifest is missing: {manifest_key}")
 
-        manifest_bytes = self.object_store.read_bytes(manifest_key)
+        manifest_bytes = store.read_bytes(manifest_key)
         manifest_checksum = hashlib.sha256(manifest_bytes).hexdigest()
         if manifest_checksum != ref.checksum:
             raise SafeFilesystemError(
@@ -1772,7 +1853,7 @@ class TilePublisher:
             if output_key is not None:
                 expected_checksum = _same_package_output_file_checksum(output_file)
                 if expected_checksum is not None:
-                    actual_checksum = self.object_store.checksum(output_key)
+                    actual_checksum = store.checksum(output_key)
                     if actual_checksum != expected_checksum:
                         raise SafeFilesystemError(
                             f"Forcing package output file checksum mismatch: {output_key}"
@@ -2052,6 +2133,13 @@ def _forcing_copyback_error_details(
     return details
 
 
+def _forcing_refs_by_key(refs: list[_ForcingPackageRef]) -> dict[str, list[_ForcingPackageRef]]:
+    refs_by_key: dict[str, list[_ForcingPackageRef]] = {}
+    for ref in refs:
+        refs_by_key.setdefault(ref.object_key, []).append(ref)
+    return {key: refs_by_key[key] for key in sorted(refs_by_key)}
+
+
 def _missing_forcing_field(run: dict[str, Any], error: BaseException) -> str | None:
     message = str(error)
     marker = "Missing forcing metadata field: "
@@ -2220,9 +2308,11 @@ def _collect_copyback_source_entries(
                 os.close(child_fd)
             continue
         if stat.S_ISREG(entry_stat.st_mode):
+            file_size = int(entry_stat.st_size)
             counters["files"] += 1
-            counters["bytes"] += int(entry_stat.st_size)
+            counters["bytes"] += file_size
             _enforce_copyback_tree_count("files", counters["files"], _COPYBACK_MAX_FILES, tree_key=directory_key)
+            _enforce_copyback_tree_count("file bytes", file_size, _COPYBACK_MAX_FILE_BYTES, tree_key=directory_key)
             _enforce_copyback_tree_count(
                 "total bytes",
                 counters["bytes"],
@@ -2230,7 +2320,7 @@ def _collect_copyback_source_entries(
                 tree_key=directory_key,
             )
             files.append(entry_key)
-            file_sizes.append((entry_key, int(entry_stat.st_size)))
+            file_sizes.append((entry_key, file_size))
             continue
         raise SafeFilesystemError(
             f"{_copyback_tree_label_title(directory_key)} entry must be a regular file or directory: {entry_key}"
@@ -2321,6 +2411,7 @@ def _replace_directory_tree_no_follow(temp_dir: Path, target_dir: Path, *, conta
     parent_fd = os.open(target_dir.parent, _COPYBACK_DIR_FLAGS)
     try:
         if _directory_entry_exists(parent_fd, target_dir.name, target_dir):
+            _verify_copyback_target_tree_clean(target_dir, containment_root=containment_root)
             os.replace(target_dir.name, backup_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             target_backed_up = True
         os.replace(temp_dir.name, target_dir.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
@@ -2387,6 +2478,7 @@ def _replace_directory_tree_for_qdown_batch(
     parent_fd = os.open(target_dir.parent, _COPYBACK_DIR_FLAGS)
     try:
         if _directory_entry_exists(parent_fd, target_dir.name, target_dir):
+            _verify_copyback_target_tree_clean(target_dir, containment_root=containment_root)
             os.replace(target_dir.name, backup_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             target_backed_up = True
         os.replace(temp_dir.name, target_dir.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
@@ -2456,17 +2548,26 @@ def _commit_qdown_copyback_batch(
     rollback_log: list[_CopybackRollbackEntry],
     *,
     containment_root: Path,
-) -> list[str]:
+) -> None:
+    for entry in rollback_log:
+        if entry.backup_dir is not None:
+            _verify_copyback_target_tree_clean(entry.backup_dir, containment_root=containment_root)
+
     errors: list[str] = []
+    remaining_for_rollback: list[_CopybackRollbackEntry] = []
     for entry in rollback_log:
         if entry.backup_dir is None:
+            remaining_for_rollback.append(entry)
             continue
         try:
             rmtree_no_follow(entry.backup_dir, containment_root=containment_root, missing_ok=True)
         except (OSError, SafeFilesystemError) as error:
             errors.append(str(error))
+            remaining_for_rollback.append(entry)
+    if errors:
+        rollback_log[:] = remaining_for_rollback
+        raise SafeFilesystemError(f"Failed to clean up q_down copyback backups: {'; '.join(errors)}", kind="io")
     rollback_log.clear()
-    return errors
 
 
 def _directory_entry_exists(parent_fd: int, name: str, path_label: Path) -> bool:
@@ -2481,6 +2582,17 @@ def _directory_entry_exists(parent_fd: int, name: str, path_label: Path) -> bool
     if not stat.S_ISDIR(entry_stat.st_mode):
         raise SafeFilesystemError(f"Copyback target tree must be a directory: {path_label}")
     return True
+
+
+def _verify_copyback_target_tree_clean(target_dir: Path, *, containment_root: Path) -> None:
+    verify_directory_no_follow(target_dir)
+    for entry in sorted(target_dir.rglob("*")):
+        entry.relative_to(containment_root)
+        entry_stat = entry.lstat()
+        if stat.S_ISLNK(entry_stat.st_mode):
+            raise SafeFilesystemError(f"Copyback target tree entry must not be a symlink: {entry}")
+        if not (stat.S_ISDIR(entry_stat.st_mode) or stat.S_ISREG(entry_stat.st_mode)):
+            raise SafeFilesystemError(f"Copyback target tree entry must be a file or directory: {entry}")
 
 
 def _restore_copyback_backup(
