@@ -564,6 +564,7 @@ def _compact_required_bounded_field(field_name: str, value: Any) -> Any:
                 "service_role",
                 "require_runtime_roots",
                 "dry_run",
+                "allowed_cycle_hours_utc",
             ),
         )
     if field_name == "root_preflight":
@@ -695,6 +696,7 @@ def _compact_retained_bounded_field(field_name: str, value: Any) -> Any:
                 "service_role",
                 "require_runtime_roots",
                 "dry_run",
+                "allowed_cycle_hours_utc",
             ),
         )
     if field_name == "root_preflight":

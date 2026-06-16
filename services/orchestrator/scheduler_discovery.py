@@ -411,11 +411,12 @@ def _filter_allowed_cycle_hours(
 def _source_cycle_evidence(discovery: CycleDiscovery, *, horizon: Mapping[str, Any]) -> dict[str, Any]:
     available = bool(discovery.available)
     status = discovery.status or ("discovered" if available else "unavailable")
+    cycle_time_hour_utc = _ensure_utc(discovery.cycle_time).hour
     evidence = {
         "source_id": discovery.source_id,
         "cycle_id": discovery.cycle_id,
         "cycle_time_utc": _format_utc(discovery.cycle_time),
-        "cycle_hour": discovery.cycle_hour,
+        "cycle_hour": cycle_time_hour_utc,
         "horizon": dict(horizon),
         "available": available,
         "status": status,
@@ -505,7 +506,7 @@ def _duplicate_cycle_evidence(discovery: CycleDiscovery, *, reason: str) -> dict
         "source_id": discovery.source_id,
         "cycle_id": cycle_id_for(discovery.source_id, discovery.cycle_time),
         "cycle_time_utc": _format_utc(discovery.cycle_time),
-        "cycle_hour": discovery.cycle_hour,
+        "cycle_hour": _ensure_utc(discovery.cycle_time).hour,
         "available": discovery.available,
         "status": "excluded",
         "reason": reason,
@@ -518,7 +519,7 @@ def _backfill_deferred_evidence(discovery: CycleDiscovery, *, reason: str) -> di
         "source_id": discovery.source_id,
         "cycle_id": cycle_id_for(discovery.source_id, discovery.cycle_time),
         "cycle_time_utc": _format_utc(discovery.cycle_time),
-        "cycle_hour": discovery.cycle_hour,
+        "cycle_hour": _ensure_utc(discovery.cycle_time).hour,
         "available": discovery.available,
         "status": "gap",
         "reason": reason,

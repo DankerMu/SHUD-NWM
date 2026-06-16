@@ -15,6 +15,8 @@
       config, and explicit four-cycle compatibility.
 - [x] Update `infra/env/compute.example` with
       `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12`.
+- [x] Pass `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC` through
+      `infra/compose.compute.yml` compute service environment.
 
 ## Required Evidence
 
@@ -27,17 +29,23 @@
       deduped `[0, 12]`.
 - [x] Config failure case: empty configured value, non-integer token, or value
       outside `0..23` -> stable fail-closed exception before scheduler work.
+- [x] Direct config failure case: non-`int` values and `bool` are rejected
+      before scheduler work.
 - [x] Discovery case: source window returns `00/06/12/18` and allowed hours
       are `0,12` -> selected cycles include only `00/12`.
 - [x] Dedupe-order case: disallowed `06/18` cycles mixed with allowed `00/12`
       cycles do not consume dedupe keys, do not replace allowed cycles, and do
       not affect latest/oldest allowed-cycle collapse results.
+- [x] Legacy single-slot case: with `max_cycles_per_source=1`, disallowed
+      `18` cannot replace the latest allowed `12` cycle.
 - [x] Completion-status case: `cycle_completion_status_provider` or equivalent
       completion lookup is not called for disallowed `06/18` cycles and receives
       only allowed `00/12` cycles.
 - [x] Evidence case: filtered `06/18` rows include
       `selection_status=excluded` and
       `selection_reason=cycle_hour_not_allowed`.
+- [x] Evidence hour case: excluded cycle evidence reports the UTC hour derived
+      from `cycle_time`, matching the hour used by the allowed-cycle gate.
 - [x] Backfill case: `06/18` are not counted in `gap_count`,
       `available_gap_count`, or `unavailable_gap_count`.
 - [x] Candidate case: `06/18` do not appear in `candidates` or
@@ -48,11 +56,15 @@
       allowed `00/12` boundary.
 - [x] Compatibility case: explicit allowed hours `0,6,12,18` preserves tests
       or paths that intentionally exercise four-cycle behavior.
+- [x] QHH scheduler fixture compatibility: 06Z-only readiness fixtures use
+      explicit `0,6,12,18` allowed-cycle config.
 
 ## Documentation Evidence
 
 - [x] `infra/env/compute.example` contains
       `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12`.
+- [x] `infra/compose.compute.yml` passes
+      `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC` into compute containers.
 - [x] Env comment explains that scheduler allowed hours are the hard gate for
       business candidate/backfill selection.
 

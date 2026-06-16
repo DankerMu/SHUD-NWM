@@ -6206,11 +6206,14 @@ def _normalize_allowed_cycle_hours_utc(
     field_name: str = "allowed_cycle_hours_utc",
 ) -> tuple[int, ...]:
     hours: set[int] = set()
-    for raw_hour in value:
-        try:
-            hour = int(raw_hour)
-        except (TypeError, ValueError) as error:
-            raise ValueError(f"production scheduler {field_name} must contain integer UTC cycle hours") from error
+    try:
+        raw_hours = iter(value)
+    except TypeError as error:
+        raise ValueError(f"production scheduler {field_name} must contain integer UTC cycle hours") from error
+    for raw_hour in raw_hours:
+        if isinstance(raw_hour, bool) or not isinstance(raw_hour, int):
+            raise ValueError(f"production scheduler {field_name} must contain integer UTC cycle hours")
+        hour = raw_hour
         if hour < 0 or hour > 23:
             raise ValueError(f"production scheduler {field_name} must only contain values in 0..23")
         hours.add(hour)

@@ -594,6 +594,89 @@ def test_allowed_cycle_hours_filter_before_dedupe_latest_source_collapse(
     ]
 
 
+def test_allowed_cycle_hours_filter_before_legacy_single_slot_latest_collapse(
+    tmp_path: Path,
+) -> None:
+    now = _dt("2026-05-22T00:00:00Z")
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=now,
+        cycle_times=[
+            "2026-05-21T00:00:00Z",
+            "2026-05-21T06:00:00Z",
+            "2026-05-21T12:00:00Z",
+            "2026-05-21T18:00:00Z",
+        ],
+        backfill_enabled=False,
+        max_cycles_per_source=1,
+        allowed_cycle_hours_utc=(0, 12),
+    )
+
+    cycles, evidence = scheduler._discover_cycles(now, models=())
+
+    assert [scheduler_module._format_utc(cycle.discovery.cycle_time) for cycle in cycles] == [
+        "2026-05-21T12:00:00Z",
+    ]
+    excluded = [
+        item
+        for item in evidence
+        if item.get("selection_reason") == "cycle_hour_not_allowed"
+    ]
+    assert [(item["cycle_time_utc"], item["cycle_hour"], item["selection_status"]) for item in excluded] == [
+        ("2026-05-21T06:00:00Z", 6, "excluded"),
+        ("2026-05-21T18:00:00Z", 18, "excluded"),
+    ]
+
+
+def test_disallowed_cycle_hour_evidence_uses_gate_cycle_time_hour(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    now = _dt("2026-05-22T00:00:00Z")
+    scheduler = _build_scheduler(
+        tmp_path,
+        now=now,
+        cycle_times=[],
+        backfill_enabled=False,
+        max_cycles_per_source=1,
+        allowed_cycle_hours_utc=(0, 12),
+    )
+    cycle_time = _dt("2026-05-21T06:00:00Z")
+
+    def _fake_discover_source_window(
+        adapter: Any,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[Any]:
+        del adapter, start_time, end_time
+        return [
+            scheduler_module.CycleDiscovery(
+                cycle_id=scheduler_module.cycle_id_for(source_id, cycle_time),
+                source_id=source_id,
+                cycle_time=cycle_time,
+                cycle_hour=0,
+                available=True,
+                status="discovered",
+            )
+        ]
+
+    monkeypatch.setattr(scheduler, "_discover_source_window", _fake_discover_source_window)
+
+    cycles, evidence = scheduler._discover_cycles(now, models=())
+
+    assert cycles == []
+    excluded = [
+        item
+        for item in evidence
+        if item.get("selection_reason") == "cycle_hour_not_allowed"
+    ]
+    assert [(item["cycle_time_utc"], item["cycle_hour"], item["selection_status"]) for item in excluded] == [
+        ("2026-05-21T06:00:00Z", 6, "excluded"),
+    ]
+
+
 def test_allowed_cycle_hours_explicit_four_cycle_compatibility(tmp_path: Path) -> None:
     now = _dt("2026-05-21T18:00:00Z")
     scheduler = _build_scheduler(

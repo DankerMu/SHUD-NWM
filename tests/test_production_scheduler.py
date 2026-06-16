@@ -4125,6 +4125,18 @@ def test_scheduler_allowed_cycle_hours_env_fails_closed(
         ProductionSchedulerConfig(workspace_root=tmp_path)
 
 
+@pytest.mark.parametrize("allowed_cycle_hours_utc", [(12.9,), (True,), ("12",)])
+def test_scheduler_allowed_cycle_hours_direct_config_requires_int_not_bool(
+    tmp_path: Path,
+    allowed_cycle_hours_utc: tuple[Any, ...],
+) -> None:
+    with pytest.raises(ValueError, match="allowed_cycle_hours_utc must contain integer UTC cycle hours"):
+        ProductionSchedulerConfig(
+            workspace_root=tmp_path,
+            allowed_cycle_hours_utc=allowed_cycle_hours_utc,
+        )
+
+
 def test_scheduler_allowed_cycle_hours_default_is_00_12(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.delenv("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", raising=False)
 
@@ -4387,6 +4399,7 @@ def test_bounded_evidence_payload_shim_summarizes_large_retained_fields_within_l
     assert shim_payload["duplicate_exclusions"]["status"] == "omitted"
     assert shim_payload["duplicate_exclusions"]["reason"] == "evidence_size_limit_exceeded"
     assert shim_payload["runtime_config"]["dry_run"] is False
+    assert shim_payload["runtime_config"]["allowed_cycle_hours_utc"] == [0, 6, 12, 18]
     assert shim_payload["root_preflight"]["status"] == "ready"
     assert shim_payload["execution_write_proof"]["status"] == "submitted"
     assert shim_payload["slurm_status_sync_proof"]["status"] == "not_required"
@@ -4450,6 +4463,7 @@ def test_write_evidence_bounds_serialized_payload_before_artifact_creation(tmp_p
     assert "slurm_submit_called" in persisted["no_mutation_proof"]
     assert persisted["duplicate_exclusions"]["status"] == "omitted"
     assert persisted["runtime_config"]["dry_run"] is False
+    assert persisted["runtime_config"]["allowed_cycle_hours_utc"] == [0, 6, 12, 18]
     assert persisted["evidence_pre_execution"]["status"] == "reserved"
     assert persisted["execution_write_proof"]["status"] == "submitted"
     assert persisted["slurm_status_sync_proof"]["status"] == "not_required"
@@ -13430,7 +13444,11 @@ def _large_scheduler_evidence_payload(pass_id: str) -> dict[str, Any]:
         },
         "counts": {"candidate_count": 1, "submitted_count": 1},
         "resolved_runtime_roots": {"evidence_root": {"path": "/workspace/evidence", "payload": large_text}},
-        "runtime_config": {"dry_run": False, "payload": large_text},
+        "runtime_config": {
+            "dry_run": False,
+            "allowed_cycle_hours_utc": [0, 6, 12, 18],
+            "payload": large_text,
+        },
         "root_preflight": {"status": "ready", "checks": {"evidence_root": {"payload": large_text}}},
         "evidence_pre_execution": {"status": "reserved", "payload": large_text},
         "execution_write_proof": {"status": "submitted", "submitted_count": 1, "payload": large_text},
