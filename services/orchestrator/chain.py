@@ -355,7 +355,14 @@ def _validate_strict_state_lineage(
     model_package_checksum: str | None,
 ) -> str | None:
     if source_id is not None:
-        if state.source_id is None or normalize_source_id(state.source_id) != normalize_source_id(source_id):
+        if state.source_id is None:
+            return LINEAGE_SOURCE_MISMATCH
+        try:
+            state_source_id = normalize_source_id(state.source_id)
+            target_source_id = normalize_source_id(source_id)
+        except (AttributeError, TypeError, ValueError):
+            return LINEAGE_SOURCE_MISMATCH
+        if state_source_id != target_source_id:
             return LINEAGE_SOURCE_MISMATCH
 
     if model_package_version is not None:

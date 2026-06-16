@@ -899,6 +899,50 @@ def test_strict_cycle_invalid_successor_blocks_before_side_effects(
     _assert_no_cycle_mutation(tmp_path, repository, client)
 
 
+def test_strict_cycle_malformed_persisted_source_blocks_before_side_effects(tmp_path: Path) -> None:
+    t_next = "2026-05-01T12:00:00Z"
+    state = StateSnapshot(
+        state_id="state_demo_model_2026050112",
+        model_id="demo_model",
+        run_id="fcst_gfs_2026050100_demo_model",
+        valid_time=_dt(t_next),
+        state_uri="states/gfs/demo_model/2026050112/state.cfg.ic",
+        checksum="csum-next",
+        usable_flag=True,
+        source_id="UNKNOWN",
+        cycle_id="gfs_2026050100",
+        lead_hours=12,
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="package-sha",
+    )
+    repository = FakeOrchestratorRepository()
+    client = FakeSlurmClient()
+    object_root = tmp_path / "object-store"
+    orchestrator = ForecastOrchestrator(
+        config=OrchestratorConfig(
+            workspace_root=tmp_path / "workspace",
+            object_store_root=object_root,
+            object_store_prefix="s3://nhms",
+            poll_interval_seconds=0,
+            job_timeout_seconds=5,
+            require_forecast_warm_start=True,
+        ),
+        repository=repository,
+        state_manager=FakeStateManager([state]),
+        slurm_client=client,
+        object_store=LocalObjectStore(object_root, "s3://nhms"),
+    )
+    basin = _strict_basin(package_checksum="package-sha")
+    basin["init_state_id"] = state.state_id
+    basin["init_state_uri"] = state.state_uri
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.orchestrate_cycle("gfs", _dt(t_next), [basin])
+
+    assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+    _assert_no_cycle_mutation(tmp_path, repository, client)
+
+
 def test_strict_cycle_prefilled_uri_only_mismatch_blocks_before_side_effects(tmp_path: Path) -> None:
     t_next = "2026-05-01T12:00:00Z"
     state = StateSnapshot(

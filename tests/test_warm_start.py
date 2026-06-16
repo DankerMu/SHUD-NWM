@@ -475,6 +475,26 @@ def test_strict_forecast_lineage_mismatch_blocks(tmp_path: Path) -> None:
     _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
 
 
+def test_strict_forecast_malformed_persisted_source_blocks_before_side_effects(tmp_path: Path) -> None:
+    state = _state(
+        "state_demo_model_2026050100",
+        "2026-05-01T00:00:00Z",
+        source_id="UNKNOWN",
+        model_package_version="models/demo_model/package/",
+        model_package_checksum="package-sha",
+        lead_hours=12,
+    )
+    repository = FakeOrchestratorRepository()
+    repository.model = replace(repository.model, model_package_checksum="package-sha")
+    orchestrator = _orchestrator(tmp_path, repository, FakeStateManager([state]), require_forecast_warm_start=True)
+
+    with pytest.raises(OrchestratorError) as exc_info:
+        orchestrator.trigger_forecast(source_id="gfs", cycle_time="2026050100", model_id="demo_model")
+
+    assert exc_info.value.error_code == WARM_START_LINEAGE_MISMATCH
+    _assert_no_forecast_mutation(tmp_path, repository, orchestrator)
+
+
 def test_strict_forecast_package_version_mismatch_blocks_before_side_effects(tmp_path: Path) -> None:
     state = _state(
         "state_demo_model_2026050100",
