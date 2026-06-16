@@ -65,6 +65,9 @@
       `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12`.
 - [x] `infra/compose.compute.yml` passes
       `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC` into compute containers.
+- [x] Compose interpolation preserves an explicitly empty
+      `NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC` instead of replacing it with
+      `0,12`, so scheduler config validation can fail closed.
 - [x] Env comment explains that scheduler allowed hours are the hard gate for
       business candidate/backfill selection.
 
