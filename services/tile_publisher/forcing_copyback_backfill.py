@@ -322,6 +322,11 @@ def _validate_copyback_root_boundary(
     object_store_root: Path,
     apply: bool,
 ) -> None:
+    _reject_existing_same_copyback_root(
+        copyback_root_raw=copyback_root_raw,
+        object_store_root_raw=object_store_root_raw,
+        object_store_root=object_store_root,
+    )
     if _paths_overlap(copyback_root_raw, object_store_root_raw) and copyback_root_raw != object_store_root_raw:
         raise BackfillError(
             "COPYBACK_ROOT_OVERLAP",
@@ -340,6 +345,23 @@ def _validate_copyback_root_boundary(
                 "NHMS_OBJECT_STORE_COPYBACK_ROOT has an unsafe existing path component.",
                 details={"copyback_root": str(copyback_root_raw), "error": str(error)},
             ) from error
+
+
+def _reject_existing_same_copyback_root(
+    *,
+    copyback_root_raw: Path,
+    object_store_root_raw: Path,
+    object_store_root: Path,
+) -> None:
+    if copyback_root_raw == object_store_root_raw:
+        _reject_same_copyback_root(copyback_root=object_store_root, object_store_root=object_store_root)
+    try:
+        copyback_root = verify_directory_no_follow(copyback_root_raw).resolve()
+    except FileNotFoundError:
+        return
+    except (OSError, SafeFilesystemError):
+        return
+    _reject_same_copyback_root(copyback_root=copyback_root, object_store_root=object_store_root)
 
 
 def _dry_run_copyback_root(

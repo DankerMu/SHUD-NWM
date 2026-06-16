@@ -374,6 +374,26 @@ def test_cli_rejects_copyback_root_equal_object_store_root_without_already_prese
     assert after == before
 
 
+@pytest.mark.parametrize("args", [(), ("--apply",)])
+def test_cli_rejects_copyback_root_equal_object_store_root_with_zero_eligible_runs(
+    tmp_path: Path,
+    args: tuple[str, ...],
+) -> None:
+    _engine, db_path = _init_db(tmp_path)
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+
+    result = _run_module(_env(db_path, object_store_root, object_store_root), *args)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["error_code"] == "COPYBACK_ROOT_SAME_AS_OBJECT_STORE_ROOT"
+    assert payload["details"]["reason"] == "copyback_root_matches_object_store_root"
+    assert "already_present" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_cli_apply_prepare_publish_error_emits_json_without_traceback_or_writes(tmp_path: Path) -> None:
     _engine, db_path, object_store_root, copyback_root, _checksum, _manifest_bytes = _seed_valid_candidate(tmp_path)
     real_parent = tmp_path / "real-parent"
