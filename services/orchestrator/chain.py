@@ -3593,7 +3593,11 @@ class AnalysisOrchestrator(ForecastOrchestrator):
         )
 
     def _build_run_manifest(self, context: AnalysisRunContext) -> dict[str, Any]:
-        return chain_manifests.build_analysis_run_manifest(context)
+        return chain_manifests.build_analysis_run_manifest(
+            context,
+            analysis_forcing_causality=_analysis_forcing_causality,
+            analysis_update_ic_step_minutes=_analysis_update_ic_step_minutes,
+        )
 
     def _before_stage_submit(self, stage: StageDefinition, context: ForecastRunContext | AnalysisRunContext) -> None:
         if stage.stage == "era5_download":

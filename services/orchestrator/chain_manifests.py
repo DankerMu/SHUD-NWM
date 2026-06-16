@@ -472,7 +472,14 @@ def build_forecast_run_manifest(
     return manifest
 
 
-def build_analysis_run_manifest(context: AnalysisRunContext) -> dict[str, Any]:
+def build_analysis_run_manifest(
+    context: AnalysisRunContext,
+    *,
+    analysis_forcing_causality: Callable[[], Mapping[str, Any]] | None = None,
+    analysis_update_ic_step_minutes: Callable[[datetime, datetime], int] | None = None,
+) -> dict[str, Any]:
+    analysis_forcing_causality = analysis_forcing_causality or _analysis_forcing_causality
+    analysis_update_ic_step_minutes = analysis_update_ic_step_minutes or _analysis_update_ic_step_minutes
     return {
         "run_id": context.run_id,
         "run_type": "analysis",
@@ -501,7 +508,7 @@ def build_analysis_run_manifest(context: AnalysisRunContext) -> dict[str, Any]:
             "forcing_uri": context.forcing_package_uri,
         },
         "forcing_causality": dict(
-            context.forcing_causality if context.forcing_causality is not None else _analysis_forcing_causality()
+            context.forcing_causality if context.forcing_causality is not None else analysis_forcing_causality()
         ),
         "runtime": {
             "output_interval_minutes": 60,
@@ -509,7 +516,7 @@ def build_analysis_run_manifest(context: AnalysisRunContext) -> dict[str, Any]:
             "update_ic_step_minutes": (
                 context.update_ic_step_minutes
                 if context.update_ic_step_minutes is not None
-                else _analysis_update_ic_step_minutes(context.start_time, context.end_time)
+                else analysis_update_ic_step_minutes(context.start_time, context.end_time)
             ),
         },
         "outputs": {
@@ -684,7 +691,7 @@ def build_model_run_assembly(
             or _nested_mapping(basin.get("runtime")).get("command_style")
             or "shud_project"
         ),
-        "project_name": _project_name_for_basin(basin, fallback=model_id),
+        "project_name": project_name_for_basin(basin, fallback=model_id),
         "output_interval_minutes": int(
             basin.get("output_interval_minutes")
             or _nested_mapping(basin.get("runtime")).get("output_interval_minutes")

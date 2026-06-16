@@ -7438,6 +7438,11 @@ def test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases(
             "quality_flag": "patched_output_ok",
         },
     )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_project_name_for_basin",
+        lambda _basin, *, fallback: f"patched-project-{fallback}",
+    )
 
     assembly = chain_runtime.build_model_run_assembly(
         basin,
@@ -7452,6 +7457,7 @@ def test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases(
     assert assembly.forcing["forcing_uri"] == "patched://forcing/gfs/2024010100/basin-v1/model-1/"
     assert assembly.forcing["station_metadata"]["station_count"] == 2
     assert assembly.runtime["output_river"]["river_network_version_id"] == "patched-river"
+    assert assembly.runtime["project_name"] == "patched-project-model-1"
     assert assembly.outputs["output_segment_count"] == 5
     assert assembly.identity["segment_count"] == 5
 
@@ -7503,12 +7509,25 @@ def test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases(
     assert runtime_manifest["runtime"]["state_checkpoint_hours"] == [77]
     assert runtime_manifest["forcing"]["forcing_uri"] == "patched://forcing/gfs/2024010100/basin-v1/model-1/"
     assert runtime_manifest["forcing"]["station_count"] == 2
+    assert runtime_manifest["model"]["project_name"] == "patched-project-model-1"
+    assert runtime_manifest["runtime"]["project_name"] == "patched-project-model-1"
     assert runtime_manifest["runtime"]["output_river"]["segment_count"] == 5
 
 
-def test_chain_manifest_build_analysis_run_manifest_direct_export() -> None:
+def test_chain_manifest_build_analysis_run_manifest_direct_export(monkeypatch) -> None:
+    from services.orchestrator import chain as chain_runtime
     from services.orchestrator import chain_manifests
 
+    monkeypatch.setattr(
+        chain_runtime,
+        "_analysis_forcing_causality",
+        lambda: {"type": "patched_analysis", "latency_minutes": 42},
+    )
+    monkeypatch.setattr(
+        chain_runtime,
+        "_analysis_update_ic_step_minutes",
+        lambda start_time, end_time: 240,
+    )
     context = AnalysisRunContext(
         run_id="analysis-run-1",
         source_id="era5",
@@ -7531,8 +7550,6 @@ def test_chain_manifest_build_analysis_run_manifest_direct_export() -> None:
         init_state_id="state-1",
         init_state_uri="object://states/state-1.nc",
         init_state_valid_time=datetime(2024, 1, 1, tzinfo=UTC),
-        update_ic_step_minutes=180,
-        forcing_causality={"type": "delayed_reanalysis", "latency_minutes": 7200},
     )
 
     assert chain_manifests.build_analysis_run_manifest(context) == {
@@ -7560,11 +7577,15 @@ def test_chain_manifest_build_analysis_run_manifest_direct_export() -> None:
             "forcing_version_id": "era5-202401",
             "forcing_uri": "object://forcing/era5-202401",
         },
-        "forcing_causality": {"type": "delayed_reanalysis", "latency_minutes": 7200},
+        "forcing_causality": {
+            "mode": "delayed_reanalysis",
+            "latency_minutes": 7200,
+            "no_future_leak": True,
+        },
         "runtime": {
             "output_interval_minutes": 60,
             "init_mode": 3,
-            "update_ic_step_minutes": 180,
+            "update_ic_step_minutes": 1440,
         },
         "outputs": {
             "run_manifest_uri": "object://runs/analysis-run-1/input/manifest.json",
@@ -7574,6 +7595,10 @@ def test_chain_manifest_build_analysis_run_manifest_direct_export() -> None:
             "gis_segment_count": 12,
         },
     }
+    analysis_orchestrator = object.__new__(AnalysisOrchestrator)
+    legacy_manifest = analysis_orchestrator._build_run_manifest(context)
+    assert legacy_manifest["forcing_causality"] == {"type": "patched_analysis", "latency_minutes": 42}
+    assert legacy_manifest["runtime"]["update_ic_step_minutes"] == 240
 
 
 # --- M24 §3A: two-phase reserve -> bind through the real chain submit path ----
