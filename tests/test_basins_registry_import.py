@@ -1626,7 +1626,7 @@ def test_registry_import_creates_idempotent_inactive_rows(
     # (output rows are NULL-geom until display backfill), so feature_total / features stay geometry-only.
     assert segments["total"] == 4
     assert segments["feature_total"] == 2
-    assert segments["features"][0]["geometry"]["type"] == "LineString"
+    assert segments["features"][0]["geometry"]["type"] == "MultiLineString"
     assert segments["features"][0]["properties"]["river_segment_id"] == f"{model_id}_seg_1"
     assert segments["features"][0]["properties"]["river_network_version_id"] == first["river_network_version_id"]
     assert segments["features"][0]["properties"]["basin_version_id"] == first["basin_version_id"]
@@ -1821,7 +1821,7 @@ def test_real_basins_import_smoke_is_gated(
     )
     assert segments["type"] == "FeatureCollection"
     assert segments["feature_total"] > 0
-    assert segments["features"][0]["geometry"]["type"] == "LineString"
+    assert segments["features"][0]["geometry"]["type"] == "MultiLineString"
     assert segments["features"][0]["properties"]["river_segment_id"]
     assert segments["features"][0]["properties"]["river_network_version_id"] == report["river_network_version_id"]
     assert segments["features"][0]["properties"]["basin_version_id"] == report["basin_version_id"]

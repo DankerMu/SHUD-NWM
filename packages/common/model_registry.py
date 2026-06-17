@@ -149,10 +149,43 @@ def geometry_to_wkt(geom: Mapping[str, Any] | str, expected_type: str) -> str:
     raise InvalidPayloadError(f"Unsupported geometry type: {geom_type}.")
 
 
+def line_or_multiline_to_wkt(geom: Mapping[str, Any] | str) -> str:
+    """Convert a LineString OR MultiLineString GeoJSON/WKT into WKT.
+
+    ``core.river_segment.geom`` is ``geometry(MultiLineString, 4490)`` since 000036.
+    The openapi widens segment geom to ``oneOf[LineString, MultiLineString]``, so the
+    write path must accept both: a legacy LineString (wrapped by the caller's ST_Multi)
+    and a gap-split MultiLineString that passes straight through.
+    """
+    if isinstance(geom, str):
+        upper = geom.strip().upper()
+        if not (upper.startswith("LINESTRING") or upper.startswith("MULTILINESTRING")):
+            raise InvalidPayloadError("geom must be a LineString or MultiLineString geometry.")
+        return geom.strip()
+    geom_type = str(geom.get("type", ""))
+    coordinates = geom.get("coordinates")
+    if geom_type == "LineString":
+        return _linestring_to_wkt(coordinates)
+    if geom_type == "MultiLineString":
+        return _multilinestring_to_wkt(coordinates)
+    raise InvalidPayloadError("geom.type must be LineString or MultiLineString.")
+
+
 def _linestring_to_wkt(coordinates: Any) -> str:
     if not isinstance(coordinates, list) or len(coordinates) < 2:
         raise InvalidPayloadError("LineString coordinates must contain at least two points.")
     return "LINESTRING(" + ", ".join(_format_point(point) for point in coordinates) + ")"
+
+
+def _multilinestring_to_wkt(coordinates: Any) -> str:
+    if not isinstance(coordinates, list) or not coordinates:
+        raise InvalidPayloadError("MultiLineString coordinates must contain at least one part.")
+    parts: list[str] = []
+    for part in coordinates:
+        if not isinstance(part, list) or len(part) < 2:
+            raise InvalidPayloadError("Each MultiLineString part must contain at least two points.")
+        parts.append("(" + ", ".join(_format_point(point) for point in part) + ")")
+    return "MULTILINESTRING(" + ", ".join(parts) + ")"
 
 
 def _multipolygon_to_wkt(coordinates: Any) -> str:
@@ -358,7 +391,7 @@ class PsycopgModelRegistryStore:
                 segment.get("segment_order"),
                 segment.get("downstream_segment_id"),
                 segment.get("length_m"),
-                geometry_to_wkt(segment["geom"], "LineString"),
+                line_or_multiline_to_wkt(segment["geom"]),
                 self._json(segment.get("properties_json") or {}),
             )
             for segment in segments

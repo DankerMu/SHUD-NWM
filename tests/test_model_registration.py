@@ -26,6 +26,7 @@ from packages.common.model_registry import (
     RiverSegmentGeoJsonBudgetError,
     _is_unsafe_source_value,
     geometry_to_wkt,
+    line_or_multiline_to_wkt,
     sanitize_model_detail_payload,
     sanitize_model_list_payload,
 )
@@ -1879,6 +1880,29 @@ def test_geometry_to_wkt_accepts_expected_geojson_shapes() -> None:
         {"type": "MultiPolygon", "coordinates": [[[[90, 25], [91, 25], [91, 26], [90, 26], [90, 25]]]]},
         "MultiPolygon",
     ).startswith("MULTIPOLYGON")
+
+
+def test_line_or_multiline_to_wkt_accepts_both_geometries() -> None:
+    # 000036 widened river_segment.geom to MultiLineString and openapi advertises
+    # geom as oneOf[LineString, MultiLineString]; the write path must accept both.
+    assert line_or_multiline_to_wkt({"type": "LineString", "coordinates": [[90, 25], [91, 26]]}) == (
+        "LINESTRING(90 25, 91 26)"
+    )
+    assert line_or_multiline_to_wkt(
+        {"type": "MultiLineString", "coordinates": [[[90, 25], [91, 26]], [[92, 27], [93, 28]]]}
+    ) == "MULTILINESTRING((90 25, 91 26), (92 27, 93 28))"
+    # WKT strings pass through for either geometry.
+    assert line_or_multiline_to_wkt("MULTILINESTRING((90 25, 91 26))") == "MULTILINESTRING((90 25, 91 26))"
+    assert line_or_multiline_to_wkt("LINESTRING(90 25, 91 26)") == "LINESTRING(90 25, 91 26)"
+
+
+def test_line_or_multiline_to_wkt_rejects_bad_input() -> None:
+    with pytest.raises(InvalidPayloadError):
+        line_or_multiline_to_wkt({"type": "Point", "coordinates": [90, 25]})
+    with pytest.raises(InvalidPayloadError):
+        line_or_multiline_to_wkt({"type": "MultiLineString", "coordinates": [[[90, 25]]]})
+    with pytest.raises(InvalidPayloadError):
+        line_or_multiline_to_wkt("POINT(90 25)")
 
 
 def test_model_package_validator_and_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

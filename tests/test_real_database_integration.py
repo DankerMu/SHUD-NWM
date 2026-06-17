@@ -495,7 +495,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     assert {feature["properties"]["segment_id"] for feature in flood_bbox.json()["features"]} == {
         "it126_seg_inside",
     }
-    assert flood_bbox.json()["features"][0]["geometry"]["type"] == "LineString"
+    assert flood_bbox.json()["features"][0]["geometry"]["type"] == "MultiLineString"
     assert states.json()["items"][0]["state_id"] == STATE_ID
     assert state_detail.json()["state_id"] == STATE_ID
     assert state_detail.json()["usable_flag"] is True

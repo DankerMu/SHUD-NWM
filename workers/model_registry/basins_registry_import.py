@@ -24,7 +24,7 @@ from .basins_geometry import (
     ParsedBasinsGeometry,
     TrustedBasinsRoot,
     _merge_polyline_parts,
-    gap_split_positions,
+    gap_split_multilinestring_wkt,
     parse_basins_geometry,
     safe_basins_file_sha256,
     trusted_basins_root,
@@ -719,10 +719,9 @@ def _backfill_output_segment_geometry(
         merged = _merge_polyline_parts(parts)
         if len(merged) < 2:
             continue
-        split_parts = [part for part in gap_split_positions(merged) if len(part) >= 2] or [merged]
-        wkt = "MULTILINESTRING(" + ",".join(
-            "(" + ",".join(f"{x!r} {y!r}" for x, y in part) + ")" for part in split_parts
-        ) + ")"
+        # Same shared renderer as the parser (basins_geometry): gap-split + %.12g WKT,
+        # so output-reach geometry is byte-identical in precision to the parser path.
+        wkt = gap_split_multilinestring_wkt(merged)
         total_length = length_by_index.get(index)
         if record_geometry_source:
             provenance = json.dumps(

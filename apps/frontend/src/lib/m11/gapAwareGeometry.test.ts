@@ -78,13 +78,26 @@ describe('gapAwareLineGeometry', () => {
     expect(gapAwareLineGeometry(empty)).toBe(empty)
   })
 
-  it('MultiLineString 直通（源已按缝拆好，不再二次处理）', () => {
-    // 即便某段内部含跨缝直线，MultiLineString 入参也原样返回——后端源头已拆分，
-    // 前端不重复拆（避免双重处理与坐标重算）。
+  it('各部件已无缝的 MultiLineString 原样直通（同一对象、不重建）', () => {
     const mls = {
       type: 'MultiLineString' as const,
-      coordinates: [vline(38.0, 38.0007, 38.0164), vline(38.04, 38.0407)],
+      coordinates: [vline(38.0, 38.0007, 38.0014), vline(38.04, 38.0407)],
     }
     expect(gapAwareLineGeometry(mls)).toBe(mls)
+  })
+
+  it('迁移未回填：单部件 MultiLineString 内仍含跨缝直线 → 该部件防御性再拆', () => {
+    // part0 内 38.0014→38.0164 是 1668m 假桥；part1 无缝。预期拆成 3 段、缝不连线。
+    const mls = {
+      type: 'MultiLineString' as const,
+      coordinates: [vline(38.0, 38.0007, 38.0014, 38.0164, 38.0171), vline(38.04, 38.0407)],
+    }
+    const out = gapAwareLineGeometry(mls)
+    expect(out.type).toBe('MultiLineString')
+    const parts = out.coordinates as number[][][]
+    expect(parts).toHaveLength(3)
+    expect(parts[0]).toEqual(vline(38.0, 38.0007, 38.0014))
+    expect(parts[1]).toEqual(vline(38.0164, 38.0171))
+    expect(parts[2]).toEqual(vline(38.04, 38.0407))
   })
 })
