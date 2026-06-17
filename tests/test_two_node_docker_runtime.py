@@ -1541,17 +1541,46 @@ def test_static_checker_rejects_live_mvt_flag_as_compute_interpolation(tmp_path:
     )
 
 
-def test_static_checker_approves_compute_scheduler_allowed_cycle_hours_interpolation(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("env_key", "expression"),
+    [
+        ("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", "${NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC-0,12}"),
+        ("GFS_CYCLE_HOURS_UTC", "${GFS_CYCLE_HOURS_UTC-0,12}"),
+        ("IFS_CYCLE_HOURS_UTC", "${IFS_CYCLE_HOURS_UTC-0,12}"),
+    ],
+)
+def test_static_checker_approves_compute_scheduler_allowed_cycle_hours_interpolation(
+    tmp_path: Path,
+    env_key: str,
+    expression: str,
+) -> None:
     compose = _safe_compute_compose()
     for service in compose["services"].values():
-        service["environment"]["NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC"] = (
-            "${NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC-0,12}"
-        )
+        service["environment"][env_key] = expression
     compute_compose = _write_compute_compose(tmp_path, compose)
 
     result = _run_compute_static_check(compute_compose)
 
     assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
+
+
+@pytest.mark.parametrize("env_key", ["GFS_CYCLE_HOURS_UTC", "IFS_CYCLE_HOURS_UTC"])
+def test_static_checker_requires_compute_adapter_cycle_hours_runtime_env(
+    tmp_path: Path,
+    env_key: str,
+) -> None:
+    compose = _safe_compute_compose()
+    for service in compose["services"].values():
+        service["environment"].pop(env_key, None)
+    compute_compose = _write_compute_compose(tmp_path, compose)
+
+    result = _run_compute_static_check(compute_compose)
+
+    assert result.status == "FAIL"
+    assert any(
+        finding.code == "COMPUTE_RUNTIME_ENV_MISSING" and finding.details["key"] == env_key
+        for finding in result.findings
+    )
 
 
 def test_static_checker_rejects_unapproved_compute_scheduler_cycle_lag_interpolation(tmp_path: Path) -> None:

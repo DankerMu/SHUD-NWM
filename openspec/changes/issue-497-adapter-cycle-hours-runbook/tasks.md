@@ -39,7 +39,7 @@
       `published/` is display-only.
 - [ ] Runbook includes strict warm-start checks and repair guidance.
 - [ ] `uv run --no-sync pytest -q tests/test_gfs_adapter.py tests/test_ifs_adapter.py tests/test_production_scheduler.py`
-- [ ] `uv run --no-sync ruff check workers/data_adapters/gfs_adapter.py workers/data_adapters/ifs_adapter.py tests/test_gfs_adapter.py tests/test_ifs_adapter.py tests/test_production_scheduler.py`
+- [ ] `uv run --no-sync ruff check workers/data_adapters/cycle_hours.py workers/data_adapters/gfs_adapter.py workers/data_adapters/ifs_adapter.py tests/test_gfs_adapter.py tests/test_ifs_adapter.py tests/test_production_scheduler.py`
 - [ ] `openspec validate issue-497-adapter-cycle-hours-runbook --strict --no-interactive`
 - [ ] `git diff --check`
 
@@ -55,11 +55,15 @@
 - [ ] Runbook verification snippets define the input tuple
       `<source_id, cycle_time, basin_version_id, model_id, run_id>` and expected
       outputs:
-      `met.forcing_version` row has `status='ready'` and a `forcing/...`
-      package URI; `hydro.state_snapshot` row has `status='ready'`,
-      `stage='state_save_qc'`, and a state snapshot URI for the previous allowed
-      cycle; `ops.pipeline_job` rows show scheduler/forcing/run stages with
-      non-failed terminal status; shared object-store shell checks find
+      `met.forcing_version` row has a non-empty checksum and a package URI that
+      normalizes to object-store `forcing/...` from either relative-key form or
+      configured-prefix form such as `s3://nhms-prod/forcing/...`;
+      `hydro.state_snapshot` row is the exact successor checkpoint for
+      `cycle_time` with `lead_hours=12`, `usable_flag=true`, a non-empty
+      checksum, and a state URI whose object exists; producer `state_save_qc`
+      is inspected by the snapshot's `run_id` or previous-cycle `cycle_id`;
+      `ops.pipeline_job` rows show scheduler/forcing/run stages with non-failed
+      terminal status; shared object-store shell checks find
       `forcing/.../manifest.json` and `runs/...` outputs; scheduler evidence
       shows allowed-cycle decisions; published checks find only display tiles,
       logs, or display manifests under `published/...`.

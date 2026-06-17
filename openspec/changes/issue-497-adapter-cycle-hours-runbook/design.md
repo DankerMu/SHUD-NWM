@@ -137,12 +137,13 @@ Regression rows:
   `cycle_hour_not_allowed` before candidates/readiness/forcing/submit.
 - Production env example shows scheduler allowed hours, adapter hours, and strict
   warm-start together.
-- Runbook checks forcing under node-22/node-27 shared object-store `forcing/...`,
-  run output under node-22/node-27 shared object-store `runs/...`, and display
-  artifacts under `published/...` without implying full business products live
-  in `published`.
-- Runbook strict warm-start failure path directs operators to prior
-  `state_save_qc` / state snapshot repair, not cold start.
+- Runbook checks forcing by normalizing relative or configured-prefix package
+  URIs to node-22/node-27 shared object-store `forcing/...`, run output under
+  node-22/node-27 shared object-store `runs/...`, and display artifacts under
+  `published/...` without implying full business products live in `published`.
+- Runbook strict warm-start failure path verifies the exact successor
+  checkpoint at current `cycle_time` with `lead_hours=12`, then directs
+  operators to producer `state_save_qc` / state snapshot repair, not cold start.
 
 ## Boundary-Surface Checklist
 

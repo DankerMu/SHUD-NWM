@@ -305,73 +305,159 @@ cycle_key=2026061312
 basin_version_id=basins_heihe_vbasins
 model_id=basins_heihe_shud
 run_id=fcst_gfs_2026061312_basins_heihe_shud
-previous_allowed_cycle='2026-06-13 00:00:00+00'
+previous_cycle_id=gfs_2026061300
+object_store_mirror_root=${NHMS_OBJECT_STORE_COPYBACK_ROOT:-/ghdc/data/nwm/object-store}
+object_store_uri_prefix=${OBJECT_STORE_PREFIX:-s3://nhms-prod}
+
+normalize_object_key() {
+  uri="${1%/}"
+  prefix="${object_store_uri_prefix%/}"
+  if [ -n "$prefix" ] && [ "${uri#"$prefix"/}" != "$uri" ]; then
+    printf '%s\n' "${uri#"$prefix"/}"
+    return 0
+  fi
+  case "$uri" in
+    forcing/*|runs/*|states/*) printf '%s\n' "$uri" ;;
+    *)
+      printf >&2 'unexpected object-store URI/key: %s\n' "$uri"
+      return 1
+      ;;
+  esac
+}
 ```
 
-`met.forcing_version` 应存在、按合约 ready，并指向 object-store `forcing/...` 包：
+`met.forcing_version` 没有 `status` 字段；这里用真实谓词判断 forcing 包是否可用：`checksum` 非空，且
+`forcing_package_uri` 可规范化为 object-store `forcing/...` key。URI 可以是相对 key（`forcing/...`），也可以是带
+`OBJECT_STORE_PREFIX` 的形式（例如 `s3://nhms-prod/forcing/...`）：
 
 ```bash
 psql "$DATABASE_URL" -P pager=off -F $'\t' -v source_id="$source_id" \
-  -v cycle_time="$cycle_time" -v model_id="$model_id" -Atc "
-select 'ready' as expected_status, forcing_version_id, source_id, cycle_time,
-       model_id, forcing_package_uri, checksum
+  -v cycle_time="$cycle_time" -v model_id="$model_id" \
+  -v object_store_uri_prefix="$object_store_uri_prefix" -Atc "
+select forcing_version_id, source_id, cycle_time, model_id,
+       forcing_package_uri,
+       nullif(trim(coalesce(checksum, '')), '') is not null as checksum_present,
+       (
+         forcing_package_uri like 'forcing/%'
+         or (
+           :'object_store_uri_prefix' <> ''
+           and forcing_package_uri like rtrim(:'object_store_uri_prefix', '/') || '/forcing/%'
+         )
+       ) as forcing_uri_in_object_store_scope
 from met.forcing_version
 where source_id = :'source_id'
   and cycle_time = :'cycle_time'::timestamptz
   and model_id = :'model_id'
-  and forcing_package_uri like 'forcing/%'
 order by created_at desc
 limit 5;"
 ```
 
-期望：至少一行；`expected_status=ready`；`forcing_package_uri` 是 `forcing/...`；`checksum` 非空或正在同一 pass
-内由 forcing producer 完成。对象存储检查：
+期望：至少一行，且同一行 `checksum_present=t`、`forcing_uri_in_object_store_scope=t`。`checksum` 为空表示 producer
+尚未 finalization，不能把它当成 ready。对象存储检查先把 URI 规范化为相对 key，再检查 package manifest：
 
 ```bash
-forcing_prefix=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
-  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
+forcing_package_uri=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" \
+  -v object_store_uri_prefix="$object_store_uri_prefix" -c "
 select forcing_package_uri
 from met.forcing_version
 where source_id = :'source_id'
   and cycle_time = :'cycle_time'::timestamptz
   and model_id = :'model_id'
+  and nullif(trim(coalesce(checksum, '')), '') is not null
+  and (
+    forcing_package_uri like 'forcing/%'
+    or (
+      :'object_store_uri_prefix' <> ''
+      and forcing_package_uri like rtrim(:'object_store_uri_prefix', '/') || '/forcing/%'
+    )
+  )
 order by created_at desc
 limit 1;")
+forcing_key=$(normalize_object_key "$forcing_package_uri")
 
-test -f "/ghdc/data/nwm/object-store/${forcing_prefix%/}/forcing_package.json" \
-  || test -f "/ghdc/data/nwm/object-store/${forcing_prefix%/}/manifest.json"
-find "/ghdc/data/nwm/object-store/${forcing_prefix%/}" -maxdepth 2 -type f -printf '%p\n' | sort | head -40
+test -f "$object_store_mirror_root/${forcing_key%/}/forcing_package.json" \
+  || test -f "$object_store_mirror_root/${forcing_key%/}/manifest.json"
+find "$object_store_mirror_root/${forcing_key%/}" -maxdepth 2 -type f -printf '%p\n' | sort | head -40
 ```
 
-`hydro.state_snapshot` 应有上一 allowed cycle 的可用状态；严格 warm-start 失败时优先修复这一行和对应
-`state_save_qc`，不要默认让下一 forecast cold-start：
+严格 warm-start 要求当前 cycle 的精确 successor checkpoint：`hydro.state_snapshot.valid_time = cycle_time`、
+`lead_hours = 12`、同一 `source_id/model_id`、`usable_flag=true`。这行通常由上一 allowed cycle 的 run 在
+`state_save_qc` 阶段产出；不要按上一 allowed cycle 的 `valid_time` 查 checkpoint，也不要用当前待启动 `run_id` 去判断
+checkpoint producer：
 
 ```bash
 psql "$DATABASE_URL" -P pager=off -F $'\t' -v source_id="$source_id" \
-  -v previous_allowed_cycle="$previous_allowed_cycle" -v model_id="$model_id" -Atc "
-select 'ready' as expected_status, state_id, source_id, valid_time, run_id,
-       state_uri, usable_flag
+  -v cycle_time="$cycle_time" -v model_id="$model_id" -Atc "
+select state_id, source_id, valid_time, run_id as producer_run_id,
+       cycle_id as producer_cycle_id, lead_hours, state_uri, usable_flag,
+       nullif(trim(coalesce(checksum, '')), '') is not null as checksum_present
 from hydro.state_snapshot
 where source_id = :'source_id'
-  and valid_time = :'previous_allowed_cycle'::timestamptz
+  and valid_time = :'cycle_time'::timestamptz
   and model_id = :'model_id'
+  and lead_hours = 12
   and usable_flag is true
 order by created_at desc
 limit 5;"
 
-psql "$DATABASE_URL" -P pager=off -F $'\t' -v run_id="$run_id" -Atc "
-select 'state_save_qc' as expected_stage, job_id, stage, status, slurm_job_id,
+state_uri=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
+select state_uri
+from hydro.state_snapshot
+where source_id = :'source_id'
+  and valid_time = :'cycle_time'::timestamptz
+  and model_id = :'model_id'
+  and lead_hours = 12
+  and usable_flag is true
+order by created_at desc
+limit 1;")
+state_key=$(normalize_object_key "$state_uri")
+test -f "$object_store_mirror_root/$state_key"
+find "$(dirname "$object_store_mirror_root/$state_key")" -maxdepth 1 -type f -printf '%p\n' | sort
+
+state_producer_run_id=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
+select run_id
+from hydro.state_snapshot
+where source_id = :'source_id'
+  and valid_time = :'cycle_time'::timestamptz
+  and model_id = :'model_id'
+  and lead_hours = 12
+  and usable_flag is true
+order by created_at desc
+limit 1;")
+state_producer_cycle_id=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
+select coalesce(cycle_id, '')
+from hydro.state_snapshot
+where source_id = :'source_id'
+  and valid_time = :'cycle_time'::timestamptz
+  and model_id = :'model_id'
+  and lead_hours = 12
+  and usable_flag is true
+order by created_at desc
+limit 1;")
+state_producer_cycle_id=${state_producer_cycle_id:-$previous_cycle_id}
+
+psql "$DATABASE_URL" -P pager=off -F $'\t' \
+  -v producer_run_id="$state_producer_run_id" \
+  -v producer_cycle_id="$state_producer_cycle_id" -Atc "
+select job_id, stage, status, slurm_job_id,
        coalesce(error_code,''), left(coalesce(error_message,''),140)
 from ops.pipeline_job
-where run_id = :'run_id'
-  and stage = 'state_save_qc'
+where stage = 'state_save_qc'
+  and (
+    (:'producer_run_id' <> '' and run_id = :'producer_run_id')
+    or (:'producer_cycle_id' <> '' and cycle_id = :'producer_cycle_id')
+  )
 order by updated_at desc
 limit 5;"
 ```
 
-期望：snapshot 查询至少一行；`expected_status=ready`、`usable_flag=t`、`state_uri` 指向对象存储状态文件。
+期望：snapshot 查询至少一行，且 `lead_hours=12`、`usable_flag=t`、`checksum_present=t`，`state_uri` 文件存在。
 `state_save_qc` job 应是 `succeeded`、`complete`、`completed` 或其他非 failed terminal 状态；如失败，先查修复
-上一 allowed cycle 的 state 文件、QC 结果、Slurm 日志，再重跑该 cycle 的 `state_save_qc`/后续链路。
+producer run / 上一 allowed cycle 的 state 文件、QC 结果、Slurm 日志，再重跑该 cycle 的 `state_save_qc`/后续链路。
 
 调度、forcing、run 阶段不应有 failed terminal 状态：
 
@@ -389,8 +475,8 @@ order by submitted_at nulls last, updated_at;"
 对象存储 run 输出和 scheduler evidence：
 
 ```bash
-test -f "/ghdc/data/nwm/object-store/runs/${run_id}/input/manifest.json"
-find "/ghdc/data/nwm/object-store/runs/${run_id}/output" -maxdepth 2 -type f -printf '%p\n' | sort | head -40
+test -f "$object_store_mirror_root/runs/${run_id}/input/manifest.json"
+find "$object_store_mirror_root/runs/${run_id}/output" -maxdepth 2 -type f -printf '%p\n' | sort | head -40
 
 grep -R "\"allowed_cycle_hours_utc\"\\|\"cycle_hour_not_allowed\"\\|\"cycle_time_utc\"" \
   /scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence | tail -80

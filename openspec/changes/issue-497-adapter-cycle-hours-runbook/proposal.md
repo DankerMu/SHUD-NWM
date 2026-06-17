@@ -24,8 +24,9 @@ Risk triage:
 - Document node-22/node-27 artifact locations accurately: object-store contains
   `runs/` and `forcing/`; `published/` contains only display tiles/logs/display
   manifests.
-- Document strict warm-start checks and failure handling: fix or rerun the prior
-  `state_save_qc` checkpoint instead of cold-starting the next forecast.
+- Document strict warm-start checks and failure handling: verify the current
+  cycle's exact successor checkpoint (`lead_hours=12`) and fix or rerun the
+  producer `state_save_qc` checkpoint instead of cold-starting the next forecast.
 - Provide operator verification commands for forcing packages, run output, state
   snapshots, scheduler evidence, and published display artifacts.
 

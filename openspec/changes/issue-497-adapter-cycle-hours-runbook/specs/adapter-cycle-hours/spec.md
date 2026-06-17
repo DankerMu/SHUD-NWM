@@ -73,7 +73,12 @@ run outputs, state snapshots, scheduler evidence, and display artifacts.
 
 - **GIVEN** a published business run references a forcing package
 - **WHEN** an operator follows the runbook on node-22 or node-27
-- **THEN** the runbook directs them to shared object-store `forcing/...`
+- **THEN** the runbook normalizes the package URI to a shared object-store
+  `forcing/...` key
+- **AND** it accepts both relative keys and configured-prefix URIs such as
+  `s3://nhms-prod/forcing/...`
+- **AND** it derives readiness from a non-empty checksum and package object
+  existence
 - **AND** it does not imply the forcing package lives under `published/`
 
 #### Scenario: Display artifacts remain published-only
@@ -89,7 +94,11 @@ run outputs, state snapshots, scheduler evidence, and display artifacts.
 - **AND** a forecast fails because the exact successor state checkpoint is
   missing or unusable
 - **WHEN** an operator follows the runbook
-- **THEN** the guidance is to inspect/repair/rerun the previous allowed cycle's
-  `state_save_qc` and state snapshot
+- **THEN** the guidance checks `hydro.state_snapshot.valid_time` against the
+  current `cycle_time`
+- **AND** it requires `lead_hours=12`, matching source/model, usable flag, and
+  a state URI whose object exists
+- **AND** it inspects the producer `state_save_qc` by the snapshot's `run_id` or
+  previous-cycle `cycle_id`
 - **AND** it does not instruct cold-starting the next forecast as the default
   production remedy
