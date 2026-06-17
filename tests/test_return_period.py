@@ -87,32 +87,44 @@ def test_above_q100_returns_over_100_and_extreme_warning() -> None:
     assert map_warning_level(result, _sample_quality(40)) == "extreme"
 
 
-def test_no_frequency_curve_writes_null_result() -> None:
+def test_no_frequency_curve_skips_empty_results_and_records_quality() -> None:
     with _store() as session:
-        _insert_forecast_run(session, segment_values={"seg_002": [100.0, 120.0]})
+        _insert_forecast_run(session, segment_values={"seg_001": [100.0]})
 
         result = compute_return_periods("forecast_run", session)
 
-        row = _result_row(session, segment_id="seg_002", max_over_window=True)
         quality = _quality_row(session)
+        result_row_count = _return_period_row_count(session)
+        q_down = session.execute(
+            text(
+                """
+                SELECT value
+                FROM hydro.river_timeseries
+                WHERE run_id = 'forecast_run'
+                  AND river_segment_id = 'seg_001'
+                  AND variable = 'q_down'
+                """
+            )
+        ).scalar_one()
         assert result.without_curve == 1
-        assert row["return_period"] is None
-        assert row["warning_level"] is None
-        assert row["quality_flag"] == "no_frequency_curve"
-        assert quality["result_rows"] == 3
-        assert quality["max_result_rows"] == 1
+        assert result.rows_written == 0
+        assert result_row_count == 0
+        assert q_down == 100.0
+        assert quality is not None
+        assert quality["result_rows"] == 0
+        assert quality["max_result_rows"] == 0
         assert quality["return_period_rows"] == 0
         assert quality["warning_rows"] == 0
         assert quality["max_return_period_rows"] == 0
         assert quality["max_warning_rows"] == 0
         assert quality["quality_state"] == "unavailable"
         assert quality["quality_source"] == "explicit"
-        assert json.loads(quality["unavailable_products"]) == ["frequency_curves"]
-        assert quality["expected_result_rows"] == 3
+        assert json.loads(quality["unavailable_products"]) == ["frequency_curves", "return_period_result"]
+        assert quality["expected_result_rows"] == 2
         assert quality["expected_max_result_rows"] == 1
-        assert quality["expected_timestep_result_rows"] == 2
+        assert quality["expected_timestep_result_rows"] == 1
         assert quality["meaningful_result_rows"] == 0
-        assert quality["no_frequency_curve_rows"] == 3
+        assert quality["no_frequency_curve_rows"] == 2
         blockers = json.loads(quality["residual_blockers"])
         assert blockers[0]["code"] == "FREQUENCY_CURVE_UNAVAILABLE"
         assert blockers[0]["state"] == "unavailable"
@@ -120,12 +132,14 @@ def test_no_frequency_curve_writes_null_result() -> None:
         assert blockers[0]["residual_risk"]
         assert blockers[0]["run_id"] == "forecast_run"
         assert blockers[0]["count"] == 1
-        assert blockers[0]["sample_segment_ids"] == ["seg_002"]
+        assert blockers[0]["sample_segment_ids"] == ["seg_001"]
         assert blockers[0]["omitted_count"] == 0
+        assert blockers[1]["code"] == "RETURN_PERIOD_RESULT_UNAVAILABLE"
         assert result.quality_state == "unavailable"
-        assert result.unavailable_products == ("frequency_curves",)
+        assert result.unavailable_products == ("frequency_curves", "return_period_result")
         assert result.residual_blockers[0]["code"] == "FREQUENCY_CURVE_UNAVAILABLE"
         assert result.residual_blockers[0]["quality_flag"] == "no_frequency_curve"
+        assert result.residual_blockers[1]["code"] == "RETURN_PERIOD_RESULT_UNAVAILABLE"
         assert _tile_layer_count(session) == 0
 
 
@@ -149,6 +163,19 @@ def test_warning_thresholds_unavailable_keeps_warning_null_with_curve() -> None:
         assert row["return_period"] is not None
         assert row["warning_level"] is None
         assert row["quality_flag"] == "warning_thresholds_unavailable"
+        stored_rows = session.execute(
+            text(
+                """
+                SELECT return_period, warning_level
+                FROM flood.return_period_result
+                WHERE run_id = 'forecast_run'
+                ORDER BY valid_time, max_over_window DESC
+                """
+            )
+        ).mappings().all()
+        assert len(stored_rows) == 3
+        assert all(stored_row["return_period"] is not None for stored_row in stored_rows)
+        assert all(stored_row["warning_level"] is None for stored_row in stored_rows)
         assert quality["result_rows"] == 3
         assert quality["max_result_rows"] == 1
         assert quality["return_period_rows"] == 3
@@ -174,11 +201,28 @@ def test_partial_curve_run_quality_is_degraded_not_ready() -> None:
 
         result = compute_return_periods("forecast_run", session)
         quality = _quality_row(session)
+        stored_rows = session.execute(
+            text(
+                """
+                SELECT river_segment_id, return_period, warning_level
+                FROM flood.return_period_result
+                WHERE run_id = 'forecast_run'
+                ORDER BY river_segment_id, max_over_window DESC
+                """
+            )
+        ).mappings().all()
 
     assert result.quality_state == "degraded"
     assert result.unavailable_products == ("frequency_curves",)
+    assert result.rows_written == 2
+    assert len(stored_rows) == 2
+    assert {row["river_segment_id"] for row in stored_rows} == {"seg_001"}
+    assert all(row["return_period"] is not None for row in stored_rows)
+    assert all(row["warning_level"] is not None for row in stored_rows)
     assert quality is not None
     assert quality["quality_state"] == "degraded"
+    assert quality["result_rows"] == 2
+    assert quality["max_result_rows"] == 1
     assert quality["expected_result_rows"] == 4
     assert quality["meaningful_result_rows"] == 2
     assert quality["no_frequency_curve_rows"] == 2
@@ -194,18 +238,19 @@ def test_no_frequency_curve_residual_blockers_are_run_level_bounded() -> None:
         quality = _quality_row(session)
 
     assert result.without_curve == 15
-    assert len(result.residual_blockers) == 1
-    blocker = result.residual_blockers[0]
+    assert len(result.residual_blockers) == 2
+    blocker = next(item for item in result.residual_blockers if item["code"] == "FREQUENCY_CURVE_UNAVAILABLE")
     assert blocker["code"] == "FREQUENCY_CURVE_UNAVAILABLE"
     assert blocker["quality_flag"] == "no_frequency_curve"
     assert blocker["count"] == 15
     assert blocker["sample_segment_ids"] == [f"seg_{index:03d}" for index in range(10)]
     assert blocker["omitted_count"] == 5
     assert "river_segment_id" not in blocker
+    assert result.residual_blockers[1]["code"] == "RETURN_PERIOD_RESULT_UNAVAILABLE"
     assert quality is not None
     stored_blockers = json.loads(quality["residual_blockers"])
-    assert len(stored_blockers) == 1
-    assert stored_blockers[0]["sample_segment_ids"] == [f"seg_{index:03d}" for index in range(10)]
+    stored_frequency_blocker = next(item for item in stored_blockers if item["code"] == "FREQUENCY_CURVE_UNAVAILABLE")
+    assert stored_frequency_blocker["sample_segment_ids"] == [f"seg_{index:03d}" for index in range(10)]
 
 
 def test_partial_sample_degrades_to_highest_reliable_warning_level() -> None:
@@ -226,12 +271,17 @@ def test_fit_failed_curve_is_not_used() -> None:
         _insert_curve(session, "seg_001", quality_flag="fit_failed")
         _insert_forecast_run(session, segment_values={"seg_001": [400.0]})
 
-        compute_return_periods("forecast_run", session)
+        result = compute_return_periods("forecast_run", session)
+        quality = _quality_row(session)
 
-        row = _result_row(session, segment_id="seg_001", max_over_window=True)
-        assert row["return_period"] is None
-        assert row["warning_level"] is None
-        assert row["quality_flag"] == "no_usable_frequency_curve"
+        assert result.rows_written == 0
+        assert _return_period_row_count(session) == 0
+        assert quality is not None
+        assert quality["quality_state"] == "unavailable"
+        assert quality["expected_result_rows"] == 2
+        assert quality["meaningful_result_rows"] == 0
+        assert quality["no_usable_frequency_curve_rows"] == 2
+        assert json.loads(quality["unavailable_products"]) == ["frequency_curves", "return_period_result"]
 
 
 def test_timestep_calculation_multiple_timesteps() -> None:
@@ -421,6 +471,87 @@ def test_upsert_to_return_period_result_updates_existing_row() -> None:
         assert quality["result_rows"] == 2
         assert quality["max_result_rows"] == 1
         assert quality["max_warning_rows"] == 1
+
+
+def test_recompute_with_no_usable_curves_deletes_stale_empty_rows() -> None:
+    with _store() as session:
+        _insert_forecast_run(session, segment_values={"seg_001": [100.0]})
+        _insert_quality_source_row(
+            session,
+            run_id="forecast_run",
+            segment_id="seg_001",
+            valid_time=datetime(2026, 5, 1),
+            return_period=None,
+            warning_level=None,
+            max_over_window=True,
+            quality_flag="no_frequency_curve",
+        )
+        _insert_quality_source_row(
+            session,
+            run_id="forecast_run",
+            segment_id="seg_001",
+            valid_time=datetime(2026, 5, 1),
+            return_period=None,
+            warning_level=None,
+            max_over_window=False,
+            quality_flag="no_frequency_curve",
+        )
+
+        assert _return_period_row_count(session) == 2
+
+        result = compute_return_periods("forecast_run", session)
+        quality = _quality_row(session)
+        final_row_count = _return_period_row_count(session)
+
+    assert result.rows_written == 0
+    assert final_row_count == 0
+    assert quality is not None
+    assert quality["quality_source"] == "explicit"
+    assert quality["quality_state"] == "unavailable"
+    assert quality["expected_result_rows"] == 2
+    assert quality["meaningful_result_rows"] == 0
+    assert quality["no_frequency_curve_rows"] == 2
+    assert json.loads(quality["unavailable_products"]) == ["frequency_curves", "return_period_result"]
+
+
+def test_recompute_with_zero_usable_rows_removes_stale_flood_tile_layer() -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0]})
+        compute_return_periods("forecast_run", session)
+
+        assert _return_period_row_count(session) == 2
+        assert _q_down_row_count(session) == 1
+        assert _tile_layer_count(session) == 1
+        assert _tile_layer_row(session)["layer_id"] == "flood_return_period_forecast_run"
+
+        session.execute(
+            text(
+                """
+                UPDATE flood.flood_frequency_curve
+                SET quality_flag = 'fit_failed',
+                    q2 = NULL,
+                    q5 = NULL,
+                    q10 = NULL,
+                    q20 = NULL,
+                    q50 = NULL,
+                    q100 = NULL
+                WHERE river_segment_id = 'seg_001'
+                """
+            )
+        )
+        result = compute_return_periods("forecast_run", session)
+        quality = _quality_row(session)
+
+    assert result.rows_written == 0
+    assert result.quality_state == "unavailable"
+    assert _return_period_row_count(session) == 0
+    assert _q_down_row_count(session) == 1
+    assert _tile_layer_count(session) == 0
+    assert quality is not None
+    assert quality["return_period_rows"] == 0
+    assert quality["no_usable_frequency_curve_rows"] == 2
+    assert json.loads(quality["unavailable_products"]) == ["frequency_curves", "return_period_result"]
 
 
 def test_run_product_quality_backfill_is_idempotent_and_overwrites_stale_counts() -> None:
@@ -1879,6 +2010,29 @@ def _result_rows(session: Session, *, max_over_window: bool) -> list[dict[str, A
         {"max_over_window": max_over_window},
     ).mappings()
     return [dict(row) for row in rows]
+
+
+def _return_period_row_count(session: Session) -> int:
+    return int(
+        session.execute(
+            text("SELECT COUNT(*) FROM flood.return_period_result WHERE run_id = 'forecast_run'")
+        ).scalar_one()
+    )
+
+
+def _q_down_row_count(session: Session) -> int:
+    return int(
+        session.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM hydro.river_timeseries
+                WHERE run_id = 'forecast_run'
+                  AND variable = 'q_down'
+                """
+            )
+        ).scalar_one()
+    )
 
 
 def _result_row(session: Session, *, segment_id: str, max_over_window: bool) -> dict[str, Any]:
