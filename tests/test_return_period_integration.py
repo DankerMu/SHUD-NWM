@@ -101,7 +101,7 @@ def _seed_run(
             )
             VALUES (
                 %s, %s, 1,
-                ST_SetSRID(ST_MakeLine(ST_Point(110.1, 30.1), ST_Point(110.2, 30.2)), 4490),
+                ST_Multi(ST_SetSRID(ST_MakeLine(ST_Point(110.1, 30.1), ST_Point(110.2, 30.2)), 4490)),
                 '{}'::jsonb
             )
             """,

@@ -106,7 +106,9 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
             assert geometry_columns["core.basin_version.geom"]["srid"] == 4490
             assert geometry_columns["core.basin_version.geom"]["type"] == "MULTIPOLYGON"
             assert geometry_columns["core.river_segment.geom"]["srid"] == 4490
-            assert geometry_columns["core.river_segment.geom"]["type"] == "LINESTRING"
+            # 000036 widened geom to MultiLineString so a reach can express a real
+            # source gap as separate parts instead of a fabricated cross-gap bridge.
+            assert geometry_columns["core.river_segment.geom"]["type"] == "MULTILINESTRING"
             assert geometry_columns["met.met_station.geom"]["type"] == "POINT"
 
             indexes = {
@@ -335,7 +337,7 @@ def test_real_return_period_repair_migration_replaces_old_key_idempotently(
                         'it126_seg_inside',
                         'it126_rnv_v2',
                         1,
-                        ST_SetSRID(ST_MakeLine(ST_Point(110.1, 30.1), ST_Point(110.2, 30.2)), 4490),
+                        ST_Multi(ST_SetSRID(ST_MakeLine(ST_Point(110.1, 30.1), ST_Point(110.2, 30.2)), 4490)),
                         '{}'::jsonb
                     )
                     ON CONFLICT (river_segment_id, river_network_version_id) DO NOTHING

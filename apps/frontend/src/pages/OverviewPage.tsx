@@ -119,7 +119,10 @@ function M11FullscreenMap({
   nationalRiverGeo?: import('geojson').FeatureCollection | null
   meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
-  selectedSegmentGeometry?: import('@/api/types').components['schemas']['GeoJsonLineString'] | null
+  selectedSegmentGeometry?:
+    | import('@/api/types').components['schemas']['GeoJsonLineString']
+    | import('@/api/types').components['schemas']['GeoJsonMultiLineString']
+    | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
   loading?: boolean

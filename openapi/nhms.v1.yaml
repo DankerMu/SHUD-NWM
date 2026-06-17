@@ -2585,7 +2585,9 @@ components:
           type: number
           nullable: true
         geom:
-          $ref: "#/components/schemas/GeoJsonLineString"
+          oneOf:
+            - $ref: "#/components/schemas/GeoJsonLineString"
+            - $ref: "#/components/schemas/GeoJsonMultiLineString"
         properties_json:
           type: object
           additionalProperties: true
@@ -2626,7 +2628,9 @@ components:
               nullable: true
           additionalProperties: true
         geometry:
-          $ref: "#/components/schemas/GeoJsonLineString"
+          oneOf:
+            - $ref: "#/components/schemas/GeoJsonLineString"
+            - $ref: "#/components/schemas/GeoJsonMultiLineString"
     RiverSegmentFeatureCollection:
       type: object
       required: [type, features, total, feature_total, limit, offset]

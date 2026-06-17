@@ -406,7 +406,11 @@ class PsycopgModelRegistryStore:
                     VALUES %s
                     """,
                     segment_rows,
-                    template="(%s, %s, %s, %s, %s, ST_GeomFromText(%s, 4490), %s)",
+                    # geom is geometry(MultiLineString, 4490) (000036). ST_Multi wraps a
+                    # LineString payload into a single-part MultiLineString so the legacy
+                    # LineString write contract still inserts; a MultiLineString WKT passes
+                    # through unchanged.
+                    template="(%s, %s, %s, %s, %s, ST_Multi(ST_GeomFromText(%s, 4490)), %s)",
                 )
         return {"river_network_version": network, "segment_count": segment_count}
 

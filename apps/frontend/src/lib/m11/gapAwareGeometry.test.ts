@@ -77,4 +77,14 @@ describe('gapAwareLineGeometry', () => {
     const empty = { type: 'LineString' as const, coordinates: [] as number[][] }
     expect(gapAwareLineGeometry(empty)).toBe(empty)
   })
+
+  it('MultiLineString 直通（源已按缝拆好，不再二次处理）', () => {
+    // 即便某段内部含跨缝直线，MultiLineString 入参也原样返回——后端源头已拆分，
+    // 前端不重复拆（避免双重处理与坐标重算）。
+    const mls = {
+      type: 'MultiLineString' as const,
+      coordinates: [vline(38.0, 38.0007, 38.0164), vline(38.04, 38.0407)],
+    }
+    expect(gapAwareLineGeometry(mls)).toBe(mls)
+  })
 })

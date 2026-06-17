@@ -943,7 +943,7 @@ export interface components {
             segment_order?: number | null;
             downstream_segment_id?: string | null;
             length_m?: number | null;
-            geom: components["schemas"]["GeoJsonLineString"];
+            geom: components["schemas"]["GeoJsonLineString"] | components["schemas"]["GeoJsonMultiLineString"];
             properties_json: {
                 [key: string]: unknown;
             };
@@ -966,7 +966,7 @@ export interface components {
             } & {
                 [key: string]: unknown;
             };
-            geometry: components["schemas"]["GeoJsonLineString"];
+            geometry: components["schemas"]["GeoJsonLineString"] | components["schemas"]["GeoJsonMultiLineString"];
         };
         RiverSegmentFeatureCollection: {
             /** @enum {string} */

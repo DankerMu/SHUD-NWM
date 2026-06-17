@@ -57,7 +57,49 @@ def test_parser_reads_real_shapefiles_and_shud_evidence(tmp_path: Path) -> None:
     assert parsed.river_segments[0].downstream_segment_id == f"{model_id}_seg_2"
     assert parsed.river_segments[1].downstream_segment_id is None
     assert parsed.river_segments[0].properties["source_downstream_segment_id"] == "2"
-    assert parsed.river_segments[0].geom_wkt.startswith("LINESTRING")
+    # geom is gap-split MultiLineString now (a seamless reach is a one-part MLS).
+    assert parsed.river_segments[0].geom_wkt.startswith("MULTILINESTRING")
+
+
+def test_parser_splits_cross_gap_record_into_multilinestring_parts(tmp_path: Path) -> None:
+    # One source record whose vertices contain a real >300m gap (78m mesh edges with
+    # one ~1668m jump). The parser must emit a 2-part MultiLineString where the gap
+    # endpoints land in different parts -- the cross-gap straight bridge is in neither.
+    root, input_dir, inventory_path, manifest_path, model_id = _write_registry_fixture(
+        tmp_path, sp_segment_count=1
+    )
+    del root, inventory_path, manifest_path
+    _write_line_shapefile(
+        input_dir / "gis" / "seg",
+        points=[
+            [
+                (100.0, 30.0),
+                (100.0, 30.0007),
+                (100.0, 30.0014),
+                (100.0, 30.0164),
+                (100.0, 30.0171),
+            ]
+        ],
+        records=[(1, 1, 0, 100.0)],
+    )
+    inventory = discover_basins_inventory(tmp_path / "basins")
+    model = inventory["models"][0]
+
+    parsed = parse_basins_geometry(
+        model_id=model_id,
+        input_dir=input_dir,
+        shud_input_name="alias-a",
+        required_files=model["required_files"],
+    )
+
+    assert parsed.segment_count == 1
+    wkt = parsed.river_segments[0].geom_wkt
+    assert wkt.startswith("MULTILINESTRING(")
+    # exactly two parts (one "),(") separating the gap endpoints
+    assert wkt.replace(" ", "").count("),(") == 1
+    # the gap endpoints (30.0014 and 30.0164) are never adjacent inside one ring
+    compact = wkt.replace(", ", ",")
+    assert "30.0014,100 30.0164" not in compact
 
 
 def test_parser_disambiguates_duplicate_raw_segment_ids(tmp_path: Path) -> None:
@@ -1822,7 +1864,9 @@ def test_real_basins_parser_smoke_reprojects_and_uses_rivseg_count(
     assert sources.geometry.segment_count == sources.geometry.evidence_counts["rivseg_segment_count"]
     assert sources.geometry.evidence_counts["river_count"] != sources.geometry.evidence_counts["rivseg_segment_count"]
     first_wkt = sources.geometry.river_segments[0].geom_wkt
-    first_numbers = [float(value) for value in first_wkt.removeprefix("LINESTRING(").split(",", 1)[0].split()]
+    assert first_wkt.startswith("MULTILINESTRING((")
+    first_point = first_wkt.removeprefix("MULTILINESTRING((").split(",", 1)[0]
+    first_numbers = [float(value) for value in first_point.split()]
     assert -180 <= first_numbers[0] <= 180
     assert -90 <= first_numbers[1] <= 90
 
@@ -2145,13 +2189,17 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
 ) -> None:
     """Real-DB coverage for the output-reach geometry backfill -- the path that
     actually produced the heihe cross-ridge lines AND the later channel breakage
-    (the Python greedy stitch is unit-tested in test_basins_geometry_merge).
-    Asserts: in-order + reversed fine segments stitch into ONE LINESTRING (no
-    fabricated jump); a genuine source gap is BRIDGED into one continuous line by
-    nearest endpoints (NOT truncated to the longest part, nothing dropped) while
-    length stays the honest summed length; a lone single-segment reach is
-    backfilled; and an output reach carrying a non-numeric shud_riv_index is
-    skipped, not crashed, by the text-based target match.
+    (the Python greedy stitch + gap-split is unit-tested in test_basins_geometry_merge
+    and test_river_segment_gap_split).
+    Asserts: every reach is now emitted as a MultiLineString; in-order + reversed
+    fine segments stitch into ONE continuous part (no fabricated jump); a reach whose
+    parts sit far apart but UNIFORMLY (here ~58km edges throughout) is NOT split -- the
+    relative 4x-median guard correctly treats no edge as an anomalous gap, so it stays
+    a one-part line with nothing dropped and the honest summed length; a lone
+    single-segment reach is a one-part MultiLineString; and an output reach carrying a
+    non-numeric shud_riv_index is skipped, not crashed, by the text-based target match.
+    (gap_split's ABSOLUTE-floor cut on a small-median reach is exercised in
+    test_river_segment_gap_split.)
     """
     apply_migrations_from_zero(integration_database_url)
     rnv = "geomfix_rnv_v1"
@@ -2178,11 +2226,14 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
         )
         # Fine GIS segments grouped by source_raw_segment_id (= SHUD reach index):
         #   reach 1: two parts sharing the (110.1 30.1) joint, 2nd stored REVERSED
-        #            -> greedy stitch yields ONE LINESTRING, not a back-and-forth jump.
-        #   reach 2: two parts with a GAP (no shared endpoint)
-        #            -> greedy BRIDGES them into one continuous line by nearest
-        #               endpoints, nothing dropped; length stays the SUM.
-        #   reach 3: a lone single segment -> returned as the reach's line unchanged.
+        #            -> greedy stitch yields ONE continuous part (no back-and-forth
+        #               jump), emitted as a one-part MultiLineString.
+        #   reach 2: two parts with no shared endpoint, but all edges ~uniformly ~58km
+        #            -> stitched into one continuous line; gap_split's relative
+        #               4x-median guard sees no anomalous edge, so it stays ONE part
+        #               (nothing dropped, length stays the SUM). Anomalous-gap splitting
+        #               is covered by test_river_segment_gap_split.
+        #   reach 3: a lone single segment -> one-part MultiLineString unchanged.
         execute_values(
             cursor,
             "INSERT INTO core.river_segment "
@@ -2195,7 +2246,9 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
                 ("gf_2b", rnv, 4, 50.0, "LINESTRING(111.8 31.8, 111.9 31.9)", Json({"source_raw_segment_id": "2"})),
                 ("gf_3a", rnv, 5, 300.0, "LINESTRING(112.0 32.0, 112.3 32.3)", Json({"source_raw_segment_id": "3"})),
             ],
-            template="(%s, %s, %s, %s, ST_GeomFromText(%s, 4490), %s)",
+            # geom is geometry(MultiLineString, 4490) (000036); ST_Multi wraps the
+            # LineString fixtures so the insert satisfies the column type.
+            template="(%s, %s, %s, %s, ST_Multi(ST_GeomFromText(%s, 4490)), %s)",
         )
         # Output reach rows: NULL geom, shud_output_river=true, indices 1/2/3 plus
         # one row with a NON-NUMERIC shud_riv_index. The target match compares the
@@ -2236,19 +2289,20 @@ def test_backfill_output_segment_geometry_stitches_gap_and_keeps_honest_length(
         )
         assert cursor.fetchone()["geom"] is None
 
-    # reach 1: reversed part stitched into one continuous LINESTRING (3 deduped points)
-    assert rows[1]["gtype"] == "LINESTRING"
+    # reach 1: reversed part stitched into one continuous part, emitted as a one-part
+    # MultiLineString (3 deduped points).
+    assert rows[1]["gtype"] == "MULTILINESTRING"
     assert rows[1]["npts"] == 3
     assert rows[1]["length_m"] == 200.0
 
-    # reach 2: source gap BRIDGED into one continuous line (all 4 points, nothing
-    # dropped), not truncated to the longest part; length stays the honest SUM.
-    assert rows[2]["gtype"] == "LINESTRING"
+    # reach 2: uniformly-spaced parts stitched into one continuous line (all 4 points,
+    # nothing dropped); the relative gap guard keeps it ONE part. length stays the SUM.
+    assert rows[2]["gtype"] == "MULTILINESTRING"
     assert rows[2]["npts"] == 4
     assert rows[2]["length_m"] == 150.0
     assert rows[2]["prov_len"] == 150.0
     assert rows[2]["prov_cnt"] == 2
 
-    # reach 3: a lone single segment still stitches to a valid LINESTRING via ST_LineMerge
-    assert rows[3]["gtype"] == "LINESTRING"
+    # reach 3: a lone single segment is a valid one-part MultiLineString.
+    assert rows[3]["gtype"] == "MULTILINESTRING"
     assert rows[3]["length_m"] == 300.0
