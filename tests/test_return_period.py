@@ -14,9 +14,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from packages.common.flood_quality import (
+    ExplicitFloodRunProductQuality,
     FloodRunProductQualityBackfillSummary,
     backfill_run_product_quality,
+    get_run_product_quality,
+    read_run_product_quality,
     refresh_run_product_quality,
+    refresh_run_product_quality_many,
+    write_explicit_run_product_quality,
 )
 from workers.flood_frequency import return_period
 from workers.flood_frequency.frequency import check_sample_size
@@ -27,6 +32,31 @@ from workers.flood_frequency.return_period import (
     interpolate_return_period,
     map_warning_level,
 )
+
+RUN_PRODUCT_QUALITY_COLUMNS_SQL = """
+    run_id TEXT PRIMARY KEY,
+    quality_state TEXT NOT NULL DEFAULT 'ready',
+    quality_source TEXT NOT NULL DEFAULT 'historical_backfill',
+    unavailable_products TEXT NOT NULL DEFAULT '[]',
+    residual_blockers TEXT NOT NULL DEFAULT '[]',
+    result_rows INTEGER NOT NULL DEFAULT 0,
+    max_result_rows INTEGER NOT NULL DEFAULT 0,
+    return_period_rows INTEGER NOT NULL DEFAULT 0,
+    warning_rows INTEGER NOT NULL DEFAULT 0,
+    max_return_period_rows INTEGER NOT NULL DEFAULT 0,
+    max_warning_rows INTEGER NOT NULL DEFAULT 0,
+    expected_result_rows INTEGER NOT NULL DEFAULT 0,
+    expected_max_result_rows INTEGER NOT NULL DEFAULT 0,
+    expected_timestep_result_rows INTEGER NOT NULL DEFAULT 0,
+    meaningful_result_rows INTEGER NOT NULL DEFAULT 0,
+    meaningful_max_result_rows INTEGER NOT NULL DEFAULT 0,
+    meaningful_timestep_result_rows INTEGER NOT NULL DEFAULT 0,
+    no_frequency_curve_rows INTEGER NOT NULL DEFAULT 0,
+    no_usable_frequency_curve_rows INTEGER NOT NULL DEFAULT 0,
+    warning_threshold_unavailable_rows INTEGER NOT NULL DEFAULT 0,
+    refreshed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+"""
 
 
 def test_normal_interpolation_between_q10_and_q20() -> None:
@@ -75,6 +105,23 @@ def test_no_frequency_curve_writes_null_result() -> None:
         assert quality["warning_rows"] == 0
         assert quality["max_return_period_rows"] == 0
         assert quality["max_warning_rows"] == 0
+        assert quality["quality_state"] == "unavailable"
+        assert quality["quality_source"] == "explicit"
+        assert json.loads(quality["unavailable_products"]) == ["frequency_curves"]
+        assert quality["expected_result_rows"] == 3
+        assert quality["expected_max_result_rows"] == 1
+        assert quality["expected_timestep_result_rows"] == 2
+        assert quality["meaningful_result_rows"] == 0
+        assert quality["no_frequency_curve_rows"] == 3
+        blockers = json.loads(quality["residual_blockers"])
+        assert blockers[0]["code"] == "FREQUENCY_CURVE_UNAVAILABLE"
+        assert blockers[0]["state"] == "unavailable"
+        assert blockers[0]["quality_flag"] == "no_frequency_curve"
+        assert blockers[0]["residual_risk"]
+        assert blockers[0]["run_id"] == "forecast_run"
+        assert blockers[0]["count"] == 1
+        assert blockers[0]["sample_segment_ids"] == ["seg_002"]
+        assert blockers[0]["omitted_count"] == 0
         assert result.quality_state == "unavailable"
         assert result.unavailable_products == ("frequency_curves",)
         assert result.residual_blockers[0]["code"] == "FREQUENCY_CURVE_UNAVAILABLE"
@@ -108,11 +155,57 @@ def test_warning_thresholds_unavailable_keeps_warning_null_with_curve() -> None:
         assert quality["warning_rows"] == 0
         assert quality["max_return_period_rows"] == 1
         assert quality["max_warning_rows"] == 0
+        assert quality["quality_state"] == "unavailable"
+        assert quality["quality_source"] == "explicit"
+        assert json.loads(quality["unavailable_products"]) == ["warning_thresholds"]
+        assert quality["meaningful_result_rows"] == 3
+        assert quality["warning_threshold_unavailable_rows"] == 3
         assert result.quality_state == "unavailable"
         assert result.unavailable_products == ("warning_thresholds",)
         assert result.residual_blockers[0]["code"] == "WARNING_THRESHOLDS_UNAVAILABLE"
         assert "warning_level remains null" in result.residual_blockers[0]["residual_risk"]
         assert _tile_layer_count(session) == 0
+
+
+def test_partial_curve_run_quality_is_degraded_not_ready() -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [260.0], "seg_002": [300.0]})
+
+        result = compute_return_periods("forecast_run", session)
+        quality = _quality_row(session)
+
+    assert result.quality_state == "degraded"
+    assert result.unavailable_products == ("frequency_curves",)
+    assert quality is not None
+    assert quality["quality_state"] == "degraded"
+    assert quality["expected_result_rows"] == 4
+    assert quality["meaningful_result_rows"] == 2
+    assert quality["no_frequency_curve_rows"] == 2
+    assert quality["quality_state"] != "ready"
+
+
+def test_no_frequency_curve_residual_blockers_are_run_level_bounded() -> None:
+    segment_values = {f"seg_{index:03d}": [100.0] for index in range(15)}
+    with _store() as session:
+        _insert_forecast_run(session, segment_values=segment_values)
+
+        result = compute_return_periods("forecast_run", session)
+        quality = _quality_row(session)
+
+    assert result.without_curve == 15
+    assert len(result.residual_blockers) == 1
+    blocker = result.residual_blockers[0]
+    assert blocker["code"] == "FREQUENCY_CURVE_UNAVAILABLE"
+    assert blocker["quality_flag"] == "no_frequency_curve"
+    assert blocker["count"] == 15
+    assert blocker["sample_segment_ids"] == [f"seg_{index:03d}" for index in range(10)]
+    assert blocker["omitted_count"] == 5
+    assert "river_segment_id" not in blocker
+    assert quality is not None
+    stored_blockers = json.loads(quality["residual_blockers"])
+    assert len(stored_blockers) == 1
+    assert stored_blockers[0]["sample_segment_ids"] == [f"seg_{index:03d}" for index in range(10)]
 
 
 def test_partial_sample_degrades_to_highest_reliable_warning_level() -> None:
@@ -451,7 +544,8 @@ def test_run_product_quality_default_backfill_is_set_based_and_summarized() -> N
     upper_statements = [statement.upper() for statement in statements]
     assert any(
         "INSERT INTO FLOOD.RUN_PRODUCT_QUALITY" in statement
-        and "SELECT RUN_ID, COUNT(*) AS RESULT_ROWS" in statement
+        and "SELECT RUN_ID," in statement
+        and "COUNT(*) AS RESULT_ROWS" in statement
         and "GROUP BY RUN_ID" in statement
         and "ON CONFLICT (RUN_ID) DO UPDATE" in statement
         for statement in upper_statements
@@ -465,7 +559,507 @@ def test_run_product_quality_default_backfill_is_set_based_and_summarized() -> N
     assert all(" NOT IN " not in statement for statement in upper_statements)
 
 
-def test_run_product_quality_refresh_deletes_stale_row_when_source_rows_are_missing() -> None:
+def test_run_product_quality_default_backfill_preserves_explicit_quality_on_conflict() -> None:
+    with _store() as session:
+        write_explicit_run_product_quality(
+            session,
+            ExplicitFloodRunProductQuality(
+                run_id="forecast_run",
+                quality_state="unavailable",
+                unavailable_products=("frequency_curves", "return_period_result"),
+                residual_blockers=(
+                    {
+                        "code": "EXPLICIT_FLOOD_PRODUCT_UNAVAILABLE",
+                        "state": "unavailable",
+                        "quality_flag": "explicit_unavailable",
+                        "residual_risk": "Worker marked flood products unavailable for this run.",
+                        "run_id": "forecast_run",
+                    },
+                ),
+                result_rows=0,
+                max_result_rows=0,
+                return_period_rows=0,
+                warning_rows=0,
+                max_return_period_rows=0,
+                max_warning_rows=0,
+                expected_result_rows=4,
+                expected_max_result_rows=2,
+                expected_timestep_result_rows=2,
+                meaningful_result_rows=0,
+                meaningful_max_result_rows=0,
+                meaningful_timestep_result_rows=0,
+                no_frequency_curve_rows=4,
+            ),
+        )
+        _insert_quality_source_row(session, run_id="forecast_run", max_over_window=True)
+        _insert_quality_source_row(
+            session,
+            run_id="forecast_run",
+            segment_id="seg_002",
+            valid_time=datetime(2026, 5, 1, 1),
+            return_period=20.0,
+            warning_level="severe",
+            max_over_window=False,
+        )
+        _insert_quality_source_row(session, run_id="historical_run", max_over_window=True)
+        session.execute(
+            text(
+                """
+                INSERT INTO flood.run_product_quality (
+                    run_id, result_rows, max_result_rows, return_period_rows, warning_rows,
+                    max_return_period_rows, max_warning_rows
+                )
+                VALUES ('orphan_run', 99, 99, 99, 99, 99, 99)
+                """
+            )
+        )
+        session.commit()
+
+        summary = backfill_run_product_quality(session)
+        rows = {
+            row["run_id"]: dict(row)
+            for row in session.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM flood.run_product_quality
+                    WHERE run_id IN ('forecast_run', 'historical_run', 'orphan_run')
+                    """
+                )
+            ).mappings()
+        }
+
+    explicit = rows["forecast_run"]
+    assert summary.refreshed_runs == 1
+    assert summary.orphan_quality_rows_deleted == 1
+    assert "orphan_run" not in rows
+    assert rows["historical_run"]["quality_source"] == "historical_backfill"
+    assert rows["historical_run"]["result_rows"] == 1
+
+    assert explicit["quality_source"] == "explicit"
+    assert explicit["quality_state"] == "unavailable"
+    assert json.loads(explicit["unavailable_products"]) == ["frequency_curves", "return_period_result"]
+    blockers = json.loads(explicit["residual_blockers"])
+    assert blockers == [
+        {
+            "code": "EXPLICIT_FLOOD_PRODUCT_UNAVAILABLE",
+            "quality_flag": "explicit_unavailable",
+            "residual_risk": "Worker marked flood products unavailable for this run.",
+            "run_id": "forecast_run",
+            "state": "unavailable",
+        }
+    ]
+    assert explicit["result_rows"] == 0
+    assert explicit["return_period_rows"] == 0
+    assert explicit["warning_rows"] == 0
+    assert explicit["expected_result_rows"] == 4
+    assert explicit["expected_max_result_rows"] == 2
+    assert explicit["expected_timestep_result_rows"] == 2
+    assert explicit["meaningful_result_rows"] == 0
+    assert explicit["no_frequency_curve_rows"] == 4
+
+
+def test_explicit_all_no_curve_quality_round_trips_without_source_rows() -> None:
+    with _store() as session:
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0], "seg_002": [180.0]})
+
+        written = write_explicit_run_product_quality(
+            session,
+            ExplicitFloodRunProductQuality(
+                run_id="forecast_run",
+                quality_state="unavailable",
+                unavailable_products=("frequency_curves", "return_period_result"),
+                residual_blockers=(
+                    {
+                        "code": "FREQUENCY_CURVE_UNAVAILABLE",
+                        "state": "unavailable",
+                        "quality_flag": "no_frequency_curve",
+                        "residual_risk": "Return-period rows are absent because no curves are usable.",
+                        "run_id": "forecast_run",
+                    },
+                ),
+                expected_result_rows=4,
+                expected_max_result_rows=2,
+                expected_timestep_result_rows=2,
+                no_frequency_curve_rows=4,
+            ),
+        )
+        session.commit()
+        row_count = session.execute(
+            text("SELECT COUNT(*) FROM flood.return_period_result WHERE run_id = 'forecast_run'")
+        ).scalar_one()
+        quality = read_run_product_quality(session, "forecast_run")
+        stored = _quality_row(session)
+
+    assert row_count == 0
+    assert written.quality_source == "explicit"
+    assert quality.quality_state == "unavailable"
+    assert quality.q_down_available is True
+    assert quality.unavailable_products == ("frequency_curves", "return_period_result")
+    assert quality.residual_blockers[0]["code"] == "FREQUENCY_CURVE_UNAVAILABLE"
+    assert quality.residual_blockers[0]["state"] == "unavailable"
+    assert quality.residual_blockers[0]["quality_flag"] == "no_frequency_curve"
+    assert quality.residual_blockers[0]["residual_risk"]
+    assert quality.residual_blockers[0]["run_id"] == "forecast_run"
+    assert stored is not None
+    assert stored["meaningful_result_rows"] == 0
+    assert stored["no_frequency_curve_rows"] == 4
+
+
+def test_explicit_partial_curve_quality_is_non_ready() -> None:
+    with _store() as session:
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0], "seg_002": [180.0]})
+
+        write_explicit_run_product_quality(
+            session,
+            ExplicitFloodRunProductQuality(
+                run_id="forecast_run",
+                quality_state="degraded",
+                unavailable_products=("frequency_curves",),
+                residual_blockers=(
+                    {
+                        "code": "FREQUENCY_CURVES_UNAVAILABLE",
+                        "state": "degraded",
+                        "quality_flag": "no_usable_frequency_curve",
+                        "residual_risk": "Only part of the expected flood coverage has usable curves.",
+                        "run_id": "forecast_run",
+                    },
+                ),
+                result_rows=4,
+                max_result_rows=2,
+                return_period_rows=2,
+                warning_rows=2,
+                max_return_period_rows=1,
+                max_warning_rows=1,
+                expected_result_rows=4,
+                expected_max_result_rows=2,
+                expected_timestep_result_rows=2,
+                meaningful_result_rows=2,
+                meaningful_max_result_rows=1,
+                meaningful_timestep_result_rows=1,
+                no_usable_frequency_curve_rows=2,
+            ),
+        )
+        session.commit()
+        quality = _quality_row(session)
+
+    assert quality is not None
+    assert quality["quality_state"] == "degraded"
+    assert quality["quality_state"] != "ready"
+    assert quality["expected_result_rows"] > quality["meaningful_result_rows"]
+    assert json.loads(quality["unavailable_products"]) == ["frequency_curves"]
+
+
+def test_explicit_ready_rejects_unavailable_reasons() -> None:
+    with _store() as session:
+        with pytest.raises(ValueError, match="ready explicit"):
+            write_explicit_run_product_quality(
+                session,
+                ExplicitFloodRunProductQuality(
+                    run_id="forecast_run",
+                    quality_state="ready",
+                    unavailable_products=("frequency_curves",),
+                    result_rows=2,
+                    max_result_rows=1,
+                    return_period_rows=2,
+                    warning_rows=2,
+                    max_return_period_rows=1,
+                    max_warning_rows=1,
+                    expected_result_rows=2,
+                    expected_max_result_rows=1,
+                    expected_timestep_result_rows=1,
+                    meaningful_result_rows=2,
+                    meaningful_max_result_rows=1,
+                    meaningful_timestep_result_rows=1,
+                ),
+            )
+
+
+def test_explicit_ready_rejects_incomplete_counts() -> None:
+    with _store() as session:
+        with pytest.raises(ValueError, match="expected_result_rows <= meaningful_result_rows"):
+            write_explicit_run_product_quality(
+                session,
+                ExplicitFloodRunProductQuality(
+                    run_id="forecast_run",
+                    quality_state="ready",
+                    result_rows=2,
+                    max_result_rows=1,
+                    return_period_rows=2,
+                    warning_rows=2,
+                    max_return_period_rows=1,
+                    max_warning_rows=1,
+                    expected_result_rows=4,
+                    expected_max_result_rows=1,
+                    expected_timestep_result_rows=1,
+                    meaningful_result_rows=2,
+                    meaningful_max_result_rows=1,
+                    meaningful_timestep_result_rows=1,
+                ),
+            )
+
+
+def test_explicit_ready_rejects_impossible_counts() -> None:
+    with _store() as session:
+        with pytest.raises(ValueError, match="inconsistent result row counts"):
+            write_explicit_run_product_quality(
+                session,
+                ExplicitFloodRunProductQuality(
+                    run_id="forecast_run",
+                    quality_state="ready",
+                    result_rows=2,
+                    max_result_rows=1,
+                    return_period_rows=3,
+                    warning_rows=3,
+                    max_return_period_rows=1,
+                    max_warning_rows=1,
+                    expected_result_rows=2,
+                    expected_max_result_rows=1,
+                    expected_timestep_result_rows=1,
+                    meaningful_result_rows=3,
+                    meaningful_max_result_rows=1,
+                    meaningful_timestep_result_rows=2,
+                ),
+            )
+
+
+def test_explicit_residual_blocker_requires_audit_keys() -> None:
+    with _store() as session:
+        with pytest.raises(ValueError, match="missing required fields"):
+            write_explicit_run_product_quality(
+                session,
+                ExplicitFloodRunProductQuality(
+                    run_id="forecast_run",
+                    quality_state="unavailable",
+                    residual_blockers=(
+                        {
+                            "state": "unavailable",
+                            "quality_flag": "no_frequency_curve",
+                            "residual_risk": "Missing code must be rejected.",
+                            "run_id": "forecast_run",
+                        },
+                    ),
+                ),
+            )
+
+
+def test_explicit_residual_blocker_rejects_run_id_mismatch() -> None:
+    with _store() as session:
+        with pytest.raises(ValueError, match="run_id must match"):
+            write_explicit_run_product_quality(
+                session,
+                ExplicitFloodRunProductQuality(
+                    run_id="forecast_run",
+                    quality_state="unavailable",
+                    residual_blockers=(
+                        {
+                            "code": "FREQUENCY_CURVE_UNAVAILABLE",
+                            "state": "unavailable",
+                            "quality_flag": "no_frequency_curve",
+                            "residual_risk": "Wrong run_id must be rejected.",
+                            "run_id": "other_run",
+                        },
+                    ),
+                ),
+            )
+
+
+def test_storage_read_normalizes_residual_blockers_to_bounded_audit_shape() -> None:
+    long_risk = "x" * 700
+    blockers = [
+        {
+            "code": f"BLOCKER_{index}",
+            "state": "unavailable",
+            "quality_flag": "no_frequency_curve",
+            "residual_risk": long_risk,
+            "run_id": "forecast_run",
+            "river_segment_id": f"seg_{index:03d}",
+            "sample_segment_ids": [f"seg_{sample:03d}" for sample in range(12)],
+            "count": index + 1,
+            "omitted_count": -10,
+        }
+        for index in range(25)
+    ]
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO flood.run_product_quality (
+                    run_id, quality_state, quality_source, residual_blockers
+                )
+                VALUES ('forecast_run', 'unavailable', 'historical_backfill', :residual_blockers)
+                """
+            ),
+            {"residual_blockers": json.dumps(blockers)},
+        )
+        session.commit()
+
+        quality = get_run_product_quality(session, "forecast_run")
+
+    assert quality is not None
+    assert len(quality.residual_blockers) == 20
+    normalized = quality.residual_blockers[0]
+    assert "river_segment_id" not in normalized
+    assert len(normalized["residual_risk"]) == 512
+    assert normalized["sample_segment_ids"] == [f"seg_{sample:03d}" for sample in range(10)]
+    assert normalized["omitted_count"] == 0
+
+
+def test_historical_backfill_populates_compatible_counts_and_default_explicit_fields() -> None:
+    with _store() as session:
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0]})
+        _insert_quality_source_row(session, run_id="forecast_run", max_over_window=True)
+        _insert_quality_source_row(
+            session,
+            run_id="forecast_run",
+            segment_id="seg_002",
+            valid_time=datetime(2026, 5, 1, 1),
+            return_period=None,
+            warning_level=None,
+            max_over_window=False,
+            quality_flag="no_frequency_curve",
+        )
+        session.commit()
+
+        result = backfill_run_product_quality(session, ["forecast_run"])
+        quality = _quality_row(session)
+
+    assert [item.run_id for item in result] == ["forecast_run"]
+    assert result[0].quality_source == "historical_backfill"
+    assert result[0].quality_state == "degraded"
+    assert quality is not None
+    assert quality["result_rows"] == 2
+    assert quality["return_period_rows"] == 1
+    assert quality["warning_rows"] == 1
+    assert quality["quality_source"] == "historical_backfill"
+    assert quality["quality_state"] == "degraded"
+    assert quality["expected_result_rows"] == 2
+    assert quality["meaningful_result_rows"] == 1
+    assert quality["no_frequency_curve_rows"] == 1
+
+
+@pytest.mark.parametrize(
+    ("run_id", "counts", "expected_state", "expected_product"),
+    [
+        (
+            "count_only_zero_run",
+            {
+                "result_rows": 2,
+                "max_result_rows": 1,
+                "return_period_rows": 0,
+                "warning_rows": 0,
+                "max_return_period_rows": 0,
+                "max_warning_rows": 0,
+            },
+            "unavailable",
+            "return_period_result",
+        ),
+        (
+            "count_only_partial_run",
+            {
+                "result_rows": 2,
+                "max_result_rows": 1,
+                "return_period_rows": 1,
+                "warning_rows": 1,
+                "max_return_period_rows": 1,
+                "max_warning_rows": 1,
+            },
+            "degraded",
+            "frequency_curves",
+        ),
+    ],
+)
+def test_historical_count_only_rows_fallback_from_counts(
+    run_id: str,
+    counts: dict[str, int],
+    expected_state: str,
+    expected_product: str,
+) -> None:
+    with _store() as session:
+        session.execute(
+            text(
+                """
+                INSERT INTO flood.run_product_quality (
+                    run_id, quality_state, quality_source,
+                    result_rows, max_result_rows, return_period_rows, warning_rows,
+                    max_return_period_rows, max_warning_rows
+                )
+                VALUES (
+                    :run_id, 'ready', 'historical_backfill',
+                    :result_rows, :max_result_rows, :return_period_rows, :warning_rows,
+                    :max_return_period_rows, :max_warning_rows
+                )
+                """
+            ),
+            {"run_id": run_id, **counts},
+        )
+        session.commit()
+
+        quality = get_run_product_quality(session, run_id)
+
+    assert quality is not None
+    assert quality.quality_source == "historical_backfill"
+    assert quality.quality_state == expected_state
+    assert quality.quality_state != "ready"
+    assert expected_product in quality.unavailable_products
+    assert quality.residual_blockers
+
+
+def test_missing_quality_storage_readiness_fails_flood_closed_without_q_down_unavailable() -> None:
+    with _store() as session:
+        session.execute(text("DROP TABLE flood.run_product_quality"))
+        session.commit()
+
+        quality = read_run_product_quality(session, "forecast_run")
+
+    assert quality.quality_state == "unavailable"
+    assert quality.unavailable_products == ("return_period_result",)
+    assert quality.residual_blockers[0]["code"] == "FLOOD_QUALITY_STORAGE_MISSING"
+    assert quality.residual_blockers[0]["run_id"] == "forecast_run"
+    assert quality.q_down_available is True
+
+
+def test_legacy_quality_schema_readiness_degrades_without_q_down_unavailable() -> None:
+    with _store() as session:
+        session.execute(text("DROP TABLE flood.run_product_quality"))
+        session.execute(
+            text(
+                """
+                CREATE TABLE flood.run_product_quality (
+                    run_id TEXT PRIMARY KEY,
+                    result_rows INTEGER NOT NULL DEFAULT 0,
+                    max_result_rows INTEGER NOT NULL DEFAULT 0,
+                    return_period_rows INTEGER NOT NULL DEFAULT 0,
+                    warning_rows INTEGER NOT NULL DEFAULT 0,
+                    max_return_period_rows INTEGER NOT NULL DEFAULT 0,
+                    max_warning_rows INTEGER NOT NULL DEFAULT 0,
+                    refreshed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                INSERT INTO flood.run_product_quality (
+                    run_id, result_rows, max_result_rows, return_period_rows, warning_rows,
+                    max_return_period_rows, max_warning_rows
+                )
+                VALUES ('forecast_run', 2, 1, 0, 0, 0, 0)
+                """
+            )
+        )
+        session.commit()
+
+        quality = read_run_product_quality(session, "forecast_run")
+
+    assert quality.quality_state == "unavailable"
+    assert quality.q_down_available is True
+    assert quality.unavailable_products == ("return_period_result",)
+    assert quality.residual_blockers[0]["code"] == "RETURN_PERIOD_RESULT_UNAVAILABLE"
+
+
+def test_run_product_quality_refresh_deletes_legacy_stale_row_when_source_rows_are_missing() -> None:
     with _store() as session:
         _insert_forecast_run(session, segment_values={"seg_001": [150.0]})
         session.execute(
@@ -486,6 +1080,135 @@ def test_run_product_quality_refresh_deletes_stale_row_when_source_rows_are_miss
 
     assert result is None
     assert quality is None
+
+
+def test_run_product_quality_refresh_preserves_explicit_unavailable_when_source_rows_are_missing() -> None:
+    with _store() as session:
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0]})
+        write_explicit_run_product_quality(
+            session,
+            ExplicitFloodRunProductQuality(
+                run_id="forecast_run",
+                quality_state="unavailable",
+                unavailable_products=("frequency_curves",),
+                residual_blockers=(
+                    {
+                        "code": "FREQUENCY_CURVE_UNAVAILABLE",
+                        "state": "unavailable",
+                        "quality_flag": "no_frequency_curve",
+                        "residual_risk": "No usable curves exist for this run.",
+                        "run_id": "forecast_run",
+                    },
+                ),
+                expected_result_rows=3,
+                expected_max_result_rows=1,
+                expected_timestep_result_rows=2,
+                no_frequency_curve_rows=3,
+            ),
+        )
+        session.commit()
+
+        result = refresh_run_product_quality(session, "forecast_run")
+        quality = _quality_row(session)
+
+    assert result is not None
+    assert result.quality_source == "explicit"
+    assert quality is not None
+    assert quality["quality_state"] == "unavailable"
+    assert quality["quality_source"] == "explicit"
+    assert json.loads(quality["unavailable_products"]) == ["frequency_curves"]
+    assert quality["expected_result_rows"] == 3
+    assert quality["no_frequency_curve_rows"] == 3
+
+
+def test_run_product_quality_refresh_returns_preserved_explicit_when_source_rows_exist() -> None:
+    with _store() as session:
+        _insert_explicit_frequency_unavailable_quality(session)
+        _insert_quality_source_row(session, run_id="forecast_run", max_over_window=True)
+        session.commit()
+
+        result = refresh_run_product_quality(session, "forecast_run")
+        quality = _quality_row(session)
+
+    assert result is not None
+    assert result.quality_source == "explicit"
+    assert result.quality_state == "unavailable"
+    assert result.expected_result_rows == 3
+    assert quality is not None
+    assert quality["quality_source"] == "explicit"
+    assert quality["result_rows"] == 0
+
+
+def test_run_product_quality_refresh_many_returns_preserved_explicit_when_source_rows_exist() -> None:
+    with _store() as session:
+        _insert_explicit_frequency_unavailable_quality(session)
+        _insert_quality_source_row(session, run_id="forecast_run", max_over_window=True)
+        _insert_quality_source_row(session, run_id="historical_run", max_over_window=True)
+        session.commit()
+
+        result = refresh_run_product_quality_many(session, ["forecast_run", "historical_run"])
+
+    assert [(quality.run_id, quality.quality_source) for quality in result] == [
+        ("forecast_run", "explicit"),
+        ("historical_run", "historical_backfill"),
+    ]
+    assert result[0].quality_state == "unavailable"
+
+
+def test_frequency_failure_preserves_explicit_quality(monkeypatch: pytest.MonkeyPatch) -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0]})
+        _insert_explicit_frequency_unavailable_quality(session)
+        session.commit()
+
+        def fail_extract(_run_id: str, _db_session: Session) -> dict[str, tuple[float, datetime]]:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(return_period, "extract_max_forecast_q", fail_extract)
+
+        result = compute_return_periods("forecast_run", session)
+        quality = _quality_row(session)
+
+    assert result.status == "failed"
+    assert quality is not None
+    assert quality["quality_source"] == "explicit"
+    assert quality["quality_state"] == "unavailable"
+    assert json.loads(quality["unavailable_products"]) == ["frequency_curves"]
+
+
+def test_frequency_failure_overwrites_previous_explicit_ready_quality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _store() as session:
+        _insert_curve(session, "seg_001")
+        _insert_forecast_run(session, segment_values={"seg_001": [150.0]})
+        compute_return_periods("forecast_run", session)
+        ready_quality = _quality_row(session)
+        assert ready_quality is not None
+        assert ready_quality["quality_source"] == "explicit"
+        assert ready_quality["quality_state"] == "ready"
+
+        def fail_extract(_run_id: str, _db_session: Session) -> dict[str, tuple[float, datetime]]:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(return_period, "extract_max_forecast_q", fail_extract)
+
+        result = compute_return_periods("forecast_run", session)
+        quality = _quality_row(session)
+
+    assert result.status == "failed"
+    assert result.error_code == "RETURN_PERIOD_FAILED"
+    assert quality is not None
+    assert quality["quality_source"] == "explicit"
+    assert quality["quality_state"] == "unavailable"
+    assert json.loads(quality["unavailable_products"]) == ["return_period_result"]
+    blockers = json.loads(quality["residual_blockers"])
+    assert blockers[0]["code"] == "RETURN_PERIOD_FAILED"
+    assert blockers[0]["state"] == "unavailable"
+    assert blockers[0]["quality_flag"] == "frequency_failed"
+    assert blockers[0]["run_id"] == "forecast_run"
+    assert blockers[0]["residual_risk"] == "boom"
 
 
 def test_recompute_replaces_peak_when_peak_valid_time_moves() -> None:
@@ -642,6 +1365,7 @@ def _insert_quality_source_row(
     return_period: float | None = 10.0,
     warning_level: str | None = "warning",
     max_over_window: bool,
+    quality_flag: str = "ok",
 ) -> None:
     session.execute(
         text(
@@ -655,7 +1379,7 @@ def _insert_quality_source_row(
             VALUES (
                 :run_id, 'scenario_v1', 'basin_v1', 'rnv_v1',
                 'model_v1', :segment_id, :valid_time, :duration, :q_value, 'm3/s',
-                :return_period, :warning_level, 'GFS', :cycle_time, :max_over_window, 'ok'
+                :return_period, :warning_level, 'GFS', :cycle_time, :max_over_window, :quality_flag
             )
             """
         ),
@@ -669,9 +1393,34 @@ def _insert_quality_source_row(
             "warning_level": warning_level,
             "cycle_time": datetime(2026, 5, 1),
             "max_over_window": max_over_window,
+            "quality_flag": quality_flag,
         },
     )
     session.commit()
+
+
+def _insert_explicit_frequency_unavailable_quality(session: Session) -> None:
+    write_explicit_run_product_quality(
+        session,
+        ExplicitFloodRunProductQuality(
+            run_id="forecast_run",
+            quality_state="unavailable",
+            unavailable_products=("frequency_curves",),
+            residual_blockers=(
+                {
+                    "code": "FREQUENCY_CURVE_UNAVAILABLE",
+                    "state": "unavailable",
+                    "quality_flag": "no_frequency_curve",
+                    "residual_risk": "No usable curves exist for this run.",
+                    "run_id": "forecast_run",
+                },
+            ),
+            expected_result_rows=3,
+            expected_max_result_rows=1,
+            expected_timestep_result_rows=2,
+            no_frequency_curve_rows=3,
+        ),
+    )
 
 
 def _stale_label_count(session: Session, *, duration: str, max_over_window: bool) -> int:
@@ -945,21 +1694,7 @@ def _create_tables(connection: Any) -> None:
         )
     )
     connection.execute(
-        text(
-            """
-            CREATE TABLE flood.run_product_quality (
-                run_id TEXT PRIMARY KEY,
-                result_rows INTEGER NOT NULL DEFAULT 0,
-                max_result_rows INTEGER NOT NULL DEFAULT 0,
-                return_period_rows INTEGER NOT NULL DEFAULT 0,
-                warning_rows INTEGER NOT NULL DEFAULT 0,
-                max_return_period_rows INTEGER NOT NULL DEFAULT 0,
-                max_warning_rows INTEGER NOT NULL DEFAULT 0,
-                refreshed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
+        text(f"CREATE TABLE flood.run_product_quality ({RUN_PRODUCT_QUALITY_COLUMNS_SQL})")
     )
     connection.execute(
         text(

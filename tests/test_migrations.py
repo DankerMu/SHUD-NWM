@@ -39,6 +39,7 @@ EXPECTED_MIGRATIONS = [
     "000033_station_mvt_active_source_index.sql",
     "000034_return_period_run_quality_materialization.sql",
     "000035_qhh_display_coverage_materialization.sql",
+    "000036_run_product_quality_explicit_source.sql",
     "000037_river_segment_multilinestring.sql",
 ]
 
@@ -637,45 +638,70 @@ def test_station_mvt_active_source_index_migration_is_forward_upgrade_safe() -> 
     assert "USING GIN" not in active_station_index
 
 
-def test_return_period_run_quality_materialization_migration_adds_table_and_violation_indexes() -> None:
+def test_run_quality_materialization_adds_explicit_quality_source_without_null_indexes() -> None:
     migration_sql = dict(_migration_sql())
     migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
     migration = migration_sql["000034_return_period_run_quality_materialization.sql"]
+    explicit_migration = migration_sql["000036_run_product_quality_explicit_source.sql"]
 
     assert migration_names.index("000033_station_mvt_active_source_index.sql") < migration_names.index(
         "000034_return_period_run_quality_materialization.sql"
     )
+    assert migration_names.index("000035_qhh_display_coverage_materialization.sql") < migration_names.index(
+        "000036_run_product_quality_explicit_source.sql"
+    )
     assert "CREATE TABLE IF NOT EXISTS flood.run_product_quality" in migration
     assert "run_id TEXT PRIMARY KEY REFERENCES hydro.hydro_run(run_id) ON DELETE CASCADE" in migration
     for column in (
+        "quality_state TEXT NOT NULL DEFAULT 'ready'",
+        "quality_source TEXT NOT NULL DEFAULT 'historical_backfill'",
+        "unavailable_products JSONB NOT NULL DEFAULT '[]'::jsonb",
+        "residual_blockers JSONB NOT NULL DEFAULT '[]'::jsonb",
         "result_rows BIGINT NOT NULL DEFAULT 0",
         "max_result_rows BIGINT NOT NULL DEFAULT 0",
         "return_period_rows BIGINT NOT NULL DEFAULT 0",
         "warning_rows BIGINT NOT NULL DEFAULT 0",
         "max_return_period_rows BIGINT NOT NULL DEFAULT 0",
         "max_warning_rows BIGINT NOT NULL DEFAULT 0",
+        "expected_result_rows BIGINT NOT NULL DEFAULT 0",
+        "expected_max_result_rows BIGINT NOT NULL DEFAULT 0",
+        "expected_timestep_result_rows BIGINT NOT NULL DEFAULT 0",
+        "meaningful_result_rows BIGINT NOT NULL DEFAULT 0",
+        "meaningful_max_result_rows BIGINT NOT NULL DEFAULT 0",
+        "meaningful_timestep_result_rows BIGINT NOT NULL DEFAULT 0",
+        "no_frequency_curve_rows BIGINT NOT NULL DEFAULT 0",
+        "no_usable_frequency_curve_rows BIGINT NOT NULL DEFAULT 0",
+        "warning_threshold_unavailable_rows BIGINT NOT NULL DEFAULT 0",
         "refreshed_at TIMESTAMPTZ NOT NULL DEFAULT now()",
     ):
         assert column in migration
+    assert "CONSTRAINT run_product_quality_unavailable_products_array_chk" in migration
+    assert "CHECK (jsonb_typeof(unavailable_products) = 'array')" in migration
+    assert "CONSTRAINT run_product_quality_residual_blockers_array_chk" in migration
+    assert "CHECK (jsonb_typeof(residual_blockers) = 'array')" in migration
 
-    assert _index_columns_by_name(migration, "return_period_result_null_return_period_run_idx") == ("run_id",)
-    assert _index_columns_by_name(migration, "return_period_result_null_warning_level_run_idx") == ("run_id",)
-    assert "WHERE return_period IS NULL" in _index_sql_by_name(
-        migration,
+    for index_name in (
         "return_period_result_null_return_period_run_idx",
-    )
-    assert "WHERE warning_level IS NULL" in _index_sql_by_name(
-        migration,
         "return_period_result_null_warning_level_run_idx",
-    )
-    assert "CREATE INDEX CONCURRENTLY" not in _index_sql_by_name(
-        migration,
-        "return_period_result_null_return_period_run_idx",
-    )
-    assert "CREATE INDEX CONCURRENTLY" not in _index_sql_by_name(
-        migration,
-        "return_period_result_null_warning_level_run_idx",
-    )
+    ):
+        assert index_name not in migration
+        assert index_name not in explicit_migration
+
+    assert "ALTER TABLE flood.run_product_quality" in explicit_migration
+    assert "ADD COLUMN IF NOT EXISTS quality_state TEXT NOT NULL DEFAULT 'ready'" in explicit_migration
+    assert "ADD COLUMN IF NOT EXISTS residual_blockers JSONB NOT NULL DEFAULT '[]'::jsonb" in explicit_migration
+    assert "DO $$" in explicit_migration
+    assert "FROM pg_constraint" in explicit_migration
+    assert "ADD CONSTRAINT run_product_quality_unavailable_products_array_chk" in explicit_migration
+    assert "ADD CONSTRAINT run_product_quality_residual_blockers_array_chk" in explicit_migration
+    assert "WITH source_quality AS" in explicit_migration
+    assert "SUM(CASE WHEN quality_flag = 'no_frequency_curve' THEN 1 ELSE 0 END)" in explicit_migration
+    assert "SUM(CASE WHEN quality_flag = 'no_usable_frequency_curve' THEN 1 ELSE 0 END)" in explicit_migration
+    assert "SUM(CASE WHEN quality_flag = 'warning_thresholds_unavailable' THEN 1 ELSE 0 END)" in explicit_migration
+    assert "jsonb_array_elements_text(backfill.unavailable_products)" in explicit_migration
+    assert "|| backfill.residual_blockers" in explicit_migration
+    assert "WHEN unavailable_products <> '[]'::jsonb THEN unavailable_products" not in explicit_migration
+    assert "jsonb_build_object" in explicit_migration
 
 
 def test_ops_strict_identity_index_migration_is_forward_upgrade_safe() -> None:
