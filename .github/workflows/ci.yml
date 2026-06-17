@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,8 +43,10 @@ jobs:
               - 'apps/api/**'
               - 'services/**'
               - 'workers/**'
+              - 'infra/**'
               - 'schemas/**'
               - 'db/**'
+              - 'scripts/validate_*.py'
             frontend:
               - 'apps/frontend/**'
               - 'openapi/**'
@@ -120,9 +123,9 @@ jobs:
             fi
           done
 
-  # Merge-gate backend suites: full pytest + real-DB integration. Run on push-to-master and on
-  # ready (non-draft) PRs. Skipped while a PR is a DRAFT — keep iterating fast, mark the PR
-  # ready-for-review to trigger the full gate before merge. node-22's real DB stays the iteration oracle.
+  # Merge-gate database suite. Full unit pytest is reserved for push-to-master or manual
+  # workflow_dispatch; PRs run the focused unit-test job below so ready PRs do not wait on
+  # a half-hour full suite for every push. node-22/local review remains the full-suite oracle.
   real-db-integration:
     name: SQL Migration Dry Run
     needs: changes
@@ -161,11 +164,11 @@ jobs:
         run: pytest -q -m integration
 
   unit-test:
-    name: Unit Tests
+    name: Unit Tests (full)
     needs: changes
     if: >-
-      needs.changes.outputs.backend == 'true' &&
-      (github.event_name == 'push' || github.event.pull_request.draft == false)
+      github.event_name == 'workflow_dispatch' ||
+      (needs.changes.outputs.backend == 'true' && github.event_name == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -183,15 +186,15 @@ jobs:
       - name: Run tests with coverage
         run: pytest tests/ -v --tb=short -m "not e2e and not grib and not integration" --co -q 2>/dev/null; pytest tests/ -v --tb=short -m "not e2e and not grib and not integration"
 
-  # Fast lane for DRAFT PRs: run only the test files this PR changed (full suite is the ready/merge
-  # gate above). Fail-safe: if you forget to draft, the full gate runs instead — you never get LESS
-  # coverage by accident, only more.
-  unit-test-fast:
-    name: Unit Tests (targeted, draft)
+  # PR merge gate: run a focused suite derived from changed files. The selector maps runtime
+  # modules/config surfaces to their owning tests and falls back to core smoke tests for unknown
+  # backend Python paths. Full unit tests still run on master and on manual workflow_dispatch.
+  unit-test-targeted:
+    name: Unit Tests
     needs: changes
     if: >-
       needs.changes.outputs.backend == 'true' &&
-      github.event_name == 'pull_request' && github.event.pull_request.draft == true
+      github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -208,15 +211,18 @@ jobs:
           sudo mkdir -p /scratch/frd_muziyao
           sudo chown "$USER:$(id -gn)" /scratch/frd_muziyao
           chmod u+rwx /scratch/frd_muziyao
-      - name: Targeted tests (changed test files; full suite runs at the ready/merge gate)
+      - name: Select targeted tests
+        id: targeted
         run: |
-          git fetch --no-tags origin "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
-          mapfile -t T < <(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- 'tests/**/*.py')
-          if [ "${#T[@]}" -gt 0 ]; then
-            echo "Targeted test files:"; printf '  %s\n' "${T[@]}"
-            pytest -q "${T[@]}"
+          python scripts/select_ci_tests.py --base-ref "${GITHUB_BASE_REF}" --github-output "$GITHUB_OUTPUT"
+      - name: Run targeted tests
+        env:
+          TARGETED_TESTS_JSON: ${{ steps.targeted.outputs.tests_json }}
+        run: |
+          if [ "${{ steps.targeted.outputs.count }}" != "0" ]; then
+            python -c 'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); print("Targeted test files:"); [print(f"  {test}") for test in tests]; subprocess.run(["pytest", "-q", *tests], check=True)'
           else
-            echo "No changed test files — running collect-only smoke (import/syntax across suite)"
+            echo "No backend test files selected — running collect-only smoke (import/syntax across suite)"
             pytest tests/ -q --collect-only >/dev/null
           fi
 

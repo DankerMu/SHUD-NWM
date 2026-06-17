@@ -14,7 +14,8 @@
 - 调度器每个 pass 发现 GFS/IFS cycle，提交 `download -> convert -> forcing -> forecast -> parse -> state_save_qc -> frequency -> publish`。
 - 计算任务通过 standalone Slurm Gateway 提交到 CPU 分区，实际执行在 Slurm 计算节点。
 - 计算节点不保证能访问 `/ghdc`；运行中间态必须放在 `/scratch/frd_muziyao/nhms-prod`。
-- 对 27 展示可见的发布面是 `/ghdc/data/nwm/published`，27 本机对应 `/home/ghdc/nwm/published`。
+- 完整业务 forcing 包和 SHUD run 输出的共享真相源是 object-store `forcing/...`、`runs/...`，不是 `published/`。
+- 对 27 展示可见的 `published/` 只放 tiles、logs、display manifests；22 路径是 `/ghdc/data/nwm/published`，27 本机对应 `/home/ghdc/nwm/published`。
 - 主展示产品当前以 DB/PostGIS live 查询和 published q_down/logs 为主；`frequency` 的 basin-level 质量记录仍有缺表卡点，见第 8 节。
 
 ## 2. 节点和服务
@@ -203,9 +204,12 @@ tail -100 /scratch/frd_muziyao/nhms-prod/workspace/fcst_gfs_2026061312_basins_he
 当前文件系统对象存储根：
 
 ```text
+node-22 OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store
+Slurm/container OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store
+
 /scratch/frd_muziyao/nhms-prod/object-store/
   canonical/<source>/<YYYYMMDDHH>/<variable>/*.nc
-  forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/
+  forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/forcing_package.json
   runs/<run_id>/
   tiles/...
 ```
@@ -215,12 +219,20 @@ URI 口径通常使用 `s3://nhms/...`，但当前本地落盘根是上面的 `/
 
 ### 5.4 Shared Object Store Copyback
 
-完整水文 run 产物不放在 `published/` 下。`s3://nhms/runs/<run_id>/...` 当前先落在
-`/scratch/frd_muziyao/nhms-prod/object-store/runs/<run_id>/...`，再由 22 控制面的 publish 阶段同步到共享对象存储镜像：
+完整 forcing 包和水文 run 产物不放在 `published/` 下。`s3://nhms/forcing/...` 和
+`s3://nhms/runs/<run_id>/...` 当前先落在 `OBJECT_STORE_ROOT`，再由 22 控制面的 publish/copyback
+阶段同步到共享对象存储镜像：
 
 ```text
-22 host: /ghdc/data/nwm/object-store/runs/<run_id>/
-27 host: /home/ghdc/nwm/object-store/runs/<run_id>/
+node-22 NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
+node-27 shared object-store mirror=/home/ghdc/nwm/object-store
+
+22 host forcing: /ghdc/data/nwm/object-store/forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/
+27 host forcing: /home/ghdc/nwm/object-store/forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/
+URI key: forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/
+
+22 host runs: /ghdc/data/nwm/object-store/runs/<run_id>/
+27 host runs: /home/ghdc/nwm/object-store/runs/<run_id>/
 URI key: runs/<run_id>/
 ```
 
@@ -233,6 +245,10 @@ URI key: runs/<run_id>/
 检查最新 run 产物：
 
 ```bash
+find /ghdc/data/nwm/object-store/forcing -maxdepth 5 -type f \
+  \( -name 'forcing_package.json' -o -name 'manifest.json' \) \
+  -printf '%TY-%Tm-%Td %TH:%TM %M %u %g %p\n' | sort | tail -30
+
 find /ghdc/data/nwm/object-store/runs -maxdepth 2 -type d -name 'fcst_*20260613*' \
   -printf '%TY-%Tm-%Td %TH:%TM %M %u %g %p\n' | sort | tail -30
 
@@ -244,8 +260,9 @@ ls -la /ghdc/data/nwm/object-store/runs/fcst_gfs_2026061312_basins_heihe_shud/ou
 当前 22 写、27 读的发布面：
 
 ```text
-22 host: /ghdc/data/nwm/published
-27 host: /home/ghdc/nwm/published
+node-22 NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
+node-22 published host mount: /ghdc/data/nwm/published
+node-27 published host mount: /home/ghdc/nwm/published
 container: /var/lib/nhms/published
 URI prefix: published://
 ```
@@ -256,10 +273,12 @@ URI prefix: published://
 /ghdc/data/nwm/published/
   logs/<source>/<YYYYMMDDHH>/cycle_<source>_<YYYYMMDDHH>/job_*.out
   tiles/hydro/<source>_<YYYYMMDDHH>/q-down/...
+  manifests/... display manifests only
 ```
 
 `published/` 只承载展示发布物、瓦片 manifest 和日志；不要在这里查完整 SHUD `runs/<run_id>/output/`。
-完整 run 产物见第 5.4 节的 `/ghdc/data/nwm/object-store/runs/`。
+完整 forcing 包和 run 产物见第 5.4 节的 `/ghdc/data/nwm/object-store/forcing/` 和
+`/ghdc/data/nwm/object-store/runs/`。
 
 检查最新发布：
 
@@ -274,6 +293,206 @@ find /ghdc/data/nwm/published/tiles/hydro -maxdepth 3 -type f \
 注意：Slurm 计算节点不应依赖 `/ghdc`。需要先在 `/scratch/.../object-store` 和 workspace 完成计算，再由 22 控制面的
 publish/copyback 阶段把完整 run 产物写到 `/ghdc/data/nwm/object-store`，把展示产物、manifest、日志写到
 `/ghdc/data/nwm/published`。
+
+### 5.6 单个业务 run 验收元组
+
+以下检查绑定同一个输入元组 `<source_id, cycle_time, basin_version_id, model_id, run_id>`。示例先设置变量：
+
+```bash
+source_id=gfs
+cycle_time='2026-06-13 12:00:00+00'
+cycle_key=2026061312
+basin_version_id=basins_heihe_vbasins
+model_id=basins_heihe_shud
+run_id=fcst_gfs_2026061312_basins_heihe_shud
+previous_cycle_id=gfs_2026061300
+object_store_mirror_root=${NHMS_OBJECT_STORE_COPYBACK_ROOT:-/ghdc/data/nwm/object-store}
+object_store_uri_prefix=${OBJECT_STORE_PREFIX:-s3://nhms-prod}
+
+normalize_object_key() {
+  uri="${1%/}"
+  prefix="${object_store_uri_prefix%/}"
+  if [ -n "$prefix" ] && [ "${uri#"$prefix"/}" != "$uri" ]; then
+    printf '%s\n' "${uri#"$prefix"/}"
+    return 0
+  fi
+  case "$uri" in
+    forcing/*|runs/*|states/*) printf '%s\n' "$uri" ;;
+    *)
+      printf >&2 'unexpected object-store URI/key: %s\n' "$uri"
+      return 1
+      ;;
+  esac
+}
+```
+
+`met.forcing_version` 没有 `status` 字段；这里用真实谓词判断 forcing 包是否可用：`checksum` 非空，且
+`forcing_package_uri` 可规范化为 object-store `forcing/...` key。URI 可以是相对 key（`forcing/...`），也可以是带
+`OBJECT_STORE_PREFIX` 的形式（例如 `s3://nhms-prod/forcing/...`）：
+
+```bash
+psql "$DATABASE_URL" -P pager=off -F $'\t' -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" \
+  -v object_store_uri_prefix="$object_store_uri_prefix" -Atc "
+select forcing_version_id, source_id, cycle_time, model_id,
+       forcing_package_uri,
+       nullif(trim(coalesce(checksum, '')), '') is not null as checksum_present,
+       (
+         forcing_package_uri like 'forcing/%'
+         or (
+           :'object_store_uri_prefix' <> ''
+           and forcing_package_uri like rtrim(:'object_store_uri_prefix', '/') || '/forcing/%'
+         )
+       ) as forcing_uri_in_object_store_scope
+from met.forcing_version
+where source_id = :'source_id'
+  and cycle_time = :'cycle_time'::timestamptz
+  and model_id = :'model_id'
+order by created_at desc
+limit 5;"
+```
+
+期望：至少一行，且同一行 `checksum_present=t`、`forcing_uri_in_object_store_scope=t`。`checksum` 为空表示 producer
+尚未 finalization，不能把它当成 ready。对象存储检查先把 URI 规范化为相对 key，再检查 package manifest：
+
+```bash
+forcing_package_uri=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" \
+  -v object_store_uri_prefix="$object_store_uri_prefix" -c "
+select forcing_package_uri
+from met.forcing_version
+where source_id = :'source_id'
+  and cycle_time = :'cycle_time'::timestamptz
+  and model_id = :'model_id'
+  and nullif(trim(coalesce(checksum, '')), '') is not null
+  and (
+    forcing_package_uri like 'forcing/%'
+    or (
+      :'object_store_uri_prefix' <> ''
+      and forcing_package_uri like rtrim(:'object_store_uri_prefix', '/') || '/forcing/%'
+    )
+  )
+order by created_at desc
+limit 1;")
+forcing_key=$(normalize_object_key "$forcing_package_uri")
+
+test -f "$object_store_mirror_root/${forcing_key%/}/forcing_package.json" \
+  || test -f "$object_store_mirror_root/${forcing_key%/}/manifest.json"
+find "$object_store_mirror_root/${forcing_key%/}" -maxdepth 2 -type f -printf '%p\n' | sort | head -40
+```
+
+严格 warm-start 要求当前 cycle 的精确 successor checkpoint：`hydro.state_snapshot.valid_time = cycle_time`、
+`lead_hours = 12`、同一 `source_id/model_id`、`usable_flag=true`。这行通常由上一 allowed cycle 的 run 在
+`state_save_qc` 阶段产出；不要按上一 allowed cycle 的 `valid_time` 查 checkpoint，也不要用当前待启动 `run_id` 去判断
+checkpoint producer：
+
+```bash
+psql "$DATABASE_URL" -P pager=off -F $'\t' -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" -Atc "
+select state_id, source_id, valid_time, run_id as producer_run_id,
+       cycle_id as producer_cycle_id, lead_hours, state_uri, usable_flag,
+       nullif(trim(coalesce(checksum, '')), '') is not null as checksum_present
+from hydro.state_snapshot
+where source_id = :'source_id'
+  and valid_time = :'cycle_time'::timestamptz
+  and model_id = :'model_id'
+  and lead_hours = 12
+  and usable_flag is true
+order by created_at desc
+limit 5;"
+
+state_uri=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
+select state_uri
+from hydro.state_snapshot
+where source_id = :'source_id'
+  and valid_time = :'cycle_time'::timestamptz
+  and model_id = :'model_id'
+  and lead_hours = 12
+  and usable_flag is true
+order by created_at desc
+limit 1;")
+state_key=$(normalize_object_key "$state_uri")
+test -f "$object_store_mirror_root/$state_key"
+find "$(dirname "$object_store_mirror_root/$state_key")" -maxdepth 1 -type f -printf '%p\n' | sort
+
+state_producer_run_id=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
+select run_id
+from hydro.state_snapshot
+where source_id = :'source_id'
+  and valid_time = :'cycle_time'::timestamptz
+  and model_id = :'model_id'
+  and lead_hours = 12
+  and usable_flag is true
+order by created_at desc
+limit 1;")
+state_producer_cycle_id=$(psql "$DATABASE_URL" -P pager=off -At -v source_id="$source_id" \
+  -v cycle_time="$cycle_time" -v model_id="$model_id" -c "
+select coalesce(cycle_id, '')
+from hydro.state_snapshot
+where source_id = :'source_id'
+  and valid_time = :'cycle_time'::timestamptz
+  and model_id = :'model_id'
+  and lead_hours = 12
+  and usable_flag is true
+order by created_at desc
+limit 1;")
+state_producer_cycle_id=${state_producer_cycle_id:-$previous_cycle_id}
+
+psql "$DATABASE_URL" -P pager=off -F $'\t' \
+  -v producer_run_id="$state_producer_run_id" \
+  -v producer_cycle_id="$state_producer_cycle_id" -Atc "
+select job_id, stage, status, slurm_job_id,
+       coalesce(error_code,''), left(coalesce(error_message,''),140)
+from ops.pipeline_job
+where stage = 'state_save_qc'
+  and (
+    (:'producer_run_id' <> '' and run_id = :'producer_run_id')
+    or (:'producer_cycle_id' <> '' and cycle_id = :'producer_cycle_id')
+  )
+order by updated_at desc
+limit 5;"
+```
+
+期望：snapshot 查询至少一行，且 `lead_hours=12`、`usable_flag=t`、`checksum_present=t`，`state_uri` 文件存在。
+`state_save_qc` job 应是 `succeeded`、`complete`、`completed` 或其他非 failed terminal 状态；如失败，先查修复
+producer run / 上一 allowed cycle 的 state 文件、QC 结果、Slurm 日志，再重跑该 cycle 的 `state_save_qc`/后续链路。
+
+调度、forcing、run 阶段不应有 failed terminal 状态：
+
+```bash
+psql "$DATABASE_URL" -P pager=off -F $'\t' -v run_id="$run_id" -v source_id="$source_id" \
+  -v cycle_key="$cycle_key" -Atc "
+select job_id, stage, job_type, status, slurm_job_id,
+       coalesce(error_code,''), left(coalesce(error_message,''),140)
+from ops.pipeline_job
+where (run_id = :'run_id' or cycle_id = lower(:'source_id') || '_' || :'cycle_key')
+  and stage in ('download','convert','forcing','forecast','parse','state_save_qc','frequency','publish')
+order by submitted_at nulls last, updated_at;"
+```
+
+对象存储 run 输出和 scheduler evidence：
+
+```bash
+test -f "$object_store_mirror_root/runs/${run_id}/input/manifest.json"
+find "$object_store_mirror_root/runs/${run_id}/output" -maxdepth 2 -type f -printf '%p\n' | sort | head -40
+
+grep -R "\"allowed_cycle_hours_utc\"\\|\"cycle_hour_not_allowed\"\\|\"cycle_time_utc\"" \
+  /scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence | tail -80
+```
+
+published 面只验展示产物：
+
+```bash
+find /ghdc/data/nwm/published/logs /ghdc/data/nwm/published/tiles \
+  -type f \( -name '*.out' -o -name '*.err' -o -name '*.json' -o -name '*.pmtiles' -o -name '*.pbf' \) \
+  -path "*${source_id}*" -print | tail -80
+
+find /ghdc/data/nwm/published -path '*/runs/*' -o -path '*/forcing/*'
+```
+
+最后一个命令期望无输出；如果 `published/forcing` 或 `published/runs` 出现完整业务包，说明发布边界配置错了。
 
 ## 6. 如何判断是否卡住
 

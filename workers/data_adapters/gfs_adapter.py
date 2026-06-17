@@ -40,6 +40,7 @@ from .base import (
     valid_time_for,
     validate_forecast_hours,
 )
+from .cycle_hours import env_cycle_hours_utc, normalize_cycle_hours_utc
 from .region import GeoBBox, china_buffered_bbox_from_env
 
 LOGGER = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ NOMADS_QUERY_PARAMS: dict[str, dict[str, str]] = {
 GFS_CLOUD_BACKENDS: tuple[str, ...] = ("s3", "gcs", "azure", "ftpprd")
 GFS_NOMADS_BACKEND = "nomads"
 GFS_DEFAULT_SOURCE_BACKENDS: tuple[str, ...] = (*GFS_CLOUD_BACKENDS, GFS_NOMADS_BACKEND)
+GFS_DEFAULT_CYCLE_HOURS_UTC: tuple[int, ...] = (0, 6, 12, 18)
 
 GFS_MIRROR_BASE_URL_ENV: dict[str, str] = {
     "s3": "GFS_S3_BASE_URL",
@@ -306,7 +308,9 @@ class GFSAdapterConfig:
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
     object_store_root: Path | str = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT", ""))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
-    cycle_hours_utc: tuple[int, ...] = (0, 6, 12, 18)
+    cycle_hours_utc: tuple[int, ...] = field(
+        default_factory=lambda: env_cycle_hours_utc("GFS_CYCLE_HOURS_UTC", GFS_DEFAULT_CYCLE_HOURS_UTC)
+    )
     forecast_start_hour: int = field(default_factory=lambda: int(os.getenv("GFS_FORECAST_START_HOUR", "0")))
     forecast_end_hour: int = field(default_factory=lambda: int(os.getenv("GFS_FORECAST_END_HOUR", "168")))
     forecast_step_hours: int = 3
@@ -340,6 +344,11 @@ class GFSAdapterConfig:
         return list(range(self.forecast_start_hour, self.forecast_end_hour + 1, self.forecast_step_hours))
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "cycle_hours_utc",
+            normalize_cycle_hours_utc(self.cycle_hours_utc, field_name="cycle_hours_utc"),
+        )
         if not str(self.object_store_root):
             object.__setattr__(self, "object_store_root", self.workspace_root)
 
@@ -510,6 +519,7 @@ class GFSAdapter(DataSourceAdapter):
                     "probe_uri": self._safe_text(idx_url),
                     "evidence": {
                         "source": self.config.source_id,
+                        "cycle_hours_utc": list(self.config.cycle_hours_utc),
                         "probe": {
                             "uri": self._safe_text(idx_url),
                             "backend": backend,
@@ -533,6 +543,7 @@ class GFSAdapter(DataSourceAdapter):
                     "probe_uri": self._safe_text(nomads_url),
                     "evidence": {
                         "source": self.config.source_id,
+                        "cycle_hours_utc": list(self.config.cycle_hours_utc),
                         "probe": {
                             "uri": self._safe_text(nomads_url),
                             "backend": GFS_NOMADS_BACKEND,
@@ -556,7 +567,11 @@ class GFSAdapter(DataSourceAdapter):
                     "classifier": "forbidden",
                     "retryable": False,
                     "probe_uri": self._safe_text(nomads_url),
-                    "evidence": {"source": self.config.source_id, "cloud_probes": cloud_probes},
+                    "evidence": {
+                        "source": self.config.source_id,
+                        "cycle_hours_utc": list(self.config.cycle_hours_utc),
+                        "cloud_probes": cloud_probes,
+                    },
                 }
             except Exception:
                 LOGGER.exception("Failed to check GFS NOMADS availability for %s", self._safe_text(nomads_url))
@@ -568,7 +583,11 @@ class GFSAdapter(DataSourceAdapter):
             "classifier": "unavailable",
             "retryable": True,
             "probe_uri": self._safe_text(nomads_url),
-            "evidence": {"source": self.config.source_id, "cloud_probes": cloud_probes},
+            "evidence": {
+                "source": self.config.source_id,
+                "cycle_hours_utc": list(self.config.cycle_hours_utc),
+                "cloud_probes": cloud_probes,
+            },
         }
 
     def build_manifest(
