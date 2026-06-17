@@ -60,11 +60,20 @@ export function splitPositionsAtGaps(coords: Position[]): Position[][] {
 }
 
 /**
- * gap-aware 渲染入口：LineString 含跨缝直线时拆成 MultiLineString（各段独立绘制、不再画
- * 跨缝连接线）；无缝 LineString 原样返回。只改几何分组、不动属性，故 river_segment_id 等
- * 仍属同一 feature，hover/点击/高亮过滤照常按整条河段命中。
+ * gap-aware 渲染入口。后端自 #532 源头修复后已把河段几何按缝拆成 MultiLineString
+ * （geom 列改 MultiLineString + gap_split），正常数据各部件已无缝、原样按引用直通。
+ * 仍对每个部件做防御性再拆，护住两类漏网：① LineString 旧数据 / 单 run 选中段；
+ * ② 迁移已改列但回填脚本未跑的窗口里，单部件 MultiLineString 仍把跨缝直线裹在一个 part 内。
+ * 已拆好的输入再拆是恒等（各 part split 回自身、部件数不变），故按引用直通、不重建。
+ * 只改几何分组、不动属性，故 river_segment_id 等仍属同一 feature，hover/点击/高亮照常命中。
  */
-export function gapAwareLineGeometry(geometry: LineString): LineString | MultiLineString {
+export function gapAwareLineGeometry(geometry: LineString | MultiLineString): LineString | MultiLineString {
+  if (geometry.type === 'MultiLineString') {
+    const parts = geometry.coordinates.flatMap((part) => splitPositionsAtGaps(part))
+    // 部件数不变 ⇒ 无 part 含缝、各自 split 回自身 ⇒ 原样返回，避免无谓重建坐标。
+    if (parts.length === geometry.coordinates.length) return geometry
+    return { type: 'MultiLineString', coordinates: parts }
+  }
   const parts = splitPositionsAtGaps(geometry.coordinates)
   if (parts.length <= 1) return geometry
   return { type: 'MultiLineString', coordinates: parts }

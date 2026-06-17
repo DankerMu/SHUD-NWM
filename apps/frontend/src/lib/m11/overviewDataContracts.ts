@@ -123,7 +123,10 @@ export interface M11SelectedSegmentGeometryBudgetStatus {
   reason: string | null
   coordinateCount: number
   serializedBytes: number
-  sanitizedGeometry: components['schemas']['GeoJsonLineString'] | null
+  sanitizedGeometry:
+    | components['schemas']['GeoJsonLineString']
+    | components['schemas']['GeoJsonMultiLineString']
+    | null
 }
 
 export interface BasinVersionOption {
@@ -250,7 +253,10 @@ export interface BasinSegmentRow {
   cycleTime: string | null
   validTime: string | null
   hasGeometry: boolean
-  geometry: components['schemas']['GeoJsonLineString'] | null
+  geometry:
+    | components['schemas']['GeoJsonLineString']
+    | components['schemas']['GeoJsonMultiLineString']
+    | null
   unavailableReason: string | null
 }
 
@@ -284,7 +290,10 @@ export interface SelectedSegmentDetail {
   lineageStatus: 'available' | 'unavailable' | 'failed'
   lineageUnavailableReason: string | null
   handoffUrl: string
-  geometry: components['schemas']['GeoJsonLineString'] | null
+  geometry:
+    | components['schemas']['GeoJsonLineString']
+    | components['schemas']['GeoJsonMultiLineString']
+    | null
   freshness: FreshnessMetadata
   unavailableReason: string | null
 }
@@ -1034,60 +1043,65 @@ export function getM11BasinGeometryBudgetStatus(
   return geometryStatus(true, null, bbox, polygonCount, ringCount, vertexCount, serializedBytes, sanitizedGeometry)
 }
 
-export function getM11SelectedSegmentGeometryBudgetStatus(
-  geom: components['schemas']['GeoJsonLineString'] | null | undefined,
-): M11SelectedSegmentGeometryBudgetStatus {
-  if (!geom?.coordinates) {
-    return selectedSegmentGeometryStatus(false, 'Selected segment geometry is unavailable.', 0, 0, null)
+// 河段几何自 #532 源头修复后为 LineString | MultiLineString（geom 列改 MultiLineString）。
+// 预算校验对二者统一：坐标计数递归 MultiLineString 的嵌套（多一层 part），各 part 至少两点、
+// 序列化字节用最终 sanitized 几何计。拆分不增顶点，故同一河段的预算与 LineString 时基本不变。
+function sanitizeSegmentLineCoordinates(
+  rawCoordinates: unknown,
+  startCount: number,
+): { ok: true; coordinates: number[][]; coordinateCount: number } | { ok: false; status: M11SelectedSegmentGeometryBudgetStatus } {
+  if (!Array.isArray(rawCoordinates)) {
+    return { ok: false, status: selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', startCount, 0, null) }
   }
-  if (geom.type !== 'LineString' || !Array.isArray(geom.coordinates)) {
-    return selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', 0, serializedByteLength(geom), null)
-  }
-
-  const sanitizedCoordinates: number[][] = []
-  let coordinateCount = 0
-
-  for (const coordinate of geom.coordinates as unknown[]) {
+  const sanitized: number[][] = []
+  let coordinateCount = startCount
+  for (const coordinate of rawCoordinates as unknown[]) {
     if (!Array.isArray(coordinate) || coordinate.length < 2) {
-      return selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', coordinateCount, 0, null)
+      return { ok: false, status: selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', coordinateCount, 0, null) }
     }
     if (coordinate.length > m11SelectedSegmentGeometryBudget.maxCoordinateDimensions) {
-      return selectedSegmentGeometryStatus(
-        false,
-        `Selected segment geometry coordinate dimensions exceed client rendering budget (${m11SelectedSegmentGeometryBudget.maxCoordinateDimensions}).`,
-        coordinateCount + 1,
-        0,
-        null,
-      )
+      return {
+        ok: false,
+        status: selectedSegmentGeometryStatus(
+          false,
+          `Selected segment geometry coordinate dimensions exceed client rendering budget (${m11SelectedSegmentGeometryBudget.maxCoordinateDimensions}).`,
+          coordinateCount + 1,
+          0,
+          null,
+        ),
+      }
     }
     coordinateCount += 1
     if (coordinateCount > m11SelectedSegmentGeometryBudget.maxCoordinates) {
-      return selectedSegmentGeometryStatus(
-        false,
-        `Selected segment geometry exceeds client rendering budget (${coordinateCount}/${m11SelectedSegmentGeometryBudget.maxCoordinates} coordinates).`,
-        coordinateCount,
-        0,
-        null,
-      )
+      return {
+        ok: false,
+        status: selectedSegmentGeometryStatus(
+          false,
+          `Selected segment geometry exceeds client rendering budget (${coordinateCount}/${m11SelectedSegmentGeometryBudget.maxCoordinates} coordinates).`,
+          coordinateCount,
+          0,
+          null,
+        ),
+      }
     }
-
     const lon = finiteNumberOrNull(coordinate[0])
     const lat = finiteNumberOrNull(coordinate[1])
     if (lon === null || lat === null) {
-      return selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', coordinateCount, 0, null)
+      return { ok: false, status: selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', coordinateCount, 0, null) }
     }
     const elevation = coordinate.length >= 3 ? finiteNumberOrNull(coordinate[2]) : null
     if (coordinate.length >= 3 && elevation === null) {
-      return selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', coordinateCount, 0, null)
+      return { ok: false, status: selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', coordinateCount, 0, null) }
     }
-    sanitizedCoordinates.push(elevation === null ? [lon, lat] : [lon, lat, elevation])
+    sanitized.push(elevation === null ? [lon, lat] : [lon, lat, elevation])
   }
+  return { ok: true, coordinates: sanitized, coordinateCount }
+}
 
-  if (sanitizedCoordinates.length < 2) {
-    return selectedSegmentGeometryStatus(false, 'Selected segment geometry requires at least two coordinates.', coordinateCount, 0, null)
-  }
-
-  const sanitizedGeometry = { type: 'LineString' as const, coordinates: sanitizedCoordinates }
+function finalizeSelectedSegmentGeometry(
+  sanitizedGeometry: components['schemas']['GeoJsonLineString'] | components['schemas']['GeoJsonMultiLineString'],
+  coordinateCount: number,
+): M11SelectedSegmentGeometryBudgetStatus {
   const serializedBytes = serializedByteLength(sanitizedGeometry)
   if (serializedBytes > m11SelectedSegmentGeometryBudget.maxSerializedBytes) {
     return selectedSegmentGeometryStatus(
@@ -1098,8 +1112,45 @@ export function getM11SelectedSegmentGeometryBudgetStatus(
       null,
     )
   }
-
   return selectedSegmentGeometryStatus(true, null, coordinateCount, serializedBytes, sanitizedGeometry)
+}
+
+export function getM11SelectedSegmentGeometryBudgetStatus(
+  geom:
+    | components['schemas']['GeoJsonLineString']
+    | components['schemas']['GeoJsonMultiLineString']
+    | null
+    | undefined,
+): M11SelectedSegmentGeometryBudgetStatus {
+  if (!geom?.coordinates) {
+    return selectedSegmentGeometryStatus(false, 'Selected segment geometry is unavailable.', 0, 0, null)
+  }
+
+  if (geom.type === 'LineString' && Array.isArray(geom.coordinates)) {
+    const sanitized = sanitizeSegmentLineCoordinates(geom.coordinates, 0)
+    if (!sanitized.ok) return sanitized.status
+    if (sanitized.coordinates.length < 2) {
+      return selectedSegmentGeometryStatus(false, 'Selected segment geometry requires at least two coordinates.', sanitized.coordinateCount, 0, null)
+    }
+    return finalizeSelectedSegmentGeometry({ type: 'LineString', coordinates: sanitized.coordinates }, sanitized.coordinateCount)
+  }
+
+  if (geom.type === 'MultiLineString' && Array.isArray(geom.coordinates)) {
+    const sanitizedParts: number[][][] = []
+    let coordinateCount = 0
+    for (const part of geom.coordinates as unknown[]) {
+      const sanitized = sanitizeSegmentLineCoordinates(part, coordinateCount)
+      if (!sanitized.ok) return sanitized.status
+      coordinateCount = sanitized.coordinateCount
+      if (sanitized.coordinates.length >= 2) sanitizedParts.push(sanitized.coordinates)
+    }
+    if (sanitizedParts.length === 0) {
+      return selectedSegmentGeometryStatus(false, 'Selected segment geometry requires at least two coordinates.', coordinateCount, 0, null)
+    }
+    return finalizeSelectedSegmentGeometry({ type: 'MultiLineString', coordinates: sanitizedParts }, coordinateCount)
+  }
+
+  return selectedSegmentGeometryStatus(false, 'Selected segment geometry is malformed.', 0, serializedByteLength(geom), null)
 }
 
 function geometryTooLarge(polygonCount: number, ringCount: number, vertexCount: number): M11BasinGeometryBudgetStatus {
@@ -1175,7 +1226,10 @@ function selectedSegmentGeometryStatus(
   reason: string | null,
   coordinateCount: number,
   serializedBytes: number,
-  sanitizedGeometry: components['schemas']['GeoJsonLineString'] | null,
+  sanitizedGeometry:
+    | components['schemas']['GeoJsonLineString']
+    | components['schemas']['GeoJsonMultiLineString']
+    | null,
 ): M11SelectedSegmentGeometryBudgetStatus {
   return { ok, reason, coordinateCount, serializedBytes, sanitizedGeometry }
 }

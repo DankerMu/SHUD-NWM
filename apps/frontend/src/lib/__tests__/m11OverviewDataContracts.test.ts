@@ -728,6 +728,71 @@ describe('M11 overview data contracts', () => {
     })
   })
 
+  it('accepts a gap-split MultiLineString and counts coordinates across its parts', () => {
+    const status = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'MultiLineString',
+      coordinates: [
+        [
+          [100, 30],
+          [100.001, 30.001],
+        ],
+        [
+          [100.02, 30.02],
+          [100.021, 30.021, 8],
+        ],
+      ],
+    })
+
+    expect(status.ok).toBe(true)
+    expect(status.sanitizedGeometry?.type).toBe('MultiLineString')
+    expect(status.coordinateCount).toBe(4)
+    const parts = status.sanitizedGeometry?.coordinates as number[][][]
+    expect(parts).toHaveLength(2)
+    expect(parts[1][1]).toEqual([100.021, 30.021, 8])
+  })
+
+  it('drops sub-two-point parts and rejects a MultiLineString left with no renderable part', () => {
+    const onlyShortParts = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'MultiLineString',
+      coordinates: [[[100, 30]], [[101, 31]]],
+    })
+    expect(onlyShortParts).toMatchObject({
+      ok: false,
+      reason: 'Selected segment geometry requires at least two coordinates.',
+      sanitizedGeometry: null,
+    })
+
+    const malformedPart = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'MultiLineString',
+      coordinates: [
+        [
+          [100, 30],
+          ['101' as unknown as number, 31],
+        ],
+      ],
+    })
+    expect(malformedPart).toMatchObject({
+      ok: false,
+      reason: 'Selected segment geometry is malformed.',
+      sanitizedGeometry: null,
+    })
+  })
+
+  it('enforces the coordinate budget on the recursive MultiLineString total', () => {
+    const half = Math.ceil((m11SelectedSegmentGeometryBudget.maxCoordinates + 1) / 2)
+    const part = (offset: number) =>
+      Array.from({ length: half }, (_, index) => [100 + offset + index / 100_000, 30])
+    const status = getM11SelectedSegmentGeometryBudgetStatus({
+      type: 'MultiLineString',
+      coordinates: [part(0), part(1)],
+    })
+    expect(status).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('exceeds client rendering budget'),
+      sanitizedGeometry: null,
+    })
+  })
+
   it('keeps selected segment detail usable while omitting invalid selected segment geometry', () => {
     const detail = normalizeSelectedSegmentDetail({
       query,

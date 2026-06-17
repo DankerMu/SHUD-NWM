@@ -24,6 +24,7 @@ from .basins_geometry import (
     ParsedBasinsGeometry,
     TrustedBasinsRoot,
     _merge_polyline_parts,
+    gap_split_multilinestring_wkt,
     parse_basins_geometry,
     safe_basins_file_sha256,
     trusted_basins_root,
@@ -514,7 +515,10 @@ def _ensure_river_segments(cursor: Any, sources: ImportSources) -> int:
             VALUES %s
             """,
             rows,
-            template="(%s, %s, %s, %s, %s, ST_GeomFromText(%s, 4490), %s)",
+            # The parser emits gap-split MULTILINESTRING WKT; ST_Multi is a no-op on a
+            # MultiLineString and a safety wrap for any LineString that reaches here, so
+            # the insert always satisfies the geometry(MultiLineString, 4490) column.
+            template="(%s, %s, %s, %s, %s, ST_Multi(ST_GeomFromText(%s, 4490)), %s)",
             page_size=RIVER_SEGMENT_INSERT_PAGE_SIZE,
         )
         inserted += len(rows)
@@ -609,8 +613,10 @@ def _backfill_output_segment_geometry(
     reach rows but renders nothing — the live display can neither draw nor click
     those reaches (the heihe symptom). Every finer GIS segment is grouped by
     ``source_raw_segment_id`` (the SHUD reach index) and the group's parts are
-    greedy-stitched (``_merge_polyline_parts``) into ONE continuous LineString
-    per reach, matched onto the reach row via ``shud_riv_index``.
+    greedy-stitched (``_merge_polyline_parts``) into one ordered point list, then
+    split into a gap-aware MultiLineString (``gap_split_positions``) so a genuine
+    source gap is NOT drawn as a straight bridge, matched onto the reach row via
+    ``shud_riv_index``. A single continuous reach is a one-part MultiLineString.
 
     Why greedy in Python, not ``ST_LineMerge`` in SQL: a reach's finer segments
     routinely meet only at coincident vertices that ST_LineMerge refuses to
@@ -621,11 +627,12 @@ def _backfill_output_segment_geometry(
     The even older ``ST_MakeLine(... ORDER BY segment_order)`` had the opposite
     failure: it linked every point in storage order, drawing a cross-ridge
     straight "jump" wherever record order != flow order. ``_merge_polyline_parts``
-    chains parts by NEAREST endpoints (reversing as needed): parts that touch
-    join with a zero-length link (continuous, no jump), a genuine source gap
-    joins with the shortest bridge (faithful, never a storage-order artifact),
-    and nothing is dropped. This is the SAME stitch the parser uses
-    (``basins_geometry``), so the two paths stay in lock-step by construction.
+    chains parts by NEAREST endpoints (reversing as needed): parts that touch join
+    with a zero-length link (continuous, no jump) and nothing is dropped; a genuine
+    source gap is then cut by ``gap_split_positions`` into separate MultiLineString
+    parts so it is no longer drawn as a bridge. This is the SAME stitch + split the
+    parser uses (``basins_geometry``), so the two paths stay in lock-step by
+    construction.
 
     ``length_m`` is the SUM of the reach's finer segments (its true channel
     length). ``record_geometry_source`` additionally stamps provenance into
@@ -699,8 +706,11 @@ def _backfill_output_segment_geometry(
         length_by_index[index] = length_by_index.get(index, 0.0) + (float(length_m) if length_m is not None else 0.0)
         count_by_index[index] = count_by_index.get(index, 0) + 1
 
-    # Greedy-stitch each reach's parts into ONE continuous LineString (no dropped
-    # part, no storage-order jump). length_m stays the SUM of the finer segments.
+    # Greedy-stitch each reach's parts into ONE ordered point list (no dropped part,
+    # no storage-order jump), then split it into a gap-aware MultiLineString at any
+    # fabricated cross-gap straight link (same threshold/metric as the parser and the
+    # frontend). length_m stays the SUM of the finer segments -- the split changes
+    # only part boundaries, never vertices or length.
     updates: list[tuple[str, str, float | None, str]] = []
     for index, reach_ids in reaches_by_index.items():
         parts = parts_by_index.get(index)
@@ -709,7 +719,9 @@ def _backfill_output_segment_geometry(
         merged = _merge_polyline_parts(parts)
         if len(merged) < 2:
             continue
-        wkt = "LINESTRING(" + ",".join(f"{x!r} {y!r}" for x, y in merged) + ")"
+        # Same shared renderer as the parser (basins_geometry): gap-split + %.12g WKT,
+        # so output-reach geometry is byte-identical in precision to the parser path.
+        wkt = gap_split_multilinestring_wkt(merged)
         total_length = length_by_index.get(index)
         if record_geometry_source:
             provenance = json.dumps(
@@ -741,7 +753,7 @@ def _backfill_output_segment_geometry(
         FROM (
             SELECT
                 value.river_segment_id::text AS river_segment_id,
-                ST_GeomFromText(value.wkt, 4490) AS geom,
+                ST_Multi(ST_GeomFromText(value.wkt, 4490)) AS geom,
                 value.length_m::double precision AS length_m,
                 value.provenance::jsonb AS provenance
             FROM (VALUES %s) AS value(river_segment_id, wkt, length_m, provenance)

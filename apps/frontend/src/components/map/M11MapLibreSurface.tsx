@@ -98,7 +98,10 @@ interface M11MapLibreSurfaceProps {
   /** 已被动态 mesh 河网层覆盖的流域 id：这些流域的静态河流从 national 底图剔除，规避双线。 */
   meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
-  selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
+  selectedSegmentGeometry?:
+    | components['schemas']['GeoJsonLineString']
+    | components['schemas']['GeoJsonMultiLineString']
+    | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
   /** 数据加载中（overview/basin 取数）：抑制叠加层/边界/河段"未就绪"类瞬态空态，避免刷新闪烁。 */
@@ -1188,7 +1191,11 @@ function expandStationCluster(
 
 export function buildSelectedSegmentFeatureCollection(
   selectedSegmentId: string | null | undefined,
-  geometry: components['schemas']['GeoJsonLineString'] | null | undefined,
+  geometry:
+    | components['schemas']['GeoJsonLineString']
+    | components['schemas']['GeoJsonMultiLineString']
+    | null
+    | undefined,
 ): SelectedSegmentFeatureCollection {
   const geometryStatus = selectedSegmentId ? getM11SelectedSegmentGeometryBudgetStatus(geometry) : null
   return {

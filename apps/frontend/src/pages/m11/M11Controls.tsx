@@ -55,7 +55,10 @@ interface M11MapSurfaceProps extends SharedControlProps {
   nationalRiverGeo?: import('geojson').FeatureCollection | null
   meshRiverBasinIds?: string[]
   selectedSegmentId?: string | null
-  selectedSegmentGeometry?: components['schemas']['GeoJsonLineString'] | null
+  selectedSegmentGeometry?:
+    | components['schemas']['GeoJsonLineString']
+    | components['schemas']['GeoJsonMultiLineString']
+    | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
   loading?: boolean

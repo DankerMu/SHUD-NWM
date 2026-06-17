@@ -146,7 +146,9 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                         Json({"name": "Outside segment"}),
                     ),
                 ],
-                template="(%s, %s, %s, %s, ST_GeomFromText(%s, 4490), %s)",
+                # geom is geometry(MultiLineString, 4490) (000036); ST_Multi wraps the
+                # LineString fixtures so the insert satisfies the column type.
+                template="(%s, %s, %s, %s, ST_Multi(ST_GeomFromText(%s, 4490)), %s)",
             )
             cursor.execute(
                 """

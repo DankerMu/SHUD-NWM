@@ -586,7 +586,11 @@ def _river_segments_from_layer(
                     "raw_id": raw_id,
                     "raw_downstream": downstream,
                     "length_m": length_m,
-                    "geom_wkt": "LINESTRING(" + ", ".join(_point_wkt(point) for point in transformed_points) + ")",
+                    # Emit gap-split MultiLineString so a record whose source parts
+                    # are genuinely far apart renders as separate channels instead of
+                    # one line carrying a fabricated cross-gap straight bridge. A
+                    # single continuous reach is a one-part MultiLineString.
+                    "geom_wkt": gap_split_multilinestring_wkt(transformed_points),
                     "properties": properties,
                 }
             )
@@ -752,9 +756,12 @@ def _merge_polyline_parts(parts: list[list[tuple[float, float]]]) -> list[tuple[
       node. A single river-segment record is normally unbranched, so this is a
       known, rare edge (see test_merge_folds_back_on_branching_record).
     - Where a record's parts are genuinely far apart in the source GIS, the
-      shortest link is still long -- faithful to the source gap, not a
-      stitch-order artifact this can remove (root fix is source-data repair or
-      gap-aware rendering, tracked separately).
+      shortest link this emits is still long. That cross-gap link is no longer a
+      rendering problem: callers split the merged line into a MultiLineString at
+      such links via ``gap_split_multilinestring_wkt`` (same threshold/metric as
+      the frontend ``splitPositionsAtGaps``), so the bridge appears in no part and
+      is never drawn. The merge stays single-line on purpose -- it produces the
+      ordered point list; the split decides part boundaries.
     """
     chain = [list(points) for points in parts if len(points) >= 2]
     if not chain:
@@ -770,6 +777,86 @@ def _merge_polyline_parts(parts: list[list[tuple[float, float]]]) -> list[tuple[
             oriented = piece[::-1] if use_start else piece
             merged[:0] = oriented[:-1] if oriented[-1] == merged[0] else oriented
     return merged
+
+
+# --- gap-split: cut the merged polyline at fabricated cross-gap straight links ---
+#
+# ``_merge_polyline_parts`` joins multi-part source polylines by nearest endpoints.
+# Where a record's parts are genuinely far apart in the source GIS, the shortest
+# link is still long: a straight "jump" that is NOT real channel (qhh: edges up to
+# 1721m against a <130m normal-mesh edge, >300m on 100+ links). The ``geom`` column
+# was ``LineString`` so the merge had to emit that jump as part of one line and the
+# flow MVT/overview drew it. Splitting the merged line into a MultiLineString at
+# those jumps drops the bridge from rendering while keeping every real vertex.
+#
+# Threshold and metric are kept STRICTLY equivalent to the frontend
+# ``splitPositionsAtGaps`` (apps/frontend/src/lib/m11/gapAwareGeometry.ts): same
+# absolute floor, same relative multiple of the per-segment median edge, same
+# equirectangular metre approximation (EARTH_RADIUS_M, lon/lat EPSG:4490 ~ WGS84).
+# Both sides therefore agree on which links are gaps; the source repair here means
+# the client almost never has to split, but its defensive split stays as a backstop.
+RIVER_GAP_ABSOLUTE_M = 300.0
+RIVER_GAP_RELATIVE = 4
+_EARTH_RADIUS_M = 6_371_000.0
+
+
+def _edge_meters(a: tuple[float, float], b: tuple[float, float]) -> float:
+    lat_rad = ((a[1] + b[1]) / 2.0) * (math.pi / 180.0)
+    dx = (b[0] - a[0]) * (math.pi / 180.0) * math.cos(lat_rad) * _EARTH_RADIUS_M
+    dy = (b[1] - a[1]) * (math.pi / 180.0) * _EARTH_RADIUS_M
+    return math.hypot(dx, dy)
+
+
+def _median_edge(edges: list[float]) -> float:
+    if not edges:
+        return 0.0
+    ordered = sorted(edges)
+    return ordered[len(ordered) // 2]
+
+
+def gap_split_positions(points: list[tuple[float, float]]) -> list[list[tuple[float, float]]]:
+    """Split an ordered point list into continuous parts at cross-gap straight links.
+
+    Mirrors the frontend ``splitPositionsAtGaps``: a link longer than
+    ``max(RIVER_GAP_ABSOLUTE_M, RIVER_GAP_RELATIVE * median_edge)`` is a fabricated
+    bridge, so the points on either side become separate parts and the bridge itself
+    appears in no part. Parts with <2 points (an isolated vertex pinned between two
+    gaps) are dropped. Never returns an empty result: a fully degenerate input falls
+    back to the original points as a single part so the geometry is never lost.
+    """
+    if len(points) < 2:
+        return [list(points)]
+    edges = [_edge_meters(points[i - 1], points[i]) for i in range(1, len(points))]
+    threshold = max(RIVER_GAP_ABSOLUTE_M, RIVER_GAP_RELATIVE * _median_edge(edges))
+    parts: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = [points[0]]
+    for index, edge in enumerate(edges):
+        if edge > threshold:
+            if len(current) >= 2:
+                parts.append(current)
+            current = [points[index + 1]]
+        else:
+            current.append(points[index + 1])
+    if len(current) >= 2:
+        parts.append(current)
+    return parts if parts else [list(points)]
+
+
+def gap_split_multilinestring_wkt(points: list[tuple[float, float]]) -> str:
+    """Render an ordered point list as gap-split ``MULTILINESTRING`` WKT.
+
+    Always a MultiLineString (a single continuous reach is one part); cross-gap
+    straight links are dropped between parts. Caller guarantees >=2 points.
+    """
+    parts = gap_split_positions(points)
+    rendered_parts = [
+        "(" + ", ".join(_point_wkt(point) for point in part) + ")"
+        for part in parts
+        if len(part) >= 2
+    ]
+    if not rendered_parts:
+        rendered_parts = ["(" + ", ".join(_point_wkt(point) for point in points) + ")"]
+    return "MULTILINESTRING(" + ", ".join(rendered_parts) + ")"
 
 
 def _nearest_attachment(

@@ -40,6 +40,7 @@ EXPECTED_MIGRATIONS = [
     "000034_return_period_run_quality_materialization.sql",
     "000035_qhh_display_coverage_materialization.sql",
     "000036_run_product_quality_explicit_source.sql",
+    "000037_river_segment_multilinestring.sql",
 ]
 
 EXPECTED_SCHEMAS = {"core", "met", "hydro", "flood", "map", "ops"}

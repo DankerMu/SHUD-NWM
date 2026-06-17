@@ -361,7 +361,9 @@ def seed_core(cursor: Any, json_adapter: Any, execute_values: Any) -> None:
         ON CONFLICT DO NOTHING
         """,
         river_segment_rows,
-        template="(%s, %s, %s, %s, %s, ST_GeomFromText(%s, 4490), %s)",
+        # geom is geometry(MultiLineString, 4490) (000036); ST_Multi wraps the demo
+        # LineString WKT so the seed satisfies the column type.
+        template="(%s, %s, %s, %s, %s, ST_Multi(ST_GeomFromText(%s, 4490)), %s)",
         page_size=1000,
     )
     cursor.execute(
