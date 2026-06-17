@@ -376,14 +376,13 @@ def _compute_return_periods(
                 else "no_frequency_curve"
             )
 
-    rows_written = 0
     warning_counts: Counter[str] = Counter()
     # return_period_result.duration is the design-duration key of the frequency curve.
     # Forecast-window peak rows use the same 1h curve as timestep rows; max_over_window
     # carries the "peak over forecast window" semantics.
     curve_duration = "1h"
 
-    peak_rows: list[dict[str, Any]] = []
+    peak_evaluations: list[dict[str, Any]] = []
     for segment_id, (q_value, max_time) in max_values.items():
         result = _evaluate_q(
             q_value,
@@ -392,15 +391,14 @@ def _compute_return_periods(
             warning_thresholds_available=warning_thresholds_available,
         )
         warning_counts.update([result["warning_level"]] if result["warning_level"] else [])
-        peak_rows.append(
+        peak_evaluations.append(
             _build_return_period_row(
                 context, segment_id, max_time, curve_duration, q_value,
                 max_over_window=True, result=result,
             )
         )
-        rows_written += 1
 
-    timestep_rows: list[dict[str, Any]] = []
+    timestep_evaluations: list[dict[str, Any]] = []
     for valid_time, segment_values in timestep_values.items():
         for segment_id, q_value in segment_values.items():
             result = _evaluate_q(
@@ -409,40 +407,46 @@ def _compute_return_periods(
                 no_curve_quality.get(segment_id),
                 warning_thresholds_available=warning_thresholds_available,
             )
-            timestep_rows.append(
+            timestep_evaluations.append(
                 _build_return_period_row(
                     context, segment_id, valid_time, curve_duration, q_value,
                     max_over_window=False, result=result,
                 )
             )
-            rows_written += 1
 
+    peak_rows = [row for row in peak_evaluations if _is_meaningful_return_period_row(row)]
+    timestep_rows = [row for row in timestep_evaluations if _is_meaningful_return_period_row(row)]
     # 峰值行的 valid_time 随重算移动，先批量清除该 run 的旧峰值再批量写（无视陈旧 duration
     # 标签全清，保留 moved-peak 语义并消除跨标签孤儿）。
-    if peak_rows:
-        _delete_all_prior_peaks(db_session, context)
-        _batch_upsert_return_period_results(db_session, peak_rows)
-    if timestep_rows:
-        _delete_all_prior_timesteps(db_session, context)
-        _batch_upsert_return_period_results(db_session, timestep_rows)
+    _delete_all_prior_peaks(db_session, context)
+    _batch_upsert_return_period_results(db_session, peak_rows)
+    _delete_all_prior_timesteps(db_session, context)
+    _batch_upsert_return_period_results(db_session, timestep_rows)
 
     _mark_frequency_succeeded(db_session, context, started_at)
+    all_evaluations = [*peak_evaluations, *timestep_evaluations]
+    all_stored_rows = [*peak_rows, *timestep_rows]
+    rows_written = len(all_stored_rows)
+    return_period_rows = sum(1 for row in all_stored_rows if row["return_period"] is not None)
+    warning_rows = sum(1 for row in all_stored_rows if row["warning_level"] is not None)
+    meaningful_result_rows = sum(
+        1 for row in all_stored_rows if row["return_period"] is not None or row["warning_level"] is not None
+    )
     unavailable_products = set(contract["unavailable_products"])
     if any(curve is None for curve in curves.values()):
         unavailable_products.add("frequency_curves")
+    if return_period_rows <= 0:
+        unavailable_products.add("return_period_result")
     blockers = [
         *_frequency_residual_blockers(context, no_curve_quality),
+        *_return_period_result_residual_blockers(context, unavailable_products, return_period_rows),
         *_quality_contract_residual_blockers(context, unavailable_products),
     ]
     tile_blockers = unavailable_products - {"frequency_curves"}
-    if not tile_blockers and any(curve is not None for curve in curves.values()):
+    if not tile_blockers and return_period_rows > 0:
         register_flood_tile_layer(run_id, db_session)
-    all_rows = [*peak_rows, *timestep_rows]
-    return_period_rows = sum(1 for row in all_rows if row["return_period"] is not None)
-    warning_rows = sum(1 for row in all_rows if row["warning_level"] is not None)
-    meaningful_result_rows = sum(
-        1 for row in all_rows if row["return_period"] is not None or row["warning_level"] is not None
-    )
+    else:
+        cleanup_flood_tile_layer(run_id, db_session)
     quality_state = _run_quality_state(
         unavailable_products,
         return_period_rows=return_period_rows,
@@ -461,9 +465,9 @@ def _compute_return_periods(
             warning_rows=warning_rows,
             max_return_period_rows=sum(1 for row in peak_rows if row["return_period"] is not None),
             max_warning_rows=sum(1 for row in peak_rows if row["warning_level"] is not None),
-            expected_result_rows=rows_written,
-            expected_max_result_rows=len(peak_rows),
-            expected_timestep_result_rows=len(timestep_rows),
+            expected_result_rows=len(all_evaluations),
+            expected_max_result_rows=len(peak_evaluations),
+            expected_timestep_result_rows=len(timestep_evaluations),
             meaningful_result_rows=meaningful_result_rows,
             meaningful_max_result_rows=sum(
                 1 for row in peak_rows if row["return_period"] is not None or row["warning_level"] is not None
@@ -472,13 +476,13 @@ def _compute_return_periods(
                 1 for row in timestep_rows if row["return_period"] is not None or row["warning_level"] is not None
             ),
             no_frequency_curve_rows=sum(
-                1 for row in all_rows if row["quality_flag"] == "no_frequency_curve"
+                1 for row in all_evaluations if row["quality_flag"] == "no_frequency_curve"
             ),
             no_usable_frequency_curve_rows=sum(
-                1 for row in all_rows if row["quality_flag"] == "no_usable_frequency_curve"
+                1 for row in all_evaluations if row["quality_flag"] == "no_usable_frequency_curve"
             ),
             warning_threshold_unavailable_rows=sum(
-                1 for row in all_rows if row["quality_flag"] == "warning_thresholds_unavailable"
+                1 for row in all_evaluations if row["quality_flag"] == "warning_thresholds_unavailable"
             ),
         ),
     )
@@ -502,7 +506,7 @@ def register_flood_tile_layer(run_id: str, db_session: Session) -> None:
 
     columns = _table_columns(db_session, "map", "tile_layer")
     context = _load_run_context(run_id, db_session)
-    layer_id = f"flood_return_period_{run_id}"
+    layer_id = _flood_tile_layer_id(run_id)
     tile_uri_template = (
         f"/api/v1/tiles/flood-return-period?run_id={run_id}&duration={{duration}}&valid_time={{valid_time}}"
     )
@@ -546,6 +550,24 @@ def register_flood_tile_layer(run_id: str, db_session: Session) -> None:
         ),
         values,
     )
+
+
+def cleanup_flood_tile_layer(run_id: str, db_session: Session) -> None:
+    """Remove stale flood return-period tile metadata when this run is not publishable."""
+    if not _table_exists(db_session, "map", "tile_layer"):
+        LOGGER.info("Skipping flood tile layer cleanup; map.tile_layer is unavailable")
+        return
+    if "layer_id" not in _table_columns(db_session, "map", "tile_layer"):
+        LOGGER.info("Skipping flood tile layer cleanup; map.tile_layer.layer_id is unavailable")
+        return
+    db_session.execute(
+        text("DELETE FROM map.tile_layer WHERE layer_id = :layer_id"),
+        {"layer_id": _flood_tile_layer_id(run_id)},
+    )
+
+
+def _flood_tile_layer_id(run_id: str) -> str:
+    return f"flood_return_period_{run_id}"
 
 
 def _evaluate_q(
@@ -640,6 +662,10 @@ def _build_return_period_row(
         "max_over_window": bool(max_over_window),
         "quality_flag": result["quality_flag"],
     }
+
+
+def _is_meaningful_return_period_row(row: Mapping[str, Any]) -> bool:
+    return row["return_period"] is not None or row["warning_level"] is not None
 
 
 def _batch_upsert_return_period_results(db_session: Session, rows: list[dict[str, Any]]) -> None:
@@ -889,6 +915,31 @@ def _quality_contract_residual_blockers(
             }
         )
     return blockers
+
+
+def _return_period_result_residual_blockers(
+    context: Mapping[str, Any],
+    unavailable_products: set[str],
+    return_period_rows: int,
+) -> list[dict[str, Any]]:
+    if "return_period_result" not in unavailable_products:
+        return []
+    residual_risk = (
+        "No non-null return-period rows are available for this run."
+        if return_period_rows <= 0
+        else "Return-period results are unavailable per the run quality contract."
+    )
+    return [
+        {
+            "code": "RETURN_PERIOD_RESULT_UNAVAILABLE",
+            "state": "unavailable",
+            "quality_flag": "missing_return_period_result",
+            "run_id": context.get("run_id"),
+            "model_id": context.get("model_id"),
+            "river_network_version_id": context.get("river_network_version_id"),
+            "residual_risk": residual_risk,
+        }
+    ]
 
 
 def _run_quality_state(
