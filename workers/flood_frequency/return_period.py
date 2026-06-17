@@ -12,7 +12,13 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from packages.common.flood_quality import clear_run_product_quality, refresh_run_product_quality
+from packages.common.flood_quality import (
+    MAX_BLOCKER_SAMPLE_SEGMENT_IDS,
+    ExplicitFloodRunProductQuality,
+    clear_historical_run_product_quality,
+    get_run_product_quality,
+    write_explicit_run_product_quality,
+)
 from workers.data_adapters.base import cycle_id_for
 
 RETURN_PERIODS: tuple[int, ...] = (2, 5, 10, 20, 50, 100)
@@ -281,7 +287,8 @@ def compute_return_periods(
         db_session.rollback()
         error_code = getattr(error, "error_code", "RETURN_PERIOD_FAILED")
         error_message = getattr(error, "message", str(error))
-        clear_run_product_quality(db_session, run_id)
+        failure_blocker = _frequency_failure_blocker(run_id, str(error_code), str(error_message))
+        _record_failure_product_quality(db_session, run_id, failure_blocker)
         _record_frequency_failure(db_session, run_id, str(error_code), str(error_message), started_at)
         db_session.commit()
         LOGGER.warning("Return-period computation failed for run_id=%s: %s", run_id, error_message)
@@ -297,17 +304,41 @@ def compute_return_periods(
                 error_message=str(error_message),
                 quality_state="unavailable",
                 unavailable_products=("return_period_result",),
-                residual_blockers=(
-                    {
-                        "code": str(error_code),
-                        "state": "unavailable",
-                        "quality_flag": "frequency_failed",
-                        "run_id": run_id,
-                        "residual_risk": str(error_message),
-                    },
-                ),
+                residual_blockers=(failure_blocker,),
             )
         raise
+
+
+def _frequency_failure_blocker(run_id: str, error_code: str, error_message: str) -> dict[str, Any]:
+    return {
+        "code": error_code,
+        "state": "unavailable",
+        "quality_flag": "frequency_failed",
+        "run_id": run_id,
+        "residual_risk": error_message,
+    }
+
+
+def _record_failure_product_quality(
+    db_session: Session,
+    run_id: str,
+    failure_blocker: Mapping[str, Any],
+) -> None:
+    existing_quality = get_run_product_quality(db_session, run_id)
+    if existing_quality is not None and existing_quality.quality_source == "explicit":
+        if existing_quality.quality_state != "ready":
+            return
+        write_explicit_run_product_quality(
+            db_session,
+            ExplicitFloodRunProductQuality(
+                run_id=run_id,
+                quality_state="unavailable",
+                unavailable_products=("return_period_result",),
+                residual_blockers=(failure_blocker,),
+            ),
+        )
+        return
+    clear_historical_run_product_quality(db_session, run_id)
 
 
 def _compute_return_periods(
@@ -406,14 +437,58 @@ def _compute_return_periods(
     tile_blockers = unavailable_products - {"frequency_curves"}
     if not tile_blockers and any(curve is not None for curve in curves.values()):
         register_flood_tile_layer(run_id, db_session)
-    refresh_run_product_quality(db_session, run_id)
+    all_rows = [*peak_rows, *timestep_rows]
+    return_period_rows = sum(1 for row in all_rows if row["return_period"] is not None)
+    warning_rows = sum(1 for row in all_rows if row["warning_level"] is not None)
+    meaningful_result_rows = sum(
+        1 for row in all_rows if row["return_period"] is not None or row["warning_level"] is not None
+    )
+    quality_state = _run_quality_state(
+        unavailable_products,
+        return_period_rows=return_period_rows,
+        warning_rows=warning_rows,
+    )
+    write_explicit_run_product_quality(
+        db_session,
+        ExplicitFloodRunProductQuality(
+            run_id=run_id,
+            quality_state=quality_state,
+            unavailable_products=tuple(sorted(unavailable_products)),
+            residual_blockers=tuple(blockers),
+            result_rows=rows_written,
+            max_result_rows=len(peak_rows),
+            return_period_rows=return_period_rows,
+            warning_rows=warning_rows,
+            max_return_period_rows=sum(1 for row in peak_rows if row["return_period"] is not None),
+            max_warning_rows=sum(1 for row in peak_rows if row["warning_level"] is not None),
+            expected_result_rows=rows_written,
+            expected_max_result_rows=len(peak_rows),
+            expected_timestep_result_rows=len(timestep_rows),
+            meaningful_result_rows=meaningful_result_rows,
+            meaningful_max_result_rows=sum(
+                1 for row in peak_rows if row["return_period"] is not None or row["warning_level"] is not None
+            ),
+            meaningful_timestep_result_rows=sum(
+                1 for row in timestep_rows if row["return_period"] is not None or row["warning_level"] is not None
+            ),
+            no_frequency_curve_rows=sum(
+                1 for row in all_rows if row["quality_flag"] == "no_frequency_curve"
+            ),
+            no_usable_frequency_curve_rows=sum(
+                1 for row in all_rows if row["quality_flag"] == "no_usable_frequency_curve"
+            ),
+            warning_threshold_unavailable_rows=sum(
+                1 for row in all_rows if row["quality_flag"] == "warning_thresholds_unavailable"
+            ),
+        ),
+    )
     return ReturnPeriodComputationStats(
         total_segments=len(segment_ids),
         with_curve=sum(1 for curve in curves.values() if curve is not None),
         without_curve=sum(1 for curve in curves.values() if curve is None),
         warning_counts={level: int(warning_counts.get(level, 0)) for level in WARNING_LEVELS},
         rows_written=rows_written,
-        quality_state="ready" if not unavailable_products else "unavailable",
+        quality_state=quality_state,
         unavailable_products=tuple(sorted(unavailable_products)),
         residual_blockers=tuple(blockers),
     )
@@ -751,18 +826,29 @@ def _frequency_residual_blockers(
     no_curve_quality: Mapping[str, str],
 ) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
+    grouped_segment_ids: dict[tuple[str, str, str], list[str]] = {}
     for segment_id, quality_flag in sorted(no_curve_quality.items()):
+        key = (
+            quality_flag,
+            str(context.get("model_id") or ""),
+            str(context.get("river_network_version_id") or ""),
+        )
+        grouped_segment_ids.setdefault(key, []).append(segment_id)
+    for (quality_flag, model_id, river_network_version_id), segment_ids in sorted(grouped_segment_ids.items()):
+        sample_segment_ids = segment_ids[:MAX_BLOCKER_SAMPLE_SEGMENT_IDS]
         blockers.append(
             {
                 "code": "FREQUENCY_CURVE_UNAVAILABLE",
                 "state": "unavailable",
                 "quality_flag": quality_flag,
                 "run_id": context.get("run_id"),
-                "model_id": context.get("model_id"),
-                "river_network_version_id": context.get("river_network_version_id"),
-                "river_segment_id": segment_id,
+                "model_id": model_id,
+                "river_network_version_id": river_network_version_id,
+                "count": len(segment_ids),
+                "sample_segment_ids": sample_segment_ids,
+                "omitted_count": max(len(segment_ids) - len(sample_segment_ids), 0),
                 "residual_risk": (
-                    "Return period and warning level are null for this segment; no values were fabricated."
+                    "Return period and warning level are null for grouped segments; no values were fabricated."
                 ),
             }
         )
@@ -803,6 +889,21 @@ def _quality_contract_residual_blockers(
             }
         )
     return blockers
+
+
+def _run_quality_state(
+    unavailable_products: set[str],
+    *,
+    return_period_rows: int,
+    warning_rows: int,
+) -> str:
+    if not unavailable_products:
+        return "ready"
+    if return_period_rows <= 0 or "return_period_result" in unavailable_products:
+        return "unavailable"
+    if "warning_thresholds" in unavailable_products or warning_rows < return_period_rows:
+        return "unavailable"
+    return "degraded"
 
 
 def _mark_frequency_succeeded(
