@@ -39,9 +39,10 @@ ForbiddenSourceError = ifs_module.ForbiddenSourceError
 
 
 @pytest.fixture(autouse=True)
-def _reset_source_cooldowns() -> Any:
+def _reset_source_cooldowns_and_cycle_hours_env(monkeypatch: Any) -> Any:
     # The per-source cooldown table is module-level; reset around every test so a
     # rate-limit case cannot leak a cooldown into an unrelated case.
+    monkeypatch.delenv("IFS_CYCLE_HOURS_UTC", raising=False)
     IFSAdapter.reset_source_cooldowns()
     yield
     IFSAdapter.reset_source_cooldowns()
@@ -187,6 +188,94 @@ def test_discover_cycles_normal_date_range_and_all_day_unavailable(tmp_path: Pat
     assert len(unavailable) == 4
     assert not any(cycle.available for cycle in unavailable)
     assert unavailable_repository.cycles == {}
+
+
+def test_cycle_hours_env_narrows_ifs_discovery_and_data_source_config(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("IFS_CYCLE_HOURS_UTC", "0,12")
+    repository = FakeMetRepository()
+    calls: list[str] = []
+
+    def checker(url: str) -> bool:
+        calls.append(url)
+        return True
+
+    config = IFSAdapterConfig(workspace_root=tmp_path, preferred_source="aws", fallback_sources=())
+    adapter = IFSAdapter(
+        config=config,
+        repository=repository,
+        object_store=LocalObjectStore(tmp_path),
+        availability_checker=checker,
+        sleeper=lambda _seconds: None,
+    )
+
+    cycles = adapter.discover_cycles("2026-05-01")
+
+    assert config.cycle_hours_utc == (0, 12)
+    assert [cycle.cycle_hour for cycle in cycles] == [0, 12]
+    assert repository.data_sources["IFS"]["config_json"]["cycle_hours_utc"] == [0, 12]
+    assert [("t00z" in url, "t12z" in url) for url in calls] == [(True, False), (False, True)]
+    assert all("t06z" not in url and "t18z" not in url for url in calls)
+
+
+@pytest.mark.parametrize("env_value", ["12,0,12", "12, 0,12"])
+def test_cycle_hours_env_normalizes_duplicate_unordered_ifs_hours(
+    tmp_path: Path,
+    monkeypatch: Any,
+    env_value: str,
+) -> None:
+    monkeypatch.setenv("IFS_CYCLE_HOURS_UTC", env_value)
+
+    config = IFSAdapterConfig(workspace_root=tmp_path)
+
+    assert config.cycle_hours_utc == (0, 12)
+
+
+@pytest.mark.parametrize("env_value", ["", "0,,12", "abc", "24", "-1"])
+def test_cycle_hours_env_rejects_malformed_ifs_hours(
+    tmp_path: Path,
+    monkeypatch: Any,
+    env_value: str,
+) -> None:
+    monkeypatch.setenv("IFS_CYCLE_HOURS_UTC", env_value)
+
+    with pytest.raises(ValueError, match="IFS_CYCLE_HOURS_UTC"):
+        IFSAdapterConfig(workspace_root=tmp_path)
+
+
+def test_cycle_hours_direct_config_normalizes_duplicate_unordered_ifs_hours(tmp_path: Path) -> None:
+    config = IFSAdapterConfig(workspace_root=tmp_path, cycle_hours_utc=(12, 0, 12))
+
+    assert config.cycle_hours_utc == (0, 12)
+
+
+@pytest.mark.parametrize("cycle_hours_utc", [(True,), ("12",), (12.5,)])
+def test_cycle_hours_direct_config_rejects_non_integer_ifs_hours(
+    tmp_path: Path,
+    cycle_hours_utc: tuple[Any, ...],
+) -> None:
+    with pytest.raises(ValueError, match="cycle_hours_utc must contain integer UTC cycle hours"):
+        IFSAdapterConfig(workspace_root=tmp_path, cycle_hours_utc=cycle_hours_utc)
+
+
+def test_cycle_hours_env_unset_preserves_legacy_ifs_default(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.delenv("IFS_CYCLE_HOURS_UTC", raising=False)
+
+    config = IFSAdapterConfig(workspace_root=tmp_path)
+
+    assert config.cycle_hours_utc == (0, 6, 12, 18)
+
+
+def test_explicit_four_cycle_ifs_config_keeps_06_18_lead_time_policy(tmp_path: Path) -> None:
+    config = IFSAdapterConfig(workspace_root=tmp_path, cycle_hours_utc=(0, 6, 12, 18))
+
+    assert config.cycle_hours_utc == (0, 6, 12, 18)
+    assert config.forecast_end_hour_for_cycle(6) == 144
+    assert config.forecast_end_hour_for_cycle(18) == 144
+    assert config.as_data_source_config()["lead_time_policy"]["06"] == 144
+    assert config.as_data_source_config()["lead_time_policy"]["18"] == 144
 
 
 def test_discover_cycles_switches_source_when_primary_probe_fails(tmp_path: Path) -> None:

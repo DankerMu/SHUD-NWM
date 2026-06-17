@@ -39,6 +39,7 @@ from .base import (
     valid_time_for,
     validate_forecast_hours,
 )
+from .cycle_hours import env_cycle_hours_utc, normalize_cycle_hours_utc
 from .region import GeoBBox, china_buffered_bbox_from_env
 
 LOGGER = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ IFS_GRIB_SHORT_NAME: dict[str, str] = {
 IFS_FALLBACK_SOURCES: tuple[str, ...] = ("aws", "azure", "google", "ecmwf")
 IFS_TERMINAL_FALLBACK_SOURCE = "ecmwf"
 IFS_DEFAULT_FORECAST_RESOLUTION_SEGMENTS: tuple[tuple[int, int], ...] = ((144, 3), (360, 6))
+IFS_DEFAULT_CYCLE_HOURS_UTC: tuple[int, ...] = (0, 6, 12, 18)
 CDO_CLIP_TIMEOUT_SECONDS = 300
 IFS_DISCOVERY_ATTEMPT_LIMIT = 8
 IFS_DISCOVERY_TEXT_LIMIT = 512
@@ -186,7 +188,9 @@ class IFSAdapterConfig:
     workspace_root: Path | str = field(default_factory=lambda: os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
     object_store_root: Path | str = field(default_factory=lambda: os.getenv("OBJECT_STORE_ROOT", ""))
     object_store_prefix: str = field(default_factory=lambda: os.getenv("OBJECT_STORE_PREFIX", ""))
-    cycle_hours_utc: tuple[int, ...] = (0, 6, 12, 18)
+    cycle_hours_utc: tuple[int, ...] = field(
+        default_factory=lambda: env_cycle_hours_utc("IFS_CYCLE_HOURS_UTC", IFS_DEFAULT_CYCLE_HOURS_UTC)
+    )
     forecast_start_hour: int = field(default_factory=lambda: int(os.getenv("IFS_FORECAST_START_HOUR", "0")))
     forecast_step_hours: int = 3
     # Optional piecewise native resolution, e.g. IFS "144:3,360:6" (3-hourly to 144h,
@@ -219,6 +223,11 @@ class IFSAdapterConfig:
     bbox: GeoBBox = field(default_factory=china_buffered_bbox_from_env)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "cycle_hours_utc",
+            normalize_cycle_hours_utc(self.cycle_hours_utc, field_name="cycle_hours_utc"),
+        )
         if not str(self.object_store_root):
             object.__setattr__(self, "object_store_root", self.workspace_root)
 
@@ -539,6 +548,7 @@ class IFSAdapter(DataSourceAdapter):
         attempts = self._bounded_attempted_sources(availability.get("attempted_sources"))
         return {
             "source": self.config.source_id,
+            "cycle_hours_utc": list(self.config.cycle_hours_utc),
             "probe": {
                 "uri": self._bounded_safe_text(remote_url),
                 "forecast_hour": 0,

@@ -31,6 +31,11 @@ DownloadedPayload = gfs_module.DownloadedPayload
 ForbiddenSourceError = gfs_module.ForbiddenSourceError
 
 
+@pytest.fixture(autouse=True)
+def _clear_gfs_cycle_hours_env(monkeypatch: Any) -> None:
+    monkeypatch.delenv("GFS_CYCLE_HOURS_UTC", raising=False)
+
+
 class FakeMetRepository:
     def __init__(self) -> None:
         self.data_sources: dict[str, dict[str, Any]] = {}
@@ -162,6 +167,88 @@ def test_cycle_discovery_upserts_four_available_cycles(tmp_path: Path) -> None:
     assert len(repository.cycles) == 4
     assert {cycle["status"] for cycle in repository.cycles.values()} == {"discovered"}
     assert repository.data_sources["gfs"]["adapter_name"] == "gfs_adapter"
+
+
+def test_cycle_hours_env_narrows_gfs_discovery_and_data_source_config(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("GFS_CYCLE_HOURS_UTC", "0,12")
+    repository = FakeMetRepository()
+    calls: list[str] = []
+
+    def checker(url: str) -> bool:
+        calls.append(url)
+        return True
+
+    config = GFSAdapterConfig(
+        workspace_root=tmp_path,
+        source_backends=("nomads",),
+        nomads_min_interval_seconds=0,
+    )
+    adapter = GFSAdapter(
+        config=config,
+        repository=repository,
+        object_store=LocalObjectStore(tmp_path),
+        availability_checker=checker,
+        sleeper=lambda _seconds: None,
+    )
+
+    cycles = adapter.discover_cycles("2026-05-07")
+
+    assert config.cycle_hours_utc == (0, 12)
+    assert [cycle.cycle_hour for cycle in cycles] == [0, 12]
+    assert repository.data_sources["gfs"]["config_json"]["cycle_hours_utc"] == [0, 12]
+    assert [("t00z" in url, "t12z" in url) for url in calls] == [(True, False), (False, True)]
+    assert all("t06z" not in url and "t18z" not in url for url in calls)
+
+
+@pytest.mark.parametrize("env_value", ["12,0,12", "12, 0,12"])
+def test_cycle_hours_env_normalizes_duplicate_unordered_gfs_hours(
+    tmp_path: Path,
+    monkeypatch: Any,
+    env_value: str,
+) -> None:
+    monkeypatch.setenv("GFS_CYCLE_HOURS_UTC", env_value)
+
+    config = GFSAdapterConfig(workspace_root=tmp_path)
+
+    assert config.cycle_hours_utc == (0, 12)
+
+
+@pytest.mark.parametrize("env_value", ["", "0,,12", "abc", "24", "-1"])
+def test_cycle_hours_env_rejects_malformed_gfs_hours(
+    tmp_path: Path,
+    monkeypatch: Any,
+    env_value: str,
+) -> None:
+    monkeypatch.setenv("GFS_CYCLE_HOURS_UTC", env_value)
+
+    with pytest.raises(ValueError, match="GFS_CYCLE_HOURS_UTC"):
+        GFSAdapterConfig(workspace_root=tmp_path)
+
+
+def test_cycle_hours_direct_config_normalizes_duplicate_unordered_gfs_hours(tmp_path: Path) -> None:
+    config = GFSAdapterConfig(workspace_root=tmp_path, cycle_hours_utc=(12, 0, 12))
+
+    assert config.cycle_hours_utc == (0, 12)
+
+
+@pytest.mark.parametrize("cycle_hours_utc", [(True,), ("12",), (12.5,)])
+def test_cycle_hours_direct_config_rejects_non_integer_gfs_hours(
+    tmp_path: Path,
+    cycle_hours_utc: tuple[Any, ...],
+) -> None:
+    with pytest.raises(ValueError, match="cycle_hours_utc must contain integer UTC cycle hours"):
+        GFSAdapterConfig(workspace_root=tmp_path, cycle_hours_utc=cycle_hours_utc)
+
+
+def test_cycle_hours_env_unset_preserves_legacy_gfs_default(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.delenv("GFS_CYCLE_HOURS_UTC", raising=False)
+
+    config = GFSAdapterConfig(workspace_root=tmp_path)
+
+    assert config.cycle_hours_utc == (0, 6, 12, 18)
 
 
 def test_forbidden_nomads_discovery_does_not_gate_available_cloud_cycle(tmp_path: Path) -> None:

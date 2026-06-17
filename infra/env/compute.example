@@ -45,10 +45,19 @@ NHMS_SCHEDULER_ALLOWED_ROOTS=/scratch/frd_muziyao/nhms-production/workspace:/scr
 NHMS_SCHEDULER_SOURCES=gfs,IFS
 # Scheduler hard gate for business candidate/backfill selection.
 NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC=0,12
+# Adapter cycle hours only narrow provider discovery/probe breadth; they do not
+# decide executable business cycles. Keep them aligned with the scheduler hard
+# gate in production so downloads converge on UTC 00/12 by default.
+GFS_CYCLE_HOURS_UTC=0,12
+IFS_CYCLE_HOURS_UTC=0,12
 NHMS_SCHEDULER_MODEL_IDS=basins_qhh_shud
 NHMS_SCHEDULER_BASIN_IDS=basins_qhh
 NHMS_SCHEDULER_INTERVAL_SECONDS=300
 NHMS_SCHEDULER_MAX_PASSES=1
+# Discovery time is floored by this lag to the prior allowed-cycle boundary
+# (for example, with allowed hours 0,12, a lagged 18:01 UTC target floors to 12).
+# Adapter cycle-hour env only reduces provider probes; the scheduler hard gate
+# remains authoritative for candidate/backfill execution.
 NHMS_SCHEDULER_CYCLE_LAG_HOURS=6
 # Backfill: each pass scans the past LOOKBACK_HOURS window and re-drives every
 # incomplete cycle's full pipeline (completed cycles are skipped, do not consume
