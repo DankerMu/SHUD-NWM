@@ -4,6 +4,7 @@ x-compute-env: &compute-env
   NHMS_SERVICE_ROLE: compute_control
   NHMS_REQUIRE_SERVICE_ROLE: "true"
   NHMS_AUTH_MODE: ${NHMS_AUTH_MODE:-production}
+  NHMS_REQUIRE_FORECAST_WARM_START: ${NHMS_REQUIRE_FORECAST_WARM_START:-true}
   UV_CACHE_DIR: /tmp/nhms-uv-cache
   DATABASE_URL: ${DATABASE_URL:?set compute writer database url}
   WORKSPACE_ROOT: ${WORKSPACE_ROOT:?set compute workspace root}

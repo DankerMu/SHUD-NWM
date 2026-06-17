@@ -196,6 +196,13 @@ def test_docker_compose_examples_render_when_cli_is_available() -> None:
         ):
             pytest.skip("docker compose plugin is not available")
         assert completed.returncode == 0, completed.stderr
+        if "compose.compute.yml" in command:
+            rendered = yaml.safe_load(completed.stdout)
+            for service_name in ("compute-api", "scheduler-once"):
+                assert (
+                    rendered["services"][service_name]["environment"]["NHMS_REQUIRE_FORECAST_WARM_START"]
+                    == "true"
+                )
 
 
 @pytest.mark.parametrize("bad_input", ["display_env", "display_compose"])
@@ -1544,6 +1551,7 @@ def test_static_checker_rejects_live_mvt_flag_as_compute_interpolation(tmp_path:
 @pytest.mark.parametrize(
     ("env_key", "expression"),
     [
+        ("NHMS_REQUIRE_FORECAST_WARM_START", "${NHMS_REQUIRE_FORECAST_WARM_START:-true}"),
         ("NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC", "${NHMS_SCHEDULER_ALLOWED_CYCLE_HOURS_UTC-0,12}"),
         ("GFS_CYCLE_HOURS_UTC", "${GFS_CYCLE_HOURS_UTC-0,12}"),
         ("IFS_CYCLE_HOURS_UTC", "${IFS_CYCLE_HOURS_UTC-0,12}"),
@@ -1564,8 +1572,8 @@ def test_static_checker_approves_compute_scheduler_allowed_cycle_hours_interpola
     assert result.status == "PASS", [finding.to_dict() for finding in result.findings]
 
 
-@pytest.mark.parametrize("env_key", ["GFS_CYCLE_HOURS_UTC", "IFS_CYCLE_HOURS_UTC"])
-def test_static_checker_requires_compute_adapter_cycle_hours_runtime_env(
+@pytest.mark.parametrize("env_key", ["NHMS_REQUIRE_FORECAST_WARM_START", "GFS_CYCLE_HOURS_UTC", "IFS_CYCLE_HOURS_UTC"])
+def test_static_checker_requires_compute_runtime_env(
     tmp_path: Path,
     env_key: str,
 ) -> None:
@@ -1577,10 +1585,14 @@ def test_static_checker_requires_compute_adapter_cycle_hours_runtime_env(
     result = _run_compute_static_check(compute_compose)
 
     assert result.status == "FAIL"
-    assert any(
-        finding.code == "COMPUTE_RUNTIME_ENV_MISSING" and finding.details["key"] == env_key
+    assert {
+        (finding.service, finding.details.get("key"))
         for finding in result.findings
-    )
+        if finding.code == "COMPUTE_RUNTIME_ENV_MISSING"
+    } >= {
+        ("compute-api", env_key),
+        ("scheduler-once", env_key),
+    }
 
 
 def test_static_checker_rejects_unapproved_compute_scheduler_cycle_lag_interpolation(tmp_path: Path) -> None:
