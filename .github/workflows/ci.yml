@@ -43,8 +43,10 @@ jobs:
               - 'apps/api/**'
               - 'services/**'
               - 'workers/**'
+              - 'infra/**'
               - 'schemas/**'
               - 'db/**'
+              - 'scripts/validate_*.py'
             frontend:
               - 'apps/frontend/**'
               - 'openapi/**'
@@ -214,11 +216,11 @@ jobs:
         run: |
           python scripts/select_ci_tests.py --base-ref "${GITHUB_BASE_REF}" --github-output "$GITHUB_OUTPUT"
       - name: Run targeted tests
+        env:
+          TARGETED_TESTS_JSON: ${{ steps.targeted.outputs.tests_json }}
         run: |
           if [ "${{ steps.targeted.outputs.count }}" != "0" ]; then
-            echo "Targeted test files:"
-            printf '  %s\n' ${{ steps.targeted.outputs.tests }}
-            pytest -q ${{ steps.targeted.outputs.tests }}
+            python -c 'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); print("Targeted test files:"); [print(f"  {test}") for test in tests]; subprocess.run(["pytest", "-q", *tests], check=True)'
           else
             echo "No backend test files selected — running collect-only smoke (import/syntax across suite)"
             pytest tests/ -q --collect-only >/dev/null

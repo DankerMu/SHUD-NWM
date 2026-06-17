@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import json
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
@@ -108,6 +109,7 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("scripts/validate_readonly_db_boundary.py", ("tests/test_readonly_db_validation.py",)),
     ("scripts/run_qhh_continuous.py", ("tests/test_run_qhh_continuous.py",)),
+    ("scripts/select_ci_tests.py", ("tests/test_select_ci_tests.py",)),
     ("pyproject.toml", CORE_SMOKE_TESTS),
     ("uv.lock", CORE_SMOKE_TESTS),
 )
@@ -116,15 +118,22 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -> list[str]:
     selected: set[str] = set()
     changed = [path.strip().replace("\\", "/") for path in changed_paths if path.strip()]
+    unknown_backend_python = False
 
     for path in changed:
         if path.startswith("tests/") and path.endswith(".py"):
             selected.add(path)
+            continue
+        matched = False
         for pattern, tests in PATH_TEST_RULES:
             if fnmatch.fnmatch(path, pattern):
                 selected.update(tests)
+                matched = True
 
-    if any(_is_backend_python_path(path) for path in changed) and not selected:
+        if _is_backend_python_path(path) and not matched:
+            unknown_backend_python = True
+
+    if unknown_backend_python:
         selected.update(CORE_SMOKE_TESTS)
 
     return sorted(path for path in selected if (repo_root / path).is_file())
@@ -152,6 +161,7 @@ def _write_github_output(tests: Sequence[str], *, output_path: Path) -> None:
     with output_path.open("a", encoding="utf-8") as handle:
         handle.write(f"count={len(tests)}\n")
         handle.write(f"tests={' '.join(tests)}\n")
+        handle.write(f"tests_json={json.dumps(list(tests), separators=(',', ':'))}\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

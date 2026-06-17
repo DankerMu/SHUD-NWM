@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.select_ci_tests import CORE_SMOKE_TESTS, select_tests
+from scripts.select_ci_tests import CORE_SMOKE_TESTS, main, select_tests
 
 
 def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:
@@ -38,5 +38,28 @@ def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path()
         assert test_path in selected
 
 
+def test_select_tests_adds_core_smoke_for_unknown_backend_path_mixed_with_known_path() -> None:
+    selected = select_tests(
+        ["workers/data_adapters/gfs_adapter.py", "services/new_surface/new_module.py"],
+        repo_root=Path("."),
+    )
+
+    assert "tests/test_gfs_adapter.py" in selected
+    for test_path in CORE_SMOKE_TESTS:
+        assert test_path in selected
+
+
 def test_select_tests_ignores_docs_only_changes() -> None:
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == []
+
+
+def test_main_writes_json_github_output(tmp_path: Path) -> None:
+    changed_file = tmp_path / "changed.txt"
+    output_file = tmp_path / "github-output.txt"
+    changed_file.write_text("infra/compose.compute.yml\n", encoding="utf-8")
+
+    assert main(["--changed-file", str(changed_file), "--github-output", str(output_file)]) == 0
+
+    output = output_file.read_text(encoding="utf-8")
+    assert "count=1\n" in output
+    assert 'tests_json=["tests/test_two_node_docker_runtime.py"]\n' in output
