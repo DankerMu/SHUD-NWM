@@ -3211,6 +3211,8 @@ class ForecastOrchestrator:
             run_manifest_uri=self.object_store.uri_for_key(f"runs/{run_id}/input/manifest.json"),
             output_uri=_directory_uri(self.object_store, f"runs/{run_id}/output/"),
             log_uri=_directory_uri(self.object_store, f"runs/{run_id}/logs/"),
+            forcing_package_manifest_uri=getattr(forcing, "forcing_package_manifest_uri", None),
+            forcing_package_manifest_checksum=getattr(forcing, "forcing_package_manifest_checksum", None),
             init_state_id=selected_state.state_id,
             init_state_uri=selected_state.state_uri,
             init_state_valid_time=selected_state.valid_time,

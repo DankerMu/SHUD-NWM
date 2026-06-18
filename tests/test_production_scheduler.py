@@ -490,6 +490,10 @@ def test_scheduler_invokes_forcing_producer_before_orchestration_for_ready_canon
     assert submitted_basin["forcing_version_id"] == "forc_gfs_2026052106_model_a"
     assert submitted_basin["forcing_package_uri"].endswith("/forcing/gfs/2026052106/basin_a_v1/model_a/")
     assert submitted_basin["forcing_uri"].endswith("/forcing/gfs/2026052106/basin_a_v1/model_a/forcing.tsd.forc")
+    assert submitted_basin["forcing_package_manifest_uri"].endswith(
+        "/forcing/gfs/2026052106/basin_a_v1/model_a/forcing_package.json"
+    )
+    assert submitted_basin["forcing_manifest_checksum"] == "forcing-manifest-sha"
 
 
 def test_scheduler_blocks_orchestration_when_forcing_producer_fails(tmp_path: Path) -> None:

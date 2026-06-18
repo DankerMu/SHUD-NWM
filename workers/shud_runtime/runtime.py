@@ -23,6 +23,7 @@ from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
+    read_bytes_limited_no_follow,
     read_bytes_no_follow,
     stat_no_follow,
     unlink_no_follow,
@@ -48,6 +49,11 @@ EXPECTED_PRCP_UNIT = "mm/day"
 # the read generously and tolerate-skip (never hard-fail) if a multi-station
 # manifest exceeds the cap.
 MAX_PACKAGE_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_DIRECT_GRID_TSD_FORC_BYTES = 8 * 1024 * 1024
+MAX_DIRECT_GRID_SP_ATT_BYTES = 32 * 1024 * 1024
+MAX_DIRECT_GRID_TSD_FORC_LINES = 250_000
+MAX_DIRECT_GRID_SP_ATT_LINES = 2_000_000
+MAX_DIRECT_GRID_STAGING_LINE_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -597,21 +603,40 @@ class SHUDRuntime:
         forcing = manifest.get("forcing") or {}
         if _mapping_metadata_declares_direct_grid(forcing):
             return True
-        package_manifest = self._read_forcing_package_manifest(forcing)
+        if _mapping_metadata_declares_non_direct_grid(forcing):
+            return False
+        package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
         return _mapping_metadata_declares_direct_grid(package_manifest or {})
 
-    def _read_forcing_package_manifest(self, forcing: Mapping[str, Any]) -> dict[str, Any] | None:
-        package_manifest_uri = str(forcing.get("package_manifest_uri") or "").strip()
+    def _read_authoritative_forcing_package_manifest(self, forcing: Mapping[str, Any]) -> dict[str, Any] | None:
+        package_manifest_uri = _forcing_package_manifest_uri(forcing)
         if not package_manifest_uri:
             return None
         try:
             content = self.object_store.read_bytes_limited(
                 package_manifest_uri, max_bytes=MAX_PACKAGE_MANIFEST_BYTES
             )
+        except Exception as error:
+            raise SHUDRuntimeError(
+                "FORCING_PACKAGE_MANIFEST_READ_FAILED",
+                "Forcing package manifest could not be read for authoritative mapping-mode detection: "
+                f"{package_manifest_uri}",
+            ) from error
+        try:
             package_manifest = json.loads(content.decode("utf-8"))
-        except Exception:
-            return None
-        return package_manifest if isinstance(package_manifest, dict) else None
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise SHUDRuntimeError(
+                "FORCING_PACKAGE_MANIFEST_INVALID",
+                "Forcing package manifest is not valid JSON for authoritative mapping-mode detection: "
+                f"{package_manifest_uri}",
+            ) from error
+        if not isinstance(package_manifest, dict):
+            raise SHUDRuntimeError(
+                "FORCING_PACKAGE_MANIFEST_INVALID",
+                "Forcing package manifest must be a JSON object for authoritative mapping-mode detection: "
+                f"{package_manifest_uri}",
+            )
+        return package_manifest
 
     def verify_output(self, manifest: dict[str, Any], output_dir: Path) -> Path:
         files = sorted(
@@ -986,8 +1011,8 @@ class SHUDRuntime:
 
     def _verify_forcing_manifest_checksums(self, manifest: dict[str, Any]) -> None:
         forcing = manifest.get("forcing") or {}
-        package_manifest_uri = str(forcing.get("package_manifest_uri") or "").strip()
-        expected_package_checksum = str(forcing.get("package_manifest_checksum") or "").strip()
+        package_manifest_uri = _forcing_package_manifest_uri(forcing)
+        expected_package_checksum = _forcing_package_manifest_checksum(forcing)
         if package_manifest_uri or expected_package_checksum:
             if not package_manifest_uri or not expected_package_checksum:
                 raise SHUDRuntimeError(
@@ -1090,7 +1115,20 @@ class SHUDRuntime:
                     "FORCING_FILE_NOT_STAGED",
                     f"Forcing checksum entry is not a regular staged file: {relative_path}",
                 )
-            actual_checksum = sha256_bytes(_read_staged_bytes(staged_path, root=model_input_dir))
+            if (
+                _mapping_metadata_declares_direct_grid(manifest.get("forcing") or {})
+                and relative_path == "shud/qhh.tsd.forc"
+            ):
+                staged_bytes = _read_limited_staged_bytes(
+                    staged_path,
+                    root=model_input_dir,
+                    max_bytes=MAX_DIRECT_GRID_TSD_FORC_BYTES,
+                    too_large_code="DIRECT_GRID_TSD_FORC_TOO_LARGE",
+                    too_large_message="Direct-grid SHUD forcing station file exceeds the staging read cap",
+                )
+            else:
+                staged_bytes = _read_staged_bytes(staged_path, root=model_input_dir)
+            actual_checksum = sha256_bytes(staged_bytes)
             expected_checksum = str(file_entry["checksum"])
             if actual_checksum != expected_checksum:
                 raise SHUDRuntimeError(
@@ -1180,6 +1218,75 @@ def _write_staged_bytes(path: Path, content: bytes, *, root: Path) -> Path:
 
 def _read_text_no_follow(path: Path, *, containment_root: Path) -> str:
     return _read_staged_bytes(path, root=containment_root).decode("utf-8")
+
+
+def _read_limited_text_no_follow(
+    path: Path,
+    *,
+    containment_root: Path,
+    max_bytes: int,
+    too_large_code: str,
+    too_large_message: str,
+) -> str:
+    content = _read_limited_staged_bytes(
+        path,
+        root=containment_root,
+        max_bytes=max_bytes,
+        too_large_code=too_large_code,
+        too_large_message=too_large_message,
+    )
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SHUDRuntimeError("WORKSPACE_READ_FAILED", f"Failed to decode staged file {path}: {error}") from error
+
+
+def _read_limited_staged_bytes(
+    path: Path,
+    *,
+    root: Path,
+    max_bytes: int,
+    too_large_code: str,
+    too_large_message: str,
+) -> bytes:
+    try:
+        _ensure_relative_to_root(path, root)
+        content = read_bytes_limited_no_follow(path, max_bytes=max_bytes, containment_root=root)
+    except SafeFilesystemError as error:
+        raise SHUDRuntimeError("WORKSPACE_PATH_UNSAFE", f"Unsafe workspace file source {path}: {error}") from error
+    except OSError as error:
+        raise SHUDRuntimeError("WORKSPACE_READ_FAILED", f"Failed to read staged file {path}: {error}") from error
+    if len(content) > max_bytes:
+        raise SHUDRuntimeError(too_large_code, f"{too_large_message}: {path}")
+    return content
+
+
+def _bounded_nonempty_lines(
+    text: str,
+    *,
+    path: Path,
+    max_lines: int,
+    max_line_bytes: int,
+    too_many_lines_code: str,
+    line_too_long_code: str,
+) -> list[str]:
+    lines: list[str] = []
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        if len(raw_line.encode("utf-8")) > max_line_bytes:
+            raise SHUDRuntimeError(
+                line_too_long_code,
+                f"Direct-grid staging file line {line_number} exceeds {max_line_bytes} bytes: {path}",
+            )
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        lines.append(stripped)
+        if len(lines) > max_lines:
+            raise SHUDRuntimeError(
+                too_many_lines_code,
+                f"Direct-grid staging file exceeds {max_lines} non-empty lines: {path}",
+            )
+    return lines
 
 
 def _open_log_file_no_follow(path: Path, *, containment_root: Path) -> Any:
@@ -1617,11 +1724,21 @@ def _shift_project_time_inputs(model_input_dir: Path, project_name: str, first_t
 
 
 def _read_shud_forcing_station_rows(path: Path) -> list[dict[str, Any]]:
-    lines = [
-        line.strip()
-        for line in _read_text_no_follow(path, containment_root=path.parent).splitlines()
-        if line.strip()
-    ]
+    text = _read_limited_text_no_follow(
+        path,
+        containment_root=path.parent,
+        max_bytes=MAX_DIRECT_GRID_TSD_FORC_BYTES,
+        too_large_code="DIRECT_GRID_TSD_FORC_TOO_LARGE",
+        too_large_message="Direct-grid SHUD forcing station file exceeds the staging read cap",
+    )
+    lines = _bounded_nonempty_lines(
+        text,
+        path=path,
+        max_lines=MAX_DIRECT_GRID_TSD_FORC_LINES,
+        max_line_bytes=MAX_DIRECT_GRID_STAGING_LINE_BYTES,
+        too_many_lines_code="DIRECT_GRID_TSD_FORC_TOO_MANY_LINES",
+        line_too_long_code="DIRECT_GRID_TSD_FORC_LINE_TOO_LONG",
+    )
     if len(lines) < 4:
         return []
     rows: list[dict[str, Any]] = []
@@ -1652,6 +1769,15 @@ def _mapping_metadata_declares_direct_grid(metadata: Mapping[str, Any]) -> bool:
     return False
 
 
+def _mapping_metadata_declares_non_direct_grid(metadata: Mapping[str, Any]) -> bool:
+    for payload in _iter_mapping_metadata_payloads(metadata):
+        for key in ("forcing_mapping_mode", "spatial_mapping_method"):
+            value = str(payload.get(key) or "").strip()
+            if value and value != "direct_grid":
+                return True
+    return False
+
+
 def _iter_mapping_metadata_payloads(metadata: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     payloads: list[Mapping[str, Any]] = [metadata]
     for key in ("lineage", "lineage_json", "metadata", "properties", "properties_json"):
@@ -1659,6 +1785,16 @@ def _iter_mapping_metadata_payloads(metadata: Mapping[str, Any]) -> list[Mapping
         if isinstance(value, Mapping):
             payloads.append(value)
     return payloads
+
+
+def _forcing_package_manifest_uri(forcing: Mapping[str, Any]) -> str:
+    return str(forcing.get("package_manifest_uri") or forcing.get("forcing_package_manifest_uri") or "").strip()
+
+
+def _forcing_package_manifest_checksum(forcing: Mapping[str, Any]) -> str:
+    return str(
+        forcing.get("package_manifest_checksum") or forcing.get("forcing_manifest_checksum") or ""
+    ).strip()
 
 
 def _validate_direct_grid_sp_att_forcing_ids(path: Path, allowed_ids: set[int]) -> None:
@@ -1678,7 +1814,21 @@ def _read_sp_att_forcing_ids(path: Path) -> set[int]:
             "DIRECT_GRID_SP_ATT_MISSING",
             f"Direct-grid forcing requires staged .sp.att ownership file: {path}",
         )
-    lines = _read_text_no_follow(path, containment_root=path.parent).splitlines()
+    text = _read_limited_text_no_follow(
+        path,
+        containment_root=path.parent,
+        max_bytes=MAX_DIRECT_GRID_SP_ATT_BYTES,
+        too_large_code="DIRECT_GRID_SP_ATT_TOO_LARGE",
+        too_large_message="Direct-grid .sp.att ownership file exceeds the staging read cap",
+    )
+    lines = _bounded_nonempty_lines(
+        text,
+        path=path,
+        max_lines=MAX_DIRECT_GRID_SP_ATT_LINES,
+        max_line_bytes=MAX_DIRECT_GRID_STAGING_LINE_BYTES,
+        too_many_lines_code="DIRECT_GRID_SP_ATT_TOO_MANY_LINES",
+        line_too_long_code="DIRECT_GRID_SP_ATT_LINE_TOO_LONG",
+    )
     if len(lines) < 3:
         raise SHUDRuntimeError(
             "DIRECT_GRID_SP_ATT_INVALID",

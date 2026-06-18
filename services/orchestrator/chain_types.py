@@ -43,6 +43,8 @@ class ForcingContext:
     end_time: datetime | None = None
     source_id: str | None = None
     max_lead_hours: int | None = None
+    forcing_package_manifest_uri: str | None = None
+    forcing_package_manifest_checksum: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,8 @@ class ForecastRunContext:
     run_manifest_uri: str
     output_uri: str
     log_uri: str
+    forcing_package_manifest_uri: str | None = None
+    forcing_package_manifest_checksum: str | None = None
     init_state_id: str | None = None
     init_state_uri: str | None = None
     init_state_valid_time: datetime | None = None

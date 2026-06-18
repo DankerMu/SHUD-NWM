@@ -440,10 +440,15 @@ def build_forecast_run_manifest(
                 context.output_segment_count if context.output_segment_count is not None else context.segment_count
             ),
         },
-        "forcing": {
-            "forcing_version_id": context.forcing_version_id,
-            "forcing_uri": context.forcing_package_uri,
-        },
+        "forcing": _runtime_forcing_metadata(
+            {
+                "forcing_version_id": context.forcing_version_id,
+                "forcing_uri": context.forcing_package_uri,
+                "forcing_package_uri": context.forcing_package_uri,
+                "package_manifest_uri": context.forcing_package_manifest_uri,
+                "package_manifest_checksum": context.forcing_package_manifest_checksum,
+            }
+        ),
         "initial_state": {
             "state_id": context.init_state_id,
             "ic_file_uri": context.init_state_uri,
@@ -736,15 +741,21 @@ def build_model_run_assembly(
         "start_time": _format_time(start_time),
         "end_time": _format_time(end_time),
     }
-    forcing = {
-        "forcing_version_id": forcing_version_id,
-        "forcing_uri": forcing_uri,
-        "forcing_package_uri": forcing_uri,
-        "station_metadata": station_metadata,
-        "station_count": station_metadata.get("station_count"),
-        "station_ids": station_metadata.get("station_ids", []),
-        "quality_flag": station_metadata.get("quality_flag"),
-    }
+    forcing = _runtime_forcing_metadata(
+        {
+            "forcing_version_id": forcing_version_id,
+            "forcing_uri": forcing_uri,
+            "forcing_package_uri": forcing_uri,
+            "forcing_package_manifest_uri": basin.get("forcing_package_manifest_uri")
+            or _nested_mapping(basin.get("resource_profile")).get("forcing_package_manifest_uri"),
+            "forcing_manifest_checksum": basin.get("forcing_manifest_checksum")
+            or _nested_mapping(basin.get("resource_profile")).get("forcing_manifest_checksum"),
+            "station_metadata": station_metadata,
+            "station_count": station_metadata.get("station_count"),
+            "station_ids": station_metadata.get("station_ids", []),
+            "quality_flag": station_metadata.get("quality_flag"),
+        }
+    )
     if station_metadata.get("shud_station"):
         forcing["shud_station"] = station_metadata["shud_station"]
     outputs = {
@@ -765,6 +776,29 @@ def build_model_run_assembly(
         quality_states=quality_states,
         residual_blockers=tuple(blockers),
     )
+
+
+def _runtime_forcing_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
+    forcing = {
+        key: value
+        for key, value in values.items()
+        if key not in {"forcing_package_manifest_uri", "forcing_manifest_checksum"}
+    }
+    package_manifest_uri = (
+        values.get("package_manifest_uri")
+        or values.get("forcing_package_manifest_uri")
+        or forcing.get("package_manifest_uri")
+    )
+    package_manifest_checksum = (
+        values.get("package_manifest_checksum")
+        or values.get("forcing_manifest_checksum")
+        or forcing.get("package_manifest_checksum")
+    )
+    if package_manifest_uri not in (None, ""):
+        forcing["package_manifest_uri"] = package_manifest_uri
+    if package_manifest_checksum not in (None, ""):
+        forcing["package_manifest_checksum"] = package_manifest_checksum
+    return forcing
 
 
 def _default_forcing_uri(

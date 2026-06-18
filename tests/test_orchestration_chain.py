@@ -2130,6 +2130,33 @@ def test_model_run_identity_and_quality_contracts_propagate_to_worker_manifests(
     assert publish_submission["metadata"]["quality_states"][0]["run_id"] == basin["run_id"]
 
 
+def test_model_run_forcing_package_manifest_identity_reaches_runtime_manifest(tmp_path: Path) -> None:
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client)
+    basin = {
+        **_basins(1)[0],
+        "candidate_id": "gfs:2026-05-01T00:00:00Z:model_0:forecast_gfs_deterministic",
+        "run_id": "fcst_gfs_2026050100_model_0",
+        "forcing_version_id": "forc_gfs_2026050100_model_0",
+        "model_package_uri": "s3://nhms/models/model_0/v1/package/",
+        "segment_count": 3,
+        "forcing_package_uri": "s3://nhms/forcing/gfs/2026050100/basin_v0/model_0/",
+        "forcing_package_manifest_uri": "s3://nhms/forcing/gfs/2026050100/basin_v0/model_0/forcing_package.json",
+        "forcing_manifest_checksum": "sha256:forcing-package-manifest",
+    }
+
+    orchestrator.orchestrate_cycle("gfs", "2026050100", [basin])
+
+    forecast_submission = next(submission for submission in client.submissions if submission["stage"] == "forecast")
+    task = forecast_submission["tasks"][0]
+    runtime_manifest = json.loads(Path(task["manifest_path"]).read_text(encoding="utf-8"))
+    assert runtime_manifest["forcing"]["package_manifest_uri"] == basin["forcing_package_manifest_uri"]
+    assert runtime_manifest["forcing"]["package_manifest_checksum"] == basin["forcing_manifest_checksum"]
+    assert "forcing_package_manifest_uri" not in runtime_manifest["forcing"]
+    assert "forcing_manifest_checksum" not in runtime_manifest["forcing"]
+
+
 def test_nested_forcing_station_metadata_reaches_runtime_manifest(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
@@ -7744,9 +7771,13 @@ def test_chain_manifest_legacy_builders_use_monkeypatched_helper_aliases(
         run_manifest_uri="s3://runs/run-1/input/manifest.json",
         output_uri="s3://runs/run-1/output/",
         log_uri="s3://runs/run-1/logs/",
+        forcing_package_manifest_uri="s3://forcing/gfs/forcing_package.json",
+        forcing_package_manifest_checksum="sha256:forcing-package",
     )
     forecast_orchestrator = object.__new__(ForecastOrchestrator)
     run_manifest = forecast_orchestrator._build_run_manifest(run_context)
+    assert run_manifest["forcing"]["package_manifest_uri"] == "s3://forcing/gfs/forcing_package.json"
+    assert run_manifest["forcing"]["package_manifest_checksum"] == "sha256:forcing-package"
     assert run_manifest["runtime"]["state_checkpoint_hours"] == [77]
     assert run_manifest["runtime"]["update_ic_step_minutes"] == 77 * 60
 
