@@ -132,6 +132,14 @@ PATH_TEST_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/test_model_registry_list_basins.py",
         ),
     ),
+    (
+        "packages/common/flood_quality.py",
+        (
+            "tests/test_forecast_api.py",
+            "tests/test_return_period.py",
+            "tests/test_return_period_integration.py",
+        ),
+    ),
     ("packages/common/state_manager.py", ("tests/test_state_manager.py", "tests/test_state_qc.py")),
     ("packages/common/state_cli.py", ("tests/test_state_manager.py", "tests/test_state_qc.py")),
     ("packages/common/redaction.py", ("tests/test_redaction.py",)),

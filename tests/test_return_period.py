@@ -592,6 +592,30 @@ def test_run_product_quality_backfill_is_idempotent_and_overwrites_stale_counts(
     assert quality["max_warning_rows"] == 1
 
 
+def test_run_product_quality_backfill_ignores_non_peak_non_null_return_period_for_readiness() -> None:
+    with _store() as session:
+        _insert_quality_source_row(
+            session,
+            run_id="forecast_run",
+            return_period=2.0,
+            warning_level=None,
+            max_over_window=False,
+        )
+        session.commit()
+
+        result = backfill_run_product_quality(session, ["forecast_run"])
+        quality = _quality_row(session)
+
+    assert [item.run_id for item in result] == ["forecast_run"]
+    assert quality is not None
+    assert quality["quality_state"] == "unavailable"
+    assert quality["return_period_rows"] == 1
+    assert quality["max_return_period_rows"] == 0
+    assert json.loads(quality["unavailable_products"]) == ["return_period_result"]
+    blockers = json.loads(quality["residual_blockers"])
+    assert {blocker["code"] for blocker in blockers} == {"RETURN_PERIOD_RESULT_UNAVAILABLE"}
+
+
 def test_run_product_quality_default_backfill_is_set_based_and_summarized() -> None:
     with _store() as session:
         statements: list[str] = []
@@ -688,6 +712,34 @@ def test_run_product_quality_default_backfill_is_set_based_and_summarized() -> N
     assert all("SELECT DISTINCT RUN_ID" not in statement for statement in upper_statements)
     assert all("FROM FLOOD.RETURN_PERIOD_RESULT WHERE RUN_ID IN" not in statement for statement in upper_statements)
     assert all(" NOT IN " not in statement for statement in upper_statements)
+
+
+def test_run_product_quality_default_backfill_ignores_non_peak_non_null_return_period_for_readiness() -> None:
+    with _store() as session:
+        _insert_quality_source_row(
+            session,
+            run_id="forecast_run",
+            return_period=2.0,
+            warning_level=None,
+            max_over_window=False,
+        )
+        session.commit()
+
+        summary = backfill_run_product_quality(session)
+        quality = _quality_row(session)
+        normalized_quality = get_run_product_quality(session, "forecast_run")
+
+    assert summary.refreshed_runs == 1
+    assert quality is not None
+    assert quality["quality_state"] == "unavailable"
+    assert quality["return_period_rows"] == 1
+    assert quality["max_return_period_rows"] == 0
+    assert normalized_quality is not None
+    assert normalized_quality.quality_state == "unavailable"
+    assert normalized_quality.unavailable_products == ("return_period_result",)
+    assert {blocker["code"] for blocker in normalized_quality.residual_blockers} == {
+        "RETURN_PERIOD_RESULT_UNAVAILABLE"
+    }
 
 
 def test_run_product_quality_default_backfill_preserves_explicit_quality_on_conflict() -> None:
@@ -1057,13 +1109,13 @@ def test_historical_backfill_populates_compatible_counts_and_default_explicit_fi
 
     assert [item.run_id for item in result] == ["forecast_run"]
     assert result[0].quality_source == "historical_backfill"
-    assert result[0].quality_state == "degraded"
+    assert result[0].quality_state == "ready"
     assert quality is not None
     assert quality["result_rows"] == 2
     assert quality["return_period_rows"] == 1
     assert quality["warning_rows"] == 1
     assert quality["quality_source"] == "historical_backfill"
-    assert quality["quality_state"] == "degraded"
+    assert quality["quality_state"] == "ready"
     assert quality["expected_result_rows"] == 2
     assert quality["meaningful_result_rows"] == 1
     assert quality["no_frequency_curve_rows"] == 1
@@ -1095,8 +1147,8 @@ def test_historical_backfill_populates_compatible_counts_and_default_explicit_fi
                 "max_return_period_rows": 1,
                 "max_warning_rows": 1,
             },
-            "degraded",
-            "frequency_curves",
+            "ready",
+            None,
         ),
     ],
 )
@@ -1104,7 +1156,7 @@ def test_historical_count_only_rows_fallback_from_counts(
     run_id: str,
     counts: dict[str, int],
     expected_state: str,
-    expected_product: str,
+    expected_product: str | None,
 ) -> None:
     with _store() as session:
         session.execute(
@@ -1131,9 +1183,13 @@ def test_historical_count_only_rows_fallback_from_counts(
     assert quality is not None
     assert quality.quality_source == "historical_backfill"
     assert quality.quality_state == expected_state
-    assert quality.quality_state != "ready"
-    assert expected_product in quality.unavailable_products
-    assert quality.residual_blockers
+    if expected_product is None:
+        assert quality.unavailable_products == ()
+        assert quality.residual_blockers == ()
+    else:
+        assert quality.quality_state != "ready"
+        assert expected_product in quality.unavailable_products
+        assert quality.residual_blockers
 
 
 def test_missing_quality_storage_readiness_fails_flood_closed_without_q_down_unavailable() -> None:

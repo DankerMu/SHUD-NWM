@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.met_store import MetStoreError
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from workers.forcing_producer import (
     CanonicalProduct,
@@ -137,7 +138,8 @@ class FakeForcingRepository:
         if not weights:
             return
         scopes = {(weight.source_id, weight.grid_id, weight.model_id) for weight in weights}
-        assert len(scopes) == 1
+        if len(scopes) != 1:
+            raise MetStoreError("Interpolation weights must be replaced one source/grid/model scope at a time.")
         source_id, grid_id, model_id = next(iter(scopes))
         self.interp_weights = [
             weight
@@ -3168,3 +3170,298 @@ def test_precip_mmday_accepted_and_other_units_rejected(tmp_path: Path) -> None:
     assert producer._precip_to_timestep_factor("gfs", _precip_product("mm/day")) == 1.0
     with pytest.raises(ForcingProductionError):
         producer._precip_to_timestep_factor("gfs", _precip_product("mm"))
+
+
+class _MemoryInterpWeightRepository(PsycopgForcingRepository):
+    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(database_url="memory://interp-weight")
+        object.__setattr__(self, "rows", list(rows or []))
+        object.__setattr__(self, "replace_calls", [])
+        object.__setattr__(self, "sql_calls", [])
+
+    def _fetch_all(self, statement: str, parameters: tuple[Any, ...]) -> list[dict[str, Any]]:
+        assert "FROM met.interp_weight" in statement
+        source_id, grid_id, model_id = parameters
+        return [
+            dict(row)
+            for row in self.rows
+            if row["source_id"] == source_id and row["grid_id"] == grid_id and row["model_id"] == model_id
+        ]
+
+    def _replace_values(
+        self,
+        pre_delete_statement: str | None,
+        pre_delete_parameters: tuple[Any, ...],
+        delete_statement: str | None,
+        delete_parameters: tuple[Any, ...],
+        insert_statement: str,
+        rows: list[tuple[Any, ...]] | tuple[tuple[Any, ...], ...],
+    ) -> None:
+        assert pre_delete_statement is not None
+        assert "pg_advisory_xact_lock" in pre_delete_statement
+        assert "hashtextextended" in pre_delete_statement
+        assert delete_statement is not None
+        assert "DELETE FROM met.interp_weight" in delete_statement
+        assert "INSERT INTO met.interp_weight" in insert_statement
+        self.sql_calls.append(("lock", pre_delete_statement, pre_delete_parameters))
+        self.sql_calls.append(("delete", delete_statement, delete_parameters))
+        self.sql_calls.append(("insert", insert_statement, tuple(rows)))
+        self.replace_calls.append((delete_parameters, tuple(rows)))
+        source_id, grid_id, model_id = delete_parameters
+        self.rows = [
+            row
+            for row in self.rows
+            if not (row["source_id"] == source_id and row["grid_id"] == grid_id and row["model_id"] == model_id)
+        ]
+        self.rows.extend(
+            {
+                "source_id": row[0],
+                "grid_id": row[1],
+                "model_id": row[2],
+                "station_id": row[3],
+                "variable": row[4],
+                "grid_cell_id": row[5],
+                "weight": row[6],
+                "method": row[7],
+                "grid_signature": row[8],
+            }
+            for row in rows
+        )
+
+
+def test_store_direct_grid_interp_weights_round_trip_with_grid_signature() -> None:
+    repository = _MemoryInterpWeightRepository()
+
+    repository.upsert_interp_weights(
+        (
+            InterpolationWeight(
+                "GFS",
+                "ifs_gfs_025deg",
+                "demo_model",
+                "qhh_forc_001",
+                "PRCP",
+                "cell-001",
+                1.0,
+                method="direct_grid",
+                grid_signature="sha256:grid-signature",
+            ),
+            InterpolationWeight(
+                "GFS",
+                "ifs_gfs_025deg",
+                "demo_model",
+                "qhh_forc_001",
+                "TEMP",
+                "cell-001",
+                1.0,
+                method="direct_grid",
+                grid_signature="sha256:grid-signature",
+            ),
+        )
+    )
+
+    loaded = repository.load_interp_weights(source_id="GFS", grid_id="ifs_gfs_025deg", model_id="demo_model")
+
+    assert [(row.station_id, row.variable, row.grid_cell_id) for row in loaded] == [
+        ("qhh_forc_001", "PRCP", "cell-001"),
+        ("qhh_forc_001", "TEMP", "cell-001"),
+    ]
+    assert {row.method for row in loaded} == {"direct_grid"}
+    assert {row.weight for row in loaded} == {1.0}
+    assert {row.grid_signature for row in loaded} == {"sha256:grid-signature"}
+
+
+def test_store_interp_weight_replacement_locks_scope_before_delete_and_insert() -> None:
+    repository = _MemoryInterpWeightRepository(
+        [_interp_weight_row(method="idw", grid_cell_id="stale-cell", weight=1.0)]
+    )
+
+    repository.upsert_interp_weights(
+        (
+            InterpolationWeight(
+                "GFS",
+                "ifs_gfs_025deg",
+                "demo_model",
+                "qhh_forc_001",
+                "PRCP",
+                "cell-001",
+                1.0,
+                method="direct_grid",
+                grid_signature="sha256:grid-signature",
+            ),
+        )
+    )
+
+    assert [call[0] for call in repository.sql_calls] == ["lock", "delete", "insert"]
+    assert repository.sql_calls[0][2] == ("met.interp_weight:GFS\x1fifs_gfs_025deg\x1fdemo_model",)
+    assert repository.sql_calls[1][2] == ("GFS", "ifs_gfs_025deg", "demo_model")
+
+
+def test_store_direct_grid_snapshot_replaces_same_scope_idw_rows_without_mixing() -> None:
+    repository = _MemoryInterpWeightRepository(
+        [
+            _interp_weight_row(method="idw", grid_cell_id="stale-cell-a", weight=0.25),
+            _interp_weight_row(method="idw", grid_cell_id="stale-cell-b", weight=0.75),
+            _interp_weight_row(source_id="IFS", method="idw", grid_cell_id="unrelated-cell", weight=1.0),
+        ]
+    )
+
+    repository.upsert_interp_weights(
+        (
+            InterpolationWeight(
+                "GFS",
+                "ifs_gfs_025deg",
+                "demo_model",
+                "qhh_forc_001",
+                "PRCP",
+                "cell-001",
+                1.0,
+                method="direct_grid",
+                grid_signature="sha256:grid-signature",
+            ),
+        )
+    )
+
+    assert repository.replace_calls[0][0] == ("GFS", "ifs_gfs_025deg", "demo_model")
+    same_scope = repository.load_interp_weights(source_id="GFS", grid_id="ifs_gfs_025deg", model_id="demo_model")
+    unrelated = repository.load_interp_weights(source_id="IFS", grid_id="ifs_gfs_025deg", model_id="demo_model")
+    assert [(row.method, row.grid_cell_id, row.weight) for row in same_scope] == [
+        ("direct_grid", "cell-001", 1.0)
+    ]
+    assert [(row.method, row.grid_cell_id, row.weight) for row in unrelated] == [
+        ("idw", "unrelated-cell", 1.0)
+    ]
+
+
+def test_store_interp_weight_mixed_scope_rejection_happens_before_replacement() -> None:
+    repository = _MemoryInterpWeightRepository(
+        [_interp_weight_row(method="idw", grid_cell_id="existing-cell", weight=1.0)]
+    )
+    before = list(repository.rows)
+
+    with pytest.raises(MetStoreError, match="one source/grid/model scope at a time"):
+        repository.upsert_interp_weights(
+            (
+                InterpolationWeight(
+                    "GFS",
+                    "ifs_gfs_025deg",
+                    "demo_model",
+                    "qhh_forc_001",
+                    "PRCP",
+                    "cell-001",
+                    1.0,
+                    method="direct_grid",
+                    grid_signature="sha256:grid-signature",
+                ),
+                InterpolationWeight(
+                    "IFS",
+                    "ifs_gfs_025deg",
+                    "demo_model",
+                    "qhh_forc_002",
+                    "PRCP",
+                    "cell-002",
+                    1.0,
+                    method="direct_grid",
+                    grid_signature="sha256:grid-signature",
+                ),
+            )
+        )
+
+    assert repository.replace_calls == []
+    assert repository.rows == before
+
+
+def test_store_rejects_invalid_direct_grid_interp_weight_shape_before_replacement() -> None:
+    repository = _MemoryInterpWeightRepository()
+
+    with pytest.raises(MetStoreError, match="exactly one grid cell"):
+        repository.upsert_interp_weights(
+            (
+                InterpolationWeight(
+                    "GFS",
+                    "ifs_gfs_025deg",
+                    "demo_model",
+                    "qhh_forc_001",
+                    "PRCP",
+                    "cell-001",
+                    1.0,
+                    method="direct_grid",
+                    grid_signature="sha256:grid-signature",
+                ),
+                InterpolationWeight(
+                    "GFS",
+                    "ifs_gfs_025deg",
+                    "demo_model",
+                    "qhh_forc_001",
+                    "PRCP",
+                    "cell-002",
+                    1.0,
+                    method="direct_grid",
+                    grid_signature="sha256:grid-signature",
+                ),
+            )
+        )
+
+    assert repository.replace_calls == []
+
+
+def test_store_rejects_mixed_direct_grid_grid_signatures_before_replacement() -> None:
+    repository = _MemoryInterpWeightRepository(
+        [_interp_weight_row(method="idw", grid_cell_id="existing-cell", weight=1.0)]
+    )
+    before = list(repository.rows)
+
+    with pytest.raises(MetStoreError, match="exactly one grid_signature"):
+        repository.upsert_interp_weights(
+            (
+                InterpolationWeight(
+                    "GFS",
+                    "ifs_gfs_025deg",
+                    "demo_model",
+                    "qhh_forc_001",
+                    "PRCP",
+                    "cell-001",
+                    1.0,
+                    method="direct_grid",
+                    grid_signature="sha256:grid-signature-a",
+                ),
+                InterpolationWeight(
+                    "GFS",
+                    "ifs_gfs_025deg",
+                    "demo_model",
+                    "qhh_forc_002",
+                    "PRCP",
+                    "cell-002",
+                    1.0,
+                    method="direct_grid",
+                    grid_signature="sha256:grid-signature-b",
+                ),
+            )
+        )
+
+    assert repository.replace_calls == []
+    assert repository.rows == before
+
+
+def _interp_weight_row(
+    *,
+    source_id: str = "GFS",
+    grid_id: str = "ifs_gfs_025deg",
+    model_id: str = "demo_model",
+    station_id: str = "qhh_forc_001",
+    variable: str = "PRCP",
+    grid_cell_id: str,
+    weight: float,
+    method: str,
+    grid_signature: str = "sha256:grid-signature",
+) -> dict[str, Any]:
+    return {
+        "source_id": source_id,
+        "grid_id": grid_id,
+        "model_id": model_id,
+        "station_id": station_id,
+        "variable": variable,
+        "grid_cell_id": grid_cell_id,
+        "weight": weight,
+        "method": method,
+        "grid_signature": grid_signature,
+    }

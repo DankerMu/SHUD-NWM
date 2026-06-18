@@ -485,10 +485,11 @@ def _historical_quality_from_counts(
     meaningful_result_rows = max(return_period_rows, warning_rows)
     meaningful_max_result_rows = max(max_return_period_rows, max_warning_rows)
     no_frequency_curve_rows = max(result_rows - return_period_rows, 0)
-    warning_threshold_unavailable_rows = max(return_period_rows - warning_rows, 0)
+    peak_return_period_unavailable_rows = max(max_result_rows - max_return_period_rows, 0)
+    warning_threshold_unavailable_rows = max(max_return_period_rows - max_warning_rows, 0)
     unavailable_products: list[str] = []
     residual_blockers: list[dict[str, Any]] = []
-    if return_period_rows <= 0:
+    if max_return_period_rows <= 0:
         unavailable_products.append("return_period_result")
         residual_blockers.append(
             _blocker(
@@ -496,10 +497,10 @@ def _historical_quality_from_counts(
                 code="RETURN_PERIOD_RESULT_UNAVAILABLE",
                 state="unavailable",
                 quality_flag="missing_return_period_result",
-                residual_risk="No non-null return-period rows are available for this run.",
+                residual_risk="No non-null peak return-period rows are available for this run.",
             )
         )
-    elif no_frequency_curve_rows > 0:
+    elif peak_return_period_unavailable_rows > 0:
         unavailable_products.append("frequency_curves")
         residual_blockers.append(
             _blocker(
@@ -507,7 +508,7 @@ def _historical_quality_from_counts(
                 code="FREQUENCY_CURVES_UNAVAILABLE",
                 state="degraded",
                 quality_flag="no_frequency_curve",
-                residual_risk="Some rows have null return_period because frequency curves are unavailable.",
+                residual_risk="Some peak rows have null return_period because frequency curves are unavailable.",
             )
         )
     if warning_threshold_unavailable_rows > 0:
@@ -678,6 +679,9 @@ def _quality_from_storage_row(row: Mapping[str, Any]) -> FloodRunProductQuality:
         state = fallback.quality_state
         unavailable_products = fallback.unavailable_products
         residual_blockers = fallback.residual_blockers
+    elif source == "historical_backfill" and state != "ready" and not unavailable_products and not residual_blockers:
+        unavailable_products = fallback.unavailable_products
+        residual_blockers = fallback.residual_blockers
     return FloodRunProductQuality(
         run_id=run_id,
         result_rows=result_rows,
@@ -764,10 +768,14 @@ def _source_select_columns(columns: Sequence[str], *, dialect_name: str) -> list
         "run_id": "run_id",
         "quality_state": """
             CASE
-                WHEN SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) <= 0 THEN 'unavailable'
-                WHEN SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END)
-                    < SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) THEN 'unavailable'
-                WHEN COUNT(*) > SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) THEN 'degraded'
+                WHEN SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END) <= 0
+                    THEN 'unavailable'
+                WHEN SUM(CASE WHEN max_over_window = true AND warning_level IS NOT NULL THEN 1 ELSE 0 END)
+                    < SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END)
+                    THEN 'unavailable'
+                WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END)
+                    > SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END)
+                    THEN 'degraded'
                 ELSE 'ready'
             END AS quality_state
         """,
@@ -827,20 +835,21 @@ def _source_unavailable_products_sql(dialect_name: str) -> str:
     return """
         to_jsonb(array_remove(ARRAY[
             CASE
-                WHEN SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) <= 0
+                WHEN SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END) <= 0
                 THEN 'return_period_result'
                 ELSE NULL
             END,
             CASE
-                WHEN COUNT(*) > SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END)
-                  AND SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) > 0
+                WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END)
+                    > SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END)
+                  AND SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END) > 0
                 THEN 'frequency_curves'
                 ELSE NULL
             END,
             CASE
-                WHEN SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END)
-                    < SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END)
-                  AND SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) > 0
+                WHEN SUM(CASE WHEN max_over_window = true AND warning_level IS NOT NULL THEN 1 ELSE 0 END)
+                    < SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END)
+                  AND SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END) > 0
                 THEN 'warning_thresholds'
                 ELSE NULL
             END
@@ -854,38 +863,39 @@ def _source_residual_blockers_sql(dialect_name: str) -> str:
     return """
         (
             CASE
-                WHEN SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) <= 0
+                WHEN SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END) <= 0
                 THEN jsonb_build_array(jsonb_build_object(
                     'code', 'RETURN_PERIOD_RESULT_UNAVAILABLE',
                     'state', 'unavailable',
                     'quality_flag', 'missing_return_period_result',
-                    'residual_risk', 'No non-null return-period rows are available for this run.',
+                    'residual_risk', 'No non-null peak return-period rows are available for this run.',
                     'run_id', run_id
                 ))
                 ELSE '[]'::jsonb
             END
             || CASE
-                WHEN COUNT(*) > SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END)
-                  AND SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) > 0
+                WHEN SUM(CASE WHEN max_over_window = true THEN 1 ELSE 0 END)
+                    > SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END)
+                  AND SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END) > 0
                 THEN jsonb_build_array(jsonb_build_object(
                     'code', 'FREQUENCY_CURVES_UNAVAILABLE',
                     'state', 'degraded',
                     'quality_flag', 'no_frequency_curve',
                     'residual_risk',
-                    'Some rows have null return_period because frequency curves are unavailable.',
+                    'Some peak rows have null return_period because frequency curves are unavailable.',
                     'run_id', run_id
                 ))
                 ELSE '[]'::jsonb
             END
             || CASE
-                WHEN SUM(CASE WHEN warning_level IS NOT NULL THEN 1 ELSE 0 END)
-                    < SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END)
-                  AND SUM(CASE WHEN return_period IS NOT NULL THEN 1 ELSE 0 END) > 0
+                WHEN SUM(CASE WHEN max_over_window = true AND warning_level IS NOT NULL THEN 1 ELSE 0 END)
+                    < SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END)
+                  AND SUM(CASE WHEN max_over_window = true AND return_period IS NOT NULL THEN 1 ELSE 0 END) > 0
                 THEN jsonb_build_array(jsonb_build_object(
                     'code', 'WARNING_THRESHOLDS_UNAVAILABLE',
                     'state', 'unavailable',
                     'quality_flag', 'warning_thresholds_unavailable',
-                    'residual_risk', 'warning_level remains null for return-period rows.',
+                    'residual_risk', 'warning_level remains null for peak return-period rows.',
                     'run_id', run_id
                 ))
                 ELSE '[]'::jsonb

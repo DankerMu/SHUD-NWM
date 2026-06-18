@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -282,6 +283,7 @@ class PsycopgForcingRepository:
         scopes = {(weight.source_id, weight.grid_id, weight.model_id) for weight in weights}
         if len(scopes) != 1:
             raise MetStoreError("Interpolation weights must be replaced one source/grid/model scope at a time.")
+        _validate_interp_weight_snapshot(weights)
         source_id, grid_id, model_id = next(iter(scopes))
         rows = [
             (
@@ -298,6 +300,10 @@ class PsycopgForcingRepository:
             for weight in weights
         ]
         self._replace_values(
+            """
+            SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))
+            """,
+            (f"met.interp_weight:{source_id}\x1f{grid_id}\x1f{model_id}",),
             """
             DELETE FROM met.interp_weight
             WHERE source_id = %s
@@ -562,6 +568,8 @@ class PsycopgForcingRepository:
             for component in components
         ]
         self._replace_values(
+            None,
+            (),
             "DELETE FROM met.forcing_version_component WHERE forcing_version_id = %s",
             (forcing_version_id,),
             """
@@ -594,6 +602,8 @@ class PsycopgForcingRepository:
             for row in rows
         ]
         self._replace_values(
+            None,
+            (),
             "DELETE FROM met.forcing_station_timeseries WHERE forcing_version_id = %s",
             (forcing_version_id,),
             """
@@ -686,6 +696,8 @@ class PsycopgForcingRepository:
 
     def _replace_values(
         self,
+        pre_delete_statement: str | None,
+        pre_delete_parameters: tuple[Any, ...],
         delete_statement: str | None,
         delete_parameters: tuple[Any, ...],
         insert_statement: str,
@@ -702,6 +714,8 @@ class PsycopgForcingRepository:
             connection = psycopg2.connect(self.database_url)
             connection.autocommit = False
             with connection.cursor() as cursor:
+                if pre_delete_statement is not None:
+                    cursor.execute(pre_delete_statement, pre_delete_parameters)
                 if delete_statement is not None:
                     cursor.execute(delete_statement, delete_parameters)
                 if rows:
@@ -714,3 +728,31 @@ class PsycopgForcingRepository:
         finally:
             if connection is not None:
                 connection.close()
+
+
+def _validate_interp_weight_snapshot(weights: Sequence[InterpolationWeight]) -> None:
+    methods = {weight.method for weight in weights}
+    if len(methods) != 1:
+        raise MetStoreError("Interpolation weight snapshots must use a single mapping method.")
+    if methods != {"direct_grid"}:
+        return
+
+    seen: set[tuple[str, str]] = set()
+    grid_signatures: set[str] = set()
+    for weight in weights:
+        station_variable = (weight.station_id, weight.variable)
+        if station_variable in seen:
+            raise MetStoreError(
+                "Direct-grid interpolation weights must contain exactly one grid cell per station/variable."
+            )
+        seen.add(station_variable)
+        if not math.isfinite(weight.weight) or weight.weight != 1.0:
+            raise MetStoreError("Direct-grid interpolation weights must use weight 1.0.")
+        if not str(weight.grid_cell_id).strip():
+            raise MetStoreError("Direct-grid interpolation weights must include a grid_cell_id.")
+        grid_signature = str(weight.grid_signature or "").strip()
+        if not grid_signature:
+            raise MetStoreError("Direct-grid interpolation weights must include a grid_signature.")
+        grid_signatures.add(grid_signature)
+    if len(grid_signatures) != 1:
+        raise MetStoreError("Direct-grid interpolation weight snapshots must use exactly one grid_signature.")

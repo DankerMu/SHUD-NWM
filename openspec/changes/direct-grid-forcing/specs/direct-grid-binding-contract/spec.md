@@ -54,6 +54,25 @@ The system SHALL expose direct-grid forcing mapping metadata through a single re
 - **THEN** a database mirror value cannot replace or override manifest `binding_checksum`, `model_input_package_id`, `.sp.att` checksum, `applicable_source_ids`, `grid_id`, or `grid_signature`
 - **THEN** a mismatch between mirror values and manifest identities is handled as a direct-grid contract validation failure before readiness.
 
+### Requirement: Direct-grid mapping persistence is compatible with interpolation weights
+The system SHALL be able to persist direct-grid station-to-grid-cell mappings in `met.interp_weight` or an equivalent store without mixing them with stale IDW snapshots for the same mapping scope.
+
+#### Scenario: Direct-grid one-cell weights round-trip
+- **WHEN** direct-grid mappings are persisted as interpolation weights
+- **THEN** each `(station_id, variable)` mapping has exactly one `grid_cell_id`
+- **THEN** each persisted row uses `method="direct_grid"` and `weight=1.0`
+- **THEN** loading interpolation weights returns the stored method, weight, grid cell, and grid signature without coercing the row to IDW.
+
+#### Scenario: Direct-grid snapshot replaces same-scope IDW rows
+- **WHEN** a direct-grid mapping snapshot is saved for an existing `(source_id, grid_id, model_id)` scope that already has IDW rows
+- **THEN** the previous rows for that scope are removed before the direct-grid rows are inserted
+- **THEN** the resulting scope does not contain a mixture of stale IDW rows and direct-grid rows.
+
+#### Scenario: Interpolation weight replacement is scoped
+- **WHEN** a save request includes interpolation weights for more than one `(source_id, grid_id, model_id)` scope
+- **THEN** the store rejects the request before replacing rows
+- **THEN** unrelated scopes remain unchanged.
+
 ### Requirement: Direct-grid assets declare grid identity
 A direct-grid basin/model asset SHALL declare the canonical grid identity that its bindings target.
 

@@ -61,6 +61,17 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
     assert not fallback_only_tests & set(selected)
 
 
+def test_select_tests_maps_flood_quality_to_focused_return_period_tests() -> None:
+    selected = select_tests(["packages/common/flood_quality.py"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_forecast_api.py",
+        "tests/test_return_period.py",
+        "tests/test_return_period_integration.py",
+    ]
+    assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
 def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
     selected = select_tests(["services/tiles/mvt.py"], repo_root=Path("."))
     fallback_only_tests = set(CORE_SMOKE_TESTS) - {"tests/test_migrations.py"}
