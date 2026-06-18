@@ -258,10 +258,14 @@ def _applicable_source_ids(payload: Mapping[str, Any], *, source_id: str | None)
             normalized_source = normalize_source_id(raw_source)
         except ValueError as error:
             raise DirectGridContractError(
-                f"Direct-grid contract includes unsupported source {raw_source!r}.",
+                "Direct-grid contract includes an unsupported source identifier.",
                 field="applicable_source_ids",
                 source_id=source_id,
-                details={"invalid_source_id": raw_source},
+                details={
+                    "invalid_source_index": source_index,
+                    "actual_type": type(raw_source).__name__,
+                    "source_id_length": len(raw_source),
+                },
             ) from error
         if normalized_source not in normalized:
             normalized.append(normalized_source)

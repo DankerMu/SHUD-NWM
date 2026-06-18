@@ -1561,6 +1561,27 @@ def test_direct_grid_contract_non_string_source_scope_entry_uses_bounded_error_d
     assert invalid_source not in error.values()
 
 
+def test_direct_grid_contract_unsupported_source_scope_entry_uses_bounded_error_details() -> None:
+    invalid_source = "UNSUPPORTED_" + ("x" * 4096)
+    manifest = _direct_grid_manifest()
+    manifest["applicable_source_ids"] = ["GFS", invalid_source]
+
+    with pytest.raises(DirectGridContractError) as exc_info:
+        parse_direct_grid_forcing_contract(manifest, source_id="GFS")
+
+    error = exc_info.value.to_dict()
+    assert error["error_code"] == "DIRECT_GRID_CONTRACT_INVALID"
+    assert error["message"] == "Direct-grid contract includes an unsupported source identifier."
+    assert error["field"] == "applicable_source_ids"
+    assert error["source_id"] == "GFS"
+    assert error["invalid_source_index"] == 1
+    assert error["actual_type"] == "str"
+    assert error["source_id_length"] == len(invalid_source)
+    assert "invalid_source_id" not in error
+    assert invalid_source not in str(exc_info.value)
+    assert invalid_source not in error.values()
+
+
 def test_direct_grid_contract_unsupported_mode_fails_closed() -> None:
     manifest = _direct_grid_manifest()
     manifest["forcing_mapping_mode"] = "nearest"
