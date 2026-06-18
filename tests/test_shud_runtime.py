@@ -624,6 +624,7 @@ def test_runtime_direct_grid_invalid_package_manifest_fails_closed_without_sp_at
         }
     )
     manifest["forcing"]["files"] = []
+    manifest["forcing"]["forcing_mapping_mode"] = "idw"
     input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
     input_dir.mkdir(parents=True)
 
@@ -677,6 +678,7 @@ def test_runtime_direct_grid_unreadable_package_manifest_fails_closed_without_sp
         }
     )
     manifest["forcing"]["files"] = []
+    manifest["forcing"]["forcing_mapping_mode"] = "idw"
     input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
     input_dir.mkdir(parents=True)
 
@@ -904,6 +906,150 @@ def test_runtime_direct_grid_checksum_cap_uses_package_manifest_when_outer_metad
     assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
     assert repository.statuses == ["created", "failed"]
     assert repository.failures[0][0] == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
+
+
+def test_runtime_direct_grid_checksum_cap_fails_during_checksum_verification(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["forcing"]["forcing_mapping_mode"] = "idw"
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_shud_dir = input_dir / "shud"
+    staged_shud_dir.mkdir(parents=True)
+    oversized_tsd = (
+        b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
+        + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
+    )
+    (staged_shud_dir / "qhh.tsd.forc").write_bytes(oversized_tsd)
+    (staged_shud_dir / "forcing.csv").write_text(
+        "2\t6\t20260501\t20260501\n"
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        "0\t1\t2\t3\t4\t5\n",
+        encoding="utf-8",
+    )
+    manifest["forcing"]["files"][0]["checksum"] = sha256_bytes(oversized_tsd)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._verify_staged_forcing_checksums(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
+    assert not (input_dir / "alias-a.tsd.forc").exists()
+
+
+def test_runtime_direct_grid_checksum_cap_uses_normalized_staged_tsd_path(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_shud_dir = input_dir / "shud"
+    staged_shud_dir.mkdir(parents=True)
+    oversized_tsd = (
+        b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
+        + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
+    )
+    (staged_shud_dir / "qhh.tsd.forc").write_bytes(oversized_tsd)
+    (staged_shud_dir / "forcing.csv").write_text(
+        "2\t6\t20260501\t20260501\n"
+        "Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        "0\t1\t2\t3\t4\t5\n",
+        encoding="utf-8",
+    )
+    manifest["forcing"]["files"][0]["relative_path"] = "./shud/qhh.tsd.forc"
+    manifest["forcing"]["files"][0]["checksum"] = sha256_bytes(oversized_tsd)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._verify_staged_forcing_checksums(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
+
+
+def test_runtime_direct_grid_station_csv_checksum_is_bounded(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    staged_shud_dir = input_dir / "shud"
+    staged_shud_dir.mkdir(parents=True)
+    (staged_shud_dir / "qhh.tsd.forc").write_text(
+        "1 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "1\t100\t30\t1\t1\t1\tforcing.csv\n",
+        encoding="utf-8",
+    )
+    oversized_csv = (
+        b"2\t6\t20260501\t20260501\n"
+        b"Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        + b"0\t1\t2\t3\t4\t5\n" * 700_000
+    )
+    (staged_shud_dir / "forcing.csv").write_bytes(oversized_csv)
+    manifest["forcing"]["files"][1]["checksum"] = sha256_bytes(oversized_csv)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime._verify_staged_forcing_checksums(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_CSV_TOO_LARGE"
+
+
+def test_runtime_direct_grid_non_first_station_csv_copy_is_bounded(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1, 2),
+    )
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    shud_dir = forcing_dir / "shud"
+    first_csv_bytes = (shud_dir / "forcing.csv").read_bytes()
+    oversized_csv = (
+        b"2\t6\t20260501\t20260501\n"
+        b"Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        + b"0\t2\t2\t3\t4\t5\n" * 700_000
+    )
+    (shud_dir / "forcing_002.csv").write_bytes(oversized_csv)
+    package_manifest_path = forcing_dir / "forcing_package.json"
+    package_manifest = json.loads(package_manifest_path.read_text(encoding="utf-8"))
+    for file_entry in package_manifest["files"]:
+        if file_entry["relative_path"] == "shud/forcing_002.csv":
+            file_entry["checksum"] = sha256_bytes(oversized_csv)
+    manifest_content = json_bytes(package_manifest)
+    package_manifest_path.write_bytes(manifest_content)
+    checksums["manifest_checksum"] = sha256_bytes(manifest_content)
+    checksums["csv_checksum"] = sha256_bytes(first_csv_bytes)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_CSV_TOO_LARGE"
+    assert (input_dir / "alias-a" / "forcing.csv").exists()
+    assert not (input_dir / "alias-a" / "forcing_002.csv").exists()
 
 
 def test_runtime_direct_grid_station_filename_collision_fails_without_overwriting_sp_att(tmp_path: Path) -> None:
@@ -1149,12 +1295,10 @@ class _ReadLimitFailingObjectStore:
         return getattr(self._inner, name)
 
 
-def test_runtime_staging_tolerates_unreadable_package_manifest(tmp_path: Path) -> None:
-    """#270 (best-effort): an unreadable / over-size-cap package manifest must NOT
-    hard-fail the run. The unit peek is optional; a read failure (e.g. a multi-station
-    manifest exceeding the read cap, or a transient object-store error) tolerate-skips.
-    Content integrity is already guaranteed by the checksum verified before this call.
-    """
+def test_runtime_staging_fails_closed_on_unreadable_package_manifest_even_with_outer_idw(
+    tmp_path: Path,
+) -> None:
+    """#547: package manifest authority is fail-closed once a manifest URI is supplied."""
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
     checksums = _write_standard_shud_forcing(object_root, units=_MMDAY_UNITS)
@@ -1177,17 +1321,15 @@ def test_runtime_staging_tolerates_unreadable_package_manifest(tmp_path: Path) -
     input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
     input_dir.mkdir(parents=True)
 
-    runtime.prepare_workspace(manifest, input_dir)
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
 
-    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+    assert exc_info.value.error_code == "FORCING_PACKAGE_MANIFEST_READ_FAILED"
+    assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
 
 
-def test_runtime_staging_tolerates_invalid_json_package_manifest(tmp_path: Path) -> None:
-    """#270 (best-effort): a package manifest that is not valid JSON must NOT hard-fail.
-
-    The checksum still matches the (malformed) bytes, so checksum verification passes;
-    the unit peek then fails to parse and tolerate-skips instead of breaking the run.
-    """
+def test_runtime_staging_fails_closed_on_invalid_package_manifest_even_with_outer_idw(tmp_path: Path) -> None:
+    """#547: stale outer IDW metadata cannot mask an invalid authoritative manifest."""
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
     checksums = _write_standard_shud_forcing(object_root, units=_MMDAY_UNITS)
@@ -1214,9 +1356,11 @@ def test_runtime_staging_tolerates_invalid_json_package_manifest(tmp_path: Path)
     input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
     input_dir.mkdir(parents=True)
 
-    runtime.prepare_workspace(manifest, input_dir)
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
 
-    assert (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
+    assert exc_info.value.error_code == "FORCING_PACKAGE_MANIFEST_INVALID"
+    assert not (input_dir / "alias-a" / "alias-a.tsd.forc").exists()
 
 
 @pytest.mark.parametrize(

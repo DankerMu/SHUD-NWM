@@ -597,7 +597,9 @@ class SHUDRuntime:
                     model_input_dir=model_input_dir,
                     project_name=_project_name(manifest),
                 )
-            _copy_staged_file_no_follow(source_csv, target_csv, root=model_input_dir)
+                _copy_direct_grid_station_csv_no_follow(source_csv, target_csv, root=model_input_dir)
+            else:
+                _copy_staged_file_no_follow(source_csv, target_csv, root=model_input_dir)
             output_lines.append(
                 "\t".join(
                     [
@@ -618,12 +620,7 @@ class SHUDRuntime:
         forcing = manifest.get("forcing") or {}
         forcing_declares_direct = _mapping_metadata_declares_direct_grid(forcing)
         forcing_declares_non_direct = _mapping_metadata_declares_non_direct_grid(forcing)
-        try:
-            package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
-        except SHUDRuntimeError:
-            if forcing_declares_non_direct and not forcing_declares_direct:
-                return False
-            raise
+        package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
         if package_manifest is not None:
             if _mapping_metadata_declares_direct_grid(package_manifest):
                 return True
@@ -1143,13 +1140,22 @@ class SHUDRuntime:
                     "FORCING_FILE_NOT_STAGED",
                     f"Forcing checksum entry is not a regular staged file: {relative_path}",
                 )
-            if is_direct_grid and relative_path == "shud/qhh.tsd.forc":
+            normalized_relative_path = _staged_relative_posix(model_input_dir, staged_path)
+            if is_direct_grid and normalized_relative_path == "shud/qhh.tsd.forc":
                 staged_bytes = _read_limited_staged_bytes(
                     staged_path,
                     root=model_input_dir,
                     max_bytes=MAX_DIRECT_GRID_TSD_FORC_BYTES,
                     too_large_code="DIRECT_GRID_TSD_FORC_TOO_LARGE",
                     too_large_message="Direct-grid SHUD forcing station file exceeds the staging read cap",
+                )
+            elif is_direct_grid and _is_direct_grid_station_csv_relative_path(normalized_relative_path):
+                staged_bytes = _read_limited_staged_bytes(
+                    staged_path,
+                    root=model_input_dir,
+                    max_bytes=MAX_DIRECT_GRID_FORCING_CSV_BYTES,
+                    too_large_code="DIRECT_GRID_FORCING_CSV_TOO_LARGE",
+                    too_large_message="Direct-grid SHUD forcing CSV exceeds the staging read cap",
                 )
             else:
                 staged_bytes = _read_staged_bytes(staged_path, root=model_input_dir)
@@ -1357,6 +1363,20 @@ def _read_staged_bytes(path: Path, *, root: Path) -> bytes:
 
 def _copy_staged_file_no_follow(source: Path, target: Path, *, root: Path) -> None:
     _write_staged_bytes(target, _read_staged_bytes(source, root=root), root=root)
+
+
+def _copy_direct_grid_station_csv_no_follow(source: Path, target: Path, *, root: Path) -> None:
+    _write_staged_bytes(
+        target,
+        _read_limited_staged_bytes(
+            source,
+            root=root,
+            max_bytes=MAX_DIRECT_GRID_FORCING_CSV_BYTES,
+            too_large_code="DIRECT_GRID_FORCING_CSV_TOO_LARGE",
+            too_large_message="Direct-grid SHUD forcing CSV exceeds the staging read cap",
+        ),
+        root=root,
+    )
 
 
 def _regular_file_exists(path: Path, *, containment_root: Path) -> bool:
@@ -2351,6 +2371,26 @@ def _resolve_staged_forcing_path(model_input_dir: Path, relative_path: str) -> P
             f"Forcing checksum relative_path escapes model input directory: {relative_path}",
         )
     return model_input_dir / candidate
+
+
+def _staged_relative_posix(model_input_dir: Path, staged_path: Path) -> str:
+    try:
+        relative = _absolute_lexical_path(staged_path).relative_to(_absolute_lexical_path(model_input_dir))
+    except ValueError as error:
+        raise SHUDRuntimeError(
+            "FORCING_FILE_PATH_INVALID",
+            f"Forcing checksum staged path escapes model input directory: {staged_path}",
+        ) from error
+    return PurePosixPath(*relative.parts).as_posix()
+
+
+def _is_direct_grid_station_csv_relative_path(relative_path: str) -> bool:
+    candidate = PurePosixPath(relative_path)
+    return (
+        len(candidate.parts) == 2
+        and candidate.parts[0] == "shud"
+        and candidate.parts[1].endswith(".csv")
+    )
 
 
 def _set_initial_state_from_snapshot(manifest: dict[str, Any], snapshot: StateSnapshot, *, quality: str) -> None:
