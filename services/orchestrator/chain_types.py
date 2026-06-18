@@ -114,6 +114,8 @@ class AnalysisRunContext:
     run_manifest_uri: str
     output_uri: str
     log_uri: str
+    forcing_package_manifest_uri: str | None = None
+    forcing_package_manifest_checksum: str | None = None
     init_state_id: str | None = None
     init_state_uri: str | None = None
     init_state_valid_time: datetime | None = None

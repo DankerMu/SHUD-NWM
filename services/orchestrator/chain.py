@@ -3781,6 +3781,8 @@ class AnalysisOrchestrator(ForecastOrchestrator):
             run_manifest_uri=self.object_store.uri_for_key(f"runs/{run_id}/input/manifest.json"),
             output_uri=_directory_uri(self.object_store, f"runs/{run_id}/output/"),
             log_uri=_directory_uri(self.object_store, f"runs/{run_id}/logs/"),
+            forcing_package_manifest_uri=getattr(forcing, "forcing_package_manifest_uri", None),
+            forcing_package_manifest_checksum=getattr(forcing, "forcing_package_manifest_checksum", None),
             init_state_id=init_state.state_id if init_state is not None else None,
             init_state_uri=init_state.state_uri if init_state is not None else None,
             init_state_valid_time=init_state.valid_time if init_state is not None else None,
@@ -4463,6 +4465,8 @@ class PsycopgOrchestratorRepository:
             row.get("end_time"),
             row.get("source_id"),
             _max_lead_hours_from_lineage(row.get("lineage_json")),
+            _optional_str(_nested_mapping(row.get("lineage_json")).get("forcing_package_manifest_uri")),
+            _optional_str(_nested_mapping(row.get("lineage_json")).get("forcing_package_manifest_checksum")),
         )
 
     def ensure_forecast_cycle(self, *, source_id: str, cycle_time: datetime) -> dict[str, Any]:

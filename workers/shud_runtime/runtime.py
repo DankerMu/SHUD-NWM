@@ -50,8 +50,10 @@ EXPECTED_PRCP_UNIT = "mm/day"
 # manifest exceeds the cap.
 MAX_PACKAGE_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_DIRECT_GRID_TSD_FORC_BYTES = 8 * 1024 * 1024
+MAX_DIRECT_GRID_FORCING_CSV_BYTES = 8 * 1024 * 1024
 MAX_DIRECT_GRID_SP_ATT_BYTES = 32 * 1024 * 1024
 MAX_DIRECT_GRID_TSD_FORC_LINES = 250_000
+MAX_DIRECT_GRID_FORCING_CSV_LINES = 250_000
 MAX_DIRECT_GRID_SP_ATT_LINES = 2_000_000
 MAX_DIRECT_GRID_STAGING_LINE_BYTES = 64 * 1024
 
@@ -526,7 +528,7 @@ class SHUDRuntime:
 
     def _prepare_shud_project_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
         is_direct_grid = self._forcing_declares_direct_grid(manifest)
-        staged_ids = self._stage_standard_shud_forcing(manifest, model_input_dir)
+        staged_ids = self._stage_standard_shud_forcing(manifest, model_input_dir, is_direct_grid=is_direct_grid)
         if staged_ids is not None:
             if is_direct_grid:
                 _validate_direct_grid_sp_att_forcing_ids(
@@ -559,16 +561,22 @@ class SHUDRuntime:
             project_name=_project_name(manifest),
         )
 
-    def _stage_standard_shud_forcing(self, manifest: dict[str, Any], model_input_dir: Path) -> set[int] | None:
+    def _stage_standard_shud_forcing(
+        self,
+        manifest: dict[str, Any],
+        model_input_dir: Path,
+        *,
+        is_direct_grid: bool,
+    ) -> set[int] | None:
         shud_dir = model_input_dir / "shud"
         source_tsd = shud_dir / "qhh.tsd.forc"
         if not _regular_file_exists(source_tsd, containment_root=model_input_dir):
             return None
-        rows = _read_shud_forcing_station_rows(source_tsd)
+        rows = _read_shud_forcing_station_rows(source_tsd, is_direct_grid=is_direct_grid)
         if not rows:
             raise SHUDRuntimeError("SHUD_FORCING_STATIONS_EMPTY", f"No stations found in {source_tsd}.")
         first_csv = shud_dir / str(rows[0]["filename"])
-        first_time = _first_shud_forcing_time(first_csv)
+        first_time = _first_shud_forcing_time(first_csv, is_direct_grid=is_direct_grid)
         _shift_project_time_inputs(model_input_dir, _project_name(manifest), first_time)
         start_date = first_time.strftime("%Y%m%d")
         target_tsd = model_input_dir / f"{_project_name(manifest)}.tsd.forc"
@@ -582,7 +590,14 @@ class SHUDRuntime:
             source_csv = shud_dir / filename
             if not _regular_file_exists(source_csv, containment_root=model_input_dir):
                 raise SHUDRuntimeError("SHUD_FORCING_CSV_MISSING", f"Missing SHUD forcing CSV: {source_csv}")
-            _copy_staged_file_no_follow(source_csv, model_input_dir / filename, root=model_input_dir)
+            target_csv = model_input_dir / filename
+            if is_direct_grid:
+                _validate_direct_grid_station_filename_target(
+                    target_csv,
+                    model_input_dir=model_input_dir,
+                    project_name=_project_name(manifest),
+                )
+            _copy_staged_file_no_follow(source_csv, target_csv, root=model_input_dir)
             output_lines.append(
                 "\t".join(
                     [
@@ -601,12 +616,24 @@ class SHUDRuntime:
 
     def _forcing_declares_direct_grid(self, manifest: dict[str, Any]) -> bool:
         forcing = manifest.get("forcing") or {}
-        if _mapping_metadata_declares_direct_grid(forcing):
+        forcing_declares_direct = _mapping_metadata_declares_direct_grid(forcing)
+        forcing_declares_non_direct = _mapping_metadata_declares_non_direct_grid(forcing)
+        try:
+            package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
+        except SHUDRuntimeError:
+            if forcing_declares_non_direct and not forcing_declares_direct:
+                return False
+            raise
+        if package_manifest is not None:
+            if _mapping_metadata_declares_direct_grid(package_manifest):
+                return True
+            if _mapping_metadata_declares_non_direct_grid(package_manifest):
+                return False
+        if forcing_declares_direct:
             return True
-        if _mapping_metadata_declares_non_direct_grid(forcing):
+        if forcing_declares_non_direct:
             return False
-        package_manifest = self._read_authoritative_forcing_package_manifest(forcing)
-        return _mapping_metadata_declares_direct_grid(package_manifest or {})
+        return False
 
     def _read_authoritative_forcing_package_manifest(self, forcing: Mapping[str, Any]) -> dict[str, Any] | None:
         package_manifest_uri = _forcing_package_manifest_uri(forcing)
@@ -1089,6 +1116,7 @@ class SHUDRuntime:
 
     def _verify_staged_forcing_checksums(self, manifest: dict[str, Any], model_input_dir: Path) -> None:
         forcing_root = _object_key(manifest["forcing"]["forcing_uri"], self.config.object_store_prefix).rstrip("/")
+        is_direct_grid = self._forcing_declares_direct_grid(manifest)
         for file_entry in _forcing_checksum_entries(manifest):
             relative_path = str(file_entry.get("relative_path") or "").strip()
             if not relative_path:
@@ -1115,10 +1143,7 @@ class SHUDRuntime:
                     "FORCING_FILE_NOT_STAGED",
                     f"Forcing checksum entry is not a regular staged file: {relative_path}",
                 )
-            if (
-                _mapping_metadata_declares_direct_grid(manifest.get("forcing") or {})
-                and relative_path == "shud/qhh.tsd.forc"
-            ):
+            if is_direct_grid and relative_path == "shud/qhh.tsd.forc":
                 staged_bytes = _read_limited_staged_bytes(
                     staged_path,
                     root=model_input_dir,
@@ -1723,22 +1748,29 @@ def _shift_project_time_inputs(model_input_dir: Path, project_name: str, first_t
     _shift_tsd_time_axis(model_input_dir / f"{project_name}.tsd.rl", first_time, start_minute=start_minute)
 
 
-def _read_shud_forcing_station_rows(path: Path) -> list[dict[str, Any]]:
-    text = _read_limited_text_no_follow(
-        path,
-        containment_root=path.parent,
-        max_bytes=MAX_DIRECT_GRID_TSD_FORC_BYTES,
-        too_large_code="DIRECT_GRID_TSD_FORC_TOO_LARGE",
-        too_large_message="Direct-grid SHUD forcing station file exceeds the staging read cap",
-    )
-    lines = _bounded_nonempty_lines(
-        text,
-        path=path,
-        max_lines=MAX_DIRECT_GRID_TSD_FORC_LINES,
-        max_line_bytes=MAX_DIRECT_GRID_STAGING_LINE_BYTES,
-        too_many_lines_code="DIRECT_GRID_TSD_FORC_TOO_MANY_LINES",
-        line_too_long_code="DIRECT_GRID_TSD_FORC_LINE_TOO_LONG",
-    )
+def _read_shud_forcing_station_rows(path: Path, *, is_direct_grid: bool) -> list[dict[str, Any]]:
+    if is_direct_grid:
+        text = _read_limited_text_no_follow(
+            path,
+            containment_root=path.parent,
+            max_bytes=MAX_DIRECT_GRID_TSD_FORC_BYTES,
+            too_large_code="DIRECT_GRID_TSD_FORC_TOO_LARGE",
+            too_large_message="Direct-grid SHUD forcing station file exceeds the staging read cap",
+        )
+        lines = _bounded_nonempty_lines(
+            text,
+            path=path,
+            max_lines=MAX_DIRECT_GRID_TSD_FORC_LINES,
+            max_line_bytes=MAX_DIRECT_GRID_STAGING_LINE_BYTES,
+            too_many_lines_code="DIRECT_GRID_TSD_FORC_TOO_MANY_LINES",
+            line_too_long_code="DIRECT_GRID_TSD_FORC_LINE_TOO_LONG",
+        )
+    else:
+        lines = [
+            line.strip()
+            for line in _read_text_no_follow(path, containment_root=path.parent).splitlines()
+            if line.strip()
+        ]
     if len(lines) < 4:
         return []
     rows: list[dict[str, Any]] = []
@@ -1795,6 +1827,25 @@ def _forcing_package_manifest_checksum(forcing: Mapping[str, Any]) -> str:
     return str(
         forcing.get("package_manifest_checksum") or forcing.get("forcing_manifest_checksum") or ""
     ).strip()
+
+
+def _validate_direct_grid_station_filename_target(target: Path, *, model_input_dir: Path, project_name: str) -> None:
+    reserved_names = {
+        f"{project_name}.sp.att",
+        f"{project_name}.sp.mesh",
+        f"{project_name}.sp.riv",
+        f"{project_name}.sp.rivseg",
+        f"{project_name}.cfg.para",
+        f"{project_name}.cfg.calib",
+        f"{project_name}.cfg.ic",
+        f"{project_name}.tsd.forc",
+    }
+    if target.name in reserved_names or _regular_file_exists(target, containment_root=model_input_dir):
+        raise SHUDRuntimeError(
+            "DIRECT_GRID_STATION_FILENAME_COLLISION",
+            "Direct-grid SHUD forcing station filename collides with a staged model/runtime file: "
+            f"{target.name}",
+        )
 
 
 def _validate_direct_grid_sp_att_forcing_ids(path: Path, allowed_ids: set[int]) -> None:
@@ -1870,12 +1921,29 @@ def _read_sp_att_forcing_ids(path: Path) -> set[int]:
     return forcing_ids
 
 
-def _first_shud_forcing_time(path: Path) -> datetime:
-    lines = [
-        line.strip()
-        for line in _read_text_no_follow(path, containment_root=path.parent).splitlines()
-        if line.strip()
-    ]
+def _first_shud_forcing_time(path: Path, *, is_direct_grid: bool) -> datetime:
+    if is_direct_grid:
+        text = _read_limited_text_no_follow(
+            path,
+            containment_root=path.parent,
+            max_bytes=MAX_DIRECT_GRID_FORCING_CSV_BYTES,
+            too_large_code="DIRECT_GRID_FORCING_CSV_TOO_LARGE",
+            too_large_message="Direct-grid SHUD forcing CSV exceeds the staging read cap",
+        )
+        lines = _bounded_nonempty_lines(
+            text,
+            path=path,
+            max_lines=MAX_DIRECT_GRID_FORCING_CSV_LINES,
+            max_line_bytes=MAX_DIRECT_GRID_STAGING_LINE_BYTES,
+            too_many_lines_code="DIRECT_GRID_FORCING_CSV_TOO_MANY_LINES",
+            line_too_long_code="DIRECT_GRID_FORCING_CSV_LINE_TOO_LONG",
+        )
+    else:
+        lines = [
+            line.strip()
+            for line in _read_text_no_follow(path, containment_root=path.parent).splitlines()
+            if line.strip()
+        ]
     if len(lines) < 3:
         raise SHUDRuntimeError("SHUD_FORCING_CSV_EMPTY", f"Invalid SHUD forcing CSV: {path}")
     header = lines[0].split()

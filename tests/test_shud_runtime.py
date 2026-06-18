@@ -13,7 +13,13 @@ from typing import Any
 import pytest
 
 from packages.common.object_store import LocalObjectStore, ObjectStoreError, sha256_bytes
-from workers.shud_runtime.runtime import SHUDRuntime, SHUDRuntimeConfig, SHUDRuntimeError, _StateCheckpointTracker
+from workers.shud_runtime.runtime import (
+    SHUDRuntime,
+    SHUDRuntimeConfig,
+    SHUDRuntimeError,
+    _StateCheckpointTracker,
+    _validate_direct_grid_station_filename_target,
+)
 
 
 class FakeHydroRunRepository:
@@ -556,6 +562,44 @@ def test_runtime_direct_grid_missing_standard_forcing_fails_without_sp_att_rewri
     assert "\t1\n" not in (input_dir / "alias-a" / "alias-a.sp.att").read_text(encoding="utf-8")
 
 
+def test_runtime_direct_grid_package_manifest_overrides_stale_outer_idw(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    _write_forcing(object_root)
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    (forcing_dir / "forcing_debug.csv").write_text(
+        "valid_time,variable,value\n"
+        "2026-05-01T00:00:00Z,PRCP,1\n"
+        "2026-05-01T00:00:00Z,TEMP,2\n",
+        encoding="utf-8",
+    )
+    package_manifest = {"lineage": {"forcing_mapping_mode": "direct_grid"}, "files": []}
+    manifest_content = json_bytes(package_manifest)
+    (forcing_dir / "forcing_package.json").write_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(
+        {
+            "manifest_uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/forcing_package.json",
+            "manifest_checksum": sha256_bytes(manifest_content),
+            "tsd_checksum": "",
+            "csv_checksum": "",
+        }
+    )
+    manifest["forcing"]["files"] = []
+    manifest["forcing"]["forcing_mapping_mode"] = "idw"
+    input_dir = tmp_path / "workspace" / "runs" / manifest["run_id"] / "input"
+    input_dir.mkdir(parents=True)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.prepare_workspace(manifest, input_dir)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_STANDARD_SHUD_FORCING_MISSING"
+    sp_att = (input_dir / "alias-a" / "alias-a.sp.att").read_text(encoding="utf-8")
+    assert "2\t0\t0\t0\t3" in sp_att
+    assert "2\t0\t0\t0\t1" not in sp_att
+
+
 def test_runtime_direct_grid_invalid_package_manifest_fails_closed_without_sp_att_rewrite(tmp_path: Path) -> None:
     object_root = tmp_path / "object-store"
     _write_basins_package(object_root)
@@ -743,6 +787,194 @@ def test_runtime_direct_grid_tsd_forc_too_large_fails_before_staged_status(tmp_p
     assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
     assert repository.statuses == ["created", "failed"]
     assert repository.failures[0][0] == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
+
+
+def test_runtime_legacy_standard_shud_forcing_reader_allows_direct_grid_sized_tsd(tmp_path: Path) -> None:
+    from workers.shud_runtime.runtime import _read_shud_forcing_station_rows
+
+    shud_dir = tmp_path / "shud"
+    shud_dir.mkdir()
+    tsd_path = shud_dir / "qhh.tsd.forc"
+    tsd_path.write_bytes(
+        b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n"
+        + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
+    )
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        _read_shud_forcing_station_rows(tsd_path, is_direct_grid=True)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
+    assert _read_shud_forcing_station_rows(tsd_path, is_direct_grid=False)[0]["filename"] == "forcing.csv"
+
+
+def test_runtime_direct_grid_first_station_csv_too_large_fails_before_staged_status(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    csv_path = (
+        object_root
+        / "forcing"
+        / "gfs"
+        / "2026050100"
+        / "basin_v01"
+        / "demo_model"
+        / "shud"
+        / "forcing.csv"
+    )
+    csv_bytes = (
+        b"2\t6\t20260501\t20260501\n"
+        b"Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        + b"0\t1\t2\t3\t4\t5\n" * 700_000
+    )
+    csv_path.write_bytes(csv_bytes)
+    checksums["csv_checksum"] = sha256_bytes(csv_bytes)
+    manifest_path = (
+        object_root
+        / "forcing"
+        / "gfs"
+        / "2026050100"
+        / "basin_v01"
+        / "demo_model"
+        / "forcing_package.json"
+    )
+    package_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package_manifest["files"][1]["checksum"] = checksums["csv_checksum"]
+    manifest_content = json_bytes(package_manifest)
+    manifest_path.write_bytes(manifest_content)
+    checksums["manifest_checksum"] = sha256_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute(manifest)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_FORCING_CSV_TOO_LARGE"
+    assert repository.statuses == ["created", "failed"]
+    assert repository.failures[0][0] == "DIRECT_GRID_FORCING_CSV_TOO_LARGE"
+
+
+def test_runtime_direct_grid_checksum_cap_uses_package_manifest_when_outer_metadata_is_idw(tmp_path: Path) -> None:
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    tsd_path = (
+        object_root
+        / "forcing"
+        / "gfs"
+        / "2026050100"
+        / "basin_v01"
+        / "demo_model"
+        / "shud"
+        / "qhh.tsd.forc"
+    )
+    tsd_bytes = b"1 20260501\n/data\nID Lon Lat X Y Z Filename\n" + b"1 100 30 1 1 1 forcing.csv\n" * 400_000
+    tsd_path.write_bytes(tsd_bytes)
+    checksums["tsd_checksum"] = sha256_bytes(tsd_bytes)
+    manifest_path = (
+        object_root
+        / "forcing"
+        / "gfs"
+        / "2026050100"
+        / "basin_v01"
+        / "demo_model"
+        / "forcing_package.json"
+    )
+    package_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package_manifest["files"][0]["checksum"] = checksums["tsd_checksum"]
+    manifest_content = json_bytes(package_manifest)
+    manifest_path.write_bytes(manifest_content)
+    checksums["manifest_checksum"] = sha256_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["forcing"]["forcing_mapping_mode"] = "idw"
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute(manifest)
+
+    assert exc_info.value.error_code == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
+    assert repository.statuses == ["created", "failed"]
+    assert repository.failures[0][0] == "DIRECT_GRID_TSD_FORC_TOO_LARGE"
+
+
+def test_runtime_direct_grid_station_filename_collision_fails_without_overwriting_sp_att(tmp_path: Path) -> None:
+    non_project_input_dir = tmp_path / "input-dir-not-named-for-project"
+    non_project_input_dir.mkdir()
+    with pytest.raises(SHUDRuntimeError) as helper_exc_info:
+        _validate_direct_grid_station_filename_target(
+            non_project_input_dir / "alias-a.sp.att",
+            model_input_dir=non_project_input_dir,
+            project_name="alias-a",
+        )
+    assert helper_exc_info.value.error_code == "DIRECT_GRID_STATION_FILENAME_COLLISION"
+
+    object_root = tmp_path / "object-store"
+    _write_basins_package(object_root)
+    checksums = _write_standard_shud_forcing(
+        object_root,
+        lineage={"forcing_mapping_mode": "direct_grid"},
+        station_ids=(1,),
+    )
+    forcing_dir = object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model"
+    shud_dir = forcing_dir / "shud"
+    (shud_dir / "qhh.tsd.forc").write_text(
+        "1 20260501\n"
+        "/data\n"
+        "ID\tLon\tLat\tX\tY\tZ\tFilename\n"
+        "1\t100\t30\t1\t1\t1\talias-a.sp.att\n",
+        encoding="utf-8",
+    )
+    collision_bytes = (
+        b"2\t6\t20260501\t20260501\n"
+        b"Time_Day\tPrecip\tTemp\tRH\tWind\tRN\n"
+        b"0\t1\t2\t3\t4\t5\n"
+    )
+    (shud_dir / "alias-a.sp.att").write_bytes(collision_bytes)
+    checksums["tsd_checksum"] = sha256_bytes((shud_dir / "qhh.tsd.forc").read_bytes())
+    checksums["csv_checksum"] = sha256_bytes(collision_bytes)
+    manifest_path = forcing_dir / "forcing_package.json"
+    package_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    package_manifest["files"][0]["checksum"] = checksums["tsd_checksum"]
+    package_manifest["files"][1] = {
+        **package_manifest["files"][1],
+        "relative_path": "shud/alias-a.sp.att",
+        "uri": "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/alias-a.sp.att",
+        "checksum": checksums["csv_checksum"],
+    }
+    manifest_content = json_bytes(package_manifest)
+    manifest_path.write_bytes(manifest_content)
+    checksums["manifest_checksum"] = sha256_bytes(manifest_content)
+    repository = FakeHydroRunRepository()
+    runtime = _runtime(tmp_path, repository)
+    manifest = _shud_project_manifest_with_forcing_checksums(checksums)
+    manifest["forcing"]["files"][1]["relative_path"] = "shud/alias-a.sp.att"
+    manifest["forcing"]["files"][1]["uri"] = "s3://nhms/forcing/gfs/2026050100/basin_v01/demo_model/shud/alias-a.sp.att"
+
+    with pytest.raises(SHUDRuntimeError) as exc_info:
+        runtime.execute(manifest)
+
+    model_sp_att = (
+        tmp_path
+        / "workspace"
+        / "runs"
+        / manifest["run_id"]
+        / "input"
+        / "alias-a"
+        / "alias-a.sp.att"
+    )
+    assert exc_info.value.error_code == "DIRECT_GRID_STATION_FILENAME_COLLISION"
+    assert repository.statuses == ["created", "failed"]
+    assert repository.failures[0][0] == "DIRECT_GRID_STATION_FILENAME_COLLISION"
+    assert "2\t0\t0\t0\t3" in model_sp_att.read_text(encoding="utf-8")
 
 
 def test_runtime_legacy_non_direct_grid_fallback_rewrites_sp_att_to_single_forcing_id(tmp_path: Path) -> None:

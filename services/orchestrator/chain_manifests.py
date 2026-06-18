@@ -510,10 +510,15 @@ def build_analysis_run_manifest(
             "ic_file_uri": context.init_state_uri,
             "valid_time": _format_time_or_none(context.init_state_valid_time),
         },
-        "forcing": {
-            "forcing_version_id": context.forcing_version_id,
-            "forcing_uri": context.forcing_package_uri,
-        },
+        "forcing": _runtime_forcing_metadata(
+            {
+                "forcing_version_id": context.forcing_version_id,
+                "forcing_uri": context.forcing_package_uri,
+                "forcing_package_uri": context.forcing_package_uri,
+                "package_manifest_uri": context.forcing_package_manifest_uri,
+                "package_manifest_checksum": context.forcing_package_manifest_checksum,
+            }
+        ),
         "forcing_causality": dict(
             context.forcing_causality if context.forcing_causality is not None else analysis_forcing_causality()
         ),

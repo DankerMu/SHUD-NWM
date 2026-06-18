@@ -2157,6 +2157,37 @@ def test_model_run_forcing_package_manifest_identity_reaches_runtime_manifest(tm
     assert "forcing_manifest_checksum" not in runtime_manifest["forcing"]
 
 
+def test_psycopg_find_forcing_context_populates_package_manifest_metadata() -> None:
+    cycle_time = datetime(2026, 5, 1, tzinfo=UTC)
+
+    class CapturingRepository(PsycopgOrchestratorRepository):
+        def _fetch_optional(self, statement: str, parameters: tuple[Any, ...]) -> dict[str, Any]:
+            assert "lineage_json" in statement
+            assert parameters == ("GFS", cycle_time, "model-1")
+            return {
+                "forcing_version_id": "forc-gfs",
+                "forcing_package_uri": "s3://nhms/forcing/gfs/model-1/",
+                "start_time": cycle_time,
+                "end_time": cycle_time + timedelta(hours=72),
+                "source_id": "GFS",
+                "lineage_json": {
+                    "max_lead_hours": 72,
+                    "forcing_package_manifest_uri": "s3://nhms/forcing/gfs/model-1/forcing_package.json",
+                    "forcing_package_manifest_checksum": "sha256:forcing-package",
+                },
+            }
+
+    context = CapturingRepository("postgresql://example").find_forcing_context(
+        source_id="GFS",
+        cycle_time=cycle_time,
+        model_id="model-1",
+    )
+
+    assert context.max_lead_hours == 72
+    assert context.forcing_package_manifest_uri == "s3://nhms/forcing/gfs/model-1/forcing_package.json"
+    assert context.forcing_package_manifest_checksum == "sha256:forcing-package"
+
+
 def test_nested_forcing_station_metadata_reaches_runtime_manifest(tmp_path: Path) -> None:
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()
@@ -7836,6 +7867,8 @@ def test_chain_manifest_build_analysis_run_manifest_direct_export(monkeypatch) -
         model_package_uri="object://models/shud-v1",
         forcing_version_id="era5-202401",
         forcing_package_uri="object://forcing/era5-202401",
+        forcing_package_manifest_uri="object://forcing/era5-202401/forcing_package.json",
+        forcing_package_manifest_checksum="sha256:analysis-forcing-package",
         start_time=datetime(2024, 1, 1, tzinfo=UTC),
         end_time=datetime(2024, 1, 2, tzinfo=UTC),
         run_manifest_uri="object://runs/analysis-run-1/input/manifest.json",
@@ -7870,6 +7903,9 @@ def test_chain_manifest_build_analysis_run_manifest_direct_export(monkeypatch) -
         "forcing": {
             "forcing_version_id": "era5-202401",
             "forcing_uri": "object://forcing/era5-202401",
+            "forcing_package_uri": "object://forcing/era5-202401",
+            "package_manifest_uri": "object://forcing/era5-202401/forcing_package.json",
+            "package_manifest_checksum": "sha256:analysis-forcing-package",
         },
         "forcing_causality": {
             "mode": "delayed_reanalysis",
